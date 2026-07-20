@@ -27,6 +27,50 @@ Mental model: Think of a reactive chain as a pipeline of lazy transformations. E
 
 Why it matters: Traditional blocking I/O holds a thread for the entire duration of a database call or an HTTP request to another service. With 200 Tomcat threads and 100ms average I/O wait, maximum throughput is 200 / 0.1s = 2,000 req/sec. An event-loop model with 8 threads can handle orders of magnitude more concurrent I/O operations because threads are never parked waiting.
 
+**What this actually says.** "In a thread-per-request server your throughput ceiling is not set
+by how fast your code is — it is set by how long each thread sits doing nothing." The `200 /
+0.1s` above is Little's Law rearranged: `throughput = threads / time_per_request`, and
+`time_per_request` is dominated by I/O wait, so the ceiling scales with a resource you cannot
+cheaply buy more of.
+
+| Symbol | What it is |
+|--------|------------|
+| `threads` | Size of the request-handling pool. Tomcat's default is `200` |
+| `time_per_request` | Wall-clock a thread is *occupied*, including time spent blocked on I/O |
+| `threads / time` | Maximum sustainable requests per second. The ceiling |
+| I/O wait | The share of `time_per_request` where the thread is parked, doing zero work |
+
+**Walk one example.** The same 200-thread pool against three different backends:
+
+```
+  I/O wait     ceiling = 200 / wait        threads needed for 10,000 req/s
+  ---------   ----------------------      ------------------------------
+    10 ms      200 / 0.010 = 20,000 /s     10,000 x 0.010 =    100 threads
+   100 ms      200 / 0.100 =  2,000 /s     10,000 x 0.100 =  1,000 threads
+   500 ms      200 / 0.500 =    400 /s     10,000 x 0.500 =  5,000 threads
+
+  At ~1 MB of stack per platform thread, the 100 ms row needs 1,000 threads
+  = ~1 GB of stack just to sit and wait. The 500 ms row needs ~5 GB.
+```
+
+That memory column is the real wall. You cannot scale a blocking server past a few thousand
+threads because each one costs a megabyte of stack and a share of the scheduler's context
+switching — so a slower dependency makes your server cheaper to overwhelm, not just slower.
+
+**Why 8 event-loop threads beat 200 blocking ones here.** An event loop never counts I/O wait
+against a thread at all. Netty's default is `max(2 x CPU cores, 4)` — `8` threads on a 4-core
+box — and each holds thousands of connections whose sockets are simply registered with the OS
+selector while nothing is happening. `10,000 / 8 = 1,250` connections per thread costs a few
+hundred bytes of state each, not 1,250 MB of stacks. The threads are now sized to the *CPU
+work*, which is the only thing they actually do.
+
+**And the corollary that produces every WebFlux incident.** Since the model assumes threads
+never wait, one blocking call on an event-loop thread does not slow one request — it stalls
+every connection registered to that loop. Block all 8 and the entire server is dead while a
+200-thread Tomcat would have degraded gracefully. That is exactly the payment-service war
+story in §10: `JdbcTemplate` inside a `Mono`, 8 threads parked on HikariCP, p99 50x worse than
+the Spring MVC version they migrated away from.
+
 Key insight: The power of reactive programming is not in the operators — it is in the ability to describe a complete computation pipeline that handles concurrency, backpressure, error propagation, and cancellation declaratively, with no shared mutable state and no thread coordination primitives.
 
 ---
@@ -431,6 +475,48 @@ Flux.interval(Duration.ofMillis(1))   // emits 1000/sec
     .delayElements(Duration.ofMillis(5))  // processes 200/sec
     .subscribe();
 ```
+
+**Read it like this.** "Backpressure is just a rate comparison: if the source produces faster
+than the consumer drains, the difference has to go *somewhere* — into a buffer, onto the floor,
+or into an `OutOfMemoryError`." Every operator above is a different answer to that same
+question, and choosing between them means first computing the surplus.
+
+| Symbol | What it is |
+|--------|------------|
+| production rate | Items/sec the source emits. `Duration.ofMillis(1)` = `1/0.001` = 1,000/s |
+| consumption rate | Items/sec downstream can drain. `delayElements(5ms)` = `1/0.005` = 200/s |
+| surplus | `production - consumption`. The rate at which the gap accumulates |
+| `onBackpressureBuffer(500)` | How many surplus items you are willing to hold |
+| `limitRate(n)` | Caps outstanding demand at `n`, replenishing after `0.75 x n` are consumed |
+
+**Walk one example.** The `Flux.interval` chain above, second by second:
+
+```
+  production      1 / 0.001 s   = 1,000 items/s
+  consumption     1 / 0.005 s   =   200 items/s
+  surplus         1,000 - 200   =   800 items/s
+
+  buffer of 500 fills in   500 / 800   = 0.625 s
+  after that, DROP_OLDEST discards 800 items/s
+  over one minute:         800 x 60    = 48,000 items dropped
+
+  Now the unbounded version -- flatMap with no limit over Flux.range(1, 1_000_000):
+  all 1,000,000 inner subscriptions are opened at once. There is no buffer to
+  overflow and nothing to drop, so the surplus becomes heap. OOM.
+```
+
+The 0.625 seconds is the point. A bounded buffer does not *solve* a rate mismatch, it only
+delays it — sizing a buffer is choosing how long you can absorb a burst, and this one absorbs
+under a second. If the mismatch is sustained rather than bursty, no buffer size is correct and
+you must fix the rate itself (slow the source, parallelize the consumer, or shed load
+deliberately).
+
+**Why `limitRate` replenishes at 75% rather than at zero.** Waiting until demand is fully
+exhausted before requesting more leaves the pipeline idle for one full round trip of the
+`request(n)` signal — a stutter every batch. Refilling at `0.75 x 100 = 75` consumed means the
+next 25 items are already in flight while the last 25 of the current batch are still being
+processed, so the source never actually goes quiet. It is double-buffering, expressed as a
+ratio.
 
 ### 6.7 Concrete Numbers
 

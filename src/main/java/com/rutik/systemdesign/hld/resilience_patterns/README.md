@@ -305,6 +305,43 @@ sequenceDiagram
 
 The key numbers to internalize: **20-call window and 50% threshold** mean the breaker needs to see a *sustained* problem (10+ failures within the last 20 calls) — a single transient blip (1-2 failures) doesn't trip it. The **30-second cooldown** is long enough to give a struggling dependency real breathing room, but short enough that recovery is detected within tens of seconds, not minutes.
 
+**In plain terms.** "Trip when `failures / window >= threshold`" means the window size alone decides how much evidence one bad call is worth — a single failure is 5% of a 20-call window but 20% of a 5-call window.
+
+The threshold gets all the attention in configuration reviews, but the window is the parameter that decides whether the breaker is measuring a trend or reacting to noise. Both war stories in Section 10 about breaker tuning are window problems wearing a threshold costume.
+
+| Symbol | What it is |
+|--------|------------|
+| window | Number of recent calls the breaker scores over — `20` in this configuration |
+| threshold | Failure fraction that opens the circuit — `50%` here |
+| failures to trip | `window x threshold`, rounded up — the absolute count that matters operationally |
+| one call's weight | `1 / window` — how much a single failure moves the measured rate |
+| cooldown | Seconds in OPEN before trial calls are allowed — `30s` |
+| close rate | Fraction of the `5` trial calls that must succeed to re-close — `80%`, so 4 of 5 |
+
+**Walk one example.** The reference configuration, then the mis-tuned one from War Story 3:
+
+```
+  Reference: window 20, threshold 50%
+      failures to trip = 20 x 0.50 = 10 failures
+      weight of one failure = 1 / 20 = 5.0%
+      a 2-failure blip reads as 2/20 = 10%  ->  well under 50%, stays CLOSED
+
+  War Story 3: window 5, threshold 40%
+      failures to trip = 5 x 0.40 = 2 failures
+      weight of one failure = 1 / 5 = 20.0%
+      the observed 3-of-5 blip reads as 3/5 = 60%  ->  OPENS immediately
+
+  Cost of that false trip:
+      30 s cooldown served from the degraded fallback, while the
+      dependency was actually healthy again after ~5 s
+      wasted degradation = 30 - 5 = 25 s per deploy
+      at several deploys/week the fallback becomes the de facto primary
+
+  Half-open gate: 5 trial calls x 80% = 4 of 5 must succeed to re-close.
+```
+
+Why the window cannot simply be made huge: at a given call rate, the window is also a *time* window. A 1,000-call window at 10 req/s spans `1,000 / 10 = 100 seconds`, so a real outage needs 100 seconds of sustained failure before the rate even has a chance to cross the threshold — the breaker becomes an obituary rather than a circuit breaker.
+
 ### 6.2 Exponential Backoff with Full Jitter — Worked Table
 
 ```
@@ -327,10 +364,49 @@ attempt | base * 2^attempt | capped at 20s? | delay range (full jitter)
 
 Most retry policies also cap the TOTAL number of attempts (e.g., 3-5)
 rather than retrying indefinitely -- by attempt 5, the operation has
-already taken up to ~1+2+4+8+16 = ~31 seconds of cumulative possible
-delay even before this attempt's own timeout, which is often already
-longer than an end-to-end request deadline (§6.3) allows.
+already taken up to ~0.2+0.4+0.8+1.6+3.2 = ~6.2 seconds of cumulative
+possible delay even before this attempt's own timeout, which is often
+already longer than an end-to-end request deadline (§6.3) allows.
+(With a 1-second base instead of 100ms, the same five attempts sum to
+~1+2+4+8+16 = ~31 seconds -- the base is what sets the scale.)
 ```
+
+**Stated plainly.** `delay = random(0, min(cap, base * 2^attempt))` says: "double the waiting room each attempt, never let it exceed the cap, then pick a random point inside it so no two clients wait the same amount."
+
+The formula is doing two independent jobs that are easy to confuse. The `2^attempt` reduces *load* on a struggling dependency; the `random(0, ...)` reduces *correlation* between clients. Dropping either one leaves a distinct failure mode.
+
+| Symbol | What it is |
+|--------|------------|
+| `base` | The first delay unit, `100ms` here — sets the absolute scale of every later delay |
+| `attempt` | Retry number, `1, 2, 3, ...`. It is the exponent, so it multiplies the wait, not adds to it |
+| `2^attempt` | Doubling factor: `2, 4, 8, 16, ...` — halves the retry rate at each step |
+| `cap` | Ceiling on the delay, `20,000ms`. Past this, growth stops entirely |
+| `min(cap, ...)` | Take whichever is smaller — the growth curve or the ceiling |
+| `random(0, X)` | Uniform pick in `[0, X)`. Expected wait is `X/2`; two clients almost never collide |
+
+**Walk one example.** One client at attempt 4, then the fleet-wide effect of the `random`:
+
+```
+  attempt 4, base 100ms:
+      base x 2^attempt = 100 x 2^4 = 100 x 16 = 1,600 ms
+      min(20,000, 1,600)            = 1,600 ms
+      delay = random(0, 1,600)      -> expected wait 800 ms
+
+  Where the cap starts binding:
+      attempt 7 : 100 x 128 = 12,800 ms  -> under cap
+      attempt 8 : 100 x 256 = 25,600 ms  -> CAPPED to 20,000 ms
+      attempt 9+: growth stops; every delay range is 0 - 20,000 ms
+
+  Fleet effect at War Story 2's scale (3,000 clients, one shared failure):
+      fixed 2,000 ms delay  -> all 3,000 retries land in ~the same instant
+      random(0, 1,600) ms   -> 3,000 retries spread over 1,600 ms
+                            -> 3,000 / 1,600 = 1.88 retries per millisecond
+
+  Cumulative worst case through 5 attempts:
+      0.2 + 0.4 + 0.8 + 1.6 + 3.2 = 6.2 s  (matches the table above)
+```
+
+**Why the jitter term exists.** Remove `random(...)` and the delays become deterministic: every client that failed at the same instant retries at the same instant, forever. War Story 2's 3,000x spike is precisely this — the backoff was working (2 seconds of relief) and the system still collapsed, because 3,000 requests arriving within one millisecond is indistinguishable from a 3,000x traffic spike. Remove `2^attempt` instead and you keep the desynchronization but never reduce the aggregate retry rate, so a dependency that needs 30 seconds to recover is hammered at full rate the entire time.
 
 ### 6.3 Timeout / Deadline Budget Propagation Across a Call Chain
 
@@ -364,6 +440,46 @@ sequenceDiagram
 ```
 
 *Each hop derives its own timeout from the deadline it was handed rather than a fixed guess — the parallel airline calls get about 900ms each, and the whole round trip finishes at t=995ms, safely inside the 1000ms budget the client actually set.*
+
+**What this actually says.** "Each hop's timeout is `remaining deadline - (my own overhead + my reserved margin)` — a subtraction that runs fresh at every hop, not a constant copied into every config file."
+
+The critical property is that the budget only ever shrinks. A fixed per-hop timeout has no such guarantee, which is how "reasonable" 2-second timeouts compose into an 8-second response for a client that quit after 1 second.
+
+| Symbol | What it is |
+|--------|------------|
+| client deadline | The only real number: `1000ms`, set by whoever is actually waiting |
+| hop overhead | Time this hop spends on its own work before calling downstream (`10ms`, `20ms`) |
+| reserved margin | Slack this hop keeps for merging/serializing the response (`~80ms`) |
+| remaining budget | `deadline - elapsed - margin` — what gets handed to the next hop |
+| parallel vs serial | Parallel calls each get the *whole* remaining budget; serial calls must split it |
+
+**Walk one example.** The chain in the diagram, subtraction by subtraction:
+
+```
+  Client sets deadline                        = 1,000 ms
+
+  Gateway: overhead 10 ms
+      remaining = 1,000 - 10                  =   990 ms
+      passes downstream deadline               =   980 ms  (10 ms of its own slack)
+
+  Aggregator: overhead 20 ms, reserves ~80 ms for merge/sort/serialize
+      remaining = 980 - 20 - 80  (approx)      =   900 ms  per parallel call
+
+  Because the 3 airline calls run in PARALLEL, each gets the full 900 ms:
+      wall-clock cost = max(150, 300, 900)     =   900 ms
+      response at     = 20 + 900 + merge       =   950 ms at the aggregator
+      client sees                              =   995 ms   < 1,000 ms  OK
+
+  Had they run SERIALLY, the same 900 ms budget would have to be split:
+      900 / 3 airlines                         =   300 ms each
+      and the actual 150 + 300 + 900 = 1,350 ms would blow the deadline.
+
+  The anti-pattern, fixed 2 s per hop, 4 hops:
+      4 x 2,000 = 8,000 ms spent serving a client that left at 1,000 ms
+      wasted work ratio = 8,000 / 1,000 = 8x
+```
+
+The parallel-versus-serial line is the part worth memorizing: fan-out is what makes deadline propagation cheap. Under fan-out the per-hop timeout equals the remaining budget, so no hop has to guess at a division; the moment calls become sequential, every hop's share must be divided down and the arithmetic gets genuinely hard.
 
 ### 6.4 Bulkhead Sizing with Little's Law
 
@@ -448,6 +564,43 @@ flowchart LR
 ```
 
 *During a spike to 1000 req/s (2.5x the pool's 400 req/s capacity), this ladder sheds low-priority traffic the instant queue depth passes 50, capping the effective arrival rate so checkout's queueing delay stays in the low tens of ms instead of growing unbounded until the process crashes.*
+
+**Put simply.** "Service rate is `workers / average latency`; once arrivals exceed it, the queue does not slow down — it grows forever, so the only remaining choice is which requests to drop."
+
+Load shedding is the one pattern where the arithmetic is not about tuning but about arithmetic impossibility. When `arrival rate > service rate`, no amount of queueing, buffering, or retrying helps; the queue is a countdown to a crash.
+
+| Symbol | What it is |
+|--------|------------|
+| workers | Concurrent request slots in the pool — `20` |
+| average latency | Time one worker spends per request — `50ms` = `0.05s` |
+| service rate | `workers / latency` — sustainable requests per second |
+| arrival rate | Offered load, `1,000` req/s during the spike |
+| overload factor | `arrival / service` — how far past capacity the system is |
+| queue thresholds | Depth at which shedding tiers engage — `50` and `200` |
+
+**Walk one example.** The pool in the diagram, at the spike described:
+
+```
+  service rate = 20 workers / 0.05 s = 400 req/s      (the "400 req/s sustainable")
+
+  overload factor = 1,000 / 400 = 2.5x
+
+  excess arrivals = 1,000 - 400 = 600 req/s that CANNOT be served, ever
+
+  Without shedding, queue growth is 600 requests per second:
+      to reach the 50-threshold  :  50 / 600 = 0.08 s
+      to reach the 200-threshold : 200 / 600 = 0.33 s
+      to reach 10,000 queued     : 10,000 / 600 = 16.7 s before OOM territory
+
+  Queueing delay at depth 200, by Little's Law rearranged (W = L / lambda):
+      200 / 400 = 0.5 s of pure waiting, on top of the 50 ms of work
+
+  With shedding, the accepted rate is clamped at 400 req/s:
+      queue depth stays bounded, delay stays near 50 / 400 = 0.125 s
+      the other 600 req/s get an immediate 503 + Retry-After
+```
+
+The 0.08-second figure is why the threshold ladder must be evaluated per request rather than on a timer: at 2.5x overload the queue crosses the first shedding threshold in under a tenth of a second, long before any periodic health check or auto-scaler could react. Shedding is the only control loop fast enough to run at overload speed.
 
 ---
 
@@ -646,6 +799,42 @@ A travel-booking platform's flight search feature fans out a single user search 
 - Airline APIs are wildly heterogeneous: 2 are fast and reliable (p99 ~300ms, >99.9% success), 2 are moderate (p99 ~800ms, ~99% success), and 2 are historically unreliable (p99 ~2-4 seconds, occasional multi-minute outages, ~95% success on a good day)
 - **Current (broken) behavior**: the aggregator calls all 6 airlines with a single shared HTTP client (no per-airline timeout configuration — all use the client's default 30-second timeout), waits for ALL 6 responses (or timeout) before returning anything, and a single airline's failure causes the ENTIRE search to return an error page to the user
 
+**The idea behind it.** "Fan-out multiplies your inbound rate before anything else happens — 8,000 searches per minute is 48,000 outbound calls per minute, and every pool you size is sized against the second number."
+
+The single most common sizing mistake in a fan-out service is provisioning against the request rate the users generate rather than the call rate the architecture generates. The two differ by exactly the fan-out width.
+
+| Symbol | What it is |
+|--------|------------|
+| inbound rate | User-facing searches: `8,000/minute` |
+| fan-out width | Downstream calls per inbound request: `6` airlines |
+| outbound rate | `inbound x fan-out` — the number pools are actually sized against |
+| `lambda` | Arrival rate per second for one airline, in Little's Law terms |
+| `W` | That airline's hold time (its p99 latency or its timeout, whichever binds) |
+| `L = lambda x W` | Concurrent slots that airline's bulkhead needs |
+
+**Walk one example.** From the stated peak down to a per-airline pool size:
+
+```
+  outbound rate = 8,000 searches/min x 6 airlines = 48,000 calls/min
+  per second    = 48,000 / 60 = 800 calls/sec across all airlines
+  per airline   = 8,000 / 60  = 133 calls/sec     (each search hits each airline once)
+
+  Little's Law for a FAST airline (p99 ~300ms):
+      L = 133 x 0.3 s = 40 concurrent slots
+
+  Little's Law for an UNRELIABLE airline at its 1,200ms timeout:
+      L = 133 x 1.2 s = 160 concurrent slots to never block
+
+  The design deliberately provisions 6, not 160:
+      6 slots / 1.2 s = 5 calls/sec of capacity
+      133 - 5 = 128 calls/sec hit a full bulkhead and fail fast
+
+  Time for a degraded airline to fill its 6-slot pool:
+      6 slots / 133 arrivals per sec = 0.045 s
+```
+
+That deliberate under-provisioning is the point, and it is the opposite of how pools are usually sized. A pool of 160 would faithfully absorb the degradation — holding 160 threads hostage for 1.2 seconds each. A pool of 6 fills in 45 milliseconds and converts the remaining 128 calls/sec into instant fallbacks, which is what keeps the 2.5s SLA intact while the provider is broken.
+
 ### Current (Broken) Architecture
 
 ```mermaid
@@ -761,3 +950,38 @@ flowchart LR
 1. **A single shared timeout/client configuration across heterogeneous dependencies guarantees the configuration is wrong for most of them.** The original 30-second default timeout was "safe" for no airline — too long for the fast ones (no benefit, just delayed failure detection) and not meaningfully different from "wait forever" relative to the 2.5s SLA for the slow ones. Per-dependency configuration, derived from each dependency's OWN observed latency distribution, is not optional polish — it's the difference between the pattern working at all and the pattern being decorative.
 
 2. **"Wait for all N, fail if any fails" is an availability multiplier in the wrong direction.** If each of 6 airlines is independently available 99% of the time, the probability that ALL 6 are simultaneously available is `0.99^6 ≈ 94.1%` — meaning the original architecture's *effective* availability was ~94.1% even though every individual dependency looked fine on its own dashboard (each at 99%, which looks "healthy"). Designing for partial results changes the effective availability calculation entirely: the platform's search feature is now "down" only if it can't get a UI-acceptable minimum (e.g., at least 2-3 airlines respond), which — per the same independence assumption — has a probability on the order of `1 - (6 choose 0)*0.01^6 - (6 choose 1)*0.99*0.01^5 - ...` (overwhelmingly close to 100%). The lesson generalizes: **any "wait for all N dependencies" design point compounds each dependency's imperfect availability multiplicatively against you; graceful degradation to "most of N" is what actually delivers high availability to the user.**
+
+**What it means.** `A_effective = a^N` says: "if your request needs all N dependencies to answer, your availability is theirs multiplied together — and multiplying numbers below 1 only ever goes down."
+
+This is the most under-appreciated formula in resilience work, because each individual dashboard looks fine. Nobody is alerting at 99%; the outage lives entirely in the composition.
+
+| Symbol | What it is |
+|--------|------------|
+| `a` | Availability of one dependency, as a fraction — `0.99` for `99%` |
+| `N` | Number of dependencies the request requires ALL of — `6` airlines |
+| `a^N` | Effective availability of the "wait for all" design |
+| `1 - a^N` | Failure rate the user actually experiences |
+| `k of N` | The graceful-degradation alternative: succeed if any `k` respond |
+
+**Walk one example.** Six dependencies at 99% each, and what widening N does:
+
+```
+  N = 1 :  0.99^1 = 99.000%   ->  failure rate 1.00%
+  N = 3 :  0.99^3 = 97.030%   ->  failure rate 2.97%
+  N = 6 :  0.99^6 = 94.148%   ->  failure rate 5.85%   (the stated ~94.1%)
+  N = 12:  0.99^12 = 88.638%  ->  failure rate 11.36%
+
+  Against the 99.95% target from a typical SLA:
+      allowed failure rate = 0.05%
+      actual at N = 6      = 5.85%
+      overshoot            = 5.85 / 0.05 = 117x the entire error budget
+
+  Downtime equivalent per year at 94.148%:
+      (1 - 0.94148) x 8,760 h = 512.6 hours/year of degraded search
+
+  Now relax to "succeed if at least 1 of 6 responds":
+      failure = all six down = 0.01^6 = 0.000000000001 = 1e-12
+      availability = 99.9999999999%
+```
+
+The jump from `94.148%` to twelve nines is produced by exactly one design change — accepting partial results — with no improvement whatsoever to any individual airline. That is the argument for graceful degradation in a single line: `a^N` is a tax you pay for insisting on completeness, and it compounds with every dependency you add.

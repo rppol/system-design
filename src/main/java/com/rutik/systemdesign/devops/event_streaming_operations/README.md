@@ -170,6 +170,38 @@ flowchart LR
 ```
 LAG = `log-end-offset − committed-offset`, summed across all partitions; flat near zero is healthy, while a widening gap (consume rate < produce rate) must be caught before it reaches the retention edge.
 
+**In plain terms.** "Lag counts messages, but what you actually care about is time — divide the message count by the produce rate and you get how many seconds of history the consumer is standing behind."
+
+| Symbol | What it is |
+|--------|------------|
+| `log-end-offset` | The offset of the newest message in the partition — the head of the log |
+| `committed-offset` | The last offset the consumer group durably committed as processed |
+| LAG | `log-end-offset - committed-offset`, per partition, summed over the group |
+| Produce rate `p` | Messages per second being appended to the partition |
+| Time behind | `LAG / p` — how stale the consumer's view of the world is |
+| Retention edge | Where `LAG / p` reaches `retention.ms`; past it, unread data is deleted |
+
+**Walk one example.** Take the diagram's numbers, then a topic producing 50,000 msg/s with 7-day retention:
+
+```
+  from the diagram:
+    LAG = 1,000,000 - 985,000 = 15,000 messages
+    at 50,000 msg/s  ->  15,000 / 50,000 = 0.3 seconds behind  (healthy)
+
+  what the retention edge is, in messages:
+    7 days = 604,800 s  x  50,000 msg/s = 30,240,000,000 messages retained
+
+  a consumer that stops entirely (consume rate = 0):
+    lag grows at the full produce rate, 50,000 msg/s
+    time to hit the edge = 604,800 s / 1 = 7 days   <- exactly the retention window
+
+  a consumer running at 90% of produce rate (45,000 msg/s):
+    lag grows at 50,000 - 45,000 = 5,000 msg/s
+    time to the edge = 30,240,000,000 / 5,000 = 6,048,000 s = 70 days
+```
+
+**The bound worth memorizing.** A completely dead consumer reaches the retention edge in exactly `retention.ms`, never sooner — retention is your hard deadline to notice and fix a stall. A partially-slow consumer gets proportionally longer, which is why a lag graph that is *rising slowly* is a ticket while one *rising at the full produce rate* is a page: the second one means nobody is consuming at all, and the clock is the retention window itself.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -237,6 +269,35 @@ also: partitions >= max desired consumer parallelism in any one group
 choose 36 (round up, leave headroom; avoid frequent re-partitioning which is disruptive)
 ```
 
+**What the formula is telling you.** "Partition count is a max of two independent floors — one set by bytes per second, one set by how many consumers you want working at once — and you take whichever is larger, then add headroom because raising it later is disruptive."
+
+| Symbol | What it is |
+|--------|------------|
+| Target throughput | Peak write rate the topic must sustain, 600 MB/s here |
+| Per-partition limit | Measured write ceiling for one partition, ~10-25 MB/s on typical hardware |
+| Throughput floor | `target / per_partition_limit` — partitions needed for bytes alone |
+| Parallelism floor | Max consumers you want active in one group; a partition feeds exactly one consumer |
+| Chosen count | `max(floors)` rounded up for headroom — 36 here |
+
+**Walk one example.** Watch how sensitive the answer is to the per-partition number you assume, then stress it:
+
+```
+  per-partition limit assumed     partitions required = 600 / limit
+    10 MB/s (conservative)          600 / 10 = 60
+    20 MB/s (the module's choice)   600 / 20 = 30
+    25 MB/s (optimistic)            600 / 25 = 24
+
+  chosen 36 against the 30 floor  ->  36 / 30 = 1.2 = 20% headroom
+  actual load per partition at 36 ->  600 / 36 = 16.7 MB/s  (comfortably under 20)
+
+  now apply the case study's 3x Black Friday spike:
+    1,800 MB/s / 36 partitions = 50.0 MB/s per partition  -> 2x over the 25 MB/s
+      optimistic ceiling; the topic is now partition-bound
+    partitions needed at 20 MB/s = 1,800 / 20 = 90
+```
+
+**Why "measure the per-partition limit" is not optional.** The same 600 MB/s target produces answers between 24 and 60 partitions depending purely on which per-partition number you believe — a 2.5x spread. Guessing high under-provisions the topic and guessing low burns file handles and lengthens every rebalance. And because increasing partitions later rewrites the key-to-partition mapping (the case study's discussion question 1), the cost of getting it wrong is not symmetric: too few is a re-partition under load, too many is merely wasteful.
+
 Disk per broker — retention drives this:
 ```
 ingest          = 600 MB/s
@@ -286,6 +347,42 @@ Peak ingest (600 MB/s) over-counts cumulative writes as if they were stored byte
 
 This is exactly why tiered storage exists: keep ~6–24h hot on EBS, offload the rest to S3.
 
+**What it means.** "Stored bytes are a standing pool, not a running total: the log only ever holds one retention window's worth of data, so the rate that matters is the average over that window, not the peak you sized partitions with."
+
+| Symbol | What it is |
+|--------|------------|
+| Peak ingest | 600 MB/s — the right input for *partition* sizing, the wrong one for disk |
+| Average ingest | 200 MB/s — the sustained rate over the whole retention window |
+| Retention | 7 days = 604,800 seconds |
+| RF | Replication factor 3 — every byte is stored three times, on three brokers |
+| Stored bytes | `avg_ingest x retention x RF` |
+| Per broker | `stored_bytes / broker_count` |
+
+**Walk one example.** Run both paths and then find the hot window that actually fits a 2 TB disk:
+
+```
+  WRONG path (peak x retention, treated as stored):
+    600 MB/s x 604,800 s = 362,880,000 MB = 362.88 TB
+    this is cumulative bytes WRITTEN, and only if peak were sustained all week
+
+  CORRECT path:
+    200 MB/s x 604,800 s = 120,960,000 MB = 120.96 TB raw
+    x RF 3               = 362.88 TB replicated
+    / 3 brokers          = 120.96 TB per broker
+    vs a 2 TB disk       = 120.96 / 2 = 60.5x oversubscribed
+
+  so what hot window DOES fit 2 TB per broker?
+    per-broker bytes = avg_ingest x window   (the RF 3 and the 3 brokers cancel)
+    2,000,000 MB / 200 MB/s = 10,000 s = 2.78 hours
+
+  and to hold the recommended 6h hot window:
+    200 MB/s x 21,600 s = 4,320,000 MB = 4.32 TB per broker needed
+```
+
+Note the numerical coincidence that makes the wrong path easy to miss: `600 x retention` and `200 x retention x 3` both land on 362.88 TB, because peak happens to be 3x average here. Change the peak-to-average ratio and the two diverge immediately — at 800 MB/s peak the wrong path gives 483.84 TB while the correct answer stays 362.88 TB.
+
+**Why the `/3 brokers` step cancels the RF.** Multiplying by RF 3 and then dividing across 3 brokers returns you to the raw figure, so with one broker per replica each broker holds a full copy of the log. Adding brokers is what actually reduces per-broker bytes: the same workload on 6 brokers stores `362.88 / 6 = 60.48` TB each. That is the third option the text offers — cut retention, add brokers, or tier to S3.
+
 ### 6.3 Monitoring consumer lag
 
 Lag is exported by the broker and by tools like **Kafka Lag Exporter** / **Burrow** / Strimzi's metrics into Prometheus:
@@ -310,6 +407,38 @@ kafka-consumer-groups.sh --bootstrap-server prod-kafka:9092 \
 # TOPIC   PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
 # orders  0          985000          1000000         15000   <- this partition is behind
 ```
+
+**Put simply.** "A raw lag threshold like 500,000 is meaningless until you divide it by your produce rate — and once you do, the second question is whether you have any spare consume capacity to work the backlog off with."
+
+| Symbol | What it is |
+|--------|------------|
+| Threshold 500,000 | Total messages of lag across the group that trips the alert |
+| `for: 10m` | The lag must stay above the threshold for 10 minutes — ignores deploy blips |
+| Produce rate `p` | Messages/s arriving; converts the threshold into seconds of staleness |
+| Consume rate `c` | Messages/s the group can process; must exceed `p` to ever catch up |
+| Surplus `c - p` | The only rate at which a backlog actually shrinks |
+
+**Walk one example.** Interpret the threshold, then price the case study's 4-hour backlog at 50,000 msg/s:
+
+```
+  what 500,000 lag means at p = 50,000 msg/s:
+    500,000 / 50,000 = 10 seconds behind the head   <- an EARLY warning, not a crisis
+    the retention edge sits at 7 days = 604,800 s of lag, so this fires with
+    604,800 / 10 = 60,480x the runway still remaining
+
+  the case study's 4-hour backlog:
+    4 x 3,600 x 50,000 = 720,000,000 messages of lag
+
+  draining it depends ENTIRELY on surplus, not on total capacity:
+    c = 50,000 (matches produce)  surplus = 0        -> never drains
+    c = 60,000 (+20% headroom)    surplus = 10,000   -> 720,000,000 / 10,000
+                                                     = 72,000 s = 20 hours
+    c = 100,000 (2x capacity)     surplus = 50,000   -> 14,400 s = 4 hours
+```
+
+**Why the drain is so much slower than intuition says.** Doubling consumer capacity does not halve the recovery time — it takes a backlog that would never clear and clears it in 4 hours, while a 20% boost takes 20 hours to undo a 4-hour outage. That 5:1 penalty (20 hours to recover 4 hours) is the argument for the case study's KEDA autoscaler: you need surplus capacity to appear automatically during the incident, because provisioning it by hand after the fact means the backlog is still draining long after the traffic spike that caused it has passed.
+
+**The `for: 10m` clause is doing real work.** Every deploy of the consumer group triggers a rebalance pause, so lag spikes and then recovers within a minute or two. Without the 10-minute hold, the page fires on every routine deploy — the exact alert-fatigue pattern that trains on-call to ignore lag alerts entirely.
 
 ### 6.4 Rebalancing brokers with Cruise Control (throttled)
 
@@ -337,6 +466,32 @@ kafka-reassign-partitions.sh --bootstrap-server prod-kafka:9092 \
   --reassignment-json-file plan.json --execute \
   --throttle 50000000     # 50 MB/s cap so reassignment doesn't saturate the NICs
 ```
+
+**The idea behind it.** "The throttle is a budget split: whatever bandwidth you hand to replication is bandwidth clients do not get, so you are choosing directly between how long the migration runs and how much client latency it costs."
+
+| Symbol | What it is |
+|--------|------------|
+| `--throttle 50000000` | Bytes per second, so 50,000,000 B/s = 50 MB/s of replication traffic |
+| Bytes to move | Total partition data being relocated onto the new or rebalanced broker |
+| Migration time | `bytes_to_move / throttle` |
+| NIC capacity | The physical ceiling; replication plus client traffic must fit under it |
+| Under-replicated partitions | The metric that must return to 0 before the throttle is removed |
+
+**Walk one example.** Move 2 TB of partition data onto a freshly added broker:
+
+```
+  2 TB = 2,000,000 MB
+
+  throttle    migration time                       share of a 10 Gbps (1,250 MB/s) NIC
+   50 MB/s    2,000,000 /  50 = 40,000 s = 11.1 h    50 / 1,250 =  4%
+  100 MB/s    2,000,000 / 100 = 20,000 s =  5.6 h   100 / 1,250 =  8%
+  250 MB/s    2,000,000 / 250 =  8,000 s =  2.2 h   250 / 1,250 = 20%
+  unthrottled up to line rate  ->  minutes            100% -> clients starve
+```
+
+The unthrottled row is the pitfall: replication is a bulk sequential copy that will happily consume the entire NIC, and Kafka gives it no inherent priority below client traffic. Producers then start timing out and consumers fall behind — an operator-caused incident during what was meant to be a routine capacity addition.
+
+**Why 50 MB/s and an 11-hour migration is usually the right answer.** Nothing about the rebalance is urgent; the cluster was already serving traffic before the new broker arrived. Trading 11 hours of background copying for a 4% bandwidth footprint is almost always better than a 20-minute migration that spikes client p99. This is also why Cruise Control is preferred over the manual script — it moves partitions gradually under its own throttle and watches capacity goals, rather than relying on an operator remembering the `--throttle` flag at 2am.
 
 ### 6.5 Rolling upgrades without downtime
 
@@ -523,6 +678,37 @@ Redpanda is a Kafka-API-compatible broker written in C++ with no JVM and no ZooK
 **Diagnosis:**
 - Incident 1: the `orders` group had 12 consumers but the topic had only **8 partitions** — 4 consumers sat idle, capping parallelism below the produce rate, so lag grew unbounded under 3× load.
 - Incident 2: the on-call engineer restarted **two** brokers at once to save time; with `min.insync.replicas=2` and RF=3, dropping two brokers left only 1 ISR → all writes to those partitions blocked for 6 minutes.
+
+**Stated plainly.** "A partition is assigned to exactly one consumer in a group, so effective parallelism is `min(partitions, consumers)` — adding consumers past the partition count adds nothing but idle pods."
+
+| Symbol | What it is |
+|--------|------------|
+| Partitions | 8 before the fix, 36 after — the hard ceiling on group parallelism |
+| Group consumers | 12 running pods in the `orders` group |
+| Effective workers | `min(partitions, consumers)` |
+| Idle consumers | `max(0, consumers - partitions)` — running, assigned nothing, still costing money |
+| `maxReplicaCount: 36` | The KEDA cap, deliberately set equal to the partition count |
+
+**Walk one example.** Price the before/after against the 3x Black Friday load:
+
+```
+  BEFORE:  partitions =  8    consumers = 12
+    effective workers = min(8, 12)  =  8
+    idle consumers    = 12 - 8      =  4   ->  4 / 12 = 33% of the fleet doing nothing
+    ceiling: the group can never exceed 8 partitions' worth of throughput,
+             no matter how many pods are added, so lag grew unbounded at 3x load
+
+  AFTER:   partitions = 36    consumers scale 4 -> 36 via KEDA
+    effective workers = min(36, 36) = 36
+    parallelism gain  = 36 / 8      = 4.5x
+    idle consumers    = 0 at every scale point, because maxReplicaCount == partitions
+
+  the KEDA trigger: lagThreshold 10,000 means one consumer is added per 10,000 lag
+    lag  40,000 ->  4 consumers    lag 360,000 -> 36 consumers (cap reached)
+    lag 500,000 ->  still 36       <- past the cap, only repartitioning helps
+```
+
+**What the cap is protecting you from.** Setting `maxReplicaCount` above 36 would let KEDA spin up pods that get no partition assignment at all — they consume nothing, cost the same, and every one of them joining or leaving triggers a rebalance that pauses the consumers that *are* working. The rule "never exceed partition count" is not a cost optimization; it is the difference between scaling out and inducing a rebalance storm.
 
 The fixes map directly onto the two root causes:
 

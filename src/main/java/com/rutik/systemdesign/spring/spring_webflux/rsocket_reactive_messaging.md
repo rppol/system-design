@@ -535,6 +535,42 @@ Flux<Event> events() {
 }
 ```
 
+**What it means.** "A bounded buffer does not fix a producer that is faster than its consumer — it only converts an out-of-memory crash into a measured, bounded data loss, and the buffer size is how many seconds of grace you are buying before that loss starts."
+
+`REQUEST_N` backpressure works only when the source can actually slow down. A hot source physically cannot, so the buffer is the shock absorber between a producer that ignores demand and a consumer that signals it.
+
+| Symbol | What it is |
+|--------|------------|
+| `REQUEST_N` | The frame carrying the consumer's demand `n` back to the producer over the wire |
+| producer rate | How fast the hot source emits, independent of demand |
+| consumer rate | How fast demand is signalled — here `delayElements(100ms)` caps it at 10/sec |
+| `1000` | Buffer capacity, in elements |
+| `DROP_OLDEST` | What happens on overflow: discard the stalest element, keep the newest |
+| time to fill | `capacity / (producer rate - consumer rate)` — the grace period |
+
+**Walk one example.** A telemetry source outpacing a consumer that drains at the stated 10 elements/sec:
+
+```
+  consumer rate = 1 element per 100 ms = 10 elements/sec
+
+  net fill rate = producer rate - consumer rate
+  time to fill  = 1000 / net fill rate
+
+    producer     net fill      time to fill 1000        verdict
+      10/sec        0/sec         never                 balanced
+      12/sec        2/sec         500 sec = 8.3 min     survives a blip
+      20/sec       10/sec         100 sec = 1.7 min     survives a short stall
+     100/sec       90/sec          11 sec               loses data almost at once
+   1,000/sec      990/sec           1.0 sec             buffer is decorative
+
+  Steady-state loss once full (producer 100/sec):
+    100 emitted - 10 consumed = 90 elements/sec dropped, indefinitely
+```
+
+The buffer only ever buys time; it never changes the steady state. At a producer rate of 100/sec against a 10/sec consumer, the buffer delays the first drop by 11 seconds and then discards 90% of everything forever. Sizing it larger moves the 11 seconds, not the 90%.
+
+**Why `DROP_OLDEST` rather than an unbounded buffer.** Unbounded is the default failure mode and the one that kills the process: the JVM buffers until it OOMs, taking down every other multiplexed stream on that connection with it. Choosing a bound forces you to answer which data you would rather lose — `DROP_OLDEST` keeps the newest, correct for telemetry and price ticks where stale values are worthless, while `DROP_LATEST` keeps the oldest, correct for ordered command streams where the first message must not be skipped. The `log.warn` on drop is what makes the loss visible; without it the buffer silently discards 90% of your data and the dashboards look healthy.
+
 ### Pitfall 4: Per-request load balancer in front of RSocket
 
 Placing an L4 load balancer expecting to spread requests across backends breaks

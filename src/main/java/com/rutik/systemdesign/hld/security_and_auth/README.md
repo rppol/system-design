@@ -308,6 +308,40 @@ Tradeoff table:
   No expiry (bad)     UNBOUNDED                None -- but see why this is wrong below
 ```
 
+**In plain terms.** "The access token's lifetime IS the attacker's window, because nothing between issue and expiry ever re-checks whether the user is still allowed in."
+
+Every row of that table is the same one-line equation — blast radius equals TTL — which is why the choice is a latency-versus-exposure dial and not a security feature you either have or don't.
+
+| Symbol | What it is |
+|--------|------------|
+| access TTL | Access-token lifetime; also the maximum time a stolen token stays usable |
+| refresh TTL | Refresh-token lifetime (days/weeks); tracked server-side, so revocable |
+| zombie window | Time between an account being disabled and the token expiring |
+| refreshes | `refresh TTL / access TTL` — token exchanges over one login session |
+| revocation lag | Worst-case delay before a disabled account is actually locked out (= access TTL) |
+
+**Walk one example.** The standard 15-minute / 30-day pairing, and the account-disable scenario from the state diagram above:
+
+```
+  access TTL = 15 min, refresh TTL = 30 days
+
+  disable the account at t = 1 min:
+    zombie window = 15 min - 1 min = 14 minutes of a still-honoured token
+    worst case (disable at t = 0) = the full 15 min TTL
+
+  refreshes over one login session:
+    30 days x 24 h x 60 min = 43,200 min
+    43,200 / 15             = 2,880 refresh calls
+    -> 2,880 chances to check the revocation store, vs zero
+       checks if the access token had simply been given a 30-day TTL
+
+  the same account disable with a 24-hour TTL:
+    zombie window = up to 24 h = 1,440 min
+    1,440 / 15 = 96x larger exposure for identical code
+```
+
+The 2,880 number is the real argument for the split: the refresh endpoint is the only place a stateless design gets to consult a database, so a short access TTL is what converts "stateless and unrevocable" into "stateless, with a revocation check every 15 minutes."
+
 The standard resolution: **short-lived access tokens (15 min) + longer-lived refresh tokens (days/weeks), with rotation**. The refresh token IS tracked server-side (in a database/Redis) — so it CAN be revoked immediately (disable account -> delete refresh token record -> next refresh attempt fails -> user is fully logged out within 15 minutes at most, when their current access token expires). **Rotation** (§5.4) means each use of a refresh token invalidates it and issues a new one — if an attacker steals a refresh token and uses it, and then the legitimate user's next refresh also fires, the server detects two uses of the same token and can revoke the entire session family as a compromise signal.
 
 ### 6.3 PKCE — Why the Authorization Code Alone Isn't Enough
@@ -362,7 +396,68 @@ xychart-beta
 
 Each +2 cost factor roughly quadruples the hash time; ~250ms (cost 12) is the common production default.
 
+**What it means.** "The cost factor is an exponent, not a dial — each step up doubles the work, so moving from 10 to 14 makes an attacker do sixteen times more computation for the same login."
+
+Exponential is what lets the parameter keep pace with hardware: as GPUs get faster, you raise the cost by one or two and restore the original margin.
+
+| Symbol | What it is |
+|--------|------------|
+| cost factor | The bcrypt work parameter, typically 10–14 |
+| `2^cost` | Internal key-setup iterations bcrypt performs — the actual work done |
+| +1 cost | Doubles the hash time |
+| +2 cost | Quadruples the hash time (`2^2 = 4`) |
+| hash time | Wall-clock ms per single hash on the defending server |
+
+**Walk one example.** Walk the three cost factors in the chart above:
+
+```
+  cost 10 -> 2^10 =  1,024 iterations ->   65 ms per hash
+  cost 12 -> 2^12 =  4,096 iterations ->  250 ms per hash
+  cost 14 -> 2^14 = 16,384 iterations -> 1000 ms per hash
+
+  check the doubling claim:
+    iterations 4,096 / 1,024 = 4x     measured 250 / 65  = 3.8x
+    iterations 16,384 / 4,096 = 4x    measured 1000 / 250 = 4.0x
+    -> +2 cost really is ~4x, as advertised
+
+  total swing 10 -> 14:
+    16,384 / 1,024 = 16x more work for every single guess
+```
+
+The reason 12 is the default rather than 14: 250ms is invisible inside a login round trip, while 1000ms starts to be felt by users and, more importantly, makes your own login endpoint a cheap denial-of-service target — an attacker sending bogus logins burns a full CPU-second each.
+
 **Why "slow" is the feature:** a legitimate login pays this cost once per login — imperceptible to a user. An attacker with a stolen hash database pays it per guess instead: at cost 12 (~250ms/guess), one GPU tries only ~4 guesses/sec, so a dictionary of 100M common passwords takes ~290 days PER HASH, versus seconds against an unsalted MD5 hash crackable at billions of guesses/sec.
+
+**Put simply.** "Cracking time is simply how many guesses you must try divided by how many guesses per second the algorithm allows — and a slow hash attacks the denominator."
+
+The password itself is unchanged in both scenarios. All the defence lives in that denominator, which is precisely what the cost factor sets.
+
+| Symbol | What it is |
+|--------|------------|
+| keyspace | Guesses the attacker must try — 100M for a common-password dictionary |
+| guesses/sec | `1 / hash time` for a slow hash; billions/sec for a fast one like MD5 |
+| crack time | `keyspace / guesses per sec` |
+| per-hash cost | Salting forces this whole calculation to be repeated for every stolen row |
+| salt | Random per-password value; makes precomputed rainbow tables useless |
+
+**Walk one example.** The same 100M-entry dictionary against bcrypt cost 12 versus unsalted MD5:
+
+```
+  BCRYPT, cost 12
+    guesses/sec = 1 / 0.250 s              =              4 guesses/sec
+    crack time  = 100,000,000 / 4          =     25,000,000 seconds
+                = 25,000,000 / 86,400      =        ~289 days
+    ... PER HASH, because each row has its own salt.
+    10,000 stolen rows -> 289 days x 10,000. Not happening.
+
+  UNSALTED MD5, ~1,000,000,000 guesses/sec
+    crack time  = 100,000,000 / 1e9        =            0.1 seconds
+    and unsalted means ONE pass cracks every matching row at once.
+
+  ratio = 25,000,000 s / 0.1 s = 250,000,000x slower to attack
+```
+
+The two defences are doing different jobs, which is why you need both: the cost factor makes each individual guess expensive, and the salt stops one expensive campaign from being amortized across an entire stolen database.
 
 Salt (a random per-password value, stored alongside the hash) ensures two users with the same password produce DIFFERENT hashes — defeating precomputed "rainbow table" attacks.
 
@@ -498,6 +593,37 @@ A JWT library's signature verification was implemented as: "decode the token, ch
 
 A SPA stored its JWT access token in `localStorage` for convenience (easy to read in JavaScript for API calls). A third-party analytics script, compromised via a supply-chain attack, ran `JSON.stringify(localStorage)` and exfiltrated it to an attacker-controlled endpoint — including every active user's JWT. Because the tokens were valid for **24 hours** (chosen for "user convenience" — fewer re-logins), the attacker had a 24-hour window to impersonate any of the ~40,000 affected users.
 *Fix*: tokens moved to `httpOnly` cookies (inaccessible to JavaScript, hence to XSS) with `Secure` and `SameSite=Strict` flags, and access token TTL reduced to 15 minutes with refresh-token rotation (§6.2) — even a stolen access token now has a 15-minute blast radius instead of 24 hours.
+
+**Read it like this.** "Exposure is token lifetime multiplied by the number of tokens stolen — the storage choice decided the second factor, and the TTL choice decided the first."
+
+Both mistakes were made for convenience, and they multiplied rather than added. That is what turned a compromised third-party script into a platform-wide incident.
+
+| Symbol | What it is |
+|--------|------------|
+| TTL | Access-token lifetime chosen for "user convenience" (24h before, 15 min after) |
+| affected users | Sessions readable from `localStorage` at the moment of exfiltration (~40,000) |
+| blast radius | `TTL` — how long each stolen token stays usable |
+| exposure | `TTL x affected users` — usable impersonation-hours available to the attacker |
+| `httpOnly` | Cookie flag that makes a token unreadable from JavaScript, so XSS cannot exfiltrate it |
+
+**Walk one example.** The war story before and after both fixes:
+
+```
+  BEFORE: 24h TTL, tokens in localStorage
+    blast radius = 24 hours per token
+    exposure     = 24 h x 40,000 users = 960,000 user-hours
+
+  AFTER: 15-min TTL, httpOnly + Secure + SameSite cookies
+    TTL reduction  = 1,440 min / 15 min = 96x smaller window
+    exposure       = 0.25 h x 40,000    = 10,000 user-hours
+                     (if a token could still be read at all)
+
+  but the cookie change attacks the OTHER factor:
+    JavaScript cannot read an httpOnly cookie ->
+    affected users from this XSS class = 0 -> exposure = 0
+```
+
+The ordering matters when you have limited time: the TTL cut is a 96x improvement, while moving to `httpOnly` cookies removes the attack path entirely. Shortening the TTL alone would have left the same script stealing the same tokens, just 96 times less usefully.
 
 **War Story 3 — Missing Audience Validation: Token Confusion Across Services**
 
@@ -678,6 +804,38 @@ RLS enforcement happens at the database layer, not just in application code (Des
 5. **Per-tenant CMKs (envelope encryption, §6.5) only for the largest ~50 enterprise customers** with contractual key-isolation requirements; the remaining 750 tenants share a smaller set of CMKs, rotated regularly. This balances the operational overhead of per-tenant key management (KMS API rate limits, rotation complexity) against the contractual requirements driving it.
 
 6. **Public API uses scoped, prefixed API keys** (`pf_live_...` / `pf_test_...`), each scoped to specific resource types and rate-limited per key — modeled on Stripe's approach (§7) — rather than one all-access key per tenant.
+
+**The idea behind it.** "Give dedicated keys only to the tenants whose contracts demand them, and let the long tail share — key isolation is bought per tenant, so you buy it where it is actually required."
+
+Per-tenant keys are not free: each one is a separate rotation schedule, a separate audit stream, and a slice of the KMS API rate limit. Applying them uniformly across all 800 tenants would multiply that overhead roughly fifteen-fold for no contractual benefit.
+
+| Symbol | What it is |
+|--------|------------|
+| tenants | Total enterprise customers on the platform (800) |
+| dedicated CMKs | Tenants with contractual key-isolation requirements (~50) |
+| shared CMKs | Remaining tenants sharing a small, regularly-rotated key set (750) |
+| CMK | Customer Master Key — never leaves KMS; encrypts the per-object DEKs (§6.5) |
+| DEK | Per-object Data Encryption Key — the only thing re-encrypted on rotation |
+
+**Walk one example.** The split, and what uniform per-tenant keying would have cost:
+
+```
+  dedicated = 50  of 800  =  6.25% of tenants
+  shared    = 800 - 50    =   750 tenants = 93.75%
+
+  keys to rotate under the chosen design:
+    50 dedicated + a small shared set (say 5) = ~55 CMKs
+
+  keys to rotate if every tenant got its own:
+    800 CMKs -> 800 / 55 = ~15x more rotation work, audit
+    surface, and KMS API pressure, for zero extra contracts met
+
+  and note what rotation actually touches, either way:
+    only the DEKs are re-encrypted -- never the underlying data,
+    which may be terabytes per tenant.
+```
+
+That last line is why the decision is affordable at all: envelope encryption makes the cost of a CMK proportional to the number of DEKs, not to data volume, so the only real variable left is how many CMKs you have chosen to operate.
 
 ### Operational Results
 

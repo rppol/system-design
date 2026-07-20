@@ -95,6 +95,47 @@ A participant that voted `VOTE_COMMIT` cannot unilaterally abort. It holds locks
 - Heterogeneous services (different databases, messaging systems) rarely expose the XA interface needed for 2PC.
 - P in CAP: 2PC is not partition-tolerant; if a participant cannot reach the coordinator, it blocks.
 
+**Read it like this.** "Every participant must hold its locks for the full width of two network round trips, because it cannot know the outcome until the slowest participant has voted and the coordinator has told everyone."
+
+The "2× latency minimum" line is doing a lot of work. It is not the coordinator's latency budget that hurts — it is that the number becomes the *lock hold time* on every row the transaction touched, and lock hold time is the denominator of contended throughput.
+
+| Symbol | What it is |
+|--------|------------|
+| RTT | One network round trip between coordinator and a participant |
+| Phase 1 | PREPARE out, votes back. One RTT, paced by the *slowest* participant |
+| Phase 2 | COMMIT/ABORT out, acks back. One more RTT |
+| `2 × RTT` | Minimum lock hold time at every participant. The number that matters |
+| Blocking window | If the coordinator dies after phase 1, lock hold becomes "until coordinator recovery" — unbounded |
+| Contended throughput | `1 / lock hold time` — serial transactions per second on any single hot row |
+
+**Walk one example.** A 10 ms RTT between services, against the 100 ms SLA named above:
+
+```
+  Phase 1 (PREPARE + votes)     10 ms
+  Phase 2 (COMMIT + acks)       10 ms
+  ------------------------------------
+  Lock hold per participant     20 ms      vs ~1 ms for a purely local transaction  = 20x
+
+  Against a 100 ms SLA:  100 - 20 = 80 ms left for all business logic
+
+  Throughput on one contended row:
+    local  1 ms hold  ->  1000 / 1   = 1,000 txn/s
+    2PC   20 ms hold  ->  1000 / 20  =    50 txn/s      20x collapse
+
+  Coordinator crashes after phase 1, recovers in 5 minutes:
+    lock hold = 300,000 ms  =  15,000x the normal hold
+```
+
+Note that the participant count barely moves the first number — 3 participants or 100, it is
+still two round trips, paced by the slowest voter. What the participant count changes is the
+*probability* of the last row: every additional participant is another process that can vanish
+mid-protocol, and another set of locks frozen when the coordinator does. The 20 ms is the
+advertised price; the 300,000 ms is the one that ends up in the incident review, and no timeout
+setting on the participant side can shorten it, because a participant that voted `VOTE_COMMIT`
+has surrendered its right to decide.
+
+
+
 ### 4.2 Three-Phase Commit (3PC)
 
 Adds a `PRE-COMMIT` phase between prepare and commit to allow participants to determine the coordinator's decision even if it crashes.
@@ -780,6 +821,44 @@ A team's outbox relay polled `SELECT * FROM outbox_events WHERE published = FALS
 Fix:
 1. Create a partial index: `CREATE INDEX idx_outbox_unpublished ON outbox_events (created_at) WHERE published = FALSE`.
 2. Schedule a cleanup job: `DELETE FROM outbox_events WHERE published = TRUE AND published_at < NOW() - INTERVAL '7 days'`.
+
+**Put simply.** "An outbox table without a retention policy is not a queue, it is an append-only log of everything that ever happened — and the relay's scan cost grows with the log, not with the backlog."
+
+The subtle part is that the relay only ever *cares about* the unpublished rows, which stay a tiny constant. It is the rows it does not care about that destroy it, because without a partial index the planner still has to walk them.
+
+| Symbol | What it is |
+|--------|------------|
+| Poll interval | `fixedDelay = 500` ms — how often the relay scans for unpublished rows |
+| Publish latency | `0` to one full interval. Averages half the interval |
+| Ingest rate | Events written per second by the application |
+| Table size | `ingest rate × retention` — governed entirely by the cleanup job |
+| Partial index | `... WHERE published = FALSE` — indexes only the rows the relay reads |
+| Selectivity | Fraction of rows matching the predicate. Below roughly 1%, a plain index is useful; near 100% the planner ignores it |
+
+**Walk one example.** The incident's own numbers, and what retention changes:
+
+```
+  Publish latency added by polling:
+    average  =  500 ms / 2  =  250 ms
+    worst    =  500 ms
+
+  Table growth, 50,000,000 rows over 3 months (90 days):
+    per day     =  50,000,000 / 90        =  555,556 rows/day
+    per second  =  50,000,000 / 7,776,000 =      6.4 rows/s
+
+  With 7-day retention instead of forever:
+    resident rows  =  555,556 x 7  =  3,888,889
+    reduction      =  50,000,000 / 3,888,889  =  12.9x smaller
+```
+
+A sustained 6.4 rows/second is a trivially small write rate — which is the whole lesson. Nothing
+about the traffic was extreme; the table reached 50 million rows purely because nothing ever
+deleted from it, and an 8-second full scan every 500 ms means the relay is permanently behind,
+overlapping its own runs and pinning the database. Both fixes are needed and they fix different
+things: the partial index makes the *scan* cheap regardless of table size, and the retention job
+makes the *table* small. Ship only the index and storage grows without bound; ship only the
+cleanup and you are still one traffic spike away from the planner abandoning a low-selectivity
+index again.
 
 ### Pitfall 5: Missing Idempotency on Forward Steps
 

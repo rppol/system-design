@@ -1185,6 +1185,39 @@ public class ViewEventPublisher {
 | Recently-viewed events lost per Redis failover | ~8,000 (pub/sub, no persistence) | 0 (Streams + consumer group replay) |
 | Redis memory per session | 1.9 KB (JDK serialization overhead) | 0.6 KB (JSON) |
 
+**What the formula is telling you.** "A per-object overhead that reads as a rounding error becomes a capacity decision once you multiply it by the object count — 1.3 KB per session is nothing until two million sessions turn it into gigabytes of RAM you are paying for."
+
+Two rows of this table share one cause: the JDK serializer. It is why sessions cost 3x more memory *and* why a class change broke all of them on deploy.
+
+| Symbol | What it is |
+|--------|------------|
+| JDK serialization | Java binary format — embeds class names, field metadata, and `serialVersionUID` per object |
+| JSON serialization | Text format via `GenericJackson2JsonRedisSerializer` — field names only, no class metadata |
+| per-session delta | `1.9 - 0.6` = **1.3 KB** saved on every session |
+| session count | **~2M** active, from the deserialization-failures row |
+| `serialVersionUID` | The version stamp JDK serialization checks; a mismatch throws `InvalidClassException` |
+
+**Walk one example.** Scale the per-session figures to the fleet's 2M active sessions:
+
+```
+  Redis memory held by session data:
+    JDK  : 2,000,000 x 1.9 KB = 3,800,000 KB = 3,800 MB = 3.8 GB
+    JSON : 2,000,000 x 0.6 KB = 1,200,000 KB = 1,200 MB = 1.2 GB
+    saved:                                                2.6 GB  (68% less)
+
+  Compression ratio:
+    1.9 / 0.6 = 3.2x
+    -> the same instance now holds 3.2x more sessions before eviction
+
+  Deploy blast radius, before the fix:
+    a single incompatible class change -> InvalidClassException on read
+    -> 2,000,000 sessions = 100% of logged-in users get a 500
+```
+
+The 3.8 GB figure is what forces the Redis instance size; dropping to 1.2 GB means the same node absorbs a 3x traffic spike without eviction. But the memory win is the secondary benefit here — the primary one is that the deserialization-failures row goes to zero.
+
+**Why JSON removes the deploy failure and JDK serialization cannot.** JDK serialization encodes the exact class shape, so adding one field changes `serialVersionUID` and every session written by the previous deploy becomes unreadable — 100% of logged-in users, mid-deploy, with no gradual failure to catch in canary. JSON stores field names and simply ignores ones it does not recognize, making additive changes forward- and backward-compatible by construction. Pinning `serialVersionUID` by hand is the fallback if you must keep JDK serialization, but it only defers the problem: it silences the version check without making the binary layouts actually compatible.
+
 ### Common Pitfalls
 
 **Pitfall 1 — category browse called `findAll()` then filtered in Java.**

@@ -41,7 +41,7 @@ GraphQL defines a strongly-typed schema as the contract between client and serve
 | Scalar | Leaf values | String, Int, Float, Boolean, ID, custom |
 | Enum | Named constants | `enum Status { ACTIVE, INACTIVE }` |
 | Interface | Abstract type (fields must be present) | `interface Node { id: ID! }` |
-| Union | One of multiple types | `union SearchResult = User | Post` |
+| Union | One of multiple types | `union SearchResult = User \| Post` |
 | Input type | Object used as argument | `input CreateUserInput { name: String! }` |
 | List | Array of a type | `[User]`, `[User!]!` |
 | Non-null | Field cannot be null | `String!` |
@@ -148,6 +148,37 @@ flowchart LR
 ```
 
 Without batching, resolving each user's department independently fans out into 10 extra one-by-one queries (11 total); DataLoader collects every pending department ID and fetches them in a single `WHERE id IN (...)` query (2 total).
+
+**The idea behind it.** "Query count grows with your result set instead of with your schema depth — so the cost of a page is set by how many rows it happens to return, not by how the query was written."
+
+The name "N+1" hides the important property: N is not a constant you control at development time. It is the page size a client picked at runtime, which is why this bug passes every test written against three seed rows and then melts under a production page of 500.
+
+| Symbol | What it is |
+|--------|------------|
+| 1 | The root query that fetches the list of users |
+| N | One query per returned user, issued independently by the child field resolver |
+| `1 + N` | Total round trips without batching |
+| 2 | Total with DataLoader — the root query plus one batched `WHERE id IN (...)` |
+| Batch window | The tick during which DataLoader accumulates pending keys before firing one query |
+| Request cache | DataLoader's per-request memo, so a department requested by 10 users is fetched once |
+
+**Walk one example.** Assume a modest 2 ms per database round trip:
+
+```
+                       queries       round-trip cost
+  N = 10   no loader    1 + 10 = 11    11 x 2 ms  =  22 ms
+           DataLoader            2      2 x 2 ms  =   4 ms
+
+  N = 100  no loader   1 + 100 = 101   101 x 2 ms = 202 ms
+           DataLoader            2      2 x 2 ms  =   4 ms
+```
+
+Note what the DataLoader column does: it stays at 2 queries and 4 ms while N grows tenfold.
+The batched path is `O(1)` in round trips and the naive path is `O(N)`, so the gap is not a
+constant speedup to be weighed against complexity — it widens without bound as clients ask for
+larger pages. That asymmetry is why the Common Pitfalls section calls DataLoader mandatory
+rather than recommended: there is no page size at which the naive resolver becomes acceptable
+again, and the failure arrives on the day a client raises `first:` from 10 to 500.
 
 ### Apollo Federation Architecture
 
@@ -361,6 +392,43 @@ public class GraphQLSecurityConfig {
 //   }
 // }
 ```
+
+**Stated plainly.** "Depth counts how far the query nests; complexity counts how many nodes it will actually materialize — and only the second one tracks what the server has to pay."
+
+The two limits exist because neither is sufficient alone, and the reason is arithmetic: nesting is additive but fan-out is *multiplicative*. Five levels of nesting is a small number; five levels of nesting each returning 100 items is not.
+
+| Symbol | What it is |
+|--------|------------|
+| Depth | Nesting levels from the root selection to the deepest leaf. `users → friends → friends` is depth 3 |
+| `MaxQueryDepthInstrumentation(10)` | Reject any query nesting deeper than 10 levels |
+| Complexity score | Sum of per-field weights across every node the query is projected to resolve. Default weight 1 |
+| `MaxQueryComplexityInstrumentation(100)` | Reject any query scoring above 100 |
+| `FieldComplexityCalculator` | Custom weighting, so an expensive field can cost more than 1 |
+| Page-size multiplier | The `first:`/`limit:` argument, which multiplies every field weight beneath it |
+
+**Walk one example.** One recursive `friends` field, 100 per page, and the node count at each level:
+
+```
+  depth 1    100^1 =             100 nodes    cumulative           100
+  depth 2    100^2 =          10,000          cumulative        10,100
+  depth 3    100^3 =       1,000,000          cumulative     1,010,100
+  depth 4    100^4 =     100,000,000          cumulative   101,010,100
+  depth 5    100^5 =  10,000,000,000          cumulative 10,101,010,100
+```
+
+Five levels — well inside a depth limit of 10 — asks the server for ten billion nodes from a
+query that fits comfortably on one screen. That is the DoS: the attacker spends a few hundred
+bytes and the server spends its entire heap. Conversely, a query that selects 200 scalar fields
+off a single object is depth 2 and utterly harmless in nesting terms, yet doubles the complexity
+budget of 100.
+
+**Why the complexity limit is the one that actually protects you.** Depth limiting is a blunt
+guard against unbounded recursion; complexity limiting is the one that prices fan-out. Configure
+both, because they fail in opposite directions — a wide-but-shallow query slips past the depth
+check, and a deep-but-narrow one slips past a naive complexity count. Also make sure your
+calculator multiplies by the pagination argument rather than counting fields flatly: without
+that multiplier the 100^5 query above scores as though it returned a single node, and the limit
+you configured provides no protection at all.
 
 ### 6.4 Persisted Queries
 

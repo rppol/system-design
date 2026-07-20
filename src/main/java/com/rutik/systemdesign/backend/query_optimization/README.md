@@ -109,6 +109,49 @@ Reading the output:
   Fix: CREATE INDEX ON orders (user_id) or covering index
 ```
 
+**The idea behind it.** "`cost` is what the planner *guessed* before running anything, `actual`
+is what really happened — and the single most useful thing in the whole plan is the ratio
+between the two." You are not reading a performance report; you are auditing whether the
+planner's model of your data still matches reality.
+
+| Symbol | What it is |
+|--------|------------|
+| `cost=X..Y` | Estimated startup cost `X` and total cost `Y`, in arbitrary planner units |
+| `actual time=A..B` | Real milliseconds: `A` to produce the first row, `B` to produce the last |
+| `rows=N` | The planner's **estimate** of rows this node emits |
+| `actual rows=M` | What the node actually emitted |
+| `M / N` | Estimation error. Near `1` is healthy; orders of magnitude off is the bug |
+| `loops=L` | How many times this node ran. Reported times are **per loop**, not totals |
+
+Cost units are not milliseconds and not comparable across machines — `1.0` is defined as one
+sequential page fetch. Never chase a cost number down; only ever compare two costs from the
+same plan, or compare `rows` against `actual rows`.
+
+**Walk one example.** Auditing the estimates in the plan above, node by node:
+
+```
+  node                   rows= (est)   actual rows      M / N       verdict
+  --------------------   -----------   -------------   --------   -------------------
+  Hash (users)                10,720          10,720     1.000     statistics perfect
+  Hash Join                  200,000         245,678     1.228     acceptable drift
+  HashAggregate                8,000           8,213     1.027     fine
+  Seq Scan on orders               -       1,245,678         -     THE bottleneck
+
+  Total actual time = 234.125 ms, and the Seq Scan feeding 1,245,678 rows into
+  the join accounts for nearly all of it. Every estimate above is accurate --
+  so this is NOT a stale-statistics problem, it is a missing-index problem.
+```
+
+That distinction is the point of the audit. Estimates close to actuals mean the planner knew
+what it was doing and simply had no better option — fix it with an index or a rewrite. Estimates
+off by 100x or 1000x mean the planner was *misinformed*, and the fix is `ANALYZE`, a raised
+statistics target, or an extended statistics object, not a new index.
+
+**Why `loops` is the field that catches people out.** A node showing `actual time=0.8..0.9`
+with `loops=1000` did not take 0.9 ms — it took `0.9 x 1000 = 900` ms. PostgreSQL reports
+per-loop averages, so a nested loop's inner side always looks harmless until you multiply. This
+is exactly how an N+1 hides inside a single plan.
+
 ### EXPLAIN Plan Execution Flow
 
 ```mermaid
@@ -217,6 +260,12 @@ List<User> findActiveUsers();
 @Query("SELECT o FROM Order o WHERE o.userId IN :userIds")
 List<Order> findOrdersByUserIds(@Param("userIds") List<Long> userIds);
 
+// Query counts for the four shapes above, as a function of N parent rows:
+//   N+1 (broken)     : 1 + N
+//   JOIN FETCH       : 1
+//   @BatchSize(size) : 1 + ceil(N / size)
+//   IN clause        : 2
+
 // Service:
 List<User> users = userRepository.findActiveUsers();
 List<Long> userIds = users.stream().map(User::getId).toList();
@@ -229,6 +278,42 @@ users.forEach(user ->
     user.setOrders(ordersByUserId.getOrDefault(user.getId(), List.of()))
 );
 ```
+
+**What it means.** "N+1 is not slow because any one query is slow — every query in it is fast.
+It is slow because the count of network round trips grows with your result set." A 2 ms query
+is fine; five hundred of them, one after another, each paying a full round trip before the next
+can be issued, is a second of latency that no index will fix.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Parent rows returned by the first query. Grows with page size and data |
+| `1` | The parent query itself. Irreducible — you always pay it |
+| `ceil(N / size)` | `@BatchSize` collapses N child lookups into this many `IN` queries |
+| round trip | Per-query network + parse + plan cost. `~2 ms` on a same-AZ Postgres |
+| total latency | `queries x round_trip`. The `queries` factor is the one you control |
+
+**Walk one example.** A page of `N = 500` active users, 2 ms per round trip:
+
+```
+  strategy            queries                    latency = queries x 2 ms
+  -----------------   ------------------------   ------------------------
+  N+1 (broken)        1 + 500          = 501            1,002 ms
+  @BatchSize(50)      1 + ceil(500/50) =  11               22 ms
+  IN clause           2                =   2                4 ms
+  JOIN FETCH          1                =   1                2 ms
+
+  N+1 vs JOIN FETCH: 501x fewer queries, 1,002 ms -> 2 ms.
+```
+
+The scaling behaviour is what matters more than the absolute numbers. Double the page size and
+N+1 doubles its latency; the other three do not move at all. This is why an N+1 always ships
+clean — with 5 rows in the dev database it costs `6 x 2 = 12` ms and nobody notices.
+
+**Why `@BatchSize` is the compromise and not the answer.** It is `1 + ceil(N/size)`, so it never
+reaches 1 — it just makes the growth 50x flatter. Its advantage is that it needs no query
+rewrite, only an annotation, and it dodges the Cartesian-product blowup that `JOIN FETCH`
+causes when an entity has two collections fetched at once (`|orders| x |addresses|` rows for
+every user). Reach for `JOIN FETCH` with one collection, the `IN`-clause split with several.
 
 ### 6.2 Detecting N+1 with Statistics
 

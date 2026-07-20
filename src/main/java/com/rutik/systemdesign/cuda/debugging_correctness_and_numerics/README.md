@@ -68,6 +68,42 @@ xychart-beta
 
 *racecheck's shared-memory hazard tracking costs an order of magnitude more than the other three tools — this is exactly why §6.7 scopes it to the smallest reproducing input instead of a full production-size run.*
 
+**Read it like this.** A slowdown factor is not a rating — it is a multiplier you apply to
+your own run time to find out whether the tool is usable at all. `sanitized = baseline x
+overhead` is the whole calculation, and it is why "just run all four" fails in practice.
+
+The asymmetry matters more than the absolute numbers. Three tools cost you a coffee
+break; one costs you the afternoon. Choosing by symptom instead of running everything is
+a scheduling decision, not a stylistic preference.
+
+| Symbol | What it is |
+|--------|------------|
+| baseline | Unsanitized wall time of the run you want to check |
+| overhead | Slowdown multiplier for the chosen tool, from the table above |
+| sanitized time | `baseline x overhead` — what you actually wait |
+| shrink factor | How much you cut the input by before sanitizing; divides the baseline |
+| memcheck | `2-20x` — cheap enough to run on every new kernel as a habit |
+| racecheck | `10-100x` — the tool that forces you to shrink the input first |
+
+**Walk one example.** A workload that takes 2 minutes unsanitized:
+
+```
+  memcheck  at  2x :   2 min x   2 =     4 min   -- run it, no thought required
+  memcheck  at 20x :   2 min x  20 =    40 min   -- still a single sitting
+  racecheck at 10x :   2 min x  10 =    20 min   -- tolerable
+  racecheck at 100x:   2 min x 100 =   200 min   =  3.3 hours
+
+  now shrink the input 100x first (smallest grid that still reproduces):
+    new baseline = 2 min / 100 = 1.2 s
+    racecheck at 100x = 1.2 s x 100 = 120 s = 2 min
+```
+
+Shrinking the input before sanitizing turns a 3.3-hour run into a 2-minute one — the same
+answer, 100x sooner. Note that Section 10.2's "3-6 hours" figure for this scenario is the
+upper end read generously: 2 minutes at the stated 100x ceiling is 3.3 hours, and reaching
+6 hours implies an overhead nearer 180x, which racecheck can hit on shared-memory-heavy
+kernels but is above the range quoted in the table.
+
 ### 4.3 By Symptom (Quick Lookup)
 
 | Symptom | Likely cause | Reach for |
@@ -445,6 +481,45 @@ This scoping is what makes `racecheck` practical against a real training loop ra
 
 Three facts cover the interview-relevant surface; the mechanism, formats, and reproducibility knobs are fully derived in [numerical_precision_and_determinism](../case_studies/cross_cutting/numerical_precision_and_determinism.md) — do not re-derive them here.
 
+**What the formula is telling you.** A format's unit roundoff is `2^-(p)` where `p` is the
+number of significand bits *including* the implicit leading 1 — it says "any single
+rounding can move a value by at most this fraction of itself."
+
+Every tolerance you ever pick for a GPU-vs-CPU comparison descends from that one number.
+Choose `rtol` below the format's unit roundoff and correct code fails your test; choose it
+far above and real bugs slip through.
+
+| Symbol | What it is |
+|--------|------------|
+| stored mantissa bits | Bits actually written in the format; the leading `1` is implicit, not stored |
+| `p` (significand bits) | Stored bits plus 1 — the real precision the arithmetic carries |
+| unit roundoff `u` | `2^-p` — max relative error of one correctly-rounded operation |
+| decimal digits | `p * log10(2)` — how many decimal digits you can trust |
+| exponent bits | Sets *range*, not precision; why BF16 survives overflow that FP16 does not |
+| TF32 | 10 stored mantissa bits with FP32's 8 exponent bits — the silent Ampere+ default |
+
+**Walk one example.** The four formats a CUDA numerics bug lives among:
+
+```
+  format   stored   p = bits+1   u = 2^-p            decimal digits
+  ------   ------   ----------   -----------------   --------------
+  FP32       23         24       2^-24 = 5.96e-08        7.22
+  TF32       10         11       2^-11 = 4.88e-04        3.31
+  FP16       10         11       2^-11 = 4.88e-04        3.31
+  BF16        7          8       2^-8  = 3.91e-03        2.41
+
+  FP32 -> TF32 precision loss = 2^-11 / 2^-24 = 2^13 = 8,192x coarser
+  TF32 vs BF16                = 2^-8  / 2^-11 = 2^3  =     8x coarser
+
+  TF32 and FP16 carry the SAME 11 significand bits -- they differ only in
+  exponent bits (8 vs 5), i.e. in range, not in precision.
+```
+
+This is the arithmetic behind the "moved to an A100 and lost accuracy with zero code
+change" trap: switching FP32 to TF32 silently drops you from 7.2 trustworthy decimal
+digits to 3.3. A test asserting `rtol=1e-5` passes under FP32 (`u = 6e-8`) and fails
+under TF32 (`u = 4.9e-4`) without a single line of source changing.
+
 ```cpp
 // FMA contraction: nvcc fuses a*b+c into ONE rounding by default (--fmad=true).
 // This is faster AND more accurate in isolation, but differs bit-for-bit from
@@ -453,6 +528,55 @@ float d_fma = fmaf(a, b, c);              // one rounding — the default codege
 // nvcc -O3 --fmad=false forces the two-rounding path when debugging a mismatch
 // against a scalar CPU reference; never ship --fmad=false for production.
 ```
+
+**In plain terms.** `fmaf(a, b, c)` says: "compute `a*b + c` on the exact product, and
+round only at the very end" — where the unfused path rounds twice, once after the multiply
+and once after the add.
+
+The extra rounding is usually invisible, worth a fraction of a ULP. It becomes total when
+the addition cancels most of the product, because cancellation amplifies whatever error
+the intermediate rounding already introduced.
+
+| Symbol | What it is |
+|--------|------------|
+| `a*b` (exact) | The true product, needing up to `2p` significand bits to represent |
+| two-rounding path | Round `a*b` to FP32, then round the sum — the CPU reference's behavior |
+| `fmaf(a,b,c)` | Keeps the full-width product, rounds once after adding `c` — nvcc's default |
+| `--fmad=false` | Forces the two-rounding path; a triage switch, never a production setting |
+| catastrophic cancellation | Subtracting nearly-equal values, promoting a tiny error to a huge one |
+| relative error | Absolute error divided by the true answer — the number that actually matters |
+
+**Walk one example.** Values chosen so the product needs exactly one bit more than FP32
+has, and `c` cancels everything above it:
+
+```
+  a = b = 1 + 2^-12   (exactly representable in FP32)
+  c     = -(1 + 2^-11) (exactly representable in FP32)
+
+  exact product a*b = 1 + 2^-11 + 2^-24
+                      ^^^^^^^^^^   ^^^^^ needs a 25th significand bit
+  FP32 has 24 significand bits, so the 2^-24 term does not fit.
+
+  TWO-ROUNDING PATH (--fmad=false, or a CPU reference):
+    round(a*b) = 1 + 2^-11          <- the 2^-24 term is rounded AWAY
+    (1 + 2^-11) + c
+      = (1 + 2^-11) - (1 + 2^-11)
+      = 0.0                          <- every significant digit cancelled
+
+  FUSED PATH (fmaf, nvcc default):
+    exact a*b + c = (1 + 2^-11 + 2^-24) - (1 + 2^-11)
+                  = 2^-24
+    round once    = 5.9604645e-08    <- exactly right
+
+  true answer = 2^-24 = 5.9604645e-08
+    fused      : relative error =   0%
+    two-rounding: relative error = 100%   (returned 0.0 for a nonzero answer)
+```
+
+A 100% relative error from one extra correctly-rounded operation is the point: the fused
+path is both faster *and* more accurate, so a mismatch against a CPU reference here means
+the CPU is the less accurate side. That inverts the usual triage instinct — reach for
+`--fmad=false` to *explain* a discrepancy, never to "fix" one, and never ship it.
 
 ```python
 import torch
@@ -569,6 +693,49 @@ __global__ void scaleFixed(float* data, float k, int n) {
 // compute-sanitizer --tool memcheck ./app now reports zero errors, and the
 // result no longer depends on what happens to sit past the array's end.
 ```
+
+**Stated plainly.** `blocks = ceil(n / threads)` guarantees you launch *at least* `n`
+threads — and therefore, whenever `n` is not an exact multiple, strictly more than `n`.
+The count of those surplus threads is exactly the size of the bug.
+
+The reason this bug hides so well is visible in the ratio: the offending threads are a
+vanishing fraction of the launch, all of them in the final block. Every other block is
+perfectly correct, so any test that checks aggregate output rather than the tail passes.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of valid elements — the only true bound |
+| `threads` | Threads per block, `256` here |
+| `blocks` | `(n + threads - 1) / threads` — integer ceiling division, always rounds up |
+| total threads | `blocks * threads` — what actually launches, `>= n` always |
+| overshoot | `blocks * threads - n` — threads with `idx >= n`, all in the last block |
+| `if (idx < n)` | The one-comparison guard that turns overshoot threads into no-ops |
+
+**Walk one example.** A vector sized to be awkward, at the module's 256 threads per block:
+
+```
+  n = 1,000,000        threads = 256
+
+  blocks = (1000000 + 255) / 256 = 1000255 / 256 = 3907   (integer division)
+
+  total threads = 3907 x 256 = 1,000,192
+  valid indices =             1,000,000
+  overshoot     =                   192 threads with idx >= n
+
+  last block (blockIdx.x = 3906):
+    idx range   = 3906*256 = 999,936 .. 1,000,191
+    valid here  = 1,000,000 - 999,936 = 64 threads
+    out of range= 256 - 64            = 192 threads   <- matches the overshoot
+
+  damage without the guard: 192 threads x 4 B = 768 bytes written past the end
+
+  fraction of the launch that is wrong = 192 / 1,000,192 = 0.019%
+```
+
+768 bytes out of a 4 MB buffer, written by 0.019% of the threads, all in one block. That
+is precisely why it "sometimes works" — the corruption is small enough to land in
+allocator padding on most allocations, and the guard that prevents it costs one integer
+comparison per thread.
 
 ### 10.2 Additional Pitfalls (Shorter Form)
 
@@ -691,6 +858,46 @@ depends on the warp scheduler's actual execution order for THIS launch --
 which the hardware is free to vary between runs, GPU models, and driver
 versions, producing a bug that reproduces only intermittently.
 ```
+
+**Put simply.** A tree reduction is `log2(TILE)` deep where a sequential loop is `TILE`
+long, and worst-case rounding error grows with *depth*, not with the number of values. The
+GPU's answer is therefore not merely different from the CPU's — it is usually better.
+
+This is why Section 9 tells you a mismatch inside FP32 tolerance is not a bug. The tree
+and the loop compute two different, both-legitimate roundings of the same exact sum, and
+the error bound tells you how far apart they are allowed to drift.
+
+| Symbol | What it is |
+|--------|------------|
+| `TILE` | Values reduced per block, `256` here |
+| tree depth | `log2(TILE)` — the 8 steps the loop above performs |
+| `u` | FP32 unit roundoff, `2^-24 = 5.96e-08` |
+| sequential bound | `TILE * u` — worst-case relative error of a CPU left-to-right loop |
+| tree bound | `log2(TILE) * u` — worst-case relative error of the pairwise tree |
+| `rtol` / `atol` | The tolerance an `allclose` check must exceed to accept both answers |
+
+**Walk one example.** The `TILE = 256` reduction this case study ships:
+
+```
+  tree depth = log2(256) = 8 steps
+  u          = 2^-24     = 5.96e-08
+
+  CPU sequential loop, worst case:
+    256 x 5.96e-08 = 1.53e-05
+
+  GPU pairwise tree, worst case:
+      8 x 5.96e-08 = 4.77e-07
+
+  ratio = 256 / 8 = 32x tighter error bound for the tree
+
+  so the two answers may legitimately differ by up to about
+    1.53e-05 + 4.77e-07 = 1.58e-05
+```
+
+Compare that to the tolerance the CuPy check in 14.4 actually uses — `rtol=1e-5` — and to
+the "~1e-5 to 1e-7 relative tolerance" quoted in Section 9. Those are not arbitrary round
+numbers: `1e-5` is the sequential bound `256u` and `1e-7` is the neighbourhood of the tree
+bound `8u`. The tolerance range in this module is the two ends of this one calculation.
 
 ### 14.2 BROKEN — Missing `__syncthreads()` Between Reduction Steps
 
@@ -822,6 +1029,46 @@ assert np.allclose(d_out.get(), cpu_ref, rtol=1e-5, atol=1e-6)
 ### 14.5 Measured-Style Result
 
 Before the fix: `compute-sanitizer --tool racecheck` reports RAW hazards on every run, and the block's output sum matches a reference on roughly 90-98% of runs (varying with occupancy and GPU model) — high enough to pass a handful of manual test runs, low enough to eventually fail in production. After the fix: zero hazards reported, and the output is identical across repeated runs on the same input and hardware, with only the expected sub-ULP tree-vs-sequential reduction-order difference against a CPU reference.
+
+**What it means.** A per-run pass rate of 90-98% compounds: the chance that `k`
+independent test runs *all* pass is `p^k`, so a handful of green runs is almost worthless
+evidence, while production's run count makes failure a certainty rather than a risk.
+
+The same exponent explains why `racecheck` is the only reliable oracle here. It reports
+the hazard on 100% of runs — including the ones that produced the right answer — because
+it inspects the access pattern, not the outcome.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one run happens to produce the correct sum, `0.90` to `0.98` here |
+| `k` | Number of runs |
+| `p^k` | Probability all `k` runs pass — what "I tested it a few times" is worth |
+| `1 - p^k` | Probability at least one run fails — what production will observe |
+| racecheck detection | `1.0` per run, independent of `p`; it flags the hazard, not the symptom |
+
+**Walk one example.** Both ends of the quoted 90-98% pass rate:
+
+```
+                 p = 0.90                    p = 0.98
+  k =    1   ->  0.900 all pass          ->  0.980 all pass
+  k =    5   ->  0.590 all pass          ->  0.904 all pass
+  k =   20   ->  0.122 all pass          ->  0.668 all pass
+  k = 1000   ->  1.7e-46 all pass        ->  1.7e-09 all pass
+
+  developer runs it 5 times, sees green:
+    at p=0.98 that happens 90.4% of the time -- almost guaranteed to mislead
+
+  production runs the kernel 1000 times:
+    at p=0.98, probability of zero failures = 1.7e-09
+    i.e. failure is effectively certain, and 1000 x (1 - 0.98) = 20 bad results
+
+  racecheck, any k: detects on every run. p is irrelevant to it.
+```
+
+Five green runs at `p = 0.98` occur 90% of the time, which is exactly the trap described
+in 14.5 — the developer's evidence and the production outcome are both the predictable
+consequence of the same `p`. Only the tool that examines the hazard rather than the
+answer breaks the tie.
 
 ### 14.6 Discussion Questions
 

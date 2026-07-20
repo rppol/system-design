@@ -422,6 +422,40 @@ A mobile backend uses `HeaderHttpSessionIdResolver.xAuthToken()`. The app receiv
 | Logout-everywhere | Built-in via principal index | Hard; requires server-side tracking |
 | Read cost per request | One store round-trip (~0.5–1ms) | Local signature verify (~0.1ms) |
 
+**The idea behind it.** "Stateful sessions move the cost from the wire to the request path; stateless JWTs move it from the request path to the wire. You are choosing which resource to spend, and the exchange rate is roughly ten-to-one on latency against fifty-to-one on bytes."
+
+Both rows of this table describe the same request, just measured differently. Multiplying each by your request rate is what turns a preference into a decision.
+
+| Symbol | What it is |
+|--------|------------|
+| session read cost | **0.5-1 ms** — one Redis round-trip, added to every authenticated request |
+| JWT verify cost | **~0.1 ms** — in-process signature check, no network |
+| session cookie size | **~40 bytes** — an opaque id, nothing else |
+| JWT size | **500-2,000 bytes** — the full claim set, resent on every request |
+| the tradeoff | Latency on the server path versus bandwidth on every request |
+
+**Walk one example.** Price both designs at a realistic 22,000 authenticated req/sec:
+
+```
+  Latency added per request:
+    session : 0.5 - 1.0 ms   (network hop to Redis)
+    JWT     :       0.1 ms   (local crypto)
+    ratio   : 5x to 10x more per-request latency for sessions
+
+  Inbound bytes per second, credential only:
+    session :    40 bytes x 22,000 =    880,000 B/s =  0.88 MB/s
+    JWT     : 2,000 bytes x 22,000 = 44,000,000 B/s = 44.0 MB/s
+    ratio   : 2,000 / 40 = 50x more bandwidth for JWTs
+
+  Redis load created by the session design:
+    22,000 reads/sec against the session store, on the auth path
+    -> Redis is now a hard dependency of every logged-in request
+```
+
+The 44 MB/s figure is the one people miss. A 2 KB bearer token is not free — it is uploaded on every request, over mobile links, and it inflates every proxy log line and every trace. Meanwhile the 0.88 MB/s session design pays for that saving with 22,000 Redis reads per second sitting directly on the authentication path.
+
+**Why the Redis read rate is the real decision.** The latency difference is small in absolute terms — 1 ms against 0.1 ms disappears inside a 250 ms budget. What does not disappear is that the session design puts a network service in the hard path of every authenticated request, so Redis being down means *nobody is logged in*, whereas JWT validation keeps working with the auth server entirely offline. That availability coupling, not the millisecond, is what the last row of this table is really pricing.
+
 ### Backend Comparison
 
 | | Redis | JDBC | Hazelcast |
@@ -679,6 +713,40 @@ A retail web app runs a Spring MVC monolith. Black Friday traffic forced a scale
 - **Deploy logouts:** every rolling deploy restarted instances and dropped ~1/12 of active carts per instance cycled, generating a spike of "my cart is empty" complaints.
 - **Failover logouts:** when an instance OOM-killed, all users pinned to it were logged out with no recovery.
 - **Hot-node skew:** long-lived sticky sessions concentrated heavy users on a few nodes, so the balancer could not spread load evenly.
+
+**Stated plainly.** "With sticky sessions and in-memory state, a rolling deploy does not log out a fraction of your users — it logs out all of them, one twelfth at a time, and the fraction per step only gets worse as you scale out."
+
+The `~1/12` looks reassuringly small, which is precisely the trap. A rolling deploy cycles every instance, so the per-step fraction is not the damage — the sum is.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Instance count — **12** after the Black Friday scale-out |
+| `1 / N` | Fraction of active sessions pinned to any one instance |
+| sticky session | LB pins a user to one node via `JSESSIONID`; state lives only in that node's heap |
+| rolling deploy | Restarts all `N` instances one at a time |
+| blast radius | Sessions destroyed. Per step it is `1/N`; across a full deploy it is `1` |
+
+**Walk one example.** Follow one rolling deploy across the 12 instances:
+
+```
+  Per-instance share of active sessions:
+    1 / 12 = 8.3% of logged-in users
+
+  A full rolling deploy restarts every instance once:
+    12 steps x (1/12 of sessions) = 12/12 = 100% of sessions destroyed
+
+  Scaling out makes each step smaller but changes the total not at all:
+    N =  2  ->  50.0% lost per step, 100% across the deploy
+    N = 12  ->   8.3% lost per step, 100% across the deploy
+    N = 50  ->   2.0% lost per step, 100% across the deploy
+
+  Unplanned single-node loss (the OOM-kill case) is the per-step figure:
+    1 instance lost of 12 = 8.3% of users logged out, no recovery path
+```
+
+Scaling from 2 to 12 instances did not reduce the deploy's damage — it spread the same 100% over six times as many smaller complaint spikes, which is why the incident presented as "intermittent cart loss" rather than an obvious outage. Externalizing session state to Redis is what takes the total from 100% to 0%, because instance identity stops mattering at all.
+
+**Why sticky sessions also break load balancing.** A pinned user stays pinned for the session's whole 30-minute lifetime, so the balancer is not distributing requests — it is distributing *logins*, once, and then living with whatever traffic those users generate. Heavy users landing on the same node cannot be rebalanced away, which is the hot-node skew above. Removing stickiness lets every request be routed independently, and that is only safe once no request depends on which node served the previous one.
 
 **Requirements:**
 - Sessions must survive load-balancing across all 12 instances and node restarts.

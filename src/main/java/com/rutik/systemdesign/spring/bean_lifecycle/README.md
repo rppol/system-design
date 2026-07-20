@@ -569,6 +569,43 @@ A trade-settlement service (Spring Boot 3.2 / Java 17) wraps its own `DatabaseCo
 - Every `DataSource` bean must be transparently wrapped with a metrics proxy to count borrows/returns
 - The service handles ~3,000 queries/sec across the 10 connections
 
+**Put simply.** "Ten connections serving three thousand queries a second is a statement about query duration, not about pool size — each query has 3.3 milliseconds to finish, and anything slower means requests are queueing for a connection rather than running."
+
+Pool size and throughput are never independent facts. Little's Law fixes the third number the moment you state two of them.
+
+| Symbol | What it is |
+|--------|------------|
+| `λ` (lambda) | Query rate — **~3,000 queries/sec** |
+| `L` | Pool size — **10** connections, the concurrency ceiling |
+| `W` | Service time per query. `W = L / λ` |
+| SIGTERM grace | **~30 s** Kubernetes gives the pod before `SIGKILL` |
+| `timeout-per-shutdown-phase` | **25 s** Spring allows in-flight work to drain |
+
+**Walk one example.** Derive the query budget, then check the shutdown budget:
+
+```
+  Little's Law:  L = lambda x W   ->   W = L / lambda
+
+    W = 10 connections / 3,000 queries per sec
+      = 0.00333 sec
+      = 3.3 ms per query, average, including network round-trip
+
+  Check it in reverse:  3,000 x 0.00333 sec = 10.0 connections busy. Consistent.
+
+  What a slower query costs:
+    W =  3.3 ms -> pool supports 10 / 0.0033 = 3,000 queries/sec   (at capacity)
+    W = 10.0 ms -> pool supports 10 / 0.0100 = 1,000 queries/sec   (2/3 shortfall)
+    W = 33.0 ms -> pool supports 10 / 0.0330 =   303 queries/sec   (10x shortfall)
+
+  Shutdown budget:
+    30 s SIGTERM grace - 25 s graceful drain = 5 s left for @PreDestroy
+    -> closing 10 connections must complete inside 5 s, or SIGKILL leaks them
+```
+
+The 3.3 ms is unforgiving: one query degrading to 10 ms drops the pool's ceiling to a third of the required rate, and callers start blocking on connection acquisition rather than on the database. The symptom looks like a slow database; the cause is an undersized pool for the new service time.
+
+**Why the 5-second gap is the number that prevents the leak.** The 25 s and 30 s figures were chosen so that they do not collide — the drain finishes with 5 seconds to spare, and `@PreDestroy` runs inside that margin. Set `timeout-per-shutdown-phase` to 30 s and the two budgets meet exactly: the drain consumes the entire grace period, `SIGKILL` arrives before `@PreDestroy` closes anything, and all 10 sockets leak — the precise incident this design was built to prevent. The graceful-shutdown timeout must always be strictly less than the orchestrator's grace period, by enough time to actually run the teardown.
+
 The lifecycle hooks (`@PostConstruct`, `@PreDestroy`) and a `BeanPostProcessor` make this clean and centralized.
 
 ### Architecture Overview

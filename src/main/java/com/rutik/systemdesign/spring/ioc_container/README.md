@@ -534,6 +534,40 @@ BeanFactory vs ApplicationContext refresh:
 - Cached tenant lookup (`containsBeanDefinition` + `getBean`): **<0.1ms**.
 - 50 live tenant pools x 5 connections = **250 connections** budgeted; idle pools evicted after 10 min.
 
+**In plain terms.** "Every tenant you register at runtime silently claims a slice of a database-side resource that nobody in the application can see. Multiply tenants by pool size before you register the first one, because the ceiling belongs to the database, not to Spring."
+
+Runtime bean registration makes it trivially easy to add a tenant. The connection budget is the reason that ease is dangerous.
+
+| Symbol | What it is |
+|--------|------------|
+| tenant count | **50** live tenants, each with an isolated `DataSource` bean |
+| pool size | **5** connections per tenant pool |
+| total connections | `tenants x pool size` — what the DB server must accommodate |
+| idle eviction | 10 min — returns connections from dormant tenants to the budget |
+| the ceiling | Postgres `max_connections`, commonly **100** by default |
+
+**Walk one example.** Push the tenant count against a typical database ceiling:
+
+```
+  total = tenants x pool size
+
+    50 tenants x 5 =   250 connections   <- the budgeted figure
+   100 tenants x 5 =   500 connections
+   500 tenants x 5 = 2,500 connections
+
+  Against a Postgres default of max_connections = 100:
+    250 / 100 = 2.5x oversubscribed  -> "too many connections" at ~20 tenants
+    tenants that actually fit = 100 / 5 = 20
+
+  Idle eviction is what makes 50 workable:
+    if only 20 tenants are active in any 10-minute window,
+    live connections = 20 x 5 = 100, and the other 30 pools hold nothing
+```
+
+The arithmetic says 50 tenants need 250 connections while the database offers 100 — the design only works because eviction means the *concurrent* tenant count, not the registered one, is what draws from the budget. Registering a 51st tenant costs nothing; 51 tenants being simultaneously active is what breaks.
+
+**Why the ~120 ms cold-registration cost matters here.** The 10-minute eviction is a direct trade against that 120 ms: evict too eagerly and every returning tenant pays pool warm-up on its first request, evict too lazily and dormant tenants hold connections that active tenants need. At 50 tenants the ~120 ms is a one-time cost worth paying; at 500 tenants with a short eviction window it becomes a recurring latency spike on every cold tenant's first request, which is the point where a shared pool with a tenant-discriminator column beats pool-per-tenant outright.
+
 ### Pitfalls
 
 **Pitfall 1 — Calling `getBean()` during `BeanFactoryPostProcessor` execution.**

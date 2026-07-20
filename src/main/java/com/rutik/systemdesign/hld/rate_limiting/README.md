@@ -98,6 +98,42 @@ class TokenBucket:
         self.last_refill = now
 ```
 
+**In plain terms.** "Don't run a timer that drips tokens in — just check the clock, credit however many tokens should have arrived since you last looked, and never let the pile grow past the burst cap."
+
+This lazy-refill trick is the reason token bucket costs nothing at rest. There is no background job per client; a million idle buckets consume zero CPU because refill only happens when a request forces you to look.
+
+| Symbol | What it is |
+|--------|------------|
+| `capacity` | Burst size — the highest number of tokens the bucket can ever hold. `50` in the chart above |
+| `refill_rate` | Tokens credited per second. This is the sustained rate the limit converges to. `10/s` above |
+| `elapsed` | Seconds since the last time this bucket was touched, `now - last_refill` |
+| `elapsed * refill_rate` | Tokens owed for the idle period. The whole refill, computed in one multiply |
+| `min(capacity, ...)` | The cap. Truncates unused credit so idleness cannot be banked forever |
+| `tokens_needed` | Cost of this request, usually `1` — but a heavy endpoint can charge more |
+
+**Walk one example.** Using the chart's bucket (`capacity = 50`, `refill_rate = 10/s`), starting from empty:
+
+```
+  t = 0.0s   burst of 100 requests arrives, bucket had 10 tokens
+             allowed = 10, rejected = 90, tokens -> 0
+
+  t = 0.5s   next request calls _refill()
+             elapsed     = 0.5 - 0.0 = 0.5 s
+             new_tokens  = 0.5 x 10  = 5.0
+             tokens      = min(50, 0 + 5.0) = 5.0     -> request allowed
+
+  t = 6.0s   client has been idle; a request arrives
+             elapsed     = 6.0 - 0.5 = 5.5 s
+             new_tokens  = 5.5 x 10  = 55.0
+             uncapped    = 4.0 + 55.0 = 59.0
+             tokens      = min(50, 59.0) = 50          -> capped
+
+  Time to refill an empty bucket completely:
+             capacity / refill_rate = 50 / 10 = 5.0 s
+```
+
+The `min` is the term that makes this a rate limiter rather than a quota. Delete it and a client idle for an hour accumulates `3600 x 10 = 36,000` tokens, then dumps all of them at once — precisely the burst the limiter exists to prevent. The `capacity` value is therefore a direct statement of "the largest spike I am willing to absorb."
+
 #### Pros
 - Allows controlled bursting — ideal for APIs where users occasionally need short bursts
 - Smooth average rate enforcement
@@ -169,6 +205,41 @@ class LeakyBucket:
             process(self.queue.popleft())
         self.last_leak = now
 ```
+
+**What this actually says.** "Work out how many requests the drain could have processed while you weren't looking, process exactly that many, and drop anything that arrives while the queue is already full."
+
+Token bucket and leaky bucket use the same lazy clock trick, but they meter opposite ends: token bucket credits *permission* to enter, leaky bucket credits *service* on the way out. That is why one produces bursts and the other cannot.
+
+| Symbol | What it is |
+|--------|------------|
+| `capacity` | Maximum queue depth — `20` in the diagram. Requests beyond this are dropped, not delayed |
+| `leak_rate` | Requests drained per second — `5/s`. The constant output rate the downstream sees |
+| `elapsed` | Seconds since `_leak` last ran |
+| `elapsed * leak_rate` | How many requests the drain owes for that interval |
+| `int(...)` | Floor to a whole request — you cannot process 12.5 requests |
+| `min(leaked, len(queue))` | Never drain more than is actually queued |
+
+**Walk one example.** The diagram's bucket (`capacity = 20`, `leak_rate = 5/s`) hit by a burst of 20, then left alone:
+
+```
+  t = 0.0s   20 requests arrive at once
+             queue = 20 (exactly at capacity)
+             requests 21, 22, ... -> dropped immediately
+
+  t = 2.5s   _leak() runs
+             elapsed = 2.5 s
+             leaked  = int(2.5 x 5) = int(12.5) = 12
+             process min(12, 20) = 12
+             queue   = 20 - 12 = 8
+
+  Drain time for the full queue:
+             capacity / leak_rate = 20 / 5 = 4.0 s
+
+  Worst-case latency for the request at the back of a full queue:
+             4.0 s of pure waiting -- it is never rejected, just late.
+```
+
+Two things fall out of this arithmetic. First, the output rate is `5/s` no matter what the input looked like — a 20-request burst and a 20-request trickle produce identical downstream load, which is the whole point of a traffic shaper. Second, note the `int()`: the code floors the leak but then sets `last_leak = now`, silently discarding the `0.5` request of credit. Over many small intervals that rounding makes the effective drain slightly slower than `leak_rate`. A production implementation carries the fractional remainder forward instead of advancing `last_leak` all the way.
 
 #### Pros
 - Guarantees a constant, smooth output rate — ideal for systems sensitive to traffic spikes
@@ -293,6 +364,49 @@ rate = current_window_count + previous_window_count * (1 - elapsed / window_size
 ```
 
 Where `elapsed` is the time elapsed since the start of the current window.
+
+**Read it like this.** "Count this window's requests for real, then pretend the previous window's requests were spread out evenly and bill yourself for the slice of it that still overlaps your sliding view."
+
+The formula buys the accuracy of a sliding window log using two integers instead of a timestamp per request. The whole approximation lives in one assumption — uniform arrival inside the previous window — and everything you need to know about the algorithm's failure mode follows from that.
+
+| Symbol | What it is |
+|--------|------------|
+| `current_window_count` | Exact count so far in the current fixed window. No approximation here |
+| `previous_window_count` | Exact count from the window that just ended. `84` in the chart |
+| `elapsed` | Seconds into the current window. `15` at t = 01:15 |
+| `window_size` | Length of a window in seconds. `60` here |
+| `1 - elapsed / window_size` | The overlap weight — what fraction of the previous window is still inside the sliding view |
+| `rate` | The estimated request count over the trailing `window_size`, compared against the limit |
+
+**Walk one example.** Reproducing the chart's numbers at t = 01:15, `limit = 100`:
+
+```
+  elapsed / window_size = 15 / 60           = 0.25
+  weight                = 1 - 0.25          = 0.75
+
+  previous contribution = 84 x 0.75         = 63
+  current  contribution = 36                = 36
+                                              ----
+  rate estimate         = 36 + 63           = 99
+
+  99 < 100  -> request ALLOWED, with 1 request of room left.
+```
+
+Watch how the weight decays as the current window advances, holding the counts fixed:
+
+```
+  t = 01:00   elapsed  0s   weight 1.00   est = 36 + 84.0 = 120.0  BLOCK
+  t = 01:15   elapsed 15s   weight 0.75   est = 36 + 63.0 =  99.0  allow
+  t = 01:30   elapsed 30s   weight 0.50   est = 36 + 42.0 =  78.0  allow
+  t = 01:45   elapsed 45s   weight 0.25   est = 36 + 21.0 =  57.0  allow
+  t = 02:00   elapsed 60s   weight 0.00   est = 36 +  0.0 =  36.0  allow
+
+  The previous window's influence fades smoothly to zero instead of
+  vanishing all at once -- which is exactly the boundary spike the
+  fixed window counter suffers.
+```
+
+The `1 - elapsed / window_size` term is the entire fix. Set it to `0` and you have a fixed window counter, with the `2x` boundary burst back. Set it to `1` and the previous window never expires, so a client is throttled forever by traffic it sent minutes ago. The linear decay in between is the uniform-arrival assumption made concrete, and it is why the error stays under `1%` for evenly spread traffic but can under-count a client who crammed all `84` previous requests into the final second of that window.
 
 #### How It Works
 
@@ -938,6 +1052,47 @@ Stripe processes payments and exposes a public REST API used by millions of inte
 - Availability: 99.99% — rate limiter outage must not block API requests (fail-open with logging)
 - Distributed across 3 datacenters, requests can land on any of them
 
+**Put simply.** "Convert every daily total into a per-second rate, then check that no single tenant and no single Redis shard is left carrying a number that could hurt."
+
+Scale estimation in a rate-limiter design is really two questions: what rate must the limiter sustain, and what is the worst thing one abusive key can do to the limiter itself. The bullet list answers the first; the shard count answers the second.
+
+| Symbol | What it is |
+|--------|------------|
+| calls/day | Total API volume — `5M` baseline, `50M` on shopping holidays |
+| `86,400` | Seconds in a day. The divisor that turns any daily total into an average rate |
+| peak factor | Peak rate ÷ baseline rate. How much burst headroom the limiter must carry |
+| per-key limit | `1000 requests/minute` default — the tenant-level ceiling, before endpoint splits |
+| Redis nodes | `6`, with `RF=2`. Keys are sharded by API key hash, so one key lives on one shard |
+| blast radius | Share of Redis capacity one rogue key can consume — `1 / nodes` |
+
+**Walk one example.** Push the stated scale through each division:
+
+```
+  Baseline rate
+    5,000,000 calls/day / 86,400 s = 57.9 req/sec   -> the stated "60"
+
+  Holiday peak rate
+    50,000,000 / 86,400 s          = 578.7 req/sec  -> the stated "600"
+    peak factor = 600 / 60         = 10x
+
+  What one tenant is allowed
+    1000 requests/minute / 60 s    = 16.7 req/sec per key
+    at 600 req/sec global, a single key at its full limit is
+    16.7 / 600 = 2.8% of peak traffic -- comfortably contained.
+
+  Blast radius of one rogue key on the Redis cluster
+    a key hashes to exactly ONE of the 6 shards
+    worst-case CPU share = 1 / 6 = 16.7%   -> the stated "~16%"
+    the other 83.3% of the cluster keeps serving everyone else.
+
+  Memory for the bucket state
+    ~500,000 active keys x ~100 bytes = ~50 MB
+    trivially resident, which is why PEXPIRE at 2 min is about
+    hygiene rather than capacity.
+```
+
+The interesting number is `16.7%`, not the traffic rates. A single-node Redis would give a rogue key a `100%` blast radius: saturate that instance and every tenant's rate check starts timing out, which under the fail-open policy means the limiter silently stops limiting for everyone. Sharding converts a total bypass into a partial one, and the fail-open rule is what keeps that partial failure invisible to payments.
+
 The mechanism: a token bucket per API key per endpoint stored in Redis. A Lua script executes atomically (single Redis command) to refill and decrement, so two concurrent requests cannot both consume the last token.
 
 ### Architecture Overview
@@ -1021,6 +1176,40 @@ redis.call('PEXPIRE', key, 120000)  -- evict idle keys after 2 min
 
 return {allowed, math.floor(tokens), retry_after_ms}
 ```
+
+**The idea behind it.** "You are short by some fraction of a token, and tokens arrive at a known rate — so divide the shortfall by the rate and you have told the client exactly when to come back."
+
+This is the one line that turns a `429` from a rude "no" into a usable contract. Without it clients guess, and guessing is what produces the retry storms the limiter was built to stop.
+
+| Symbol | What it is |
+|--------|------------|
+| `requested - tokens` | The shortfall — how many tokens are still missing for this request to pass |
+| `rate` | Refill rate in tokens per second, the same `refill_rate` from the pseudocode above |
+| `/ rate` | Shortfall ÷ rate = seconds until enough tokens exist. The core of the calculation |
+| `* 1000` | Convert seconds to milliseconds, since Redis is working in `now_ms` |
+| `math.ceil` | Round up. Rounding down would tell the client to retry a hair too early and fail again |
+| `elapsed_sec` | `(now_ms - last_refill) / 1000.0` — the lazy refill, in Redis server time |
+
+**Walk one example.** A key on the `POST /charges` policy (`100/min`, so `rate = 100/60 = 1.67 tok/s`) that has just run dry, and the same key on a `1000/min` GET policy:
+
+```
+  POST /charges, rate = 1.67 tokens/sec
+    tokens    = 0.4, requested = 1
+    shortfall = 1 - 0.4          = 0.6 tokens
+    seconds   = 0.6 / 1.667      = 0.360 s
+    ms        = 0.360 x 1000     = 360.0
+    ceil      = 360 ms           -> Retry-After tells the client 360 ms
+
+  GET /charges, rate = 1000/60 = 16.67 tokens/sec
+    same 0.6-token shortfall
+    seconds   = 0.6 / 16.67      = 0.036 s
+    ceil      = 36 ms
+
+  Same deficit, a 10x faster refill, a 10x shorter wait. The client is
+  never told to sleep longer than its own tier actually requires.
+```
+
+Two supporting details are easy to skim past. `now_ms` comes from `redis.call('TIME')`, not from the application server — with requests landing in any of 3 datacenters, using local clocks would make `elapsed_sec` negative under clock skew and mint free tokens. And `math.floor(tokens)` in the return is only for the `X-RateLimit-Remaining` header; the stored value keeps its fractional part, so partial tokens are never silently thrown away across calls.
 
 Java caller using Lettuce/Jedis:
 

@@ -50,7 +50,7 @@ This module cross-references [`../../../database/backup_recovery_and_disaster_re
 
 The four AWS DR strategies, ordered by increasing cost and decreasing RTO/RPO:
 
-- **Backup & Restore** — Periodic backups (RDS snapshots, S3, AMIs) replicated to the DR region. No standby infrastructure runs. On disaster, you provision everything from scratch (IaC) and restore data. RTO: hours (often 4–24h). RPO: hours (the backup interval). Cost: lowest — you pay only for stored snapshots (~$0.05/GB-month for S3 Standard plus cross-region transfer).
+- **Backup & Restore** — Periodic backups (RDS snapshots, S3, AMIs) replicated to the DR region. No standby infrastructure runs. On disaster, you provision everything from scratch (IaC) and restore data. RTO: hours (often 4–24h). RPO: hours (the backup interval). Cost: lowest — you pay only for stored snapshots (~$0.05/GB-month for EBS/RDS snapshots, ~$0.023/GB-month for S3 Standard, plus cross-region transfer).
 
 - **Pilot Light** — A minimal always-on core in the DR region: the database is continuously replicated (RDS cross-region read replica or Aurora replica) but kept small; application servers are switched off (AMIs ready, ASGs at 0). On disaster, scale the ASGs up and promote the replica. RTO: 10–30 min. RPO: minutes (replication lag). Cost: pay for the replicated DB + storage, not compute.
 
@@ -80,6 +80,51 @@ Failover mechanisms layered on top:
 - **DNS failover (Route53 health checks)**: health checks probe an endpoint every 30s (or 10s "fast" mode); after a configurable failure threshold (default 3), Route53 marks the record unhealthy and serves the failover record. End-to-end DNS failover completes in roughly 60–90s plus client TTL.
 - **ALB / Target Group health checks**: intra-region, removes unhealthy targets in seconds.
 - **Application-level failover**: client SDK retries to a secondary endpoint; fastest, no DNS propagation.
+
+### Decoding RTO and RPO as arithmetic
+
+Both numbers look like policy statements but are computed from mechanism, not chosen:
+
+```
+  RPO  =  replication lag             (continuous replication)
+  RPO  =  backup interval             (periodic backups -- worst case)
+
+  RTO  =  detection + decision + recovery + capacity restore     (serial sum)
+```
+
+**What the formula is telling you.** "RPO is set by whatever is *behind* — the gap between the last durable copy and now; RTO is set by whatever is *ahead* — every step you must walk through before traffic flows again." They are two independent budgets, and no amount of spending on one buys down the other.
+
+| Symbol | What it is |
+|--------|------------|
+| Replication lag | Seconds the replica trails the writer; the data already lost if the writer dies now |
+| Backup interval | Time between snapshots; with nightly backups the worst case is a full 24 h |
+| Detection | Time to *notice*: health-check interval multiplied by the failure threshold |
+| Capacity restore | Time to scale the standby to full size, which is part of RTO even after DNS moves |
+
+**Walk one example.** The Route53 config and the failover timeline in §5, added up serially:
+
+```
+  DETECTION (Route53 health check)
+    standard:  request_interval 30 s x failure_threshold 3   =   90 s
+    fast:      request_interval 10 s x failure_threshold 3   =   30 s
+
+  RTO chain for the warm-standby timeline in the sequence diagram above
+    detect DNS failure                                       =   90 s
+    promote Aurora replica to writer                         =   60 s
+    scale ASG from 2 to 20 nodes (10x)                       =   30 s
+    ------------------------------------------------------------------
+    RTO total                                                =  180 s  =  3 min
+
+  RPO for the same setup
+    Aurora Global Database async lag                         =   <1 s
+
+  compare: "DR = nightly RDS snapshots"
+    RPO worst case = 24 h,  RPO average = 12 h,  RTO = provision + restore = hours
+```
+
+Serial summing is the part teams get wrong. Cutting detection to 30s with fast health checks removes 60s from a 180s chain — a real 33% win — but it cannot get you below the 90s that promotion and scaling already cost. Whichever term dominates is the only one worth optimising, and it is rarely the one with the tunable knob.
+
+One term is missing from that chain and it is the classic trap: **client DNS TTL**. Route53 deciding to serve the failover record does nothing for a client that cached the old answer. With the 3600s TTL from Pitfall 3, worst-case client recovery is `90 + 3600 = 3,690 s = 61.5 minutes` against a stated RTO of 3 minutes — a 20x overrun caused by a single line of config. This is why the fix uses an ALB alias with `evaluate_target_health`: alias records resolve against AWS's own short TTLs, deleting the term entirely rather than shrinking it.
 
 ---
 
@@ -465,3 +510,46 @@ export DATABASE_URL="postgres://app@app-global.cluster-write.${REGION}.rds.amazo
 ```
 
 **Outcome**: After fixing the endpoint resolution and adding `target_session_attrs=read-write` so the driver refuses to write to a read-only node, the next game day measured RTO of 2 minutes 50 seconds and RPO 0 for committed transactions (verified by reconciling the last committed ledger ID across regions). The team now runs the region-evacuation game day monthly, and replication lag is alerted at 500 ms — half the RPO budget — giving headroom before any breach.
+
+### Decoding the numbers behind the mandate
+
+**Put simply.** "Convert the outage into money per second, and the RTO/RPO targets stop being opinions." Every DR budget argument reduces to comparing the standby's monthly cost against the revenue the standby protects per second of outage:
+
+```
+  revenue per second  =  hourly revenue / 3600
+  outage cost         =  revenue per second x RTO seconds
+  data at risk        =  transactions per second x RPO seconds
+```
+
+| Symbol | What it is |
+|--------|------------|
+| Hourly revenue | The $2.4M/hour this API generates when healthy |
+| RTO seconds | Wall-clock outage duration — the *measured* one from a game day, not the target |
+| Transactions/sec | 4,000 tps here; multiplied by RPO to get transactions actually lost |
+| Cost of DR tier | The standby's monthly spend, the number the outage cost has to justify |
+
+**Walk one example.** Every figure in this scenario, derived from the two the business gave:
+
+```
+  throughput and unit value
+    transactions/hour   =  4,000 x 3600           =  14,400,000
+    revenue per tx      =  2,400,000 / 14,400,000 =  $0.1667
+    revenue per minute  =  2,400,000 / 60         =  $40,000
+    revenue per second  =  2,400,000 / 3600       =  $666.67
+
+  what each RTO is worth
+    mandated  RTO 5 min       =  300 s x 666.67   =    $200,000
+    achieved  RTO 2 min 50 s  =  170 s x 666.67   =    $113,333   (43% under budget)
+    old "DR"  RTO 6 h         =  360 min x 40000  = $14,400,000
+
+  what the old RPO was worth
+    RPO 24 h  =  4,000 tps x 86,400 s  =  345,600,000 transactions lost
+              =  24 h x $2.4M          =  $57,600,000 of ledger
+
+  sanity check against the tier-0 bar in §9 (">$10k/min")
+    40,000 / 10,000  =  4x over the threshold  ->  active/active is justified
+```
+
+That last line is the actual decision. §9 sets active/active's bar at $10k/min of downtime cost; this workload is 4x past it, so doubling the footprint is cheap relative to what it prevents — whereas a workload at $500/min running the same architecture is simply paying twice for nothing.
+
+The `$14.4M` figure is also why "nightly snapshots" was never a DR plan. It was not slightly out of spec: at 6h RTO it was 72x the mandated 5-minute target, and the $57.6M of exposed ledger exceeded a year of the standby region's cost by orders of magnitude. Finally, note the 500 ms lag alert — Aurora Global DB's RPO is "<1s", so alerting at half of that fires while there is still budget left, rather than confirming a breach after the fact. Alert at a fraction of the budget, never at the budget itself.

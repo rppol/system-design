@@ -349,6 +349,47 @@ boolean matches = encoder.matches(rawPassword, hashed); // login check
 // No need to store salt separately
 ```
 
+**Put simply.** "The cost factor is an exponent, not a dial. Adding 1 doubles the work an attacker must do — and doubles your login time too. You are buying attacker-seconds with user-milliseconds, and the exchange rate is brutally in your favour."
+
+This is the rare security control where a one-character config change buys a 2x defensive improvement, forever, with no code change. It is also why "bump the cost factor" is the standard response to faster hardware.
+
+| Symbol | What it is |
+|--------|------------|
+| cost factor | The number after `$2a$` in the hash — `12` here. An exponent |
+| `2^cost` | Key-derivation rounds actually executed. Cost 12 = 4,096 rounds |
+| time per hash | Wall clock for one hash. Roughly doubles per `+1` of cost |
+| hashes/sec | `1 ÷ time per hash`. The attacker's guess rate against your database |
+
+**Walk one example.** Cost 10 versus cost 12, using the two timings in the code above:
+
+```
+  cost   2^cost rounds   time per hash   guesses/sec an attacker gets
+  ----   -------------   -------------   ----------------------------
+    10           1,024        ~100 ms          10.0 /sec
+    11           2,048        ~200 ms           5.0 /sec
+    12           4,096        ~400 ms           2.5 /sec
+    13           8,192        ~800 ms           1.25 /sec
+    14          16,384      ~1,600 ms           0.625 /sec
+
+  cost 10 -> 12 : rounds 1,024 -> 4,096  =  4x the work
+                  login   100 ms -> 400 ms  = +300 ms, once, at sign-in
+```
+
+**Now put that beside the unsalted-SHA-256 alternative:**
+
+```
+  SHA-256 on a GPU farm        : 10,000,000,000 guesses/sec
+  BCrypt cost 12               :             2.5 guesses/sec
+  ------------------------------------------------------------
+  defensive ratio              : 4,000,000,000x
+
+  cracking an 8-char lowercase password (26^8 = 208 billion combinations):
+    SHA-256 @ 10e9/sec   : 208e9 / 10e9        =     21 seconds
+    BCrypt  @ 2.5/sec    : 208e9 / 2.5         =  2,647 years
+```
+
+**Why the cost lives inside the hash string.** `$2a$12$...` carries its own cost factor, which is what makes upgrades possible at all: when you raise the application default from 10 to 12, existing cost-10 hashes still verify correctly (the verifier reads the cost from the stored string), and Spring Security's `DelegatingPasswordEncoder` re-hashes each user at their next successful login. Without that embedded parameter you would have to force a password reset on every account to change the cost — which is exactly the migration pain that traps teams still on a hardcoded, unversioned hashing scheme.
+
 ### Security Headers
 
 ```java

@@ -87,6 +87,43 @@ flowchart TD
 
 The pyramid narrows from a broad base of fast unit tests (70%) to a thin peak of slow, brittle E2E tests (10%) — each layer up trades speed for confidence, which is why the suite should stay bottom-heavy.
 
+**In plain terms.** "Total suite time is the count of tests at each layer times what one test at that layer costs. Because the per-test costs differ by four orders of magnitude, the shape of the distribution matters far more than the total number of tests."
+
+The 70/20/10 split looks like an arbitrary convention until you multiply it out. It is not a style preference — it is the only distribution where a four-figure test count still finishes inside a coffee break.
+
+| Symbol | What it is |
+|--------|------------|
+| 70 / 20 / 10 | Share of total tests at unit / integration / E2E layer |
+| per-test cost | Wall-clock seconds one test at that layer burns |
+| layer time | `count × per-test cost`. What that layer contributes to the suite |
+| suite time | Sum of the layer times. What a developer waits for on every commit |
+
+**Walk one example.** A 1,000-test suite, priced with the per-layer costs from the tradeoff table in Section 8 (unit milliseconds, integration 5-30s, E2E minutes):
+
+```
+  per-test cost:  unit 5 ms   |   integration 3 s   |   E2E 30 s
+
+  PYRAMID -- 70 / 20 / 10
+    unit          700 x 0.005 s  =      3.5 s
+    integration   200 x 3     s  =    600   s
+    E2E           100 x 30    s  =  3,000   s
+                                   ----------
+    suite total                    = 3,603.5 s  =  60 minutes
+
+  INVERTED (ice-cream cone) -- 10 / 20 / 70, same 1,000 tests
+    unit          100 x 0.005 s  =      0.5 s
+    integration   200 x 3     s  =    600   s
+    E2E           700 x 30    s  = 21,000   s
+                                   ----------
+    suite total                   = 21,600.5 s  =  360 minutes  =  6 hours
+
+  same test count, same coverage claim  ->  6.0x slower
+```
+
+Two things fall out of this that are worth saying out loud in an interview. First, **the 700 unit tests contribute 3.5 seconds — 0.1% of the pyramid's runtime.** They are effectively free; there is no such thing as "too many unit tests" from a speed standpoint. Second, **even in the correct pyramid, E2E is 83% of the wall clock** despite being only 10% of the tests. That is why the guidance is "E2E for critical happy paths only" rather than "E2E for everything important" — every E2E test you add costs 6,000 unit tests' worth of time.
+
+This also explains the module's stated budgets (unit suite under 30 seconds, integration under 5 minutes). Working backwards: 700 unit tests in 30 seconds allows 43 ms per test, which is generous for a pure in-memory test and impossible the moment a test loads a Spring context. That single division is why the `@SpringBootTest`-on-everything pitfall in Section 10 turns a 30-second suite into a 25-minute one.
+
 **Consumer-Driven Contract Testing with Pact**
 
 ```mermaid

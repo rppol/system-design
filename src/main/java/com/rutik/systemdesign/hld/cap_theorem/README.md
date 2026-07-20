@@ -606,6 +606,35 @@ A FinTech startup (digital wallet, B2C) migrating from a single-region PostgreSQ
 - **Soft requirements:** activity feed, search, transaction history — eventual consistency acceptable (~5s lag OK)
 - **Regions:** us-east, us-west, eu-west (regulatory data residency)
 
+**What it means.** "Daily totals tell you how much data you will accumulate; peak QPS tells you how much hardware you must own. The gap between them — the burst factor — is the number that actually sets the bill, and here it is nearly fifty on the write path."
+
+The term worth naming is the peak-to-average ratio. Capacity sized to the daily average would be correct for roughly one instant per day and catastrophically wrong for the payday and month-end spikes a wallet product lives through.
+
+| Symbol | What it is |
+|--------|------------|
+| `V_w`, `V_r` | Daily volume: `4M` ledger writes/day, `60M` reads/day |
+| `86,400` | Seconds in a day — the divisor turning daily volume into an average rate |
+| `avg` | Average rate: `V / 86,400` |
+| `peak` | Stated peak QPS: `2,200` writes/sec, `14,000` reads/sec |
+| `burst factor` | `peak / avg` — how far above the average you must provision |
+| `read:write` | Workload shape: `V_r / V_w` — decides which path gets the optimization budget |
+
+**Walk one example.** The stated daily volumes converted to rates and compared against the stated peaks:
+
+```
+  average write rate :  4,000,000 / 86,400   =     46.3 writes/sec
+  average read rate  : 60,000,000 / 86,400   =    694.4 reads/sec
+
+  burst factor, writes : 2,200 / 46.3        =  47.5x
+  burst factor, reads  : 14,000 / 694.4      =  20.2x
+
+  workload shape :
+    by daily volume : 60M / 4M               =  15:1 reads to writes
+    by peak QPS     : 14,000 / 2,200         =   6.4:1
+```
+
+The two shape numbers disagreeing (15:1 by volume, 6.4:1 at peak) is itself informative: writes spike harder than reads, so the peak moment is relatively more write-heavy than a typical hour. That is the moment Spanner's cross-region commit path is under most pressure, and it is why decision 7 accepts an 80ms cross-region transfer p99 rather than trying to optimize the average case.
+
 ### Architecture Overview
 
 ```mermaid
@@ -734,6 +763,38 @@ public TransferResult transfer(String from, String to, long amount) {
 | Monthly cost        | $8k                | $48k               | $19k                    |
 | Operational complex.| Low                | Medium             | High (Kafka bridge)     |
 
+**Put simply.** "Availability multiplies along a request path, so a system built from two five-nines components is worse than either one alone — and adding a component that is only four nines drags the whole path down to four nines no matter how good its neighbours are. That is what the 'weakest link' entry in the table means."
+
+Each nine you drop is a 10x increase in annual downtime, which is why the jump from 99.999% to 99.99% in the hybrid row is not a rounding difference — it is the difference between five minutes of downtime a year and nearly an hour.
+
+| Symbol | What it is |
+|--------|------------|
+| `A_i` | Availability of one component on the request path, as a fraction (`0.99999` = five nines) |
+| `A_path` | Availability of a serial path: `A_1 x A_2 x ... x A_n` — every component must be up |
+| `1 - A` | Unavailability — the fraction of the year the path is down |
+| `525,600` | Minutes in a year (`365 x 24 x 60`), the multiplier that turns nines into felt time |
+| `downtime` | Annual outage budget: `(1 - A) x 525,600` minutes |
+
+**Walk one example.** Converting the table's availability targets into minutes, then composing them:
+
+```
+  99.999% :  (1 - 0.99999) x 525,600      =    5.26 min/year
+  99.99%  :  (1 - 0.9999 ) x 525,600      =   52.56 min/year
+  99.9%   :  (1 - 0.999  ) x 525,600      =  525.60 min/year
+
+  each nine dropped = 10x more downtime : 52.56 / 5.256 = 10.0
+
+  serial composition of two five-nines components:
+    0.99999 x 0.99999 = 0.999980           =   10.51 min/year
+    -- worse than either component alone
+
+  one four-nines component in the path:
+    0.99999 x 0.9999  = 0.999890           =   57.82 min/year
+    -- the four-nines link dominates entirely
+```
+
+That last pair is the case study's decision in numbers. The hybrid design puts a Spanner ledger, a DynamoDB feed, and a Kafka bridge on the same overall path, so the published 99.99% target is set by whichever of them is weakest — not by averaging them. If you want a higher number, you do not improve the strongest component; you either fix the weakest or take it off the critical path (which is exactly what making the bridge asynchronous accomplishes).
+
 ### Metrics & Results
 
 - **Overdraft incidents:** 0 (vs 7/month under PostgreSQL with optimistic locking)
@@ -743,6 +804,34 @@ public TransferResult transfer(String from, String to, long amount) {
 - **Cost:** $19k/month total ($14k Spanner + $4k DynamoDB + $1k Kafka)
 - **Migration duration:** 9 months (dual-write phase 4 months, cutover 1 month)
 - **Reconciliation discrepancies:** 0 cents across $2.3B settled over 6 months
+
+**What the formula is telling you.** "The hybrid is not a compromise between the two pure designs — it is a way of paying the expensive store's price only for the traffic that actually needs correctness, which is why it lands much closer to the cheap option than to the expensive one."
+
+The term doing the work is *routing by requirement*. Cost here is not a property of the database; it is a property of how much traffic you send to each database.
+
+| Symbol | What it is |
+|--------|------------|
+| `C_ap` | Monthly cost of the pure AP design — `$8k` (DynamoDB only) |
+| `C_cp` | Monthly cost of the pure CP design — `$48k` (Spanner only) |
+| `C_hybrid` | Monthly cost of the chosen split — `$19k` |
+| `premium` | Strong consistency's price multiple: `C_cp / C_ap` |
+| `savings` | What routing buys back: `C_cp / C_hybrid` |
+| `components` | The hybrid's parts: `$14k` Spanner + `$4k` DynamoDB + `$1k` Kafka |
+
+**Walk one example.** The three columns of the tradeoff table, priced out:
+
+```
+  consistency premium :  48 /  8               =  6.0x
+                         (matches "Spanner is ~6x more expensive")
+
+  hybrid vs CP-only   :  48 / 19               =  2.5x cheaper
+  hybrid vs AP-only   :  19 /  8               =  2.4x more expensive
+
+  hybrid breakdown    :  14 + 4 + 1            =  $19k   (checks out)
+                         Spanner share : 14/19 =  74% of the bill
+```
+
+So correctness costs 6x, and the hybrid pays that 6x only on the ledger — which still ends up as three quarters of the bill, because the ledger is where the hard invariants live. The $1k Kafka line is the price of the operational complexity flagged in the table's last row: cheap in dollars, expensive in on-call burden, which is a tradeoff the cost table alone cannot show you.
 
 ### Common Pitfalls / Lessons Learned
 

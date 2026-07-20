@@ -300,6 +300,52 @@ public class OrderAggregateSnapshotTrigger {
 }
 ```
 
+**What it means.** "Loading an aggregate costs one event replay per event since it was created — so write down the state every 50 events and the cost stops growing with the aggregate's age."
+
+Without a snapshot, load time is `O(total events)` and therefore increases forever. With one, it is bounded by the threshold and never exceeds it, no matter how old the aggregate gets. The threshold does not make replay faster; it makes replay *constant*.
+
+| Symbol | What it is |
+|--------|------------|
+| `sequenceNumber` | The aggregate's event count so far — its version |
+| `SNAPSHOT_THRESHOLD` (50) | Write a snapshot every 50 events |
+| `sequenceNumber % 50 == 0` | Fires exactly on the multiples. The `> 0` guard skips version 0 |
+| Events replayed on load | `sequenceNumber − (latest snapshot version)` — at most `threshold − 1` |
+| Worst-case replay | 49 events, reached just before the next snapshot fires |
+| Average replay | `(threshold − 1) / 2` = 24.5 events |
+
+**Walk one example.** The same aggregate at three ages, with and without snapshots:
+
+```
+  version    no snapshot        with threshold 50
+              (replay all)      snapshot at    replay
+     49            49                 0          49        worst case
+    120           120               100          20
+  1,000         1,000             1,000           0        best case
+ 10,000        10,000            10,000           0
+
+  Bound:  replay <= 50 - 1 = 49 events, forever
+  A 10,000-event aggregate:  10,000 / 49  =  204x fewer events to load
+```
+
+**Why the threshold is a genuine tradeoff, not a bigger-is-better dial.** Lowering it shortens
+replay but multiplies snapshot writes and snapshot-table storage:
+
+```
+  threshold     avg replay     snapshots written per 10,000 events
+      10            4.5                    1,000
+      50           24.5                      200
+     500          249.5                       20
+```
+
+Going from 50 to 10 buys 20 events of replay and costs 5x the snapshot writes — a bad trade,
+since replaying 25 in-memory events is microseconds while each snapshot is a serialization plus
+a database write. Going from 50 to 500 saves 90% of the writes but pushes average replay to 250
+events, which starts to show up in aggregate load latency on hot entities. 50–100 is the usual
+landing spot precisely because the cost curves cross there. Also note the snapshot is a
+*derived* cache, never a source of truth: the primary key `(aggregate_id, snapshot_version)`
+lets you keep several and delete any of them freely, because the event log can always
+regenerate the state.
+
 ### Snapshot Table
 
 ```sql

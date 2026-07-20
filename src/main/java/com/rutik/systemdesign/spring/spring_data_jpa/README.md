@@ -662,6 +662,10 @@ public class Order {
     private List<Tag> tags;
 }
 
+// Rows returned = parents x |collection A| x |collection B| x ...
+//   one collection : 10 x 5      =    50 rows
+//   two collections: 10 x 5 x 3  =   150 rows, hydrated down to 10 objects
+
 // FIX — use LAZY on all collections; fetch explicitly per use case
 @Entity
 public class Order {
@@ -672,6 +676,45 @@ public class Order {
     private List<Tag> tags;
 }
 ```
+
+**What it means.** "Joining two collections onto one parent does not add their rows together —
+it multiplies them, because SQL has no concept of 'two separate lists', only one flat result
+set." The database faithfully returns every combination, Hibernate faithfully deduplicates back
+to 10 objects, and everything in between — network bytes, sort memory, hydration time — is
+paid for the full multiplied count.
+
+| Symbol | What it is |
+|--------|------------|
+| parents | Root entities you actually asked for. `10` orders |
+| `\|items\|` | Average size of the first collection per parent. `5` |
+| `\|tags\|` | Average size of the second collection per parent. `3` |
+| rows returned | `parents x \|items\| x \|tags\|`. What crosses the wire |
+| objects hydrated | Still just `parents`. What you get back |
+| blowup factor | `rows / objects`. Pure waste |
+
+**Walk one example.** One collection is linear; two is quadratic:
+
+```
+  collections fetched         rows returned          objects   blowup
+  -------------------------   --------------------   -------   ------
+  items only                  10 x 5      =    50        10       5x
+  items + tags                10 x 5 x 3  =   150        10      15x
+
+  Now scale to a real page -- 100 orders, 20 items each, 10 tags each:
+                              100 x 20 x 10 = 20,000 rows      100     200x
+
+  20,000 rows across the wire to build 100 objects. Add a third EAGER
+  collection and it multiplies again.
+```
+
+**Why this is worse than the N+1 it was meant to fix.** N+1 costs `1 + N` *round trips* but
+transfers only the rows you need; a multi-collection `JOIN FETCH` costs one round trip but
+transfers a multiplied row set. Swapping one for the other trades a latency problem for a
+bandwidth-and-memory problem, and at 20,000 rows the second is the worse deal. The middle path
+is `hibernate.default_batch_fetch_size = 25`, which turns `1 + 100` queries into
+`1 + ceil(100/25) = 5` — five round trips, and no multiplication at all, because each
+collection is loaded by its own `IN (?, ?, ...)` query rather than joined into the same result
+set.
 
 ---
 

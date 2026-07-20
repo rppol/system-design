@@ -466,6 +466,40 @@ When a consumer joins or leaves a group, partitions are reassigned. During rebal
 - Rule of thumb: `partitions = expected_consumers * 2` (room to scale).
 - Partitions cannot be decreased after creation.
 
+**In plain terms.** "Partitions are the unit of parallelism, so your real consumer count is `min(consumers, partitions)` — and since you can add partitions later but never remove them, you over-provision partitions on purpose and let consumers catch up."
+
+That asymmetry is the whole reason for the `expected_consumers * 2` rule. Adding a consumer takes seconds; adding partitions to a live keyed topic changes which partition a key hashes to and breaks per-key ordering across the boundary. You buy the headroom up front because the cheap direction is one-way.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Partition count on the topic. Fixed upward-only after creation |
+| `C` | Consumers currently in one group |
+| `min(C, P)` | Consumers doing actual work. Anything past `P` sits idle |
+| `P / C` | Partitions each consumer carries when they divide evenly |
+| `P = C * 2` | The rule of thumb: half your partitions are growth headroom |
+
+**Walk one example.** The 4-partition topic from the diagram above, with both of its groups:
+
+```
+  topic orders:  P = 4
+
+  group order-processor   C = 3   -> min(3,4) = 3 active
+    A gets 2 partitions, B gets 1, C gets 1   (uneven: 4 does not divide by 3)
+    slowest consumer carries 2/4 = 50% of the load
+
+  group analytics         C = 2   -> min(2,4) = 2 active
+    X gets 2, Y gets 2                        (even: 4 divides by 2)
+    each carries 2/4 = 50% -- balanced
+
+  scale order-processor to C = 6:
+    min(6,4) = 4 active, 2 idle. Throughput does not improve at all.
+
+  apply the rule instead: P = C * 2 = 8 partitions for 4 expected consumers
+    room to double the group to 8 without ever retouching the topic
+```
+
+The uneven 2/1/1 split is the second lesson: pick `P` as a multiple of the consumer counts you expect, or one consumer permanently carries double the load and sets your lag.
+
 ---
 
 ## Message Ordering
@@ -659,6 +693,37 @@ Consumer lag = (latest offset in partition) - (consumer's committed offset). Hig
 
 Tools: Kafka's `kafka-consumer-groups.sh`, Burrow, Confluent Control Center, Datadog.
 
+**Stated plainly.** "Lag is a stock, not a flow — it is the running total of every message that arrived faster than you consumed it, so what actually matters is the *gap* between arrival rate and service rate, and how long that gap has been open."
+
+Alerting on absolute lag alone is the classic mistake. A lag of 50,000 that is shrinking is fine; a lag of 5,000 that is growing is an outage in twenty minutes. The derivative is the signal.
+
+| Symbol | What it is |
+|--------|------------|
+| `lag` | `latest offset - committed offset`, in messages, per partition |
+| `A` | Arrival rate — messages produced per second |
+| `S` | Service rate — messages the group can consume per second |
+| `A - S` | The gap. Positive means lag grows; negative means it drains |
+| growth | `(A - S) x elapsed_seconds` — messages of lag accumulated |
+| drain time | `lag / (S - A)` — seconds to reach zero, once `S > A` |
+
+**Walk one example.** A group serving 1,200/sec that meets a burst, then recovers:
+
+```
+  phase 1 -- burst, A = 2,000/s, S = 1,200/s, for 10 minutes
+    gap     = 2,000 - 1,200        =   800 msg/s
+    growth  =   800 x 600 s        = 480,000 messages of lag
+
+  phase 2 -- burst ends, A back to 1,000/s, S still 1,200/s
+    gap     = 1,000 - 1,200        =  -200 msg/s  (draining)
+    drain   = 480,000 / 200        = 2,400 s = 40 minutes
+
+  phase 3 -- instead, double the group: S = 2,400/s
+    gap     = 1,000 - 2,400        = -1,400 msg/s
+    drain   = 480,000 / 1,400      =   343 s = 5.7 minutes
+```
+
+A 10-minute burst took 40 minutes to clear on the original capacity. That ratio — recovery far longer than the incident — is why lag alarms need to fire on the gap turning positive, not on lag crossing a threshold.
+
 ### Schema Management
 - Use Apache Avro with a Schema Registry (Confluent) for structured messages.
 - Never break the schema contract — add optional fields only, never remove or rename fields.
@@ -801,6 +866,37 @@ Uber must propagate every ride state transition (REQUESTED → DRIVER_ASSIGNED �
 
 Each consumer team owns their service and consumes at their own pace. A producer outage in one consumer must not block ride events from flowing.
 
+**Put simply.** "Every business object emits a fixed number of events, so event volume is entity volume times events-per-entity — and the number you must actually size for is the peak, which here is roughly five times the daily average."
+
+Sizing on the daily average is how capacity plans fail. The average tells you storage; the peak tells you partition count, consumer count, and whether the SLA holds. Both come out of the same three inputs.
+
+| Symbol | What it is |
+|--------|------------|
+| rides/day | `15,000,000` business entities per day |
+| events/ride | `~6` state transitions, REQUESTED through PAID |
+| events/day | `rides x events-per-ride` |
+| sustained rate | `events/day / 86,400` — the daily average, in events/sec |
+| peak rate | `5,000/sec` during commute hours — what you actually size for |
+| peak factor | `peak / sustained` — the burstiness multiplier |
+
+**Walk one example.** The three stated inputs, pushed through to a sizing number:
+
+```
+  events/day   = 15,000,000 rides x 6 events    = 90,000,000 events/day
+
+  sustained    = 90,000,000 / 86,400 s          =  1,042 events/sec
+                 (quoted as "1,000/sec sustained" -- rounded)
+
+  peak         =                                   5,000 events/sec
+  peak factor  = 5,000 / 1,042                  =    4.8x
+
+  byte rate at ~400 bytes/event (decision 8)
+    sustained  = 1,042 x 400 B                  =    417 KB/sec
+    peak       = 5,000 x 400 B                  =  2,000 KB/sec = 2.0 MB/sec
+```
+
+Two megabytes a second at peak is a tiny load for a 12-broker Kafka cluster — which tells you immediately that this design is not sized by throughput at all. It is sized by ordering (one partition per ride key), durability (RF=3), and consumer parallelism.
+
 ### Architecture Overview
 
 ```mermaid
@@ -834,7 +930,38 @@ flowchart LR
 1. **Partition key = `ride_id`** — All events for one ride land on the same partition, guaranteeing in-order delivery per ride. Different rides can be processed in parallel.
    - *Alternative rejected*: partition by `driver_id` — would serialize unrelated rides by the same driver and starve some partitions.
 
-2. **96 partitions** — Allows up to 96 consumers per consumer group. Sized for 4x current peak (1250 events/sec/partition headroom). More than the consumer count gives room to scale up without rebalancing the topic.
+2. **96 partitions** — Allows up to 96 consumers per consumer group. Sized for 4x current peak (~208 events/sec/partition at 4x peak). More than the consumer count gives room to scale up without rebalancing the topic.
+
+**What this actually says.** "Pick the partition count from the consumer parallelism you will ever need, not from the byte rate — then check that the resulting per-partition load is comfortably below what one partition can serve."
+
+Partition count is a ceiling on concurrency and a floor on ordering granularity at the same time. Ninety-six here is chosen so the largest group (notify, 16 consumers) could grow six-fold without ever touching the topic, and the per-partition rate that falls out is almost negligible.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | `96` partitions on `ride.state.events` |
+| peak | `5,000 events/sec` at commute hours |
+| `4x peak` | `20,000 events/sec` — the design target with headroom |
+| per-partition | `target rate / P` — load one partition must carry |
+| max group size | `P` — a group can never exceed 96 working consumers |
+
+**Walk one example.** The four group sizes against the same 96 partitions:
+
+```
+  per-partition load
+    at sustained 1,042/s  ->  1,042 / 96  =    10.9 events/sec/partition
+    at peak      5,000/s  ->  5,000 / 96  =    52.1 events/sec/partition
+    at 4x peak  20,000/s  -> 20,000 / 96  =   208.3 events/sec/partition
+
+  group headroom (P = 96)
+    group      consumers   partitions each   room to grow
+    -------    ---------   ---------------   ------------
+    notify        16          96/16 = 6         6.0x
+    pricing        8          96/8  = 12       12.0x
+    fraud          8          96/8  = 12       12.0x
+    payments       4          96/4  = 24       24.0x
+```
+
+Even at four times peak, one partition carries about 208 events/sec — roughly 83 KB/sec at 400 bytes an event. The partitions exist for consumer slots and per-ride ordering, not for throughput.
 
 3. **Replication factor 3, min.insync.replicas=2** — Tolerates one broker failure without losing writes. Combined with `acks=all`, every committed write is durable on at least 2 brokers.
 
@@ -924,9 +1051,75 @@ kafka-topics.sh --create \
 - Broker failover (1 broker killed): consumers paused ~3 seconds during leader election
 - Storage: 1.2 TB across 12 brokers (7-day retention, RF=3, LZ4 compression)
 
+**What it means.** "Retention is not a time setting, it is a disk purchase — the bytes you must own are your byte rate multiplied by how long you keep it, and then multiplied again by the replication factor."
+
+The `x RF` at the end is the term people forget, and it is the one that triples the bill. Retention and replication are independent knobs that multiply: cutting retention from 7 days to 3 saves the same proportion as dropping RF from 3 to 1, but only one of those is safe.
+
+| Symbol | What it is |
+|--------|------------|
+| event rate | `90,000,000` events/day |
+| event size | `~400 bytes` after decision 8 trimmed it from ~5 KB |
+| retention | `7 days` = `retention.ms=604800000` |
+| `RF` | Replication factor `3` — every byte stored on three brokers |
+| retained bytes | `rate x size x retention x RF` |
+| per broker | `total / 12` brokers |
+
+**Walk one example.** The topic config, converted into disk:
+
+```
+  daily bytes    = 90,000,000 x 400 B            =    36 GB/day
+  x retention    =         36 x 7 days           =   252 GB (one copy)
+  x RF           =        252 x 3                =   756 GB (all replicas)
+  per broker     =        756 / 12               =    63 GB each
+
+  reported: 1.2 TB -- the extra ~450 GB is record headers, Avro schema IDs,
+  and the .index/.timeindex files Kafka keeps alongside every log segment.
+
+  what decision 8 was worth (5 KB full state vs 400 B deltas):
+    5,000 B/event -> 90,000,000 x 5,000 x 7 x 3  = 9,450 GB = 9.45 TB
+    ratio 9,450 / 756                            = 12.5x more disk
+```
+
+That last line is why "events carry deltas, not full state" is a storage decision as much as a bandwidth one: the 12.5x message-size reduction shows up multiplied by both retention and replication factor.
+
 ### Common Pitfalls / Lessons Learned
 
 1. **Fraud consumer lag during demand spikes** — Broken: fraud detection (heavy ML inference) consumed at 800 events/sec while peak was 5,000/sec; lag grew to 2M messages in 30 minutes. Fix: scaled the consumer group from 4 to 16 instances (matching partition count), and offloaded the heaviest ML model to async batch scoring. Lag now stays under 10k messages.
+
+**What the formula is telling you.** "Consumer count is not a judgement call — it is arrival rate divided by what one instance can actually do, and if that quotient exceeds your instance count the lag is arithmetic, not bad luck."
+
+The fraud group was provisioned by symmetry with the other groups rather than by measured per-instance throughput. That is the failure mode: four instances that each do 200 events/sec is a 800/sec group facing a 5,000/sec peak, and no amount of retry tuning fixes a capacity deficit.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Arrival rate at peak — `5,000` events/sec |
+| `S_1` | What one instance sustains — measured, not assumed |
+| `C` | Instances in the group. Capped at `P = 96` partitions |
+| `C = ceil(A / S_1)` | Instances needed to just keep up |
+| lag growth | `(A - C x S_1) x seconds` |
+
+**Walk one example.** Back out the per-instance rate, then size the group properly:
+
+```
+  measured   group did 800/s across 4 instances
+             S_1 = 800 / 4                       =   200 events/sec/instance
+
+  required   C = ceil(5,000 / 200)               =    25 instances
+  actual     C = 4                               ->  deficit of 21 instances
+
+  after scaling to 16 instances (no model change)
+             S = 16 x 200                        = 3,200 events/sec
+             still short of 5,000 -- which is why the heavy ML model
+             was ALSO moved to async batch scoring, raising S_1
+
+  reading the incident backwards from the observed lag
+    2,000,000 messages / 1,800 s                 = 1,111 msg/s average gap
+    implied average arrival = 800 + 1,111        = 1,911 events/sec
+    (a sustained 5,000/s against 800/s would have built
+     (5,000-800) x 1,800 = 7,560,000 messages instead)
+```
+
+That last block is the useful habit: lag is an integral, so dividing observed lag by the window recovers the *average* deficit. The 2M figure tells you the spike averaged around 1,900/sec, not that it sat at the 5,000/sec headline peak for the full half hour.
 
 2. **Ordering violation: COMPLETED before IN_PROGRESS** — Broken: a transient broker error caused the producer to retry IN_PROGRESS; without idempotence, it was buffered behind COMPLETED. Consumer saw out-of-order events and skipped state validation. Fix: enabled `enable.idempotence=true` (which forces `max.in.flight.requests.per.connection ≤ 5` with per-partition sequence numbers, preserving order across retries).
 

@@ -261,6 +261,46 @@ gh-ost \
 # PostgreSQL: CREATE INDEX CONCURRENTLY (non-blocking)
 ```
 
+**The idea behind it.** "Trade one unbounded lock for a very large number of tiny ones, then let the database itself decide how fast you are allowed to go."
+
+A plain `ALTER TABLE` holds a single lock for however long the rewrite takes — an interval nobody can bound in advance. gh-ost converts that into 100,000 lock acquisitions of a millisecond each, which is strictly more total work but has a property the alternative lacks: it can be paused at any point, and it never blocks a production query for longer than one chunk.
+
+| Symbol | What it is |
+|--------|------------|
+| `--chunk-size=1000` | Rows copied per batch. Each batch is its own short transaction |
+| Chunk count | `rows ÷ chunk-size`. The number of separate short locks taken |
+| `--max-lag-millis=1500` | Pause copying whenever a replica falls more than 1.5 s behind |
+| `--max-load=Threads_running=25` | Pause when the primary already has 25 queries running |
+| `--critical-load=Threads_running=50` | Abort entirely — this is a kill switch, not a throttle |
+| Binlog replay | Concurrent writes captured from the binlog and applied to the ghost table, so the copy stays current |
+
+**Walk one example.** The 100M-row table from the expand-contract diagram:
+
+```
+  chunks  =  100,000,000 / 1,000  =  100,000 chunks
+
+  Wall clock at various per-chunk costs:
+      5 ms/chunk  ->    500 s  =   8.3 min
+     10 ms/chunk  ->  1,000 s  =  16.7 min
+     20 ms/chunk  ->  2,000 s  =  33.3 min
+
+  With throttling pausing roughly half the wall clock (10 ms/chunk):
+                        ->  2,000 s  =  33.3 min
+```
+
+Two things fall out of this. First, the throttle is the *point*, not an inconvenience: the
+migration is deliberately willing to take twice as long so it never competes with production
+traffic, and `--max-lag-millis=1500` means replicas — which serve reads — stay usable
+throughout. Second, chunk size is a real dial with a real cost on both ends. Raising it to
+10,000 cuts the chunk count to 10,000 and reduces per-batch overhead, but each batch now holds
+its lock roughly 10x longer, so p99 latency on concurrent queries rises. 1,000 is the common
+default because it keeps individual lock hold times in the single-digit-milliseconds range,
+which is short enough to hide inside normal query variance.
+
+Note that `--critical-load` is categorically different from `--max-load` despite the similar
+name: one pauses and resumes automatically, the other aborts the migration and leaves you to
+restart it. Setting them to the same value gives you a migration that dies instead of waiting.
+
 ### 6.4 Testing Migrations in CI
 
 ```java

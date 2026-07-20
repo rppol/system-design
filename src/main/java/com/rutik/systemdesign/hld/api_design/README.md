@@ -133,6 +133,34 @@ sequenceDiagram
 
 REST's resource-per-endpoint model costs 3 round trips to assemble one view; GraphQL's single query resolves the same data in 1 round trip.
 
+**The idea behind it.** "On a mobile network the server's processing time is almost irrelevant — what the user feels is the number of times the phone had to talk to the server, multiplied by the round-trip time. Collapsing three sequential requests into one is a 3x latency win before a single line of server code gets faster."
+
+The reason these round trips cannot overlap is that they are *dependent*: the client cannot request `/avatars/99` until the first response tells it the avatar ID is 99. Independent requests could be issued in parallel; a dependency chain must be paid serially, which is what makes it a latency problem rather than a throughput one.
+
+| Symbol | What it is |
+|--------|------------|
+| `rt` | Round-trip time on the client's network — `100ms` is a reasonable mobile figure |
+| `k` | Sequential dependent round trips the client must make |
+| `latency` | Wall-clock time to assemble the view: `k x rt` |
+| `N` | List length in the N+1 shape — one request for the list, one per item |
+| `k_rest` | REST round trips: `3` in the diagram, `1 + N` in the general N+1 case |
+| `k_graphql` | GraphQL round trips: `1`, regardless of how many resources the query touches |
+
+**Walk one example.** The diagram's three-request sequence at a 100ms mobile round trip, then the same shape on a 50-item list:
+
+```
+  REST, diagram    : k = 3        ->  3 x 100ms   =   300 ms
+  GraphQL          : k = 1        ->  1 x 100ms   =   100 ms
+  saving                                          =   200 ms  (3x)
+
+  N+1 on a 50-item list:
+    REST           : k = 1 + 50   ->  51 x 100ms  = 5,100 ms  (5.1 s)
+    GraphQL        : k = 1        ->   1 x 100ms  =   100 ms
+    saving                                        = 5,000 ms  (51x)
+```
+
+The 51x figure is why this pattern gets called a problem rather than an inefficiency. Note though that GraphQL does not delete the work — it moves it server-side, where the same 50 lookups happen inside resolvers. That is precisely the "N+1 problem moves to server" entry in the Section 7 tradeoff table, and why DataLoader-style batching is mandatory rather than optional.
+
 ### gRPC Internal Service Communication
 
 ```mermaid
@@ -186,6 +214,38 @@ Status codes carry semantic meaning:
 **Page-based:** `GET /items?page=3&per_page=20`
 - Human-friendly
 - Suffers same offset problems
+
+**In plain terms.** "`OFFSET 100000` does not skip 100,000 rows — the database has to walk past every one of them before it can return your twenty. Keyset pagination instead says 'start after this indexed value', so the cost of page 5000 is identical to the cost of page 1."
+
+The term that explains everything here is *seek versus scan*. OFFSET is a counting operation the database performs after retrieving rows; a keyset predicate is a range condition the index can jump straight to. That is the whole difference, and it is why deep pagination quietly degrades as a catalog grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Total rows in the collection being paginated |
+| `L` | Page size (`limit`, `per_page`) — `20` in the examples above |
+| `pages` | Number of pages the client can walk: `ceil(T / L)` |
+| `offset` | Rows to skip — `(page - 1) x L` for page-based pagination |
+| `rows_offset` | Rows the database actually touches with OFFSET: `offset + L` |
+| `rows_keyset` | Rows touched by `WHERE id > last_id LIMIT L`: exactly `L`, at any depth |
+
+**Walk one example.** A 1M-row collection at the section's 20-per-page size:
+
+```
+  total pages : 1,000,000 / 20                 = 50,000 pages
+
+  rows scanned to serve a page:
+    page      1  (offset      0) :      0 + 20 =        20 rows
+    page      3  (offset     40) :     40 + 20 =        60 rows
+    page  5,001  (offset 100,000):100,000 + 20 =   100,020 rows
+    page 50,000  (offset 999,980):999,980 + 20 = 1,000,000 rows
+
+  keyset equivalent, every page  :               =        20 rows
+
+  cost ratio at page 5,001 : 100,020 / 20       = 5,001x more work
+  cost ratio at the last page                   = 50,000x more work
+```
+
+Two practical consequences. First, offset pagination is perfectly fine for a UI that only ever shows the first few pages — the cost only explodes deep in the list, which is exactly where crawlers and scripted exports go. Second, `pages = 50,000` is itself a design signal: if a client would need 50,000 requests to read the collection, the right answer is probably a bulk export endpoint, not a faster paginator.
 
 ### Authentication
 
@@ -442,6 +502,34 @@ A single GraphQL query can request deeply nested or duplicated fields that fan o
 | Auth Failure Rate | % of requests failing auth | Spike detection |
 | Payload Size | Average response size | >100KB (investigate) |
 
+**Stated plainly.** "Response size is not just a client concern — multiply it by your request rate and it becomes an egress bandwidth number, which is why a 100KB average payload is worth investigating rather than shrugging at."
+
+The reason a payload threshold belongs in a metrics table at all is that it is the one API-design decision that shows up directly on the infrastructure bill. Trimming fields is usually the cheapest performance work available, because it reduces serialization cost, transfer time, and egress charges simultaneously.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Average response payload size — the table's `100KB` investigate threshold |
+| `RPS` | Requests per second on the endpoint |
+| `throughput` | Egress in bytes per second: `S x RPS` |
+| `Mbps` | The same figure in network units: `S x RPS x 8 / 1,000,000` |
+| `1024` | Bytes per KB (binary units, as sizing tools report them) |
+
+**Walk one example.** The 100KB threshold at the Stripe case study's 800 req/sec peak, then the effect of trimming the payload:
+
+```
+  100KB x 800 RPS   : 102,400 x 800  = 81,920,000 bytes/sec
+                                      =     81.9 MB/sec
+                                      =    655.4 Mbps sustained
+
+  at the 25 RPS average instead      =     20.5 Mbps
+
+  trim payload to 10KB (fields=... or a leaner schema):
+  10KB  x 800 RPS                    =     65.5 Mbps
+  reduction                          =    589.9 Mbps saved, a 10x cut
+```
+
+655 Mbps of sustained egress from a single endpoint is a real line item, and it is proportional to payload size with no other variable involved. This is the concrete argument behind the "design for mobile: minimize payload size, support partial responses" best practice above — the field-selection parameter is not a nicety, it is a 10x lever on both user-visible latency and bandwidth cost.
+
 Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (distributed tracing).
 
 ---
@@ -577,6 +665,37 @@ stateDiagram-v2
 
 The idempotency key's lifecycle is what makes retries safe: a same-key retry inside the 60-second lock window gets back a 409, a mid-flight crash lets the lock expire and reopens the key to a fresh attempt, and terminal SUCCEEDED/FAILED results are replayed to any retry for the full 24-hour TTL.
 
+**Read it like this.** "A TTL is a memory budget in disguise. Keeping every key for 24 hours means the store holds exactly one day's worth of requests at all times, so the memory it needs is daily request volume multiplied by the size of one stored entry — nothing else."
+
+The steady state is the key idea: with a fixed TTL, keys expire at the same rate they arrive, so memory plateaus instead of growing. Decision 7's rejected alternative (permanent storage) removes that plateau entirely, which is why "unbounded growth" is the stated reason for rejecting it.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Request volume — `1,000,000` payment requests/day |
+| `TTL` | Key retention window — `24h`, i.e. exactly one day |
+| `keys` | Keys resident at steady state: `V x TTL_in_days` |
+| `s` | Bytes per entry: the cached response body, body hash, state, and status code |
+| `memory` | Redis footprint: `keys x s` — the reported `38GB` |
+| `budget` | The `~40GB` bound decision 7 is sizing against |
+
+**Walk one example.** Working backwards from the reported footprint to find what one entry costs:
+
+```
+  resident keys  : 1,000,000/day x 1 day        = 1,000,000 keys
+
+  implied size   : 38 GB / 1,000,000 keys       = 38,000 bytes/key
+                   -- about 38KB, dominated by the cached
+                      response body, not the key metadata
+
+  budget check   : 38 GB / 40 GB                = 95% of budget
+
+  what a longer TTL would cost:
+    48h TTL      : 2,000,000 keys x 38 KB       = 76 GB  (2x, over budget)
+    7-day TTL    : 7,000,000 keys x 38 KB       = 266 GB (7x)
+```
+
+Two things this exposes. First, at 95% of budget there is essentially no headroom — the 10x scaling question in the discussion points is not hypothetical, it is close. Second, 38KB per entry means the cached *response* is the memory cost, not the idempotency bookkeeping; storing a response pointer instead of the full body would cut the footprint far more than shortening the TTL would, and without touching the retry-safety window.
+
 ### Implementation
 
 Java idempotency middleware (Spring):
@@ -682,6 +801,39 @@ CREATE TABLE idempotency_keys (
 - **Redis memory footprint:** 38GB across 24h window
 - **False 422 rate (payload mismatch):** 0.003% (mostly buggy SDK versions)
 - **Cost of idempotency layer:** ~$2k/month Redis + ~$5k/month Postgres partition storage
+
+**What it means.** "A defect rate expressed as 'one in N requests' only becomes meaningful when you divide your traffic into it — that turns an abstract ratio into how often the incident happens, and multiplying by the incident's cost turns it into the annual budget the whole idempotency layer is justified against."
+
+The reason this framing matters is that correctness work is hard to fund on principle and easy to fund on arithmetic. The layer costs $7k/month; the arithmetic below shows what it prevents.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Daily request volume — `1,000,000` payment requests/day |
+| `1/N` | Duplicate-charge rate: `1 in 110M` achieved, `1 in 50k` industry baseline |
+| `days_per_incident` | `N / V` — how long between duplicate charges |
+| `incidents_per_year` | `365 / days_per_incident`, equivalently `V x 365 / N` |
+| `c` | Cost per incident — `$50k` in credits, from the problem statement |
+| `annual_cost` | `incidents_per_year x c` |
+| `layer_cost` | Running cost of the idempotency layer: `$2k + $5k = $7k/month` |
+
+**Walk one example.** Both rates priced out against the stated 1M requests/day:
+
+```
+  achieved, 1 in 110M:
+    days per incident   : 110,000,000 / 1,000,000   =    110 days
+    incidents per year  : 365 / 110                 =    3.32
+    annual exposure     : 3.32 x $50,000            = $165,909
+
+  baseline, 1 in 50k:
+    incidents per day   : 1,000,000 / 50,000        =     20
+    incidents per year  : 20 x 365                  =  7,300
+    annual exposure     : 7,300 x $50,000           = $365,000,000
+
+  improvement factor    : 110,000,000 / 50,000      =  2,200x
+  layer cost            : ($2k + $5k) x 12          =  $84,000/year
+```
+
+The comparison is not close: $84k/year of Redis and Postgres removes roughly $365M/year of exposure. That ratio is the answer to "why build idempotency at all," and it is also why decision 6 chooses to fail closed — returning 503 during a Redis outage costs availability measured in minutes, while failing open costs money measured against the $50k-per-incident line.
 
 ### Common Pitfalls / Lessons Learned
 

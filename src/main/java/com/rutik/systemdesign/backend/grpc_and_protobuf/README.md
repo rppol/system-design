@@ -128,7 +128,7 @@ Wire encoding (bytes):
     Value: 30 = 0x1E
 
 Full encoding: 0A 05 41 6C 69 63 65 10 1E (9 bytes)
-JSON equivalent: {"name":"Alice","age":30} (24 bytes)
+JSON equivalent: {"name":"Alice","age":30} (25 bytes)
 
 Note: Field names are NOT in the wire format.
       The receiver uses field numbers (1, 2) to identify fields.

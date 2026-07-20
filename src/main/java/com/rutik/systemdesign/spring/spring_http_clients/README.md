@@ -218,6 +218,66 @@ public RestTemplate restTemplate(ClientHttpRequestFactory partnerRequestFactory)
 
 Now a stalled partner fails after 3 seconds with a `ResourceAccessException` wrapping a timeout instead of hanging forever, and the pool caps concurrent in-flight calls to that partner at 100 instead of growing unbounded.
 
+**Put simply.** "The three timeouts are sequential stages of one call, so the number that
+actually bounds your latency is their *sum*, not the largest of them." Everyone quotes the 3
+second response timeout as 'our timeout'; the real worst case is what the caller upstream will
+experience, and the caller does not care which stage the time was spent in.
+
+| Symbol | What it is |
+|--------|------------|
+| `setConnectionRequestTimeout` | Window 1: waiting for a free pooled connection. `1` s |
+| `setConnectTimeout` | Window 2: TCP handshake + TLS. `2` s. Skipped on a pool hit |
+| `setResponseTimeout` | Window 3: waiting for response bytes after the request is sent. `3` s |
+| worst-case call | `1 + 2 + 3`. All three windows exhausted back to back |
+| retries | A multiplier on the whole budget, not an addition to it |
+
+**Walk one example.** The best and worst paths through the same configuration:
+
+```
+  path                          w1      w2      w3      total
+  ---------------------------  -----   -----   -----   -------
+  pool hit, fast partner        0 ms    skip    40 ms     40 ms
+  pool hit, stalled partner     0 ms    skip   3000 ms  3,000 ms
+  pool empty, cold + stalled   1000 ms 2000 ms 3000 ms  6,000 ms   <- the real bound
+
+  Now wrap it in a retry policy of 3 attempts:
+    3 x 6,000 ms = 18,000 ms of caller-visible latency from a "3 second timeout".
+```
+
+If the upstream caller's own SLO is 5 seconds, this configuration blows it on a single attempt
+before any retry is involved. The rule that falls out: **every timeout budget must be derived
+downward from the caller's deadline**, and retries must be counted inside it, not bolted on
+after.
+
+**Why Window 1 is the one people forget.** It is the only window that does not exist in the
+`SimpleClientHttpRequestFactory` mental model, so it is routinely left at its default —
+Reactor Netty's `pendingAcquireTimeout` defaults to a very generous 45 s. Leave it there and a
+degrading dependency does not fail fast; it silently parks every caller thread in the pool
+queue for three quarters of a minute, which looks like an application hang rather than a
+downstream fault.
+
+**Sizing the pool is Little's Law, not a vibe.** `maxTotal` bounds concurrency, and concurrency
+is `rate x latency`:
+
+```
+  connections_needed  = calls_per_second x seconds_per_call
+  sustainable_rate    = pool_size / seconds_per_call
+
+  at a 300 ms partner call:
+    200 calls/s needs   200 x 0.300 =  60 connections
+    maxTotal      = 100  supports   100 / 0.300 = 333 calls/s
+    maxPerRoute   =  20  supports    20 / 0.300 =  66.7 calls/s per route
+
+  So maxTotal is comfortable, but maxPerRoute is the real ceiling for any single
+  partner -- and it is the limit that will bite first.
+```
+
+Note what happens when the partner degrades from 300 ms to 3 s: required connections jump
+tenfold to 600 while the pool is still 100, so the pool saturates, Window 1 starts firing, and
+callers see pool-acquisition timeouts rather than the partner's own slowness. That is the
+correct behaviour — but it is why `maxPerRoute` must be read alongside the dependency's *worst*
+latency, never its median.
+
 **Spring Boot 3.4+ shortcut** for the same intent without hand-building Apache HttpClient types:
 
 ```java

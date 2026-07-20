@@ -752,6 +752,49 @@ Before trusting a new node or cluster for a real training run, benchmark it agai
 #   8388608     2097152  float     sum       9.4      0.89e+03    1.56e+03   <- ~900 GB/s-class NVLink
 ```
 
+**What it means.** "`algbw` is how fast your *data* got reduced; `busbw` is how hard the
+*wires* were actually working — and only the second one is comparable to a spec sheet."
+
+The distinction exists because an all-reduce moves more bytes than it reports. You hand
+NCCL 8 MB and get 8 MB back, so the naive rate (`algbw = size / time`) undercounts the
+link traffic by exactly the ring's `2(N-1)/N` multiplier from Section 5. Multiply it back
+in and you get `busbw`, the figure that can be compared against NVLink's rated bandwidth.
+Compare `algbw` to the spec sheet instead and a perfectly healthy 8-GPU node looks like
+it is running at roughly half its rated speed.
+
+| Symbol | What it is |
+|--------|------------|
+| `size(B)` | Bytes in the buffer handed to `ncclAllReduce` — 8,388,608 (8 MiB) here |
+| `time(us)` | Wall-clock duration of the collective, in microseconds |
+| `algbw` | Algorithm bandwidth, `size / time` — user-visible throughput |
+| `2(N-1)/N` | Ring correction factor; `1.75` for `N = 8` |
+| `busbw` | Bus bandwidth, `algbw x 2(N-1)/N` — the actual link utilisation |
+| `-g 8` | The `nccl-tests` flag setting `N = 8` GPUs, which fixes the factor above |
+
+**Walk one example.** Reproducing every column of the sample output row:
+
+```
+  size  = 8,388,608 B (8 MiB),  N = 8 GPUs
+
+  algbw = size / time
+        = 8,388,608 B / 9.4 us
+        = 8.9e11 B/s  = 890 GB/s        -> printed as 0.89e+03
+
+  correction = 2(N-1)/N = 2 x 7/8       = 1.75
+
+  busbw = algbw x 1.75
+        = 890 x 1.75  = 1,557.5 GB/s    -> printed as 1.56e+03
+
+  If you had compared algbw (890) to a link rated near 900 GB/s you would conclude
+  "fine". If you compared it after a P2P misdetection dropped you to PCIe:
+    PCIe-fallback algbw would be roughly 64 / 1.75 = 36.6 GB/s
+    ratio to the healthy 890 GB/s = 24.3x slower -> unmistakable in the output
+```
+
+The takeaway for debugging is that the `busbw`/`algbw` gap is a fixed, known constant for
+a given `N` — so if `busbw` is far below the fabric's rating, the problem is the
+transport NCCL chose (check `NCCL_DEBUG=INFO`), never the arithmetic.
+
 `busbw` (bus bandwidth) is the number to compare against the hardware spec sheet (~900 GB/s for H100 NVLink 4); a result well below that on an NVSwitch node usually means P2P is disabled, the wrong GPUs are paired, or a driver/topology misdetection is silently falling back to a slower path — exactly the class of problem `NCCL_DEBUG=INFO` (Section 4.6) is built to expose.
 
 ---

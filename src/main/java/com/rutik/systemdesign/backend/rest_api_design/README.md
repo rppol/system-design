@@ -114,6 +114,38 @@ xychart-beta
 
 The offset line reuses the two concrete numbers already in this module: page 1000 scans and discards 20,000 rows (above), and the equivalent `OFFSET 500000` query scans 500,000 rows (Section 10). Keyset/cursor pagination touches only the page size, 20 rows, at any depth.
 
+**What this actually says.** "`OFFSET N` does not mean 'jump to row N.' It means 'read N rows, throw them all away, then start returning results.' The database has no way to skip rows it has not read."
+
+That one sentence is the whole interview answer. Everything else — why page 1 is fast, why page 1000 times out, why the fix is a `WHERE` clause and not an index — follows from it mechanically.
+
+| Symbol | What it is |
+|--------|------------|
+| page size | Rows the client actually receives. Constant, 20 here |
+| `OFFSET N` | `(page - 1) × page size`. Rows read and discarded before the first result |
+| rows scanned, offset | `OFFSET + page size`. Grows linearly with page depth |
+| rows scanned, keyset | `page size`. Constant — the index seeks directly to the cursor |
+| wasted work ratio | `OFFSET ÷ page size`. Rows discarded per row returned |
+
+**Walk one example.** The four points plotted above, with the waste made explicit:
+
+```
+  page    OFFSET     scanned   returned   discarded   wasted per row returned
+  -----   --------   -------   --------   ---------   -----------------------
+      1          0        20         20           0        0x
+    100      1,980     2,000         20       1,980       99x
+  1,000     19,980    20,000         20      19,980      999x
+ 25,000    499,980   500,000         20     499,980   24,999x
+
+  keyset, any page:  WHERE id > <cursor> ORDER BY id LIMIT 20
+                     scanned 20, discarded 0, wasted 0x at every depth
+
+  page 25,000 comparison: 500,000 rows scanned vs 20  ->  25,000x more work
+```
+
+**Why an index does not save you.** The instinct is "add an index on the sort column." The index does help — it removes the sort — but `OFFSET` still walks the index entries one at a time to count off 499,980 of them before it can start emitting rows. Counting is cheaper than sorting, so the query gets faster, but it stays **O(offset)**. Keyset pagination changes the complexity class rather than the constant: `WHERE id > 100` is a single B-tree descent to the leaf, then a sequential read of 20 entries, which is `O(log n + page size)` at page 1 and page 25,000 alike.
+
+This is also why offset pagination gets *slower as the table grows* even for a fixed page number, and why it silently skips or duplicates rows when items are inserted between requests — the offset counts positions in a result set that shifted underneath it, while a cursor names an actual row that does not move.
+
 ---
 
 ## 5. Architecture Diagrams

@@ -927,6 +927,82 @@ def preprocess_and_infer_fixed(raw_batch_gpu: cp.ndarray, model: torch.nn.Module
 | End-to-end batch latency (preprocess + handoff + inference) | ~3.3 ms | ~1.3 ms |
 | Throughput at fixed batch size | ~1,240 batches/s | ~3,150 batches/s |
 
+**In plain terms.** `round_trip_bytes = 2 x batch x features x sizeof(dtype)`, and the latency it causes is `round_trip_bytes / effective_bandwidth` — "you are charged twice for every byte, and the price per byte is set by the slowest link the data crosses, which for pageable host memory is far below what the PCIe spec advertises."
+
+Writing it out is what turns "~2.0 ms of unexplained tax" into a diagnosis. The byte count is fully determined by the tensor shape, so if the measured latency implies a bandwidth well under the link's rating, the copy is going through pageable memory rather than a pinned DMA path.
+
+| Symbol | What it is |
+|--------|------------|
+| `batch x features` | The tensor shape — **4096 x 512** elements per batch in this pipeline |
+| `sizeof(dtype)` | **4 bytes** for `float32`, the dtype the CuPy preprocessing step produces |
+| `2 x` | The round trip: device-to-host on `.get()`, then host-to-device on `torch.tensor(..., device="cuda")` |
+| `effective_bandwidth` | Bytes moved divided by measured time — the number to compare against the link's rating |
+| DLPack path | Moves a fixed-size metadata capsule instead, so this entire product drops out of the cost |
+
+**Walk one example.** Compute the bytes, then back out what bandwidth the 2.0 ms implies:
+
+```
+  One batch, one direction:
+    4,096 x 512            =  2,097,152 elements
+    x 4 bytes (float32)    =  8,388,608 bytes   =  8.0 MiB   (~8.39 MB)
+
+  Round trip (down, then back up):
+    2 x 8,388,608          = 16,777,216 bytes   = 16.0 MiB
+
+  Back out the effective bandwidth from the measured handoff latency:
+    16,777,216 B  /  2.0 ms  =  8.39 GB/s
+
+  Compare against the links it could have used:
+    PCIe Gen4 x16 (pinned)   ~25 GB/s   ->  8.39 is only 33.6% of it
+    NVLink                  ~300 GB/s   ->  not being used at all
+
+  -> 8.39 GB/s is the signature of PAGEABLE host memory: the driver stages
+     through an internal pinned bounce buffer, so the transfer never reaches
+     the DMA engine's full rate. Even "fixing" this with pinned memory would
+     only reach ~0.67 ms -- still infinitely worse than copying nothing.
+
+  DLPack path, same batch:
+    bytes copied  =  0        (capsule carries pointer + shape + strides + dtype)
+    latency       =  ~0.01 ms, and INDEPENDENT of batch x features
+```
+
+The last two lines answer discussion question 1 quantitatively. The broken path's cost is a product containing `batch x features`, so doubling the batch doubles the tax; the DLPack capsule is a small fixed-size struct describing an allocation, so its cost is constant whether the tensor is 8 MiB or 8 GiB. This is also why "optimize the copy" is the wrong fix here — pinned memory would win back roughly 1.3 ms of the 2.0, while deleting the copy wins all of it.
+
+**What it means.** `throughput = concurrency / latency` says: "these two rows of the metrics table are not independent measurements — given the pipeline keeps a fixed number of batches in flight, the throughput figure is fully determined by the latency figure."
+
+Checking that relation is how you validate a benchmark table before trusting it. If throughput and latency imply *different* concurrency levels in the before and after rows, something other than the fix changed between runs.
+
+| Symbol | What it is |
+|--------|------------|
+| `latency` | End-to-end per-batch time: **3.3 ms** broken, **1.3 ms** fixed |
+| `throughput` | Batches completed per second: **~1,240/s** broken, **~3,150/s** fixed |
+| `concurrency` | Batches in flight simultaneously — the pipeline depth, which the fix does not change |
+| `speedup` | `throughput_fixed / throughput_broken`, which must equal `latency_broken / latency_fixed` |
+
+**Walk one example.** Solve both rows for the implied concurrency, then cross-check the speedup:
+
+```
+  concurrency  =  throughput x latency
+
+    broken :  1,240 /s  x  3.3 ms  =  1,240 x 0.0033  =  4.09 in flight
+    fixed  :  3,150 /s  x  1.3 ms  =  3,150 x 0.0013  =  4.10 in flight
+                                                          ^^^^
+    Both rows imply ~4.1 concurrent batches -- the pipeline depth held
+    constant across the change, exactly as it should. The table is coherent.
+
+  Cross-check the speedup two ways:
+    by throughput :  3,150 / 1,240  =  2.540x
+    by latency    :    3.3 / 1.3    =  2.538x     -> agree to 0.1%
+
+  Where the 2.0 ms went:
+    latency removed   =  3.3 - 1.3          =  2.0 ms
+    share of original =  2.0 / 3.3          =  60.6%
+    remaining 1.3 ms  =  ~1.1 ms model forward + ~0.2 ms preprocessing
+                          -- i.e. the pipeline is now bounded by real work
+```
+
+Two things fall out. The concurrency agreement (4.09 vs 4.10) is the evidence that this is a clean A/B: only the handoff changed. And the 60.6% figure reframes the result — this was never a 2.5x optimization of the model, it was the deletion of a step that was consuming **more time than the inference it was feeding**. The fixed pipeline's 1.3 ms is within ~18% of the model's own 1.1 ms forward pass, meaning there is very little left to win here; further effort belongs in the model, not the plumbing.
+
 **Discussion Questions**:
 1. Why does the broken version's cost scale with batch size while the fixed version's handoff cost stays nearly flat? (The round-trip literally copies every byte of the batch twice across the memory bus, so its cost is proportional to batch-size x feature-count x 4 bytes; the DLPack capsule is a small, fixed-size metadata structure regardless of how large the underlying tensor is.)
 2. What would happen if `raw_batch_gpu` and the PyTorch model lived on two different GPUs? (DLPack cannot zero-copy-share across devices — the consumer must run on the same device as the producer's allocation, so a genuine copy, and an explicit one, would still be required; see the pitfall bullet in §10.)

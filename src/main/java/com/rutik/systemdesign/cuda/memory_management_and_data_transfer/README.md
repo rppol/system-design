@@ -174,6 +174,47 @@ The bottom edge is the whole point of prefetching: it skips `PageFault` and
 turning an unpredictable stall into a scheduled async copy the profiler can
 see coming.
 
+**Read it like this.** "On-demand migration moves the same bytes a bulk copy would, but it
+moves them one page at a time, and you pay a fault round-trip for every single page." The
+byte count is identical; only the *number of events* differs, and that count is what
+dominates.
+
+| Symbol | What it is |
+|--------|------------|
+| Page | The migration unit, 4 KB up to 2 MB depending on generation and access pattern |
+| Page fault | A device access to an unmigrated page; the warp stalls until the page lands |
+| Fault cost | Driver round-trip per fault, order ~10-20 microseconds, largely independent of page size |
+| `cudaMemPrefetchAsync` | Moves a whole range in one scheduled operation — one event, not N |
+| Bulk bandwidth | ~25 GB/s over PCIe once a transfer is actually in flight |
+
+**Walk one example.** Move 1 GB to the device two ways and count events, not bytes:
+
+```
+  ON-DEMAND FAULTING, 4 KB pages
+    pages       = 1 GB / 4 KB                        = 262,144 pages
+    faults      = one per page                       = 262,144 faults
+    at ~20 us each, if fully serialized              =   5.2 seconds
+
+  ON-DEMAND FAULTING, 2 MB pages
+    pages       = 1 GB / 2 MB                        =     512 pages
+    at ~20 us each                                   =    10 ms
+
+  PREFETCH, one bulk copy
+    bytes       =                                       1 GB
+    at 25 GB/s  = 1 / 25                             =    40 ms
+    events      =                                          1
+```
+
+The 4 KB row is the number that ends careers: the same 1 GB that a prefetch moves in 40 ms
+can cost seconds if the kernel walks it page by page. In practice the driver batches
+neighbouring faults and prefetches speculatively, so real on-demand performance lands
+between these rows rather than at the 5.2-second worst case — but the shape of the risk is
+real, and it is entirely invisible in the source, which looks like an ordinary pointer
+dereference. Note too that the 2 MB row *beats* the bulk copy on paper; that is the trap
+in reverse, because it assumes perfectly sequential access with no fault serialization.
+`cudaMemPrefetchAsync` wins because its cost is predictable and schedulable, not because
+it is always the smaller number.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -222,6 +263,42 @@ making the call synchronous; the pinned path lets the DMA engine read the
 host buffer directly, reaching the link's full rated bandwidth and letting
 `cudaMemcpyAsync` actually run concurrently with kernels on other streams.
 
+**What this actually says.** "Two transfers happen back to back instead of one, and when
+you chain two pipes in series the combined rate is worse than the slower of the two — not
+the average of them." The "roughly half" figure is not a fudge factor; it falls straight
+out of the reciprocal-sum rule for stages that cannot overlap.
+
+| Symbol | What it is |
+|--------|------------|
+| CPU `memcpy` | The driver copying your pageable buffer into its own pinned staging buffer, ~20 GB/s |
+| DMA hop | The staging buffer crossing PCIe to the device, at the link's rated ~32 GB/s |
+| Series | The two stages cannot overlap — byte N must be staged before it can be DMA'd |
+| `1/(1/a + 1/b)` | Combined rate of two serial stages; always below `min(a, b)` |
+| Pinned path | One stage only: DMA reads your buffer directly, so the rate is just the link's |
+
+**Walk one example.** Chain the two pageable stages and see where the 12 GB/s bar in §8
+comes from:
+
+```
+  PAGEABLE (two stages, in series)
+    stage 1  CPU memcpy into staging buffer  =  20 GB/s
+    stage 2  DMA staging buffer over PCIe    =  32 GB/s
+    combined = 1 / (1/20 + 1/32)
+             = 1 / (0.0500 + 0.03125)
+             = 1 / 0.08125                   =  12.3 GB/s
+
+  PINNED (one stage)
+    DMA reads the host buffer directly       =  ~28 GB/s achieved on a 32 GB/s link
+
+  ratio = 28 / 12.3                          =  2.3x
+```
+
+The reciprocal-sum shape is the part worth internalizing: making the *faster* stage faster
+barely helps. Upgrade the link from 32 to 64 GB/s and the pageable path only moves from
+12.3 to 15.2 GB/s, because the 20 GB/s CPU copy now dominates. That is why pinning — which
+deletes a stage rather than speeding one up — is the fix, and why pageable transfers get
+*relatively worse* on every new interconnect generation.
+
 ### Overlapped copy + compute across streams (ASCII timeline)
 
 ```
@@ -233,7 +310,7 @@ Single default stream (no overlap):
 Two streams, pinned memory + cudaMemcpyAsync (overlap):
   stream 0: [ H2D chunk0 ][ kernel chunk0 ][ D2H chunk0 ]
   stream 1:              [ H2D chunk1 ][ kernel chunk1 ][ D2H chunk1 ]
-  total ~= 10ms + 8ms + 8ms + 10ms/2  ~= 18-20ms   (roughly 30-35% faster)
+  total ~= 10ms/2 + 8ms/2 + 10ms/2 + 10ms/2  ~= 18-20ms   (roughly 30-35% faster)
 
 Copy engines and compute run on independent hardware queues, so a
 copy in stream 1 executes while a kernel runs in stream 0 -- the two
@@ -245,6 +322,43 @@ This overlap requires pinned host buffers (Section 4.2) and multiple streams
 [streams_events_and_concurrency](../streams_events_and_concurrency/)); the
 diagram here shows only enough to motivate *why* pinning matters for anything
 beyond raw bandwidth.
+
+**Put simply.** "Splitting the work in two does not make any single stage faster — it lets
+the second chunk's upload hide inside the first chunk's kernel, so you pay for the pipeline
+to fill and drain but not for the middle." The saving is bounded by how much of the
+timeline is genuinely overlappable, which is why 28 ms becomes 19 ms and not 10 ms.
+
+| Symbol | What it is |
+|--------|------------|
+| 10ms / 8ms / 10ms | Whole-problem H2D, kernel, and D2H times on the single-stream baseline |
+| Chunking into 2 | Each stage's per-chunk time halves: 5 ms, 4 ms, 5 ms |
+| Copy engine | Dedicated DMA hardware, a separate queue from the SMs — this is what allows overlap |
+| Fill | The first chunk's upload, which nothing can hide behind — pure added latency |
+| Drain | The last chunk's download, likewise unhidden at the tail |
+
+**Walk one example.** Lay the two streams on a shared clock and read off the finish time:
+
+```
+  BASELINE, one stream
+    10 + 8 + 10                                        = 28 ms
+
+  TWO STREAMS, two chunks of half size each
+    stream 0   H2D0  0 -> 5     K0  5 -> 9     D2H0  9 -> 14
+    stream 1   H2D1  5 -> 10    K1 10 -> 14    D2H1 14 -> 19
+                                                  ^ overlaps K0
+    finish time                                        = 19 ms
+
+  breakdown  fill 5 + kernel 4 + drain 5 + tail 5      = 19 ms
+  speedup    28 / 19                                   = 1.47x
+  saved      (28 - 19) / 28                            = 32%
+```
+
+Notice what the 19 ms is made of: 14 of those milliseconds are pipeline fill and drain,
+and only 5 came free. Chunk into 4 instead of 2 and the per-chunk stages shrink further, so
+fill and drain shrink too — the asymptote as chunk count grows is the *sum of the busiest
+single resource*, here the copy engine's 20 ms of total H2D+D2H work. That is the real
+ceiling, and it is why this optimization tops out around 1.4-1.5x rather than approaching
+the 28/8 = 3.5x you would get if copies were free.
 
 ### Overlap as an actor timeline — copy engine vs. SM
 
@@ -511,6 +625,41 @@ xychart-beta
 The staging-buffer bounce (Section 5's flowchart) is not a rounding error —
 it costs roughly half the link's rated bandwidth, which is the concrete
 number behind the "~half of pinned" row in the table above.
+
+**The idea behind it.** "The 32 GB/s on the chart's title is not a marketing round number
+— it is 16 lanes each running at 16 gigatransfers per second, minus the encoding tax,
+divided by 8 to get bytes." Knowing where the ceiling comes from is what lets you judge
+whether 28 GB/s is a good result or a disappointing one.
+
+| Symbol | What it is |
+|--------|------------|
+| `x16` | Lane count — PCIe scales linearly with lanes, so x8 is exactly half of x16 |
+| Gen4 | Generation, which sets the per-lane signalling rate: 16 GT/s (gigatransfers/second) |
+| `128b/130b` | Encoding overhead — 130 bits go on the wire to carry 128 bits of payload |
+| `/ 8` | Bits to bytes |
+| GT/s vs GB/s | Transfers per second vs bytes per second; confusing them is a 8x error |
+| Achieved | What a real `cudaMemcpy` measures, always under rated because of protocol overhead |
+
+**Walk one example.** Derive the ceiling, then score both bars against it:
+
+```
+  rated one-direction bandwidth, PCIe Gen4 x16
+    raw bits/s   = 16 lanes x 16 GT/s                =    256 Gbit/s
+    encoding tax = x 128/130                         =  252.1 Gbit/s
+    to bytes     = / 8                               =   31.5 GB/s  ~= "32 GB/s"
+
+  score the two bars
+    pinned    = 28 / 31.5                            =    89% of rated
+    pageable  = 12 / 31.5                            =    38% of rated
+    gap                                              =    51 points
+```
+
+89% of rated is close to the practical ceiling for a real DMA transfer — the missing 11%
+is packet headers, flow control, and the driver's own descriptor overhead, none of which
+your code can remove. So when a profiler reports ~28 GB/s on a Gen4 x16 link, the transfer
+path is *done*; further optimization has to come from moving fewer bytes or overlapping
+the transfer, not from moving them faster. The 38% figure, by contrast, is a bug you can
+fix in one line.
 
 ### Bandwidth vs. setup cost, all five strategies
 
@@ -970,6 +1119,47 @@ struct AudioPipelineFixed {
 | Kernel | ~3 ms | ~3 ms |
 | Steady-state per-frame latency | ~11 ms (over budget) | ~4-5 ms (overlap of stages, under budget) |
 | Real-time margin at 10ms budget | -1 ms (falling behind) | +5-6 ms headroom |
+
+**Stated plainly.** "Two independent fixes stack: pinning cut each copy in half, and
+overlap turned the remaining sum into a maximum — and only the two together get under the
+budget." Either change alone leaves the pipeline failing, which is exactly why the team
+could not find the win by tuning one thing at a time.
+
+| Symbol | What it is |
+|--------|------------|
+| 10 ms budget | Real-time deadline — a frame arrives every 10 ms, so the pipeline must finish in 10 ms |
+| ~4 ms copy | Per-direction transfer time on the pageable path, with the staging bounce |
+| ~2 ms copy | Same transfer once the host buffer is pinned; the bounce stage is gone |
+| ~3 ms kernel | Denoise time, unchanged by any of this — the part that was already fast |
+| Sum vs max | Serialized stages add; overlapped stages converge on the slowest single stage |
+
+**Walk one example.** Apply the two fixes one at a time and check each against the budget:
+
+```
+  BROKEN     pageable, synchronous
+    4 + 3 + 4                                   = 11 ms   vs 10 ms budget  -> FAIL by 1 ms
+
+  FIX 1 only pinned, still synchronous
+    2 + 3 + 2                                   =  7 ms   vs 10 ms budget  -> passes,
+                                                            but only 3 ms of margin
+
+  FIX 2 only pageable, but overlapped
+    max(4, 3, 4)                                =  4 ms steady state
+    ... except pageable copies cannot overlap at all, so this fix is UNAVAILABLE
+        without fix 1 -- async requires pinned memory
+
+  BOTH       pinned + async + double-buffered
+    steady state ~ max(2, 3, 2) + overhead      = ~4-5 ms
+    margin      = 10 - 4.5                      = ~5.5 ms headroom
+    improvement = 11 / 4.5                      = 2.4x
+```
+
+The third row is the interesting one and it is not arithmetic at all — it is a dependency.
+Pinning is not merely the larger of two independent wins; it is the *precondition* for the
+other one, because `cudaMemcpyAsync` silently degrades to a blocking copy on a pageable
+buffer (the same trap as PyTorch's `non_blocking=True` in §10). A team that tried overlap
+first would have measured no change, concluded overlap does not help this workload, and
+moved on.
 
 Pinning alone roughly doubled the copy bandwidth (removing the staging
 bounce); moving to `cudaMemcpyAsync` on a dedicated stream then let the next

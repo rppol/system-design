@@ -260,6 +260,38 @@ A 6-week plan over the Interview-Specific Path. Each week pairs modules with one
 | 99.99% | 52 minutes | 4.4 minutes |
 | 99.999% | 5.2 minutes | 26 seconds |
 
+**In plain terms.** "Allowed downtime is just the failure fraction multiplied by the length of the period — every extra nine divides that allowance by ten."
+
+Memorizing the table is fine, but deriving it is faster under interview pressure and works for any window an interviewer names (a quarter, a 28-day SLO period, a single day).
+
+| Symbol | What it is |
+|--------|------------|
+| SLA | Promised availability as a fraction, e.g. `0.9999` |
+| `1 - SLA` | Failure fraction — the share of the period allowed to be down |
+| period | Length of the measurement window in minutes |
+| downtime | `(1 - SLA) x period` |
+| each extra nine | Divides allowed downtime by exactly 10 |
+
+**Walk one example.** Derive the 99.99% row from scratch, then check the ten-fold rule:
+
+```
+  minutes in a year  = 365 x 24 x 60 = 525,600
+  minutes in a month =  30 x 24 x 60 =  43,200
+
+  99.99% -> failure fraction = 1 - 0.9999 = 0.0001
+    per year  = 525,600 x 0.0001 = 52.56 min   -> table says 52 minutes
+    per month =  43,200 x 0.0001 =  4.32 min   -> table says 4.4 minutes
+
+  the ten-fold rule, per year:
+    99%     : 525,600 x 0.01    = 5,256 min = 3.65 days
+    99.9%   : 525,600 x 0.001   =   526 min = 8.76 hours
+    99.99%  : 525,600 x 0.0001  =    53 min
+    99.999% : 525,600 x 0.00001 =   5.3 min
+    each step down the column is the previous value / 10.
+```
+
+The practical read: 99.9% leaves room for a single bad deploy per month, while 99.99% leaves 4 minutes — less than most human paging response times, which is why that tier requires automated failover rather than an on-call engineer.
+
 ### Latency Targets (typical)
 - User-facing APIs: p99 < 200ms
 - Internal services: p99 < 50ms
@@ -274,6 +306,38 @@ A 6-week plan over the Interview-Specific Path. Each week pairs modules with one
 1 million photos/day × 1 MB = 1 TB/day
 ```
 
+**What this actually says.** "Storage is count times size — and the only trick worth memorizing is that a million of anything turns bytes into megabytes, and a billion turns them into gigabytes."
+
+Anchoring on those two multipliers means you never do long division on stage; you shift units and read the answer off.
+
+| Symbol | What it is |
+|--------|------------|
+| count | Number of records — users, tweets, photos |
+| record size | Average bytes per record (1 KB profile, 300 B tweet, 1 MB photo) |
+| storage | `count x record size` |
+| 1e6 shift | A million records moves the unit up two steps (KB -> GB, B -> MB) |
+| annualize | `daily x 365` — turn a per-day number into a retention number |
+
+**Walk one example.** Derive the tweet line, the only row that hides a second step:
+
+```
+  per day  = 1,000,000 tweets x 300 bytes
+           = 300,000,000 bytes = 300 MB/day
+
+  per year = 300 MB x 365 = 109,500 MB = 109.5 GB
+           ~ 100 GB/year   (the cheat sheet rounds down)
+
+  same shift on the profile rows:
+    1,000,000 users x 1 KB     = 1,000,000 KB = 1 GB
+    1,000,000,000 users x 1 KB = 1,000,000,000 KB = 1 TB
+    x1,000 the users -> x1,000 the storage. Linear, always.
+
+  and the one that surprises people:
+    1,000,000 photos/day x 1 MB = 1 TB/DAY = ~365 TB/year
+```
+
+The photo row is the point of the whole table: identical record counts across three workloads produce 1 GB, 300 MB, and 1 TB respectively — record size, not user count, is what decides whether you are sizing a disk or a data centre.
+
 ### QPS Estimates
 ```
 1 million requests/day  ÷ 86,400 ≈ 12 RPS
@@ -281,6 +345,40 @@ A 6-week plan over the Interview-Specific Path. Each week pairs modules with one
 1 billion requests/day  ÷ 86,400 ≈ 12,000 RPS
 Peak = 2-3× average
 ```
+
+**Put simply.** "Divide the daily request count by the ~86,400 seconds in a day to get the average rate, then multiply by 2-3 because real traffic is not spread evenly."
+
+The peak multiplier is the half everyone drops, and it is the half that decides how many servers you provision — average load never sized a fleet.
+
+| Symbol | What it is |
+|--------|------------|
+| requests/day | Total daily request volume |
+| 86,400 | Seconds in a day (`24 x 60 x 60`) — the only constant you must remember |
+| average RPS | `requests per day / 86,400` |
+| peak factor | 2-3x, from daily traffic cycles; higher for event-driven spikes |
+| peak RPS | `average RPS x peak factor` — the number capacity planning actually uses |
+
+**Walk one example.** Take the 1-billion-per-day row all the way to a provisioning number:
+
+```
+  seconds/day  = 24 x 60 x 60                    =    86,400
+
+  average RPS  = 1,000,000,000 / 86,400          =    11,574
+                                                 ~    12,000 RPS
+
+  peak RPS     = 12,000 x 3                      =    36,000 RPS
+
+  if one server handles 1,000 RPS:
+    sized on average = 12 servers -> browns out every afternoon
+    sized on peak    = 36 servers -> survives the daily cycle
+    that 3x gap IS the capacity plan.
+
+  sanity-check the smaller rows the same way:
+    1,000,000     / 86,400 =     11.6 ~    12 RPS
+    10,000,000    / 86,400 =    115.7 ~   120 RPS
+```
+
+Note the linearity: 10x the daily requests is exactly 10x the RPS, so one memorized anchor (1M/day ≈ 12 RPS) generates the entire table by shifting the decimal point.
 
 ---
 

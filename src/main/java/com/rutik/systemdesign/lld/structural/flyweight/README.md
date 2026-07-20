@@ -231,7 +231,7 @@ per-instance extrinsic bytes.
 |--------|-----------|
 | `N` | Total object instances live at once — 10M on-screen characters here |
 | `U` | Number of *distinct* intrinsic values — 256 unique codepoints in this scene |
-| `S_intrinsic` | Bytes of shareable, immutable state per distinct value — 2KB of glyph bitmap/metrics |
+| `S_intrinsic` | Shareable immutable bytes per distinct value — 2KB of glyph bitmap/metrics |
 | `S_extrinsic` | Bytes of per-instance state that cannot be shared — 24 bytes of `(x, y, color)` |
 | `N / U` | Sharing factor — how many instances reuse each flyweight; the whole source of the win |
 

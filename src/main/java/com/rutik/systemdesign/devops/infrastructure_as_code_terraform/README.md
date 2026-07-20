@@ -184,7 +184,7 @@ flowchart LR
 terraform {
   required_version = ">= 1.6"
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.40" }   # pin major; allow patch
+    aws = { source = "hashicorp/aws", version = "~> 5.40" }   # pin major; allow minor+patch (>= 5.40.0, < 6.0.0)
   }
   backend "s3" {
     bucket         = "acme-tfstate-prod"

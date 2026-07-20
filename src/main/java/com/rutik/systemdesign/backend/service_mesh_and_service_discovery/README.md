@@ -201,6 +201,45 @@ spec:
         version: v2
 ```
 
+**In plain terms.** "Count 5 failures in a row, kick that instance out for 30 seconds, re-check every 30 seconds — and never kick out so many that the survivors get crushed."
+
+Three of these four numbers control how *fast* the breaker reacts. The fourth, `maxEjectionPercent`, controls something different and more important: whether the breaker is allowed to cause the outage it exists to prevent.
+
+| Symbol | What it is |
+|--------|------------|
+| `consecutiveGatewayErrors: 5` | Consecutive 5xx responses from one instance before it becomes a candidate for ejection |
+| `interval: 30s` | How often Envoy sweeps the pool and applies the ejection decision |
+| `baseEjectionTime: 30s` | How long the first ejection lasts. Repeat offenders are ejected for multiples of it |
+| `maxEjectionPercent: 50` | Hard cap on the fraction of the pool ejected at once, regardless of how many are failing |
+| Detection lag | Up to one full `interval` after the fifth error — the sweep is periodic, not event-driven |
+| Load on survivors | `pool size ÷ healthy remaining` — the multiplier each surviving instance absorbs |
+
+**Walk one example.** A pool of 10 instances, with a bad deploy taking out half of them:
+
+```
+  Detection:   5 consecutive errors, then up to 30 s until the next sweep
+
+  Ejection escalation for a repeat offender:
+    1st ejection   1 x 30 s  =   30 s
+    2nd            2 x 30 s  =   60 s
+    3rd            3 x 30 s  =   90 s
+    4th            4 x 30 s  =  120 s
+
+  maxEjectionPercent 50 on a pool of 10:
+    max ejected        =  10 x 0.50  =  5
+    always left serving =  10 - 5    =  5
+    load per survivor   =  10 / 5    =  2x normal share
+```
+
+The escalation is the anti-flapping mechanism: an instance that recovers, fails again, and
+recovers again gets progressively longer timeouts rather than cycling in and out of the pool
+every 30 seconds. The 50% cap is the anti-cascade one. Without it, a bad dependency that makes
+*every* instance return 5xx would cause Envoy to eject the entire pool — turning a degraded
+service into a completely unreachable one, right when the shared cause means a fresh instance
+would fail identically. Capping at 50% guarantees traffic always has somewhere to go, and
+accepts that the survivors absorb 2x load as the cheaper failure. Set it to 100 and the breaker
+becomes an amplifier.
+
 **Outlier Detection State Machine (Envoy)**
 
 ```mermaid
@@ -406,6 +445,46 @@ eureka:
     health-check-url-path: /actuator/health
     prefer-ip-address: true
 ```
+
+**What the formula is telling you.** "These three intervals are not independent settings — they stack, and their sum is how long a client can keep sending traffic to an instance that is already dead."
+
+Discovery staleness is almost always debugged one knob at a time, which is why it stays mysterious. The number that governs the incident is the total: expiry on the server plus cache lifetime on the client.
+
+| Symbol | What it is |
+|--------|------------|
+| `lease-renewal-interval-in-seconds: 30` | How often a healthy instance heartbeats to the Eureka server |
+| `lease-expiration-duration-in-seconds: 90` | How long the server waits without a heartbeat before evicting the instance |
+| `90 / 30` | Missed heartbeats tolerated = 3. The margin that stops a GC pause from deregistering a healthy pod |
+| `registry-fetch-interval-seconds: 30` | How often each client refreshes its local copy of the registry |
+| Total staleness | `expiration + fetch interval` — server-side eviction lag plus client-side cache lag |
+| `ServerListRefreshInterval` | The client-side cache refresh the pitfall below tightens to 5 s |
+
+**Walk one example.** An instance is killed at t=0 and never sends another heartbeat:
+
+```
+  Server still lists it for up to            90 s   (lease expiration)
+  Client cache still holds it for up to      30 s   (registry fetch interval)
+  ---------------------------------------------
+  Worst-case routing to a dead instance     120 s  =  2 minutes
+
+  Tolerated missed heartbeats:  90 / 30  =  3
+
+  After ServerListRefreshInterval = 5 s:
+    90 + 5  =  95 s        still dominated by the 90 s server-side lease
+```
+
+Note what the second calculation shows: dropping the client cache from 30 s to 5 s removes only
+25 of the 120 seconds, because the 90-second lease expiration is the dominant term and no
+client-side setting touches it. This is why the fix in Common Pitfalls pairs the cache change
+with connect timeouts and retry-on-first-failure — you cannot tune your way to zero staleness in
+a heartbeat-based registry, so the client must be built to survive a dead endpoint rather than
+to never receive one.
+
+The `90 / 30 = 3` ratio is the part not to "optimize" casually. It exists so that a single
+missed heartbeat — a stop-the-world GC pause, a momentary network blip, a slow health endpoint —
+cannot evict a perfectly healthy instance. Set expiration to 30 s to cut staleness and you get a
+registry that deregisters healthy pods during every major GC, which fails far more disruptively
+than the two-minute staleness you were trying to fix.
 
 ---
 

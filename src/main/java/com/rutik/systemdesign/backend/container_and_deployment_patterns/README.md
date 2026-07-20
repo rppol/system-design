@@ -155,6 +155,45 @@ EXPOSE 8080
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]
 ```
 
+**Read it like this.** "Take 75 percent of *the container's* memory limit for the Java heap — and the two flags together are what make the JVM read the cgroup limit instead of the machine's total RAM."
+
+The number 75 is the interesting part, but the word "container's" is the load-bearing part. Without `UseContainerSupport` the percentage is applied to the wrong base, and the result is not a slightly-wrong heap — it is a heap several times larger than the memory the container is allowed to touch.
+
+| Symbol | What it is |
+|--------|------------|
+| `-XX:+UseContainerSupport` | Makes the JVM read the cgroup memory limit as "available RAM". Default on since Java 10 |
+| `-XX:MaxRAMPercentage=75.0` | Max heap as a percentage of that available RAM |
+| Available RAM | The container's `resources.limits.memory` when container support is on; the *host's* total RAM when it is off |
+| The other 25% | Metaspace, code cache, JIT buffers, thread stacks, direct/Netty off-heap buffers, GC structures |
+| Default without the flag | `MaxRAMFraction=4`, i.e. 25% — applied to whatever the JVM believes "available" means |
+
+**Walk one example.** The same JVM, the same 25% default, two different bases:
+
+```
+  Container limit 512 Mi, host has 8 GB RAM
+
+  container support OFF:  heap = 25% x 8,192 Mi  =  2,048 Mi
+                          container limit         =    512 Mi
+                          -> JVM plans a heap 4x larger than the cgroup allows
+                          -> OOMKill (exit 137) as soon as the heap actually grows
+
+  container support ON,
+  MaxRAMPercentage=75:    heap = 75% x   512 Mi  =    384 Mi
+                          overhead budget          =    128 Mi
+                          -> fits, with room for metaspace and off-heap
+
+  Same flags at a 1,024 Mi limit:
+                          heap = 75% x 1,024 Mi  =    768 Mi
+                          overhead budget          =    256 Mi
+```
+
+The failure is silent in exactly the wrong way: the JVM starts fine, serves traffic fine, and
+is killed by the kernel only once real load pushes the heap past the limit — so it looks like
+a traffic-triggered application bug rather than a launch-flag mistake. Section 10 has this
+exact incident. Note also that 75% is a ceiling, not a reservation: the 25% remainder is a
+budget for everything the JVM allocates outside the heap, and a service with heavy Netty
+direct buffers may need to drop to 60–65% rather than assume the default is safe.
+
 ### Kubernetes Deployment with Rolling Update
 
 ```yaml
@@ -239,6 +278,39 @@ spec:
               exec:
                 command: ["/bin/sleep", "10"]  # wait for iptables to propagate
 ```
+
+**What the numbers are telling you.** "Every probe is really a stopwatch — `failureThreshold × periodSeconds` is the only number that matters, and each of the three probes is buying a different guarantee with it."
+
+Probes are usually tuned by adjusting whichever field looks wrong. The right way to read them is as three independent time budgets whose *products* must line up with three different realities: how slow startup can legitimately be, how long a hung process may keep running, and how long a sick pod may keep receiving traffic.
+
+| Symbol | What it is |
+|--------|------------|
+| `periodSeconds` | How often kubelet re-runs the check |
+| `failureThreshold` | Consecutive failures tolerated before the probe is declared failed |
+| `failureThreshold × periodSeconds` | The actual budget — the only derived value worth reasoning about |
+| startupProbe | Suppresses liveness and readiness entirely until it first passes. Runs once per container lifetime |
+| livenessProbe | Failure ⇒ kubelet restarts the container |
+| readinessProbe | Failure ⇒ pod is removed from the Service endpoint list, but keeps running |
+
+**Walk one example.** The three budgets in this manifest, and what each one buys:
+
+```
+  startup    30 x 10 s  =  300 s  =  5 min   how slow a cold JVM may legitimately be
+  liveness    3 x 10 s  =   30 s            how long a hung JVM keeps running before restart
+  readiness   3 x  5 s  =   15 s            how long a sick pod keeps receiving traffic
+
+  Worst-case bad-pod traffic exposure:
+    up to 5 s until the next readiness check  +  15 s of failures  =  20 s
+```
+
+The startup probe is what makes the other two safe to keep tight. Without it, liveness must be
+padded with `initialDelaySeconds` large enough to cover the slowest cold start — and that
+padding then applies for the container's entire life, so a JVM that deadlocks after an hour of
+uptime still waits out the full startup grace before being restarted. Splitting the budget in
+two lets startup be generous (5 minutes, once) while liveness stays aggressive (30 seconds,
+forever). Note the readiness period is deliberately shorter than liveness: pulling a pod out of
+rotation is cheap and reversible, restarting one is not, so you want to detect "unhealthy"
+faster than you conclude "dead."
 
 ### Pod Disruption Budget
 

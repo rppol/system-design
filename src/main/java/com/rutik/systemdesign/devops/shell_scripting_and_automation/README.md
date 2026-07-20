@@ -214,6 +214,52 @@ retry() {
 retry 5 2 curl -sf https://api.example.com/ready   # 2s,4s,8s,16s backoff
 ```
 
+#### Decoding `delay=$((delay*2))`
+
+```
+delay_k    = initialDelay x 2^(k-1)              (wait before attempt k+1)
+sleeps     = max - 1                             (the last failure returns, it never sleeps)
+totalWait  = initialDelay x (2^(max-1) - 1)      (geometric series sum)
+```
+
+**Stated plainly.** "Wait twice as long after every failure, so a service that is briefly busy gets retried almost immediately while a service that is genuinely down stops being hammered within a few rounds."
+
+The doubling exists to protect the *callee*, not the caller. A fixed 2-second retry from a hundred script instances is a sustained 50 requests/sec against something already struggling — the classic retry storm that turns a blip into an outage. Exponential growth makes the aggregate load decay on its own.
+
+| Symbol | What it is |
+|--------|------------|
+| `max` (`$1`) | Total attempts, `5` here — not the number of *retries* |
+| `initialDelay` (`$2`) | `2` seconds, the first backoff |
+| `n` | Attempts made so far; the loop returns `1` once `n >= max` |
+| `2^(k-1)` | The doubling factor after `k` failures |
+| `until "$@"` | Runs the command first, sleeps only on failure — a healthy service costs 0 seconds |
+
+**Walk one example.** `retry 5 2 curl ...` against a service that never comes back:
+
+```
+  attempt   command   n after   sleeps    cumulative wait
+     1       fails       1        2 s          2 s
+     2       fails       2        4 s          6 s
+     3       fails       3        8 s         14 s
+     4       fails       4       16 s         30 s
+     5       fails       5      none          30 s   -> n >= max, return 1
+
+  totalWait = 2 x (2^4 - 1) = 2 x 15 = 30 s across 5 attempts.
+```
+
+**Why one more attempt costs so much.** The total is exponential in `max`, so raising it feels cheap and is not:
+
+```
+  max = 3   ->  2 sleeps,  total wait     6 s
+  max = 5   ->  4 sleeps,  total wait    30 s
+  max = 7   ->  6 sleeps,  total wait   126 s   (over 2 minutes)
+  max = 10  ->  9 sleeps,  total wait 1,022 s   (17 minutes)
+```
+
+Going from 5 to 10 attempts is a 2x change in the parameter and a **34x** change in wall-clock time. This is why retry loops need a total-deadline cap alongside the attempt count, and why the `--timeout=120s` on the `kubectl rollout status` above matters: without an outer bound, a backoff loop inside a CI job can silently hold a runner for a quarter of an hour.
+
+One thing this implementation omits deliberately worth naming: there is no **jitter**. Every instance that started together retries at exactly 2s, 4s, 8s, 16s, so a fleet of 100 nodes recovering from the same outage arrives in synchronized waves. Production retry helpers randomize each delay (e.g. `sleep $((RANDOM % delay + 1))`) to spread the herd.
+
 ---
 
 ## 7. Real-World Examples
@@ -445,6 +491,41 @@ remote=$(aws s3api head-object --bucket backups --key "$(basename "$KEY")" --que
 [ "$remote" = "$actual" ] || { echo "upload size mismatch" >&2; exit 1; }
 echo "backup OK: ${actual} bytes -> $KEY"
 ```
+
+### Reading `min_bytes=1048576`
+
+```
+1048576 = 1024 x 1024 = 2^20 bytes = 1 MiB
+
+  gate:  actual >= min_bytes           -> proceed
+         remote == actual              -> upload verified byte-for-byte
+```
+
+**What the formula is telling you.** "A real backup of this database is never smaller than a megabyte, so anything under that is proof of failure even when every exit code says success."
+
+The magic number is not arbitrary and it is not a size limit — it is a **liveness assertion** encoded as arithmetic. Exit codes tell you a command ran; a size floor tells you it produced something. The two checks answer different questions, which is why the fix needs both.
+
+| Symbol | What it is |
+|--------|------------|
+| `1048576` | `2^20`, one mebibyte. Binary MiB, not the decimal 1,000,000-byte MB |
+| `actual` | `stat -c%s` — local size of the gzipped dump, in bytes |
+| `remote` | `ContentLength` from `head-object`, the size S3 actually stored |
+| `actual >= min_bytes` | Catches the empty-dump class of failure |
+| `remote = actual` | Catches truncated or interrupted uploads — a different failure entirely |
+
+**Walk one example.** The two weeks of silent failure, scored against each gate:
+
+```
+  scenario                    actual bytes   >= 1,048,576?   remote == actual?   verdict
+  healthy nightly dump         48,000,000        YES              YES            uploaded
+  bad creds, empty stream              20        NO               --             ABORTS
+  dump truncated mid-stream       900,000        NO               --             ABORTS
+  full dump, upload cut short  48,000,000        YES              NO             ABORTS
+
+  Under the BROKEN script every one of these rows exits 0.
+```
+
+Row two is the actual incident: gzip of an empty stream produces a valid ~20-byte file, so the artifact exists, the upload succeeds, and monitoring is green — for 14 nights. Note `1 MiB = 1,048,576` bytes is about 1.05x a decimal `1 MB`; the distinction is irrelevant at this threshold but matters the moment someone "rounds" the constant to `1000000` and quietly loosens the gate.
 
 **Outcome:** the new script would have failed on night one with a clear error, paging the team instead of producing 14 useless backups. The lesson: **a backup that is never restore-tested and never size-verified is not a backup.**
 

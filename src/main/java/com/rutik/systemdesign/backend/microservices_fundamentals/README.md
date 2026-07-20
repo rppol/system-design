@@ -497,6 +497,42 @@ Splitting services before domain boundaries are understood. Six months later you
 **Chatty Services (Nano-Services)**
 Services so small that a single user action requires 20 sequential service calls. Each hop adds 5-20ms of network latency. A checkout flow that calls inventory, pricing, coupon, tax, payment, fraud, shipping, notification, loyalty, analytics — 10 sequential hops — adds 50-200ms to every checkout. Merge cohesive nano-services or use async/parallel calls.
 
+**Stated plainly.** "Split a call chain in series and the latencies add up; but the availabilities multiply — and multiplying numbers below 1 drives the product down fast."
+
+Those are two different arithmetic operations on the same decomposition, and the second one surprises people. Latency degrades linearly with hop count. Availability degrades *exponentially*.
+
+| Symbol | What it is |
+|--------|------------|
+| hop | One synchronous service-to-service call in the chain |
+| per-hop latency | 5-20 ms of network and serialization cost, before any business logic |
+| chain latency | `hops × per-hop latency` when sequential; `max(hops)` when parallel |
+| per-service availability | Probability one service answers correctly, e.g. `0.999` |
+| chain availability | `per-service ^ hops`. Every dependency is a multiplication |
+
+**Walk one example.** The 10-hop checkout above, on both axes:
+
+```
+  LATENCY -- addition
+    sequential, 10 hops x  5 ms  =   50 ms  (best case)
+    sequential, 10 hops x 20 ms  =  200 ms  (worst case)
+    fully parallel, 10 hops      =   20 ms  (bounded by the slowest single hop)
+                                   -------
+    restructuring serial -> parallel saves 180 ms  (90% of the overhead)
+
+  AVAILABILITY -- multiplication, each service a "three nines" 99.9%
+     1 service   0.999^1  = 99.900%    ->    526 min/year down
+     3 services  0.999^3  = 99.700%    ->  1,575 min/year down
+     5 services  0.999^5  = 99.501%    ->  2,623 min/year down
+    10 services  0.999^10 = 99.004%    ->  5,232 min/year down
+
+    ten 99.9% services in series = 99.0%, barely "two nines"
+    downtime multiplied by 5,232 / 526 = 10x
+```
+
+**This is the number that kills naive decomposition.** Every team ships a 99.9% service and believes the system is 99.9% available; chained ten deep it is 99.0%, which is 87 hours of downtime a year instead of 8.8. And the arithmetic only gets worse — a 20-hop chain of the same services lands at 98.0%.
+
+There are exactly three ways to fight the exponent, and all three appear elsewhere in this module: **reduce the exponent** (merge cohesive services so there are fewer hops), **remove hops from the critical path** (make non-essential calls async, so a notification-service outage cannot fail a checkout), or **stop a failed hop from counting as a failure** (circuit breakers with fallbacks, so a degraded response beats no response). Retries help too, but note they trade the availability problem for a latency one — each retry adds a full hop's timeout to the chain.
+
 **Shared Database**
 Two services reading and writing the same database. This is a shared deployment unit pretending to be microservices. Schema changes become a cross-team coordination event. One service's heavy query degrades another service's performance. The database becomes the monolith.
 

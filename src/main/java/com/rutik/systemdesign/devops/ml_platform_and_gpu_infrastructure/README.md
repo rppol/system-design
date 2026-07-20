@@ -263,6 +263,43 @@ data:
 
 After applying, an 8-GPU node advertises `nvidia.com/gpu: 32`. Four Pods land per card; if one allocates 70 GB the others will OOM.
 
+#### What `replicas: 4` does and does not divide
+
+```
+advertised    = gpusPerNode x replicas          =  8 x 4  =  32
+memoryPerPod  = UNDIVIDED                       -- every replica still sees the full 80 GB
+effectiveSMs  ~ 1 / replicas                    -- round-robin time slices, not partitions
+```
+
+**What this actually says.** "Lie to the scheduler four times about each card. Compute gets shared by taking turns; memory gets shared by hoping."
+
+That asymmetry is the whole risk profile. `replicas` is a pure counting change in the device plugin — no hardware is reconfigured, nothing is carved, and the number is not a resource limit of any kind. Contrast the MIG line above, where the same `x7` fan-out is backed by a hardware partition.
+
+| Symbol | What it is |
+|--------|------------|
+| `replicas: 4` | How many times each physical GPU is advertised. Any integer; no hardware support needed |
+| `advertised` | The inflated `nvidia.com/gpu` capacity the scheduler now believes |
+| memory | **Not divided.** All 4 co-tenants allocate against the same 80 GB pool, first-come |
+| SM access | Time-multiplexed by the GPU's hardware scheduler; each Pod waits its turn |
+| context switch | The per-turn cost that makes p99 latency unpredictable (Pitfall 6) |
+
+**Walk one example.** Four Pods on one 80 GB A100 under `replicas: 4`:
+
+```
+  what a MIG 4-way split WOULD give     what time-slicing actually gives
+  ---------------------------------     --------------------------------
+    pod A   20 GB hard cap                pod A   allocates 70 GB   -> succeeds
+    pod B   20 GB hard cap                pod B   allocates 10 GB   -> succeeds (80 GB used)
+    pod C   20 GB hard cap                pod C   allocates 10 GB   -> CUDA OOM
+    pod D   20 GB hard cap                pod D   allocates 10 GB   -> CUDA OOM
+
+  Scheduler's view in BOTH columns: 4 happily-placed Pods, 0 events, 0 alerts.
+```
+
+Two Pods crash and Kubernetes reports nothing wrong, because from its side the resource accounting is perfectly satisfied — it handed out 4 of the 4 things it was told existed. The failure surfaces only as `CUDA out of memory` inside the container, which is why time-slicing belongs on dev, notebooks, and throughput-tolerant batch, and never behind a latency SLA.
+
+Also note that `replicas` divides *throughput*, not capability: at `replicas: 4` a Pod that had the whole card gets roughly a quarter of the SM time, so a 100ms inference becomes ~400ms under full contention. The advertised number went up 4x; the work the node can actually do did not move at all.
+
 ### 6.5 Karpenter GPU NodePool with Spot + checkpointing
 
 Karpenter provisions GPU nodes just-in-time, picking the cheapest instance that fits the pending Pod's `nvidia.com/gpu` request. A training NodePool prefers Spot:
@@ -317,6 +354,44 @@ spec:
         resources: { limits: { nvidia.com/gpu: 8 } } }] } }
 # 32 GPUs total; Kueue admits the job only when all 32 are available, then releases together.
 ```
+
+#### Where "32 GPUs total" comes from, and why partial is worse than none
+
+```
+jobGpuDemand = (masterReplicas + workerReplicas) x gpusPerReplica
+             = (1 + 3) x 8
+             = 32
+
+  admit  when  availableGpus >= jobGpuDemand      (all-or-nothing)
+  never  admit a strict subset
+```
+
+**Put simply.** "A distributed training job is one indivisible request for 32 GPUs, not 4 independent requests for 8 — so the scheduler must answer yes to all of it or no to all of it."
+
+The master counts. It is `replicas: 1` and it holds 8 GPUs exactly like every worker, so the naive "3 workers x 8" undercount is off by a quarter. NCCL all-reduce needs every rank present, and the master is rank 0.
+
+| Symbol | What it is |
+|--------|------------|
+| `masterReplicas` | `1` — rank 0, and a full GPU consumer, not a coordinator-only Pod |
+| `workerReplicas` | `3` |
+| `gpusPerReplica` | `nvidia.com/gpu: 8` — one whole p4d node's worth per Pod |
+| `jobGpuDemand` | `32`, the number Kueue must satisfy atomically |
+| gang admission | Kueue holds the job in the queue rather than placing any Pod |
+
+**Walk one example.** A cluster with 24 free GPUs and this 32-GPU job pending:
+
+```
+                     default scheduler            gang scheduler (Kueue / Volcano)
+  Pods placed              3 of 4                          0 of 4
+  GPUs consumed            24                              0
+  GPUs doing work           0   <- all idle, blocked        0
+  4th Pod                Pending forever                 job queued, whole
+  other jobs           BLOCKED (24 GPUs held hostage)    can use all 24 GPUs
+
+  Waste under the default scheduler: 24 GPUs x $3.27/hr = $78.48/hr producing nothing.
+```
+
+This is the counterintuitive part worth saying out loud: placing 3 of 4 Pods is *strictly worse* than placing zero. Zero placements leave 24 GPUs available for other teams; three placements consume 24 GPUs, produce no training progress, and block everyone — a textbook resource deadlock that resolves only when a human kills the job. Gang admission trades queue latency for the guarantee that allocated always means working.
 
 Without gang scheduling, partial placement deadlocks the job; Kueue/Volcano's all-or-nothing admission avoids it:
 
@@ -615,6 +690,39 @@ disruption:
 # pod annotation: karpenter.sh/do-not-disrupt: "true"
 # checkpoint interval: every 500 steps (~6 min) -> max loss now ~6 min, not 2h
 ```
+
+### The checkpoint-interval formula behind that page
+
+```
+maxWorkLost      = checkpointInterval
+expectedWorkLost = checkpointInterval / 2      (an interruption is uniformly likely in the window)
+costPerEvent     = expectedWorkLost x gpuCount x pricePerGpuHour
+```
+
+**What it means.** "Your checkpoint interval is not a storage setting — it is a direct statement of how much GPU time you are willing to burn every time Spot or a consolidation event takes the node."
+
+The division by two is what makes the case for frequent checkpoints. Interruptions do not politely arrive right after a save; on average they land mid-window, so halving the interval halves the expected bill from every future interruption, and the effect compounds across a nightly job.
+
+| Symbol | What it is |
+|--------|------------|
+| `checkpointInterval` | `2h` before the fix, `~6 min` (every 500 steps) after |
+| `maxWorkLost` | Worst case — an interruption one instant before the next save |
+| `expectedWorkLost` | Average case, half the interval |
+| `gpuCount` | `8` for this run |
+| `pricePerGpuHour` | `$3.27` per A100, the same rate used in Pitfall 1 |
+
+**Walk one example.** The actual incident (`1h58m` lost on an 8-GPU run) versus the same interruption after the fix:
+
+```
+  checkpoint every    max lost    expected lost    8-GPU rate      cost of the observed event
+      2 h              120 min       60 min       $26.16/hr    1.9667h x $26.16 = $51.45
+      6 min              6 min        3 min       $26.16/hr    0.1000h x $26.16 =  $2.62
+
+  Repeated nightly for a month:   $51.45 x 30 = $1,543   vs   $2.62 x 30 = $79
+  Interval cut 120 -> 6 min = 20x less work at risk per interruption.
+```
+
+Fifty dollars a night sounds trivial against a `$70k` monthly bill, which is exactly why it survived until it caused a 2 a.m. page — the real cost was the schedule slip and the on-call burn, not the `$1,543`. The lesson generalizes: on Spot, pick the checkpoint interval from `expectedWorkLost x gpuCount x price` against your interruption rate, not from a feeling about how often writing to S3 is "too often."
 
 **Result:** Serving collapsed from 14 whole GPUs to ~2 GPUs' worth of MIG slices; training moved to Spot with frequent checkpoints; rarely-used models scale to zero overnight. GPU bill dropped from ~$70k to ~$26k/month (a 63% cut), DCGM serving utilization rose to ~64%, and daytime inference latency stabilized because training can no longer steal its GPUs.
 

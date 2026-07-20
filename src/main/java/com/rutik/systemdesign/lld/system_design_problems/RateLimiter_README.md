@@ -193,7 +193,7 @@ you are willing to allow," so the memory bill scales with the *limit itself*, no
 | `limit` | Requests permitted per window — the configured quota |
 | `window` | Fixed window duration that the counter resets on (60s here) |
 | `2 × limit` | Worst count observable in any rolling `window`-length span under Fixed Window |
-| `bytes_per_client` | Sliding Window Log footprint, `limit × 8` (a `long` epoch-millis per request) |
+| `bytes_per_client` | Sliding Window Log footprint, `limit × 8` (one `long` per request) |
 | `8` | Bytes in one Java `long` timestamp stored in the per-client `Deque<Long>` |
 
 **Walk one example.** First the boundary artifact, using the table's own `limit = 5`, 60s window:

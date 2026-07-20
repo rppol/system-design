@@ -560,6 +560,46 @@ public class ApiKeyService {
 }
 ```
 
+**In plain terms.** "Thirty-two random bytes is 256 bits of entropy, which puts the key permanently out of reach of guessing — so the only way to lose it is to leak it."
+
+That conclusion is what justifies the rest of the design. Because brute force is off the table by an absurd margin, every remaining control in this class — hashing before storage, showing the raw key once, prefixing for secret scanning — targets *disclosure*, not guessing.
+
+| Symbol | What it is |
+|--------|------------|
+| `new byte[32]` | 32 bytes = 256 bits of key material |
+| `SecureRandom` | CSPRNG. `java.util.Random` here would be the actual vulnerability — 48 bits of seed, predictable |
+| Keyspace | `2^256` possible keys |
+| Base64url of 32 bytes | `ceil(32 × 4/3)` = 43 characters, unpadded |
+| `PREFIX` (`sk_live_`) | 8 identifying characters. Adds zero entropy — it is a label, not a secret |
+| SHA-256 before storage | One-way. A dumped `api_keys` table yields hashes, not usable credentials |
+
+**Walk one example.** What 256 bits actually buys, against an attacker guessing a billion keys per second:
+
+```
+  keyspace          = 2^256  ~=  1.16 x 10^77
+  expected guesses  = 2^255      (half the space, on average)
+
+  at 1,000,000,000 guesses/second:
+    2^255 / 1e9 / 31,557,600 s-per-year  ~=  1.8 x 10^60 years
+
+  Total key length: 8 (prefix) + 43 (base64url) = 51 characters
+```
+
+For contrast, an 8-character alphanumeric key — the kind hand-rolled key generators tend to
+produce — has a keyspace of `62^8 ≈ 2.18 × 10^14`, which the same attacker exhausts in about
+109,000 seconds, roughly **30 hours**. The gap between 30 hours and 10^60 years is entirely a
+function of the byte count, which is why "32 bytes from `SecureRandom`" is the whole
+recommendation and no amount of clever formatting substitutes for it.
+
+**Why the prefix is stored separately.** `prefix(rawKey.substring(0, 10))` looks like it weakens
+the key by persisting part of it in plaintext, and it would if the prefix carried entropy. It
+does not: `sk_live_` is a constant plus two characters, so the searchable prefix narrows
+`2^256` to roughly `2^244` — an irrelevant reduction. What it buys is real: operators can
+identify a key in a UI without ever storing the secret, and GitHub's secret scanner can
+recognize a leaked key on sight (Section 7). Never extend that prefix far enough to matter —
+storing the first 30 characters would reveal 22 base64 characters (132 bits) and leave only 124
+bits unknown.
+
 ### Token Revocation with Blocklist
 
 ```java
@@ -610,6 +650,45 @@ public class JwtRevocationFilter extends OncePerRequestFilter {
     }
 }
 ```
+
+**What this actually says.** "A revoked token only needs to be remembered until the moment it would have expired on its own — so the blocklist's size is set by your access-token lifetime, not by how many tokens you have ever revoked."
+
+This is why short access tokens make revocation *cheap* rather than merely *safer*. The two properties are the same lever pulled once, which is the point interviewers are usually driving at when they ask "how do you revoke a JWT?"
+
+| Symbol | What it is |
+|--------|------------|
+| `jti` | JWT ID — the unique per-token claim used as the blocklist key |
+| `exp − now` | Remaining lifetime. The exact TTL to set on the Redis key |
+| Access-token TTL | 5–60 minutes per Section 3. Simultaneously the revocation lag and the blocklist retention |
+| Blocklist size | `revocation rate × TTL` — a steady-state count, not a growing set |
+| Refresh calls per session | `session length ÷ TTL` — the cost side of shortening the TTL |
+
+**Walk one example.** Both sides of the TTL choice, for an 8-hour working session:
+
+```
+  TTL     stolen-token window     refresh calls per 8h session
+   5 min        5 min                    480/5   =  96
+  15 min       15 min                    480/15  =  32
+  30 min       30 min                    480/30  =  16
+  60 min       60 min                    480/60  =   8
+
+  Refresh load at 1,000,000 active users:
+    TTL 15 min ->  32,000,000 refreshes/day  =  370 req/s
+    TTL 60 min ->   8,000,000 refreshes/day  =   93 req/s
+```
+
+Halving the TTL halves the attacker's window and doubles the traffic to your token endpoint —
+a clean linear trade with no free lunch, which is exactly why 15 minutes is the common landing
+spot rather than 1 minute. Note that 370 req/s of refresh traffic against a single authorization
+server is not trivial; it is a real capacity line item that the "just use short tokens" advice
+tends to skip.
+
+The blocklist itself stays small because of the TTL rule above. At 5,000 revocations per hour
+with a 15-minute token lifetime, the steady-state resident key count is `5000/60 × 15 = 1,250`
+keys — bounded, regardless of how long the system has been running. Set the TTL to a fixed
+large value instead of `exp − now` and that same workload grows without limit, which is the
+usual reason a "revocation is easy, just use Redis" design eventually runs the auth cache out
+of memory.
 
 ---
 

@@ -37,6 +37,45 @@ Imagine a bank that mails a withdrawal receipt only after the money is debited. 
 - **Separate DLQ per source**: avoids DLQ processing from one topic affecting another
 - **DLQ consumer**: monitoring, alerting, root cause analysis, manual replay after fix
 
+**What it means.** "Wait twice as long before each retry, so a downstream service that is already struggling gets exponentially more breathing room instead of a steady hammering from every consumer at once."
+
+The doubling is the point, and so is where it stops. Both the total time-to-DLQ and the load you inflict on the failing dependency are fixed by the retry count — pick it deliberately, not by accepting a library default.
+
+| Symbol | What it is |
+|--------|------------|
+| attempt `n` | Which try this is. Attempt 0 is the original, unretried delivery |
+| delay | `2^(n-1)` seconds — 1, 2, 4, 8, doubling every attempt |
+| max retries | Where the sequence stops and the message goes to the DLQ |
+| time-to-DLQ | Sum of all delays. How long a poison message occupies a consumer |
+
+**Walk one example.** The `1s, 2s, 4s, 8s` schedule above, plus what happens if you keep doubling:
+
+```
+  attempt   delay      cumulative wait        cumulative in minutes
+  -------   --------   --------------------   ---------------------
+     0      0 s        0 s                     0.0
+     1      1 s        1 s                     0.0
+     2      2 s        3 s                     0.1
+     3      4 s        7 s                     0.1
+     4      8 s        15 s                    0.2      <- DLQ at 4 retries
+     5      16 s       31 s                    0.5
+     6      32 s       63 s                    1.1
+     7      64 s       127 s                   2.1
+     8      128 s      255 s                   4.2
+     9      256 s      511 s                   8.5
+    10      512 s      1,023 s                17.1
+
+  the pattern: cumulative wait after n retries = 2^n - 1 seconds
+    n = 4  ->  2^4 - 1 =    15 s
+    n = 10 ->  2^10 - 1 = 1,023 s
+```
+
+**The `2^n - 1` shortcut is worth memorizing** — the total wait is always one second short of the next delay in the sequence, because doubling means every prior delay summed together is just under the current one. It lets you answer "how long before this lands in the DLQ?" without adding anything up.
+
+**Why the retry count matters more than it looks.** Going from 4 retries to 10 does not make you 2.5x more patient — it makes you **68x** more patient (1,023 s vs 15 s). Meanwhile each retried message holds a consumer thread or a partition's progress for that whole window. With 4 retries a poison message costs 15 seconds of a partition's throughput; with 10 it costs 17 minutes, and a few hundred poison messages arriving together will stall the topic entirely. That is the failure mode that makes "just bump the retries" a dangerous instinct.
+
+**Why jitter is added on top.** Pure exponential backoff synchronizes retries: every consumer that failed at the same instant retries at exactly 1s, 2s, 4s together, so the recovering downstream service is hit by a thundering herd at each step instead of a smooth trickle. Adding random jitter (retry at a uniformly random point in `[0, 2^(n-1)]`) spreads the same total load across the interval. Without it, backoff delays the herd rather than dissolving it.
+
 ```mermaid
 stateDiagram-v2
     state "Attempting Delivery" as Attempting
@@ -84,6 +123,41 @@ flowchart LR
 ```
 
 The order write and its outbox insert commit in one local transaction, so a Kafka outage never loses or fabricates an event — the relay polling every 500ms is the only component that talks to Kafka, and the dotted edge marks its `published_at` update as the confirmation step.
+
+**The idea behind it.** "A polling relay's maximum throughput is its batch size divided by its poll interval — nothing else. Two config values you probably copied from a blog post are silently setting the ceiling for your entire event pipeline."
+
+This is the calculation nobody runs until the outbox table is millions of rows deep and growing, because the relay looks perfectly healthy the whole time: it polls on schedule, it publishes successfully, it just cannot keep up.
+
+| Symbol | What it is |
+|--------|------------|
+| `LIMIT 100` | Rows the relay claims per poll — the batch size |
+| 500 ms | Poll interval — how often the relay wakes up |
+| relay ceiling | `batch ÷ interval`. Hard maximum events/sec, regardless of load |
+| publish latency | Worst-case wait before an event reaches Kafka, roughly one interval |
+
+**Walk one example.** The configuration drawn above, and what it can and cannot absorb:
+
+```
+  relay ceiling = 100 rows / 0.5 s = 200 events/sec
+                = 720,000 events/hour
+
+  ORDER RATE 150/sec -- fits
+    drains every poll, outbox table stays near empty
+    publish latency = up to 500 ms
+
+  ORDER RATE 500/sec -- does not fit
+    deficit = 500 - 200 = 300 events/sec accumulating
+    after 1 hour  : 300 x 3600     = 1,080,000 unpublished rows
+    after 8 hours : 300 x 28,800   = 8,640,000 unpublished rows
+    publish latency at hour 8 = 8,640,000 / 200 = 43,200 s = 12 hours stale
+
+  RAISING THE CEILING -- two independent levers:
+    batch 100 -> 500,  interval 500 ms         =  1,000 events/sec   (5x)
+    batch 100,         interval 500 -> 100 ms  =  1,000 events/sec   (5x)
+    batch 500,         interval 100 ms         =  5,000 events/sec  (25x)
+```
+
+The two levers are not equivalent even though they multiply the same way. **Larger batches cost you nothing per event but raise worst-case publish latency to a full interval; shorter intervals cut latency but multiply the query load on the database** — at 100 ms the relay is issuing 10 `SELECT ... FOR UPDATE SKIP LOCKED` queries per second per relay instance, forever, whether or not there is anything to publish. That polling floor is exactly the cost Debezium removes by tailing the WAL instead: it has no interval and therefore no ceiling of this shape, which is why the CDC variant reaches sub-100ms publish latency with zero idle database load.
 
 **Outbox Pattern (CDC with Debezium)**
 

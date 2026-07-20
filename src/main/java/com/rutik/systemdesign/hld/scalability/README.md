@@ -550,6 +550,42 @@ Discord scaling its real-time messaging platform for major gaming events (game l
 - **Availability:** 99.95% (4.4 hours downtime/year budget)
 - **Reconnection storm scale:** 1M users may reconnect within 60s after backend deploy
 
+**In plain terms.** "Divide the daily volume by 86,400 to get the sustained rate, then multiply by the fan-out to get what the system actually moves — the two numbers differ by 5.6x here."
+
+Every capacity estimate in system design starts with this one division, and the fan-out multiplier is what separates the number the product team quotes from the number the infrastructure must carry.
+
+| Symbol | What it is |
+|--------|------------|
+| daily volume | Messages *sent* per day: `2.5 billion` |
+| `86,400` | Seconds in a day (`60 x 60 x 24`) — the constant that converts daily to per-second |
+| sent QPS | `daily volume / 86,400` — the write rate |
+| delivered volume | Messages *received* after fan-out: `14 billion/day` |
+| fan-out factor | `delivered / sent` — average recipients per message |
+| availability target | `99.95%`, leaving `0.05%` of the year as the error budget |
+
+**Walk one example.** Both rates, then the error budget:
+
+```
+  sent QPS      = 2,500,000,000 / 86,400 =  28,935 messages/sec written
+  delivered QPS = 14,000,000,000 / 86,400 = 162,037 messages/sec pushed
+
+  fan-out factor = 14 B / 2.5 B = 5.6 recipients per message
+
+  So the write path and the push path are sized against DIFFERENT numbers:
+      Cassandra sees ~29k writes/sec
+      the gateway fleet sees ~162k pushes/sec   (5.6x larger)
+
+  Error budget:
+      unavailable fraction = 1 - 0.9995 = 0.0005
+      hours per year       = 365 x 24   = 8,760
+      budget = 0.0005 x 8,760 = 4.38 hours/year   (the stated "4.4 hours")
+
+  What one reconnect storm costs against it:
+      8-minute outage = 0.133 h  ->  0.133 / 4.38 = 3.0% of the annual budget
+```
+
+The gap between 29k and 162k is the whole argument for presence-aware fan-out: the write path is a fixed cost set by user behaviour, but the push path is a *design* cost that multiplies with how many recipients you choose to deliver to. Shrinking the multiplier is cheaper than scaling the fleet that absorbs it.
+
 ### Architecture Overview
 
 ```mermaid
@@ -584,6 +620,40 @@ Cloudflare (purple) is the external edge dependency; the gateway routes each con
 ### Key Design Decisions
 
 1. **Erlang/Elixir actor model per guild.** Each guild is a lightweight BEAM process (2KB stack). 19M guilds run as 19M concurrent actors across a fleet of 200 nodes. *Alternative rejected:* thread-per-guild in JVM — 1MB stack x 19M = 19TB RAM, infeasible.
+
+**Stated plainly.** "Total memory is `per-unit cost x unit count` — and when the count is 19 million, a 512x difference in per-unit cost is the difference between a rack and a datacenter."
+
+Per-concurrency-unit memory is the number that decides which concurrency model is even available to you. At small counts nobody notices; at 19M the multiplication makes the choice for you.
+
+| Symbol | What it is |
+|--------|------------|
+| unit count | Concurrent things needed: `19,000,000` guilds, one actor each |
+| BEAM process | Erlang's unit of concurrency, `~2 KB` initial stack |
+| OS/JVM thread | The alternative unit, `~1 MB` stack — `512x` heavier |
+| total footprint | `unit count x per-unit stack` |
+| per-node share | `total / nodes` — what one of the `200` machines must actually hold |
+
+**Walk one example.** Both concurrency models at the same 19M count:
+
+```
+  per-unit ratio = 1 MB / 2 KB = 1,048,576 / 2,048 = 512x
+
+  BEAM actors:
+      19,000,000 x 2 KB = 38,000,000 KB = 38.0 GB total
+      spread over 200 nodes: 38.0 / 200 = 0.19 GB = 190 MB per node
+
+  JVM threads:
+      19,000,000 x 1 MB = 19,000,000 MB = 19.0 TB total   (the stated 19TB)
+      spread over 200 nodes: 19,000 / 200 = 95 GB per node, stacks alone
+
+  Actors per node = 19,000,000 / 200 = 95,000 actors on each machine
+
+  Nodes required to hold the JVM version at 256 GB/node:
+      19,000 GB / 256 GB = 75 nodes just for thread stacks -- before any
+      heap, message buffers, or the OS scheduler collapsing under 19M threads
+```
+
+The 190 MB-per-node figure is the one that makes the design work: guild state fits comfortably in RAM alongside everything else the node does, so there is no paging, no external state store on the hot path, and per-guild isolation comes free. The JVM column is not "expensive" so much as structurally impossible — 19M preemptively scheduled OS threads would spend all their time context-switching regardless of how much RAM you bought.
 
 2. **Guild sharding by `guild_id % N`.** Each guild lives on exactly one shard; all members of that guild connect to that shard. Eliminates cross-shard fan-out for in-guild messages. *Alternative rejected:* random sharding — every message would require N-way fan-out lookup.
 
@@ -670,6 +740,46 @@ xychart-beta
     bar [1, 2, 4, 8, 16, 32, 60, 60]
 ```
 
+**What the formula is telling you.** `delay = min(rand(0.5, 1.5) * 2^attempt, 60s)` says: "wait roughly twice as long as last time, nudged up or down by up to 50%, and never longer than a minute."
+
+Each of the three pieces defends against a different failure. The doubling drains the herd, the random factor breaks the lockstep, and the cap stops a client from disappearing for an hour after a long outage.
+
+| Symbol | What it is |
+|--------|------------|
+| `attempt` | Retry counter starting at `0` — an exponent, so it doubles rather than adds |
+| `2^attempt` | Base delay in seconds: `1, 2, 4, 8, 16, 32, 64, ...` |
+| `rand(0.5, 1.5)` | Jitter multiplier — spreads each client's delay across a `+/-50%` band |
+| `min(..., 60s)` | Hard ceiling, so a client always retries at least once a minute |
+| spread width | `1.5x - 0.5x = 1.0x` of the base delay — the window clients land across |
+
+**Walk one example.** Attempt 4, then the point where the cap takes over:
+
+```
+  attempt 4:
+      base       = 2^4 = 16 s
+      jitter band = 0.5 x 16 = 8 s   to   1.5 x 16 = 24 s
+      delay      = somewhere in [8 s, 24 s], midpoint 16 s
+      spread width = 24 - 8 = 16 s of arrival window
+
+  Where the cap starts binding (upper edge first):
+      attempt 5 : 1.5 x 32 = 48 s   -> under the cap
+      attempt 6 : 1.5 x 64 = 96 s   -> CAPPED to 60 s
+      attempt 7 : 1.5 x 128 = 192 s -> CAPPED to 60 s
+
+  The 1M-client reconnect storm, attempt 0 vs no jitter:
+      no jitter      : 1,000,000 clients land in one instant  -> 1M RPS spike
+      rand(0.5,1.5)  : base 1 s, band [0.5 s, 1.5 s] = 1.0 s wide
+                       1,000,000 / 1.0 s = 1,000,000 RPS -- still too fast
+
+      which is why the storm is only tamed by later attempts:
+      by attempt 4 the band is 16 s wide -> 1,000,000 / 16 = 62,500 RPS
+      by attempt 6 every client is spread across the 60 s cap window
+
+  Stated result: 95% reconnected within 45 s, versus 8 minutes of downtime.
+```
+
+The attempt-0 line is worth sitting with: jitter at the first attempt spreads 1M clients over just one second, which is still a 1M-RPS spike. The storm is survivable only because the *failed* first attempts push clients onto attempts 4 through 6, where the bands are 16 to 60 seconds wide. That is why the server-side fix (pre-warming the Redis presence cache) is listed alongside the client-side backoff — backoff alone does not make the first wave safe.
+
 ### Tradeoffs
 
 | Approach           | Single Server | Sharded Gateway | Actor Model (chosen) | Microservices |
@@ -704,6 +814,40 @@ quadrantChart
 - **Daily messages:** 2.5B sent, 14B delivered (with fan-out)
 - **Gateway nodes:** 850 instances handling 11M concurrent WS connections
 - **Cost per 1M messages delivered:** $0.0008 (industry avg ~$0.005)
+
+**Read it like this.** "Fleet capacity is `nodes x per-node capacity` — so the same 11M connections is either 850 nodes at 13k each or 200 nodes at 55k each, and which one you get is set by the per-node ceiling, not by the node count."
+
+Connection capacity is the clearest case where horizontal scaling is bounded by a per-machine limit you must measure rather than assume. Every number below is a division of one stated figure by another.
+
+| Symbol | What it is |
+|--------|------------|
+| fleet connections | Total concurrent WebSocket connections carried: `11,000,000` |
+| gateway nodes | Machines sharing that load: `850` instances |
+| per-node capacity | `fleet / nodes` — connections one machine actually holds |
+| C10K ceiling | The per-process limit that ended Phase 2: `~100,000` connections per box |
+| headroom | `per-node capacity / ceiling` — how close the fleet runs to the wall |
+
+**Walk one example.** The stated fleet, then the earlier 200-node configuration:
+
+```
+  current fleet:
+      11,000,000 connections / 850 nodes = 12,941 connections per node
+
+  earlier configuration (from Lesson 1):
+      200 nodes x 50,000 connections     = 10,000,000 connection capacity
+
+  headroom against the ~100,000-per-box ceiling:
+      12,941 / 100,000 = 13% utilized  -> 7.7x headroom per node
+      50,000 / 100,000 = 50% utilized  -> 2.0x headroom per node
+
+  Nodes required if per-node capacity were the old 50,000:
+      11,000,000 / 50,000 = 220 nodes
+
+  Nodes lost before the fleet cannot hold 11M at 12,941 each:
+      850 - (11,000,000 / 100,000) = 850 - 110 = 740 nodes of slack
+```
+
+The 13%-utilization figure looks like massive over-provisioning until you read it as failure-domain sizing rather than capacity sizing: at 12,941 connections per node, losing one node drops 0.1% of connections, and the surviving fleet absorbs them without any node approaching the C10K wall. Running at 50,000 per node would need 3.9x fewer nodes and would turn every single node failure into a reconnect storm — which is precisely the failure the backoff formula above exists to survive.
 - **Reconnect storm recovery:** previously 8 min downtime; now 95% reconnected within 45s
 
 ### Common Pitfalls / Lessons Learned
@@ -715,6 +859,38 @@ quadrantChart
 2. **Fan-out storm on large-server message.** A message to a 500k-member guild triggered 500k WebSocket writes in a tight loop, monopolizing the gateway's event loop for 4 seconds during which all other messages stalled.
    - *Broken:* `for member in guild.members: send_ws(member, msg)`
    - *Fix:* presence-filtered fan-out — `for session in presence.online(guild_id): send_ws(session, msg)`. Reduced 500k writes to ~30k (only currently-connected).
+
+**The idea behind it.** "Fan-out cost is `members x online fraction`, and the online fraction is the only one of the two you control — filtering by presence is a 94% cost cut with no change to what any user sees."
+
+Broadcasting to membership rather than to presence is the classic fan-out bug: it looks correct, it scales linearly with a number that grows forever, and the wasted work is invisible because every write "succeeds" into nowhere.
+
+| Symbol | What it is |
+|--------|------------|
+| guild members | Total accounts in the guild: `500,000` |
+| online fraction | Share currently holding a WebSocket: `~6%` here, `5-10%` typically |
+| naive fan-out | `members` writes — one per member, connected or not |
+| presence fan-out | `members x online fraction` — one per live session |
+| wasted writes | `naive - presence` — work that could never reach anyone |
+
+**Walk one example.** The 500k-member guild in this pitfall:
+
+```
+  naive fan-out    = 500,000 writes per message
+  presence fan-out =  30,000 writes per message
+
+  online fraction = 30,000 / 500,000 = 6.0%
+  wasted writes   = 500,000 - 30,000 = 470,000 per message (94% of the work)
+  reduction factor = 500,000 / 30,000 = 16.7x
+
+  Event-loop time, at the observed 4 s to push 500,000 writes:
+      per-write cost = 4 s / 500,000 = 8 microseconds
+      presence cost  = 30,000 x 8 us = 0.24 s
+
+  So the stall drops from 4 s to 0.24 s -- from "every other message in this
+  guild is blocked" to "unnoticeable" -- purely by not writing to absent users.
+```
+
+Note that this is one of the few optimizations with no tradeoff to name: an offline member cannot receive a push regardless, so the 470,000 skipped writes were pure waste. The corollary is that the fan-out ceiling is set by *concurrent* users, not registered ones — which is why the case study's headline metric is 1M concurrent per channel rather than total membership.
 
 3. **Thundering herd on reconnect after gateway deploy.** A rolling restart triggered 1M simultaneous reconnects; gateway nodes accepted 1M `INIT` requests, each spawning a Cassandra presence-load query — cassandra collapsed under 1M QPS.
    - *Broken:* `client.on('disconnect', () => connect());`

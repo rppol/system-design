@@ -58,6 +58,53 @@ Long polling was the original workaround: the client sends a request and the ser
 | 32 | Masking key | Present if MASK=1 |
 | * | Payload | Application data |
 
+**Stated plainly.** "The whole header is two bytes, and the payload-length field is only seven bits — so two of its values are reserved as escapes that say 'the real length is in the next 2 or 8 bytes instead.'"
+
+That escape trick is the reason a protocol carrying gigabyte messages still costs two bytes to frame a chat message. The header is variable-length, sized to the message rather than to the worst case.
+
+| Symbol | What it is |
+|--------|------------|
+| FIN (1 bit) | Last fragment of a message. `0` means a continuation frame follows |
+| RSV1-3 (3 bits) | Reserved for extensions such as permessage-deflate |
+| Opcode (4 bits) | Frame type. 16 possible values, of which 6 are defined |
+| MASK (1 bit) | Whether a masking key follows. Mandatory `1` client→server, mandatory `0` server→client |
+| Payload length (7 bits) | Holds `0–125` literally; `126` and `127` are escapes, not lengths |
+| Masking key (32 bits) | 4 bytes XORed over the payload. Anti-cache-poisoning, not encryption |
+
+**Walk one example.** How the bits pack into bytes, and what each frame actually costs:
+
+```
+  Byte 1:  FIN 1 + RSV 3 + opcode 4        =  8 bits  =  1 byte
+  Byte 2:  MASK 1 + payload length 7       =  8 bits  =  1 byte
+                                              minimum header = 2 bytes
+
+  Total header by direction and payload size:
+                              server -> client      client -> server
+    payload <= 125 bytes          2 bytes               2 + 4 =  6
+    payload 126 .. 65,535         2 + 2 =  4            4 + 4 =  8
+    payload > 65,535              2 + 8 = 10           10 + 4 = 14
+
+  What each escape value reaches:
+    literal        0 .. 125
+    escape 126     up to 2^16 - 1  =              65,535 bytes
+    escape 127     up to 2^64 - 1  =  18,446,744,073,709,551,615
+```
+
+A 20-byte JSON message from a browser therefore costs `20 + 6 = 26` bytes on the wire — about
+23% overhead, and *constant* rather than per-request. That is the number to compare against
+long polling, where every message re-sends a full set of HTTP request and response headers.
+The 7-bit field is also why the framing table lists 125 rather than 127 as the literal maximum:
+the top two values were spent on the escapes, so the literal range stops two short of the
+`2^7 − 1 = 127` the field could otherwise express.
+
+**Why the masking key exists at all.** It is required on every client frame and forbidden on
+every server frame, which looks arbitrary until you consider the threat: a malicious script
+could otherwise craft a WebSocket payload that a transparent HTTP proxy misreads as a fresh
+HTTP request and caches. XORing with a fresh random 4-byte key per frame makes the bytes on the
+wire unpredictable, so no attacker-chosen sequence survives to the proxy. Servers do not mask
+because the attack has no reverse direction — and the 4 bytes it would cost per frame are pure
+waste on the high-volume side of a fan-out.
+
 ### 4.3 STOMP over WebSocket
 
 STOMP (Simple Text Oriented Messaging Protocol) adds a pub/sub messaging layer over WebSocket. Spring's Spring WebSocket + SockJS stack supports STOMP:
