@@ -3,10 +3,11 @@ set -euo pipefail
 
 # Rebuilds the Android WebView asset payload.
 #
-# Mirrors the entire study repo (every Markdown section + the game SPA) into the
-# APK's assets/www, then vendors Mermaid locally so diagrams render fully offline
-# (the reader falls back to this file when the CDN is unreachable). Run before
-# any Gradle assemble; the assets/ tree is gitignored and always regenerated.
+# Generates the question banks, mirrors the entire study repo (every Markdown
+# section + the game SPA) into the APK's assets/www, then vendors Mermaid
+# locally so diagrams render fully offline (the reader falls back to this file
+# when the CDN is unreachable). Run before any Gradle assemble; the assets/ tree
+# is gitignored and always regenerated.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$REPO_ROOT/src/main/java/com/rutik/systemdesign/"
@@ -15,6 +16,12 @@ DEST="$REPO_ROOT/android/app/src/main/assets/www"
 echo "Repo root : $REPO_ROOT"
 echo "Source    : $SRC"
 echo "Dest      : $DEST"
+
+# Banks and graphs are gitignored build artifacts, so a fresh clone has none.
+# Generating them HERE (rather than expecting the caller to remember) is what
+# stops a local build from shipping an APK whose reader works but whose entire
+# quiz is empty.
+bash "$REPO_ROOT/scripts/build_banks.sh"
 
 # Recreate the payload from scratch so deleted content never lingers.
 rm -rf "$DEST"
@@ -29,12 +36,25 @@ rsync -a \
   "$SRC" "$DEST/"
 
 # Vendor Mermaid for offline diagram rendering.
+#
+# The version is DERIVED from app.js's CDN import rather than pinned a second
+# time here: two independent pins drift silently, and a drifted pair means the
+# APK and Pages render diagrams on different engines. Bump the version in
+# app.js and the APK re-vendors to match automatically.
 VENDOR_DIR="$DEST/game/vendor"
 mkdir -p "$VENDOR_DIR"
-MERMAID_URL="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"
+MERMAID_VERSION=$(grep -oE 'mermaid@[0-9]+\.[0-9]+\.[0-9]+' "$SRC/game/app.js" | sort -u)
+if [ "$(printf '%s\n' "$MERMAID_VERSION" | grep -c .)" -ne 1 ]; then
+  echo "ERROR: expected exactly one pinned mermaid@x.y.z in game/app.js, found:" >&2
+  printf '  %s\n' ${MERMAID_VERSION:-"(none)"} >&2
+  exit 1
+fi
+MERMAID_URL="https://cdn.jsdelivr.net/npm/${MERMAID_VERSION}/dist/mermaid.min.js"
 MERMAID_OUT="$VENDOR_DIR/mermaid.min.js"
 echo "Fetching  : $MERMAID_URL"
-curl -fSL "$MERMAID_URL" -o "$MERMAID_OUT"
+# A transient CDN blip must not fail the build of an app whose whole point is
+# working offline.
+curl -fSL --retry 3 --retry-delay 2 --retry-all-errors "$MERMAID_URL" -o "$MERMAID_OUT"
 
 # Sanity: the real minified bundle is ~3.4 MB (3,565,102 bytes for 11.16.0);
 # anything under 2.5 MB means a 404 page, a redirect stub, or a truncated
@@ -48,4 +68,4 @@ if [ "$SIZE" -lt "$MIN_BYTES" ]; then
 fi
 
 FILE_COUNT=$(find "$DEST" -type f | wc -l | tr -d ' ')
-echo "OK: www files=$FILE_COUNT  mermaid=$SIZE bytes"
+echo "OK: www files=$FILE_COUNT  mermaid=$MERMAID_VERSION $SIZE bytes"

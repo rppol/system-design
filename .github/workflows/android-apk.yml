@@ -23,15 +23,26 @@ jobs:
     outputs:
       signing: ${{ steps.check.outputs.signing }}
     steps:
-      - name: Check signing secret
+      - name: Check signing secrets
         id: check
+        # All four are required to assemble a signed release. Checking only the
+        # keystore let a half-configured secret set pass the gate and then paint
+        # main red at assembleRelease. (A secret that is set but WRONG still
+        # fails loudly there — that is intended: unconfigured skips quietly,
+        # misconfigured shouts.)
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::warning::Skipping APK build: signing secrets not configured."
-            echo "::warning::Add KEYSTORE_B64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"
-            echo "::warning::in Settings > Secrets and variables > Actions to enable it."
+          MISSING=""
+          for name in KEYSTORE_B64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            [ -n "${!name}" ] || MISSING="$MISSING $name"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::warning::Skipping APK build: missing signing secret(s):$MISSING"
+            echo "::warning::Add them in Settings > Secrets and variables > Actions to enable it."
             echo "signing=false" >> "$GITHUB_OUTPUT"
           else
             echo "signing=true" >> "$GITHUB_OUTPUT"
@@ -58,17 +69,17 @@ jobs:
           echo "code=$VC" >> "$GITHUB_OUTPUT"
           echo "name=$VN" >> "$GITHUB_OUTPUT"
 
-      - name: Regenerate question bank + graphs
-        # Same bank-regen steps as pages.yml: run extract.py fresh so newly added
-        # modules are picked up, then rebuild the relatedness graph per section.
+      - name: Validate SPA syntax
+        # A syntax error in app.js still assembles a perfectly signed APK (R8 is
+        # off, nothing else parses the JS) and ships a white screen. Parse it
+        # before spending 10 minutes building.
         run: |
-          cd src/main/java/com/rutik/systemdesign/game
-          python3 extract.py --strict
-          for sec in $(python3 -c "import json;print(' '.join(json.load(open('questions/index.json'))['sections']))"); do
-            python3 build_graph.py "$sec"
-          done
+          node --check src/main/java/com/rutik/systemdesign/game/app.js
+          node --check src/main/java/com/rutik/systemdesign/game/sw.js
 
       - name: Build WebView asset payload
+        # build_android_assets.sh calls scripts/build_banks.sh itself, which is
+        # the single source of bank/graph generation shared with pages.yml.
         run: bash scripts/build_android_assets.sh
 
       - name: Set up JDK 17
@@ -99,6 +110,39 @@ jobs:
           gradle -p android :app:assembleRelease
           cp android/app/build/outputs/apk/release/app-release.apk \
              android/app/build/outputs/apk/release/systemdesign-daily.apk
+
+      - name: Smoke-test APK payload
+        # Everything below is a white-screen-class failure that a green build
+        # would otherwise publish to releases/latest. unzip/zipinfo/python3/node
+        # only — aapt is not guaranteed on the runner.
+        run: |
+          APK=android/app/build/outputs/apk/release/systemdesign-daily.apk
+          for f in assets/www/game/index.html assets/www/game/app.js \
+                   assets/www/game/style.css assets/www/game/sw.js \
+                   assets/www/game/vendor/mermaid.min.js \
+                   assets/www/game/questions/index.json; do
+            unzip -l "$APK" "$f" > /dev/null || { echo "MISSING from APK: $f"; exit 1; }
+          done
+          # The JS that ships is the JS that parses (post-rsync copy, not the source).
+          unzip -p "$APK" assets/www/game/app.js > /tmp/shipped-app.js
+          node --check /tmp/shipped-app.js
+          # Bank/graph completeness measured inside the artifact itself.
+          SEC=$(unzip -p "$APK" assets/www/game/questions/index.json \
+                | python3 -c "import json,sys;print(len(json.load(sys.stdin)['sections']))")
+          GRAPHS=$(zipinfo -1 "$APK" 'assets/www/game/graph/*.json' | wc -l)
+          BANKS=$(zipinfo -1 "$APK" 'assets/www/game/questions/*.json' | wc -l)
+          [ "$GRAPHS" -eq "$SEC" ] || { echo "graphs $GRAPHS != sections $SEC"; exit 1; }
+          [ "$BANKS" -eq $((SEC + 1)) ] || { echo "banks $BANKS != sections+index ($SEC+1)"; exit 1; }
+          # The APK must never receive the Pages-only service-worker stamp.
+          unzip -p "$APK" assets/www/game/sw.js | grep -q '__BUILD__' \
+            || { echo "sw.js in the APK was Pages-stamped"; exit 1; }
+          # ~27 MiB today (the ~59 MB asset tree compresses ~2x in the zip).
+          # Band is deliberately wide: it catches "content went missing" and
+          # "something exploded", not ordinary content growth.
+          SIZE=$(stat -c%s "$APK")
+          [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((60*1024*1024)) ] \
+            || { echo "APK size $SIZE outside the 15-60 MiB window"; exit 1; }
+          echo "smoke OK: sections=$SEC banks=$BANKS graphs=$GRAPHS size=$SIZE"
 
       - name: Publish GitHub Release
         # Primary delivery: a stable latest URL at

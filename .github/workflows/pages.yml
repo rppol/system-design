@@ -25,16 +25,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Regenerate question bank + graphs, stamp service worker
-        # Runs extract.py fresh so newly added modules are picked up automatically,
-        # then rebuilds the module-relatedness graph for every section, then stamps
-        # the deploy time into sw.js so the PWA shell cache busts on every deploy.
-        # No need to commit questions/*.json or graph/*.json — the artifact carries them.
+        # build_banks.sh is shared with the Android APK build so the two surfaces
+        # can never ship different banks. The sw.js stamp stays HERE and only
+        # here: it is Pages-only cache-busting, and the APK's smoke test asserts
+        # the literal __BUILD__ still ships in its copy.
         run: |
+          bash scripts/build_banks.sh
           cd src/main/java/com/rutik/systemdesign/game
-          python3 extract.py --strict
-          for sec in $(python3 -c "import json;print(' '.join(json.load(open('questions/index.json'))['sections']))"); do
-            python3 build_graph.py "$sec"
-          done
           sed -i "s/__BUILD__/$(date +%Y%m%d%H%M%S)/" sw.js
 
       - uses: actions/upload-pages-artifact@v3
