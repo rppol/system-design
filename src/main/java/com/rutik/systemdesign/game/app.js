@@ -4909,20 +4909,73 @@ function mmTintPlain(n) {
 // notes especially), computing a viewBox smaller than the drawn content — the
 // overflow is then clipped at the canvas edge. Expand the viewBox to the true
 // bounding box after render; returns corrected dims when a fix was needed.
+// True content bounds in the root svg's user space, unioned from LEAF shapes.
+//
+// Never ask a <g> (or the root <svg>) for its own bbox here: the Android
+// WebView answers that with garbage. A six-node flowchart whose every drawable
+// leaf fits inside 256px reported a 16699px-tall group, and simple flowcharts
+// report ~2048 regardless of content. Leaf bboxes measure correctly on both
+// engines, so union those instead. Each leaf's box is in its OWN user space,
+// so it is mapped through the element's CTM into the root's space before
+// unioning — mermaid transforms nearly every group.
+function mmContentBounds(sv) {
+  const rootCTM = sv.getScreenCTM();
+  if (!rootCTM) return null;
+  let inv;
+  try { inv = rootCTM.inverse(); } catch { return null; }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, seen = 0;
+  sv.querySelectorAll("path,rect,circle,ellipse,polygon,polyline,line,text,image,foreignObject").forEach((el) => {
+    if (el.closest("defs,marker,clipPath,mask")) return;   // never painted in place
+    let b, m;
+    try { b = el.getBBox(); m = el.getScreenCTM(); } catch { return; }
+    if (!b || !m || (!b.width && !b.height)) return;
+    const t = inv.multiply(m);                             // element space -> root user space
+    for (const [px, py] of [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]]) {
+      const X = t.a * px + t.c * py + t.e, Y = t.b * px + t.d * py + t.f;
+      if (X < x0) x0 = X; if (X > x1) x1 = X;
+      if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
+    }
+    seen++;
+  });
+  if (!seen || !isFinite(x0) || x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
 function mmFixViewBox(sv) {
   try {
-    const bb = sv.getBBox();
+    const bb = mmContentBounds(sv) || sv.getBBox();
     const vb = sv.viewBox.baseVal;
     const over = bb.x < vb.x - 2 || bb.y < vb.y - 2 ||
                  bb.x + bb.width > vb.x + vb.width + 2 ||
                  bb.y + bb.height > vb.y + vb.height + 2;
-    if (!over) return null;
-    const x = Math.floor(Math.min(bb.x, vb.x)) - 8;
-    const y = Math.floor(Math.min(bb.y, vb.y)) - 8;
-    const w = Math.ceil(Math.max(bb.x + bb.width, vb.x + vb.width)) - x + 8;
-    const h = Math.ceil(Math.max(bb.y + bb.height, vb.y + vb.height)) - y + 8;
-    sv.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
-    return { w, h };
+    if (over) {
+      const x = Math.floor(Math.min(bb.x, vb.x)) - 8;
+      const y = Math.floor(Math.min(bb.y, vb.y)) - 8;
+      const w = Math.ceil(Math.max(bb.x + bb.width, vb.x + vb.width)) - x + 8;
+      const h = Math.ceil(Math.max(bb.y + bb.height, vb.y + vb.height)) - y + 8;
+      sv.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+      return { w, h };
+    }
+    // The opposite failure: a canvas far LARGER than the diagram it holds.
+    // Mermaid's dagre-based renderers (flowchart, stateDiagram-v2) size their
+    // viewBox from a DOM measurement taken while the svg still sits in
+    // mermaid's temporary render container, and the Android WebView answers
+    // that with ~2048 instead of the real content size — so a 514x62 flowchart
+    // ships a 2088x2043 canvas (134x too big) and gets scaled to ~1/4 of a
+    // legible size inside a vast empty box. The geometry itself is correct, and
+    // once the svg is in the live document getBBox() reports it truthfully, so
+    // re-derive the canvas from the content. Chart families size their canvas
+    // deliberately and measure 1.0-1.4x here, well under the threshold; on a
+    // desktop browser every family measures ~1.0x, so this never fires there
+    // and the two surfaces stay identical by construction.
+    if (bb.width > 0 && bb.height > 0 &&
+        (vb.width * vb.height) / (bb.width * bb.height) > 2.5) {
+      const x = Math.floor(bb.x) - 8, y = Math.floor(bb.y) - 8;
+      const w = Math.ceil(bb.width) + 16, h = Math.ceil(bb.height) + 16;
+      sv.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+      return { w, h };
+    }
+    return null;
   } catch { return null; }
 }
 
@@ -5047,7 +5100,18 @@ async function renderMermaid(root) {
                 plotColorPalette: "#61afef,#98c379,#e5c07b,#c678dd,#56b6c2,#d19a66,#e06c75",
               },
             },
-            flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55 },
+            // htmlLabels:false renders labels as native SVG <text> instead of
+            // HTML inside <foreignObject>. Mermaid measures a foreignObject
+            // label by laying out its HTML, and the Android WebView answers
+            // that measurement with garbage — which wrecks CLUSTER layout in
+            // particular: a two-subgraph flowchart came out 16446x16420, so
+            // its content was scaled to ~2% and read as an empty box. Native
+            // text measures correctly on every engine (same source ->
+            // 2062x2036, which mmFixViewBox then trims to the real content).
+            // Set for BOTH surfaces, not behind IS_APK: Pages and the APK must
+            // render identically, and this is not a fourth APK fork.
+            // <br/> still wraps (mermaid splits it into tspans).
+            flowchart: { curve: "basis", padding: 20, nodeSpacing: 45, rankSpacing: 55, htmlLabels: false },
             // Sequence text rendered oversized relative to prose and long
             // notes overflowed their boxes; wrap + smaller fonts fix both.
             // The font families MUST match themeVariables.fontFamily — these
