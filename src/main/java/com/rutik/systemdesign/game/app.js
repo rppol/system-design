@@ -1766,6 +1766,22 @@ function modulesOf(bank) {
   });
 }
 
+// [PERF] Same shape as modulesOf, but built from the boot-loaded index
+// (moduleCounts) instead of the multi-MB question bank — so the Study skill tree
+// can render without downloading the bank. Display name is titleize(slug), byte-
+// identical to the bank's moduleName (extract.py sets moduleName = slug too).
+function modulesFromIndex(section) {
+  const counts = (state.index && state.index.moduleCounts) || {};
+  const order = STUDY_ORDER[section] || [];
+  return Object.keys(counts)
+    .filter((m) => m.split("/")[0] === section)
+    .map((m) => ({ module: m, name: titleize(m.split("/").pop()), count: counts[m] }))
+    .sort((a, b) => {
+      const ai = order.indexOf(a.module), bi = order.indexOf(b.module);
+      return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
+    });
+}
+
 async function openTopics(section) {
   app.innerHTML = skeletonHTML("topics");
   const bank = await loadBank(section);
@@ -1788,10 +1804,15 @@ async function openTopics(section) {
       let mm = per.get(q.module); if (!mm) { mm = new Map(); per.set(q.module, mm); }
       mm.set(f, (mm.get(f) || 0) + 1);
     }
+    const fileTree = (state.index && state.index.files) || {};
     for (const [mod, mm] of per) {
       if (mm.size <= 1) continue;                     // only one file -> no selector needed
+      // Order sub-files by the curated learning sequence (file-tree order from the
+      // parent README's links), not alphabetically — matches the reader/Study order.
+      const order = fileTree[mod] || [];
+      const rank = (f) => { const i = order.indexOf(f); return i === -1 ? 9999 : i; };
       subMap.set(mod, [...mm.entries()].map(([file, count]) => ({ file, count, name: subLabel(file) }))
-        .sort((a, b) => (/^readme\.md$/i.test(a.file) ? -1 : /^readme\.md$/i.test(b.file) ? 1 : a.name.localeCompare(b.name))));
+        .sort((a, b) => rank(a.file) - rank(b.file) || a.name.localeCompare(b.name)));
     }
   }
   const rows = mods.map((m) => {
@@ -4016,12 +4037,22 @@ async function openStudySection(sectionPath) {
   const [section, ...scopeRest] = (sectionPath || "").split("/");
   const bookScope = section === "book" && scopeRest.length ? scopeRest.join("/") : null;
   app.innerHTML = skeletonHTML("study");
-  const bank = await loadBank(section);
-  if (!bank || !bank.length) {
-    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(sectionPath));
-    return;
+  // [PERF] Draw the skill tree from the boot-loaded index (module list + counts),
+  // NOT the multi-MB question bank. Clicking a section used to download the whole
+  // bank (cs_fundamentals ~1.4MB, llm ~3.9MB) just to render nodes — a multi-second
+  // stall on mobile. The bank now loads only when a quiz starts; we warm it in the
+  // background so the first node-tap stays instant.
+  let mods = modulesFromIndex(section);
+  if (!mods.length) {                                // index unavailable (pre-boot / cold offline) — fall back to the bank
+    const bank = await loadBank(section);
+    if (!bank || !bank.length) {
+      errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(sectionPath));
+      return;
+    }
+    mods = modulesOf(bank);
+  } else {
+    loadBank(section).catch(() => {});               // non-blocking warm-up for the first quiz
   }
-  let mods = modulesOf(bank);
   if (section === "book" && !bookScope) { renderBookPicker(section, mods); return; }
   if (bookScope) {
     mods = mods.filter((m) => bookOf(m.module) === bookScope);
@@ -4865,6 +4896,7 @@ function mmAddFit(n, sv) {
 const _mmSrc = new WeakMap();     // .mermaid container -> raw diagram source
 let _mmRO = null;
 let _mmROTimer = null;
+let _mmIO = null;                 // [PERF] lazy-render IntersectionObserver for off-screen diagrams
 function mmObserve(n) {
   if (!_mmRO) {
     _mmRO = new ResizeObserver(() => {
@@ -5310,15 +5342,28 @@ async function renderMermaid(root) {
     return;
   }
   if (_mmRO) _mmRO.disconnect();                   // observe only the live page's diagrams
-  for (const n of nodes) {
+  if (_mmIO) _mmIO.disconnect();                   // drop the previous page's lazy-render targets (now detached)
+  const renderOne = async (n) => {
     if (!n.querySelector("svg")) {                 // not yet rendered this visit
       const src = n.textContent.trim();
-      if (!src) continue;
+      if (!src) return;
       _mmSrc.set(n, src);
       await mmRenderNode(n, src);
     }
     mmObserve(n);
-  }
+  };
+  // [PERF] Lazy render: each mermaid.render() is tens of ms, so a diagram-dense
+  // page used to block on rendering EVERY fence up front. Now a diagram renders
+  // only as it nears the viewport; already-rendered ones just re-attach the resize
+  // observer. rootMargin renders a screen ahead so scrolling never reveals a blank.
+  nodes.filter((n) => n.querySelector("svg")).forEach(mmObserve);
+  const pending = nodes.filter((n) => !n.querySelector("svg"));
+  if (!pending.length) return;
+  if (!("IntersectionObserver" in window)) { for (const n of pending) await renderOne(n); return; }
+  _mmIO = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) { _mmIO.unobserve(e.target); renderOne(e.target); }
+  }, { rootMargin: "800px 0px" });
+  pending.forEach((n) => _mmIO.observe(n));
 }
 
 // Unified diagram lightbox: drag-to-pan + zoom-toward-cursor for both Mermaid

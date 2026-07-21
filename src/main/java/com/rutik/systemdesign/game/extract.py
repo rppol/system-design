@@ -346,6 +346,30 @@ def check_wiring(questions, strict):
     if not errors: print("wiring check: OK")
 
 
+# Order a module's deep-dive files by the LEARNING sequence, not alphabetically.
+# The parent README links its sub-files in pedagogical order (e.g. dsa_patterns'
+# numbered 1..25 pattern table), so first-link-appearance in the README is the
+# curated order. README.md always leads; any file the README never links falls
+# back to the alphabetical tail so nothing is dropped.
+_SUBLINK_RE = re.compile(r"\(\.?/?([a-z0-9_]+\.md)(?:#[^)]*)?\)")
+def order_md_files(module_root, md_files):
+    readme = next((f for f in md_files if f.lower() == "readme.md"), None)
+    rest = [f for f in md_files if f != readme]
+    ordered, seen = [], set()
+    if readme:
+        try:
+            text = open(os.path.join(module_root, readme), encoding="utf-8").read()
+        except OSError:
+            text = ""
+        for m in _SUBLINK_RE.finditer(text):
+            fn = m.group(1)
+            if fn in rest and fn not in seen:
+                seen.add(fn)
+                ordered.append(fn)
+    tail = sorted(f for f in rest if f not in seen)   # unlinked files: stable alpha tail
+    return ([readme] if readme else []) + ordered + tail
+
+
 def main():
     rng = random.Random(42)  # reproducible distractor choices
     raw = []
@@ -362,7 +386,7 @@ def main():
         if SKIP_PATH_PARTS.intersection(parts):
             continue  # exclude case studies etc.
         module = rel.replace(os.sep, "/")  # parent dir -> README + its deep-dive sub-files share a module
-        md_files = sorted(fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md")
+        md_files = order_md_files(root, [fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md"])
         if md_files and len(parts) >= 2:      # skip section root dirs (depth==1)
             file_tree[module] = md_files
         for fn in md_files:
