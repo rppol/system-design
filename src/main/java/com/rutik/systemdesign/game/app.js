@@ -557,7 +557,7 @@ function toggleStreakPop() {
 const app = document.getElementById("app");
 const state = {
   index: null, today: null, progress: null,
-  deck: [], queue: [], cursor: 0, section: null, modules: null,
+  deck: [], queue: [], cursor: 0, section: null, modules: null, sourceFiles: null, limit: null,
   combo: 0, maxCombo: 0, sessionXp: 0, inQuiz: false, answered: false,
   curOptsLen: 0, replayFn: null,
   hard: false, awaitingConf: false, pendingPick: null,
@@ -716,6 +716,11 @@ const _revealObs = "IntersectionObserver" in window
 
 function wireReveals() {
   if (!_revealObs || REDUCED()) return;
+  // [PERF] Drop the previous render's targets before observing this one. app.innerHTML
+  // has already detached them; without this, any tile removed before it scrolled into
+  // view (the safety-net timeout adds "in" but never unobserved) stayed in the target
+  // set forever — a detached-node leak that grew with every Home/Study/picker render.
+  _revealObs.disconnect();
   // NOTE: utility class is "rise", NOT "reveal" — .reveal is the quiz answer panel.
   document.querySelectorAll(".grid .tile, .sectiontile, .modrow, .miss-item").forEach((n, i) => {
     n.classList.add("rise");
@@ -909,10 +914,30 @@ async function fetchJSON(path, fallback, cache = "no-store") {
 }
 
 /* ---------- [A2] shared learning helpers ---------- */
+// [PERF] Bounded insert for the section/path caches. In a never-reloaded Android
+// WebView these otherwise grow for the whole app lifetime — every section bank is
+// several MB as a live object graph, every reader page a retained markdown string
+// — which is the platform-specific "heavier the more you use it". FIFO by
+// insertion order (string-keyed objects preserve it); evicting just forces a
+// cheap re-fetch (HTTP/SW-cached) on the next visit. Every read site already
+// tolerates a cache miss, so eviction degrades gracefully.
+function capInsert(obj, key, val, cap, onEvict) {
+  obj[key] = val;
+  const keys = Object.keys(obj);
+  for (let i = 0; keys.length - i > cap; i++) {
+    const old = keys[i];
+    if (old === key) continue;                       // never evict the just-inserted entry
+    delete obj[old];
+    if (onEvict) onEvict(old);
+  }
+  return val;
+}
+
 // Knowledge-graph cache — mirrors bankCache; a missing file tolerantly -> null.
 const graphCache = {};
+const GRAPH_CACHE_CAP = 6;
 async function loadGraph(section) {
-  if (!(section in graphCache)) graphCache[section] = await fetchJSON(`graph/${section}.json`, null, "default");
+  if (!(section in graphCache)) capInsert(graphCache, section, await fetchJSON(`graph/${section}.json`, null, "default"), GRAPH_CACHE_CAP);
   return graphCache[section];
 }
 
@@ -1123,6 +1148,37 @@ function safeSet(key, val) {
   }
 }
 
+// [PERF] `reviews` is the ONLY unbounded store in sd_progress: one entry (~190 B)
+// per question ever first-attempted. Ungoverned it climbs toward the ~8,800-question
+// bank ceiling (~1.7 MB), and the whole blob is JSON-parsed on every boot and
+// re-serialized on every save — so boot/save cost grows linearly with use (the
+// "heavier to load" symptom, identical on Pages and APK). Cap it, evicting the
+// entries LEAST valuable to spaced repetition: the most stable, furthest-future
+// items. NEVER drop a user-flagged leech, a planted time capsule, or anything due
+// now/overdue. Only the entry COUNT changes — the map shape is untouched, so the
+// additive-field invariant holds and old exports still import (the next save just
+// re-applies the cap). The cap sits well above any realistic active review set.
+const REVIEWS_CAP = 6000;
+function pruneReviews(p) {
+  const r = p && p.reviews;
+  if (!r) return 0;
+  const keys = Object.keys(r);
+  if (keys.length <= REVIEWS_CAP) return 0;
+  const today = todayISO();
+  const evictable = keys.filter((id) => {
+    const v = r[id];
+    return v && !v.flagged && !v.capsule && !(v.due && v.due <= today);
+  });
+  // Most-evictable first: highest interval (most stable), then furthest-future due,
+  // then most reps. Deleting from the front sheds the lowest-marginal-loss items.
+  evictable.sort((a, b) => (r[b].interval || 0) - (r[a].interval || 0)
+    || String(r[b].due || "").localeCompare(String(r[a].due || ""))
+    || (r[b].reps || 0) - (r[a].reps || 0));
+  let over = keys.length - REVIEWS_CAP, removed = 0;
+  for (let i = 0; i < evictable.length && over > 0; i++, over--) { delete r[evictable[i]]; removed++; }
+  return removed;
+}
+
 // localStorage sd_progress is the single source of truth (Pages-only).
 function loadProgress() {
   const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; if (!p.readModules) p.readModules = {}; if (!p.reading) p.reading = { day: null, count: 0, streak: 0, longest: 0, todayKeys: {} }; return p; };  /* [C] awards + deepReads; reading-tracker backfill */
@@ -1132,8 +1188,12 @@ function loadProgress() {
   const raw = localStorage.getItem("sd_progress");
   try { ls = raw == null ? null : JSON.parse(raw); } catch { corrupt = true; }
   if (corrupt && raw) { safeSet("sd_progress_corrupt", raw); state._progressCorrupt = true; }
-  return ls ? fill(ls)
-    : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [], awards: {}, deepReads: 0 };
+  if (ls) {                                          // [PERF] one-time shrink of an oversized store on boot (idempotent)
+    const p = fill(ls);
+    if (pruneReviews(p)) safeSet("sd_progress", JSON.stringify(p));   // persist the smaller blob so future boots parse less
+    return p;
+  }
+  return { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [], awards: {}, deepReads: 0 };
 }
 
 // Reading feeds the game: mark a module read the first time its page is scrolled
@@ -1257,6 +1317,7 @@ function saveSessionLocal(session, opts = {}) {
     }
     if (res.confusion) tallyConfusion(p, res.confusion);   // [A2] confusion-pair tally (cap 50)
   }
+  pruneReviews(p);                                        // [PERF] keep the review map under its cap as it grows
   if (opts.quiet) {                                        // [A2] side-effect-free save (prime)
     const saved = safeSet("sd_progress", JSON.stringify(p));
     return { xp: 0, freezeUsed: false, saved };
@@ -1655,6 +1716,7 @@ function pushRecent(section, ids) {
 
 /* ---------- bank loading / sub-topic picker ---------- */
 const bankCache = {};
+const BANK_CACHE_CAP = 8;   // [PERF] parsed banks are multi-MB; cap retained sections (bounded at 15, heavy on Android)
 async function loadBank(section) {
   // "default" cache lets a 304 revalidate these multi-MB files instead of
   // re-downloading them on every boot.
@@ -1665,7 +1727,7 @@ async function loadBank(section) {
     // ~18 places that render it. The stored JSON is untouched, so question ids
     // and spaced-repetition state are unaffected.
     if (Array.isArray(bank)) for (const q of bank) if (q.moduleName) q.moduleName = titleize(q.moduleName);
-    bankCache[section] = bank;
+    capInsert(bankCache, section, bank, BANK_CACHE_CAP, (s) => { delete _bankById[s]; });   // [PERF] evict the paired id-map too
   }
   return bankCache[section];
 }
@@ -1712,9 +1774,44 @@ async function openTopics(section) {
     return;
   }
   const mods = modulesOf(bank);
-  const rows = mods.map((m) =>
-    `<label class="modrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
-       <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`).join("");
+  // [SF] Per-module sub-file breakdown, derived straight from the bank: a module
+  // qualifies for a sub-file selector only when its questions come from more than
+  // one file (README + deep-dives). No extract.py change — sourceFile and the counts
+  // already live in the bank and module ids are never re-keyed, so spaced-repetition
+  // state is untouched. Serves BOTH quiz and flashcard mode (one shared picker).
+  const subLabel = (f) => titleize(f.replace(/\.md$/i, ""));
+  const subMap = new Map();                          // module -> [{ file, name, count }] (README first)
+  {
+    const per = new Map();                            // module -> Map<file, count>
+    for (const q of bank) {
+      const f = q.sourceFile || "README.md";
+      let mm = per.get(q.module); if (!mm) { mm = new Map(); per.set(q.module, mm); }
+      mm.set(f, (mm.get(f) || 0) + 1);
+    }
+    for (const [mod, mm] of per) {
+      if (mm.size <= 1) continue;                     // only one file -> no selector needed
+      subMap.set(mod, [...mm.entries()].map(([file, count]) => ({ file, count, name: subLabel(file) }))
+        .sort((a, b) => (/^readme\.md$/i.test(a.file) ? -1 : /^readme\.md$/i.test(b.file) ? 1 : a.name.localeCompare(b.name))));
+    }
+  }
+  const rows = mods.map((m) => {
+    const subs = subMap.get(m.module);
+    if (!subs) {
+      return `<label class="modrow filterrow"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
+       <span class="mname">${esc(m.name)}</span><span class="mcount">${m.count}</span></label>`;
+    }
+    const subRows = subs.map((s) =>
+      `<label class="subrow"><input type="checkbox" class="subcheck" data-mod="${esc(m.module)}" value="${esc(s.file)}" checked />
+         <span class="sname">${esc(s.name)}</span><span class="scount">${s.count}</span></label>`).join("");
+    return `<div class="modrow-wrap filterrow" data-mod="${esc(m.module)}">
+        <div class="modrow modrow-parent">
+          <label class="modrow-lbl"><input type="checkbox" class="modcheck" value="${esc(m.module)}" checked />
+            <span class="mname">${esc(m.name)}</span></label>
+          <button type="button" class="subtoggle" aria-expanded="false" aria-label="Show ${subs.length} sub-files of ${esc(m.name)}"><span class="subtoggle-count">${m.count}</span><span class="subchev" aria-hidden="true">&#9662;</span></button>
+        </div>
+        <div class="sublist" hidden>${subRows}</div>
+      </div>`;
+  }).join("");
   // [E1] session length: 5/10/20 segmented control, persisted as sd_deck_len.
   const lenOpts = [5, 10, 20].map((n) =>
     `<button class="lenopt${deckLen() === n ? " on" : ""}" role="radio" aria-checked="${deckLen() === n}" data-len="${n}">${n}</button>`).join("");
@@ -1736,18 +1833,68 @@ async function openTopics(section) {
     </div>`;
   const checks = () => [...document.querySelectorAll(".modcheck")];
   const selected = () => checks().filter((c) => c.checked).map((c) => c.value);
+  const subBoxes = (mod) => [...document.querySelectorAll(`.subcheck[data-mod="${mod}"]`)];
+  // [SF] whole-module UNLESS a module is partially selected -> then its checked
+  // sub-files become the "<module>|<file>" allow-list. Every sub-file checked ⇒
+  // contributes nothing (overall null), so an untouched picker behaves exactly as before.
+  const selectedSourceFiles = () => {
+    const out = [];
+    for (const [mod, subs] of subMap) {
+      const parent = document.querySelector(`.modcheck[value="${mod}"]`);
+      if (!parent || !parent.checked) continue;
+      const on = subBoxes(mod).filter((b) => b.checked);
+      if (on.length && on.length < subs.length) for (const b of on) out.push(mod + "|" + b.value);
+    }
+    return out.length ? out : null;
+  };
+  const syncParent = (mod) => {                       // reflect child checkbox state onto the parent
+    const parent = document.querySelector(`.modcheck[value="${mod}"]`);
+    const boxes = subBoxes(mod);
+    if (!parent || !boxes.length) return;
+    const on = boxes.filter((b) => b.checked).length;
+    parent.indeterminate = on > 0 && on < boxes.length;
+    parent.checked = on > 0;
+  };
   const updateCount = () => {
     const sel = selected();
-    const n = mods.filter((m) => sel.includes(m.module)).reduce((a, m) => a + m.count, 0);
+    let n = 0;
+    for (const m of mods) {
+      if (!sel.includes(m.module)) continue;
+      const subs = subMap.get(m.module);
+      if (!subs) { n += m.count; continue; }
+      const on = new Set(subBoxes(m.module).filter((b) => b.checked).map((b) => b.value));
+      for (const s of subs) if (on.has(s.file)) n += s.count;
+    }
     el("#selCount").textContent = `${sel.length} topic${sel.length === 1 ? "" : "s"} · ${n} questions`;
-    el("#startSel").disabled = sel.length === 0;
+    el("#startSel").disabled = sel.length === 0 || n === 0;
   };
-  checks().forEach((c) => c.addEventListener("change", updateCount));
-  el("#allBtn").addEventListener("click", () => { checks().forEach((c) => (c.checked = true)); updateCount(); });
-  el("#noneBtn").addEventListener("click", () => { checks().forEach((c) => (c.checked = false)); updateCount(); });
+  checks().forEach((c) => c.addEventListener("change", () => {
+    if (subMap.has(c.value)) {                         // parent toggles every sub-file under it
+      subBoxes(c.value).forEach((b) => (b.checked = c.checked));
+      c.indeterminate = false;
+    }
+    updateCount();
+  }));
+  document.querySelectorAll(".subcheck").forEach((b) =>
+    b.addEventListener("change", () => { syncParent(b.dataset.mod); updateCount(); }));
+  document.querySelectorAll(".subtoggle").forEach((btn) => btn.addEventListener("click", () => {
+    const wrap = btn.closest(".modrow-wrap");
+    const list = wrap.querySelector(".sublist");
+    const opening = list.hidden;
+    list.hidden = !opening;
+    btn.setAttribute("aria-expanded", opening ? "true" : "false");
+    wrap.classList.toggle("open", opening);
+  }));
+  const setAll = (val) => {
+    checks().forEach((c) => { c.checked = val; c.indeterminate = false; });
+    document.querySelectorAll(".subcheck").forEach((b) => (b.checked = val));
+    updateCount();
+  };
+  el("#allBtn").addEventListener("click", () => setAll(true));
+  el("#noneBtn").addEventListener("click", () => setAll(false));
   el("#modFilter").addEventListener("input", () => {
     const f = el("#modFilter").value.trim().toLowerCase();
-    document.querySelectorAll(".modrow").forEach((r) =>
+    document.querySelectorAll(".filterrow").forEach((r) =>
       (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
   });
   document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
@@ -1758,7 +1905,7 @@ async function openTopics(section) {
   }));
   wireRadioGroup(el(".lenbar"));
   el("#backBtn").addEventListener("click", () => go("#/home"));
-  el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
+  el("#startSel").addEventListener("click", () => startBlitz(section, selected(), selectedSourceFiles()));
   updateCount();
   wireReveals();
 }
@@ -1863,23 +2010,38 @@ function startDeck(questions, replayFn, opts = {}) {
   state.mode === "flash" ? renderCard() : renderQuestion();
 }
 
-async function startBlitz(section, modules) {
+// [SF] sourceFiles: optional allow-list of "<module>|<sourceFile>" composite keys
+// that narrows a whole-module selection down to specific deep-dive sub-files. Only
+// modules that appear in the allow-list are constrained; every other selected module
+// passes through wholesale — so a mixed selection (some modules whole, one module
+// scoped to a sub-file) resolves correctly. null/empty ⇒ classic whole-module behavior.
+// [SF] limit: optional deck-size cap that overrides the 5/10/20 deckLen() pref.
+// The per-file quiz uses it to run ALL of a sub-file's questions (limit = pool size)
+// vs. a quick random subset (limit = null ⇒ deckLen()). null everywhere else.
+async function startBlitz(section, modules, sourceFiles = null, limit = null) {
   app.innerHTML = skeletonHTML("quiz");
   let bank = await loadBank(section);
   if (!bank || !bank.length) {
-    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => startBlitz(section, modules));
+    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => startBlitz(section, modules, sourceFiles, limit));
     return;
   }
   if (modules && modules.length) bank = bank.filter((q) => modules.includes(q.module));
+  if (sourceFiles && sourceFiles.length) {
+    const sf = new Set(sourceFiles);
+    const constrained = new Set(sourceFiles.map((k) => k.slice(0, k.lastIndexOf("|"))));
+    bank = bank.filter((q) => !constrained.has(q.module) || sf.has(q.module + "|" + (q.sourceFile || "README.md")));
+  }
   state.section = section;
   state.modules = modules && modules.length ? modules : null;
+  state.sourceFiles = sourceFiles && sourceFiles.length ? sourceFiles : null;
+  state.limit = limit || null;
   // [E1] no-repeat sampling: prefer questions NOT in the last-30-served ring
   // buffer for this section; only top up from the recent set if the fresh
   // pool runs short (small module selections, tiny sections).
   const recent = new Set(loadRecent(section));
   const fresh = shuffle(bank.filter((q) => !recent.has(q.id)));
   const stale = shuffle(bank.filter((q) => recent.has(q.id)));
-  const picked = [...fresh, ...stale].slice(0, deckLen());
+  const picked = [...fresh, ...stale].slice(0, limit || deckLen());
   pushRecent(section, picked.map((q) => q.id));
   // [A2] confusion-aware interleaving for multi-module decks: no two consecutive
   // questions share a module; graph-connected topics sit adjacent (A-B-A'-C).
@@ -1888,7 +2050,7 @@ async function startBlitz(section, modules) {
     const g = await loadGraph(section);
     interleave = (g && g.pairs) || [];
   }
-  startDeck(picked, () => startBlitz(section, state.modules), interleave ? { interleave } : {});
+  startDeck(picked, () => startBlitz(section, state.modules, state.sourceFiles, state.limit), interleave ? { interleave } : {});
 }
 
 async function startReview() {
@@ -2187,7 +2349,7 @@ function saveDeckSnapshot() {
   if (state.section === "interview") return;       // [C] an interview can't pause — leaving reschedules it
   if (state.prime) return;                           // [A2] prime pretests never snapshot
   const snap = {
-    date: todayISO(), section: state.section, modules: state.modules, mode: state.mode, hard: state.hard,
+    date: todayISO(), section: state.section, modules: state.modules, sourceFiles: state.sourceFiles, limit: state.limit, mode: state.mode, hard: state.hard,
     items: state.deck.map((d) => ({
       id: d.q.id, optOrder: d.optOrder, status: d.status, boss: d.boss, flip: d.flip || undefined,
       retry: d.retry, retried: d.retried, redeemed: d.redeemed, taught: d.taught, revealed: d.revealed, conf: d.conf, picked: d.picked,
@@ -2268,10 +2430,12 @@ async function resumeDeck() {
   state.combo = snap.combo || 0; state.maxCombo = snap.maxCombo || 0;
   state.sessionXp = snap.sessionXp || 0;
   state.section = snap.section; state.modules = snap.modules || null;
+  state.sourceFiles = snap.sourceFiles || null;      // [SF] additive: old snapshots read undefined -> null -> whole-module
+  state.limit = snap.limit || null;                  // [SF] additive: old snapshots -> null -> deckLen()
   state.startedAt = snap.startedAt || Date.now();
   state.replayFn = snap.section === "review" ? startReview
     : snap.section === "weakspots" ? startWeakSpots
-    : () => startBlitz(snap.section, snap.modules);
+    : () => startBlitz(snap.section, snap.modules, snap.sourceFiles, snap.limit);
   /* [C] gauntlet snapshots: restore the flags + replay; the rebuilt deck keeps
      the frozen qids/order (ids + optOrder round-trip, no reshuffle). */
   if (snap.section === "gauntlet") { state.gauntlet = { scored: true, practice: false }; state.replayFn = startGauntlet; }
@@ -5210,6 +5374,7 @@ function openDiagramZoom(contentEl) {
   requestAnimationFrame(fit);
 
   const close = () => { release(); overlay.remove(); document.removeEventListener("keydown", onKey, true); };
+  overlay._close = close;                             // let a screen change (e.g. closing the reader) tear this down cleanly
   const onKey = (e) => {
     if (e.key === "Escape") { e.stopPropagation(); close(); return; }   // don't also close the reader
     const r = box.getBoundingClientRect();
@@ -5453,6 +5618,7 @@ function mdRender(src) {
 }
 
 const readerCache = {};                            // content path -> raw markdown
+const READER_CACHE_CAP = 30;                       // [PERF] bound retained markdown strings (bounded at ~700 paths otherwise)
 const reader = { path: null, titleText: "", back: [], nav: null, full: false, toc: false, modules: false };
 const readerExpanded = new Set();   // module keys expanded in the left sidebar (session-persistent)
 const readerBooksOpen = new Set();  // book slugs expanded in the sidebar's per-book groups (session-persistent)
@@ -6066,32 +6232,57 @@ function applyRecallPref() {
 function appendEvalBlock(main, path) {
   if (state.inQuiz) return;
   const dir = path.replace(/\/[^/]+$/, "");
+  const base = path.slice(dir.length + 1);         // this page's file basename (e.g. instruction_tuning.md)
   const files = (state.index && state.index.files) || {};
   if (!files[dir]) return;                         // not a quizzable module page
   const section = dir.split("/")[0];
-  const name = titleize(dir.split("/").pop());
+  // [SF] On a deep-dive sub-file, scope the quiz to THAT file only (its own
+  // sourceFile); on the module README, keep the whole-module quiz. Every question
+  // carries sourceFile, so this is a pure filter — module ids/SR state untouched.
+  const isReadme = /^readme\.md$/i.test(base);
+  const name = isReadme ? titleize(dir.split("/").pop()) : titleize(base.replace(/\.md$/i, ""));
+  const inScope = isReadme
+    ? (q) => q.module === dir
+    : (q) => q.module === dir && (q.sourceFile || "README.md") === base;
+  // [SF] "quick" = a random subset capped at the user's deckLen() pref; "all" runs
+  // every question in scope (limit = pool size). README stays whole-module + deckLen.
+  const launch = isReadme
+    ? () => startBlitz(section, [dir])
+    : (limit) => startBlitz(section, [dir], [dir + "|" + base], limit);
   const block = document.createElement("div");
   block.className = "eval-block";
   block.innerHTML = `<div class="eval-h">Evaluate yourself</div>
     <p class="eval-sub" id="evalSub">Quick check on ${esc(name)} &mdash; misses feed your review deck.</p>
-    <button class="eval-btn" id="evalBtn">Quiz this topic</button>`;
+    <div class="eval-actions"><button class="eval-btn" id="evalBtn">Quiz this ${isReadme ? "topic" : "sub-topic"}</button></div>`;
   main.appendChild(block);
   block.querySelector("#evalBtn").addEventListener("click", async () => {
     const bank = await loadBank(section);
-    const pool = (bank || []).filter((q) => q.module === dir);
+    const pool = (bank || []).filter(inScope);
     if (!pool.length) { announce("No questions extracted for this page yet."); return; }
     closeReader();
-    startBlitz(section, [dir]);
+    launch(null);                                    // quick: deckLen()-capped random subset
   });
   // Fill the question count in the background (also warms the bank cache for
-  // an instant quiz start); hide the block for 0-question modules. Skips the
+  // an instant quiz start); hide the block for 0-question pages. Skips the
   // multi-MB fetch on data-saver connections.
   if (!(navigator.connection && navigator.connection.saveData)) {
     loadBank(section).then((bank) => {
-      const n = (bank || []).filter((q) => q.module === dir).length;
+      const n = (bank || []).filter(inScope).length;
       if (!n) { block.remove(); return; }
       const sub = block.querySelector("#evalSub");
       if (sub) sub.textContent = `${n} questions on ${name} — misses feed your review deck.`;
+      // [SF] On a sub-file with more questions than a quick deck holds, offer an
+      // "all N" run alongside the quick one. When N <= deckLen() the two are
+      // identical, so keep the single button (today's behavior).
+      if (!isReadme && n > deckLen()) {
+        const actions = block.querySelector(".eval-actions");
+        block.querySelector("#evalBtn").textContent = `Quick quiz (${deckLen()})`;
+        const allBtn = document.createElement("button");
+        allBtn.className = "eval-btn secondary";
+        allBtn.textContent = `Quiz all ${n}`;
+        allBtn.addEventListener("click", () => { closeReader(); launch(n); });
+        actions.appendChild(allBtn);
+      }
     }).catch(() => {});
   }
 }
@@ -6331,7 +6522,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     if (readerCache[path] == null) {
       const r = await fetch(`../${path}`, { cache: "no-store" });
       if (!r.ok) throw { missing: r.status === 404 };
-      readerCache[path] = await r.text();
+      capInsert(readerCache, path, await r.text(), READER_CACHE_CAP);   // [PERF] FIFO-bounded
     }
     if (reader.path !== path) return;              // user navigated away during the fetch
     const b = el("#readerBody");
@@ -6397,7 +6588,16 @@ function openReader(module, moduleName) {
 }
 
 // Remove the reader overlay only; the underlying screen DOM is untouched.
+// A diagram zoom overlay (openDiagramZoom) is appended to <body>, a sibling of
+// #reader — so removing the reader does NOT reclaim it. Any open viewer must be
+// torn down explicitly, or it strands over whatever screen comes next (e.g. a
+// quiz launched from the reader's "Quiz this topic" button).
+function closeDiagramZoom() {
+  document.querySelectorAll(".mermaid-overlay").forEach((o) => (o._close ? o._close() : o.remove()));
+}
+
 function closeReaderDom() {
+  closeDiagramZoom();                                // never let a zoom overlay outlive the reader that spawned it
   document.body.classList.remove("reader-open", "reader-full");
   const p = el("#reader"); if (p) p.remove();
   reader.path = null; reader.back = []; reader.nav = null;

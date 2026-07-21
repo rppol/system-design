@@ -738,6 +738,19 @@ button:active { transform: scale(0.98); }
 .modrow input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
 .modrow .mname { }
 .modrow .mcount { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+/* [SF] sub-file selector: a module with deep-dive files gets a disclosure of per-file checkboxes */
+.modrow-wrap { display: flex; flex-direction: column; }
+.modrow-lbl { display: flex; align-items: center; gap: 11px; flex: 1 1 auto; min-width: 0; cursor: pointer; }
+.subtoggle { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; background: none; border: 0; padding: 3px 6px; border-radius: 6px; color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); cursor: pointer; }
+.subtoggle:hover { color: var(--text); background: var(--glass-2); }
+.subtoggle-count { font-variant-numeric: tabular-nums; }
+.subchev { display: inline-block; transition: transform 0.15s ease; }
+.modrow-wrap.open .subchev { transform: rotate(180deg); }
+.sublist { display: flex; flex-direction: column; gap: 5px; margin: 6px 0 2px 26px; }
+.subrow { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm); cursor: pointer; font-size: var(--fs-sm); }
+.subrow:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--glass-2); }
+.subrow input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.subrow .scount { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 
 /* [E1] session length: 5/10/20 segmented control, persisted as sd_deck_len */
 .lenbar { display: flex; align-items: center; gap: 8px; margin: 4px 0 16px; }
@@ -2444,6 +2457,10 @@ body.interview-mode #app::before {
 }
 .eval-btn:hover { filter: brightness(1.12); }
 .eval-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* [SF] per-file quiz: quick vs "all N" sit side by side; the "all" run is secondary */
+.eval-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.eval-btn.secondary { background: transparent; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+.eval-btn.secondary:hover { filter: none; background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 /* ==========================================================================
    [E2] PHASE E2 — Insights · Command palette · Mobile tab bar · Beauty
