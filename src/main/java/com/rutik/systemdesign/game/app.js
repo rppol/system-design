@@ -5555,24 +5555,38 @@ function injectPrerendered(n, asset) {
   mmObserve(n);
 }
 
+// Render ONE diagram container: pre-rendered asset first (engine-free), else the
+// live engine as a fallback. Shared by the lazy IntersectionObserver and by
+// flushPendingDiagrams (TOC jumps need every diagram's height final first).
+async function mmRenderOne(n) {
+  if (n.querySelector("svg")) { mmObserve(n); return; }   // already rendered this visit
+  const src = n.textContent.trim();
+  if (!src) return;
+  _mmSrc.set(n, src);
+  const asset = await loadDiagramAsset(src);       // [SF] pre-rendered SVGs from the build (engine-free, offline)
+  if (asset && asset.svg0) { injectPrerendered(n, asset); return; }
+  const mermaid = await ensureMermaid(n);          // fallback: un-baked fence -> live render
+  if (!mermaid) return;
+  await mmRenderNode(n, src);
+  mmObserve(n);
+}
+
+// Render every still-unrendered diagram in `root` now (not lazily). Called before a
+// TOC jump: lazy diagrams that render DURING a smooth scroll shift the target
+// heading (measured ~1400px on a diagram-dense page), so the scroll lands on the
+// wrong section. Rendering them first makes every heading's position final.
+async function flushPendingDiagrams(root) {
+  for (const n of [...root.querySelectorAll(".mermaid")]) {
+    if (!n.querySelector("svg")) await mmRenderOne(n);
+  }
+}
+
 async function renderMermaid(root) {
   const nodes = [...root.querySelectorAll(".mermaid")];
   if (!nodes.length) return;                       // no mermaid on this page — skip
   if (_mmRO) _mmRO.disconnect();                   // observe only the live page's diagrams
   if (_mmIO) _mmIO.disconnect();                   // drop the previous page's lazy-render targets (now detached)
-  const renderOne = async (n) => {
-    if (n.querySelector("svg")) { mmObserve(n); return; }   // already rendered this visit
-    const src = n.textContent.trim();
-    if (!src) return;
-    _mmSrc.set(n, src);
-    const asset = await loadDiagramAsset(src);     // [SF] pre-rendered SVGs from the build (engine-free, offline)
-    if (asset && asset.svg0) { injectPrerendered(n, asset); return; }
-    // Fallback: un-baked fence (added/edited before the build) -> live render.
-    const mermaid = await ensureMermaid(n);
-    if (!mermaid) return;
-    await mmRenderNode(n, src);
-    mmObserve(n);
-  };
+  const renderOne = mmRenderOne;
   // [PERF] Lazy render: a diagram is mounted only as it nears the viewport;
   // already-rendered ones just re-attach the resize observer. rootMargin mounts a
   // screen ahead so scrolling never reveals a blank.
@@ -6040,8 +6054,12 @@ function buildToc(tocEl, main) {
   const items = heads.map((h) =>
     `<li class="${h.tagName === "H3" ? "lvl3" : ""}"><a href="#" data-tid="${esc(h.id)}" title="${esc(h.textContent)}">${esc(h.textContent)}</a></li>`).join("");
   tocEl.innerHTML = `<div class="toc-h">Contents<span class="toc-pos"></span></div><ul>${items}</ul>`;
-  tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", (e) => {
+  tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", async (e) => {
     e.preventDefault();
+    // Flush pending lazy diagrams FIRST so heading positions are final — otherwise a
+    // diagram rendering during the smooth scroll shifts the target and the scroll
+    // lands on the wrong heading (the "clicks act like a next pointer" bug).
+    await flushPendingDiagrams(main);
     const t = main.querySelector("#" + CSS.escape(a.dataset.tid));
     if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
   }));
@@ -6401,8 +6419,9 @@ function wireReaderBody(body) {
     reader.back.push({ path: reader.path, title: reader.titleText, nav: reader.nav });
     openReaderPath(target, null, null, a.dataset.frag);
   }));
-  body.querySelectorAll("a.md-anchor").forEach((a) => a.addEventListener("click", (e) => {
+  body.querySelectorAll("a.md-anchor").forEach((a) => a.addEventListener("click", async (e) => {
     e.preventDefault();
+    await flushPendingDiagrams(body);              // stabilize heading positions before the smooth scroll
     const t = body.querySelector("#" + CSS.escape(a.dataset.frag || ""));
     if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
   }));
