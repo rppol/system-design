@@ -1732,6 +1732,22 @@ async function loadBank(section) {
   return bankCache[section];
 }
 
+// [CS] Separate case-study Q&A pool (game/case_questions/<section>.json), NEVER
+// merged into the main bank — it feeds ONLY the reader's bottom-of-file "Quiz this
+// topic" on a case-study page. A missing pool caches as [] (no refetch).
+const caseBankCache = {};
+async function loadCaseBank(section) {
+  if (!caseBankCache[section]) {
+    const bank = await fetchJSON(`case_questions/${section}.json`, null, "default");
+    if (Array.isArray(bank)) for (const q of bank) if (q.moduleName) q.moduleName = titleize(q.moduleName);
+    capInsert(caseBankCache, section, Array.isArray(bank) ? bank : [], 4);
+  }
+  return caseBankCache[section];
+}
+// A case-study module id is "<section>/case_studies[/<study>]" — used to route a
+// quiz to the case pool instead of the main bank.
+const isCaseModule = (m) => /(^|\/)case_studies(\/|$)/.test(m || "");
+
 // id -> question map per section, built lazily from the cached bank. Lets a
 // picked distractor be traced back to the question its answer came from (A2).
 const _bankById = {};
@@ -2048,7 +2064,10 @@ function startDeck(questions, replayFn, opts = {}) {
 // vs. a quick random subset (limit = null ⇒ deckLen()). null everywhere else.
 async function startBlitz(section, modules, sourceFiles = null, limit = null) {
   app.innerHTML = skeletonHTML("quiz");
-  let bank = await loadBank(section);
+  // [CS] Quizzing a case study (reader "Quiz this topic") sources from the separate
+  // case pool, never the main bank — so case studies stay out of every other path.
+  const fromCases = (modules || []).some(isCaseModule);
+  let bank = await (fromCases ? loadCaseBank(section) : loadBank(section));
   if (!bank || !bank.length) {
     errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => startBlitz(section, modules, sourceFiles, limit));
     return;
@@ -2092,6 +2111,9 @@ async function startReview() {
     const bank = await loadBank(sec);
     if (!bank) { loadFailed = true; continue; }
     const byId = new Map(bank.map((q) => [q.id, q]));
+    if (bySec[sec].some((id) => id.includes("case_studies"))) {   // [CS] resolve case-study review misses
+      for (const q of await loadCaseBank(sec)) byId.set(q.id, q);
+    }
     for (const id of bySec[sec]) {
       const q = byId.get(id);
       if (q) items.push(q);
@@ -2208,7 +2230,11 @@ async function startRefresh(ids) {
   for (const sec of Object.keys(bySec)) {
     const bank = await loadBank(sec);
     if (!bank) { loadFailed = true; continue; }
-    const byId = bankById(sec);
+    let byId = bankById(sec);
+    if (bySec[sec].some((id) => id.includes("case_studies"))) {   // [CS] resolve case-study ids (clone: don't pollute the cached map)
+      byId = new Map(byId);
+      for (const q of await loadCaseBank(sec)) byId.set(q.id, q);
+    }
     for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
   }
   if (!items.length) {
@@ -2425,6 +2451,7 @@ async function resumeDeck() {
   for (const sec of sections) {
     const bank = await loadBank(sec);
     if (bank) for (const q of bank) byId.set(q.id, q);
+    for (const q of await loadCaseBank(sec)) byId.set(q.id, q);   // [CS] resolve case-study ids on resume
   }
   const deck = [], idxMap = new Map();
   snap.items.forEach((it, oldIdx) => {
@@ -6472,13 +6499,18 @@ function appendEvalBlock(main, path) {
   const dir = path.replace(/\/[^/]+$/, "");
   const base = path.slice(dir.length + 1);         // this page's file basename (e.g. instruction_tuning.md)
   const files = (state.index && state.index.files) || {};
-  if (!files[dir]) return;                         // not a quizzable module page
+  // [CS] Case-study pages are quizzable too, but from the SEPARATE case pool
+  // (loadCaseBank) — never the main bank. Everything else below is shared.
+  const isCase = /\/case_studies\//.test(path);
+  if (!isCase && !files[dir]) return;              // module page OR case-study page only
   const section = dir.split("/")[0];
+  const loadPool = isCase ? loadCaseBank : loadBank;
   // [SF] On a deep-dive sub-file, scope the quiz to THAT file only (its own
   // sourceFile); on the module README, keep the whole-module quiz. Every question
   // carries sourceFile, so this is a pure filter — module ids/SR state untouched.
   const isReadme = /^readme\.md$/i.test(base);
-  const name = isReadme ? titleize(dir.split("/").pop()) : titleize(base.replace(/\.md$/i, ""));
+  const csName = isCase ? (caseStudiesFromIndex(section).find((c) => c.file === path) || {}).name : null;
+  const name = csName || (isReadme ? titleize(dir.split("/").pop()) : titleize(base.replace(/\.md$/i, "")));
   const inScope = isReadme
     ? (q) => q.module === dir
     : (q) => q.module === dir && (q.sourceFile || "README.md") === base;
@@ -6491,10 +6523,10 @@ function appendEvalBlock(main, path) {
   block.className = "eval-block";
   block.innerHTML = `<div class="eval-h">Evaluate yourself</div>
     <p class="eval-sub" id="evalSub">Quick check on ${esc(name)} &mdash; misses feed your review deck.</p>
-    <div class="eval-actions"><button class="eval-btn" id="evalBtn">Quiz this ${isReadme ? "topic" : "sub-topic"}</button></div>`;
+    <div class="eval-actions"><button class="eval-btn" id="evalBtn">Quiz this ${isCase ? "case study" : isReadme ? "topic" : "sub-topic"}</button></div>`;
   main.appendChild(block);
   block.querySelector("#evalBtn").addEventListener("click", async () => {
-    const bank = await loadBank(section);
+    const bank = await loadPool(section);
     const pool = (bank || []).filter(inScope);
     if (!pool.length) { announce("No questions extracted for this page yet."); return; }
     closeReader();
@@ -6504,7 +6536,7 @@ function appendEvalBlock(main, path) {
   // an instant quiz start); hide the block for 0-question pages. Skips the
   // multi-MB fetch on data-saver connections.
   if (!(navigator.connection && navigator.connection.saveData)) {
-    loadBank(section).then((bank) => {
+    loadPool(section).then((bank) => {
       const n = (bank || []).filter(inScope).length;
       if (!n) { block.remove(); return; }
       const sub = block.querySelector("#evalSub");

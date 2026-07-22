@@ -84,6 +84,10 @@ Q_LABEL = re.compile(r"^\*\*Q\s*(\d*)\s*[:.]")
 FULLY_BOLD = re.compile(r"^\*\*.+\*\*[:.]?$")
 # Detects the interview-questions section header (number may vary; match by title).
 INTERVIEW_HDR = re.compile(r"^##\s+.*interview\s+q", re.IGNORECASE)
+# Case studies (11-section principal template) hold their Q&As under "Interview
+# Discussion Points" and/or "Additional Interview Questions" — match both. Used
+# ONLY for the separate case-study reader-quiz pool, never the main bank.
+CASE_HDR = re.compile(r"^##\s+.*interview\s+(?:q|discussion)", re.IGNORECASE)
 
 
 def is_question_line(stripped):
@@ -173,7 +177,7 @@ def make_short(text):
     return (cut[:idx] if idx >= 80 else cut).rstrip() + "…"
 
 
-def parse_md(path, section, module):
+def parse_md(path, section, module, hdr=INTERVIEW_HDR):
     """Yield per-question dicts from one .md file (a module README or deep-dive
     sub-file). Each dict carries both the stripped text (used for ids, options,
     and distractors) and, when they differ, markdown-preserving display variants."""
@@ -189,7 +193,7 @@ def parse_md(path, section, module):
     spans = []
     idx = 0
     while idx < n:
-        if INTERVIEW_HDR.match(lines[idx]):
+        if hdr.match(lines[idx]):
             start = idx + 1
             end = n
             for j in range(start, n):
@@ -431,32 +435,10 @@ def collect_case_studies(section, base_dir):
     return [{"file": universe[s], "name": names[s]} for s in ordered]
 
 
-def main():
-    rng = random.Random(42)  # reproducible distractor choices
-    raw = []
-    file_tree = {}   # "section/module" -> sorted list of .md filenames (for the sidebar tree)
-    for root, dirs, files in os.walk(BASE_DIR):
-        dirs.sort()  # deterministic traversal on every filesystem -> stable output
-        rel = os.path.relpath(root, BASE_DIR)
-        if rel == ".":
-            continue
-        parts = rel.split(os.sep)
-        section = parts[0]
-        if section in SKIP_SECTIONS:
-            continue
-        if SKIP_PATH_PARTS.intersection(parts):
-            continue  # exclude case studies etc.
-        module = rel.replace(os.sep, "/")  # parent dir -> README + its deep-dive sub-files share a module
-        md_files = order_md_files(root, [fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md"])
-        if md_files and len(parts) >= 2:      # skip section root dirs (depth==1)
-            file_tree[module] = md_files
-        for fn in md_files:
-            raw.extend(parse_md(os.path.join(root, fn), section, module))
-
-    if not raw:
-        print("ERROR: no questions parsed", file=sys.stderr)
-        sys.exit(1)
-
+def build_questions(raw, rng):
+    """raw parsed Q&As -> MCQ entries (dedup + IDF-related distractors). Called
+    for BOTH the main bank and the separate case-study reader-quiz pool; each pool
+    computes its own IDF and draws distractors only from within itself."""
     # Drop exact repeats of the same question within a module (README vs sub-file
     # overlap) so the bank and the spaced-repetition ids stay collision-free.
     seen_q = set()
@@ -590,6 +572,35 @@ def main():
         if any(x is not None for x in distractors_md):
             entry["distractorsMd"] = distractors_md
         questions.append(entry)
+    return questions
+
+
+def main():
+    rng = random.Random(42)  # reproducible distractor choices
+    raw = []
+    file_tree = {}   # "section/module" -> sorted list of .md filenames (for the sidebar tree)
+    for root, dirs, files in os.walk(BASE_DIR):
+        dirs.sort()  # deterministic traversal on every filesystem -> stable output
+        rel = os.path.relpath(root, BASE_DIR)
+        if rel == ".":
+            continue
+        parts = rel.split(os.sep)
+        section = parts[0]
+        if section in SKIP_SECTIONS:
+            continue
+        if SKIP_PATH_PARTS.intersection(parts):
+            continue  # exclude case studies etc.
+        module = rel.replace(os.sep, "/")  # parent dir -> README + its deep-dive sub-files share a module
+        md_files = order_md_files(root, [fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md"])
+        if md_files and len(parts) >= 2:      # skip section root dirs (depth==1)
+            file_tree[module] = md_files
+        for fn in md_files:
+            raw.extend(parse_md(os.path.join(root, fn), section, module))
+
+    questions = build_questions(raw, rng)
+    if not questions:
+        print("ERROR: no questions parsed", file=sys.stderr)
+        sys.exit(1)
 
     # Group per section and write one file per section + a small index manifest.
     per_section = {}
@@ -618,6 +629,33 @@ def main():
         cs = collect_case_studies(section, BASE_DIR)
         if cs:
             case_studies_map[section] = cs
+
+    # Separate case-study Q&A pool: parse each indexed case study's "Interview
+    # Discussion Points"/"Questions" (CASE_HDR) with module = its parent dir, build
+    # MCQs from WITHIN the case pool (distractors drawn from other case studies), and
+    # write questions/case_studies/<section>.json. This feeds ONLY the reader's
+    # bottom-of-file "Quiz this topic" on a case-study page — it is NEVER merged into
+    # the main bank, so case studies stay out of Study blitzes/flashcards/gauntlet.
+    case_raw = []
+    for section, entries in case_studies_map.items():
+        for e in entries:
+            module = os.path.dirname(e["file"])       # forward-slash relative parent dir
+            case_raw.extend(parse_md(os.path.join(BASE_DIR, e["file"]), section, module, CASE_HDR))
+    case_questions = build_questions(case_raw, rng)
+    # Sibling of questions/ (NOT under it) so questions/*.json stays exactly the
+    # section banks + index — the APK smoke test globs questions/*.json.
+    cs_out = os.path.join(GAME_DIR, "case_questions")
+    os.makedirs(cs_out, exist_ok=True)
+    for name in os.listdir(cs_out):                   # clear stale pools
+        if name.endswith(".json"):
+            os.remove(os.path.join(cs_out, name))
+    cs_per_section = {}
+    for q in case_questions:
+        cs_per_section.setdefault(q["section"], []).append(q)
+    for sec, qlist in cs_per_section.items():
+        with open(os.path.join(cs_out, f"{sec}.json"), "w", encoding="utf-8") as fh:
+            json.dump(qlist, fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"Wrote {len(case_questions)} case-study questions -> {cs_out}/<section>.json")
 
     index = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
