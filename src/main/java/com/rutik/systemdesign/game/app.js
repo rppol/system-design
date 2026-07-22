@@ -1782,6 +1782,13 @@ function modulesFromIndex(section) {
     });
 }
 
+// [CS] Ordered case studies for a section from index.caseStudies (extract.py,
+// README-curated). Each entry is { file: reader path, name: display title }.
+// Powers the read-only "Case Studies" study track (third path beside Full/Interview).
+function caseStudiesFromIndex(section) {
+  return ((state.index && state.index.caseStudies) || {})[section] || [];
+}
+
 async function openTopics(section) {
   app.innerHTML = skeletonHTML("topics");
   const bank = await loadBank(section);
@@ -4042,36 +4049,48 @@ async function openStudySection(sectionPath) {
   // bank (cs_fundamentals ~1.4MB, llm ~3.9MB) just to render nodes — a multi-second
   // stall on mobile. The bank now loads only when a quiz starts; we warm it in the
   // background so the first node-tap stays instant.
-  let mods = modulesFromIndex(section);
-  if (!mods.length) {                                // index unavailable (pre-boot / cold offline) — fall back to the bank
-    const bank = await loadBank(section);
-    if (!bank || !bank.length) {
-      errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(sectionPath));
-      return;
-    }
-    mods = modulesOf(bank);
-  } else {
-    loadBank(section).catch(() => {});               // non-blocking warm-up for the first quiz
-  }
-  if (section === "book" && !bookScope) { renderBookPicker(section, mods); return; }
-  if (bookScope) {
-    mods = mods.filter((m) => bookOf(m.module) === bookScope);
-    if (!mods.length) { go("#/study/book"); return; }   // unknown/renamed book slug
-  }
-  // Interview-Specific path (LLM pilot): if this section has a curated subset and
-  // the learner chose it, restrict the skill tree to those modules. mods is already
-  // in STUDY_ORDER order (== the interview list's order), so a filter preserves it;
-  // `list` and the graph chords derive from mods, so scoping happens for free.
+  // [CS] Case Studies track (a third path beside Full/Interview): nodes come from
+  // index.caseStudies (README-curated), open the reader read-only, and are NOT in
+  // the bank. Guard a stale stored "cases" value on a section with <2 case studies.
+  const casesList = caseStudiesFromIndex(section);
+  const hasCases = casesList.length >= 2;
   const interviewPath = STUDY_PATHS[section] && STUDY_PATHS[section].interview;
-  const studyPath = getStudyPath(section);              // "full" | "interview"
-  if (studyPath === "interview" && interviewPath) {
-    const keep = new Set(interviewPath);
-    mods = mods.filter((m) => keep.has(m.module));
+  let studyPath = getStudyPath(section);                // "full" | "interview" | "cases"
+  if (studyPath === "cases" && !hasCases) studyPath = "full";
+  const casesMode = studyPath === "cases" && hasCases;
+
+  let mods;
+  if (casesMode) {
+    // module = the reader path itself (unique; never collides with a real module id).
+    mods = casesList.map((c) => ({ module: c.file, name: c.name, count: 0 }));
+  } else {
+    mods = modulesFromIndex(section);
+    if (!mods.length) {                                // index unavailable (pre-boot / cold offline) — fall back to the bank
+      const bank = await loadBank(section);
+      if (!bank || !bank.length) {
+        errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(sectionPath));
+        return;
+      }
+      mods = modulesOf(bank);
+    } else {
+      loadBank(section).catch(() => {});               // non-blocking warm-up for the first quiz
+    }
+    if (section === "book" && !bookScope) { renderBookPicker(section, mods); return; }
+    if (bookScope) {
+      mods = mods.filter((m) => bookOf(m.module) === bookScope);
+      if (!mods.length) { go("#/study/book"); return; }   // unknown/renamed book slug
+    }
+    // Interview-Specific path: restrict the skill tree to the curated subset (mods is
+    // already in STUDY_ORDER == interview-list order, so a filter preserves order).
+    if (studyPath === "interview" && interviewPath) {
+      const keep = new Set(interviewPath);
+      mods = mods.filter((m) => keep.has(m.module));
+    }
   }
   // v2: weighted prerequisite edges from graph/<section>.json (real repo
   // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
   // forward along the path order. Missing/failed file -> plain v1 path.
-  const graph = await fetchJSON(`graph/${section}.json`, null, "default");
+  const graph = casesMode ? null : await fetchJSON(`graph/${section}.json`, null, "default");   // [CS] no cross-link graph for case studies
   const modIdx = new Map(mods.map((m, i) => [m.module, i]));
   const chords = [];
   let crossLinks = 0;
@@ -4088,10 +4107,14 @@ async function openStudySection(sectionPath) {
     if (c.lex) return;
     peers[c.from].add(c.to); peers[c.to].add(c.from);
   });
-  const list = mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
+  const list = casesMode
+    ? mods.map((m) => ({ path: m.module, title: m.name }))            // [CS] module IS the reader path
+    : mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
   const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
+  // [CS] Case studies are read-only: a node's "done" state is whether it's been READ.
+  const read = casesMode ? new Set(mods.filter((m) => isModuleRead(m.module)).map((m) => m.module)) : null;
   const mstats = moduleStats(state.progress);          // [A2] Module Memory Map retention tints
   // "You are here" = last page opened in the reader, if it lives in this section.
   let lastRead = null;
@@ -4100,7 +4123,9 @@ async function openStudySection(sectionPath) {
   // Resolve the module by prefix against the real module list — book modules are
   // three segments deep (book/<book>/<chapter>), so a fixed slice(0, 2) mislabels them.
   const hereMod = herePath
-    ? (mods.find((m) => herePath === `${m.module}/README.md` || herePath.startsWith(m.module + "/")) || {}).module || null
+    ? (casesMode
+        ? (mods.find((m) => herePath === m.module) || {}).module
+        : (mods.find((m) => herePath === `${m.module}/README.md` || herePath.startsWith(m.module + "/")) || {}).module) || null
     : null;
   const openFans = new Set();
   if (herePath && hereMod && !/\/README\.md$/i.test(herePath)) openFans.add(hereMod);  // reveal the "here" leaf
@@ -4112,26 +4137,30 @@ async function openStudySection(sectionPath) {
     const isHere = m.module === hereMod;
     const isOpen = openFans.has(m.module);
     // [A2] Memory Map: tint each node by estimated retention (+ amber pulse when overdue).
-    const ms = mstats[m.module];
-    let mmCls = " mm-cold", retTxt = "no review data yet";
+    // [CS] Case-study nodes: "done" = read (no retention data / no Q count).
+    const done = casesMode ? read.has(m.module) : practiced.has(m.module);
+    const ms = casesMode ? null : mstats[m.module];
+    let mmCls = casesMode ? "" : " mm-cold", retTxt = casesMode ? (done ? "read" : "case study") : "no review data yet";
     if (ms) {
       mmCls = ms.retention >= 0.75 ? " mm-fresh" : ms.retention >= 0.5 ? " mm-warm" : " mm-fading";
       retTxt = `est. retention ${Math.round(ms.retention * 100)}%, ${ms.overdue} due`;
       if (ms.overdue > 0) mmCls += " mm-overdue";
     }
+    const metaTxt = casesMode ? "Case study" : `${m.count} Qs`;
+    const ariaCount = casesMode ? "case study" : `${m.count} questions`;
     const leaves = multi ? mFiles.map((fn, k) => {
       const p = `${m.module}/${fn}`;
       return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn))}</button>`;
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
-      <div class="pathnode${practiced.has(m.module) ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
-        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${m.count} questions, ${retTxt}${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
+      <div class="pathnode${done ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
+        <button class="pn-main" data-idx="${i}" aria-label="Step ${i + 1} of ${mods.length}: ${esc(m.name)}, ${ariaCount}, ${retTxt}${peers[i].size ? `, connects to ${peers[i].size} other topics` : ""}">
           <span class="pn-num">${String(i + 1).padStart(2, "0")}</span>
           <span class="pn-body">
             <span class="pn-name">${esc(m.name)}</span>
-            <span class="pn-meta">${m.count} Qs${isHere ? ` &middot; <b class="pn-here">you are here</b>` : ""}</span>
+            <span class="pn-meta">${metaTxt}${isHere ? ` &middot; <b class="pn-here">you are here</b>` : ""}</span>
           </span>
-          ${practiced.has(m.module) ? `<span class="pn-check" title="Practiced">✓</span>` : ""}
+          ${done ? `<span class="pn-check" title="${casesMode ? "Read" : "Practiced"}">✓</span>` : ""}
         </button>
         ${multi ? `<button class="pn-fan" aria-expanded="${isOpen}" aria-controls="fan-${i}" aria-label="${mFiles.length} files in ${esc(m.name)}"><span class="pn-arrow">&#9656;</span>&nbsp;${mFiles.length} files</button>` : ""}
       </div>
@@ -4140,19 +4169,27 @@ async function openStudySection(sectionPath) {
   }).join("");
 
   const onInterview = studyPath === "interview" && interviewPath;
-  const pathSwitchHtml = interviewPath ? `
+  // [CS] Path toggle: Full always; Interview iff a curated subset exists; Case
+  // Studies iff the section has >=2. Rendered only when >=2 options exist.
+  const pathOpts = [
+    { v: "full", label: "Full" },
+    interviewPath ? { v: "interview", label: "Interview" } : null,
+    hasCases ? { v: "cases", label: "Case Studies" } : null,
+  ].filter(Boolean);
+  const pathSwitchHtml = pathOpts.length >= 2 ? `
       <div class="pathswitch" role="radiogroup" aria-label="Learning path">
         <span class="pathswitch-label">Path</span>
-        <button class="pathopt${onInterview ? "" : " on"}" role="radio" aria-checked="${!onInterview}" data-path="full">Full</button>
-        <button class="pathopt${onInterview ? " on" : ""}" role="radio" aria-checked="${!!onInterview}" data-path="interview">Interview</button>
+        ${pathOpts.map((o) => `<button class="pathopt${studyPath === o.v ? " on" : ""}" role="radio" aria-checked="${studyPath === o.v}" data-path="${o.v}">${o.label}</button>`).join("")}
       </div>` : "";
   const bookMeta = bookScope ? (BOOK_LABELS[bookScope] || {}) : null;
   app.innerHTML = `
     <div class="path-screen">
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
-      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${singleColumnPath()
-        ? `follow them top to bottom in the ${bookScope ? "book's chapter order" : "section's learning order"}.`
-        : `the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.`}</p>
+      <p>${casesMode
+        ? `${mods.length} case studies &middot; read-only &mdash; ${singleColumnPath() ? "work through them top to bottom" : "the path snakes across each row"} in the section's suggested order.`
+        : `${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${singleColumnPath()
+          ? `follow them top to bottom in the ${bookScope ? "book's chapter order" : "section's learning order"}.`
+          : `the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.`}`}</p>
       ${graph && !coarsePointer() ? `<p class="path-legend">${crossLinks
         ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
         : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
@@ -4378,8 +4415,11 @@ async function openStudySection(sectionPath) {
   wrap.querySelectorAll(".pn-main").forEach((b) => b.addEventListener("click", () => {
     const idx = +b.dataset.idx;
     const openIt = () => { reader.back = []; openReaderPath(list[idx].path, list[idx].title, { list, idx }); };
-    // [A2] Prime: offer a 3-question pretest for a never-quizzed module before reading.
-    if (maybePrime(section, mods[idx], bank, openIt)) return;
+    // [A2] Prime: a 3-question pretest before reading a never-quizzed module. Only
+    // for real bank-backed modules — the bank is warmed in the background, so read it
+    // from cache and skip prime if it isn't loaded yet or in the read-only case track.
+    const bank = bankCache[section];
+    if (!casesMode && bank && maybePrime(section, mods[idx], bank, openIt)) return;
     openIt();
   }));
   wrap.querySelectorAll(".pathleaf").forEach((b) => b.addEventListener("click", () => {
@@ -4460,7 +4500,7 @@ async function openStudySection(sectionPath) {
   document.querySelectorAll(".pathopt").forEach((b) => b.addEventListener("click", () => {
     if (b.classList.contains("on")) return;            // already active
     setStudyPath(section, b.dataset.path);
-    announce(b.dataset.path === "interview" ? "Interview-specific path" : "Full path");
+    announce(b.dataset.path === "interview" ? "Interview-specific path" : b.dataset.path === "cases" ? "Case Studies — read-only" : "Full path");
     openStudySection(section);                         // re-render with the new subset
   }));
   wireRadioGroup(el(".pathswitch"));
@@ -6590,8 +6630,19 @@ function revealClosure() {
 // Build a Study-equivalent nav context for a path from the boot-time index
 // (state.index.files: "section/module" -> [md files]) — zero bank fetches.
 function navFromIndex(path) {
-  const files = (state.index && state.index.files) || {};
   const section = path.split("/")[0];
+  // [CS] A case study reached by deep link / cross-link gets case-track nav (from
+  // index.caseStudies), not the section's module nav — so Prev/Next and the sidebar
+  // walk the case studies, and its 3-segment path resolves correctly.
+  if (path.includes("/case_studies/")) {
+    const cs = caseStudiesFromIndex(section);
+    if (cs.length) {
+      const list = cs.map((c) => ({ path: c.file, title: c.name }));
+      const idx = list.findIndex((m) => m.path === path);
+      return { list, idx: idx === -1 ? 0 : idx };
+    }
+  }
+  const files = (state.index && state.index.files) || {};
   const mods = Object.keys(files).filter((k) => k.startsWith(section + "/"));
   if (!mods.length) return null;
   const order = STUDY_ORDER[section] || [];

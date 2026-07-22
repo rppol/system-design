@@ -370,6 +370,67 @@ def order_md_files(module_root, md_files):
     return ([readme] if readme else []) + ordered + tail
 
 
+# Case studies live in <section>/case_studies/ and are EXCLUDED from the Q&A bank
+# (SKIP_PATH_PARTS) and from file_tree. This separate pass indexes them so the game
+# can surface a READ-ONLY "Case Studies" study track (a third path beside Full and
+# Interview). Two shapes coexist: a flat page (design_x.md) and a per-study directory
+# (design_x/README.md, linked in the README as `design_x/`). Order + display names
+# come from the case_studies/README.md "Full Learning Path" links (README-curated,
+# same philosophy as order_md_files); orphans not linked there are an alpha tail so
+# nothing is dropped. cross_cutting/ reference notes and dot-dirs are not case studies.
+CS_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:\./)?([a-z0-9_]+)(?:\.md|/(?:README\.md)?)(?:#[^)]*)?\)")
+CS_EXCLUDE_DIRS = {"cross_cutting"}
+
+
+def collect_case_studies(section, base_dir):
+    cs_root = os.path.join(base_dir, section, "case_studies")
+    if not os.path.isdir(cs_root):
+        return []
+    universe = {}   # slug -> reader path (relative to base_dir, forward slashes)
+    for name in sorted(os.listdir(cs_root)):
+        if name.startswith("."):
+            continue
+        full = os.path.join(cs_root, name)
+        if os.path.isdir(full):
+            if name not in CS_EXCLUDE_DIRS and os.path.isfile(os.path.join(full, "README.md")):
+                universe[name] = f"{section}/case_studies/{name}/README.md"
+        elif name.endswith(".md") and name.lower() != "readme.md":
+            universe[name[:-3]] = f"{section}/case_studies/{name}"
+    if not universe:
+        return []
+    # Order + names from the README's "Full Learning Path" section (fall back to the
+    # whole README if that heading is absent).
+    text = ""
+    readme = os.path.join(cs_root, "README.md")
+    if os.path.isfile(readme):
+        try:
+            text = open(readme, encoding="utf-8").read()
+        except OSError:
+            text = ""
+    scope = text
+    m = re.search(r"^#{2,}\s+.*Full Learning Path.*$", text, re.M | re.I)
+    if m:
+        nxt = re.search(r"^##\s", text[m.end():], re.M)
+        scope = text[m.end(): m.end() + nxt.start()] if nxt else text[m.end():]
+    ordered, names, seen = [], {}, set()
+    for lm in CS_LINK_RE.finditer(scope):
+        slug = lm.group(2)
+        if slug in universe and slug not in seen:
+            seen.add(slug)
+            ordered.append(slug)
+            txt = lm.group(1).strip()
+            # Some READMEs (e.g. llm) use the filename itself as link text; fall
+            # back to a titleized slug so the track shows readable names.
+            if txt.lower().endswith(".md") or txt.lower() == slug:
+                txt = slug.replace("_", " ").title()
+            names[slug] = txt
+    for slug in sorted(universe):                     # orphans -> alpha tail (nothing dropped)
+        if slug not in seen:
+            ordered.append(slug)
+            names[slug] = slug.replace("_", " ").title()
+    return [{"file": universe[s], "name": names[s]} for s in ordered]
+
+
 def main():
     rng = random.Random(42)  # reproducible distractor choices
     raw = []
@@ -548,6 +609,16 @@ def main():
     mod_counts = {}
     for q in questions:
         mod_counts[q["module"]] = mod_counts.get(q["module"], 0) + 1
+    # Case-studies index (read-only "Case Studies" study track). Separate walk of
+    # the top-level section dirs; excluded from the bank + file_tree above.
+    case_studies_map = {}
+    for section in sorted(os.listdir(BASE_DIR)):
+        if section in SKIP_SECTIONS or not os.path.isdir(os.path.join(BASE_DIR, section)):
+            continue
+        cs = collect_case_studies(section, BASE_DIR)
+        if cs:
+            case_studies_map[section] = cs
+
     index = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "total": len(questions),
@@ -556,6 +627,9 @@ def main():
         # additive: per-module bank counts (0 for reader-only dirs); consumed by the
         # game to scope the Codex/quests to capturable modules only.
         "moduleCounts": {m: mod_counts.get(m, 0) for m in sorted(set(file_tree) | set(mod_counts))},
+        # additive: per-section ordered case studies (reader path + display name) for
+        # the read-only Case Studies track; NOT in the bank/file_tree/moduleCounts.
+        "caseStudies": case_studies_map,
     }
     with open(os.path.join(OUT_DIR, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, indent=2)
