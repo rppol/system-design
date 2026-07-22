@@ -6048,21 +6048,38 @@ function openReaderTypeMenu(anchorBtn) {
 // Populate the always-accessible sidebar index from the rendered headings (ids
 // assigned by mdRender, so anchors always match). Returns the heading count so the
 // caller can hide the Index toggle when there's nothing to index.
+// Reliably scroll the reader to a heading — always lands ON the clicked heading,
+// never the next. The trap: lazy diagrams between here and the target render (and
+// then ResizeObserver-reclamp ~250ms later), shifting the target by ~1400px. A
+// SMOOTH scroll animates toward a position that then moves, overshooting to the
+// next heading — hence the "index is a next pointer" bug. Fix: (1) flush pending
+// diagrams so heading positions are final, (2) scroll INSTANTLY (no animation
+// window for a late reflow to corrupt), (3) one instant re-snap past the reclamp
+// debounce in case a diagram still nudged heights.
+async function scrollToHeading(root, id) {
+  if (!id) return;
+  await flushPendingDiagrams(root);
+  const find = () => root.querySelector("#" + CSS.escape(id));
+  const scroller = root.closest(".reader-body") || root.parentElement || root;
+  const offsetOf = (el) => el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+  const t = find();
+  if (!t) return;
+  t.scrollIntoView({ block: "start" });              // instant — no overshoot animation
+  clearTimeout(reader._tocSnap);
+  reader._tocSnap = setTimeout(() => {
+    const t2 = find();
+    if (t2 && Math.abs(offsetOf(t2)) > 4) t2.scrollIntoView({ block: "start" });   // re-clamp nudged it -> re-align
+  }, 320);
+}
+
 function buildToc(tocEl, main) {
   const heads = [...main.querySelectorAll("h2[id], h3[id]")];
   if (!heads.length) { tocEl.innerHTML = ""; return 0; }
   const items = heads.map((h) =>
     `<li class="${h.tagName === "H3" ? "lvl3" : ""}"><a href="#" data-tid="${esc(h.id)}" title="${esc(h.textContent)}">${esc(h.textContent)}</a></li>`).join("");
   tocEl.innerHTML = `<div class="toc-h">Contents<span class="toc-pos"></span></div><ul>${items}</ul>`;
-  tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", async (e) => {
-    e.preventDefault();
-    // Flush pending lazy diagrams FIRST so heading positions are final — otherwise a
-    // diagram rendering during the smooth scroll shifts the target and the scroll
-    // lands on the wrong heading (the "clicks act like a next pointer" bug).
-    await flushPendingDiagrams(main);
-    const t = main.querySelector("#" + CSS.escape(a.dataset.tid));
-    if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
-  }));
+  tocEl.querySelectorAll("a[data-tid]").forEach((a) =>
+    a.addEventListener("click", (e) => { e.preventDefault(); scrollToHeading(main, a.dataset.tid); }));
   return heads.length;
 }
 
@@ -6419,12 +6436,8 @@ function wireReaderBody(body) {
     reader.back.push({ path: reader.path, title: reader.titleText, nav: reader.nav });
     openReaderPath(target, null, null, a.dataset.frag);
   }));
-  body.querySelectorAll("a.md-anchor").forEach((a) => a.addEventListener("click", async (e) => {
-    e.preventDefault();
-    await flushPendingDiagrams(body);              // stabilize heading positions before the smooth scroll
-    const t = body.querySelector("#" + CSS.escape(a.dataset.frag || ""));
-    if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
-  }));
+  body.querySelectorAll("a.md-anchor").forEach((a) =>
+    a.addEventListener("click", (e) => { e.preventDefault(); scrollToHeading(body, a.dataset.frag || ""); }));
 }
 
 // ---------- think-first recall (interview Q&As) ----------
