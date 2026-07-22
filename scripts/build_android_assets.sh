@@ -23,6 +23,20 @@ echo "Dest      : $DEST"
 # quiz is empty.
 bash "$REPO_ROOT/scripts/build_banks.sh"
 
+# Pre-render Mermaid diagrams to static SVG (game/diagrams/*.mmz) so they render
+# fully offline in the WebView — no engine, no CDN. Drives the REAL app in headless
+# Chromium (Puppeteer) and reuses its render pipeline, so the SVGs are byte-identical
+# to live output. Gitignored + regenerated here every build. The vendored mermaid
+# engine (below) stays as the offline fallback for any un-baked/invalid fence.
+echo "Pre-rendering Mermaid diagrams..."
+( cd "$REPO_ROOT" && npm ci --no-audit --no-fund )
+( cd "$REPO_ROOT" && npx --yes puppeteer browsers install chrome >/dev/null )
+python3 -m http.server 8901 --directory "$REPO_ROOT" >/tmp/lora_diag_http.log 2>&1 &
+DIAG_SERVER=$!
+sleep 2
+( cd "$REPO_ROOT" && node scripts/build_diagrams.mjs --base http://localhost:8901 )
+kill "$DIAG_SERVER" 2>/dev/null || true
+
 # Recreate the payload from scratch so deleted content never lingers.
 rm -rf "$DEST"
 mkdir -p "$DEST"

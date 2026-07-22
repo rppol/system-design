@@ -136,13 +136,18 @@ jobs:
           # The APK must never receive the Pages-only service-worker stamp.
           unzip -p "$APK" assets/www/game/sw.js | grep -q '__BUILD__' \
             || { echo "sw.js in the APK was Pages-stamped"; exit 1; }
-          # ~27 MiB today (the ~59 MB asset tree compresses ~2x in the zip).
-          # Band is deliberately wide: it catches "content went missing" and
-          # "something exploded", not ordinary content growth.
+          # Pre-rendered Mermaid diagrams must ship, or every diagram would fall
+          # back to the (offline-vendored) engine — the payload is the whole point.
+          MMZ=$(zipinfo -1 "$APK" 'assets/www/game/diagrams/*.mmz' | wc -l)
+          [ "$MMZ" -ge 3000 ] || { echo "pre-rendered diagrams missing: only $MMZ .mmz in APK"; exit 1; }
+          # ~90 MiB now: the ~59 MB content tree (~2x-compressible) plus ~62 MB of
+          # pre-rendered diagram assets (game/diagrams/*.mmz, already gzipped so they
+          # don't shrink further in the zip). Band widened for the diagram payload;
+          # still catches "content went missing" and "something exploded".
           SIZE=$(stat -c%s "$APK")
-          [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((60*1024*1024)) ] \
-            || { echo "APK size $SIZE outside the 15-60 MiB window"; exit 1; }
-          echo "smoke OK: sections=$SEC banks=$BANKS graphs=$GRAPHS size=$SIZE"
+          [ "$SIZE" -ge $((15*1024*1024)) ] && [ "$SIZE" -le $((130*1024*1024)) ] \
+            || { echo "APK size $SIZE outside the 15-130 MiB window"; exit 1; }
+          echo "smoke OK: sections=$SEC banks=$BANKS graphs=$GRAPHS mmz=$MMZ size=$SIZE"
 
       - name: Publish GitHub Release
         # Primary delivery: a stable latest URL at

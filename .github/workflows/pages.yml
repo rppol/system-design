@@ -34,6 +34,27 @@ jobs:
           cd src/main/java/com/rutik/systemdesign/game
           sed -i "s/__BUILD__/$(date +%Y%m%d%H%M%S)/" sw.js
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Pre-render Mermaid diagrams to static SVG
+        # Drives the app in headless Chromium (Puppeteer) and renders every fence
+        # to game/diagrams/<hash>.mmz (gitignored, regenerated here). The runtime
+        # reads these instead of loading the mermaid engine, so diagrams draw with
+        # no CDN and no per-diagram render cost. A diagram failure never blocks the
+        # deploy — the reader live-renders that fence. node_modules is removed after
+        # so it never lands in the Pages artifact (path: . uploads the whole tree).
+        run: |
+          npm ci --no-audit --no-fund
+          npx --yes puppeteer browsers install chrome
+          python3 -m http.server 8901 >/tmp/diag_http.log 2>&1 &
+          SERVER_PID=$!
+          sleep 2
+          node scripts/build_diagrams.mjs --base http://localhost:8901
+          kill $SERVER_PID || true
+          rm -rf node_modules
+
       - uses: actions/upload-pages-artifact@v3
         with:
           # Deploy the whole repo root so every content path resolves correctly.
