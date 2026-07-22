@@ -1,0 +1,12 @@
+{
+  "name": "lora-build",
+  "private": true,
+  "type": "module",
+  "description": "CI-only build tooling for the LORA game (Mermaid diagram pre-rendering). The app itself ships as hand-authored static files with no runtime dependencies.",
+  "scripts": {
+    "build:diagrams": "node scripts/build_diagrams.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "^23.10.4"
+  }
+}

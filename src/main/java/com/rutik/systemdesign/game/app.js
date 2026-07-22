@@ -4903,15 +4903,25 @@ function mmObserve(n) {
       clearTimeout(_mmROTimer);
       _mmROTimer = setTimeout(() => {
         document.querySelectorAll(".md-body .mermaid").forEach((el) => {
-          const src = _mmSrc.get(el);
           const sv = el.querySelector("svg");
-          if (!src || !sv || sv.dataset.custom) return;
+          if (!sv || sv.dataset.custom) return;
           const avail = mmAvailWide(el);
           const was = +el.dataset.mmAvail || avail;
-          if (Math.abs(avail - was) / was > 0.15) mmRenderNode(el, src);       // re-choose orientation
-          else if (el.dataset.mmFit) mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, avail));  // track live width, no floors
-          else mmLayout(el, sv, Math.min(+sv.dataset.natw || avail,
-                                         Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
+          const asset = _mmAsset.get(el);
+          if (Math.abs(avail - was) / was > 0.15) {            // width moved enough to re-choose orientation
+            if (asset) {                                        // [SF] pre-rendered: engine-free re-orient
+              const pick = mmChooseVariant(asset, avail);
+              if (pick.variant !== el.dataset.mmVariant) injectPrerendered(el, asset);   // orientation flipped -> swap the baked SVG
+              else { el.dataset.mmAvail = avail; mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0))); }
+            } else {
+              const src = _mmSrc.get(el);
+              if (src) mmRenderNode(el, src);                   // live fallback: re-render to re-choose orientation
+            }
+          } else if (el.dataset.mmFit) {
+            mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, avail));   // track live width, no floors
+          } else {
+            mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
+          }
         });
       }, 250);
     });
@@ -5004,6 +5014,7 @@ async function __mmBuildVariants(src, width) {
   const alt = altSrc ? await one(altSrc) : null;
   return {
     v: 1,
+    ctype: mmChartType(src) || null,                  // timeline/xychart/pie/quadrant sizing on the runtime side
     svg0: base.svg, d0: base.dims ? [Math.round(base.dims.w), Math.round(base.dims.h)] : null,
     svg1: alt ? alt.svg : null, d1: alt && alt.dims ? [Math.round(alt.dims.w), Math.round(alt.dims.h)] : null,
   };
@@ -5011,7 +5022,8 @@ async function __mmBuildVariants(src, width) {
 if (typeof window !== "undefined") window.__mmBuildVariants = __mmBuildVariants;
 
 async function mmRenderNode(n, src) {
-  const mermaid = await _mermaidReady;
+  const mermaid = await ensureMermaid(n);
+  if (!mermaid) return;
   const avail = mmAvailWide(n);
   n.dataset.mmAvail = avail;
   const dispH = (d) => d.h * Math.min(1, avail / d.w);   // on-screen height at column width
@@ -5247,10 +5259,11 @@ function _loadMermaidModule() {
     .then(m => m.default);
 }
 
-async function renderMermaid(root) {
-  const nodes = [...root.querySelectorAll(".mermaid")];
-  if (!nodes.length) return;                       // no mermaid on this page — skip
-  let mermaid;
+// [SF] Lazily load + initialize the Mermaid engine (CDN ESM on Pages / vendored
+// UMD in the APK). Only reached now when a fence has NO pre-rendered asset (added
+// or edited before the build ran) — the common path is engine-free. Returns the
+// module, or null on failure (shows a source-fallback notice on failNode).
+async function ensureMermaid(failNode) {
   try {
     if (!_mermaidReady) {
       _mermaidReady = _loadMermaidModule()
@@ -5376,31 +5389,126 @@ async function renderMermaid(root) {
           return m;
         });
     }
-    mermaid = await _mermaidReady;
+    return await _mermaidReady;
   } catch (err) {
     // CDN unavailable or offline — raw source stays visible as text, nothing
     // crashes, and the import is retried on the next page open (a cached
     // rejected promise would otherwise disable diagrams for the whole session).
     _mermaidReady = null;
     console.warn("Mermaid load failed:", err);
-    if (nodes[0] && !document.querySelector(".mm-fail")) nodes[0].insertAdjacentHTML("afterbegin", `<div class="mm-fail">Diagrams need a network connection — showing source.</div>`);
-    return;
+    if (failNode && !document.querySelector(".mm-fail")) failNode.insertAdjacentHTML("afterbegin", `<div class="mm-fail">Diagrams need a network connection — showing source.</div>`);
+    return null;
   }
+}
+
+// [SF] Pre-rendered diagram assets (built by scripts/build_diagrams.mjs into
+// game/diagrams/<key>.json, keyed by the SAME cyrb53(source) a fence hashes to).
+// Cached per session; a miss (null) is cached too so an un-baked fence isn't
+// re-fetched on every scroll. Fetched relative to the game dir -> resolves on
+// Pages AND in the offline APK WebView.
+const _mmAsset = new WeakMap();                    // node -> asset (for engine-free resize swaps)
+const _diagramCache = new Map();                   // key -> asset | null
+async function loadDiagramAsset(src) {
+  const key = cyrb53(src).toString(36);
+  if (_diagramCache.has(key)) return _diagramCache.get(key);
+  let asset = null;
+  try {
+    const r = await fetch(`diagrams/${key}.mmz`, { cache: "force-cache" });   // gzipped precision-reduced asset
+    if (r.ok && "DecompressionStream" in window) {
+      const ds = new DecompressionStream("gzip");
+      const text = await new Response(r.body.pipeThrough(ds)).text();
+      asset = JSON.parse(text);
+    }
+  } catch { /* offline / missing / no DecompressionStream -> live-render fallback */ }
+  _diagramCache.set(key, asset);
+  return asset;
+}
+
+// [SF] Engine-free orientation choice — reproduces mmRenderNode's decision
+// (widescreen height test + portrait legibility test) from the BAKED dims d0/d1
+// instead of re-rendering. This is what lets phone/tablet/rotation re-orient a
+// pre-rendered diagram with no engine, offline.
+function mmChooseVariant(asset, avail) {
+  const d0 = { w: asset.d0[0], h: asset.d0[1] };
+  const dispH = (d) => d.h * Math.min(1, avail / d.w);
+  let svg = asset.svg0, d = d0, flipScale = 0, variant = "0";
+  if (asset.svg1 && asset.d1) {
+    const d1 = { w: asset.d1[0], h: asset.d1[1] };
+    const s1 = Math.min(1, Math.max(avail / d1.w, 0.7));
+    const visible = Math.min(1, avail / (d1.w * s1));
+    if (mmPortrait(avail)) {
+      const s0 = Math.min(1, avail / d0.w);
+      const s1fit = Math.min(1, avail / d1.w);
+      const sane = d1.h * s1fit <= window.innerHeight * 3.5;
+      if (s1fit > s0 * 1.25 && sane) { svg = asset.svg1; d = d1; flipScale = s1fit; variant = "1"; }
+    } else if (d1.h * s1 < dispH(d0) * 0.7 && visible >= 0.55) {
+      svg = asset.svg1; d = d1; flipScale = s1; variant = "1";
+    }
+  }
+  return { svg, d, flipScale, variant };
+}
+
+// [SF] Mount a pre-rendered asset into a container: pick the variant for the
+// current width, size it, and wire grip/fit/zoom + the resize observer — the same
+// tail mmRenderNode runs, but with no engine and no render.
+function injectPrerendered(n, asset) {
+  _mmAsset.set(n, asset);
+  const avail = mmAvailWide(n);
+  n.dataset.mmAvail = avail;
+  const pick = mmChooseVariant(asset, avail);
+  n.dataset.mmVariant = pick.variant;
+  n.innerHTML = pick.svg;
+  const sv = n.querySelector("svg");
+  const d = pick.d;
+  if (sv && d) {
+    sv.dataset.natw = Math.round(d.w);
+    if (n.dataset.mmFit) {
+      mmLayout(n, sv, Math.min(d.w, avail));
+    } else if (pick.flipScale) {
+      sv.dataset.minw = Math.round(d.w * 0.7);
+      mmLayout(n, sv, Math.round(d.w * pick.flipScale));
+    } else if (asset.ctype === "timeline" && d.w > avail) {
+      const w = Math.max(avail, Math.round(d.w * 0.75));
+      if (w > avail) sv.dataset.minw = w;
+      mmLayout(n, sv, w);
+    } else {
+      mmLayout(n, sv, Math.min(d.w, avail));
+    }
+    mmAddGrip(n, sv);
+    mmAddFit(n, sv);
+  }
+  if (!n.dataset.mmWired) {
+    n.dataset.mmWired = "1";
+    n.tabIndex = 0;
+    n.setAttribute("role", "button");
+    n.setAttribute("aria-label", "Diagram — open zoom view");
+    n.addEventListener("click", () => openMermaidZoom(n));
+    n.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMermaidZoom(n); } });
+  }
+  mmObserve(n);
+}
+
+async function renderMermaid(root) {
+  const nodes = [...root.querySelectorAll(".mermaid")];
+  if (!nodes.length) return;                       // no mermaid on this page — skip
   if (_mmRO) _mmRO.disconnect();                   // observe only the live page's diagrams
   if (_mmIO) _mmIO.disconnect();                   // drop the previous page's lazy-render targets (now detached)
   const renderOne = async (n) => {
-    if (!n.querySelector("svg")) {                 // not yet rendered this visit
-      const src = n.textContent.trim();
-      if (!src) return;
-      _mmSrc.set(n, src);
-      await mmRenderNode(n, src);
-    }
+    if (n.querySelector("svg")) { mmObserve(n); return; }   // already rendered this visit
+    const src = n.textContent.trim();
+    if (!src) return;
+    _mmSrc.set(n, src);
+    const asset = await loadDiagramAsset(src);     // [SF] pre-rendered SVGs from the build (engine-free, offline)
+    if (asset && asset.svg0) { injectPrerendered(n, asset); return; }
+    // Fallback: un-baked fence (added/edited before the build) -> live render.
+    const mermaid = await ensureMermaid(n);
+    if (!mermaid) return;
+    await mmRenderNode(n, src);
     mmObserve(n);
   };
-  // [PERF] Lazy render: each mermaid.render() is tens of ms, so a diagram-dense
-  // page used to block on rendering EVERY fence up front. Now a diagram renders
-  // only as it nears the viewport; already-rendered ones just re-attach the resize
-  // observer. rootMargin renders a screen ahead so scrolling never reveals a blank.
+  // [PERF] Lazy render: a diagram is mounted only as it nears the viewport;
+  // already-rendered ones just re-attach the resize observer. rootMargin mounts a
+  // screen ahead so scrolling never reveals a blank.
   nodes.filter((n) => n.querySelector("svg")).forEach(mmObserve);
   const pending = nodes.filter((n) => !n.querySelector("svg"));
   if (!pending.length) return;
