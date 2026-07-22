@@ -4926,6 +4926,90 @@ function mmObserve(n) {
 
 // Render one diagram into its container: pick the orientation that reads best
 // at the container's current width, size it, and wire grip + zoom.
+// [SF] Bake all appearance polish INTO the SVG content — chart post-process,
+// sequence-note widening, rounded boxes, blue arrowheads, viewBox fix, plain-node
+// tint. Extracted verbatim from mmRenderNode's tail so the build-time pre-renderer
+// produces SVGs byte-identical to live output. Sizing/interaction stay runtime-only.
+function mmPolishSvg(n, ctype) {
+  const sv = n.querySelector("svg");
+  // Sequence notes/actors: even with matched measure/display fonts, mermaid
+  // under-measures long monospace lines by a few percent (same failure class
+  // mmFixViewBox patches at canvas level), so wrapped text can poke past its
+  // rect onto the black canvas where the dark text becomes unreadable. The
+  // rect is decorative background — widen it to cover its own text.
+  n.querySelectorAll("rect.note, rect.actor").forEach(r => {
+    const rb = r.getBoundingClientRect();
+    if (!rb.width) return;
+    const k = r.width.baseVal.value / rb.width;            // screen px -> svg units
+    let over = 0;
+    r.parentElement.querySelectorAll("text").forEach(t => {
+      const tb = t.getBoundingClientRect();
+      const cy = (tb.top + tb.bottom) / 2;
+      if (cy < rb.top || cy > rb.bottom) return;           // different row of the group
+      if (tb.right < rb.left || tb.left > rb.right) return; // unrelated column
+      over = Math.max(over, rb.left - tb.left, tb.right - rb.right);
+    });
+    if (over > 0.5) {
+      const pad = (over + 4) * k;
+      r.setAttribute("x", r.x.baseVal.value - pad);
+      r.setAttribute("width", r.width.baseVal.value + 2 * pad);
+    }
+  });
+  // Post-process SVG: round EVERY box — flowchart nodes, sequence actors and
+  // notes, alt/opt frames, timeline periods — not just .node rects. Chart data
+  // marks (xychart bars, pie slices, quadrant fills) keep square corners: rx
+  // there reshapes the mark itself. Tiny rects (<12px tall) are left alone.
+  if (!["xychart", "pie", "quadrant"].includes(ctype)) {
+    n.querySelectorAll("svg rect").forEach(r => {
+      const h = r.height?.baseVal?.value || 0;
+      if (h < 12) return;
+      const rx = Math.min(8, Math.round(h / 3));
+      r.setAttribute("rx", rx); r.setAttribute("ry", rx);
+    });
+  }
+  n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
+  // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
+  n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
+  mmTintPlain(n);
+}
+
+// [SF] Build-time hook: render BOTH orientations of one fence through the LIVE
+// pipeline (same engine, config, and mmPolishSvg) at a canonical width, and
+// return finished SVG strings + measured dims for each. The Puppeteer build
+// (scripts/build_diagrams.mjs) calls this per fence — so pre-rendered assets are
+// produced by the exact runtime code, guaranteeing byte-identity. svg0 = authored
+// orientation, svg1 = flipped alt (null when the diagram has no meaningful flip).
+async function __mmBuildVariants(src, width) {
+  const mermaid = await _mermaidReady;
+  const one = async (source) => {
+    const n = document.createElement("div");
+    n.className = "mermaid md-body";
+    Object.assign(n.style, { position: "absolute", left: "-99999px", top: "0", width: width + "px" });
+    document.body.appendChild(n);
+    try {
+      const ctype = mmChartType(source);
+      const svg = (await mermaid.render("mmb" + (++_mmSeq), mmChartDirective(ctype, source, width) + source)).svg;
+      n.innerHTML = svg;
+      const sv = n.querySelector("svg");
+      if (ctype) mmChartPostProcess(ctype, sv);
+      if (sv) mmFixViewBox(sv);
+      mmPolishSvg(n, ctype);
+      const out = n.querySelector("svg").outerHTML;
+      return { svg: out, dims: mmDims(out) };
+    } finally { n.remove(); }
+  };
+  const base = await one(src);
+  const altSrc = mmAltOrientation(src);
+  const alt = altSrc ? await one(altSrc) : null;
+  return {
+    v: 1,
+    svg0: base.svg, d0: base.dims ? [Math.round(base.dims.w), Math.round(base.dims.h)] : null,
+    svg1: alt ? alt.svg : null, d1: alt && alt.dims ? [Math.round(alt.dims.w), Math.round(alt.dims.h)] : null,
+  };
+}
+if (typeof window !== "undefined") window.__mmBuildVariants = __mmBuildVariants;
+
 async function mmRenderNode(n, src) {
   const mermaid = await _mermaidReady;
   const avail = mmAvailWide(n);
@@ -5019,46 +5103,7 @@ async function mmRenderNode(n, src) {
     mmAddGrip(n, sv);
     mmAddFit(n, sv);
   }
-  // Sequence notes/actors: even with matched measure/display fonts, mermaid
-  // under-measures long monospace lines by a few percent (same failure class
-  // mmFixViewBox patches at canvas level), so wrapped text can poke past its
-  // rect onto the black canvas where the dark text becomes unreadable. The
-  // rect is decorative background — widen it to cover its own text.
-  n.querySelectorAll("rect.note, rect.actor").forEach(r => {
-    const rb = r.getBoundingClientRect();
-    if (!rb.width) return;
-    const k = r.width.baseVal.value / rb.width;            // screen px -> svg units
-    let over = 0;
-    r.parentElement.querySelectorAll("text").forEach(t => {
-      const tb = t.getBoundingClientRect();
-      const cy = (tb.top + tb.bottom) / 2;
-      if (cy < rb.top || cy > rb.bottom) return;           // different row of the group
-      if (tb.right < rb.left || tb.left > rb.right) return; // unrelated column
-      over = Math.max(over, rb.left - tb.left, tb.right - rb.right);
-    });
-    if (over > 0.5) {
-      const pad = (over + 4) * k;
-      r.setAttribute("x", r.x.baseVal.value - pad);
-      r.setAttribute("width", r.width.baseVal.value + 2 * pad);
-    }
-  });
-  // Post-process SVG: round EVERY box — flowchart nodes, sequence actors and
-  // notes, alt/opt frames, timeline periods — not just .node rects. Chart data
-  // marks (xychart bars, pie slices, quadrant fills) keep square corners: rx
-  // there reshapes the mark itself. Tiny rects (<12px tall) are left alone.
-  if (!["xychart", "pie", "quadrant"].includes(ctype)) {
-    n.querySelectorAll("svg rect").forEach(r => {
-      const h = r.height?.baseVal?.value || 0;
-      if (h < 12) return;
-      const rx = Math.min(8, Math.round(h / 3));
-      r.setAttribute("rx", rx); r.setAttribute("ry", rx);
-    });
-  }
-  n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
-  // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
-  n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
-  if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
-  mmTintPlain(n);
+  mmPolishSvg(n, ctype);                                 // [SF] appearance baking, shared with the build-time pre-renderer
   if (!n.dataset.mmWired) {                              // once per container, not per render
     n.dataset.mmWired = "1";
     n.tabIndex = 0;
