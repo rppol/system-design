@@ -426,12 +426,11 @@ flowchart TD
     OLAP -->|no| KV(["Key-value /<br/>document store"])
 
     DEPTH -->|"yes, simple<br/>rel. type"| CTE(["PostgreSQL<br/>recursive CTE"])
-    DEPTH -->|"no, variable-depth<br/>or multi-type"| GRAPH(["Graph database<br/>Neo4j"])
+    DEPTH -->|"no, variable-depth<br/>or multi-type"| GRAPH@{ icon: "logos:neo4j", form: "square", label: "Neo4j", pos: "b", h: 44 }
 
     class START,OLAP,DEPTH mathOp
     class PG1,CTE base
     class KV frozen
-    class GRAPH train
 ```
 
 Relationship-traversal-heavy and shallow-and-simple both point away from a graph database; only variable-depth or multi-relationship-type traversal earns the extra operational cost of running Neo4j alongside the primary store.
