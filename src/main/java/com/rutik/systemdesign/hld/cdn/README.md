@@ -991,14 +991,15 @@ flowchart LR
     end
 
     Workers -->|"miss"| Tier2(Tier-2 Regional<br/>Argo tiered cache)
-    Tier2 -->|"miss"| Origin(Origin: S3<br/>300TB originals)
+    Tier2 -->|"miss"| Origin
+
+    Origin@{ icon: "logos:aws-s3", form: "square", label: "Origin: S3<br/>300TB originals", pos: "b", h: 44 }
 
     class Client io
     class DNS mathOp
     class Tier1 base
     class Workers train
     class Tier2 base
-    class Origin frozen
 ```
 
 *Each hop fires only on a miss: 96.2% of requests are satisfied at Tier-1, and the Tier-2 regional shield absorbs most of the rest, so only a trickle of the 500k req/sec budget ever reaches the S3 origin.*
