@@ -302,16 +302,16 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG(["PostgreSQL<br/>50M orders table"]) -->|"JDBC keyset query<br/>(id after cursor, LIMIT 1000)"| SPL["OrderPageSpliterator<br/>currentPage, pageIndex,<br/>lastId, minId / maxId"]
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>50M orders table", pos: "b", h: 44 }
+    PG -->|"JDBC keyset query<br/>(id after cursor, LIMIT 1000)"| SPL["OrderPageSpliterator<br/>currentPage, pageIndex,<br/>lastId, minId / maxId"]
     SPL -->|"StreamSupport.stream<br/>(parallel = true)"| STR["Java Stream<br/>filter / map / collect"]
-    STR --> S3(["S3 CSV export"])
-    STR --> KAFKA(["Kafka producer"])
+    STR --> S3@{ icon: "logos:aws-s3", form: "square", label: "S3 CSV export", pos: "b", h: 44 }
+    STR --> KAFKA@{ icon: "logos:kafka", form: "square", label: "Kafka producer", pos: "b", h: 44 }
     STR --> AGG(["aggregate count"])
 
-    class PG io
     class SPL mathOp
     class STR train
-    class S3,KAFKA,AGG req
+    class AGG req
 ```
 
 *`OrderPageSpliterator` lazily pages the 50M-row table into a parallel `Stream`, holding only ~500 KB (one page) in heap at a time instead of the ~25 GB a full load would need; `trySplit()` then hands each of 8 threads a disjoint key range.*
