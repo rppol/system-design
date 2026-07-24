@@ -470,8 +470,8 @@ flowchart LR
     end
 
     subgraph Loc["Location service (write path)"]
-        LSvc(["Location<br/>service"]) --> LocDB(["User location DB<br/>Cassandra-style"])
-        LSvc --> Kafka(["Kafka<br/>location stream"])
+        LSvc(["Location<br/>service"]) --> LocDB@{ icon: "logos:cassandra", form: "square", label: "User location DB<br/>(Cassandra)", pos: "b", h: 44 }
+        LSvc --> Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
         Kafka --> Traffic(["Live traffic"])
         Kafka --> NewRoad(["New-road<br/>detection"])
         Kafka --> Pers(["Personalization"])
@@ -492,10 +492,10 @@ flowchart LR
     Client -->|"route request"| Geo
 
     class Client,CDN io
-    class TileStore,LocDB,RTiles base
+    class TileStore,RTiles base
     class LSvc,Geo,Planner,SP req
     class ETA,Traffic mathOp
-    class Kafka,NewRoad,Pers,Rank,Updater train
+    class NewRoad,Pers,Rank,Updater train
 ```
 
 Caption: three independent subsystems — static tiles served from a CDN (read path), a
