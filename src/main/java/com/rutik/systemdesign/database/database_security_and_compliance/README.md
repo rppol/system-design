@@ -28,21 +28,15 @@ Database security is like securing a safe deposit vault. The building has multip
 
 ## 4. Types / Architectures / Strategies
 
-```
-Security Layer     | Controls                             | Technology
--------------------|--------------------------------------|---------------------------
-Network            | VPC isolation, private subnets,      | VPC, Security Groups,
-                   | no public IP, bastion host           | AWS VPN, PrivateLink
-Authentication     | Password (scram-sha-256), cert-based | pg_hba.conf, TLS
-                   | IAM authentication (cloud)           | AWS RDS IAM auth
-Authorization      | GRANT/REVOKE, roles, RLS, column     | PostgreSQL GRANT,
-                   | privileges                           | Row-Level Security
-Encryption         | TLS in transit, AES-256 at rest      | pg SSL, LUKS, TDE
-Audit logging      | DDL audit, DML on sensitive tables,  | pgAudit, MySQL audit,
-                   | privilege escalation events          | CloudTrail
-Secrets management | No passwords in code; rotation       | Vault, AWS Secrets Manager
-Data masking       | Pseudonymize PII, mask SSN/CC        | Application layer, views
-```
+| Security Layer | Controls | Technology |
+|---|---|---|
+| Network | VPC isolation, private subnets, no public IP, bastion host | VPC, Security Groups, AWS VPN, PrivateLink |
+| Authentication | Password (scram-sha-256), cert-based IAM authentication (cloud) | pg_hba.conf, TLS AWS RDS IAM auth |
+| Authorization | GRANT/REVOKE, roles, RLS, column privileges | PostgreSQL GRANT, Row-Level Security |
+| Encryption | TLS in transit, AES-256 at rest | pg SSL, LUKS, TDE |
+| Audit logging | DDL audit, DML on sensitive tables, privilege escalation events | pgAudit, MySQL audit, CloudTrail |
+| Secrets management | No passwords in code; rotation | Vault, AWS Secrets Manager |
+| Data masking | Pseudonymize PII, mask SSN/CC | Application layer, views |
 
 Every request has to clear each layer in sequence — defense in depth means a leaked credential still has to get past authorization, and a bypassed authorization check is still encrypted, audited, and masked before it reaches sensitive data:
 
@@ -92,17 +86,16 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    internet(["Internet"]) --> alb["Application<br/>Load Balancer<br/>(public subnet)"]
+    internet(["Internet"]) --> alb@{ icon: "logos:aws-elb", form: "square", label: "ALB<br/>(public subnet)", pos: "b", h: 44 }
     alb --> appsrv["App servers<br/>(private 10.0.1.0/24)"]
     appsrv --> sg{"VPC Security Group<br/>allow 5432 from<br/>app subnet only"}
-    sg --> primary[("PostgreSQL Primary<br/>private 10.0.2.0/24<br/>no public IP")]
-    primary --> replica[("PostgreSQL<br/>Replica")]
+    sg --> primary@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Primary<br/>no public IP", pos: "b", h: 44 }
+    primary --> replica@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Replica", pos: "b", h: 44 }
     bastion(["Bastion Host /<br/>SSM Session Manager"]) -.->|"admin access only"| primary
 
     class internet io
-    class alb,appsrv req
+    class appsrv req
     class sg mathOp
-    class primary,replica base
     class bastion frozen
 ```
 
@@ -488,17 +481,15 @@ REVOKE SELECT ON users FROM app_user;  -- access only via function
 
 ## 8. Tradeoffs
 
-```
-Control             | Security Benefit       | Performance/UX Cost
---------------------|------------------------|-------------------------
-RLS enforcement     | Row-level isolation    | Slight query overhead
-TLS (verify-full)   | Prevent MITM           | TLS handshake overhead
-pgAudit all writes  | Full audit trail       | Storage and I/O overhead
-Dynamic credentials | Credential rotation    | Vault dependency
-Hard delete         | True erasure           | Referential integrity complexity
-SCRAM-SHA-256       | Strong auth            | Slightly slower than md5
-Column encryption   | Field-level security   | Application complexity
-```
+| Control | Security Benefit | Performance/UX Cost |
+|---|---|---|
+| RLS enforcement | Row-level isolation | Slight query overhead |
+| TLS (verify-full) | Prevent MITM | TLS handshake overhead |
+| pgAudit all writes | Full audit trail | Storage and I/O overhead |
+| Dynamic credentials | Credential rotation | Vault dependency |
+| Hard delete | True erasure | Referential integrity complexity |
+| SCRAM-SHA-256 | Strong auth | Slightly slower than md5 |
+| Column encryption | Field-level security | Application complexity |
 
 ---
 
