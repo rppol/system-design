@@ -192,20 +192,20 @@ flowchart LR
 sequenceDiagram
     participant Caller
     participant Task
-    participant Loop as EventLoop
+    participant EvLoop as EventLoop
     participant Coro as Coroutine
     participant Future
 
     Caller->>Task: create_task(coro)
-    Task->>Loop: call_soon(self.__step)
-    Note over Loop: Handle queued in _ready
-    Loop->>Task: _run_once drains _ready
+    Task->>EvLoop: call_soon(self.__step)
+    Note over EvLoop: Handle queued in _ready
+    EvLoop->>Task: _run_once drains _ready
     Task->>Coro: coro.send(None)
     Coro-->>Task: yields Future (pending)
     Task->>Future: add_done_callback(__wakeup)
     Note over Future: I/O completes elsewhere
-    Future->>Loop: call_soon(cb) per callback
-    Loop->>Task: __wakeup(future)
+    Future->>EvLoop: call_soon(cb) per callback
+    EvLoop->>Task: __wakeup(future)
     Task->>Task: __step(future.result())
 ```
 
@@ -1034,7 +1034,9 @@ flowchart LR
     Select -->|"OS waits for<br/>TCP reply"| Record(["record result"])
     Record --> Queue(["asyncio.Queue"])
     Queue --> Collector(["Result Collector Task"])
-    Collector --> Redis(["redis.xadd<br/>health:results"])
+    Collector --> Redis
+
+    Redis@{ icon: "logos:redis", form: "square", label: "redis.xadd<br/>health:results", pos: "b", h: 44 }
 
     class Start io
     class Coord,TG mathOp
@@ -1043,7 +1045,7 @@ flowchart LR
     class HTTP,Select frozen
     class Reader mathOp
     class Record train
-    class Queue,Redis base
+    class Queue base
     class Collector mathOp
 ```
 
