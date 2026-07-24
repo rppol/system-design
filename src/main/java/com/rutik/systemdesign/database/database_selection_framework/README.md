@@ -280,25 +280,20 @@ That 84% is the whole lesson. The infrastructure line items differ by a few thou
 
 ### Evaluation Scorecard
 
-```
 For each candidate database, score 1-5 on each dimension:
 
-Dimension              | Weight | PostgreSQL | DynamoDB | Cassandra
------------------------|--------|------------|----------|----------
-Consistency model match|  30%   |     5      |    3     |    3
-Query pattern match    |  25%   |     5      |    2     |    3
-Scale to requirements  |  20%   |     3      |    5     |    5
-Operational complexity |  15%   |     4      |    5     |    2
-Team expertise         |  10%   |     5      |    3     |    2
------------------------|--------|------------|----------|----------
-Weighted score         |  100%  |    4.55    |   3.55   |   3.20
+| Dimension | Weight | PostgreSQL | DynamoDB | Cassandra |
+|-----------|--------|------------|----------|-----------|
+| Consistency model match | 30% | 5 | 3 | 3 |
+| Query pattern match | 25% | 5 | 2 | 3 |
+| Scale to requirements | 20% | 3 | 5 | 5 |
+| Operational complexity | 15% | 4 | 5 | 2 |
+| Team expertise | 10% | 5 | 3 | 2 |
+| Weighted score | 100% | 4.55 | 3.55 | 3.20 |
 
-Context: Strong consistency required, SQL queries, moderate scale, no NoSQL expertise
-→ PostgreSQL wins clearly
+Context: Strong consistency required, SQL queries, moderate scale, no NoSQL expertise → PostgreSQL wins clearly.
 
-Same scorecard with: no consistency requirement, 1M writes/second, managed cloud
-→ DynamoDB might score higher (flip operational and scale weights)
-```
+Same scorecard with: no consistency requirement, 1M writes/second, managed cloud → DynamoDB might score higher (flip operational and scale weights).
 
 **What this actually says.** "Make each candidate earn its score on the dimensions you actually care about, weighted by how much you care — so the decision is settled by the requirements you agreed on before anyone had a favourite." The scorecard's value is not the number it produces; it is that it forces the weights to be argued first, in the abstract, rather than reverse-engineered to justify a preferred answer.
 
@@ -414,11 +409,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     dq{"Write scale + region<br/>requirements?"}
-    dq -->|"under 50K TPS<br/>single region, SQL team"| pgreplica(["PostgreSQL +<br/>read replicas"])
+    dq -->|"under 50K TPS<br/>single region, SQL team"| pgreplica
     dq -->|"over 50K TPS or<br/>multi-region active-active"| distsql(["CockroachDB / TiDB"])
+    pgreplica@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Replicas", pos: "b", h: 44 }
 
     class dq mathOp
-    class pgreplica,distsql base
+    class distsql base
 ```
 Distributed SQL earns its 2-5x cost premium only when write scale or multi-region active-active consistency genuinely exceeds what vertical PostgreSQL scaling (and Vitess/Citus sharding) can provide.
 
