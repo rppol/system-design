@@ -290,8 +290,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    ur(["User Request"]) --> k["Kafka · user_events"]
-    k --> flink["Flink Stream Processor\nlast_5_clicks, session, device\n+ segment / geo lookup"]
+    ur(["User Request"]) --> k@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>user_events", pos: "b", h: 44 }
+    k --> flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink Stream Processor<br/>session, device, geo lookup", pos: "b", h: 44 }
     flink --> x(["Feature Vector x"])
     x --> model["Bandit Model\nLinUCB / Thompson"]
     model --> rec(["Recommended Item"])
@@ -300,8 +300,7 @@ flowchart TD
     reward -.->|"update A_i, b_i, alpha_i, beta_i"| model
 
     class ur,x,rec io
-    class k,imp base
-    class flink mathOp
+    class imp base
     class model train
     class reward lossN
 ```
