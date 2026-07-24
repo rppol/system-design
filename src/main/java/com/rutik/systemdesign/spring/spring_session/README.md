@@ -96,16 +96,17 @@ flowchart TD
     WRAP --> CHAIN["filterChain.doFilter(wrapped)"]
     CHAIN --> CTRL["Controller / Security\ncalls request.getSession()"]
     CTRL --> REPO["SessionRepository.findById('abc')\ncontainer HttpSession never touched"]
-    REPO --> REDIS[("Redis\nspring:session:sessions:abc")]
+    REPO --> REDIS
     REDIS --> SESS([Session object\nattributes + lastAccessedTime])
     SESS --> SAVE["On response commit:\nrepository.save(session)"]
     SAVE --> REDIS
+
+    REDIS@{ icon: "logos:redis", form: "square", label: "Redis<br/>sessions:abc", pos: "b", h: 44 }
 
     class REQ,SESS io
     class SRF,WRAP,CHAIN req
     class CTRL base
     class REPO,SAVE mathOp
-    class REDIS frozen
 ```
 
 The filter runs before Spring Security, so by the time `SecurityContextHolderFilter` reads the session the swap has already happened. Everything downstream uses the standard Servlet API and never knows the store is remote.
@@ -149,14 +150,15 @@ flowchart LR
     U([User]) --> LB{"LB round-robin\nany node"}
     LB --> NA["Node A\nstateless"]
     LB --> NB["Node B\nstateless"]
-    NA --> R[("Redis\nshared session store")]
+    NA --> R
     NB --> R
     R --> OK["Node A dies →\nNode B serves the\nsame session\nzero logout"]
+
+    R@{ icon: "logos:redis", form: "square", label: "Redis<br/>session store", pos: "b", h: 44 }
 
     class U io
     class LB mathOp
     class NA,NB base
-    class R frozen
     class OK train
 ```
 
@@ -770,16 +772,18 @@ flowchart TD
     USERS([Clients]) --> LB{"L7 LB\nround-robin"}
     LB --> APP1["app-1 … app-12\nstateless Spring MVC"]
     APP1 --> SR["SessionRepositoryFilter\n+ RedisIndexedSessionRepository"]
-    SR --> SENTINEL["Redis Sentinel\nfailover-managed"]
-    SENTINEL --> PRIMARY[("Redis primary\nspring:session:*")]
-    SENTINEL -.->|"promotes on failure"| REPLICA[("Redis replica")]
+    SR --> SENTINEL
+    SENTINEL --> PRIMARY
+    SENTINEL -.->|"promotes on failure"| REPLICA
+
+    SENTINEL@{ icon: "logos:redis", form: "square", label: "Redis Sentinel", pos: "b", h: 44 }
+    PRIMARY@{ icon: "logos:redis", form: "square", label: "Redis Primary", pos: "b", h: 44 }
+    REPLICA@{ icon: "logos:redis", form: "square", label: "Redis Replica", pos: "b", h: 44 }
 
     class USERS io
     class LB mathOp
     class APP1 base
     class SR req
-    class SENTINEL train
-    class PRIMARY,REPLICA frozen
 ```
 
 **Implementation Highlights:**
