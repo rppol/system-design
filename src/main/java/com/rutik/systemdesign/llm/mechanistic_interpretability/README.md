@@ -285,41 +285,26 @@ Patching every (layer, position) pair and plotting the logit-diff shift produces
 
 ### 5.4 IOI Circuit (GPT-2 Small, Wang et al. 2022) — Simplified
 
-```
-  Prompt: "When Mary and John went to the store, John gave a drink to"
-  Correct completion: " Mary"   (the name that appears ONCE)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Token positions:     Mary1   John1        John2 (=IO duplicate of John1)
-                          |       |             |
-                          v       v             v
-  +----------------------------------------------------------------+
-  | Duplicate Token Heads (layer ~0-3)                              |
-  |   detect: "John2 is a repeat of an earlier token (John1)"       |
-  +----------------------------------------------------------------+
-                          |
-                          v
-  +----------------------------------------------------------------+
-  | S-Inhibition Heads (layer ~7-8)                                 |
-  |   write to residual stream at the END position:                |
-  |   "suppress attention to the DUPLICATED name (John)"            |
-  +----------------------------------------------------------------+
-                          |
-                          v
-  +----------------------------------------------------------------+
-  | Name Mover Heads (layer ~9-11)                                  |
-  |   at END position, attend to all earlier names EXCEPT the       |
-  |   inhibited one (John) -> copy "Mary" into the output           |
-  +----------------------------------------------------------------+
-                          |
-                          v
-  +----------------------------------------------------------------+
-  | Negative Name Mover Heads                                       |
-  |   small correction: slightly down-weight the copied name        |
-  |   (calibration, prevents overconfidence)                         |
-  +----------------------------------------------------------------+
-                          |
-                          v
-                    logit(" Mary") > logit(" John")
+    Prompt(["Prompt: 'When Mary and John went to the<br/>store, John gave a drink to ___'<br/>Correct: ' Mary' (the name that appears ONCE)"]) --> Dup
+    Dup["Duplicate Token Heads (layer ~0-3)<br/>detect: 'John2 is a repeat of<br/>an earlier token (John1)'"] --> Inhib
+    Inhib["S-Inhibition Heads (layer ~7-8)<br/>write to residual stream at END position:<br/>'suppress attention to the DUPLICATED name'"] --> Mover
+    Mover["Name Mover Heads (layer ~9-11)<br/>at END position, attend to all earlier<br/>names EXCEPT the inhibited one -> copy 'Mary'"] --> NegMover
+    NegMover["Negative Name Mover Heads<br/>small correction: slightly down-weight<br/>the copied name (calibration)"] --> Result
+
+    Result(["logit(' Mary') > logit(' John')"])
+
+    class Prompt,Result io
+    class Dup,Inhib,Mover,NegMover frozen
 ```
 
 ### 5.5 Cross-Layer Transcoder (CLT) / Attribution Graph Pipeline
