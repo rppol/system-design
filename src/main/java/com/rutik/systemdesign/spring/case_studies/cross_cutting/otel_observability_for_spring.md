@@ -180,17 +180,16 @@ flowchart TD
     service --> kafka
     mdc["MDC\ntraceId=abc...\nspanId=xyz..."]
     dbcall["DB call\nOTel JDBC auto-spans"] --> batch
-    kafka["Kafka produce\ntraceparent in message headers"] --> batch
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka produce", pos: "b", h: 44 } --> batch
     batch["OTel SDK: BatchSpanProcessor\nOTLP exporter to OTel Collector"] --> jaeger
     batch --> prom
-    jaeger["Jaeger / Tempo\ntrace spans"]
-    prom["Prometheus / Grafana\nmetrics + exemplars"]
+    jaeger@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger / Tempo", pos: "b", h: 44 }
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus / Grafana", pos: "b", h: 44 }
 
     class inbound req
-    class dispatcher,dbcall,kafka,batch mathOp
+    class dispatcher,dbcall,batch mathOp
     class service train
     class mdc base
-    class jaeger,prom frozen
 ```
 
 ### Trace tree for a distributed order request
