@@ -389,7 +389,8 @@ flowchart LR
     api --> notif
     api --> obq("Offline Backup<br/>Queue")
 
-    block --> cloud("Cloud Storage<br/>S3 buckets · blocks")
+    block --> cloud
+    cloud@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Cloud Storage", pos: "b", h: 44 }
     cloud --> cold("Cold Storage<br/>S3 Glacier")
 
     class client io
@@ -397,7 +398,7 @@ flowchart LR
     class block,api mathOp
     class mcache,obq base
     class mdb train
-    class cloud,cold frozen
+    class cold frozen
 ```
 
 Caption: two write paths leave the client — metadata through the load balancer and API
@@ -420,16 +421,28 @@ storage: they **split a file into blocks**, and each block is handled independen
   is treated as an **independent object** in cloud storage, addressed by that hash.
 - To reconstruct a file, its blocks are **joined back together in the correct order**.
 
-```
-File "report.docx" = 4 blocks (each <= 4 MB, hash-addressed)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  +---------+---------+---------+---------+
-  | block 1 | block 2 | block 3 | block 4 |
-  |  #91af  |  #b3c0  |  #77de  |  #04a2  |   <- hash addresses
-  +---------+---------+---------+---------+
-      |         |         |         |
-      v         v         v         v
-              cloud storage (blocks stored independently)
+    doc(["report.docx<br/>4 blocks, &lt;=4 MB each"]) --> b1(["Block 1<br/>#91af"])
+    doc --> b2(["Block 2<br/>#b3c0"])
+    doc --> b3(["Block 3<br/>#77de"])
+    doc --> b4(["Block 4<br/>#04a2"])
+    b1 --> cs[("Cloud Storage<br/>blocks stored independently")]
+    b2 --> cs
+    b3 --> cs
+    b4 --> cs
+
+    class doc io
+    class b1,b2,b3,b4 frozen
+    class cs base
 ```
 
 Caption: a file is nothing more than an ordered list of hash-addressed blocks; storage does
