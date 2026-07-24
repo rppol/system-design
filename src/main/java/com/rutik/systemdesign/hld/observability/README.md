@@ -707,7 +707,7 @@ flowchart LR
 
     subgraph BACKENDS ["Telemetry backends"]
         direction TB
-        PROM("Prometheus<br/>metrics")
+        PROM@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
         TEMPO("Tempo<br/>traces, tail-sampled")
         LOKI("Loki<br/>logs, with trace_id")
     end
@@ -717,15 +717,15 @@ flowchart LR
     CART & PRICING & INV & PAY -.-> COLLECTOR("OTel Collector<br/>per region")
     ORDER -.-> COLLECTOR
     COLLECTOR --> PROM & TEMPO & LOKI
-    PROM & TEMPO & LOKI --> GRAFANA(["Grafana<br/>unified dashboard<br/>metric to exemplar to trace to logs"])
+    PROM & TEMPO & LOKI --> GRAFANA
+    GRAFANA@{ icon: "logos:grafana", form: "square", label: "Grafana<br/>unified dashboard", pos: "b", h: 44 }
 
     class CLIENT io
     class GW req
     class CART,PRICING,INV,PAY req
     class ORDER train
     class COLLECTOR mathOp
-    class PROM,TEMPO,LOKI base
-    class GRAFANA io
+    class TEMPO,LOKI base
 ```
 
 ### Key Design Decisions
