@@ -159,28 +159,49 @@ Every request passes the Matter Context Enforcer before fanning out to the four 
 
 ### Multi-Region Topology
 
-```
-                         Route 53 Latency-Based Routing
-                                      |
-           +--------------------------+---------------------------+
-           |                                                      |
-    us-east-1 (US firms, default)                eu-west-1 (EU firms, GDPR)
-    +---------------------------+              +---------------------------+
-    | API Gateway               |              | API Gateway               |
-    | Matter Context Enforcer   |              | Matter Context Enforcer   |
-    | LLM Router (GPT-4o)       |              | LLM Router (GPT-4o EU)   |
-    | Qdrant cluster (US data)  |              | Qdrant cluster (EU data) |
-    | PostgreSQL primary        |              | PostgreSQL replica         |
-    | LexisNexis API endpoint   |              | LexisNexis EU endpoint    |
-    | S3 (firm docs, encrypted) |              | S3 (eu-west-1, EU only)  |
-    | Kafka (audit logs)        |              | Kafka (audit logs EU)    |
-    +---------------------------+              +---------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Data residency guarantee:
-  EU firm documents NEVER leave eu-west-1
-  EU matter Qdrant collections ONLY in eu-west-1
-  Audit logs replicated to S3 in same region only
+    r53@{ icon: "logos:aws-route53", form: "square", label: "Route 53<br/>Latency-Based Routing", pos: "b", h: 44 }
+
+    subgraph US["us-east-1 (US firms, default)"]
+        USGW["API Gateway"]
+        USMCE["Matter Context Enforcer"]
+        USLLM["LLM Router<br/>(GPT-4o)"]
+        USQ["Qdrant cluster<br/>(US data)"]
+        uspg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>primary", pos: "b", h: 44 }
+        USLN["LexisNexis<br/>API endpoint"]
+        uss3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>firm docs, encrypted", pos: "b", h: 44 }
+        uskafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>audit logs", pos: "b", h: 44 }
+    end
+
+    subgraph EU["eu-west-1 (EU firms, GDPR)"]
+        EUGW["API Gateway"]
+        EUMCE["Matter Context Enforcer"]
+        EULLM["LLM Router<br/>(GPT-4o EU)"]
+        EUQ["Qdrant cluster<br/>(EU data)"]
+        eupg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>replica", pos: "b", h: 44 }
+        EULN["LexisNexis<br/>EU endpoint"]
+        eus3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>eu-west-1, EU only", pos: "b", h: 44 }
+        eukafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>audit logs EU", pos: "b", h: 44 }
+    end
+
+    r53 --> US
+    r53 --> EU
+
+    class USGW,USMCE,USLLM,EUGW,EUMCE,EULLM req
+    class USQ,EUQ base
+    class USLN,EULN frozen
 ```
+
+Data residency guarantee: EU firm documents NEVER leave eu-west-1, EU matter Qdrant collections are ONLY provisioned in eu-west-1, and audit logs replicate to S3 within the same region only.
 
 See also: [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md) for matter-level isolation at the vector DB layer.
 
