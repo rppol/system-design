@@ -96,7 +96,7 @@ sequenceDiagram
     B->>S: GET /ws (Upgrade: websocket, Sec-WebSocket-Key, Origin)
     Note over S: HandshakeInterceptor.beforeHandshake() runs first
     S-->>B: 101 Switching Protocols (Sec-WebSocket-Accept)
-    Note over B,S: Raw WebSocket channel is open; STOMP frames now ride inside WS text frames
+    Note over B,S: Raw WebSocket channel is open - STOMP frames now ride inside WS text frames
     B->>S: STOMP CONNECT (heart-beat:10000,10000, Authorization header)
     S->>K: register session
     S-->>B: STOMP CONNECTED (heart-beat:10000,10000)
@@ -155,7 +155,7 @@ flowchart TD
     subgraph Instance2["Instance 2"]
         relay2["StompBrokerRelay\nTCP client to broker:61613"]
     end
-    rmq["RabbitMQ STOMP plugin\namq.topic exchange"]
+    rmq@{ icon: "logos:rabbitmq", form: "square", label: "RabbitMQ<br/>STOMP plugin", pos: "b", h: 44 }
     bidderA(["Bidder A's browser\nSUBSCRIBE /topic/auction.42"]) --> Instance1
     bidderB(["Bidder B's browser\nSEND /app/auction.42.bid"]) --> Instance2
     relay1 <--> rmq
@@ -801,7 +801,8 @@ flowchart TD
     lb["Load Balancer\nsticky session by cookie"] --> i1["Instance 1\nStompBrokerRelay"]
     lb --> i2["Instance 2\nStompBrokerRelay"]
     lb --> i3["Instance 3\nStompBrokerRelay"]
-    i1 <--> rmq["RabbitMQ STOMP plugin\n:61613, amq.topic exchange"]
+    rmq@{ icon: "logos:rabbitmq", form: "square", label: "RabbitMQ<br/>:61613, amq.topic", pos: "b", h: 44 }
+    i1 <--> rmq
     i2 <--> rmq
     i3 <--> rmq
     rmq -- "durable queue" --> dlq["outbid-alerts.dlq\nfor undeliverable per-user alerts"]
