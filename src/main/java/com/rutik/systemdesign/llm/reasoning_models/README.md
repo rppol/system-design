@@ -740,48 +740,33 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 **Architecture:**
 
-```
-  Incident triggered (PagerDuty alert)
-           |
-           v
-  ┌────────────────────────────────────────────────────────┐
-  │   Incident Triage Agent                                │
-  │   - Collects: stack trace, last 500 log lines,         │
-  │     git diff of last 3 commits, deployment metadata    │
-  │   - Classifies severity: P1 / P2 / P3                  │
-  └────────────────────────┬───────────────────────────────┘
-                           │  structured incident context
-                           v
-  ┌────────────────────────────────────────────────────────┐
-  │   Model Router                                         │
-  │   P3 (low severity): claude-sonnet-4-6, temp=0        │
-  │   P2 (medium):       o1-mini, budget_tokens=2000       │
-  │   P1 (critical):     o3, budget_tokens=10000           │
-  │   Timeout: P1 max 60s, P2 max 30s, P3 max 15s         │
-  └────────────────────────┬───────────────────────────────┘
-                           │
-                           v
-  ┌────────────────────────────────────────────────────────┐
-  │   Reasoning Model (o1/o3 or sonnet)                    │
-  │   Extended thinking: traces through:                   │
-  │     1. Parse stack trace — identify failing frame      │
-  │     2. Correlate with log lines — find causal event    │
-  │     3. Inspect git diff — find introduced regression   │
-  │     4. Generate root cause hypothesis                   │
-  │     5. Write targeted fix (code patch)                 │
-  │     6. Write regression test                           │
-  │   Output: structured JSON {root_cause, fix, test}      │
-  └────────────────────────┬───────────────────────────────┘
-                           │
-                           v
-  ┌────────────────────────────────────────────────────────┐
-  │   Validation Sandbox                                   │
-  │   - Apply generated patch to isolated container        │
-  │   - Run test suite (pytest subset — 120s timeout)      │
-  │   - If passes: propose PR via GitHub API               │
-  │   - If fails: retry with self-correction (max 2×)      │
-  └────────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    TRIGGER("Incident triggered<br/>PagerDuty alert")
+    TRIAGE["Incident Triage Agent<br/>Collects stack trace, last 500 log lines,<br/>git diff of last 3 commits, deployment metadata<br/>Classifies severity: P1 / P2 / P3"]
+    ROUTER["Model Router<br/>P3 low severity: claude-sonnet-4-6, temp=0<br/>P2 medium: o1-mini, budget_tokens=2000<br/>P1 critical: o3, budget_tokens=10000<br/>Timeout: P1 60s, P2 30s, P3 15s"]
+    REASON["Reasoning Model - o1/o3 or Sonnet<br/>Parses stack trace, correlates logs,<br/>inspects git diff, generates root cause,<br/>fix patch, and regression test<br/>Output: structured JSON"]
+    VALID["Validation Sandbox<br/>Apply patch to isolated container<br/>Run test suite - pytest, 120s timeout<br/>Pass: propose PR via GitHub API<br/>Fail: retry with self-correction, max 2x"]
+
+    TRIGGER --> TRIAGE -- "structured incident context" --> ROUTER --> REASON --> VALID
+
+    class TRIGGER req
+    class TRIAGE io
+    class ROUTER mathOp
+    class REASON train
+    class VALID base
+```
+
+```
 Test-Time Compute Scaling — budget_tokens effect:
   budget_tokens=500:   o1-mini "fast think" — 12s, 65% solve rate
   budget_tokens=2000:  o1-mini "deep think" — 28s, 78% solve rate
