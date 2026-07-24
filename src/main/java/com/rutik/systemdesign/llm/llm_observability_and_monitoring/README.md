@@ -215,14 +215,14 @@ flowchart TD
     User([User / Client]) --> Gateway
     Gateway["API Gateway / LLM Proxy Layer\n(token counting, cost calc, trace init, rate limiting)"] --> Embed & VDB & Rerank & LLMProv
     Embed["Embedding Model\n(ada-002, Cohere)"]
-    VDB["Vector DB\n(Pinecone, Weaviate)"]
+    VDB[("Vector DB\n(Pinecone, Weaviate)")]
     Rerank["Reranker\n(Cohere, BGE)"]
     LLMProv["LLM Provider\n(OpenAI, Anthropic, self-hosted)"]
     Embed & VDB & Rerank & LLMProv -- "telemetry side-channel" --> Collector
     Collector["Observability Collector\n(OpenTelemetry / Custom Ingest)"] --> TraceStore & MetricsStore & LogStore & QualEval
-    TraceStore["Trace Store\n(Jaeger, Tempo)"]
-    MetricsStore["Metrics Store\n(Prometheus)"]
-    LogStore["Log Store\n(Elastic, Loki)"]
+    TraceStore[("Trace Store\n(Jaeger, Tempo)")]
+    MetricsStore[("Metrics Store\n(Prometheus)")]
+    LogStore[("Log Store\n(Elastic, Loki)")]
     QualEval["Quality Eval Pipeline\n(async)"]
     TraceStore & MetricsStore & LogStore & QualEval --> Dashboard(["Dashboards & Alerting\n(Grafana, PagerDuty, custom UI)"])
 
@@ -801,62 +801,31 @@ TTFT is measured at the client side -- the time from sending the request to rece
 
 **Architecture:**
 
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Cust(["Customers<br/>10K conv/day"]) --> Frontend["Chat Frontend<br/>session_id, user_id tags"]
+    Frontend --> Gateway["LLM Gateway<br/>token counting - cost calc<br/>budget enforcement - trace ID<br/>prompt version tag"]
+    Gateway --> Embed["Embedding API<br/>ada-002"] & VDB2[("Vector DB<br/>Pinecone")] & Rerank2["Rerank API<br/>Cohere"] & LLMProv2["LLM Provider<br/>GPT-4o-mini"]
+    Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> TraceCollector["Trace Collector<br/>Langfuse - self-hosted"]
+    Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> QualEval2["Quality Eval Workers - async<br/>groundedness, safety"]
+    TraceCollector --> pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    TraceCollector --> ch@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
+    QualEval2 --> pg
+    QualEval2 --> ch
+    pg --> graf@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+    ch --> graf
+
+    classDef io   fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    class Cust io
+    class Frontend,Gateway req
+    class Embed,VDB2,Rerank2,LLMProv2,TraceCollector,QualEval2 base
 ```
-                  +------------------+
-                  |    Customers     |
-                  |  (10K conv/day)  |
-                  +--------+---------+
-                           |
-                           v
-                  +--------+---------+
-                  | Chat Frontend    |
-                  | (session_id,     |
-                  |  user_id tags)   |
-                  +--------+---------+
-                           |
-                           v
-              +------------+------------+
-              |      LLM Gateway        |
-              |  - Token counting       |
-              |  - Cost calculation     |
-              |  - Budget enforcement   |
-              |  - Trace ID generation  |
-              |  - Prompt version tag   |
-              +---+------+------+------+
-                  |      |      |
-         +--------+  +---+---+  +--------+
-         v           v       v           v
-   +---------+ +--------+ +------+ +----------+
-   |Embedding| |Vector  | |Rerank| |LLM       |
-   |API      | |DB      | |API   | |Provider  |
-   |(ada-002)| |(Pinecone)|(Cohere)|(GPT-4o-  |
-   |         | |        | |      | | mini)    |
-   +---------+ +--------+ +------+ +----------+
-         |           |      |           |
-         +-----+-----+------+-----+-----+
-               |                   |
-               v                   v
-     +---------+-------+  +-------+---------+
-     | Trace Collector |  | Quality Eval    |
-     | (Langfuse       |  | Workers (async) |
-     |  self-hosted)   |  | - Groundedness  |
-     +--------+--------+  | - Safety        |
-              |            +-------+---------+
-              v                    |
-     +--------+--------+          |
-     | PostgreSQL +    |<---------+
-     | ClickHouse      |
-     | (trace store)   |
-     +--------+--------+
-              |
-              v
-     +--------+--------+
-     | Grafana          |
-     | - Ops dashboard  |
-     | - Product dash   |
-     | - Alerts -> PD   |
-     +------------------+
-```
+
+*Trace and quality-eval telemetry from every downstream call (embedding, vector search, reranking, generation) converges on a combined PostgreSQL + ClickHouse trace store, which feeds the two Grafana dashboards described below.*
 
 **Key Design Decisions:**
 
