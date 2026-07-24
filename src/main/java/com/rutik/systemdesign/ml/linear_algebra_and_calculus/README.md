@@ -887,32 +887,23 @@ Repeatedly multiplying by the same weight matrix scales gradients by powers of i
 **Scenario:** A global e-commerce marketplace (280M products, 400M monthly active users) stores 512-dimensional image embeddings for every product, totalling 143 GB of float32 vectors. Visual similarity search serving 18,000 QPS at p99 < 45ms is bottlenecked by memory bandwidth and index build time. The goal: reduce embedding dimensionality from 512d to 64d using PCA while retaining >= 95% explained variance, cutting memory from 143 GB to 18 GB, reducing HNSW index build time from 14 hours to 2 hours, and maintaining Recall@10 >= 0.91 for visual search.
 
 **Architecture:**
-```
-EfficientNet-B5 Backbone (pretrained)
-  Output: 512-dimensional L2-normalised embeddings
-  10M products/day throughput via 8xA100 batch inference
-         |
-         v
-PCA Whitening Pipeline (offline, weekly)
-  Incremental PCA on 280M x 512 matrix
-  Memory budget: 32 GB RAM (cannot load full matrix)
-  Output: PCA transform matrix W (512 x 64)
-  Whitening: divide each PC by sqrt(eigenvalue)
-         |
-         v
-Compressed Embeddings (64d float32)
-  Storage: 280M * 64 * 4 bytes = 71.7 GB -> quantise to int8 = 18 GB
-  Delta-compress with product quantization (PQ) for HNSW
-         |
-         v
-HNSW Index (FAISS, M=32, efConstruction=200)
-  Build time: 2.1 hr on 64 CPU cores
-  Index size: 22 GB (fits in single machine RAM)
-         |
-         v
-Visual Search Service (18K QPS, p99 < 45ms)
-  Query: raw 512d embedding -> apply W -> 64d -> HNSW lookup -> re-rank top-100
-  Re-ranking: full 512d dot product on top-100 candidates
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    EN(["EfficientNet-B5 Backbone (pretrained)<br/>512-d L2-normalised embeddings<br/>10M products/day, 8xA100"]) --> PCA["PCA Whitening Pipeline (offline, weekly)<br/>Incremental PCA on 280M x 512<br/>32 GB RAM budget<br/>Output: W (512x64)"]
+    PCA --> CE(["Compressed Embeddings (64d float32)<br/>280M x 64 x 4B = 71.7 GB -> int8 = 18 GB<br/>PQ delta-compression for HNSW"])
+    CE --> HNSW["HNSW Index (FAISS, M=32, efConstruction=200)<br/>Build: 2.1 hr / 64 cores<br/>Index size: 22 GB"]
+    HNSW --> VS(["Visual Search Service<br/>18K QPS, p99 < 45ms<br/>Query -> W -> 64d -> HNSW -> re-rank top-100<br/>Re-rank: full 512d dot product"])
+
+    class EN,CE,VS io
+    class PCA,HNSW mathOp
 ```
 
 **Step-by-step implementation:**
