@@ -859,37 +859,48 @@ A doubly robust estimator combines an outcome model and a propensity model, and 
 **Scenario:** A B2C SaaS company (8M users, $240M ARR) wants to maximise revenue uplift from promotional email campaigns. Naive A/B testing showed 12% overall lift, but the marketing team suspects most lift comes from users who would have converted anyway (always-takers), and the emails are churning a segment of privacy-sensitive users (do-not-disturb). The goal: use uplift modeling to send emails only to persuadable users, targeting 2M of 8M users and achieving the same total conversions while reducing email volume by 75% and churn among anti-responders by 60%.
 
 **Architecture:**
-```
-User Feature Store (Feast, 180 features)
-  - engagement: DAU/WAU/MAU ratio, session depth, feature adoption score
-  - billing: LTV, payment history, plan tier, contract age
-  - behavioural: last login lag, support tickets, NPS survey response
-         |
-         v
-Uplift Model Training
-  Treatment assignment (email sent T=1, not sent T=0)
-  from historical RCT - 500K users (50/50 split)
-         |
-         +---------------------------+
-         |                           |
-   CausalForest (EconML)       Double ML (EconML)
-   honest splitting            residual-on-residual
-   500 trees, min_n=50         Ridge propensity model
-         |                           |
-         +---------------------------+
-                    |
-              CATE surface
-              tau_hat per user
-                    |
-                    v
-         Segmentation (tau quartiles)
-           tau > 0.08  -> "persuadable" (send email)
-           -0.02 < tau <= 0.08 -> "sure-thing" (no email needed)
-           tau <= -0.02 -> "sleeping-dog" (never email)
-                    |
-                    v
-         Email Campaign Engine
-         2M targeted emails / campaign cycle
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    fs(["User Feature Store\n180 features: engagement,\nbilling, behavioural"])
+    trainer["Uplift Model Training\nT=1 email sent, T=0 not sent\nHistorical RCT · 500K users"]
+    cf["CausalForest\nhonest splitting\n500 trees, min_n=50"]
+    dml["Double ML\nresidual-on-residual\nRidge propensity model"]
+    cate(("CATE surface\ntau_hat per user"))
+    seg{"Segmentation\ntau quartiles"}
+    persuade["Persuadable\nsend email"]
+    surething["Sure-thing\nno email needed"]
+    sleepdog["Sleeping-dog\nnever email"]
+    email(["Email Campaign Engine\n2M targeted emails / cycle"])
+
+    fs --> trainer
+    trainer --> cf
+    trainer --> dml
+    cf --> cate
+    dml --> cate
+    cate --> seg
+    seg -->|"tau > 0.08"| persuade
+    seg -->|"-0.02 < tau <= 0.08"| surething
+    seg -->|"tau <= -0.02"| sleepdog
+    persuade --> email
+
+    class fs io
+    class trainer train
+    class cf train
+    class dml train
+    class cate mathOp
+    class seg mathOp
+    class persuade req
+    class surething base
+    class sleepdog lossN
+    class email io
 ```
 
 **Step-by-step implementation:**
