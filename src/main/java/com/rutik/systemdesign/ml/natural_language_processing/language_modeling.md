@@ -907,20 +907,29 @@ The footprint is dominated by the number of distinct n-gram *types*, not tokens 
 
 **Architecture:**
 
-```
-Keystroke stream
-      |
-      v
-[ Candidate generator ]
-   |            |
-   |            +--> Personal cache (user's own frequent n-grams, on-device, adapts online)
-   |
-   +--> Pruned 4-gram Kneser-Ney trie  (quantized, ~15 MB, ns-latency lookup)
-   |
-   +--> Compact LSTM LM (weight-tied, quantized int8, ~8 MB, ~5 ms/step)
-                 |
-                 v
-        [ Score fusion + rerank ] --> top-3 predictions shown above the keyboard
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ks(["Keystroke stream"]) --> cg["Candidate generator"]
+    cg --> cache["Personal cache<br/>on-device, adapts online"]
+    cg --> trie["Pruned 4-gram<br/>Kneser-Ney trie<br/>~15 MB, ns lookup"]
+    cg --> lstm["Compact LSTM LM<br/>int8, ~8 MB, ~5 ms/step"]
+    cache --> fusion["Score fusion<br/>+ rerank"]
+    trie --> fusion
+    lstm --> fusion
+    fusion --> out(["Top-3 predictions<br/>shown above keyboard"])
+
+    class ks,out io
+    class cg,cache base
+    class trie,lstm train
+    class fusion mathOp
 ```
 
 **Component decisions:**
