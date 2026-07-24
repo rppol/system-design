@@ -784,7 +784,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph OLD["Old Flow — duplicated auth (20 services)"]
-        oc(["Client"]) --> nginx("Nginx<br/>no auth logic")
+        oc(["Client"]) --> nginx@{ icon: "logos:nginx", form: "square", label: "Nginx", pos: "b", h: 44 }
         nginx --> ou("UserService<br/>validates JWT")
         nginx --> oo("OrderService<br/>validates JWT")
         nginx --> op("PaymentService<br/>validates JWT")
@@ -792,7 +792,7 @@ flowchart TD
     end
 
     subgraph NEW["New Flow — centralized auth"]
-        nc(["Client"]) --> alb2("ALB")
+        nc(["Client"]) --> alb2@{ icon: "logos:aws-elb", form: "square", label: "ALB", pos: "b", h: 44 }
         alb2 --> scg("Spring Cloud Gateway<br/>validates JWT once")
         scg --> nu("UserService<br/>trusts X-User-Id")
         scg --> no("OrderService<br/>trusts X-User-Id")
@@ -800,7 +800,6 @@ flowchart TD
     end
 
     class oc,nc io
-    class nginx,alb2 mathOp
     class ou,oo,op,omore lossN
     class scg req
     class nu,no,np train
@@ -825,7 +824,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    alb{"AWS ALB<br/>HTTPS"}
+    alb@{ icon: "logos:aws-elb", form: "square", label: "AWS ALB<br/>HTTPS", pos: "b", h: 44 }
 
     subgraph GWT["Gateway Tier (SCG instances)"]
         mbff("Mobile BFF<br/>50 req/s/user")
@@ -857,7 +856,6 @@ flowchart LR
     net --> cs
     net --> more
 
-    class alb mathOp
     class mbff,wbff,pbff req
     class net base
     class us,os,ps,cs,more base
