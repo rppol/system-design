@@ -701,8 +701,8 @@ flowchart LR
     Events(Event Stream)
 
     CustStatus(Customer Order Status<br/>Redis / PostgreSQL<br/>p99 under 5ms)
-    Fulfillment(Warehouse Fulfillment<br/>PostgreSQL<br/>p99 under 50ms)
-    Revenue(Finance Revenue<br/>Elasticsearch<br/>30s lag OK)
+    Fulfillment@{ icon: "logos:postgresql", form: "square", label: "Warehouse Fulfillment<br/>p99 under 50ms", pos: "b", h: 44 }
+    Revenue@{ icon: "logos:elasticsearch", form: "square", label: "Finance Revenue<br/>30s lag OK", pos: "b", h: 44 }
 
     Events -->|"OrderPlaced, OrderShipped,<br/>OrderDelivered, OrderCancelled"| CustStatus
     Events -->|"InventoryReserved,<br/>PaymentConfirmed"| Fulfillment
@@ -710,8 +710,6 @@ flowchart LR
 
     class Events req
     class CustStatus train
-    class Fulfillment mathOp
-    class Revenue base
 ```
 
 ### Saga Steps with Compensation
