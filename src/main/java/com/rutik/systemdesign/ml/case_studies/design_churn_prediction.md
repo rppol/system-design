@@ -68,18 +68,20 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    RAW(["Raw Event Store\nKafka + S3\nsubscriptions · sessions\ntickets · payments"]) --> FP["Feature Pipeline\nSpark, daily 06:00\nRFM · PIT join · validation"]
+    RAW(["Raw Event Store\nKafka + S3\nsubscriptions · sessions\ntickets · payments"]) --> FP
+    FP@{ icon: "logos:apache-spark", form: "square", label: "Feature Pipeline<br/>Spark, daily 06:00<br/>RFM · PIT join · validation", pos: "b", h: 44 }
     FP --> FS["Feature Store\noffline S3/BQ snapshots\nonline Redis current values"]
     FS --> SCORE["Scoring Engine\nLightGBM batch\n5M customers in ~20 min"]
-    SCORE --> CDB["Churn Score DB\nDynamoDB · TTL 48h"]
+    SCORE --> CDB
+    CDB@{ icon: "logos:aws-dynamodb", form: "square", label: "Churn Score DB<br/>DynamoDB · TTL 48h", pos: "b", h: 44 }
     SCORE --> SHAP["SHAP Engine\ntop-4 factors\nper customer"]
     CDB --> MKT["Marketing Operations Platform\nranked top 100k + uplift filter\n+ SHAP personalization"]
     SHAP --> MKT
 
     class RAW io
-    class FP,SHAP mathOp
+    class SHAP mathOp
     class SCORE train
-    class FS,CDB base
+    class FS base
     class MKT req
 ```
 
