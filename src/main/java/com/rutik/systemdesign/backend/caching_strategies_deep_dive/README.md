@@ -457,17 +457,19 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    wal[("PostgreSQL<br/>WAL")] --> deb("Debezium<br/>connector")
-    deb --> topic(["Kafka topic<br/>db.changes"])
+    wal@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>WAL", pos: "b", h: 44 }
+    deb("Debezium<br/>connector")
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>db.changes", pos: "b", h: 44 }
+    cache@{ icon: "logos:redis", form: "square", label: "Redis<br/>cache", pos: "b", h: 44 }
+
+    wal --> deb
+    deb --> topic
     topic --> svc("Cache Invalidation<br/>Service (consumer)")
     svc -->|"map row change<br/>to cache key"| act{"Delete or<br/>update entry"}
-    act --> cache[("Redis<br/>cache")]
+    act --> cache
 
-    class wal frozen
     class deb mathOp
-    class topic req
     class svc,act mathOp
-    class cache base
 ```
 
 Debezium tails the WAL so no application write path ever has to remember to invalidate the cache — every row change flows through Kafka to the invalidation service, which maps it to a cache key and deletes or updates the entry.
