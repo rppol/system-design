@@ -160,7 +160,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Internet([Internet]) --> LB(Nginx / Load Balancer<br/>:443 / :80)
+    Internet([Internet]) --> LB
+    LB@{ icon: "logos:nginx", form: "square", label: "Nginx / LB", pos: "b", h: 44 }
     LB --> Gun(Gunicorn<br/>process supervisor<br/>reads gunicorn.conf.py)
     subgraph Workers["Pre-fork pool — workers share loaded app module"]
         direction TB
@@ -175,7 +176,6 @@ flowchart LR
     Gun --> W4
 
     class Internet io
-    class LB req
     class Gun mathOp
     class W1,W2,W3,W4 train
 ```
