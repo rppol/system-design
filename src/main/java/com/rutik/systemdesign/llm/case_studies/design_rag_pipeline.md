@@ -99,19 +99,22 @@ flowchart TD
     end
 
     subgraph ip["Indexing Pipeline"]
-        ND([New Document]) --> IQ[["Document Ingestion Queue (Kafka)"]]
+        ND([New Document]) --> IQ
+        IQ@{ icon: "logos:kafka", form: "square", label: "Ingestion Queue<br/>(Kafka)", pos: "b", h: 44 }
         IQ --> DP["Document Parser\nPDF/Word/HTML → clean text"]
         DP --> CS["Chunking Service\nsemantic/hierarchical chunking"]
         CS --> IEMB["Embedding Service"] --> VDB[["Vector DB (Weaviate/Qdrant)"]]
-        CS --> BM["BM25 Indexer"] --> ESX[["Elasticsearch"]]
-        CS --> MI["Metadata Indexer"] --> PG[["PostgreSQL"]]
+        CS --> BM["BM25 Indexer"] --> ESX
+        ESX@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+        CS --> MI["Metadata Indexer"] --> PG
+        PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
     end
 
     class UQ,UR,ND io
     class GW,QS,CA,PP req
     class EMB,KW,MF,FUSE,DP,CS,IEMB,BM,MI mathOp
     class RR,GEN base
-    class IQ,VDB,ESX,PG frozen
+    class VDB frozen
 ```
 
 The query pipeline is a fork-join: the Query Service fans out to three parallel retrieval paths (dense semantic, BM25 lexical, metadata filters) whose results reconverge via RRF fusion before the cross-encoder narrows top-50 to top-5. The indexing pipeline fans each chunk out to three independent stores — vector DB, Elasticsearch, and PostgreSQL — which is what makes hybrid retrieval possible at query time.
