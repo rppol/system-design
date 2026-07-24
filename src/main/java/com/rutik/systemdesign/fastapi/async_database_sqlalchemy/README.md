@@ -588,7 +588,7 @@ quadrantChart
     quadrant-1 Powerful but heavy
     quadrant-2 Best of both worlds
     quadrant-3 Simple, limited scale
-    quadrant-4 Avoid: cost without payoff
+    quadrant-4 "Avoid: cost without payoff"
     Async SQLAlchemy 2.0: [0.85, 0.85]
     Sync SQLAlchemy 2.0: [0.2, 0.4]
     SQLModel: [0.5, 0.8]
