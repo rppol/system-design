@@ -165,25 +165,29 @@ Call 1 is 25% *worse* than not caching — that is the write premium, and it is 
 
 ### Model Cascade
 
-```
-  User request
-       |
-       v
-  +-----------------+
-  | Router (Haiku)  |  $0.0005
-  | Classify hard?  |
-  +--+----------+---+
-     |          |
-     v          v
-  Easy step   Hard step
-     |          |
-  Haiku       Opus
-  $0.005      $0.05
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Without cascade (all Opus): $0.05/step
-  With cascade (80% easy, 20% hard): 0.8×$0.005 + 0.2×$0.05 = $0.014
-  Savings: 72%
+    request(["User request"]) --> router(["Router: Haiku<br/>Classify hard?<br/>$0.0005"])
+    router -->|Easy| easy(["Easy step"])
+    router -->|Hard| hard(["Hard step"])
+    easy --> haiku(["Haiku<br/>$0.005"])
+    hard --> opus(["Opus<br/>$0.05"])
+
+    class request req
+    class router mathOp
+    class easy,hard base
+    class haiku,opus train
 ```
+
+Without cascade (all Opus): $0.05/step. With cascade (80% easy, 20% hard): 0.8×$0.005 + 0.2×$0.05 = $0.014. Savings: 72%.
 
 **Put simply.** "Your real per-step price is not the expensive model's price — it is the two prices averaged together, weighted by how often the router actually picks each one."
 
