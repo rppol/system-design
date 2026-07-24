@@ -85,8 +85,8 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     cdc(["Production DB\n(CDC)"])
-    kafka["Kafka"]
-    flink["Flink"]
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink", pos: "b", h: 44 }
     fstore["Feature Store\noffline + online"]
     job["Training Job\n(GPU)"]
     art["MLflow artifact"]
@@ -105,7 +105,7 @@ flowchart LR
     ms --> infer
 
     class cdc,ureq,infer io
-    class kafka,flink,gw,ab,ms mathOp
+    class gw,ab,ms mathOp
     class fstore base
     class job,art train
     class reg base
