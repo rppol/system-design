@@ -92,20 +92,25 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Client"]) -->|"HTTPS"| apigw(["API Gateway"])
-    apigw -->|"invoke"| presignFn[["Lambda:<br/>presign upload"]]
-    client -->|"PUT"| s3up[("S3<br/>uploads/")]
-    s3up -.->|"ObjectCreated<br/>event"| thumbFn[["Lambda:<br/>thumbnail"]]
-    thumbFn -->|"on error"| dlq("DLQ (SQS)")
+    client(["Client"]) -->|"HTTPS"| apigw
+    apigw -->|"invoke"| presignFn
+    client -->|"PUT"| s3up
+    s3up -.->|"ObjectCreated<br/>event"| thumbFn
+    thumbFn -->|"on error"| dlq
     dlq -->|"alarm / replay"| alarmR(["Alarm & Replay"])
-    thumbFn -->|"success"| s3thumb[("S3<br/>thumbnails/")]
-    thumbFn -->|"success"| ddb[("DynamoDB<br/>metadata")]
+    thumbFn -->|"success"| s3thumb
+    thumbFn -->|"success"| ddb
+
+    apigw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    presignFn@{ icon: "logos:aws-lambda", form: "square", label: "Lambda: presign", pos: "b", h: 44 }
+    s3up@{ icon: "logos:aws-s3", form: "square", label: "S3 uploads/", pos: "b", h: 44 }
+    thumbFn@{ icon: "logos:aws-lambda", form: "square", label: "Lambda: thumbnail", pos: "b", h: 44 }
+    dlq@{ icon: "logos:aws-sqs", form: "square", label: "SQS DLQ", pos: "b", h: 44 }
+    s3thumb@{ icon: "logos:aws-s3", form: "square", label: "S3 thumbnails/", pos: "b", h: 44 }
+    ddb@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB", pos: "b", h: 44 }
 
     class client io
-    class apigw req
-    class presignFn,thumbFn mathOp
-    class s3up,s3thumb,ddb base
-    class dlq,alarmR lossN
+    class alarmR lossN
 ```
 
 *The upload path (top) and the thumbnail path (bottom) run independently: an S3 `ObjectCreated` event — not the client — triggers the thumbnail Lambda, and a failure there lands in a DLQ for alarming and replay instead of silently dropping the image.*
@@ -122,14 +127,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    req(["request"]) --> apigw(["API Gateway"]) --> decide{"warm or<br/>cold env?"}
+    req(["request"]) --> apigw --> decide{"warm or<br/>cold env?"}
     decide -->|"WARM"| warm["reuse env<br/>~1-5ms overhead"]
     decide -->|"COLD"| cold["create micro-VM, download code,<br/>start runtime, run init<br/>~100ms-1s added"]
     warm --> handler((" handler "))
     cold --> handler
 
+    apigw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+
     class req io
-    class apigw req
     class decide,handler mathOp
     class warm train
     class cold lossN
@@ -427,13 +433,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    lambda["Lambda"] -->|"writes to"| s3prefix[("S3 prefix")]
+    lambda -->|"writes to"| s3prefix
     s3prefix -.->|"ObjectCreated<br/>re-triggers"| lambda
     lambda -->|"fan-out<br/>consumes"| pool["Account concurrency<br/>cap (1000 default)"]
     pool -->|"exhausted"| throttled(["Other functions<br/>throttled"])
 
-    class lambda mathOp
-    class s3prefix,pool base
+    lambda@{ icon: "logos:aws-lambda", form: "square", label: "Lambda", pos: "b", h: 44 }
+    s3prefix@{ icon: "logos:aws-s3", form: "square", label: "S3 prefix", pos: "b", h: 44 }
+
+    class pool base
     class throttled lossN
 ```
 
