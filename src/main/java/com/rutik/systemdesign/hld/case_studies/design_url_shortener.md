@@ -83,27 +83,32 @@ flowchart LR
     subgraph WritePath["Write Path"]
         WriteAPI("Write API<br/>URL Shortening") --> URLSvc("URL Service<br/>ID Gen + Storage")
         URLSvc --> IDGen("ID Generator<br/>Counter + Zookeeper")
-        IDGen --> WriteDB[("Cassandra<br/>Database Write")]
+        IDGen --> WriteDB
+        WriteDB@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>Write", pos: "b", h: 44 }
     end
 
     subgraph ReadPath["Read Path"]
-        ReadAPI("Read API<br/>Redirects") --> Cache[("Cache Layer<br/>Redis")]
-        Cache -.->|"miss"| ReadDB[("Cassandra<br/>Database")]
+        ReadAPI("Read API<br/>Redirects") --> Cache
+        Cache@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+        Cache -.->|"miss"| ReadDB
+        ReadDB@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
     end
 
     LB --> WriteAPI
     LB --> ReadAPI
 
     subgraph Analytics["Analytics Pipeline"]
-        Click(["Click Event"]) --> Kafka("Kafka") --> Flink("Flink") --> Stats[("Cassandra<br/>time-series")] --> Dash(["Dashboard"])
+        Click(["Click Event"]) --> Kafka --> Flink --> Stats --> Dash(["Dashboard"])
+        Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+        Flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink", pos: "b", h: 44 }
+        Stats@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>time-series", pos: "b", h: 44 }
     end
 
     class DNS frozen
     class LB mathOp
-    class WriteAPI,ReadAPI,Kafka req
+    class WriteAPI,ReadAPI req
     class URLSvc train
-    class IDGen,Flink mathOp
-    class WriteDB,Cache,ReadDB,Stats base
+    class IDGen mathOp
     class Click,Dash io
 ```
 
@@ -461,17 +466,20 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Client(["Client Redirect<br/>Request"]) --> API("Read API Server<br/>returns 302 in under 10ms")
-    API -.->|"async, non-blocking"| Kafka("Kafka<br/>click_events topic")
-    Kafka --> Flink("Flink Stream Processor<br/>count per URL per minute<br/>group by country / device / browser")
-    Flink --> Hourly[("Cassandra<br/>url_stats_hourly")]
-    Flink --> Raw[("Cassandra<br/>click_events, 90-day TTL")]
+    API -.->|"async, non-blocking"| Kafka
+    Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>click_events", pos: "b", h: 44 }
+    Kafka --> Flink
+    Flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink<br/>per-min agg", pos: "b", h: 44 }
+    Flink --> Hourly
+    Hourly@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>hourly stats", pos: "b", h: 44 }
+    Flink --> Raw
+    Raw@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>raw, 90d TTL", pos: "b", h: 44 }
     Hourly --> Dash("Dashboard Service")
-    Counter[("Redis counter<br/>INCR url:count:abc1234")] --> Dash
+    Counter --> Dash
+    Counter@{ icon: "logos:redis", form: "square", label: "Redis counter", pos: "b", h: 44 }
 
     class Client io
-    class API,Kafka req
-    class Flink mathOp
-    class Hourly,Raw,Counter base
+    class API req
     class Dash io
 ```
 
