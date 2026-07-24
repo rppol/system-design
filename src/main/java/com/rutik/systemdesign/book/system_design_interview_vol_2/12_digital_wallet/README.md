@@ -600,7 +600,7 @@ flowchart LR
 
     EV --> LEAD
     LEAD --> SNAP["Periodic<br/>snapshots"]
-    LEAD --> RV["CQRS read model<br/>wallet to balance view"]
+    LEAD --> RV[("CQRS read model<br/>wallet to balance view")]
     RV --> QRY(["Balance inquiry"])
 
     class CMD,QRY io
@@ -912,13 +912,12 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    R1(["1 Redis sharding"]) -->|"no cross-shard<br/>atomicity"| R2(["2 2PC / XA"])
+    R1@{ icon: "logos:redis", form: "square", label: "1 Redis<br/>sharding", pos: "b", h: 44 } -->|"no cross-shard<br/>atomicity"| R2(["2 2PC / XA"])
     R2 -->|"blocking, SPOF,<br/>no 1M TPS"| R3(["3 TCC"])
     R3 -->|"out-of-order,<br/>logic pollution"| R4(["4 Saga"])
     R4 -->|"in-place mutation<br/>fails audit"| R5(["5 Event sourcing<br/>plus CQRS"])
     R5 -->|"replay to any point"| AUD(["Auditor recomputes<br/>any past balance"])
 
-    class R1 lossN
     class R2 mathOp
     class R3 frozen
     class R4 req
