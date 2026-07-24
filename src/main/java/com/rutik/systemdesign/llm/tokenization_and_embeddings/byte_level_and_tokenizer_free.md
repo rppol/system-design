@@ -1111,27 +1111,32 @@ of all P1 escalations despite being only **~6%** of daily volume.
 
 **Architecture — hybrid routing, not a blanket replacement**:
 
-```
-  Incoming message (raw bytes)
-         |
-         v
-  ┌──────────────────────────────────────────────────────┐
-  │  EncodingRiskSignals classifier                      │
-  │  - byte-fallback rate, script-mixing score,          │
-  │    control-char count (cheap, no model call)          │
-  └───────────────────┬──────────────────┬────────────────┘
-             clean (~94% of volume)   unusual (~6% of volume)
-                      │                  │
-                      v                  v
-        ┌─────────────────────┐  ┌───────────────────────────┐
-        │  Existing 8B BPE     │  │  BLT-style byte-level path │
-        │  model (fast, cheap) │  │  entropy patching + local/  │
-        │                      │  │  global split (Section 6.4) │
-        └──────────┬───────────┘  └──────────┬──────────────────┘
-                   │                          │
-                   └────────────┬─────────────┘
-                                v
-                     Unified response formatting
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    MSG(["Incoming message<br/>raw bytes"])
+    CLS["EncodingRiskSignals classifier<br/>byte-fallback rate, script-mixing score,<br/>control-char count (cheap, no model call)"]
+    BPE["Existing 8B BPE model<br/>fast, cheap"]
+    BLT["BLT-style byte-level path<br/>entropy patching + local/global split<br/>(Section 6.4)"]
+    OUT(["Unified response formatting"])
+
+    MSG --> CLS
+    CLS -->|"clean (~94% of volume)"| BPE
+    CLS -->|"unusual (~6% of volume)"| BLT
+    BPE --> OUT
+    BLT --> OUT
+
+    class MSG,OUT io
+    class CLS req
+    class BPE base
+    class BLT train
 ```
 
 Only the segment the incident data actually implicates is routed to the more expensive, more
