@@ -847,16 +847,18 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph ES["Option 1 — Elasticsearch"]
-      W1["email write"] --> K[["Kafka<br/>pipeline"]] --> E[("Elasticsearch<br/>index")]
+      W1["email write"] --> K --> E
       W1 --> M1[("Metadata<br/>store")]
     end
     subgraph NAT["Option 2 — Native (LSM) index"]
       W2["email write"] --> M2[("Metadata store<br/>+ inverted index<br/>updated on write")]
     end
 
+    K@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    E@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+
     class W1,W2 io
-    class K base
-    class E,M1,M2 frozen
+    class M1,M2 frozen
 ```
 
 Caption: Elasticsearch keeps a second system in sync through a Kafka pipeline (eventual-consistent,
