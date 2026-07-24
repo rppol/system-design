@@ -787,23 +787,31 @@ Each RAG component has a comprehensive standalone reference with 10+ senior-AI-e
 
 **Scenario: Hybrid BM25+HNSW retrieval for a 10M-document enterprise knowledge base.** A professional services firm has 10M internal documents (PDFs, Confluence pages, Slack threads) accumulated over 20 years. Employees spend 2 hours/day searching for precedent and policy. The RAG system must answer questions with cited sources, handle queries in English and Spanish, and respond in < 2 seconds. Retrieval recall@5 target: 85%.
 
-```
-RAG pipeline architecture:
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  User query (English/Spanish)
-        │
-  [Multilingual query rewriter] ← HyDE (hypothetical doc embedding)
-        │
-  ┌─────┴──────────────────────┐
-  │ BM25 (sparse)              │   ← keyword precision, handles rare terms
-  │ HNSW (dense, 1024-dim)     │   ← semantic similarity
-  └─────┬──────────────────────┘
-        │  RRF fusion (top-50 from each)
-  [Cross-encoder reranker]     ← reranks top-100 to top-5
-        │
-  [LLM generator + citation]   ← generates answer citing chunk IDs
-        │
-  User answer with [source links]
+    Q(["User query<br/>English/Spanish"]) --> QR["Multilingual query rewriter<br/>HyDE hypothetical doc embedding"]
+    QR --> BM25["BM25 sparse<br/>keyword precision, rare terms"]
+    QR --> HNSW["HNSW dense, 1024-dim<br/>semantic similarity"]
+    BM25 --> RRF["RRF fusion<br/>top-50 from each"]
+    HNSW --> RRF
+    RRF --> RNK["Cross-encoder reranker<br/>top-100 to top-5"]
+    RNK --> GEN["LLM generator + citation<br/>cites chunk IDs"]
+    GEN --> ANS(["User answer<br/>with source links"])
+
+    class Q,ANS io
+    class QR,RNK train
+    class BM25,HNSW req
+    class RRF mathOp
+    class GEN frozen
 ```
 
 **Hybrid retrieval with Reciprocal Rank Fusion:**
