@@ -475,7 +475,7 @@ flowchart LR
     GW --> PS(["Payment Service"])
     GW --> HMS(["Hotel Mgmt Service"])
     RES -->|"gRPC"| PS
-    HS --> CACHE[("Redis cache")]
+    HS --> CACHE@{ icon: "logos:redis", form: "square", label: "Redis<br/>cache", pos: "b", h: 44 }
     RS --> CACHE
     HS --> DB[("Reservation DB<br/>RDBMS")]
     RS --> DB
@@ -486,7 +486,6 @@ flowchart LR
     class Guest,Admin,CDN io
     class GW req
     class HS,RS,RES,PS,HMS train
-    class CACHE frozen
     class DB base
 ```
 
