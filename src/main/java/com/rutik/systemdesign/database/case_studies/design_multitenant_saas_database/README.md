@@ -35,7 +35,8 @@ flowchart LR
 
     client(["Client"]) --> gw("API Gateway")
     gw --> router{"Tenant Router"}
-    router -.->|"reads tenant<br/>metadata"| redis["Redis<br/>routing cache"]
+    router -.->|"reads tenant<br/>metadata"| redis
+    redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>routing cache", pos: "b", h: 44 }
 
     router -->|"SMB · 7000"| shared["Shared DB Cluster<br/>PgBouncer"]
     router -->|"Mid-Market · 2500"| mid["Mid-Market Clusters 1-5<br/>PgBouncer"]
@@ -44,14 +45,16 @@ flowchart LR
     shared -.-> cdc("Debezium CDC")
     mid -.-> cdc
     ent -.-> cdc
-    cdc --> kafka["Kafka"]
-    kafka --> ch["ClickHouse<br/>org_id partitioned"]
+    cdc --> kafka
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    kafka --> ch
+    ch@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>org_id partitioned", pos: "b", h: 44 }
     ch --> op(["Platform Operators"])
 
     class client,op io
-    class gw,kafka req
+    class gw req
     class router,cdc mathOp
-    class redis,shared,mid,ent,ch base
+    class shared,mid,ent base
 ```
 
 Three isolation tiers sit behind one Redis-cached tenant router: 7,000 SMB tenants share one RLS-protected cluster, 2,500 mid-market tenants get schema-per-tenant across 5 clusters, and 500 enterprise tenants get dedicated Patroni-HA instances. A separate Debezium → Kafka → ClickHouse pipeline mirrors writes into an operator-only, org_id-partitioned analytics store that tenants cannot query.
