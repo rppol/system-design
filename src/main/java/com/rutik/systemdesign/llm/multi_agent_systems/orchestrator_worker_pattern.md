@@ -157,14 +157,13 @@ flowchart LR
 ```
 
 Task Ledger (orchestrator internal state):
-```
-task_id | description          | worker    | status    | result
---------|----------------------|-----------|-----------|-------
-T001    | search arxiv papers  | research  | COMPLETED | {...}
-T002    | summarize paper 1    | summary   | COMPLETED | {...}
-T003    | summarize paper 2    | summary   | FAILED    | null
-T004    | merge summaries      | writer    | PENDING   | null
-```
+
+| task_id | description          | worker    | status    | result |
+|---------|-----------------------|-----------|-----------|--------|
+| T001    | search arxiv papers  | research  | COMPLETED | {...}  |
+| T002    | summarize paper 1    | summary   | COMPLETED | {...}  |
+| T003    | summarize paper 2    | summary   | FAILED    | null   |
+| T004    | merge summaries      | writer    | PENDING   | null   |
 
 The task-ledger design is also the core of [Magentic-One](magentic_one_and_autogen_v04.md)'s dual-loop orchestrator (task ledger for the plan, progress ledger for per-step tracking).
 
@@ -674,38 +673,23 @@ A law firm needed to analyze 200-400 patent documents per case to identify prior
 
 ### Architecture
 
-```
-                    +------------------------------------+
-                    |     Orchestrator (Claude Opus)     |
-                    |  - Reads case brief                |
-                    |  - Generates patent analysis plan  |
-                    |  - Maintains task ledger           |
-                    |  - Integrates final analysis       |
-                    +------------------------------------+
-                              |
-          +-------------------+-------------------+
-          |                   |                   |
-          v                   v                   v
-  [Batch 1: Patents 1-50]  [Batch 2: 51-100]  [Batch 3: 101-150]
-  Patent Analyst Worker    Patent Analyst      Patent Analyst
-  (Claude Haiku)           (Claude Haiku)      (Claude Haiku)
-  Output: claim_analysis   Output: same        Output: same
-  JSON per patent          format              format
-          |                   |                   |
-          +-------------------+-------------------+
-                              |
-                    +------------------------------------+
-                    |   Conflict Detection Worker        |
-                    |   (Claude Sonnet)                  |
-                    |   Input: all claim_analysis JSONs  |
-                    |   Output: overlap_matrix JSON      |
-                    +------------------------------------+
-                              |
-                    +------------------------------------+
-                    |   Legal Summary Writer (Opus)      |
-                    |   Input: overlap_matrix            |
-                    |   Output: attorney-ready report    |
-                    +------------------------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Orch["Orchestrator (Claude Opus)<br/>- Reads case brief<br/>- Generates patent analysis plan<br/>- Maintains task ledger<br/>- Integrates final analysis"] --> B1 & B2 & B3
+    B1["Batch 1: Patents 1-50<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON per patent"] --> Conflict
+    B2["Batch 2: Patents 51-100<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON, same format"] --> Conflict
+    B3["Batch 3: Patents 101-150<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON, same format"] --> Conflict
+    Conflict["Conflict Detection Worker (Claude Sonnet)<br/>Input: all claim_analysis JSONs<br/>Output: overlap_matrix JSON"] --> Summary
+    Summary["Legal Summary Writer (Opus)<br/>Input: overlap_matrix<br/>Output: attorney-ready report"]
+
+    class Orch req
+    class B1,B2,B3 base
+    class Conflict,Summary io
 ```
 
 ### Key Design Decisions
