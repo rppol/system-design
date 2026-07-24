@@ -668,9 +668,12 @@ flowchart TD
 
     App([App services<br/>Rails / Java]) -->|MySQL wire protocol| GW(VTGate proxy<br/>stateless, autoscale)
 
-    GW -->|routes by VSchema| T0(VTTablet shard0<br/>MySQL)
-    GW -->|routes by VSchema| T1(VTTablet shard1<br/>MySQL)
-    GW -->|routes by VSchema| T2(VTTablet shard2<br/>MySQL)
+    GW -->|routes by VSchema| T0
+    GW -->|routes by VSchema| T1
+    GW -->|routes by VSchema| T2
+    T0@{ icon: "logos:mysql", form: "square", label: "VTTablet shard0<br/>MySQL", pos: "b", h: 44 }
+    T1@{ icon: "logos:mysql", form: "square", label: "VTTablet shard1<br/>MySQL", pos: "b", h: 44 }
+    T2@{ icon: "logos:mysql", form: "square", label: "VTTablet shard2<br/>MySQL", pos: "b", h: 44 }
 
     T0 --> Topo(Topology service<br/>etcd / ZooKeeper)
     T1 --> Topo
@@ -678,7 +681,6 @@ flowchart TD
 
     class App io
     class GW mathOp
-    class T0,T1,T2 base
     class Topo frozen
 ```
 *VTGate is a stateless MySQL-wire-protocol proxy that routes to 16 VTTablet-managed shards by VSchema (3 of 16 shown); each tablet reports its shard map, VSchema, and health back to the etcd/ZooKeeper-backed topology service.*
