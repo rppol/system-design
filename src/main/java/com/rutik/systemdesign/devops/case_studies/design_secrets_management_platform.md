@@ -261,7 +261,7 @@ flowchart LR
 
     APP(["app"])
     ENGINE("vault database/ engine<br/>admin conn, rotated root")
-    PG(["Postgres:<br/>CREATE ROLE v-payments-ab12cd<br/>VALID UNTIL now()+1h"])
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
     LEASE(["lease: id, expiry,<br/>revocation_stmt"])
     RAFTN(["Raft"])
     DECISION{"renew or<br/>expire / revoke?"}
@@ -269,7 +269,7 @@ flowchart LR
     DROP(["DROP ROLE<br/>v-payments-ab12cd"])
 
     APP -- "creds/payments-ro" --> ENGINE
-    ENGINE --> PG
+    ENGINE -- "CREATE ROLE v-payments-ab12cd<br/>VALID UNTIL now()+1h" --> PG
     PG --> LEASE
     LEASE --> RAFTN
     RAFTN --> DECISION
@@ -278,7 +278,7 @@ flowchart LR
 
     class APP io
     class ENGINE mathOp
-    class PG,LEASE,RAFTN base
+    class LEASE,RAFTN base
     class DECISION mathOp
     class RENEW train
     class DROP lossN
