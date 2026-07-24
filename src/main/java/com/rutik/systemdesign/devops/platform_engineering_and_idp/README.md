@@ -94,7 +94,8 @@ flowchart TD
 
     subgraph GoldenPath["Golden Path Automation<br/>(GitOps + Control Plane)"]
         direction LR
-        GitRepo(["Git repo"]) --> ArgoCD["Argo CD / Flux"] --> K8s["Kubernetes"]
+        K8s@{ icon: "logos:kubernetes", form: "square", label: "Kubernetes", pos: "b", h: 44 }
+        GitRepo(["Git repo"]) --> ArgoCD["Argo CD / Flux"] --> K8s
         Claim(["Claim"]) --> Crossplane["Crossplane<br/>Composition"] --> CloudRes["Cloud resources"]
     end
 
@@ -102,9 +103,9 @@ flowchart TD
 
     subgraph Infra["Infrastructure"]
         direction LR
-        EKS["EKS"]
-        RDS["RDS"]
-        S3["S3"]
+        EKS@{ icon: "logos:aws-eks", form: "square", label: "EKS", pos: "b", h: 44 }
+        RDS@{ icon: "logos:aws-rds", form: "square", label: "RDS", pos: "b", h: 44 }
+        S3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
         IAM["IAM"]
         VPC["VPC"]
     end
@@ -117,7 +118,7 @@ flowchart TD
     class GitRepo train
     class Claim req
     class ArgoCD,Crossplane mathOp
-    class K8s,CloudRes,EKS,RDS,S3,IAM,VPC base
+    class CloudRes,IAM,VPC base
 ```
 
 Team Topologies interaction:
