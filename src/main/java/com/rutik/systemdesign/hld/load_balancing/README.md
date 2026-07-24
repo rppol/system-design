@@ -311,7 +311,8 @@ flowchart LR
     EU([Users EU]) --> M
     APAC([Users APAC]) --> M
 
-    M --> DNS(Global DNS<br/>Route 53)
+    M --> DNS
+    DNS@{ icon: "logos:aws-route53", form: "square", label: "Route 53", pos: "b", h: 44 }
     M --> ANY(Anycast IP<br/>Cloudflare)
 
     DNS --> USLB(US-EAST-1<br/>Regional LB) --> USPOOL(App Pool<br/>US servers)
@@ -321,7 +322,6 @@ flowchart LR
     class EU io
     class APAC io
     class M mathOp
-    class DNS mathOp
     class ANY mathOp
     class USLB frozen
     class EULB frozen
@@ -735,7 +735,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    R53(Route 53<br/>latency-based) --> ALB("AWS ALB L7 :443<br/>TLS terminate<br/>path/host routing")
+    R53 -->|"latency-based"| ALB("AWS ALB L7 :443<br/>TLS terminate<br/>path/host routing")
+    R53@{ icon: "logos:aws-route53", form: "square", label: "Route 53", pos: "b", h: 44 }
 
     ALB -->|"/api/*<br/>Least-Conn"| APITG(API target group<br/>200 instances)
     ALB -->|"static<br/>Round Robin"| STATICTG(Static group<br/>150 instances)
@@ -746,7 +747,6 @@ flowchart LR
     WSTG -->|"sticky by<br/>user_id hash"| BLUE("Blue Group - current<br/>A B C")
     WSTG -->|"sticky by<br/>user_id hash"| GREEN("Green Group - new ver<br/>A' B' C'")
 
-    class R53 mathOp
     class ALB mathOp
     class APITG frozen
     class STATICTG frozen
