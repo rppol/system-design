@@ -74,19 +74,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    K(["Kafka: tx events"]) --> FL["Flink job: sliding windows"]
+    K@{ icon: "logos:kafka", form: "square", label: "Kafka: tx events", pos: "b", h: 44 }
+    FL@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink: sliding windows", pos: "b", h: 44 }
+    K --> FL
     FL --> W1["card_id 1h: sum(amount), count(tx)"]
     FL --> W2["card_id 24h: sum(amount), distinct merchants"]
     FL --> W3["device_id 1h: count(cards used)"]
-    W1 --> RD["Redis: atomic INCR + EXPIRE, key feat:card:window:metric"]
+    RD@{ icon: "logos:redis", form: "square", label: "Redis: atomic INCR/EXPIRE", pos: "b", h: 44 }
+    W1 --> RD
     W2 --> RD
     W3 --> RD
     RD --> SC(["Feature read at scoring (sub-1ms)"])
 
-    class K,SC io
-    class FL mathOp
+    class SC io
     class W1,W2,W3 req
-    class RD base
 ```
 
 Spend-velocity aggregates are computed off the critical path: Flink maintains per-card and per-device sliding windows with exactly-once semantics and writes them to Redis, so scoring only does a sub-1ms GET instead of a live aggregation.
