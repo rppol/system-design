@@ -34,7 +34,7 @@ flowchart TD
     end
 
     subgraph RETR["Retrieval / candidate generation (25ms)"]
-        BM["BM25 lexical (ElasticSearch): top-1000"]
+        BM@{ icon: "logos:elasticsearch", form: "square", label: "BM25 Lexical<br/>(ElasticSearch, top-1000)", pos: "b", h: 44 }
         DE["Dense retrieval (Two-Tower + FAISS): top-500"]
         RRF(("RRF fusion"))
         BM --> RRF
@@ -42,7 +42,9 @@ flowchart TD
     end
 
     subgraph TRAIN["Training pipeline (offline, daily)"]
-        CL["Click logs (Kafka)"] --> ETL["Spark ETL + position-bias correction (IPW)"]
+        CL --> ETL
+        CL@{ icon: "logos:kafka", form: "square", label: "Click Logs<br/>(Kafka)", pos: "b", h: 44 }
+        ETL@{ icon: "logos:apache-spark", form: "square", label: "Spark ETL +<br/>position-bias<br/>correction (IPW)", pos: "b", h: 44 }
         ETL --> LBL["LTR training data: query, product, relevance"]
         LBL --> MART["LambdaMART training"]
         MART --> MLF["MLflow, A/B deploy"]
@@ -57,9 +59,9 @@ flowchart TD
 
     class Q,OUT io
     class SP,IN,EX req
-    class BM,DE frozen
+    class DE frozen
     class RRF,LTR,BR mathOp
-    class CL,ETL,LBL req
+    class LBL req
     class MART train
     class MLF base
 ```
@@ -76,14 +78,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Q(["Normalized query"]) --> BM["BM25 (ElasticSearch): inverted index, top-1000"]
+    Q(["Normalized query"]) --> BM
+    BM@{ icon: "logos:elasticsearch", form: "square", label: "BM25<br/>(ElasticSearch, inverted<br/>index, top-1000)", pos: "b", h: 44 }
     Q --> DE["Dense (Two-Tower + FAISS): nprobe=64, top-500"]
     BM --> RRF(("RRF"))
     DE --> RRF
     RRF --> C(["Top-500 fused candidates"])
 
     class Q,C io
-    class BM,DE frozen
+    class DE frozen
     class RRF mathOp
 ```
 
