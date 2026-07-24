@@ -790,26 +790,42 @@ Hybrid retrieval wins whenever a query workload mixes exact-match needs like ide
 
 **Scenario: web-scale product search for an e-commerce marketplace.** GlobalMart runs 50M product listings, 500M searches/day, and a p99 latency budget of 200ms end-to-end, and must return relevant products for misspelled, paraphrased, and exact-SKU queries alike.
 
-```
-OFFLINE (nightly batch + streaming updates)
-  Product catalog (title, description, brand, category, price, reviews)
-        |
-        +----------------------------------+
-        v                                  v
-  Inverted index (Elasticsearch)     Bi-encoder embeddings (E5-base, 768d)
-    BM25F, title weighted 2.5x         precomputed per product
-        |                                  |
-        v                                  v
-  Sparse index (~1min update lag)     HNSW index (rebuilt every 6h)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-ONLINE (per request, p99 < 200ms)
-  1. Query understanding: spell-correct, detect exact-SKU pattern   (~5ms)
-  2. Sparse retrieval: BM25F top-300                                (~12ms)
-  3. Dense retrieval: HNSW top-300, ef_search=100, ~96.5% recall    (~18ms)
-  4. Fusion: Reciprocal Rank Fusion (k=60) -> top-300 unique         (~1ms)
-  5. LTR rerank: LambdaMART, 40 features -> top-24                  (~8ms)
-  6. Business rules: in-stock filter, sponsored slot injection       (~2ms)
-  7. Render results page                                       total ~46ms
+    subgraph offline["Offline: nightly batch + streaming updates"]
+        direction LR
+        cat(["Product Catalog<br/>title, description, brand,<br/>category, price, reviews"]) --> es@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>BM25F, title weighted 2.5x", pos: "b", h: 44 }
+        cat --> emb["Bi-encoder Embeddings<br/>E5-base, 768d<br/>precomputed per product"]
+        es --> sidx[("Sparse Index<br/>~1min update lag")]
+        emb --> hidx[("HNSW Index<br/>rebuilt every 6h")]
+    end
+
+    subgraph online["Online: per request, p99 < 200ms"]
+        direction LR
+        qu["1. Query Understanding<br/>spell-correct, detect SKU<br/>~5ms"] --> sr["2. Sparse Retrieval<br/>BM25F top-300<br/>~12ms"]
+        qu --> dr["3. Dense Retrieval<br/>HNSW top-300, ef_search=100<br/>~96.5% recall, ~18ms"]
+        sr --> fu["4. Fusion<br/>RRF k=60 -&gt; top-300 unique<br/>~1ms"]
+        dr --> fu
+        fu --> rerank["5. LTR Rerank<br/>LambdaMART, 40 features<br/>-&gt; top-24, ~8ms"]
+        rerank --> biz["6. Business Rules<br/>in-stock filter,<br/>sponsored slot, ~2ms"]
+        biz --> render(["7. Render Results Page<br/>total ~46ms"])
+    end
+
+    sidx --> sr
+    hidx --> dr
+
+    class cat,render io
+    class emb,sidx,hidx,qu,sr,dr,fu req
+    class rerank mathOp
+    class biz base
 ```
 
 Offline Recall@300 (sparse+dense fused) = 0.97. Offline NDCG@10 on fusion order alone = 0.71, rising to 0.81 after the LambdaMART rerank. Online: +4.2% add-to-cart rate versus the previous BM25-only baseline, at a p99 latency of 46ms, comfortably under the 200ms budget.
