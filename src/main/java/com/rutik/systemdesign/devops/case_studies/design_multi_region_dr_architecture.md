@@ -131,23 +131,23 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    R53(Route 53 global DNS<br/>health checks: 10s / 3-fail<br/>ALIAS records, TTL 10s)
+    R53@{ icon: "logos:aws-route53", form: "square", label: "Route 53<br/>10s / 3-fail, TTL 10s", pos: "b", h: 44 }
 
     subgraph PRI["PRIMARY REGION us-east-1<br/>write authority"]
         ALB1([ALB / NLB])
         SVC1(payments-svc<br/>N pods)
-        AUR1[(Aurora Global DB<br/>PRIMARY writer<br/>+ 2 readers)]
-        DDB1[(DynamoDB<br/>Global Table)]
-        S31[(S3 bucket<br/>receipts, KYC)]
+        AUR1@{ icon: "logos:aws-aurora", form: "square", label: "Aurora Primary<br/>+ 2 readers", pos: "b", h: 44 }
+        DDB1@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB", pos: "b", h: 44 }
+        S31@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>receipts, KYC", pos: "b", h: 44 }
         ALB1 --> SVC1 --> AUR1
     end
 
     subgraph SEC["SECONDARY REGION us-west-2<br/>active reads, standby writes"]
         ALB2([ALB / NLB])
         SVC2(payments-svc<br/>0.3N pods, warm)
-        AUR2[(Aurora Global DB<br/>SECONDARY readers<br/>promotable)]
-        DDB2[(DynamoDB<br/>Global Table<br/>replica)]
-        S32[(S3 bucket<br/>replica)]
+        AUR2@{ icon: "logos:aws-aurora", form: "square", label: "Aurora Secondary<br/>promotable", pos: "b", h: 44 }
+        DDB2@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB Replica", pos: "b", h: 44 }
+        S32@{ icon: "logos:aws-s3", form: "square", label: "S3 Replica", pos: "b", h: 44 }
         ALB2 --> SVC2 --> AUR2
     end
 
@@ -162,11 +162,10 @@ flowchart TD
     CTRL -.->|fence + promote| PRI
     CTRL -.->|flips Route53| SEC
 
-    class R53,CTRL mathOp
+    class CTRL mathOp
     class ALB1,ALB2 req
-    class SVC1,AUR1 train
-    class SVC2,AUR2 frozen
-    class DDB1,DDB2,S31,S32 base
+    class SVC1 train
+    class SVC2 frozen
 ```
 
 Route 53 steers healthy traffic to the primary and keeps the secondary standing by; both regions serve reads locally off their own Aurora readers, but only the primary writer accepts commits until the Failover Controller fences the lock table and promotes us-west-2.
@@ -222,7 +221,7 @@ flowchart LR
         R2(reader)
     end
 
-    STORE(Aurora storage<br/>replication, physical)
+    STORE@{ icon: "logos:aws-aurora", form: "square", label: "Aurora storage<br/>replication, physical", pos: "b", h: 44 }
 
     subgraph S["us-west-2 SECONDARY cluster<br/>read-only until promoted"]
         SR(readers<br/>promotable)
@@ -234,7 +233,6 @@ flowchart LR
     STORE -->|"RPO approx lag<br/>(sub-second)"| SR
 
     class W,R1,R2 train
-    class STORE mathOp
     class SR frozen
 ```
 
@@ -365,7 +363,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    ZONE(Route 53 hosted zone<br/>api.payments.example.com)
+    ZONE@{ icon: "logos:aws-route53", form: "square", label: "Route 53<br/>hosted zone", pos: "b", h: 44 }
     HC1{Health check #1<br/>10s / 3-fail}
     HC2{Health check #2<br/>10s / 3-fail}
     ALB1([ALB use1])
@@ -374,7 +372,6 @@ flowchart LR
     ZONE -->|"PRIMARY failover<br/>ALIAS"| HC1 --> ALB1
     ZONE -.->|"SECONDARY failover<br/>ALIAS"| HC2 -.-> ALB2
 
-    class ZONE mathOp
     class HC1,HC2 mathOp
     class ALB1 train
     class ALB2 frozen
