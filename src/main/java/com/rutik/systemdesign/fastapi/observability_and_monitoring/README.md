@@ -146,18 +146,22 @@ flowchart LR
     TRC --> OTL(["OTLP gRPC :4317"])
 
     STD --> VEC(Vector / Fluentd)
-    MEP --> PSC(Prometheus scrape)
+    MEP --> PSC
     OTL --> OCL(OTel Collector)
 
     VEC --> LOKI(Loki)
-    PSC --> GRAF(Grafana)
-    OCL --> JAEG(Jaeger / Tempo)
+    PSC --> GRAF
+    OCL --> JAEG
+
+    PSC@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    GRAF@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+    JAEG@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger/Tempo", pos: "b", h: 44 }
 
     class CIM,OTM,RH mathOp
     class LOG,MET,TRC io
     class STD,MEP,OTL req
-    class VEC,PSC,OCL base
-    class LOKI,GRAF,JAEG frozen
+    class VEC,OCL base
+    class LOKI frozen
 ```
 
 Every request fans out from the route handler into three independent signal pipelines — logs,
@@ -1025,7 +1029,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    CL([Client]) --> ING("Nginx Ingress<br/>forwards X-Request-ID")
+    CL([Client]) --> ING
 
     subgraph POD["FastAPI Pod ×3"]
         CIM(CorrelationId<br/>Middleware) --> OTM(OTel ASGI<br/>Middleware) --> RH(Route handlers)
@@ -1036,15 +1040,20 @@ flowchart LR
     ING --> CIM
 
     RH --> LOG(structlog<br/>JSON logs) --> STD(stdout) --> PTAIL(Promtail) --> LOKI(Loki)
-    RH --> MET(prometheus_client) --> MEP(["/metrics :9090"]) --> PROMETHEUS(Prometheus) --> GRAF(Grafana)
-    RH --> TRC(manual OTel spans) --> BSP(BatchSpanProcessor) --> OCOL(OTel Collector) --> JAEG(Jaeger)
+    RH --> MET(prometheus_client) --> MEP(["/metrics :9090"]) --> PROMETHEUS --> GRAF
+    RH --> TRC(manual OTel spans) --> BSP(BatchSpanProcessor) --> OCOL(OTel Collector) --> JAEG
+
+    ING@{ icon: "logos:nginx", form: "square", label: "Nginx Ingress", pos: "b", h: 44 }
+    PROMETHEUS@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    GRAF@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+    JAEG@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger", pos: "b", h: 44 }
 
     class CL io
-    class ING,CIM,OTM,RH mathOp
+    class CIM,OTM,RH mathOp
     class HP,RP,LOG,MET,TRC io
     class STD,MEP,BSP req
-    class PTAIL,PROMETHEUS,OCOL base
-    class LOKI,GRAF,JAEG frozen
+    class PTAIL,OCOL base
+    class LOKI frozen
 ```
 
 Nginx forwards the client's X-Request-ID into one of three FastAPI pods, whose route handlers fan
