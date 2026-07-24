@@ -115,22 +115,17 @@ void process(Dog d)    { ... }    // called if declared type is Dog
 ```
 
 ### Inner Class Memory Layout
-```
-Outer instance
-  +--[fields]--+
-  |            |
-  +------------+
-        ^
-        | this$0 (hidden reference)
-        |
-  Inner instance
-  +--[fields + this$0]--+
-  |                     |
-  +---------------------+
+```mermaid
+flowchart LR
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-If inner instance is stored in a static data structure,
-Outer instance can NEVER be GC'd -> memory leak
+    INNER("Inner instance<br/>fields + this$0") -- "this$0<br/>hidden reference" --> OUTER("Outer instance<br/>fields")
+
+    class OUTER base
+    class INNER req
 ```
+If the inner instance is stored in a static data structure, the outer instance can NEVER be GC'd — a memory leak.
 
 ---
 
@@ -541,12 +536,13 @@ flowchart TD
     PE["Pricing Engine\nHashMap&lt;Money,LineItem&gt;\nlookup by hashCode+equals"] --> MONEY
     DR["Discount Resolver\nTreeSet&lt;Money&gt; (sorted)\nnavigation by compareTo"] --> MONEY
     MONEY["commons-money.jar : Money (final)\namount: BigDecimal (normalized) · currency: Currency\nequals · hashCode · compareTo · toString"]
-    KAFKA["Kafka ledger topic\n4M serializations/day"] --> MONEY
+    KAFKA@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    KAFKA --> MONEY
     FX["FX conversion service\ncompareTo for thresholds"] --> MONEY
 
     class PE,DR req
     class MONEY base
-    class KAFKA,FX io
+    class FX io
 ```
 
 #### Broken patterns, then fixes
