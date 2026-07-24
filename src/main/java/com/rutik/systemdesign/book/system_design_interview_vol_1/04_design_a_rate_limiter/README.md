@@ -134,12 +134,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    C(["Client"]) --> GW["API Gateway<br/>rate-limit middleware"]
+    C(["Client"]) --> GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
     GW -->|"under limit"| API["API Servers"]
     GW -->|"over limit"| R(["HTTP 429<br/>Too Many Requests"])
 
     class C req
-    class GW mathOp
     class API train
     class R lossN
 ```
@@ -655,14 +654,14 @@ flowchart LR
     DISK[("Rules<br/>on disk")] -->|"pull"| WK["Workers"]
     WK -->|"cache rules"| RC[("Rules<br/>Cache")]
     RC -->|"load rules"| MW
-    REDIS[("Redis<br/>counters + timestamps")] <-->|"fetch / INCR / EXPIRE"| MW
+    REDIS@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 } <-->|"fetch / INCR / EXPIRE"| MW
     MW -->|"within limit"| API["API Servers"]
     MW -->|"over limit"| E(["HTTP 429"])
     E -.->|"optional"| Q[["Queue<br/>process later"]]
 
     class C req
     class MW mathOp
-    class DISK,RC,REDIS base
+    class DISK,RC base
     class WK frozen
     class API train
     class E lossN
