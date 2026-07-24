@@ -12,40 +12,56 @@ The Java and Spring sections cover language and framework mechanics. This sectio
 
 ## 9-Phase Learning Path
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+
+    subgraph P1["Phase 1 - Networking Fundamentals"]
+        p1_osi(["OSI Model"]) --> p1_tcp(["TCP/IP Deep Dive"]) --> p1_udp(["UDP & QUIC"]) --> p1_http(["HTTP Protocols"])
+    end
+    subgraph P2["Phase 2 - API Design & Protocols"]
+        p2_rest(["REST Design"]) --> p2_grpc(["gRPC/Protobuf"]) --> p2_graphql(["GraphQL"]) --> p2_ws(["WS & SSE"])
+    end
+    subgraph P3["Phase 3 - Performance Engineering"]
+        p3_prof(["Profiling"]) --> p3_pool(["Connection Pooling"]) --> p3_cache(["Caching Deep Dive"]) --> p3_async(["Async Patterns"])
+    end
+
+    subgraph P4["Phase 4 - Database Engineering"]
+        p4_dbint(["DB Internals"]) --> p4_query(["Query Opt."]) --> p4_migr(["Migrations"]) --> p4_dtx(["Dist. Transactions"]) --> p4_dbtypes(["DB Types Deep Dive"])
+    end
+    subgraph P5["Phase 5 - Resilience & Reliability"]
+        p5_cb(["Circuit Breaker"]) --> p5_rl(["Rate Limiting"]) --> p5_obs(["Observability"])
+    end
+    subgraph P6["Phase 6 - Security"]
+        p6_owasp(["OWASP Top 10"]) --> p6_auth(["Auth & AuthZ"])
+    end
+
+    subgraph P7["Phase 7 - Testing & Quality"]
+        p7_test(["Testing Strategy"]) --> p7_load(["Load Testing"]) --> p7_chaos(["Chaos Engineering"])
+    end
+    subgraph P8["Phase 8 - Event-Driven Architecture"]
+        p8_eda(["EDA Fundamentals"]) --> p8_kafka(["Kafka Deep Dive"]) --> p8_es(["Event Sourcing"]) --> p8_msg(["Messaging Patterns"])
+    end
+    subgraph P9["Phase 9 - Microservices Architecture"]
+        p9_ms(["MS Fundamentals"]) --> p9_gw(["API Gateway"]) --> p9_mesh(["Service Mesh"]) --> p9_ops(["Operational Patterns"]) --> p9_container(["Container Patterns"])
+    end
+
+    cs(["Case Studies<br/>Booking, Feed, Payment,<br/>Order System, Migration"])
+
+    P1 --> P4 --> P7 --> cs
+    P2 --> P5 --> P8 --> cs
+    P3 --> P6 --> P9 --> cs
+
+    class p1_osi,p1_tcp,p1_udp,p1_http,p2_rest,p2_grpc,p2_graphql,p2_ws,p3_prof,p3_pool,p3_cache,p3_async io
+    class p4_dbint,p4_query,p4_migr,p4_dtx,p4_dbtypes,p5_cb,p5_rl,p5_obs,p6_owasp,p6_auth train
+    class p7_test,p7_load,p7_chaos,p8_eda,p8_kafka,p8_es,p8_msg,p9_ms,p9_gw,p9_mesh,p9_ops,p9_container mathOp
+    class cs req
 ```
-Phase 1                Phase 2               Phase 3
-Networking             API Design            Performance
-Fundamentals           & Protocols           Engineering
- OSI Model  ---------> REST Design -------> Profiling
- TCP/IP Deep Dive ----> gRPC/Protobuf -----> Connection Pooling
- UDP & QUIC ----------> GraphQL -----------> Caching Deep Dive
- HTTP Protocols ------> WS & SSE ----------> Async Patterns
-      |                      |                    |
-      v                      v                    v
-Phase 4                Phase 5               Phase 6
-Database               Resilience &          Security
-Engineering            Reliability
- DB Internals -------> Circuit Breaker ----> OWASP Top 10
- Query Opt. ----------> Rate Limiting ------> Auth & AuthZ
- Migrations ----------> Observability
- Dist. Transactions
- DB Types Deep Dive
-      |                      |                    |
-      v                      v                    v
-Phase 7                Phase 8               Phase 9
-Testing &              Event-Driven          Microservices
-Quality                Architecture          Architecture
- Testing Strategy ---> EDA Fundamentals ---> MS Fundamentals
- Load Testing -------> Kafka Deep Dive ----> API Gateway
- Chaos Engineering --> Event Sourcing ------> Service Mesh
-                    --> Messaging Patterns -> Operational Patterns
-                                          -> Container Patterns
-                                                 |
-                                                 v
-                                          Case Studies
-                                    (Booking, Feed, Payment,
-                                     Order System, Migration)
-```
+
+The three columns run independently top-to-bottom (Phase 1/4/7, Phase 2/5/8, Phase 3/6/9) and converge on the five capstone case studies.
 
 ---
 
