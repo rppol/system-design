@@ -221,7 +221,7 @@ flowchart LR
     trusted("TrustedHost<br/>Middleware")
     gzip("GZip<br/>Middleware")
     cors("CORS<br/>Middleware")
-    router("FastAPI<br/>Router")
+    router@{ icon: "logos:fastapi", form: "square", label: "FastAPI Router", pos: "b", h: 44 }
     respOut(["outgoing<br/>response"])
 
     reqIn --> trusted --> gzip --> cors --> router
@@ -232,7 +232,6 @@ flowchart LR
 
     class reqIn,respOut io
     class trusted,gzip,cors mathOp
-    class router base
 ```
 
 *Outgoing response flows back through the same chain in reverse order — the middleware added last (innermost, closest to the router) is called first on the way out.*
