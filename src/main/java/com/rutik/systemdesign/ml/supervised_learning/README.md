@@ -755,7 +755,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    kf([Raw transactions\nKafka · 50K TPS]) --> fs["Feature Service\nRedis · p99 < 2ms\nvelocity · merchant risk · 128d embeddings"]
+    kf@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>50K TPS", pos: "b", h: 44 } --> fs["Feature Service\nRedis · p99 < 2ms\nvelocity · merchant risk · 128d embeddings"]
     subgraph pipe["sklearn Pipeline · p99 < 15ms"]
         ct["ColumnTransformer\nStandardScaler · OrdinalEncoder\nTruncatedSVD 128 → 32"] --> rf["BalancedRandomForest\nn=500 · SMOTE-aware"]
         rf --> cal["Threshold calibrator\nPlatt scaling"]
@@ -767,7 +767,7 @@ flowchart TD
     de -->|"0.3 – 0.7"| su([step-up auth])
     de -->|"> 0.7"| bl([block + alert])
 
-    class kf,ap,su io
+    class ap,su io
     class fs base
     class ct,cal,shap mathOp
     class rf train
