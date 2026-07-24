@@ -92,17 +92,17 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     App(["App SDK"]) -->|"OTLP gRPC/HTTP"| Collector("OTel Collector<br/>batch + resource_detection")
-    Collector -->|"exporter: prometheus"| Prom("Prometheus")
-    Collector -->|"exporter: jaeger"| Trace("Jaeger / Tempo")
+    Collector -->|"exporter: prometheus"| Prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    Collector -->|"exporter: jaeger"| Trace@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger / Tempo", pos: "b", h: 44 }
     Collector -->|"exporter: loki"| Log("Loki")
-    Prom --> Grafana(["Grafana Dashboards"])
+    Prom --> Grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
     Trace --> TraceUI(["Trace UI"])
     Log --> LogUI(["Log Aggregation"])
 
     class App io
     class Collector mathOp
-    class Prom,Trace,Log base
-    class Grafana,TraceUI,LogUI train
+    class Log base
+    class TraceUI,LogUI train
 ```
 
 ---
