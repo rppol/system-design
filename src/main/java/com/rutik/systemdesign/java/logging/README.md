@@ -805,23 +805,31 @@ Without `maxHistory` and a `totalSizeCap`, a rolling file appender keeps every r
 
 **Scenario.** PayFlow, a fictional mid-size payments company, runs a customer-facing Payment API (Spring Boot, ~500 RPS peak) and a nightly batch **Reconciliation Service** that re-verifies 2M transactions against a card-network settlement file using a fixed 16-thread pool. Every log line must carry a `requestId` (API) or `reconciliationBatchId` (batch) so Kibana can reconstruct one transaction's full story across services. Constraints: async logging must add well under 1ms overhead to the request thread; retention is 30 days hot in Elasticsearch, 1 year cold in object storage; and — a hard PCI-DSS requirement — no full card number or CVV may ever reach a log line.
 
-```
-Payment API (virtual threads)                Reconciliation batch (fixed pool, 16 threads)
-        |                                              |
-        v                                              v
-logback-spring.xml:                          logback-spring.xml:
-  JSON encoder (LogstashEncoder)                JSON encoder (LogstashEncoder)
-  AsyncAppender (queueSize=512,                 AsyncAppender (queueSize=512,
-    neverBlock=false)                             neverBlock=false)
-  MDC: requestId per HTTP request               MDC: reconciliationBatchId,
-                                                   propagated via MdcTaskDecorator
-        |                                              |
-        +-------------------+       +------------------+
-                            v       v
-                       logs/app.log (JSON, rolling, capped)
-                            |
-                            v
-                        Filebeat  ->  Kafka  ->  Logstash  ->  Elasticsearch  ->  Kibana
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    payAPI["Payment API<br/>virtual threads"] --> payLog["logback-spring.xml<br/>JSON encoder LogstashEncoder<br/>AsyncAppender queueSize=512<br/>MDC: requestId per request"]
+    reconBatch["Reconciliation batch<br/>16-thread pool"] --> reconLog["logback-spring.xml<br/>JSON encoder LogstashEncoder<br/>AsyncAppender queueSize=512<br/>MDC: reconciliationBatchId<br/>via MdcTaskDecorator"]
+    payLog --> applog["logs/app.log<br/>JSON, rolling, capped"]
+    reconLog --> applog
+    applog --> filebeat["Filebeat"]
+    filebeat --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    kafka --> logstash["Logstash"]
+    logstash --> elasticsearch@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    elasticsearch --> kibana["Kibana"]
+
+    class payAPI,reconBatch io
+    class payLog,reconLog mathOp
+    class applog base
+    class filebeat,logstash req
+    class kibana train
 ```
 
 **Redacting sensitive fields before they ever reach a log call:**
