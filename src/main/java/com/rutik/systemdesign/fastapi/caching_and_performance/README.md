@@ -240,8 +240,8 @@ flowchart LR
 
     Client(["Client<br/>browser / mobile"])
     CDN{"CDN / Reverse Proxy<br/>nginx, CloudFront"}
-    Worker{"FastAPI Worker<br/>lru_cache / TTLCache"}
-    Redis{"Redis<br/>distributed cache"}
+    Worker@{ icon: "logos:fastapi", form: "square", label: "FastAPI Worker", pos: "b", h: 44 }
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     DB[("Database /<br/>External API")]
     Resp(["Response"])
 
@@ -255,7 +255,7 @@ flowchart LR
     DB -->|"SETEX Redis<br/>+ populate in-process"| Resp
 
     class Client,Resp io
-    class CDN,Worker,Redis base
+    class CDN base
     class DB frozen
 ```
 
@@ -276,7 +276,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Req(["Request"])
-    Check{"Check Redis"}
+    Check@{ icon: "logos:redis", form: "square", label: "Check Redis", pos: "b", h: 44 }
     DB[("Query DB")]
     Set("SETEX key val ttl")
     Resp(["Response"])
@@ -288,7 +288,6 @@ flowchart LR
     Set --> Resp
 
     class Req,Resp io
-    class Check mathOp
     class DB frozen
     class Set train
 ```
@@ -1180,9 +1179,9 @@ flowchart LR
 
     Client(["Browser /<br/>Mobile Client"])
     CDN{"CDN<br/>CloudFront / Fastly"}
-    Worker{"FastAPI Service<br/>4 Uvicorn workers, L1 TTLCache"}
-    Redis{"Redis Cluster<br/>3 shards"}
-    PG[("PostgreSQL<br/>read replica")]
+    Worker@{ icon: "logos:fastapi", form: "square", label: "FastAPI Service", pos: "b", h: 44 }
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster", pos: "b", h: 44 }
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
     Resp(["Response"])
 
     Client -->|"max-age=60<br/>s-maxage=30, ETag"| CDN
@@ -1195,8 +1194,7 @@ flowchart LR
     PG -->|"SETEX Redis + populate L1<br/>then return"| Resp
 
     class Client,Resp io
-    class CDN,Worker,Redis base
-    class PG frozen
+    class CDN base
 ```
 
 *Three progressively slower fallbacks — CDN edge, in-process L1, Redis L2 — each absorb most
