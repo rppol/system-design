@@ -104,29 +104,33 @@ Parallel (fast):
   tool_a -+
   tool_b -+--asyncio.gather()--> max(1.5, 2.1, 0.8) = 2.1s
   tool_c -+
+```
 
+**Subagent Hierarchy**
 
-Subagent Hierarchy
-===================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Parent Agent (Opus, full toolbox)
-       |
-       +-- dispatch_subagent("research X", [web_search, read_url])
-       |        |
-       |        v
-       |   Subagent A (Sonnet, web tools only)
-       |   Returns: {summary, citations, confidence}
-       |
-       +-- dispatch_subagent("analyze Y", [bash, read_file])
-                |
-                v
-           Subagent B (Sonnet, file tools only)
-           Returns: {analysis, errors}
+    P(["Parent Agent<br/>Opus, full toolbox"]) -->|"dispatch_subagent:<br/>research X"| SA(["Subagent A - Sonnet<br/>web_search, read_url"])
+    P -->|"dispatch_subagent:<br/>analyze Y"| SB(["Subagent B - Sonnet<br/>bash, read_file"])
+    SA -->|"returns"| RA["summary, citations,<br/>confidence"]
+    SB -->|"returns"| RB["analysis, errors"]
 
+    class P base
+    class SA,SB frozen
+    class RA,RB io
+```
 
-Prompt Caching for Agents
-==========================
+**Prompt Caching for Agents**
 
+```
   +----------------+----------------+----------------+
   |  System prompt |  Tool defs     |  Static prefix |  <-- CACHED
   |  (2000 toks)   |  (1500 toks)   |  (500 toks)    |      (90% cheaper on read)
