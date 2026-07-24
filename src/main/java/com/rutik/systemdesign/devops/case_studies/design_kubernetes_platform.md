@@ -155,7 +155,7 @@ flowchart TD
     subgraph MP["Management Plane<br/>HA EKS · 3 AZ · no tenant pods"]
         capi("CAPI / CAPA<br/>controllers")
         xplane("Crossplane<br/>cloud infra CRDs")
-        argocd("Argo CD<br/>App-of-Apps / AppSets")
+        argocd@{ icon: "logos:argo", form: "square", label: "Argo CD" }
         catalog("Tenant Catalog<br/>Tenant CRD")
         policy{"Kyverno /<br/>OPA Gatekeeper"}
         backstage("Backstage IDP<br/>golden paths")
@@ -187,7 +187,7 @@ flowchart TD
     euw1 -- "remote_write" --> obs
 
     class eng,backstage io
-    class capi,argocd,policy,mesh mathOp
+    class capi,policy,mesh mathOp
     class xplane,obs base
     class catalog req
     class use1,usw2,euw1,rest train
@@ -256,7 +256,7 @@ flowchart LR
         xplane2 --> pool
     end
 
-    eks[["EKS API<br/>CreateCluster / CreateNodegroup"]]
+    eks@{ icon: "logos:aws-eks", form: "square", label: "EKS API", pos: "b", h: 44 }
     infra[["IAM · VPC · SGs<br/>via Crossplane"]]
 
     git -- "Argo CD apply" --> MC
@@ -266,7 +266,7 @@ flowchart LR
     class git io
     class capicore,capa,pool mathOp
     class xplane2 base
-    class eks,infra frozen
+    class infra frozen
 ```
 
 Argo CD applies the Cluster manifests once; inside the management cluster, CAPI/CAPA drives the EKS control plane while Crossplane drives the surrounding node-pool and cloud infrastructure — one GitOps reconciliation loop, two provisioning paths.
