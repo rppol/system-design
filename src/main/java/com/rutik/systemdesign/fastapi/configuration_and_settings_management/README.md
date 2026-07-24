@@ -813,7 +813,7 @@ flowchart TD
     subgraph INIT["Startup initialisers"]
         direction LR
         DB(["DB pool init<br/>settings.database_url"])
-        REDIS(["Redis pool init<br/>settings.redis_url"])
+        REDIS@{ icon: "logos:redis", form: "square", label: "Redis pool init", pos: "b", h: 44 }
         JWT(["JWT middleware<br/>settings.jwt_secret"])
     end
 
@@ -832,7 +832,6 @@ flowchart TD
     class START mathOp
     class CACHE base
     class DB train
-    class REDIS train
     class JWT train
     class HANDLERS req
 ```
