@@ -815,22 +815,34 @@ Set scale_pos_weight to the ratio of negative to positive examples (e.g. ~1000 f
 
 **Scenario: Card-fraud detection with a stacked ensemble.** A payments processor scores 10M transactions/day, fraud rate ~0.1% (10k positives/day). A single model misses subtle fraud patterns, so three base learners trained on different feature views are stacked and combined by a logistic-regression meta-learner. The system must score each transaction in under 5ms inline with authorization.
 
-```
-                 transaction features (300+)
-        +-----------------+-----------------+
-        |                 |                 |
-   feature view A    feature view B    feature view C
-  (velocity/amount)  (device/geo)     (merchant/MCC)
-        |                 |                 |
-   XGBoost           LightGBM         Random Forest
-        |                 |                 |
-        +-------- out-of-fold scores --------+
-                          |
-                  meta-learner (LogReg)
-                          |
-                   calibrated p(fraud)
-                          |
-         threshold @ 99% recall -> decline / step-up / approve
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tx([Transaction features · 300+]) --> fa["Feature view A<br/>velocity / amount"]
+    tx --> fb["Feature view B<br/>device / geo"]
+    tx --> fc["Feature view C<br/>merchant / MCC"]
+    fa --> xgbm["XGBoost"]
+    fb --> lgbm["LightGBM"]
+    fc --> rfm["Random Forest"]
+    xgbm --> oof["Out-of-fold scores"]
+    lgbm --> oof
+    rfm --> oof
+    oof --> meta["Meta-learner<br/>LogReg"]
+    meta --> cal["Calibrated p(fraud)"]
+    cal --> thr{{"Threshold @ 99% recall<br/>decline / step-up / approve"}}
+
+    class tx,thr io
+    class fa,fb,fc req
+    class xgbm,lgbm,rfm train
+    class oof mathOp
+    class meta,cal base
 ```
 
 AUC-ROC = 0.987, precision@99%recall = 0.43 (i.e. to catch 99% of fraud, 57% of flagged transactions are false positives, routed to step-up auth rather than hard decline). End-to-end inference < 5ms because trees are shallow (max_depth 6-8) and the meta-learner is a 3-feature dot product.
