@@ -973,31 +973,39 @@ An expanding window keeps all history and grows the training set each fold, whil
 **Scenario:** A European e-commerce platform (18M SKUs, 40M monthly active users) needs 26-week demand forecasts to drive warehouse replenishment. Current ARIMA-based system has MAPE of 34% on seasonal products, causing 620M euros of overstock and 190M euros of lost sales annually. The target is MAPE < 18% on held-out 26-week test window, with forecasts generated for all 18M SKUs within 4 hours on a weekly batch schedule.
 
 **Architecture:**
-```
-Historical Sales DB (Snowflake, 5 years)
-         |
-         v
-Feature Engineering
-  - Calendar features: day-of-week, week-of-year, holiday flags
-  - Lag features: lag_1w, lag_4w, lag_52w (year-over-year)
-  - Rolling stats: mean/std 4w, 13w, 26w windows
-  - External: weather index, Google Trends, promo flags
-         |
-         v
-Model Ensemble
-  +--------------------------+---------------------------+
-  |  Prophet (per-SKU)       |  Global LSTM (all SKUs)   |
-  |  trend + seasonality     |  shared weights, item emb |
-  |  changepoints            |  seq-to-seq 52->26 steps  |
-  +--------------------------+---------------------------+
-                   |
-                   v
-         Stacking Blender (Ridge regression)
-         weights: prophet=0.42, lstm=0.58
-                   |
-                   v
-         Forecast Store (Redis + S3 Parquet)
-         26-week horizon per SKU, P10/P50/P90 quantiles
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    snow@{ icon: "logos:snowflake", form: "square", label: "Historical Sales DB<br/>Snowflake, 5yr", pos: "b", h: 44 }
+    feat["Feature Engineering<br/>calendar + lag + rolling + external"]
+    prophet["Prophet (per-SKU)<br/>trend + seasonality + changepoints"]
+    lstm["Global LSTM (all SKUs)<br/>shared weights, seq2seq 52-&gt;26"]
+    blend["Stacking Blender<br/>Ridge: prophet=0.42, lstm=0.58"]
+    store(["Forecast Store<br/>26-wk horizon, P10/P50/P90"])
+    redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3 Parquet", pos: "b", h: 44 }
+
+    snow --> feat
+    feat --> prophet
+    feat --> lstm
+    prophet --> blend
+    lstm --> blend
+    blend --> store
+    store --> redis
+    store --> s3
+
+    class feat base
+    class prophet,lstm train
+    class blend mathOp
+    class store io
 ```
 
 **Step-by-step implementation:**
