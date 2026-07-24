@@ -123,7 +123,7 @@ flowchart TD
     User([User Request]) --> App
     App["LLM Application\n(Current Model)"] --> Response([Response to User])
     App --> Feedback["Feedback Instrument\n(UI + logging layer)"]
-    Feedback --> Store["Raw Feedback Store\n(prompt, response, signal, timestamp)"]
+    Feedback --> Store[("Raw Feedback Store\n(prompt, response, signal, timestamp)")]
     Store --> Curation["Data Curation Pipeline\n– PII scrubbing\n– Deduplication\n– Quality filtering\n– Drift detection"]
     Curation --> AL["Active Learning Selector\n(uncertainty, error)"]
     AL --> Annotate["Human Annotation\n(Label Studio / Argilla)"]
@@ -160,7 +160,7 @@ flowchart TD
     Threshold -- YES --> Queue["Annotation Queue"]
     Threshold -- NO --> Discard(["Discard or store raw"])
     Queue --> Human["Human Annotator"]
-    Human --> Dataset["Curated Dataset\n(growing over time)"]
+    Human --> Dataset[("Curated Dataset\n(growing over time)")]
 
     class Stream,Discard,Dataset io
     class Scorer,Threshold mathOp
@@ -800,60 +800,33 @@ below that, the prize is smaller than the salary of the person building it.
 
 ### Architecture Overview
 
-```
-+-------------------+      +----------------------+      +------------------+
-| Customer Chatbot  |----->| Instrumentation Layer|----->| Raw Feedback DB  |
-| (Current Model)   |      | - response_id logging|      | (append-only,    |
-|                   |      | - session tracking   |      |  partitioned by  |
-|                   |      | - outcome webhook    |      |  day)            |
-+-------------------+      +----------+-----------+      +--------+---------+
-         ^                            |                           |
-         |                            v                           v
-         |              +-------------+------+     +--------------+----------+
-         |              | Ticketing System   |     | Curation Pipeline       |
-         |              | Integration        |     | - PII scrub (Presidio)  |
-         |              | (Zendesk webhook:  |     | - Dedup (MinHash LSH)   |
-         |              |  resolved vs       |     | - Quality filter        |
-         |              |  escalated within  |     | - Drift detection (PSI) |
-         |              |  30 min)           |     +----------+--------------+
-         |              +--------------------+                |
-         |                                                    v
-         |                                       +------------+-----------+
-         |                                       | Active Learning        |
-         |                                       | Selector               |
-         |                                       | - Error-based (60%)    |
-         |                                       | - Uncertainty (30%)    |
-         |                                       | - Random (10%)         |
-         |                                       +------------+-----------+
-         |                                                    |
-         |                                       +------------+-----------+
-         |                                       | Annotation Queue       |
-         |                                       | (Argilla)              |
-         |                                       | Target: 300 examples   |
-         |                                       | per week               |
-         |                                       +------------+-----------+
-         |                                                    |
-         |                                       +------------+-----------+
-         |                                       | Fine-Tuning Run        |
-         |                                       | (LoRA, r=16, alpha=32) |
-         |                                       | Mix: 30% recent prod   |
-         |                                       |      30% historical    |
-         |                                       |      40% original SFT  |
-         |                                       +------------+-----------+
-         |                                                    |
-         |                                       +------------+-----------+
-         |                                       | Evaluation Suite       |
-         |                                       | - 400 golden examples  |
-         |                                       | - 8 product slices     |
-         |                                       | - LLM-as-judge         |
-         |                                       | - Acceptance: no slice |
-         |                                       |   regresses > 2%       |
-         |                                       +------------+-----------+
-         |                                                    |
-         |                                       +------------+-----------+
-         +---------------------------------------| A/B Test -> Canary     |
-                                                 | Deploy                 |
-                                                 +------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Chatbot["Customer Chatbot<br/>(Current Model)"] --> Instr["Instrumentation Layer<br/>- response_id logging<br/>- session tracking<br/>- outcome webhook"]
+    Instr --> FeedbackDB[("Raw Feedback DB<br/>(append-only,<br/>partitioned by day)")]
+    Instr --> Ticketing["Ticketing System Integration<br/>(Zendesk webhook: resolved<br/>vs escalated within 30 min)"]
+    FeedbackDB --> Curation["Curation Pipeline<br/>- PII scrub (Presidio)<br/>- Dedup (MinHash LSH)<br/>- Quality filter<br/>- Drift detection (PSI)"]
+    Curation --> AL["Active Learning Selector<br/>- Error-based (60%)<br/>- Uncertainty (30%)<br/>- Random (10%)"]
+    AL --> Queue["Annotation Queue (Argilla)<br/>Target: 300 examples/week"]
+    Queue --> FT["Fine-Tuning Run<br/>(LoRA, r=16, alpha=32)<br/>Mix: 30% recent prod<br/>30% historical, 40% original SFT"]
+    FT --> Eval["Evaluation Suite<br/>- 400 golden examples<br/>- 8 product slices<br/>- LLM-as-judge<br/>- Acceptance: no slice regresses more than 2%"]
+    Eval --> Deploy["A/B Test then Canary Deploy"]
+    Deploy -- "better model, fewer escalations" --> Chatbot
+
+    class Chatbot base
+    class Instr,Ticketing req
+    class FeedbackDB io
+    class Curation,AL,Eval mathOp
+    class Queue frozen
+    class FT,Deploy train
 ```
 
 ### Key Design Decisions
