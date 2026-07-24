@@ -67,7 +67,8 @@ flowchart TD
 
     APP(["Client / Driver App"]) --> GW["ETA Request Gateway\nGeoDNS to regional cluster"]
     GW --> FA["Feature Assembly Service\nroute segments · time · weather\nevents · driver position"]
-    RT["Real-Time Traffic Store\nRedis · segment speeds\nupdated 30s · read < 3ms"] --> FA
+    RT@{ icon: "logos:redis", form: "square", label: "Real-Time Traffic Store<br/>Redis · segment speeds<br/>updated 30s · read < 3ms", pos: "b", h: 44 }
+    RT --> FA
     BF["Batch Feature Store\nS3 + DynamoDB\nhistorical speeds · road class"] --> FA
     FA --> MODEL["ETA Model Serving\nLightGBM p50 + p90\ntrip duration · pickup · uncertainty"]
     MODEL --> AGG["Response Aggregation\np50 = trip + pickup\np90 = p90_trip + p90_pickup\nuncertainty band"]
@@ -78,7 +79,7 @@ flowchart TD
     class APP,CLIENT,DRIVER,DISPATCH io
     class GW req
     class FA,AGG mathOp
-    class RT,BF base
+    class BF base
     class MODEL train
 ```
 
