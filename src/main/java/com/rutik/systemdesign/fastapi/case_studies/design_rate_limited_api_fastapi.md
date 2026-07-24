@@ -55,7 +55,8 @@ flowchart LR
         Raise --> ExcHandler(Exception Handler)
     end
 
-    Lua -->|"eval"| Redis(Redis<br/>Standalone / Sentinel / Cluster)
+    Lua -->|"eval"| Redis
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>Standalone / Sentinel / Cluster", pos: "b", h: 44 }
     Handler --> Resp200([200 response])
     ExcHandler --> Resp429([429 + Retry-After])
 
@@ -64,7 +65,6 @@ flowchart LR
     class Router req
     class FailOpen,Raise,ExcHandler,Resp429 lossN
     class SetState,Handler,Resp200 train
-    class Redis base
 ```
 
 Each of the two windows gets its own Redis key so the minute and day counters expire independently; every TTL is set to twice the window length so a key can never vanish while it is still the authoritative counter.
