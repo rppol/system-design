@@ -83,20 +83,20 @@ flowchart TD
     subgraph MS["Netflix Microservices (700+)"]
         UserSvc(User Service)
         CatalogSvc(Catalog Service)
-        SearchSvc(Search · ES)
+        SearchSvc@{ icon: "logos:elasticsearch", form: "square", label: "Search<br/>Elasticsearch", pos: "b", h: 44 }
         PlaybackSvc(Playback Service)
         RecSvc(Recommendation<br/>Service)
         BillingSvc(Billing Service)
         EncodingSvc(Encoding Service)
-        AnalyticsSvc(Analytics · Flink)
+        AnalyticsSvc@{ icon: "simple-icons:apacheflink", form: "square", label: "Analytics<br/>Flink", pos: "b", h: 44 }
         ABSvc(A/B Test Platform)
     end
 
     subgraph DS["Data Stores"]
-        Cass(Cassandra)
-        MySQLn(MySQL)
+        Cass@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
+        MySQLn@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
         EVC(EVCache)
-        S3n(S3)
+        S3n@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
     end
 
     Client --> Control
@@ -106,16 +106,16 @@ flowchart TD
     Gateway --> MS
     MS --> DS
 
-    Studio(["Studio Upload"]) --> RawS3(S3 raw bucket)
-    RawS3 --> EncFarm(Encoding Farm<br/>EC2 Spot)
+    Studio(["Studio Upload"]) --> RawS3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>raw bucket", pos: "b", h: 44 }
+    RawS3 --> EncFarm@{ icon: "logos:aws-ec2", form: "square", label: "Encoding Farm<br/>EC2 Spot", pos: "b", h: 44 }
     EncFarm -->|"30+ variants"| Data
 
     class Client,Studio io
     class Control req
-    class Gateway,EncFarm mathOp
+    class Gateway mathOp
     class Data,OCAEdge frozen
-    class UserSvc,CatalogSvc,SearchSvc,PlaybackSvc,RecSvc,BillingSvc,EncodingSvc,AnalyticsSvc,ABSvc train
-    class Cass,MySQLn,EVC,S3n,RawS3 base
+    class UserSvc,CatalogSvc,PlaybackSvc,RecSvc,BillingSvc,EncodingSvc,ABSvc train
+    class EVC base
 ```
 Client traffic splits at the top into a control plane (API + microservice logic on AWS) and a data plane (Open Connect CDN serving video bytes directly from ISP-embedded OCAs); the upload path runs encoding asynchronously on the side and feeds finished variants into the data plane.
 
@@ -185,12 +185,11 @@ flowchart LR
 
     Req([Client Request<br/>for Video]) --> OCA1(1st: Local ISP OCA<br/>fastest, same AS)
     OCA1 -.->|"unavailable"| OCA2(2nd: Regional<br/>OCA cluster)
-    OCA2 -.->|"unavailable"| Origin(3rd: Netflix Origin<br/>AWS S3)
+    OCA2 -.->|"unavailable"| Origin@{ icon: "logos:aws-s3", form: "square", label: "3rd: Netflix Origin<br/>AWS S3", pos: "b", h: 44 }
 
     class Req io
     class OCA1 train
     class OCA2 frozen
-    class Origin base
 ```
 Each hop is tried only if the previous one is unavailable; roughly 95% of Netflix's bytes resolve at the first hop (local ISP OCA), so the origin S3 fallback is rarely exercised.
 
@@ -282,19 +281,17 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Studio([Studio Delivery]) --> Raw(S3 Raw<br/>Content Bucket)
+    Studio([Studio Delivery]) --> Raw@{ icon: "logos:aws-s3", form: "square", label: "S3 Raw<br/>Content Bucket", pos: "b", h: 44 }
     Raw --> Valid(Validation Service<br/>integrity · format · metadata)
     Valid --> Sched(Job Scheduler<br/>splits into parallel jobs)
-    Sched -->|"100s of jobs<br/>in parallel"| Farm(Encoding Farm<br/>EC2 Spot + FFmpeg)
+    Sched -->|"100s of jobs<br/>in parallel"| Farm@{ icon: "logos:aws-ec2", form: "square", label: "Encoding Farm<br/>EC2 Spot + FFmpeg", pos: "b", h: 44 }
     Farm --> QVal(Quality Validation<br/>PSNR · VMAF scores)
-    QVal --> Enc(S3 Encoded<br/>Content Bucket)
+    QVal --> Enc@{ icon: "logos:aws-s3", form: "square", label: "S3 Encoded<br/>Content Bucket", pos: "b", h: 44 }
     Enc --> CDN([CDN Distribution<br/>OCA push or on-demand])
 
     class Studio,CDN io
-    class Raw,Enc base
     class Valid,QVal mathOp
     class Sched req
-    class Farm train
 ```
 Spot instances (60-90% cheaper, §5) run the encoding stage; the whole pipeline completes before a title ever reaches Open Connect.
 
