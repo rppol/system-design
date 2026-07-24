@@ -148,7 +148,8 @@ flowchart TD
     DP["Diffusion Pipeline\n(DiT / UNet + VAE)"]
     PS["Post-Safety Classifier\n(NSFW + CSAM check)"]
     WM["C2PA Watermarker\n(invisible perceptual + metadata manifest)"]
-    ST["Object Storage (S3) + CDN (CloudFront)\npresigned URL → user"]
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+    cf@{ icon: "logos:aws-cloudfront", form: "square", label: "CloudFront<br/>presigned URL", pos: "b", h: 44 }
 
     U --> GW --> GR
     GR --> SAFE
@@ -159,7 +160,7 @@ flowchart TD
     MF --> DP
     DP --> PS
     PS --> WM
-    WM --> ST
+    WM --> s3 --> cf
 
     class U io
     class GW req
@@ -167,7 +168,6 @@ flowchart TD
     class SAFE,PS lossN
     class LC train
     class MF,DP base
-    class ST frozen
 ```
 
 The router fans out to the pre-generation safety filter (25 ms, blocks before any GPU spend), the LoRA adapter cache, and the GPU fleet; every generated image then passes the post-generation NSFW/CSAM classifier and the C2PA watermarker before landing in S3/CDN for presigned-URL delivery.
@@ -189,7 +189,7 @@ flowchart TD
     SLOT["Return slot index\n(80ms)"]
     NVME{"NVMe cache hit?"}
     NLOAD["Load from NVMe\n(180ms)"]
-    S3F["Fetch from S3\n(2.1s, 200MB)"]
+    s3f@{ icon: "logos:aws-s3", form: "square", label: "Fetch from S3<br/>(2.1s, 200MB)", pos: "b", h: 44 }
     NW["Write to NVMe"]
     GLOAD["Load NVMe → GPU HBM slot\n(80ms VRAM load)"]
     APPLY["Apply LoRA delta weights\n(additive merge, no base model reload)"]
@@ -199,13 +199,12 @@ flowchart TD
     HBM -->|"hit"| SLOT --> DIFF
     HBM -->|"miss"| NVME
     NVME -->|"hit"| NLOAD --> GLOAD
-    NVME -->|"miss"| S3F --> NW --> GLOAD
+    NVME -->|"miss"| s3f --> NW --> GLOAD
     GLOAD --> APPLY --> DIFF
 
     class REQ io
     class HBM,NVME mathOp
     class SLOT,NLOAD,NW,GLOAD,APPLY train
-    class S3F frozen
     class DIFF base
 ```
 
