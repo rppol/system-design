@@ -325,14 +325,14 @@ flowchart LR
     F --> I("CommandInvoker<br/>executeStack + redoStack<br/>ring buffer, max 1000")
     I -->|"execute(cmd)"| E("cmd.execute triggers<br/>DocumentEditor.applyDelta")
     I -->|"undo()"| U("cmd.undo triggers<br/>DocumentEditor.revertDelta")
-    I --> L[("CommandLog, append-only<br/>Redis Sorted Set, score = seq#<br/>compacted every 1000 cmds")]
+    I --> L
+    L@{ icon: "logos:redis", form: "square", label: "CommandLog (Redis)<br/>append-only, score = seq#", pos: "b", h: 44 }
 
     class K io
     class F mathOp
     class I base
     class E train
     class U train
-    class L frozen
 ```
 
 ```java
