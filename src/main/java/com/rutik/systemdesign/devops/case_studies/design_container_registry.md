@@ -174,7 +174,7 @@ flowchart LR
     subgraph ORIGIN["Origin Region us-east-1"]
         API("Registry API<br/>OCI /v2/...")
         DB("Manifest DB<br/>Postgres: tags,<br/>manifests, scan status")
-        S3B("S3 Blob Store<br/>content-addressed")
+        S3B@{ icon: "logos:aws-s3", form: "square", label: "S3 Blob Store", pos: "b", h: 44 }
         SQS("Scan Queue<br/>SQS")
         TRIVY("Trivy Workers<br/>vuln scan")
         SIGN("cosign sign<br/>keyless, Fulcio")
@@ -183,13 +183,13 @@ flowchart LR
 
     subgraph EUWEST["Region eu-west-1"]
         CACHE1("Pull-through cache<br/>Zot / Harbor proxy")
-        K8S1("K8s clusters<br/>kubelet pull")
+        K8S1@{ icon: "logos:kubernetes", form: "square", label: "K8s Clusters", pos: "b", h: 44 }
         ADM1{"Admission Controller<br/>verify sig + issuer/subject"}
     end
 
     subgraph APSE["Region ap-southeast-1"]
         CACHE2("Pull-through cache")
-        K8S2("K8s clusters")
+        K8S2@{ icon: "logos:kubernetes", form: "square", label: "K8s Clusters", pos: "b", h: 44 }
         ADM2{"Admission Controller<br/>verify sig + issuer/subject"}
     end
 
@@ -216,8 +216,8 @@ flowchart LR
     class CI,Auth io
     class RL,SQS req
     class API mathOp
-    class DB,S3B,CACHE1,CACHE2 base
-    class TRIVY,K8S1,K8S2 train
+    class DB,CACHE1,CACHE2 base
+    class TRIVY train
     class SIGN,REKOR,MORE frozen
     class ADM1,ADM2 lossN
 ```
@@ -424,14 +424,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["push event"]) --> B("SQS scan queue")
+    A(["push event"]) --> B
+    B@{ icon: "logos:aws-sqs", form: "square", label: "SQS Scan Queue", pos: "b", h: 44 }
     B --> C("Trivy worker pool")
     C --> D("scan_results<br/>Postgres")
     D --> E{"promotion gate:<br/>query scan_status"}
     E -.->|"fail: CRITICAL/HIGH<br/>unfixed present"| F("promotion blocked")
 
     class A io
-    class B req
     class C train
     class D base
     class E mathOp
