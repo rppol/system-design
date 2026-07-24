@@ -46,38 +46,43 @@ This section covers:
 
 ## 3. 3-Phase Learning Path
 
-```
-Phase 1 — FastAPI Core & ASGI (6 modules)
-+------------------------------------------------------------+
-|  fastapi_fundamentals_asgi    pydantic_v2_deep_dive        |
-|  routing_and_request_handling                              |
-|  dependency_injection_in_fastapi                           |
-|  middleware_and_lifecycle                                  |
-|  configuration_and_settings_management                    |
-+------------------------------------------------------------+
-                               |
-                               v
-Phase 2 — Production Concerns (8 modules)
-+------------------------------+  +--------------------------+
-|  async_database_sqlalchemy   |  |  testing_fastapi         |
-|  authentication_and_security |  |  http_clients_and_       |
-|  error_handling_and_         |  |  external_apis           |
-|  validation                  |  |  message_queues_and_     |
-|  websockets_sse_and_         |  |  event_driven            |
-|  streaming                   |  +--------------------------+
-|  background_jobs_and_        |
-|  task_queues                 |
-+------------------------------+
-                               |
-                               v
-Phase 3 — Deployment, Observability & Scale (5 modules)
-+------------------------------------------------------------+
-|  production_deployment_and_scaling                         |
-|  observability_and_monitoring                              |
-|  caching_and_performance                                   |
-|  api_design_and_versioning                                 |
-|  security_hardening_and_owasp                              |
-+------------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph phase1["Phase 1 - FastAPI Core & ASGI (6 modules)"]
+        p1a(["fastapi_fundamentals_asgi"])
+        p1b(["pydantic_v2_deep_dive"])
+        p1c(["routing_and_request_handling"])
+        p1d(["dependency_injection_in_fastapi"])
+        p1e(["middleware_and_lifecycle"])
+        p1f(["configuration_and_settings_management"])
+    end
+
+    subgraph phase2["Phase 2 - Production Concerns (8 modules)"]
+        p2a(["async_database_sqlalchemy"])
+        p2b(["authentication_and_security"])
+        p2c(["error_handling_and_validation"])
+        p2d(["websockets_sse_and_streaming"])
+        p2e(["background_jobs_and_task_queues"])
+        p2f(["testing_fastapi"])
+        p2g(["http_clients_and_external_apis"])
+        p2h(["message_queues_and_event_driven"])
+    end
+
+    subgraph phase3["Phase 3 - Deployment, Observability & Scale (5 modules)"]
+        p3a(["production_deployment_and_scaling"])
+        p3b(["observability_and_monitoring"])
+        p3c(["caching_and_performance"])
+        p3d(["api_design_and_versioning"])
+        p3e(["security_hardening_and_owasp"])
+    end
+
+    phase1 --> phase2 --> phase3
+
+    class phase1,phase2,phase3 req
+    class p1a,p1b,p1c,p1d,p1e,p1f,p2a,p2b,p2c,p2d,p2e,p2f,p2g,p2h,p3a,p3b,p3c,p3d,p3e base
 ```
 
 **Dependencies to note:**
