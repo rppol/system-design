@@ -111,14 +111,15 @@ flowchart LR
 
     orderSvc("Order Service<br/>@Transactional") -->|"INSERT order +<br/>INSERT outbox event<br/>same DB txn"| db[("orders +<br/>outbox_events")]
     db -->|"SELECT unpublished<br/>LIMIT 100"| relay("Outbox Relay<br/>polls every 500ms")
-    relay -->|"publish"| topic(["Kafka topic<br/>order-events"])
+    relay -->|"publish"| topic
     relay -.->|"UPDATE published_at"| db
     topic --> consumers(["Downstream<br/>Consumers"])
+
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>order-events", pos: "b", h: 44 }
 
     class orderSvc req
     class db base
     class relay mathOp
-    class topic req
     class consumers io
 ```
 
@@ -171,13 +172,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    wal[("PostgreSQL WAL<br/>logical replication slot")] --> connector("Debezium Connector<br/>reads outbox_events")
-    connector -->|"route by<br/>aggregate_type"| topic(["Kafka topic<br/>orders (under 100ms)"])
+    wal --> connector("Debezium Connector<br/>reads outbox_events")
+    connector -->|"route by<br/>aggregate_type"| topic
     topic --> consumers(["Downstream<br/>Consumers"])
 
-    class wal frozen
+    wal@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL WAL<br/>logical replication slot", pos: "b", h: 44 }
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>orders (under 100ms)", pos: "b", h: 44 }
+
     class connector mathOp
-    class topic req
     class consumers io
 ```
 
