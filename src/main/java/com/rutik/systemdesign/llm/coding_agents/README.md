@@ -113,20 +113,28 @@ Parent CLI agent
 
 ### Cursor Composer Multi-File Edit
 
-```
-User: "Refactor auth to use JWT"
-     |
-     v
-Model identifies N files needing changes
-     |
-     v (parallel file editors)
-Diff preview UI for each file
-     |
-     v
-User accepts/rejects per hunk
-     |
-     v
-All changes applied; tests run
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    USER1(["User request:<br/>Refactor auth to use JWT"])
+    MODEL("Model identifies N files<br/>needing changes")
+    DIFF("Diff preview UI<br/>for each file")
+    USER2{"User accepts/rejects<br/>per hunk"}
+    DONE(["All changes applied,<br/>tests run"])
+
+    USER1 --> MODEL -->|"parallel file editors"| DIFF --> USER2 --> DONE
+
+    class USER1,DONE io
+    class MODEL,DIFF base
+    class USER2 req
 ```
 
 ---
