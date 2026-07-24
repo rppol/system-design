@@ -550,49 +550,27 @@ Steps:
 
 Before retrieval, AI search engines run a multi-stage query understanding pipeline to transform the raw user query into a retrieval-optimized form:
 
-```
-Raw query: "best noise cancelling headphones under 300 with good bass"
-                          │
-                          ▼
-            ┌─────────────────────────┐
-            │  Intent Classification  │
-            │  (product search, Q&A,  │
-            │  navigational, etc.)    │
-            └────────────┬────────────┘
-                         │ product_search (0.94)
-                         ▼
-            ┌─────────────────────────┐
-            │  Entity Extraction      │
-            │  headphones, $300 max,  │
-            │  noise cancelling, bass │
-            └────────────┬────────────┘
-                         │
-                         ▼
-            ┌─────────────────────────┐
-            │  Query Rewriting        │
-            │  + query expansion      │
-            │  (add: ANC, Bluetooth,  │
-            │   audiophile, review)   │
-            └────────────┬────────────┘
-                         │ 3 rewritten query variants
-                         ▼
-            ┌─────────────────────────┐
-            │  Retrieval              │
-            │  BM25 + Dense (HNSW)   │
-            │  per rewritten variant  │
-            └────────────┬────────────┘
-                         │ top-50 documents (union)
-                         ▼
-            ┌─────────────────────────┐
-            │  Cross-Encoder Rerank   │
-            │  (top-50 → top-10)      │
-            └────────────┬────────────┘
-                         │ top-10 documents
-                         ▼
-            ┌─────────────────────────┐
-            │  LLM Generation +       │
-            │  Citation Attribution   │
-            └─────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    query("Raw query:<br/>best noise cancelling<br/>headphones under $300<br/>with good bass") --> intent("Intent Classification<br/>product search, Q&A,<br/>navigational, etc.")
+    intent -- "product_search 0.94" --> entity("Entity Extraction<br/>headphones, $300 max,<br/>noise cancelling, bass")
+    entity --> rewrite("Query Rewriting +<br/>Expansion<br/>add: ANC, Bluetooth,<br/>audiophile, review")
+    rewrite -- "3 rewritten<br/>variants" --> retrieval("Retrieval<br/>BM25 + Dense HNSW<br/>per rewritten variant")
+    retrieval -- "top-50 docs<br/>union" --> rerank("Cross-Encoder Rerank<br/>top-50 to top-10")
+    rerank -- "top-10 docs" --> gen("LLM Generation +<br/>Citation Attribution")
+
+    class query io
+    class intent,entity,rewrite req
+    class retrieval,rerank base
+    class gen io
 ```
 
 **Query expansion implementation:**
@@ -770,18 +748,14 @@ Full pipeline:
 
 AI search engines face a fundamental tension: freshness requires frequent crawling and re-indexing, but high-quality retrieval requires accurate, clean embeddings from trusted sources.
 
-```
 Index update frequency options:
-┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
-│ Strategy         │ Freshness lag    │ Embedding quality│ Cost             │
-├──────────────────┼──────────────────┼──────────────────┼──────────────────┤
-│ Real-time crawl  │ Minutes          │ Low (raw HTML)   │ Very high        │
-│ Daily batch      │ 24 hours         │ Medium           │ High             │
-│ Weekly batch     │ 7 days           │ High (curated)   │ Low              │
-│ Hybrid (live +   │ Minutes for news,│ High for stable  │ Medium           │
-│  curated cache)  │ days for stable  │  content         │                  │
-└──────────────────┴──────────────────┴──────────────────┴──────────────────┘
-```
+
+| Strategy | Freshness lag | Embedding quality | Cost |
+|----------|----------------|--------------------|------|
+| Real-time crawl | Minutes | Low (raw HTML) | Very high |
+| Daily batch | 24 hours | Medium | High |
+| Weekly batch | 7 days | High (curated) | Low |
+| Hybrid (live + curated cache) | Minutes for news, days for stable | High for stable content | Medium |
 
 Perplexity's approach: real-time web fetch at query time (not pre-indexed) for the top-10 URLs from the Bing API. This trades embedding quality (raw HTML is noisy) for perfect freshness. The quality gap is compensated by the cross-encoder reranker, which handles noisy retrieved content better than embedding-based retrieval alone.
 
