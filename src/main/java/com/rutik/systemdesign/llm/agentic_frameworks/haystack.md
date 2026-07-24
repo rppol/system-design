@@ -70,39 +70,41 @@ Haystack 2.0 (released early 2024) was a complete rewrite from Haystack 1.x, int
 
 ### RAG Pipeline DAG
 
-```
-INDEXING PIPELINE (offline):
-  [TextFileToDocument]
-        |
-        v [List[Document]]
-  [DocumentSplitter (chunk_size=512)]
-        |
-        v [List[Document]]
-  [OpenAIDocumentEmbedder]
-        |
-        v [List[Document] with embeddings]
-  [DocumentWriter → InMemoryDocumentStore]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-QUERY PIPELINE (online):
-  query: "What is Haystack?"
-        |
-        v
-  [OpenAITextEmbedder]
-        |
-        v [embedding vector]
-  [InMemoryEmbeddingRetriever (top_k=10)]
-        |
-        v [List[Document]]
-  [TransformersSimilarityRanker (top_k=3)]
-        |
-        v [List[Document] reranked]
-  [PromptBuilder (template with {{documents}} and {{query}})]
-        |
-        v [str prompt]
-  [OpenAIGenerator (model="gpt-4o")]
-        |
-        v [replies: List[str]]
-  Output: "Haystack is an open-source framework..."
+    subgraph IDX["Indexing Pipeline (offline)"]
+        direction LR
+        CONV(["TextFileToDocument"])
+        SPLIT(["DocumentSplitter<br/>chunk_size=512"])
+        EMB(["OpenAIDocumentEmbedder"])
+        WRITE(["DocumentWriter"])
+        STORE[("InMemoryDocumentStore")]
+        CONV -->|"List[Document]"| SPLIT -->|"List[Document]"| EMB -->|"docs + embeddings"| WRITE --> STORE
+    end
+
+    subgraph QRY["Query Pipeline (online)"]
+        direction LR
+        Q(["Query:<br/>What is Haystack?"])
+        QEMB(["OpenAITextEmbedder"])
+        RET(["InMemoryEmbeddingRetriever<br/>top_k=10"])
+        RANK(["TransformersSimilarityRanker<br/>top_k=3"])
+        PB(["PromptBuilder"])
+        GEN(["OpenAIGenerator<br/>gpt-4o"])
+        OUT(["Answer"])
+        Q -->|"str"| QEMB -->|"embedding"| RET -->|"List[Document]"| RANK -->|"reranked docs"| PB -->|"prompt"| GEN -->|"replies"| OUT
+    end
+
+    class CONV,SPLIT,EMB,WRITE,STORE base
+    class Q,QEMB,RET,RANK,PB,GEN,OUT req
 ```
 
 ### Hybrid Retrieval Pipeline
@@ -589,34 +591,44 @@ Haystack pipelines serialize to YAML and can be deployed using Hayhooks, the off
 
 ### Architecture
 
-```
-INDEXING PIPELINE (nightly batch):
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [SharePointConnector → TextFileToDocument]
-     Metadata: {practice_area, document_type, date, authors, project_id}
-         |
-  [DocumentSplitter (split_by="sentence", split_length=5, overlap=1)]
-         |
-  [OpenAIDocumentEmbedder (model="text-embedding-3-large")]
-         |
-  [DocumentWriter → OpenSearchDocumentStore]
-     (2 million documents, updated nightly with new/modified docs)
+    subgraph IDX["Indexing Pipeline (nightly batch)"]
+        direction LR
+        SP(["SharePointConnector +<br/>TextFileToDocument"])
+        SPLIT(["DocumentSplitter<br/>sentence, len=5, overlap=1"])
+        EMB(["OpenAIDocumentEmbedder<br/>text-embedding-3-large"])
+        WRITE(["DocumentWriter"])
+        STORE[("OpenSearchDocumentStore<br/>2M documents")]
+        SP -->|"docs + metadata"| SPLIT --> EMB --> WRITE --> STORE
+    end
 
-QUERY PIPELINE (per request):
+    subgraph QRY["Query Pipeline (per request)"]
+        direction LR
+        UQ(["user_query +<br/>practice_areas"])
+        QEMB(["OpenAITextEmbedder"])
+        MF(["MetadataFilter<br/>practice_area IN user.practice_areas"])
+        RET(["OpenSearchEmbeddingRetriever<br/>top_k=20"])
+        RANK(["TransformersSimilarityRanker<br/>top_k=5"])
+        PB(["PromptBuilder +<br/>citation template"])
+        GEN(["OpenAIChatGenerator<br/>gpt-4o"])
+        OUT(["Response +<br/>5 source citations"])
+        UQ --> QEMB --> RET
+        UQ --> MF --> RET
+        RET --> RANK --> PB --> GEN --> OUT
+    end
 
-  user_query + user.practice_areas (from auth token)
-         |
-  [OpenAITextEmbedder]        [MetadataFilter (practice_area IN user.practice_areas)]
-         |                             |
-  [OpenSearchEmbeddingRetriever (top_k=20, filters=user_filters)]
-         |
-  [TransformersSimilarityRanker (top_k=5)]
-         |
-  [PromptBuilder + citation template]
-         |
-  [OpenAIChatGenerator (gpt-4o)]
-         |
-  Response + 5 source citations (document title, section, URL)
+    class SP,SPLIT,EMB,WRITE,STORE base
+    class UQ,QEMB,MF,RET,RANK,PB,GEN,OUT req
 ```
 
 ### Custom Access Control Component
