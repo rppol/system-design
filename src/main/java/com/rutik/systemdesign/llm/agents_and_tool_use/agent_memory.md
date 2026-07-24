@@ -363,34 +363,28 @@ Recency-Weighted:
 
 ### Agent Memory System
 
-```
-                    ┌────────────────────────────────────┐
-                    │         CONTEXT WINDOW              │
-                    │   (128K tokens = working memory)    │
-                    │                                     │
-                    │  System Prompt         ~2K tokens   │
-                    │  Recent History       ~30K tokens   │
-                    │  Retrieved Memories    ~5K tokens   │
-                    │  Current Tool Results ~10K tokens   │
-                    │  [Available for generation] ~80K    │
-                    └─────────────┬──────────────────────┘
-                                  │ archive/retrieve
-         ┌────────────────────────┼────────────────────────┐
-         │                        │                         │
-         ▼                        ▼                         ▼
-┌────────────────┐   ┌────────────────────┐   ┌───────────────────┐
-│ EPISODIC STORE │   │   SEMANTIC STORE   │   │ PROCEDURAL STORE  │
-│ (vector DB)    │   │   (vector DB +     │   │ (vector DB)       │
-│                │   │    knowledge graph)│   │                   │
-│ Past events:   │   │ Facts:             │   │ Skill templates:  │
-│ - conversations│   │ - user preferences │   │ - search patterns │
-│ - outcomes     │   │ - domain knowledge │   │ - code templates  │
-│ - observations │   │ - entity facts     │   │ - debug sequences │
-│                │   │                   │   │                   │
-│ Retrieved by:  │   │ Retrieved by:      │   │ Retrieved by:     │
-│ temporal query │   │ semantic similarity│   │ task similarity   │
-│ event type     │   │ entity lookup      │   │                   │
-└────────────────┘   └────────────────────┘   └───────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ctx(["Context Window<br/>128K tokens = working memory<br/>System Prompt ~2K, History ~30K<br/>Retrieved ~5K, Tool Results ~10K<br/>Available for generation ~80K"])
+
+    epi[("Episodic Store<br/>vector DB<br/>Past events, outcomes,<br/>observations<br/>Retrieved by temporal query")]
+    sem[("Semantic Store<br/>vector DB + knowledge graph<br/>User prefs, domain facts,<br/>entity facts<br/>Retrieved by semantic similarity")]
+    proc[("Procedural Store<br/>vector DB<br/>Search patterns, code<br/>templates, debug sequences<br/>Retrieved by task similarity")]
+
+    ctx -->|archive / retrieve| epi
+    ctx -->|archive / retrieve| sem
+    ctx -->|archive / retrieve| proc
+
+    class ctx req
+    class epi,sem,proc base
 ```
 
 ---
