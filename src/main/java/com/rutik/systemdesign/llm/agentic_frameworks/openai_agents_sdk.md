@@ -107,28 +107,30 @@ Handoff (Control transfers to Agent B):
                        Agent B sees conversation history
                        Agent B's instructions now in effect
                        Agent A is no longer running
+```
 
+**Triage Pattern**
 
-Triage Pattern
-===============
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                 +----------------+
-   User input -->| Triage Agent   |
-                 | (gpt-4o-mini)  |
-                 +--+----------+--+
-                    |          |
-            handoff |          | handoff
-                    v          v
-            +-------+--+    +--+-------+
-            | Billing  |    |Technical |
-            | Agent    |    | Agent    |
-            | (gpt-4o) |    | (gpt-4o) |
-            +----------+    +----------+
-                 |               |
-                 v               v
-            Refund tool      Bug ticket
-            Subscription     Diagnostic
-            tools            tools
+    USER(["User input"]) --> TRIAGE["Triage Agent<br/>(gpt-4o-mini)"]
+    TRIAGE -->|"handoff"| BILL["Billing Agent<br/>(gpt-4o)"]
+    TRIAGE -->|"handoff"| TECH["Technical Agent<br/>(gpt-4o)"]
+    BILL --> REFUND["Refund tool<br/>Subscription tools"]
+    TECH --> BUG["Bug ticket<br/>Diagnostic tools"]
+
+    class USER io
+    class TRIAGE req
+    class BILL,TECH base
+    class REFUND,BUG mathOp
 ```
 
 ---
