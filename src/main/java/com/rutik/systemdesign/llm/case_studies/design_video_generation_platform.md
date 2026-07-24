@@ -142,8 +142,8 @@ flowchart TD
     DIT["DiT Inference Pod\n1. T5 text encode\n2. DiT denoise (50 steps, TP=8)\n3. VAE decode\n4. H.264 encode"]
     SSIM["Temporal Consistency Checker\nSSIM per frame"]
     C2PA["C2PA Watermarker\ninvisible embed + metadata sign"]
-    S3[["Object Store (S3)\nmp4 + thumb"]]
-    CDN[["CDN (CloudFront)"]]
+    S3@{ icon: "logos:aws-s3", form: "square", label: "Object Store (S3)<br/>mp4 + thumb", pos: "b", h: 44 }
+    CDN@{ icon: "logos:aws-cloudfront", form: "square", label: "CDN (CloudFront)", pos: "b", h: 44 }
     NOTIF["Webhook / SSE Notifier"]
     PULL(["User pulls pre-signed URL\n(24h TTL)"])
     EVENT(["User receives completion event\n+ pre-signed URL"])
@@ -174,7 +174,6 @@ flowchart TD
     class SCHED,SSIM,C2PA mathOp
     class PREM,STD,FREE base
     class DIT train
-    class S3,CDN frozen
 ```
 
 The gateway fans each submission into a pre-generation moderation check and a per-tier Redis priority queue; only PASS jobs reach the scheduler, which dispatches to dedicated PREMIUM/STANDARD/FREE pod pools (SLA 5m/15m/60m) before the DiT pipeline, consistency and watermark stages, and S3 → CDN/webhook delivery.
