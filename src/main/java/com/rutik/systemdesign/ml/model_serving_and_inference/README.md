@@ -104,7 +104,7 @@ flowchart TD
     client(["Client\nHTTP POST /predict"]) --> lb["Load Balancer\nnginx / ALB / GLB"]
     lb --> s1["Serving Instance 1\nFastAPI / TorchServe"]
     lb --> s2["Serving Instance 2\nFastAPI / TorchServe"]
-    s1 --> store["Model Artifact Store\nS3 / GCS / NFS"]
+    s1 --> store[("Model Artifact Store\nS3 / GCS / NFS")]
     s2 --> store
     store -.->|"loaded at startup"| s1
     store -.->|"loaded at startup"| s2
@@ -195,7 +195,8 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph Training
-        pt["PyTorch Model"] -->|"torch.onnx.export()"| onnx["model.onnx"]
+        pt@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch Model", pos: "b", h: 44 }
+        pt -->|"torch.onnx.export()"| onnx["model.onnx"]
     end
     subgraph Serving
         inp(["Input Tensor"]) --> sess["ONNXRuntime Session\nCUDA / CPU provider"]
@@ -206,7 +207,6 @@ flowchart LR
     onnx -.->|"load at startup"| sess
 
     class inp,outp,resp2 io
-    class pt frozen
     class onnx base
     class sess mathOp
     class post2 train
@@ -752,20 +752,37 @@ Use streaming for generative models so users see tokens as they are produced ins
 
 **Scenario: Serving a 7B-parameter LLM with vLLM.** A chat product needs to serve a 7B model under 100 concurrent requests with streaming responses. vLLM provides PagedAttention (no KV-cache fragmentation) and continuous batching (new requests slot into gaps left by finished ones), with tensor parallelism across 2x A100. The deployment ships via shadow mode for a week before a canary rollout.
 
-```
-100 concurrent clients (streaming)
-        |
-   API gateway (auth, rate limit, server-side timeout)
-        |
-   vLLM engine
-     +-- continuous batching scheduler (per-step admission)
-     +-- PagedAttention KV cache (paged, no fragmentation)
-     +-- tensor parallelism across 2x A100 (split each layer)
-        |
-   token stream back to client (SSE)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-throughput 1200 tok/s | p99 = 800ms for a 200-token response
+    clients(["100 concurrent clients<br/>streaming"]) --> gw["API Gateway<br/>auth, rate limit, timeout"]
+
+    subgraph vLLM["vLLM Engine"]
+        sched["Continuous batching<br/>per-step admission"]
+        paged["PagedAttention KV cache<br/>no fragmentation"]
+        tp["Tensor parallelism<br/>2x A100, split per layer"]
+    end
+
+    gw --> sched
+    gw --> paged
+    gw --> tp
+    sched --> resp(["Token stream to client<br/>SSE"])
+    paged --> resp
+    tp --> resp
+
+    class clients,resp io
+    class gw req
+    class sched,paged,tp base
 ```
+
+*Throughput ~1200 tok/s aggregate, p99 = 800ms for a 200-token response.*
 
 Throughput ~1200 tokens/sec aggregate, p99 latency 800ms for a 200-token completion. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
 
