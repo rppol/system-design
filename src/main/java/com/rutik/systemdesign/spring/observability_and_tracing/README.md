@@ -94,15 +94,23 @@ flowchart TD
         OBS --> LOG["Logback (JSON output)\ntraceId, spanId, ..."]
     end
 
-    OBS -->|"metrics (Prometheus scrape)"| PROM["Prometheus -> Grafana"]
-    OBS -->|"spans (OTLP)"| TRACE["Jaeger / Tempo"]
-    LOG -->|"logs (stdout)"| LOKI["Loki / Elasticsearch"]
+    OBS -->|"metrics (Prometheus scrape)"| PROM
+    PROM --> GRAF
+    OBS -->|"spans (OTLP)"| JAEGER
+    OBS -->|"spans (OTLP)"| TEMPO["Tempo"]
+    LOG -->|"logs (stdout)"| LOKI["Loki"]
+    LOG -->|"logs (stdout)"| ES
+
+    PROM@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    GRAF@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+    JAEGER@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger", pos: "b", h: 44 }
+    ES@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
 
     class REQ req
     class FILTER,APP mathOp
     class OBS train
     class LOG io
-    class PROM,TRACE,LOKI base
+    class TEMPO,LOKI base
 ```
 
 ### Distributed Trace Propagation
