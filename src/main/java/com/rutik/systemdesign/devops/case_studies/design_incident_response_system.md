@@ -165,7 +165,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph SIG["Signal Plane<br/>shares fate with infra"]
-        PROM(["Prometheus<br/>per cluster, 30s eval"])
+        PROM@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>per cluster, 30s eval", pos: "b", h: 44 }
         DD(["Datadog / CloudWatch<br/>/ custom webhooks"])
         AM["Alertmanager HA<br/>dedup · group_by<br/>inhibit · silence"]
         PROM --> AM
@@ -213,7 +213,7 @@ flowchart LR
 
     AM -->|"signed webhook<br/>cross-region mTLS"| ING
 
-    class PROM,DD,PUSH,SMS1,VOICE1,EMAIL,CHAT io
+    class DD,PUSH,SMS1,VOICE1,EMAIL,CHAT io
     class AM,ING,ACK mathOp
     class IE,SS,EE train
     class ND req
