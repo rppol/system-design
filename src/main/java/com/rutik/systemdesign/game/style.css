@@ -78,19 +78,19 @@
 }
 
 [data-theme="orchid"] {
-  /* Orchid — deep purple-black, purple/pink spectrum */
-  --bg: #0c0611;
-  --bg-2: #150b1d;
+  /* Orchid — lifted purple, purple/pink spectrum */
+  --bg: #170e22;
+  --bg-2: #221533;
   --text: #f5edfa;
-  --muted: #bfa9d4;
-  --faint: #82709a;
+  --muted: #c4aed9;
+  --faint: #8e7ba6;
   --accent: #c084fc;
   --accent-2: #f472b6;
   --accent-ink: #190627;
-  --mesh-1: #9150e2;
+  --mesh-1: #a366e8;
   --mesh-2: #e05fb4;
-  --mesh-3: #6247d6;
-  --mesh-o: 0.22;
+  --mesh-3: #7b5ce0;
+  --mesh-o: 0.28;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
@@ -112,26 +112,26 @@
 }
 
 [data-theme="forest"] {
-  /* Forest — deep green-black, emerald/lime spectrum */
-  --bg: #060f0a;
-  --bg-2: #0b1712;
+  /* Forest — lifted green, emerald/lime spectrum */
+  --bg: #0e1a13;
+  --bg-2: #16271d;
   --text: #eaf5ee;
-  --muted: #9fc4ac;
-  --faint: #6b8a76;
+  --muted: #a6c9b3;
+  --faint: #74907f;
   --accent: #34d399;
   --accent-2: #a3e635;
   --accent-ink: #04160d;
   --mesh-1: #10b981;
   --mesh-2: #4ade80;
-  --mesh-3: #0d9488;
-  --mesh-o: 0.22;
+  --mesh-3: #14b8a6;
+  --mesh-o: 0.28;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 [data-theme="ocean"] {
-  /* Ocean — deep navy-blue, cyan + blue spectrum (no green/teal cast) */
-  --bg: #060f1c;
-  --bg-2: #0b1728;
+  /* Ocean — lifted navy-blue, cyan + blue spectrum (no green/teal cast) */
+  --bg: #0c1627;
+  --bg-2: #14233a;
   --text: #e8f2fc;
   --muted: #a6c1da;
   --faint: #7089a3;
@@ -1632,11 +1632,11 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .theme-opt[aria-checked="true"] .tcheck { visibility: visible; }
 .swatch { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.25); }
 .swatch.sw-midnight { background: linear-gradient(135deg, #3a5fe0, #7448e0 55%, #0d1022); }
-.swatch.sw-orchid { background: linear-gradient(135deg, #c084fc, #e05fb4 55%, #0c0611); }
+.swatch.sw-orchid { background: linear-gradient(135deg, #c084fc, #e05fb4 55%, #170e22); }
 .swatch.sw-ember { background: linear-gradient(135deg, #f4634f, #f59e42 55%, #1a100b); }
 .swatch.sw-daylight { background: linear-gradient(135deg, #7cb1ff, #f7a8d8 55%, #eef1f7); border-color: rgba(13, 23, 44, 0.18); }
-.swatch.sw-forest { background: linear-gradient(135deg, #34d399, #a3e635 55%, #060f0a); }
-.swatch.sw-ocean { background: linear-gradient(135deg, #38bdf8, #22d3ee 55%, #060f1c); }
+.swatch.sw-forest { background: linear-gradient(135deg, #34d399, #a3e635 55%, #0e1a13); }
+.swatch.sw-ocean { background: linear-gradient(135deg, #38bdf8, #22d3ee 55%, #0c1627); }
 .swatch.sw-rose { background: linear-gradient(135deg, #fda4af, #f0abfc 55%, #1b0e16); }
 
 /* [E1] streak detail popover — same glass-popover pattern as the theme picker,
