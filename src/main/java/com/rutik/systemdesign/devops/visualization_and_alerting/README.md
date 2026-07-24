@@ -137,7 +137,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    prom(["Prometheus HA pair A+B<br/>rule fires, for: 10m"]) --> am["Alertmanager cluster"]
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>HA pair A+B", pos: "b", h: 44 }
+    prom -->|"rule fires, for: 10m"| am["Alertmanager cluster"]
     am --> proc["Group by alertname/cluster/service<br/>Dedupe HA replicas A vs B<br/>Inhibit: ClusterDown suppresses PodDown<br/>Silence: muted 02:00-03:00"]
     proc --> route{"Routing tree<br/>match severity / team"}
 
@@ -145,7 +146,6 @@ flowchart LR
     route -->|"severity=ticket"| slack(["Slack #team-alerts<br/>Jira"])
     route -->|"team=payments"| payTeam(["Payments<br/>on-call only"])
 
-    class prom req
     class am,proc,route mathOp
     class pd,payTeam lossN
     class slack train
