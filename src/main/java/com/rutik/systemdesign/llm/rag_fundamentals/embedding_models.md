@@ -36,26 +36,42 @@ The choice of embedding model determines what "semantically similar" means in yo
 
 The dominant architecture for RAG embeddings:
 
-```
-Input text: [CLS] token1 token2 ... tokenN [SEP]
-                  |
-            BERT/RoBERTa/DistilBERT encoder
-                  |
-            Token embeddings: [h_cls, h_1, h_2, ..., h_N]
-                  |
-            Pooling:
-              Mean pooling: average all token embeddings → single vector
-              CLS pooling: use [CLS] token embedding directly
-              Max pooling: element-wise max across token embeddings
-                  |
-            L2 normalization: v / ||v||
-                  |
-            Output: 768-dim (or 1024/1536) dense vector
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Training: Contrastive learning on (query, positive_doc) pairs
-  Minimize: dist(embed(query), embed(positive))
-  Maximize: dist(embed(query), embed(random_negative))
+    INPUT(["Input text: CLS token1 token2 ... tokenN SEP"]) --> ENC(["BERT / RoBERTa / DistilBERT<br/>encoder"])
+    ENC --> TOK(["Token embeddings:<br/>h_cls, h_1, h_2, ..., h_N"])
+    TOK --> POOL(["Pooling - choose one method"])
+    subgraph POOLOPTS ["Pooling strategies"]
+        MEANP(["Mean pooling<br/>average all tokens"])
+        CLSP(["CLS pooling<br/>use CLS-token embedding"])
+        MAXP(["Max pooling<br/>element-wise max"])
+    end
+    POOL --> MEANP
+    POOL --> CLSP
+    POOL --> MAXP
+    MEANP --> NORM(["L2 normalization<br/>v / norm of v"])
+    CLSP --> NORM
+    MAXP --> NORM
+    NORM --> OUT(["Output: 768-dim<br/>or 1024/1536-dim vector"])
+
+    class INPUT req
+    class ENC base
+    class TOK io
+    class POOL,MEANP,CLSP,MAXP mathOp
+    class NORM mathOp
+    class OUT io
 ```
+
+Training uses contrastive learning on `(query, positive_doc)` pairs: minimize `dist(embed(query), embed(positive))` while maximizing `dist(embed(query), embed(random_negative))`.
 
 ### Cosine Similarity = Angle Between Vectors
 
@@ -373,7 +389,7 @@ flowchart TD
         CHUNKS["Document chunks"]
         EMB_I["Embedding model\nBAAI/bge-base or text-embedding-3-small"]
         VECS["Dense vectors\n768-dim or 1536-dim, L2-normalised"]
-        VDB["Vector Database\nHNSW index + metadata"]
+        VDB[("Vector Database\nHNSW index + metadata")]
         CHUNKS --> EMB_I --> VECS --> VDB
     end
 
