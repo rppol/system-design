@@ -153,7 +153,7 @@ sequenceDiagram
     participant AS as Auth Server
 
     Client->>AS: POST /token/refresh, refresh_token=RT1
-    Note over AS: invalidate RT1; issue new AT2 + RT2
+    Note over AS: invalidate RT1, issue new AT2 + RT2
     AS-->>Client: access_token=AT2, refresh_token=RT2
     Note over Client,AS: RT1 is now dead — if an attacker replays RT1,<br/>the server detects reuse and revokes the entire token family
 ```
@@ -777,7 +777,7 @@ flowchart TD
     pod1["API pod\nJWKS cache 1h"]
     pod2["API pod\nJWKS cache 1h"]
     podn["... 60 pods total\n(50k rps)"]
-    redis[("Redis\nrevoke list")]
+    redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>revoke list", pos: "b", h: 44 }
     rot["refresh-token rotation +\njti revocation list (SETEX)"]
 
     as -->|"JWKS (public keys, kid-tagged)"| pod1
@@ -791,7 +791,6 @@ flowchart TD
     class as frozen
     class pod1,pod2,podn train
     class rot mathOp
-    class redis base
 ```
 
 ### Resource Server Configuration
