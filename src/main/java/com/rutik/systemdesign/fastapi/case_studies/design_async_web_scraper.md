@@ -50,9 +50,9 @@ flowchart TD
     session(aiohttp Session<br/>shared connection pool)
     retry(Retry Decorator<br/>backoff + jitter)
     parser(HTML Parser<br/>BeautifulSoup4)
-    dedup[(URL Dedup<br/>Redis SADD)]
+    dedup@{ icon: "logos:redis", form: "square", label: "Redis<br/>URL Dedup (SADD)", pos: "b", h: 44 }
     writer(DB Writer<br/>asyncpg upsert)
-    pg[(PostgreSQL<br/>products table)]
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>products table", pos: "b", h: 44 }
 
     api --> postJobs
     api --> getJobs
@@ -78,7 +78,6 @@ flowchart TD
     class frontier,w0,w1,wN req
     class jobMgr,rateLimiter,robots,retry,parser mathOp
     class session frozen
-    class dedup,pg base
     class writer train
 ```
 

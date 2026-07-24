@@ -208,7 +208,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG(["PostgreSQL server<br/>max_connections = 200"])
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>max_connections = 200", pos: "b", h: 44 }
     LB("PgBouncer / LB<br/>optional")
     W1(Worker-1)
     W2(Worker-2)
@@ -226,7 +226,6 @@ flowchart TD
     W3 --> TOTAL
     W4 --> TOTAL
 
-    class PG base
     class LB mathOp
     class W1,W2,W3,W4 req
     class TOTAL mathOp
@@ -987,7 +986,8 @@ flowchart LR
     APP --> AUTH{"Auth dependency<br/>JWT validation"}
     APP --> SESS("get_async_session<br/>yield dep")
     SESS --> ENGINE(AsyncEngine)
-    ENGINE -->|"pool_size=5, max_overflow=10<br/>pool_recycle=1800, pool_pre_ping=true"| PG(["PostgreSQL RDS"])
+    ENGINE -->|"pool_size=5, max_overflow=10<br/>pool_recycle=1800, pool_pre_ping=true"| PG
+    PG@{ icon: "logos:aws-rds", form: "square", label: "PostgreSQL RDS", pos: "b", h: 44 }
     AUTH --> ROUTE(Route Handler)
     PG --> ROUTE
     ROUTE --> SVC("Service Layer<br/>document_service.py")
@@ -998,7 +998,6 @@ flowchart LR
     class UVI,APP req
     class AUTH,SESS mathOp
     class ENGINE base
-    class PG frozen
     class ROUTE,SVC,REPO,ORM train
 ```
 
