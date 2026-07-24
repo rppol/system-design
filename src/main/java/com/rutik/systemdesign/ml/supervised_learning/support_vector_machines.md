@@ -869,31 +869,28 @@ For linear SVM: the weight vector w = sum_i alpha_i y_i x_i is explicitly availa
 **Why SVM**: with n=200 and d=20,000, the feature space is extremely high-dimensional relative to sample count. Neural networks would overfit catastrophically. SVM's maximum-margin principle provides strong generalization guarantees even in this d >> n regime, especially with a linear kernel (the data may be linearly separable in gene expression space).
 
 **Pipeline**:
-```
-Raw gene expression matrix (200 x 20,000)
-    |
-    v
-Variance filtering (keep top 5,000 genes by variance across samples)
-    |
-    v
-StandardScaler (fit on training folds only)
-    |
-    v
-LinearSVC(C=0.01, multi_class="ovr", max_iter=5000)
-    |
-    v
-5-fold cross-validation for C in [0.001, 0.01, 0.1, 1.0]
-    |
-    v
-Optimal: C=0.01  (strong regularization appropriate for n=160 effective training)
-    |
-    v
-Evaluation on held-out 20% test set (40 samples)
-    |--- Accuracy: 0.88
-    |--- Macro F1: 0.87
-    |
-    v
-Feature extraction: model.coef_ shape (3, 5000) → |w_j| per subtype
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw gene expression<br/>matrix (200 x 20,000)"]) --> filter["Variance filtering<br/>(top 5,000 genes)"]
+    filter --> scale["StandardScaler<br/>(fit on train folds only)"]
+    scale --> svc["LinearSVC(C=0.01,<br/>multi_class=ovr, max_iter=5000)"]
+    svc --> cv["5-fold CV<br/>C in 0.001..1.0"]
+    cv --> opt["Optimal: C=0.01<br/>(n=160 effective training)"]
+    opt --> eval(["Held-out test (40 samples)<br/>Accuracy 0.88 / Macro F1 0.87"])
+    eval --> feat(["Feature extraction<br/>coef_ shape (3, 5000)"])
+
+    class raw,eval,feat io
+    class filter,scale base
+    class svc,cv,opt mathOp
 ```
 
 **Results**:
