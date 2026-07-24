@@ -239,14 +239,14 @@ flowchart LR
     key --> look{"Cache hit?"}
     look -->|"yes ~30%"| hit(["Serve cached score\n~1ms · no inference"])
     look -->|"no"| model["Run model inference"]
-    model --> store["Write to Redis\nTTL matched to feature drift"]
+    model --> store
+    store@{ icon: "logos:redis", form: "square", label: "Write to Redis\nTTL matched to feature drift", pos: "b", h: 44 }
     store --> out(["Serve fresh score"])
 
     class req,hit,out io
     class key mathOp
     class look req
     class model train
-    class store base
 ```
 
 Folding feature_hash and model_ver into the key means stale features or a new model version naturally miss the cache — the fix for the poisoning failure where a user's risk spikes but a cached low-risk score keeps being served.
