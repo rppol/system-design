@@ -107,7 +107,7 @@ flowchart TD
     workerStep0 --> reader["FlatFileItemReader per partition\n(StepScope — one reader per partition, own file path)"]
     reader --> processor["CustomerItemProcessor\nvalidateRequired / parseDate/Revenue / enrich from countryNameCache / deriveCustomerTier"]
     processor --> writer["CustomerItemWriter\nJdbcTemplate.batchUpdate(UPSERT_SQL, 1000 rows)"]
-    writer --> db[("PostgreSQL: customers table")]
+    writer --> db@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>customers table", pos: "b", h: 44 }
 
     job --> jobRepo[("JobRepository: batch_* tables\n(same PostgreSQL) — step state for restart")]
     processor -. skip .-> skipListener["CustomerSkipListener\nwrites rejected records to /data/customers/output/rejected.csv"]
@@ -117,7 +117,7 @@ flowchart TD
     class workerStep0,workerStep1,workerStepDots,workerStep7 train
     class reader,writer io
     class processor mathOp
-    class db,jobRepo frozen
+    class jobRepo frozen
     class skipListener lossN
 ```
 
