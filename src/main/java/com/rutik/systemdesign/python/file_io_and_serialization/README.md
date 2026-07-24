@@ -175,7 +175,9 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["HTTP Client"]) -->|"multipart/<br/>form-data"| fastapi("FastAPI /<br/>Starlette")
+    fastapi@{ icon: "logos:fastapi", form: "square", label: "FastAPI /<br/>Starlette", pos: "b", h: 44 }
+
+    client(["HTTP Client"]) -->|"multipart/<br/>form-data"| fastapi
     fastapi -->|"UploadFile<br/>async chunks"| step1
 
     subgraph handler["Endpoint handler"]
@@ -187,7 +189,6 @@ flowchart LR
     step4 --> response(["JSON response<br/>to client"])
 
     class client,response io
-    class fastapi req
     class step1,step2,step3,step4 mathOp
 ```
 
