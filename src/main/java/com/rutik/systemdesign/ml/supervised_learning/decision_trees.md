@@ -786,38 +786,35 @@ On a typical tabular dataset with n=10,000 samples and d=20 features, a tree wit
 **Requirement**: the final output must be a set of rules that the CRM team can enter manually into their rule engine. Predictions must be explainable to the customer: "We noticed [reason] and want to offer you [incentive]."
 
 **Pipeline**:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw customer data<br/>50,000 x 30 features"]) --> prep["Preprocessing<br/>impute + one-hot encode"]
+    prep --> split["Temporal train/test split<br/>40k train / 10k test"]
+    split --> prune["Cost-complexity<br/>pruning path (5-fold CV)"]
+    prune --> final["Final tree<br/>depth=5 · 18 leaves"]
+    final --> rules(["Rule extraction<br/>export_text -> 18 rules"])
+
+    class raw,rules io
+    class prep,split base
+    class prune mathOp
+    class final train
 ```
-Raw customer data (50,000 x 30 features)
-    |
-    v
-Preprocessing
-    |--- median imputation for 3 numeric features with < 2% missing
-    |--- OHE for contract_type (3 values), payment_method (4 values)
-    |--- no scaling (decision tree does not require it)
-    |
-    v
-Temporal train/test split
-    |--- train: first 40,000 customers (by account creation date)
-    |--- test: last 10,000 customers
-    |
-    v
-Cost-complexity pruning path
-    |--- DecisionTreeClassifier(class_weight="balanced").fit(X_train, y_train)
-    |--- path = tree.cost_complexity_pruning_path(X_train, y_train)
-    |--- 5-fold CV over ccp_alphas
-    |--- optimal alpha selected: 0.0008
-    |
-    v
-Final tree: depth=5, 18 leaves
-    |--- test AUC-ROC: 0.83
-    |--- test F1: 0.74
-    |--- test recall (churners): 0.81
-    |
-    v
-Rule extraction
-    |--- export_text(tree, feature_names=feature_names)
-    |--- 18 rules extracted, each with churn probability and sample size
-```
+
+- **Raw customer data** — 50,000 x 30 features.
+- **Preprocessing** — median imputation for 3 numeric features with < 2% missing; OHE for contract_type (3 values), payment_method (4 values); no scaling (decision tree does not require it).
+- **Temporal train/test split** — train: first 40,000 customers (by account creation date); test: last 10,000 customers.
+- **Cost-complexity pruning path** — `DecisionTreeClassifier(class_weight="balanced").fit(X_train, y_train)`; `path = tree.cost_complexity_pruning_path(X_train, y_train)`; 5-fold CV over ccp_alphas; optimal alpha selected: 0.0008.
+- **Final tree** — depth=5, 18 leaves; test AUC-ROC: 0.83; test F1: 0.74; test recall (churners): 0.81.
+- **Rule extraction** — `export_text(tree, feature_names=feature_names)`; 18 rules extracted, each with churn probability and sample size.
 
 **Top Rules Extracted**:
 ```
