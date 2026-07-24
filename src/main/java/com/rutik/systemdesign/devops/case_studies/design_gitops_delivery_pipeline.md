@@ -229,7 +229,7 @@ flowchart TD
         StableRS([stable rs])
         CanaryRS([canary rs])
         TrafficSplit{Traffic split<br/>Istio/Gateway}
-        Prom[(Prometheus / Thanos<br/>error-rate, p99)]
+        Prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>Thanos", pos: "b", h: 44 }
         Promote((pass to<br/>promote))
         Abort((fail to<br/>abort+rollback))
 
@@ -249,7 +249,7 @@ flowchart TD
     ClusterMore["... 48 more clusters"]
 
     class Dev,CI io
-    class AppCfg,Overlays,AppOfApps,Shared,Prom base
+    class AppCfg,Overlays,AppOfApps,Shared base
     class AppSetCtrl,RepoServer,AppCtrl,RolloutCtrl,TrafficSplit mathOp
     class Rollout,CanaryRS req
     class StableRS,Promote train
