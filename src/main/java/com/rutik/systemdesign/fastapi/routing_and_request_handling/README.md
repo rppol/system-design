@@ -239,7 +239,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    App(["FastAPI app"]) --> Users("users.router<br/>prefix=/users · tag=users<br/>deps=get_user_db")
+    App@{ icon: "logos:fastapi", form: "square", label: "FastAPI app", pos: "b", h: 44 } --> Users("users.router<br/>prefix=/users · tag=users<br/>deps=get_user_db")
     App --> Orders("orders.router<br/>prefix=/orders · tag=orders<br/>deps=get_db")
     App --> Health("health.router<br/>no prefix · tag=ops")
 
@@ -247,7 +247,6 @@ flowchart TD
     Users --> ById(["GET /users/{id}"])
     Users --> Create(["POST /users/"])
 
-    class App io
     class Users,Orders,Health mathOp
     class Me train
     class ById,Create req
@@ -1123,7 +1122,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    App(["FastAPI app"]) --> V1("v1_router<br/>prefix=/api/v1<br/>deps=jwt_auth")
+    App@{ icon: "logos:fastapi", form: "square", label: "FastAPI app", pos: "b", h: 44 } --> V1("v1_router<br/>prefix=/api/v1<br/>deps=jwt_auth")
     App --> V2("v2_router<br/>prefix=/api/v2<br/>deps=jwt_auth")
     App --> Health("health_router<br/>no prefix<br/>include_in_schema=False")
 
@@ -1131,7 +1130,6 @@ flowchart TD
     V2 --> V2Routes(["/orders (GET, POST)<br/>/orders/{id} (GET)<br/>/orders/export (CSV stream)"])
     V2Routes -.->|"on order create"| BGTask(["BackgroundTask:<br/>send_confirmation_email"])
 
-    class App io
     class V1,V2 mathOp
     class Health base
     class V1Routes,V2Routes req
