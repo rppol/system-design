@@ -843,40 +843,35 @@ Put automated data-validation gates before training so bad data fails the pipeli
 **Scenario:** A ride-sharing company (12M daily rides, 4M active drivers) runs a surge pricing model that updates every 5 minutes. The current manual promotion process takes 3 days from "model passes offline eval" to "model in production", causing 4-6 stale model incidents per quarter where drift degrades pricing accuracy. The goal: implement a CI/CD pipeline with MLflow Registry + GitHub Actions that promotes models automatically when AUC-ROC >= 0.92 and MAPE <= 8% on a rolling 7-day holdout, with promotion-to-serving in under 45 minutes and automatic rollback if production error rate exceeds 2x baseline within 30 minutes.
 
 **Architecture:**
-```
-Data Pipeline (hourly Spark job)
-  Feature store refresh: driver supply, demand signals,
-  weather, events, historical price elasticity
-         |
-         v
-MLflow Experiment Tracking
-  Parameterised training run (XGBoost or LightGBM)
-  Logs: params, metrics, model artifact, feature schema
-  Registry: Staging -> Production transition gate
-         |
-         v
-GitHub Actions CI Workflow  (triggered on model tag push)
-  +----------------------------------------------+
-  |  1. Checkout model code + MLflow artifact     |
-  |  2. Run offline validation gate               |
-  |     - AUC-ROC >= 0.92 on 7-day holdout       |
-  |     - MAPE <= 8% on surge windows            |
-  |     - PSI <= 0.15 vs production model        |
-  |     - Schema compatibility check             |
-  |  3. Integration test (shadow traffic, 15min) |
-  |  4. MLflow transition: Staging -> Production  |
-  |  5. Deploy to K8s (rolling update, 10% canary)|
-  +----------------------------------------------+
-         |
-         v
-Model Serving (FastAPI + TorchServe, 400 RPS)
-  Blue-green deployment with 10%/90% canary split
-  Prometheus metrics: request rate, error rate, p99 latency
-         |
-         v
-Automated Rollback Monitor
-  Compares canary error_rate vs baseline
-  Triggers rollback if ratio > 2.0 within 30min window
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dataPipeline["Data Pipeline<br/>hourly Spark job<br/>Feature refresh: supply - demand -<br/>weather - events - elasticity"]
+    mlflowTrack["MLflow Experiment Tracking<br/>Train XGBoost / LightGBM<br/>Params - metrics - schema logged<br/>Registry: Staging gate"]
+    ciCheckout["1. Checkout code + artifact<br/>GitHub Actions - on tag push"]
+    ciGate{"2. Offline validation gate<br/>AUC-ROC >= 0.92 - MAPE <= 8%<br/>PSI <= 0.15 - schema check"}
+    ciIntegration["3. Integration test<br/>shadow traffic, 15 min"]
+    ciPromote["4. MLflow transition<br/>Staging to Production"]
+    k8sDeploy@{ icon: "logos:kubernetes", form: "square", label: "5. Deploy to K8s<br/>rolling update, 10% canary", pos: "b", h: 44 }
+    modelServing["Model Serving<br/>FastAPI + TorchServe, 400 RPS<br/>Blue-green, 10%/90% canary split"]
+    prometheus@{ icon: "logos:prometheus", form: "square", label: "Prometheus metrics<br/>rate - errors - p99", pos: "b", h: 44 }
+    rollbackMon["Automated Rollback Monitor<br/>canary error_rate vs baseline<br/>rollback if ratio over 2.0 in 30min"]
+
+    dataPipeline --> mlflowTrack --> ciCheckout --> ciGate --> ciIntegration --> ciPromote --> k8sDeploy --> modelServing --> prometheus --> rollbackMon
+
+    class dataPipeline base
+    class mlflowTrack train
+    class ciCheckout,ciIntegration,ciPromote req
+    class ciGate mathOp
+    class modelServing req
+    class rollbackMon lossN
 ```
 
 **Step-by-step implementation:**
