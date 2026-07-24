@@ -34,25 +34,21 @@ The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Clau
 ### 4.1 Vision Language Models (VLMs)
 
 **Architecture (LLaVA / LLaMA-Vision style):**
-```
-Image
-  |
-  v
-[Vision Encoder] (CLIP ViT-L/14 or SigLIP)
-  Divide image into patches (e.g., 14×14 pixels each)
-  Encode each patch → embedding
-  Output: N visual tokens [v1, v2, ..., vN]
-  |
-  v
-[Projection Layer] (Linear or MLP)
-  Map from vision embedding dim → LLM embedding dim
-  v1 → word-like token for LLM
-  |
-  v
-[LLM] (LLaMA, Mistral, Qwen, etc.)
-  Concatenate visual tokens + text tokens
-  [v1, v2, ..., vN, t1, t2, t3, ...]
-  Standard autoregressive generation
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Image(["Image"]) --> VisionEnc["Vision Encoder<br/>CLIP ViT-L/14 or SigLIP<br/>Patches -> N visual tokens<br/>v1, v2, ..., vN"]
+    VisionEnc --> Proj["Projection Layer<br/>Linear or MLP<br/>vision dim -> LLM dim<br/>v1 -> word-like token"]
+    Proj --> LLMNode["LLM<br/>LLaMA, Mistral, Qwen, etc.<br/>Concatenate visual + text tokens<br/>Standard autoregressive generation"]
+
+    class Image io
+    class VisionEnc frozen
+    class Proj train
+    class LLMNode base
 ```
 
 **Read it like this.** "The vision encoder speaks one vector language and the LLM speaks another; the projection layer is a dictionary that rewrites each visual token into a word-shaped vector the LLM can read."
@@ -604,40 +600,33 @@ An e-commerce platform serving 80 million active users needs multimodal product 
 
 **Architecture Overview**
 
-```
-User Upload (jpg/png/webp)
-         |
-         v
-  [Image Validation]  ──── reject if >5MB, non-image MIME
-         |
-         v
-  [CLIP Vision Encoder]     ─── ViT-L/14, 224×224, fp16
-  [CLIP Text Encoder]       ─── same embedding space, 768-d
-         |
-         v
-  [Query Fusion Layer]      ─── concat(img_emb, text_emb) → MLP → 768-d
-         |
-    ┌────┴────────────────────────────────────┐
-    v                                         v
-[FAISS HNSW Index]                    [BM25 Text Index]
-400M product vectors, fp16            title+description tokens
-768-d, ef_search=128                  field-boosted (title ×3)
-    |                                         |
-    └────────────────┬────────────────────────┘
-                     v
-            [RRF Score Fusion]      ─── alpha=0.65 dense, 0.35 sparse
-                     |
-                     v
-            [Price + Category Filter]   ─── post-FAISS metadata filter
-                     |
-                     v
-            [Cross-Encoder Reranker]    ─── MiniLM-L12, top-50 → top-10
-                     |
-                     v
-            [Personalization Layer]     ─── user embedding ×0.2 blend
-                     |
-                     v
-              Ranked Results (10)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UserUpload(["User Upload<br/>jpg/png/webp"]) --> ImgValid["Image Validation<br/>reject if greater than 5MB<br/>or non-image MIME"]
+    ImgValid --> CLIPVision["CLIP Vision Encoder<br/>ViT-L/14, 224x224, fp16"]
+    ImgValid --> CLIPText["CLIP Text Encoder<br/>same embedding space, 768-d"]
+    CLIPVision --> QueryFusion["Query Fusion Layer<br/>concat img_emb, text_emb<br/>-&gt; MLP -&gt; 768-d"]
+    CLIPText --> QueryFusion
+    QueryFusion --> FAISSIdx["FAISS HNSW Index<br/>400M product vectors, fp16<br/>768-d, ef_search=128"]
+    QueryFusion --> BM25Idx["BM25 Text Index<br/>title+description tokens<br/>field-boosted, title x3"]
+    FAISSIdx --> RRF["RRF Score Fusion<br/>alpha=0.65 dense, 0.35 sparse"]
+    BM25Idx --> RRF
+    RRF --> Filter["Price + Category Filter<br/>post-FAISS metadata filter"]
+    Filter --> Rerank["Cross-Encoder Reranker<br/>MiniLM-L12, top-50 -&gt; top-10"]
+    Rerank --> Personalize["Personalization Layer<br/>user embedding x0.2 blend"]
+    Personalize --> Results(["Ranked Results, 10"])
+
+    class UserUpload,Results io
+    class ImgValid,Filter req
+    class CLIPVision,CLIPText,FAISSIdx,BM25Idx,Rerank base
+    class QueryFusion,RRF,Personalize mathOp
 ```
 
 **Key Design Decisions**
