@@ -124,91 +124,55 @@ SMB tenants (< 50k vectors, non-regulated data) share a namespace on a multi-ten
 
 ### Per-Tenant Collection Routing (Safe Path)
 
-```
-    Authenticated Request
-    JWT: { tenant_id: "acme", user_id: "u123" }
-              |
-              v
-    +---------------------+
-    |  TenantContextMiddleware |
-    |  extracts tenant_id     |
-    |  from JWT (server-side) |
-    +---------------------+
-              |
-              v
-    +---------------------+
-    |  TenantRouter        |
-    |  "acme" -> collection |
-    |    "acme_legal_docs"  |
-    +---------------------+
-              |
-              v
-    +------------------------+
-    | Qdrant Collection:     |
-    | "acme_legal_docs"      |   Only acme's data
-    | (isolated HNSW graph)  |   Cross-collection queries
-    +------------------------+   blocked at API level
-              |
-              v
-    +---------------------+
-    |  sanitize_chunks()  |  Redundant safety gate:
-    |  strips any chunk   |  confirms chunk.tenant_id
-    |  != "acme"          |  == ctx.tenant_id
-    +---------------------+
-              |
-              v
-    Context assembled — LLM generates response
-    using only acme's documents
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req("Authenticated Request<br/>JWT: tenant_id=acme, user_id=u123")
+    mw("TenantContextMiddleware<br/>Extracts tenant_id from JWT, server-side")
+    router("TenantRouter<br/>acme maps to collection acme_legal_docs")
+    qdrant("Qdrant Collection: acme_legal_docs<br/>Isolated HNSW graph - cross-collection<br/>queries blocked at API level")
+    sanitize("sanitize_chunks<br/>Redundant safety gate - confirms<br/>chunk.tenant_id equals ctx.tenant_id")
+    ctx("Context Assembled<br/>LLM generates response using<br/>only acme's documents")
+
+    req --> mw --> router --> qdrant --> sanitize --> ctx
+
+    class req,ctx io
+    class mw,router,sanitize req
+    class qdrant base
 ```
 
 ### Defense-in-Depth Stack
 
-```
-Inbound Request
-      |
-      v
-+------------------+
-| 1. API Auth      |  JWT validation, API key check
-| deny if missing  |  Extracts tenant_id claim
-+------------------+
-      |
-      v
-+------------------+
-| 2. TenantContext |  Builds TenantContext from auth
-| Injection        |  Sets tenant_id, plan_tier,
-|                  |  allowed_collections, rate_limit
-+------------------+
-      |
-      v
-+------------------+
-| 3. Rate Limiter  |  Per-tenant token bucket in Redis
-| NoisyNeighbor   |  Raises TenantQuotaExceeded if burst
-| Mitigation       |  exceeded (sliding window, 1s granularity)
-+------------------+
-      |
-      v
-+------------------+
-| 4. Retrieval     |  Filter ALWAYS injected at this layer
-| Filter Pushdown  |  Application layer cannot omit it
-| (ACLPushdown     |  Collection-level or namespace-level
-|  Retriever)      |
-+------------------+
-      |
-      v
-+------------------+
-| 5. Context       |  sanitize_retrieved_chunks()
-| Assembly         |  Verifies chunk.tenant_id == ctx.tenant_id
-| Validation       |  Logs any mismatch as SECURITY_ALERT
-+------------------+
-      |
-      v
-+------------------+
-| 6. Output Filter |  Scan for PII patterns from other tenants
-| (optional)       |  Block if cross-tenant content detected
-+------------------+
-      |
-      v
-    Response
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    inbound("Inbound Request")
+    auth("1. API Auth<br/>JWT validation, API key check<br/>Deny if missing - extracts tenant_id claim")
+    tctx("2. TenantContext Injection<br/>Builds TenantContext - tenant_id, plan_tier,<br/>allowed_collections, rate_limit")
+    ratelimit("3. Rate Limiter - NoisyNeighbor Mitigation<br/>Per-tenant token bucket in Redis<br/>Raises TenantQuotaExceeded on burst, 1s granularity")
+    retrieval("4. Retrieval Filter Pushdown - ACLPushdownRetriever<br/>Filter always injected, app layer cannot omit it<br/>Collection-level or namespace-level")
+    assembly("5. Context Assembly Validation<br/>sanitize_retrieved_chunks verifies<br/>chunk.tenant_id equals ctx.tenant_id<br/>Logs mismatch as SECURITY_ALERT")
+    output("6. Output Filter - optional<br/>Scan for PII patterns from other tenants<br/>Block if cross-tenant content detected")
+    response("Response")
+
+    inbound --> auth --> tctx --> ratelimit --> retrieval --> assembly --> output --> response
+
+    class inbound,response io
+    class auth,tctx,ratelimit,retrieval,assembly,output req
 ```
 
 ---
