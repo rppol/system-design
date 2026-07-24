@@ -81,7 +81,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    clients(["Clients / Ad Servers<br/>~1M/sec avg, 5M/sec peak"]) --> ingestion("Ingestion Layer<br/>Kafka topic ad_events<br/>partitioned by ad_id")
+    ingestion@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>Ingestion Layer", pos: "b", h: 44 }
+    clients(["Clients / Ad Servers<br/>~1M/sec avg, 5M/sec peak"]) --> ingestion
 
     ingestion -->|"stream path"| streamProc("Stream Processor<br/>Flink-style - windowing,<br/>watermarks, dedup, HLL")
     ingestion -->|"batch path"| dataLake[("Raw Event Sink<br/>Data Lake, Parquet/ORC<br/>~9-14 TB/day")]
@@ -100,7 +101,6 @@ flowchart LR
     batchJob --> billing
 
     class clients io
-    class ingestion req
     class streamProc mathOp
     class dataLake,rtOlap base
     class batchJob,billing train
@@ -491,16 +491,13 @@ A lightweight, **signal-producing** (not decision-making) pipeline runs alongsid
 
 The real-time OLAP store (§3, §4.5 — Druid/Pinot/ClickHouse-style) ingests the stream processor's emitted window aggregates (§4.2) as rows in a **denormalized, time-partitioned fact table**. The schema is deliberately flat — no joins at query time, because joins are the enemy of the sub-second query latency this layer exists to provide:
 
-```
-Table: ad_event_rollups_minute
-+------------+-------------------+--------+-------------+-----+--------+------------+------------+----------------------+
-| window_start (TIME, partition key)        | ad_id  | advertiser_id | campaign_id | geo | device | placement  | click_count| impression_count| unique_user_hll (HLL sketch, §4.5) |
-+------------+-------------------+--------+-------------+-----+--------+------------+------------+----------------------+
-| 2026-06-11T18:32:00Z                       | a_001  | adv_55        | camp_9      | US  | mobile | feed_top   | 142        | 18,304     | <12KB sketch>        |
-| 2026-06-11T18:32:00Z                       | a_001  | adv_55        | camp_9      | DE  | mobile | feed_top   | 31         | 4,012      | <12KB sketch>        |
-| 2026-06-11T18:32:00Z                       | a_002  | adv_12        | camp_3      | US  | desktop| sidebar    | 8          | 1,950      | <12KB sketch>        |
-+------------+-------------------+--------+-------------+-----+--------+------------+------------+----------------------+
-```
+**Table: `ad_event_rollups_minute`**
+
+| window_start (TIME, partition key) | ad_id | advertiser_id | campaign_id | geo | device | placement | click_count | impression_count | unique_user_hll (HLL sketch, §4.5) |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-06-11T18:32:00Z | a_001 | adv_55 | camp_9 | US | mobile | feed_top | 142 | 18,304 | `<12KB sketch>` |
+| 2026-06-11T18:32:00Z | a_001 | adv_55 | camp_9 | DE | mobile | feed_top | 31 | 4,012 | `<12KB sketch>` |
+| 2026-06-11T18:32:00Z | a_002 | adv_12 | camp_3 | US | desktop | sidebar | 8 | 1,950 | `<12KB sketch>` |
 
 A typical dashboard query — "clicks and CTR for `ad_id=a_001`, US, mobile, last 60 minutes, by minute" — is a `GROUP BY window_start` with a `WHERE` filter on the dimension columns, summing `click_count`/`impression_count` and computing `click_count/impression_count` as CTR. Because `window_start` is the partition key, the query touches only the last 60 minutes' worth of segments — a tiny fraction of the table's total retained data (§10) — which is what keeps p99 query latency in the sub-second-to-low-seconds range even as the table grows to tens of terabytes (§10).
 
@@ -521,15 +518,18 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph useast["US-EAST"]
-        ueUsers(["local users"]) --> ueIngest("Ingestion<br/>Kafka") --> ueStream("Stream Processor<br/>dedup / window / watermark") --> ueOlap[("Regional OLAP<br/>pulse / corrected")]
+        ueIngest@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 40 }
+        ueUsers(["local users"]) --> ueIngest --> ueStream("Stream Processor<br/>dedup / window / watermark") --> ueOlap[("Regional OLAP<br/>pulse / corrected")]
     end
 
     subgraph euwest["EU-WEST"]
-        ewUsers(["local users"]) --> ewIngest("Ingestion<br/>Kafka") --> ewStream("Stream Processor<br/>dedup / window / watermark") --> ewOlap[("Regional OLAP<br/>pulse / corrected")]
+        ewIngest@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 40 }
+        ewUsers(["local users"]) --> ewIngest --> ewStream("Stream Processor<br/>dedup / window / watermark") --> ewOlap[("Regional OLAP<br/>pulse / corrected")]
     end
 
     subgraph apsouth["AP-SOUTH"]
-        asUsers(["local users"]) --> asIngest("Ingestion<br/>Kafka") --> asStream("Stream Processor<br/>dedup / window / watermark") --> asOlap[("Regional OLAP<br/>pulse / corrected")]
+        asIngest@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 40 }
+        asUsers(["local users"]) --> asIngest --> asStream("Stream Processor<br/>dedup / window / watermark") --> asOlap[("Regional OLAP<br/>pulse / corrected")]
     end
 
     ueOlap -->|"hourly rollup"| global("Global Rollup<br/>Aggregation Job<br/>SUM + merge across regions")
@@ -537,7 +537,6 @@ flowchart LR
     asOlap -->|"hourly rollup"| global
 
     class ueUsers,ewUsers,asUsers io
-    class ueIngest,ewIngest,asIngest req
     class ueStream,ewStream,asStream mathOp
     class ueOlap,ewOlap,asOlap base
     class global train
