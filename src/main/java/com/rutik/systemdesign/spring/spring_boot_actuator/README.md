@@ -104,14 +104,17 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     A["Application Code\nCounter.increment()\nTimer.record(duration)\nGauge.register(supplier)"] --> B["MeterRegistry\n(abstraction layer)"]
-    B --> C["Prometheus\n(scrape /metrics)"]
+    B --> C
     B --> D["Datadog\n(push agent)"]
-    B --> E["CloudWatch\n(push agent)"]
+    B --> E
     B --> F["Graphite\n(push agent)"]
+
+    C@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>(scrape /metrics)", pos: "b", h: 44 }
+    E@{ icon: "logos:aws-cloudwatch", form: "square", label: "CloudWatch<br/>(push agent)", pos: "b", h: 44 }
 
     class A train
     class B base
-    class C,D,E,F io
+    class D,F io
 ```
 
 `MeterRegistry` is the one abstraction application code talks to; swapping the backend (Prometheus, Datadog, CloudWatch, Graphite) is a dependency change, not a code change.
@@ -589,8 +592,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Prom["Prometheus"] -->|"scrape /actuator/prometheus (15s)"| Act
-    K8s["K8s kubelet"] -->|"GET /actuator/health/readiness"| Act
+    Prom -->|"scrape /actuator/prometheus (15s)"| Act
+    K8s -->|"GET /actuator/health/readiness"| Act
     K8s -->|"GET /actuator/health/liveness"| Act
 
     subgraph Pod["Payment Pod"]
@@ -600,10 +603,12 @@ flowchart TD
     Act --> GW["PaymentGateway HealthIndicator"]
     Act --> CB["Resilience4j CB state endpoint"]
 
-    Prom -->|"PromQL"| Graf["Grafana\nrate(payments_total[1m]), histogram p99"]
+    Prom -->|"PromQL"| Graf
 
-    class Prom,Graf req
-    class K8s frozen
+    Prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    Graf@{ icon: "logos:grafana", form: "square", label: "Grafana<br/>(dashboards)", pos: "b", h: 44 }
+    K8s@{ icon: "logos:kubernetes", form: "square", label: "K8s kubelet", pos: "b", h: 44 }
+
     class Act base
     class GW,CB train
 ```
