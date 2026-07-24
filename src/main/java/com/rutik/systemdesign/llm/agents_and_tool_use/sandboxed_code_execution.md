@@ -581,25 +581,27 @@ Use a semaphore per user (stored in Redis for distributed enforcement): `async w
 **Initial (broken) implementation**: Code executed with `subprocess.run()` on the application server. Within two weeks: (1) a prompt injection caused the agent to generate `os.walk('/')` that logged 50,000 file paths into the response; (2) a buggy aggregate query consumed 100% CPU for 90 seconds, blocking all other requests; (3) an analyst accidentally triggered code that wrote a temp file to the `/etc/` directory (permissions error, but concerning).
 
 **Fixed architecture**:
-```
-Analyst query
-     |
-     v
-Claude (claude-sonnet-4-6) generates Pandas code
-     |
-     v
-E2B Sandbox
-  - Network: blocked (sample data pre-loaded)
-  - Timeout: 30s execution, 5-minute sandbox lifetime
-  - Memory: 2GB
-  - Filesystem: read-only /data (CSV sample), writable /tmp only
-  - Output truncated: 100KB max
-     |
-     v
-Output validation (valid JSON/CSV?)
-     |
-     v
-Agent receives output, generates natural language answer
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Query(["Analyst query"]) --> Gen("Claude sonnet-4-6<br/>generates Pandas code")
+    Gen --> Sandbox["E2B Sandbox<br/>Network: blocked, sample data<br/>Timeout: 30s exec / 5min lifetime<br/>Memory: 2GB<br/>FS: read-only /data, writable /tmp<br/>Output truncated: 100KB max"]
+    Sandbox --> Validate("Output validation<br/>valid JSON or CSV")
+    Validate --> Answer(["Agent receives output,<br/>generates NL answer"])
+
+    class Query,Answer io
+    class Gen train
+    class Sandbox req
+    class Validate base
 ```
 
 **Results**:
