@@ -60,18 +60,16 @@ Tuning is iterative: instrument first, diagnose which resource is the actual bot
 
 ## 4. Types / Architectures / Strategies
 
-```
-Tuning Category      | Impact | Scope         | Typical Win
----------------------|--------|---------------|------------------
-Index optimization   | 10-100× | Query         | Seq scan → index scan
-Query rewriting      | 5-100×  | Query         | N+1 → JOIN FETCH
-Configuration: memory| 2-10×   | All queries   | Buffer pool hit rate
-Configuration: I/O   | 1.5-3×  | Write-heavy   | Checkpoint tuning
-Configuration: WAL   | 1.5-2×  | Write-heavy   | WAL segment sizing
-Lock contention      | 10-100× | Write-heavy   | VACUUM, timeout tuning
-Hardware: SSD        | 5-20×   | I/O bound     | HDD → NVMe SSD
-Hardware: RAM        | 2-5×    | Memory bound  | Increase shared_buffers
-```
+| Tuning Category | Impact | Scope | Typical Win |
+|---|---|---|---|
+| Index optimization | 10-100× | Query | Seq scan → index scan |
+| Query rewriting | 5-100× | Query | N+1 → JOIN FETCH |
+| Configuration: memory | 2-10× | All queries | Buffer pool hit rate |
+| Configuration: I/O | 1.5-3× | Write-heavy | Checkpoint tuning |
+| Configuration: WAL | 1.5-2× | Write-heavy | WAL segment sizing |
+| Lock contention | 10-100× | Write-heavy | VACUUM, timeout tuning |
+| Hardware: SSD | 5-20× | I/O bound | HDD → NVMe SSD |
+| Hardware: RAM | 2-5× | Memory bound | Increase shared_buffers |
 
 **In plain terms.** Speedups multiply, but only until the bottleneck moves. Two fixes on the same
 query give `s1 x s2` — and then Amdahl's law caps you: if a fix only touches a fraction `p` of
@@ -597,16 +595,14 @@ WHERE query LIKE 'autovacuum:%';
 
 ## 8. Tradeoffs
 
-```
-Tuning Action          | Benefit               | Risk/Cost
------------------------|-----------------------|---------------------------
-Increase shared_buffers| Higher hit rate       | Less OS cache available
-Increase work_mem      | Faster sort/hash joins| OOM kill at high concurrency
-Increase max_wal_size  | Fewer checkpoints     | Longer crash recovery
-VACUUM (FULL)          | Eliminate bloat       | Exclusive lock, table rewrites
-Create index           | Faster reads          | Slower writes, storage, maintenance
-Parallel query workers | Faster large scans    | CPU-bound queries may thrash
-```
+| Tuning Action | Benefit | Risk/Cost |
+|---|---|---|
+| Increase shared_buffers | Higher hit rate | Less OS cache available |
+| Increase work_mem | Faster sort/hash joins | OOM kill at high concurrency |
+| Increase max_wal_size | Fewer checkpoints | Longer crash recovery |
+| VACUUM (FULL) | Eliminate bloat | Exclusive lock, table rewrites |
+| Create index | Faster reads | Slower writes, storage, maintenance |
+| Parallel query workers | Faster large scans | CPU-bound queries may thrash |
 
 ---
 
