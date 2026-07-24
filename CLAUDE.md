@@ -238,6 +238,20 @@ auto-widen of under-measured boxes.
 (4) **Rounded corners** — the reader rounds every box; for GitHub parity prefer rounded node
 shapes `(label)`/`([label])`, and never hand-set a light fill or a square-corner override.
 
+**Product logos (icon nodes) — owner-set 2026-07-24.** A node standing for a **concrete
+product or service** (S3, Lambda, Kafka, Redis, PostgreSQL, Kubernetes, PyTorch, …)
+should render its **real logo** via a Mermaid icon node:
+`n@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }` (or an
+`architecture-beta` diagram for a pure deployment topology). Icons come from the
+**bundled** iconify `logos` pack (`game/vendor/icons-<name>.json`, built by
+`scripts/build_icons.mjs`, registered offline — never the iconify CDN) and bake into the
+pre-rendered `.mmz`. Rules: (a) **every icon node MUST carry a text `label`** — GitHub
+does not register icon packs, so on GitHub the icon degrades to a placeholder but the
+label still reads; (b) icons are for **concrete products only** — conceptual boxes
+("Rate limiter", "Read path") keep the One-Dark `classDef` palette; (c) find the id in
+the pack (2091 `logos:` ids, all 64 `aws-*` services) — an unknown id degrades to a
+placeholder. This is additive to the four rules above, not a replacement.
+
 **Skill:** run `/mermaid-diagrams` (at `.claude/skills/mermaid-diagrams/`) before
 authoring or converting any diagram. The skill contains the full decision table
 (which form for which shape), the One-Dark color palette and `classDef` block, the

@@ -7,6 +7,7 @@
     "build:diagrams": "node scripts/build_diagrams.mjs"
   },
   "devDependencies": {
+    "@iconify-json/logos": "^1.2.11",
     "puppeteer": "^23.10.4"
   }
 }

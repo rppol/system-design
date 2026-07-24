@@ -5038,6 +5038,7 @@ function mmPolishSvg(n, ctype) {
   // there reshapes the mark itself. Tiny rects (<12px tall) are left alone.
   if (!["xychart", "pie", "quadrant"].includes(ctype)) {
     n.querySelectorAll("svg rect").forEach(r => {
+      if (r.closest(".icon-shape")) return;   // never reshape rects that are part of a product logo's artwork
       const h = r.height?.baseVal?.value || 0;
       if (h < 12) return;
       const rx = Math.min(8, Math.round(h / 3));
@@ -5214,6 +5215,7 @@ function mmTintPlain(n) {
   let i = 0;
   n.querySelectorAll("svg .node").forEach((g) => {
     if (g.classList.contains("statediagram-note")) return;   // notes are gold-themed already
+    if (g.querySelector(".icon-shape")) return;              // icon nodes carry a real product logo — never tint over it
     const shape = g.querySelector("rect, polygon, circle, path");
     if (!shape || getComputedStyle(shape).fill !== "rgb(26, 26, 26)") return;   // mainBkg #1a1a1a = unstyled
     const c = MM_TINTS[i++ % MM_TINTS.length];
@@ -5326,6 +5328,36 @@ function _loadMermaidModule() {
     .then(m => m.default);
 }
 
+// Register bundled iconify icon packs so Mermaid icon nodes
+// (`n@{ icon: "logos:aws-s3" }`) and architecture-beta services render the REAL
+// product logo instead of a labeled box. The pack is a LOCAL vendored JSON
+// (game/vendor/icons-<name>.json, built by scripts/build_icons.mjs) — never
+// iconify's CDN — so it works fully offline (Pages PWA + APK WebView) and bakes
+// into the pre-rendered .mmz. The relative URL resolves on Pages AND on the APK
+// asset host, exactly like diagrams/<key>.mmz. registerIconPacks works with or
+// without initialize() (verified), so this is safe on both the runtime and the
+// build warm-up paths. Idempotent; a fetch failure degrades icons to a
+// placeholder (the diagram still renders) instead of throwing.
+let _mmIconsRegistered = false;
+async function _mmRegisterIcons(m) {
+  if (_mmIconsRegistered || !m || typeof m.registerIconPacks !== "function") return;
+  _mmIconsRegistered = true;
+  try {
+    const names = ["logos"];   // add more packs here (e.g. "simple-icons", "devicon") for wider coverage
+    const packs = (await Promise.all(names.map((name) =>
+      fetch("vendor/icons-" + name + ".json")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((icons) => (icons ? { name, icons } : null))
+        .catch(() => null)
+    ))).filter(Boolean);
+    if (packs.length) m.registerIconPacks(packs);
+  } catch (e) {
+    _mmIconsRegistered = false;   // allow a retry on the next engine load
+    console.warn("Mermaid icon packs failed to register (logos degrade to placeholder):", e);
+  }
+}
+if (typeof window !== "undefined") window._mmRegisterIcons = _mmRegisterIcons;   // reachable from the build warm-up (build_diagrams.mjs)
+
 // [SF] Lazily load + initialize the Mermaid engine (CDN ESM on Pages / vendored
 // UMD in the APK). Only reached now when a fence has NO pre-rendered asset (added
 // or edited before the build ran) — the common path is engine-free. Returns the
@@ -5334,7 +5366,7 @@ async function ensureMermaid(failNode) {
   try {
     if (!_mermaidReady) {
       _mermaidReady = _loadMermaidModule()
-        .then(m => {
+        .then(async m => {
           // One stack for BOTH measurement and display. themeVariables.fontFamily
           // only styles the rendered SVG via CSS; the sequence renderer sizes its
           // actor/note/message boxes with its own font settings (Open Sans /
@@ -5453,6 +5485,7 @@ async function ensureMermaid(failNode) {
             },
             quadrantChart: { pointLabelFontSize: 12, pointRadius: 5, pointTextPadding: 4 },
           });
+          await _mmRegisterIcons(m);   // product logos for icon nodes / architecture-beta (offline, bundled)
           return m;
         });
     }

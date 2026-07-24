@@ -30,6 +30,7 @@ bash "$REPO_ROOT/scripts/build_banks.sh"
 # engine (below) stays as the offline fallback for any un-baked/invalid fence.
 echo "Pre-rendering Mermaid diagrams..."
 ( cd "$REPO_ROOT" && npm ci --no-audit --no-fund )
+( cd "$REPO_ROOT" && node scripts/build_icons.mjs )   # bundle iconify logo pack into game/vendor/ so icon nodes bake + ship offline
 ( cd "$REPO_ROOT" && npx --yes puppeteer browsers install chrome >/dev/null )
 python3 -m http.server 8901 --directory "$REPO_ROOT" >/tmp/lora_diag_http.log 2>&1 &
 DIAG_SERVER=$!

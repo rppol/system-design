@@ -47,6 +47,7 @@ jobs:
         # so it never lands in the Pages artifact (path: . uploads the whole tree).
         run: |
           npm ci --no-audit --no-fund
+          node scripts/build_icons.mjs
           npx --yes puppeteer browsers install chrome
           python3 -m http.server 8901 >/tmp/diag_http.log 2>&1 &
           SERVER_PID=$!

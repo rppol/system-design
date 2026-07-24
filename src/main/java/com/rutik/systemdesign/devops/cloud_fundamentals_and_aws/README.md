@@ -212,6 +212,24 @@ flowchart TD
 
 The ALB is the only internet-facing tier in each AZ; app and database tiers stay private behind security groups scoped to the tier above them, and RDS replicates synchronously to the standby for an automatic failover in roughly 60-120 seconds. S3 traffic reaches the bucket through a Gateway VPC Endpoint, bypassing the NAT Gateway — and its ~$0.045/GB processing charge — entirely, while the six Well-Architected pillars remain the recurring review lens applied over the whole topology.
 
+The serverless equivalent replaces the always-on VPC tiers with managed services billed per request — the same request path, no servers to patch:
+
+```mermaid
+flowchart LR
+    classDef io fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    user([Mobile client]):::io
+    cf@{ icon: "logos:aws-cloudfront", form: "square", label: "CloudFront", pos: "b", h: 44 }
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    fn@{ icon: "logos:aws-lambda", form: "square", label: "Lambda", pos: "b", h: 44 }
+    db@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB", pos: "b", h: 44 }
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3 media", pos: "b", h: 44 }
+    user --> cf --> gw --> fn
+    fn -->|item read / write| db
+    fn -->|presigned PUT| s3
+```
+
+CloudFront terminates TLS at the edge and serves cached responses; API Gateway authorizes and routes to Lambda, which reads and writes items in DynamoDB (single-digit-ms, on-demand capacity) and hands the client a presigned S3 URL to upload media directly — so the payload never transits the compute tier. Every box is a real service icon rendered offline (see the reader's icon-node support).
+
 ---
 
 ## 6. How It Works — Detailed Mechanics

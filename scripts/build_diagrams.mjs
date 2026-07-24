@@ -68,7 +68,16 @@ async function main() {
   await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   // Wait for the app's build hook + markdown renderer, then warm the mermaid engine.
   await page.waitForFunction("typeof window.__mmBuildVariants === 'function' && typeof mdRender === 'function' && typeof cyrb53 === 'function'", { timeout: 60000 });
-  await page.evaluate(async () => { await _loadMermaidModule().then((m) => (_mermaidReady = Promise.resolve(m))); });
+  // Register the bundled iconify icon packs on the SAME engine the pre-renderer
+  // uses, so icon nodes (`@{ icon: "logos:aws-s3" }`) and architecture-beta
+  // services bake their real product logo into the .mmz. Mirrors ensureMermaid's
+  // registration; registerIconPacks works without initialize() (verified).
+  await page.evaluate(async () => {
+    await _loadMermaidModule().then(async (m) => {
+      if (typeof _mmRegisterIcons === "function") await _mmRegisterIcons(m);
+      _mermaidReady = Promise.resolve(m);
+    });
+  });
   console.log("[diagrams] app + mermaid engine ready");
 
   // ---- collect unique fences (hash + source) using the app's OWN extraction ----

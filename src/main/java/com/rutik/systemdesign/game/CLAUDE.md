@@ -37,6 +37,20 @@ The `game/` directory is an application, not study content — see
   Keep `mmPolishSvg`, the `initialize` config, and `mmChooseVariant`/`mmRenderNode`
   in lockstep, and **bump the asset schema `v` (or clear `game/diagrams/`) whenever
   the mermaid version or theme changes** so stale assets don't linger.
+- **Mermaid icon nodes (product logos).** Diagrams may use icon nodes
+  (`n@{ icon: "logos:aws-s3" }`) / `architecture-beta` services so a real product
+  logo renders. `scripts/build_icons.mjs` bundles the iconify `logos` pack into
+  `game/vendor/icons-logos.json` (gitignored, CI-regenerated like the banks and
+  `.mmz`, in BOTH `pages.yml` and `build_android_assets.sh` before the diagram
+  pre-render). `_mmRegisterIcons()` registers it via a **relative** fetch (resolves
+  on Pages AND the APK host, like `diagrams/<key>.mmz`, so **no new `IS_APK` seam** —
+  still exactly three) on both the runtime (`ensureMermaid`) and the build warm-up
+  (`build_diagrams.mjs`) paths; icons bake into the `.mmz`, so the runtime stays
+  engine-free and offline. `registerIconPacks` works with or without `initialize()`
+  (verified), so the build hook adds icons without changing existing theming. This
+  is a **second sanctioned vendored asset** alongside `vendor/mermaid.min.js`.
+  `mmPolishSvg` (rect-rounding) and `mmTintPlain` skip `.icon-shape` subtrees so the
+  logo artwork is never reshaped or tinted — keep those guards if you touch either.
 - **Exactly three APK seams, and no others may exist.** LORA also ships as an
   offline Android APK (see `android/README.md`). Two seams are gated on
   `IS_APK` (`app.js`, keyed on `location.hostname ===
