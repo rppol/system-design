@@ -3360,6 +3360,7 @@ const BACKUP_KEYS = [
   "sd_reader_w", "sd_modules_w", "sd_toc_w", "sd_reader_fs", "sd_reader_full",
   "sd_reader_toc", "sd_reader_modules", "sd_reader_scroll", "sd_last_read",
   "sd_reader_font", "sd_reader_measure", "sd_reader_dropcap", "sd_reader_recall",
+  "sd_diagram_dir",
   "sd_last_mastery", "sd_last_export",
   "sd_cm_first_question", "sd_cm_first_combo", "sd_cm_first_results", "sd_cm_first_cards",
 ];
@@ -4964,34 +4965,65 @@ const _mmSrc = new WeakMap();     // .mermaid container -> raw diagram source
 let _mmRO = null;
 let _mmROTimer = null;
 let _mmIO = null;                 // [PERF] lazy-render IntersectionObserver for off-screen diagrams
+// Re-choose orientation + re-fit EVERY on-screen diagram for the current column
+// width. Driven by the ResizeObserver (container/sidebar size) AND by a global
+// resize/orientationchange hook (a device rotation or a mobile URL-bar collapse
+// can change the viewport without resizing the observed container).
+function mmRelayoutAll() {
+  document.querySelectorAll(".md-body .mermaid").forEach((el) => {
+    const sv = el.querySelector("svg");
+    if (!sv || sv.dataset.custom) return;
+    const avail = mmAvailWide(el);
+    const was = +el.dataset.mmAvail || avail;
+    const asset = _mmAsset.get(el);
+    if (Math.abs(avail - was) / was > 0.15) {            // width moved enough to re-choose orientation
+      if (asset) {                                        // [SF] pre-rendered: engine-free re-orient
+        const pick = mmChooseVariant(asset, avail);
+        if (pick.variant !== el.dataset.mmVariant) injectPrerendered(el, asset);   // orientation flipped -> swap the baked SVG
+        else { el.dataset.mmAvail = avail; mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0))); }
+      } else {
+        const src = _mmSrc.get(el);
+        if (src) mmRenderNode(el, src);                   // live fallback: re-render to re-choose orientation
+      }
+    } else if (el.dataset.mmFit) {
+      mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, avail));   // track live width, no floors
+    } else {
+      mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
+    }
+  });
+}
+
+// Re-choose orientation + re-fit every on-screen diagram for the CURRENT
+// orientation override (reader-wide toggle). Unlike mmRelayoutAll this ignores the
+// 15%-width gate — the width did not change, the user's choice did — so it always
+// re-injects the baked variant (or re-renders the live fallback).
+function applyDiagramDir() {
+  document.querySelectorAll(".md-body .mermaid").forEach((el) => {
+    if (!el.querySelector("svg")) return;               // not yet rendered — first render will honor the pref
+    const asset = _mmAsset.get(el);
+    if (asset) injectPrerendered(el, asset);            // engine-free re-orient (mmChooseVariant reads the pref)
+    else { const src = _mmSrc.get(el); if (src) mmRenderNode(el, src); }
+  });
+}
+
 function mmObserve(n) {
   if (!_mmRO) {
     _mmRO = new ResizeObserver(() => {
       clearTimeout(_mmROTimer);
-      _mmROTimer = setTimeout(() => {
-        document.querySelectorAll(".md-body .mermaid").forEach((el) => {
-          const sv = el.querySelector("svg");
-          if (!sv || sv.dataset.custom) return;
-          const avail = mmAvailWide(el);
-          const was = +el.dataset.mmAvail || avail;
-          const asset = _mmAsset.get(el);
-          if (Math.abs(avail - was) / was > 0.15) {            // width moved enough to re-choose orientation
-            if (asset) {                                        // [SF] pre-rendered: engine-free re-orient
-              const pick = mmChooseVariant(asset, avail);
-              if (pick.variant !== el.dataset.mmVariant) injectPrerendered(el, asset);   // orientation flipped -> swap the baked SVG
-              else { el.dataset.mmAvail = avail; mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0))); }
-            } else {
-              const src = _mmSrc.get(el);
-              if (src) mmRenderNode(el, src);                   // live fallback: re-render to re-choose orientation
-            }
-          } else if (el.dataset.mmFit) {
-            mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, avail));   // track live width, no floors
-          } else {
-            mmLayout(el, sv, Math.min(+sv.dataset.natw || avail, Math.max(avail, +sv.dataset.minw || 0)));  // re-clamp, honor floor
-          }
-        });
-      }, 250);
+      _mmROTimer = setTimeout(mmRelayoutAll, 250);
     });
+    // Belt-and-suspenders auto-fit: a device rotation (phone<->tablet, portrait<->
+    // landscape) or a mobile URL-bar show/hide changes the viewport without always
+    // resizing the observed container. Re-run the same relayout on those signals.
+    if (!window.__mmViewportHook) {
+      window.__mmViewportHook = 1;
+      let vt = 0;
+      const kick = () => { clearTimeout(vt); vt = setTimeout(mmRelayoutAll, 250); };
+      window.addEventListener("resize", kick);
+      window.addEventListener("orientationchange", kick);
+      try { window.matchMedia("(orientation: portrait)").addEventListener("change", kick); }
+      catch { try { window.matchMedia("(orientation: portrait)").addListener(kick); } catch { /* no matchMedia */ } }
+    }
   }
   _mmRO.observe(n);
   // Sidebar collapse can change only the GUTTERS (mmExtra) while the prose
@@ -5007,6 +5039,32 @@ function mmObserve(n) {
 // sequence-note widening, rounded boxes, blue arrowheads, viewBox fix, plain-node
 // tint. Extracted verbatim from mmRenderNode's tail so the build-time pre-renderer
 // produces SVGs byte-identical to live output. Sizing/interaction stay runtime-only.
+// Clip an icon-node subtree to a rounded rectangle of its own bounding box, so a
+// path-based product-logo chip (no roundable <rect>) still reads with rounded
+// corners like every other node. userSpaceOnUse + getBBox share the group's user
+// space, so the rounded rect lines up with the chip; the logo art is inset, so
+// only the square corners are trimmed. Baked into the SVG (build + runtime).
+function mmRoundIconClip(sv, g) {
+  try {
+    const bb = g.getBBox();
+    if (!(bb.width >= 16 && bb.height >= 16)) return;
+    const rr = Math.min(8, bb.width * 0.16, bb.height * 0.16);
+    let defs = sv.querySelector("defs");
+    if (!defs) { defs = document.createElementNS("http://www.w3.org/2000/svg", "defs"); sv.insertBefore(defs, sv.firstChild); }
+    const id = "mmchip" + (++_mmSeq);
+    const cp = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
+    cp.setAttribute("id", id);
+    cp.setAttribute("clipPathUnits", "userSpaceOnUse");
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", bb.x); rect.setAttribute("y", bb.y);
+    rect.setAttribute("width", bb.width); rect.setAttribute("height", bb.height);
+    rect.setAttribute("rx", rr); rect.setAttribute("ry", rr);
+    cp.appendChild(rect);
+    defs.appendChild(cp);
+    g.setAttribute("clip-path", `url(#${id})`);
+  } catch { /* getBBox throws only if detached — skip rounding, keep the square */ }
+}
+
 function mmPolishSvg(n, ctype) {
   const sv = n.querySelector("svg");
   // Sequence notes/actors: even with matched measure/display fonts, mermaid
@@ -5065,6 +5123,18 @@ function mmPolishSvg(n, ctype) {
       if (f === "#1a1a1a" || getComputedStyle(el).fill === "rgb(26, 26, 26)") el.setAttribute("fill", "#ffffff");  // chip
       else if (f === "currentcolor") el.setAttribute("fill", "#1a1a1a");                                            // monochrome glyph -> dark
     });
+    // Round the chip's SQUARE background so a logo node matches every other
+    // (rounded) node. A <rect> chip rounds cleanly via rx/ry; a path-based chip
+    // gets a rounded clip over the whole icon subtree. The glyph artwork is inset
+    // from the corners, so only the corner fill is trimmed — the logo itself is
+    // never reshaped (the guard above still keeps the glyph rects untouched).
+    let bgRounded = false;
+    g.querySelectorAll("rect").forEach(r => {
+      const w = r.width?.baseVal?.value || 0, h = r.height?.baseVal?.value || 0;
+      const m = Math.min(w, h);
+      if (m >= 16) { const rr = Math.min(8, Math.round(m * 0.16)); r.setAttribute("rx", rr); r.setAttribute("ry", rr); bgRounded = true; }
+    });
+    if (!bgRounded && sv) mmRoundIconClip(sv, g);
   });
   if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
   mmTintPlain(n);
@@ -5542,6 +5612,10 @@ async function loadDiagramAsset(src) {
   return asset;
 }
 
+// Reader-wide diagram-orientation override: "auto" (width-based, default),
+// "lr" (force horizontal) or "td" (force vertical). Persisted so it sticks.
+function diagramDir() { const v = localStorage.getItem("sd_diagram_dir"); return (v === "lr" || v === "td") ? v : "auto"; }
+
 // [SF] Engine-free orientation choice — reproduces mmRenderNode's decision
 // (widescreen height test + portrait legibility test) from the BAKED dims d0/d1
 // instead of re-rendering. This is what lets phone/tablet/rotation re-orient a
@@ -5552,6 +5626,16 @@ function mmChooseVariant(asset, avail) {
   let svg = asset.svg0, d = d0, flipScale = 0, variant = "0";
   if (asset.svg1 && asset.d1) {
     const d1 = { w: asset.d1[0], h: asset.d1[1] };
+    // Manual override wins over the width heuristic. Both orientations are baked;
+    // the horizontal one is the wider/shorter aspect (w/h) and the vertical one
+    // the taller/narrower — so dims tell them apart without knowing which was
+    // authored. Fit the chosen variant to the column (flipScale) as usual.
+    const dir = diagramDir();
+    if (dir !== "auto") {
+      const wantAlt = dir === "lr" ? (d1.w / d1.h) > (d0.w / d0.h) : (d1.w / d1.h) < (d0.w / d0.h);
+      if (wantAlt) return { svg: asset.svg1, d: d1, flipScale: Math.min(1, Math.max(avail / d1.w, 0.7)), variant: "1" };
+      return { svg: asset.svg0, d: d0, flipScale: 0, variant: "0" };
+    }
     const s1 = Math.min(1, Math.max(avail / d1.w, 0.7));
     const visible = Math.min(1, avail / (d1.w * s1));
     if (mmPortrait(avail)) {
@@ -5656,7 +5740,7 @@ async function renderMermaid(root) {
 // capture), double-click zooms in / resets, and + − 0 arrows Esc work from the
 // keyboard. Opens fitted-to-viewport and centred.
 function openDiagramZoom(contentEl) {
-  let scale = 1, tx = 0, ty = 0, panning = null, moved = false;
+  let scale = 1, tx = 0, ty = 0, panning = null, moved = false, pinch = null;
 
   const inner = document.createElement("div");
   inner.className = "mermaid-zoom-inner md-body";     // md-body -> token colours apply
@@ -5668,7 +5752,7 @@ function openDiagramZoom(contentEl) {
 
   const ctrl = document.createElement("div");
   ctrl.className = "mermaid-zoom-ctrl";
-  ctrl.innerHTML = `<button class="mz-out" title="Zoom out (−)" aria-label="Zoom out">−</button><span class="mz-pct">100%</span><button class="mz-in" title="Zoom in (+)" aria-label="Zoom in">+</button><button class="mz-reset" title="Fit (0)" aria-label="Fit to view">↺</button><span class="mz-hint">drag to pan · scroll to zoom · esc closes</span><button class="mz-close" title="Close (Esc)" aria-label="Close diagram viewer">✕</button>`;
+  ctrl.innerHTML = `<button class="mz-out" title="Zoom out (−)" aria-label="Zoom out">−</button><span class="mz-pct">100%</span><button class="mz-in" title="Zoom in (+)" aria-label="Zoom in">+</button><button class="mz-reset" title="Fit (0)" aria-label="Fit to view">↺</button><span class="mz-hint">drag to pan · pinch or scroll to zoom · esc closes</span><button class="mz-close" title="Close (Esc)" aria-label="Close diagram viewer">✕</button>`;
 
   const overlay = document.createElement("div");
   overlay.className = "mermaid-overlay";
@@ -5733,7 +5817,7 @@ function openDiagramZoom(contentEl) {
     box.classList.add("panning");
   });
   box.addEventListener("pointermove", (e) => {
-    if (!panning) return;
+    if (pinch || !panning) return;                    // a two-finger pinch owns the gesture
     const dx = e.clientX - panning.x, dy = e.clientY - panning.y;
     if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
     tx = panning.tx + dx; ty = panning.ty + dy;
@@ -5742,16 +5826,45 @@ function openDiagramZoom(contentEl) {
   const endPan = () => { panning = null; box.classList.remove("panning"); };
   box.addEventListener("pointerup", endPan);
   box.addEventListener("pointercancel", endPan);
-  box.addEventListener("click", (e) => { if (!moved && e.target === box) close(); });
+  box.addEventListener("click", (e) => { if (!moved && !pinch && e.target === box) close(); });
   box.addEventListener("dblclick", (e) => {
     const r = box.getBoundingClientRect();
     if (scale < 2.5) zoomAt(scale * 1.6, e.clientX - r.left, e.clientY - r.top); else fit();
   });
+  // Trackpad / wheel zoom about the cursor. A trackpad pinch arrives as a wheel
+  // event with ctrlKey set (small deltas -> larger factor); a plain wheel/scroll
+  // also zooms. preventDefault stops the page/pinch-to-page-zoom. {passive:false}
+  // is required for preventDefault to take effect.
   box.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = box.getBoundingClientRect();
-    zoomAt(scale * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+    const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
+    zoomAt(scale * factor, e.clientX - r.left, e.clientY - r.top);
   }, { passive: false });
+  // Touch pinch-zoom (Android app + touch laptops): track the two pointers, scale
+  // by their distance ratio about the gesture midpoint. Pointer events still fire
+  // for each finger, so the pointermove pan bails while `pinch` is set. touch-action
+  // is `none` on .mermaid-zoom-box, so the browser never pinch-zooms the page.
+  const dist = (a, b) => Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+  box.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      endPan();                                        // cancel any single-finger pan in progress
+      const r = box.getBoundingClientRect();
+      const [a, b] = e.touches;
+      pinch = { d: dist(a, b) || 1, scale, cx: (a.clientX + b.clientX) / 2 - r.left, cy: (a.clientY + b.clientY) / 2 - r.top };
+      e.preventDefault();
+    }
+  }, { passive: false });
+  box.addEventListener("touchmove", (e) => {
+    if (pinch && e.touches.length === 2) {
+      const [a, b] = e.touches;
+      zoomAt(pinch.scale * ((dist(a, b) || 1) / pinch.d), pinch.cx, pinch.cy);
+      e.preventDefault();
+    }
+  }, { passive: false });
+  const endPinch = (e) => { if (pinch && e.touches.length < 2) pinch = null; };
+  box.addEventListener("touchend", endPinch);
+  box.addEventListener("touchcancel", endPinch);
 }
 
 function openMermaidZoom(node) {
@@ -6833,6 +6946,7 @@ async function openReaderPath(path, title, navCtx, frag) {
       <button class="reader-nav reader-icon rfs" id="readerFsDn" title="Smaller text">A&#8722;</button>
       <button class="reader-nav reader-icon rfs" id="readerFsUp" title="Larger text">A+</button>
       <button class="reader-nav reader-icon" id="readerType" title="Reading options (font, width, drop-cap)">Aa</button>
+      <button class="reader-nav reader-icon" id="readerDir" title="Diagram orientation">&#10530;</button>
       <button class="reader-nav reader-icon" id="readerFindBtn" title="Find in page (Ctrl/Cmd+F)">&#8981;</button>
       <button class="reader-nav reader-icon" id="readerIdx" title="Contents">&#8801;</button>
       <button class="reader-nav reader-icon" id="readerFull" title="Immersive reading (F)">&#11036;</button>
@@ -6852,6 +6966,25 @@ async function openReaderPath(path, title, navCtx, frag) {
   el("#readerFsDn").addEventListener("click", () => applyReaderFont(-1));
   el("#readerFsUp").addEventListener("click", () => applyReaderFont(1));
   el("#readerType").addEventListener("click", (e) => openReaderTypeMenu(e.currentTarget));
+  // Diagram-orientation toggle: Auto (width-based) -> Horizontal -> Vertical ->
+  // Auto. Overrides mmChooseVariant's width heuristic for every diagram in the
+  // reader and persists via safeSet so the choice sticks across pages/sessions.
+  {
+    const dirBtn = el("#readerDir");
+    if (dirBtn) {
+      const GLYPH = { auto: "⤢", lr: "⇄", td: "⇅" };   // ⤢ auto · ⇄ horiz · ⇅ vert
+      const NEXT = { auto: "lr", lr: "td", td: "auto" };
+      const NAME = { auto: "Auto", lr: "Horizontal", td: "Vertical" };
+      const sync = () => {
+        const d = diagramDir();
+        dirBtn.textContent = GLYPH[d];
+        dirBtn.title = `Diagram orientation: ${NAME[d]} — tap for ${NAME[NEXT[d]]}`;
+        dirBtn.setAttribute("aria-label", dirBtn.title);
+      };
+      sync();
+      dirBtn.addEventListener("click", () => { safeSet("sd_diagram_dir", NEXT[diagramDir()]); sync(); applyDiagramDir(); });
+    }
+  }
   // Reading progress bar + back-to-top, driven by the body's scroll position.
   {
     const body = el("#readerBody"), prog = el("#readerProg"), top = el("#readerTop");
