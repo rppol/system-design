@@ -206,16 +206,30 @@ Routing, capacity factors, and load-balancing losses are covered in
 ## 5. Architecture Diagrams
 
 ### 3D Parallelism (Standard for Large Model Training)
-```
-   +---------------------+   +---------------------+
-   |  Node 0             |   |  Node 1             |
-   |  GPUs 0-7 (TP=8)   |   |  GPUs 8-15 (TP=8)  |
-   |  Layers 0-11  (PP)  |   |  Layers 12-23 (PP) |
-   +---------------------+   +---------------------+
-           |                           |
-           +-- InfiniBand 800 Gbps ----+
-           (Data parallel across node groups)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    subgraph N0["Node 0"]
+        N0G["GPUs 0-7 TP=8<br/>Layers 0-11 PP"]
+    end
+    subgraph N1["Node 1"]
+        N1G["GPUs 8-15 TP=8<br/>Layers 12-23 PP"]
+    end
+
+    N0G -- "InfiniBand 800 Gbps<br/>(data parallel across node groups)" --> N1G
+
+    class N0G,N1G train
+```
+
+```
 Total parallelism = TP × PP × DP
 Example: TP=8, PP=8, DP=16 = 1024 GPUs
 ```
