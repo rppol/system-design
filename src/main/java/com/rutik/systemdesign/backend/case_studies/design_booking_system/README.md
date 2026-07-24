@@ -42,17 +42,19 @@ flowchart LR
     svc1 --> merge((" + "))
     svc2 --> merge
     svc3 --> merge
-    merge --> pgPrimary("PostgreSQL Primary<br/>seats · bookings ·<br/>idempotency · outbox")
-    merge --> redis("Redis Cluster<br/>dist locks · seat holds ·<br/>inventory counters")
-    pgPrimary --> pgReplica(["PostgreSQL Replica<br/>read-only"])
-    redis --> kafka(["Kafka<br/>booking-events"])
+    merge --> pgPrimary
+    merge --> redis
+    pgPrimary --> pgReplica
+    redis --> kafka
+
+    pgPrimary@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Primary<br/>seats · bookings ·<br/>idempotency · outbox", pos: "b", h: 44 }
+    redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>dist locks · seat holds ·<br/>inventory counters", pos: "b", h: 44 }
+    pgReplica@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Replica<br/>read-only", pos: "b", h: 44 }
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>booking-events", pos: "b", h: 44 }
 
     class lb mathOp
     class svc1,svc2,svc3 req
     class merge mathOp
-    class pgPrimary,redis base
-    class pgReplica frozen
-    class kafka req
 ```
 
 Stateless booking-service nodes scale horizontally behind the load balancer to absorb the 10,000 req/s peak, then converge on the same two stores — PostgreSQL for durable seat/booking/outbox rows and Redis for the distributed lock and hold TTLs — before PostgreSQL replicates to a read replica and the outbox flow lands on Kafka's `booking-events` topic.
