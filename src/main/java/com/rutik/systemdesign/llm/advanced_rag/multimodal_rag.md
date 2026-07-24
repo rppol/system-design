@@ -550,7 +550,7 @@ flowchart TD
         TEMB["Text Embed\ntext-embedding-3-large"]
         PC["Pinecone: Text Index"]
         WV["Weaviate: Image Vector DB\nmulti2vec"]
-        S3["S3 Blob Storage\noriginal images with metadata\n(manual_id, page, figure_num, model)"]
+        S3@{ icon: "logos:aws-s3", form: "square", label: "S3 Blob Storage", pos: "b", h: 44 }
 
         MAN --> DP
         PHO --> DP
@@ -589,7 +589,7 @@ flowchart TD
     class DP,TEMB,EMD,DR,MR,FRL,CTX mathOp
     class TXT,TAB,FIG req
     class VLM,CE,GEN base
-    class PC,WV,S3 frozen
+    class PC,WV frozen
 ```
 
 The element classifier routes schematics to GPT-4o detail="high" and simple photos to GPT-4o-mini, cutting vision indexing cost 65%; at query time the weighted dual-retrieval merge (text 0.6, image 0.4) plus figure-reference linking lifts image recall to 87% vs 52% for CLIP alone.
