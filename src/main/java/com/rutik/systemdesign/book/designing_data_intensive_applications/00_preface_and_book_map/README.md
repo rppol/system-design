@@ -163,9 +163,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     client(["client"]) --> app("Your Application Code<br/>owns the glue and<br/>cross-store guarantees")
-    app --> db("DB<br/>system of record")
-    app --> cache("Cache<br/>derived, rebuildable")
-    app --> search("Search Index<br/>derived, rebuildable")
+    app --> db[("DB<br/>system of record")]
+    app --> cache[("Cache<br/>derived, rebuildable")]
+    app --> search[("Search Index<br/>derived, rebuildable")]
     app --> queue("Queue<br/>stream")
 
     class client io
