@@ -86,58 +86,38 @@ GPU requirements for inference:
 
 ## 3. High-Level Architecture
 
-```
-Client (Web/Mobile/API)
-         |
-         v
-[CDN / Edge] (static assets, geographic distribution)
-         |
-         v
-[API Gateway / Load Balancer]
-  - Authentication (JWT tokens)
-  - Rate limiting (free: 20 msg/hr, paid: unlimited)
-  - Request routing to services
-         |
-    _____|_____
-   |           |
-   v           v
-[Auth         [Chat
- Service]      Service]
- - Login       - Session management
- - OAuth2      - Message history
- - JWT         - Conversation CRUD
-   |           |
-   |           v
-   |    [Context Builder]
-   |    - Retrieve conversation history
-   |    - Apply context window limits
-   |    - Format system prompt + history
-   |           |
-   |           v
-   |    [Model Router]
-   |    - Select model (GPT-3.5 / GPT-4 / GPT-4V)
-   |    - Apply system prompts
-   |    - Queue management
-   |           |
-   |           v
-   |    [Inference Cluster]
-   |    - vLLM with PagedAttention
-   |    - Multi-GPU model sharding
-   |    - Streaming token generation
-   |           |
-   |           v
-   |    [Output Processing]
-   |    - Content filtering (safety)
-   |    - Markdown formatting
-   |    - Token counting + billing
-   |           |
-   +-----+-----+
-         |
-         v
-[Streaming Response via SSE/WebSocket]
-         |
-         v
-      Client
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>Web / Mobile / API"])
+    cdn("CDN / Edge<br/>static assets, geo distribution")
+    gateway("API Gateway / Load Balancer<br/>Auth JWT · Rate limiting · Routing")
+    auth("Auth Service<br/>Login · OAuth2 · JWT")
+    chat("Chat Service<br/>Session mgmt · History · CRUD")
+    context("Context Builder<br/>Retrieve history · Apply limits · Format prompt")
+    router("Model Router<br/>Select model · System prompts · Queue mgmt")
+    inference("Inference Cluster<br/>vLLM PagedAttention · Multi-GPU · Streaming")
+    output("Output Processing<br/>Content filtering · Markdown · Billing")
+    stream(["Streaming Response<br/>SSE / WebSocket"])
+
+    client --> cdn --> gateway
+    gateway --> auth
+    gateway --> chat
+    chat --> context --> router --> inference --> output
+    auth --> stream
+    output --> stream
+    stream --> client
+
+    class client,stream io
+    class cdn,gateway req
+    class auth frozen
+    class chat,context,router,output base
+    class inference train
 ```
 
 ---
@@ -656,27 +636,39 @@ Input safety classifiers: run in parallel with tokenization and KV prefill — a
 ### Multi-Region Architecture and Consistency
 
 **Region topology:**
-```
-Users (Global)
-     |
-     v
-[Anycast DNS + CloudFlare CDN]
-     |
-     +─── [US-East-1 Region]  ── Primary: 40% of users
-     |         |
-     |    [DispatcherService]
-     |    [InferenceCluster]  ── 600 A100 pods
-     |    [ConversationDB]    ── Aurora PostgreSQL (primary writes)
-     |         |
-     +─── [EU-West-1 Region]  ── 30% of users, GDPR boundary
-     |         |
-     |    [InferenceCluster]  ── 300 A100 pods
-     |    [ConversationDB]    ── Aurora PostgreSQL (replica, EU-local reads)
-     |         |
-     +─── [AP-Southeast-1]   ── 20% of users
-               |
-          [InferenceCluster]  ── 200 A100 pods
-          [ConversationDB]    ── Aurora PostgreSQL (replica)
+```mermaid
+flowchart TD
+    classDef io   fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    users(["Users (Global)"])
+    dns("Anycast DNS +<br/>CloudFlare CDN")
+
+    subgraph us["US-East-1 Region — Primary, 40% of users"]
+        usDispatch("DispatcherService")
+        usInfer("InferenceCluster<br/>600 A100 pods")
+        usDB@{ icon: "logos:aws-aurora", form: "square", label: "Aurora PG<br/>primary writes", pos: "b", h: 44 }
+    end
+
+    subgraph eu["EU-West-1 Region — 30% of users, GDPR boundary"]
+        euInfer("InferenceCluster<br/>300 A100 pods")
+        euDB@{ icon: "logos:aws-aurora", form: "square", label: "Aurora PG<br/>EU-local replica", pos: "b", h: 44 }
+    end
+
+    subgraph ap["AP-Southeast-1 — 20% of users"]
+        apInfer("InferenceCluster<br/>200 A100 pods")
+        apDB@{ icon: "logos:aws-aurora", form: "square", label: "Aurora PG<br/>replica", pos: "b", h: 44 }
+    end
+
+    users --> dns
+    dns --> us
+    dns --> eu
+    dns --> ap
+
+    class users,dns io
+    class usDispatch req
+    class usInfer,euInfer,apInfer base
 ```
 
 GDPR compliance requires EU user data to remain within EU-West-1. Users are region-pinned by account; conversations do NOT cross regions. Inference models are identical replicas in each region — model weights are read-only and replicated via S3 cross-region replication (weights are not user data, no GDPR constraint).
