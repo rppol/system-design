@@ -388,29 +388,33 @@ Unlike autoregressive decoding (one token at a time, left-to-right), discrete di
 
 ### 5.4 Block Diffusion (BD3-LM) — Hybrid AR + Diffusion
 
+Sequence split into fixed-size blocks of size `B` (e.g., `B=16` tokens). Blocks are generated
+left to right (autoregressive across blocks); within each block, diffusion runs in parallel:
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    B1("Block 1<br/>diffused<br/>(T steps within block)") --> B2("Block 2<br/>diffused<br/>(T steps within block)")
+    B2 --> B3("Block 3<br/>diffused<br/>(T steps within block)")
+    B1 --> KV1["KV-cache for block 1<br/>REUSED for blocks 2,3..."]
+    B2 --> KV2["KV-cache for blocks 1-2<br/>REUSED for blocks 3..."]
+    B3 --> KV3["KV-cache for blocks 1-3<br/>REUSED for later blocks"]
+
+    class B1,B2,B3 train
+    class KV1,KV2,KV3 base
 ```
-Sequence split into fixed-size blocks of size B (e.g., B=16 tokens)
 
-  Block 1          Block 2          Block 3
-+----------+    +----------+    +----------+
-| diffused |--->| diffused |--->| diffused |   <-- blocks generated
-| (T steps |    | (T steps |    | (T steps |       LEFT TO RIGHT
-| within   |    | within   |    | within   |       (autoregressive
-| block)   |    | block)   |    | block)   |        across blocks)
-+----------+    +----------+    +----------+
-     |               |               |
-     v               v               v
-  KV-cache for   KV-cache for    KV-cache for
-  block 1 is     blocks 1-2 is   blocks 1-3 is
-  REUSED for     REUSED for      REUSED for
-  blocks 2,3...  blocks 3...     later blocks
-
-  Within each block: diffusion (parallel, bidirectional, T steps)
-  Across blocks: autoregressive (sequential, KV-cache works normally)
-
-  This gets diffusion's within-block parallelism AND AR's cross-block
-  KV-cache reuse -- directly addressing Pitfall 10.1.
-```
+Within each block: diffusion (parallel, bidirectional, `T` steps). Across blocks: autoregressive
+(sequential, KV-cache works normally). This gets diffusion's within-block parallelism AND AR's
+cross-block KV-cache reuse — directly addressing Pitfall 10.1.
 
 ### 5.5 KV-Cache Mismatch — Why Standard AR Caching Doesn't Transfer
 
@@ -1197,17 +1201,23 @@ class AdaptiveDiffusionSampler(DiffusionSampler):
 
 ### Production Architecture
 
-```
-+-----------+      +------------------+      +---------------------------+
-|  IDE      |----->|  Completion API  |----->|  Diffusion-LM Server       |
-|  client   |      |  (request queue, |      |  - AdaptiveDiffusionSampler|
-|  (ghost   |<-----|   batching by L) |<-----|  - min_steps=8, max=32     |
-|  text)    |      +------------------+      |  - confidence_threshold    |
-+-----------+                                 |    =0.85                   |
-                                              |  - syntax-check fallback   |
-                                              |    (re-run AR model on     |
-                                              |     pass@1 failures, async)|
-                                              +---------------------------+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    IDE("IDE client<br/>(ghost text)") <--> API["Completion API<br/>(request queue,<br/>batching by L)"]
+    API <--> Server["Diffusion-LM Server<br/>- AdaptiveDiffusionSampler<br/>- min_steps=8, max=32<br/>- confidence_threshold=0.85<br/>- syntax-check fallback<br/>(re-run AR model on<br/>pass@1 failures, async)"]
+
+    class IDE io
+    class API req
+    class Server base
 ```
 
 A lightweight **fallback path** retains the old AR model for the small fraction of completions that
