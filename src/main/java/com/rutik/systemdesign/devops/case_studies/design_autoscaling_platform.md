@@ -181,7 +181,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph metrics["Metrics Plane"]
-        prom(["Prometheus +<br/>Kafka/SQS lag exporters"])
+        prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>+ Kafka/SQS<br/>lag exporters", pos: "b", h: 44 }
         pa["prometheus-adapter<br/>(custom.metrics.k8s.io)"]
         keda_ma["KEDA metrics-adapter<br/>(external.metrics)"]
         prom --> pa
@@ -217,7 +217,6 @@ flowchart TD
     spot -.->|"spot interruption 120s"| nth
     nth -.->|"cordon+drain<br/>reschedule"| sched
 
-    class prom io
     class pa,keda_ma,hpa,kedaop,karpenter,sched mathOp
     class deploy train
     class pending req
@@ -333,13 +332,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    app(["app /metrics"]) --> prom["Prometheus"]
+    app(["app /metrics"]) --> prom
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
     prom -->|"custom.metrics.k8s.io<br/>v1beta1"| pa["prometheus-adapter"]
     pa --> hpa{"HPA target RPS=50<br/>reads cur=80"}
     hpa --> out(["desired = ceil(10 × 1.6) = 16"])
 
     class app io
-    class prom,pa mathOp
+    class pa mathOp
     class hpa mathOp
     class out train
 ```
