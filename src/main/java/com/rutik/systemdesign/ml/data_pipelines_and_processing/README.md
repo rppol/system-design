@@ -110,12 +110,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    topic(["Kafka topic\nraw_events · JSON"]) --> flink["Flink / Spark\nStructured Streaming\nwindowed aggregations"]
+    topic["raw_events topic\nJSON"] --> flink["Flink / Spark\nStructured Streaming\nwindowed aggregations"]
     flink --> ckpt["Checkpoint state\nevery 30-60s"]
-    flink --> redis(["Online store\nRedis feature values"])
+    flink --> redis["Online store\nfeature values"]
     redis --> serve(["Online serving\nsub-second features"])
 
-    class topic,redis,serve io
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+
+    class serve io
     class flink train
     class ckpt frozen
 ```
@@ -159,16 +162,18 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph B["Batch ETL — hours, high throughput"]
-        b1(["Bounded window\ndaily / hourly partition"]) --> b2["Spark job\nfull re-aggregation"]
+        b1(["Bounded window\ndaily / hourly partition"]) --> b2["full re-aggregation"]
         b2 --> b3(["Parquet on S3\ntraining dataset"])
     end
     subgraph S["Streaming ETL — ms latency, continuous"]
-        s1(["Unbounded event stream"]) --> s2["Flink operator\nwindowed state"]
+        s1(["Unbounded event stream"]) --> s2["windowed state"]
         s2 --> s3(["Online store\nfresh features"])
     end
 
+    b2@{ icon: "logos:apache-spark", form: "square", label: "Spark job", pos: "b", h: 44 }
+    s2@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink operator", pos: "b", h: 44 }
+
     class b1,b3,s1,s3 io
-    class b2,s2 train
 ```
 
 Batch reprocesses a fixed window and can recompute the whole aggregate cheaply on spot instances; streaming maintains incremental state over an unbounded stream for freshness under a second — the split in latency vs cost is why most stacks run both (Lambda/Kappa).
@@ -769,23 +774,30 @@ At-least-once may reprocess an event on failure and risk duplicates; exactly-onc
 
 **Scenario: A medallion (Bronze/Silver/Gold) PySpark pipeline for clickstream.** A product analytics team ingests 500GB/day of raw clickstream JSON. The pipeline lands raw events (Bronze), cleans and deduplicates (Silver), then aggregates into ML-ready features (Gold). Great Expectations validates each layer; DVC versions the curated datasets. On a 20-node Spark cluster the pipeline sustains ~2GB/min, finishing the daily batch in roughly 4 hours.
 
-```
-S3 raw JSON (500GB/day)
-        |
-   BRONZE  (raw, append-only, partitioned by ingest_date)
-        |  schema-on-read, no transformation
-        v
-   SILVER  (cleaned, deduplicated, typed Parquet)
-        |  drop malformed, dedupe by event_id, cast types
-        |  Great Expectations gate: not-null keys, value ranges
-        v
-   GOLD    (aggregated session/user features)
-        |  group-by user/session, window aggregations
-        v
-   Feature store / warehouse  (consumed by training)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-DVC tracks Gold dataset hash per run; lineage = git SHA + data hash
+    s3raw["raw JSON<br/>500GB/day"] --> bronze["BRONZE<br/>raw, append-only<br/>partitioned by ingest_date"]
+    bronze -->|"schema-on-read<br/>no transformation"| silver["SILVER<br/>cleaned, deduplicated<br/>typed Parquet"]
+    silver -->|"drop malformed, dedupe by event_id<br/>cast types · GE gate: not-null keys,<br/>value ranges"| gold["GOLD<br/>aggregated session/user<br/>features"]
+    gold -->|"group-by user/session<br/>window aggregations"| fs(["Feature store / warehouse<br/>consumed by training"])
+
+    s3raw@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+
+    class bronze mathOp
+    class silver train
+    class gold base
+    class fs io
 ```
+
+DVC tracks the Gold dataset hash per run, so lineage is git SHA + data hash.
 
 Throughput 2GB/min on 20 nodes; Silver dedupe removes ~3% duplicate events; Great Expectations catches schema regressions before they reach Gold. Schema evolution (adding a column to 2TB of historical Parquet) is handled without a full rewrite via `mergeSchema`.
 
