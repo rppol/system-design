@@ -1009,14 +1009,15 @@ flowchart LR
     fmt --> file(["RotatingFileHandler<br/>/var/log/app/"])
     stream --> filebeat("Filebeat")
     file --> filebeat
-    filebeat --> es("Elasticsearch")
+    filebeat --> es
+    es@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
     es --> kibana(["Kibana"])
 
     class http,kibana io
     class mw,fmt mathOp
     class handler req
     class stream,file base
-    class filebeat,es frozen
+    class filebeat frozen
 ```
 
 Middleware stamps a request_id, the route handler logs through it, JsonFormatter
