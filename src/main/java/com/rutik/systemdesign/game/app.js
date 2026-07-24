@@ -448,6 +448,9 @@ const THEMES = [
   { id: "midnight", name: "Midnight" },
   { id: "orchid", name: "Orchid" },
   { id: "ember", name: "Ember" },
+  { id: "forest", name: "Forest" },
+  { id: "ocean", name: "Ocean" },
+  { id: "rose", name: "Rose" },
   { id: "daylight", name: "Daylight" },
 ];
 // A ?theme= URL override wins for this session; picking from the popover saves.
@@ -3817,7 +3820,7 @@ function palVerbs() {
   const flash = deckMode() === "flash";
   out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
     run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
-  for (const t of ["midnight", "orchid", "ember", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
+  for (const t of ["midnight", "orchid", "ember", "forest", "ocean", "rose", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
   out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
   return out;
 }
