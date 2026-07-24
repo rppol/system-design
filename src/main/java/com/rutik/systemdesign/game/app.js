@@ -5039,32 +5039,6 @@ function mmObserve(n) {
 // sequence-note widening, rounded boxes, blue arrowheads, viewBox fix, plain-node
 // tint. Extracted verbatim from mmRenderNode's tail so the build-time pre-renderer
 // produces SVGs byte-identical to live output. Sizing/interaction stay runtime-only.
-// Clip an icon-node subtree to a rounded rectangle of its own bounding box, so a
-// path-based product-logo chip (no roundable <rect>) still reads with rounded
-// corners like every other node. userSpaceOnUse + getBBox share the group's user
-// space, so the rounded rect lines up with the chip; the logo art is inset, so
-// only the square corners are trimmed. Baked into the SVG (build + runtime).
-function mmRoundIconClip(sv, g) {
-  try {
-    const bb = g.getBBox();
-    if (!(bb.width >= 16 && bb.height >= 16)) return;
-    const rr = Math.min(8, bb.width * 0.16, bb.height * 0.16);
-    let defs = sv.querySelector("defs");
-    if (!defs) { defs = document.createElementNS("http://www.w3.org/2000/svg", "defs"); sv.insertBefore(defs, sv.firstChild); }
-    const id = "mmchip" + (++_mmSeq);
-    const cp = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
-    cp.setAttribute("id", id);
-    cp.setAttribute("clipPathUnits", "userSpaceOnUse");
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", bb.x); rect.setAttribute("y", bb.y);
-    rect.setAttribute("width", bb.width); rect.setAttribute("height", bb.height);
-    rect.setAttribute("rx", rr); rect.setAttribute("ry", rr);
-    cp.appendChild(rect);
-    defs.appendChild(cp);
-    g.setAttribute("clip-path", `url(#${id})`);
-  } catch { /* getBBox throws only if detached — skip rounding, keep the square */ }
-}
-
 function mmPolishSvg(n, ctype) {
   const sv = n.querySelector("svg");
   // Sequence notes/actors: even with matched measure/display fonts, mermaid
@@ -5106,35 +5080,57 @@ function mmPolishSvg(n, ctype) {
   n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
   // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
   n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
-  // Product-logo chips: a Mermaid icon node draws its background SQUARE in the
+  // Product-logo chips. A Mermaid icon node draws its background SQUARE in the
   // themed mainBkg (#1a1a1a), which makes dark/monochrome logos (Kafka #1a1919,
-  // OpenAI, most simple-icons) invisible on the pitch-black reader surface.
-  // Recolor that square to a white chip so ANY logo reads. The glyph fills are a
-  // different value (e.g. #1a1919), so they are untouched; colored logos (S3, Redis)
-  // draw their own background over the chip, so it's hidden there. Scoped to
-  // .icon-shape only, so non-icon nodes are unaffected.
-  // Tiered icon packs: `logos` are full-colour (explicit fills); `simple-icons`
-  // are monochrome via fill="currentColor", which resolves to the light theme text
-  // colour and is nearly invisible on the white chip. Recolour the chip AND darken
-  // currentColor glyphs so monochrome fallback logos read as dark-on-white.
+  // OpenAI, all simple-icons) invisible on the pitch-black reader surface. Fix:
+  // (1) darken currentColor glyphs (simple-icons are monochrome via currentColor,
+  //     which resolves to the light theme text colour) so they read on white;
+  // (2) replace the dark square background with a ROUNDED WHITE chip drawn behind
+  //     the glyph — so ANY logo reads AND the node matches every other (rounded)
+  //     node. The chip's own square is made transparent and a rounded <rect> of
+  //     its exact bbox is inserted first; the glyph art is never reshaped, and a
+  //     colour logo (S3/Redis) draws its own background over the white. Scoped to
+  //     .icon-shape, so non-icon nodes are untouched.
   n.querySelectorAll(".icon-shape").forEach(g => {
     g.querySelectorAll("path, rect").forEach(el => {
+      if ((el.getAttribute("fill") || "").toLowerCase() === "currentcolor") el.setAttribute("fill", "#1a1a1a");
+    });
+    const chip = [...g.querySelectorAll("path, rect")].find(el => {
       const f = (el.getAttribute("fill") || "").toLowerCase();
-      if (f === "#1a1a1a" || getComputedStyle(el).fill === "rgb(26, 26, 26)") el.setAttribute("fill", "#ffffff");  // chip
-      else if (f === "currentcolor") el.setAttribute("fill", "#1a1a1a");                                            // monochrome glyph -> dark
+      if (f !== "#1a1a1a") { try { if (getComputedStyle(el).fill !== "rgb(26, 26, 26)") return false; } catch { return false; } }
+      let b; try { b = el.getBBox(); } catch { return false; }
+      return b.width > 10 && Math.abs(b.width - b.height) < b.width * 0.35;   // the roughly-square background
     });
-    // Round the chip's SQUARE background so a logo node matches every other
-    // (rounded) node. A <rect> chip rounds cleanly via rx/ry; a path-based chip
-    // gets a rounded clip over the whole icon subtree. The glyph artwork is inset
-    // from the corners, so only the corner fill is trimmed — the logo itself is
-    // never reshaped (the guard above still keeps the glyph rects untouched).
-    let bgRounded = false;
-    g.querySelectorAll("rect").forEach(r => {
-      const w = r.width?.baseVal?.value || 0, h = r.height?.baseVal?.value || 0;
-      const m = Math.min(w, h);
-      if (m >= 16) { const rr = Math.min(8, Math.round(m * 0.16)); r.setAttribute("rx", rr); r.setAttribute("ry", rr); bgRounded = true; }
-    });
-    if (!bgRounded && sv) mmRoundIconClip(sv, g);
+    if (!chip) return;
+    let b; try { b = chip.getBBox(); } catch { return; }
+    const rad = Math.max(6, Math.round(b.width * 0.14));
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", b.x); rect.setAttribute("y", b.y);
+    rect.setAttribute("width", b.width); rect.setAttribute("height", b.height);
+    rect.setAttribute("rx", rad); rect.setAttribute("ry", rad);
+    rect.setAttribute("fill", "#ffffff");
+    chip.setAttribute("fill", "transparent");   // hide the square; the rounded rect IS the chip now
+    g.insertBefore(rect, g.firstChild);
+    // Clip the logo art to the same rounded rect so a COLOUR logo whose own square
+    // background fills the chip (S3 green, DynamoDB blue) gets rounded corners too
+    // ("override logos"). Geometric guard: clip only children that sit WITHIN the
+    // chip square — never the text label below it, never a full-span wrapper.
+    if (sv) {
+      let defs = sv.querySelector("defs");
+      if (!defs) { defs = document.createElementNS("http://www.w3.org/2000/svg", "defs"); sv.insertBefore(defs, sv.firstChild); }
+      const cid = "chipclip" + (++_mmSeq);
+      const cp = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
+      cp.setAttribute("id", cid); cp.setAttribute("clipPathUnits", "userSpaceOnUse");
+      cp.appendChild(rect.cloneNode(false));
+      defs.appendChild(cp);
+      const top = b.y - 2, bot = b.y + b.height + 4;
+      [...g.children].forEach(ch => {
+        if (ch === rect) return;
+        let cb; try { cb = ch.getBBox(); } catch { return; }
+        if (cb.y < top || cb.y + cb.height > bot) return;   // outside the chip square (the label, or a wrapper) — leave it
+        ch.setAttribute("clip-path", `url(#${cid})`);
+      });
+    }
   });
   if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
   mmTintPlain(n);
