@@ -948,29 +948,33 @@ class KBFreshnessMonitor:
 
 ## Multi-Language Support Architecture
 
-```
-User sends message in any of 40+ supported languages
-        │
-        ▼
-Language detection (fasttext langdetect, 3ms, 176 languages)
-        │
-        ├─ Confidence < 0.8 → ask user: "Could you clarify your language preference?"
-        │
-        ▼
-Route to language-specific KB index
-(separate vector index per language: EN, ES, FR, DE, JA, ZH, etc.)
-        │
-        ▼
-Retrieve KB articles in detected language
-(translated KB articles maintained by localization team)
-        │
-        ▼
-Generate response in detected language
-(system prompt: "Always respond in {language_code}")
-        │
-        ▼
-Quality check: does response language match detected language?
-(simple regex: detect CJK characters for ZH/JA, Latin for EN/ES/FR)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    MSG(["User message<br/>40+ supported languages"])
+    LD["Language Detection<br/>fastText langdetect, 3ms<br/>176 languages"]
+    CLARIFY["Ask user to clarify<br/>language preference"]
+    ROUTE["Route to language-specific<br/>KB index<br/>(EN, ES, FR, DE, JA, ZH, etc.)"]
+    RETRIEVE["Retrieve KB articles<br/>in detected language<br/>translated by localization team"]
+    GEN["Generate response<br/>in detected language<br/>system prompt: respond in lang_code"]
+    QC{"Quality check:<br/>response language matches<br/>CJK/Latin regex check"}
+
+    MSG --> LD
+    LD -->|"confidence < 0.8"| CLARIFY
+    LD -->|"confidence >= 0.8"| ROUTE
+    ROUTE --> RETRIEVE --> GEN --> QC
+
+    class MSG io
+    class LD,QC mathOp
+    class CLARIFY lossN
+    class ROUTE,RETRIEVE,GEN base
 ```
 
 **Language-specific CSAT monitoring:**
