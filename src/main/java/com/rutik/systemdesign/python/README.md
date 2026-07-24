@@ -50,37 +50,49 @@ This section covers:
 
 ## 3. 3-Phase Learning Path
 
-```
-Phase 1 — Language Core & Data Model (8 modules)
-+------------------------------------------------------------+
-|  data_model_and_objects       core_language_idioms         |
-|  iterators_and_generators     decorators_and_closures      |
-|  context_managers_and_exceptions                           |
-|  collections_and_data_structures                           |
-|  strings_bytes_encoding_and_regex                          |
-|  file_io_and_serialization                                 |
-+------------------------------------------------------------+
-                               |
-                               v
-Phase 2 — CPython Internals & Type System (6 modules)
-+------------------------------------------------------------+
-|  cpython_memory_model         the_gil_and_free_threading   |
-|  metaclasses_and_metaprogramming                           |
-|  the_type_system_and_typing   performance_and_profiling    |
-|  functional_programming                                    |
-+------------------------------------------------------------+
-                               |
-                               v
-Phase 3 — Concurrency, Async & Quality (7 modules)
-+------------------------------+  +--------------------------+
-|  threading_and_              |  |  design_patterns_in      |
-|  multiprocessing             |  |  python                  |
-|  asyncio_and_event_loop      |  |  stdlib_datetime_and     |
-|  async_patterns_and_pitfalls |  |  logging                 |
-|                              |  |  testing_with_pytest     |
-|                              |  |  packaging_and_project   |
-|                              |  |  tooling                 |
-+------------------------------+  +--------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph phase1["Phase 1 — Language Core & Data Model (8 modules)"]
+        p1a(["data_model_and_objects"])
+        p1b(["core_language_idioms"])
+        p1c(["iterators_and_generators"])
+        p1d(["decorators_and_closures"])
+        p1e(["context_managers_and_exceptions"])
+        p1f(["collections_and_data_structures"])
+        p1g(["strings_bytes_encoding_and_regex"])
+        p1h(["file_io_and_serialization"])
+    end
+
+    subgraph phase2["Phase 2 — CPython Internals & Type System (6 modules)"]
+        p2a(["cpython_memory_model"])
+        p2b(["the_gil_and_free_threading"])
+        p2c(["metaclasses_and_metaprogramming"])
+        p2d(["the_type_system_and_typing"])
+        p2e(["performance_and_profiling"])
+        p2f(["functional_programming"])
+    end
+
+    subgraph phase3["Phase 3 — Concurrency, Async & Quality (7 modules)"]
+        p3a(["threading_and_multiprocessing"])
+        p3b(["asyncio_and_event_loop"])
+        p3c(["async_patterns_and_pitfalls"])
+        p3d(["design_patterns_in_python"])
+        p3e(["stdlib_datetime_and_logging"])
+        p3f(["testing_with_pytest"])
+        p3g(["packaging_and_project_tooling"])
+    end
+
+    phase1 --> phase2 --> phase3
+
+    class p1a,p1b,p1c,p1d,p1e,p1f,p1g,p1h,p2a,p2b,p2c,p2d,p2e,p2f,p3a,p3b,p3c,p3d,p3e,p3f,p3g base
 ```
 
 **Dependencies to note:**
