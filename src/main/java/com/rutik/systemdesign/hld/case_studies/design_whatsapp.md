@@ -67,18 +67,17 @@ flowchart LR
     LB --> CS1(Chat Server 1)
     LB --> CS2(Chat Server 2)
     LB --> CS3(Chat Server N)
-    CS1 --> Redis(Redis<br/>presence + routing)
-    CS2 --> Kafka(Kafka<br/>message queue)
+    CS1 --> Redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>presence + routing", pos: "b", h: 44 }
+    CS2 --> Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>message queue", pos: "b", h: 44 }
     CS3 --> Media(Media Service<br/>S3 + CDN)
-    CS1 --> UserDB(User / Group DB<br/>Cassandra)
-    Kafka --> MsgStore(Message Store<br/>Cassandra)
+    CS1 --> UserDB@{ icon: "logos:cassandra", form: "square", label: "User / Group DB<br/>Cassandra", pos: "b", h: 44 }
+    Kafka --> MsgStore@{ icon: "logos:cassandra", form: "square", label: "Message Store<br/>Cassandra", pos: "b", h: 44 }
     Kafka --> Push(Push Notification<br/>Service)
 
     class iOS,Droid io
     class LB mathOp
     class CS1,CS2,CS3 req
-    class Redis,UserDB,MsgStore base
-    class Kafka,Media train
+    class Media train
     class Push frozen
 ```
 
@@ -180,7 +179,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Alice([Alice sends]) --> Check{Bob online?}
-    Check -->|"no - Redis miss"| Store(Queue in<br/>Cassandra)
+    Check -->|"no - Redis miss"| Store@{ icon: "logos:cassandra", form: "square", label: "Queue in<br/>Cassandra", pos: "b", h: 44 }
     Check -->|"no - Redis miss"| Push(Push via<br/>APNs / FCM)
     Store --> Wake(Bob's device<br/>wakes, reconnects)
     Push --> Wake
@@ -188,7 +187,6 @@ flowchart LR
 
     class Alice io
     class Check mathOp
-    class Store base
     class Push frozen
     class Wake train
     class Deliver io
@@ -252,13 +250,12 @@ flowchart LR
 
     Alice([Alice sends to Group G]) --> Fetch(Group Service<br/>fetches member list)
     Fetch --> Fanout{Fan out}
-    Fanout --> Copies(1024 message copies<br/>in Kafka)
+    Fanout --> Copies@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>1024 message copies", pos: "b", h: 44 }
     Copies --> Deliver([Each member's Chat Server<br/>delivers or queues offline])
 
     class Alice io
     class Fetch base
     class Fanout mathOp
-    class Copies lossN
     class Deliver io
 ```
 
@@ -469,18 +466,16 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Sel([User selects photo]) --> Comp(Compress + encrypt<br/>on device)
-    Comp --> S3(Upload to S3<br/>via pre-signed URL)
+    Comp --> S3@{ icon: "logos:aws-s3", form: "square", label: "Upload to S3<br/>via pre-signed URL", pos: "b", h: 44 }
     S3 --> Msg(Send message with<br/>URL + key)
     Msg -.->|"normal chat flow"| Recv(Recipient gets<br/>URL + key)
-    Recv --> CDN(Download from<br/>CloudFront CDN)
+    Recv --> CDN@{ icon: "logos:aws-cloudfront", form: "square", label: "Download from<br/>CloudFront CDN", pos: "b", h: 44 }
     CDN --> Dec([Decrypt locally])
 
     class Sel io
     class Comp mathOp
-    class S3 base
     class Msg req
     class Recv req
-    class CDN frozen
     class Dec io
 ```
 
