@@ -273,13 +273,13 @@ flowchart LR
     snow --> tgt("Target Aurora PG")
 
     src -->|"2. WAL stream<br/>from L0"| deb["Debezium<br/>logical decode (slot)"]
-    deb --> kafka["Kafka Topics"]
+    deb --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka Topics", pos: "b", h: 44 }
     kafka --> apply["Apply Workers<br/>parallel by PK hash"]
     apply --> tgt
 
     class src frozen
     class tgt train
-    class snow,deb,kafka,apply mathOp
+    class snow,deb,apply mathOp
 ```
 
 Replication lag is measured as `now() - source_commit_ts(last applied)` per slot and exported to the control plane so it can gate the traffic shift on lag (see the Go exporter below).
