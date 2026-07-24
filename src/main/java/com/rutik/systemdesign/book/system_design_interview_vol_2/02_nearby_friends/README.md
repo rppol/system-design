@@ -266,18 +266,18 @@ flowchart LR
     LB -->|"REST · auth,<br/>profile, friends"| API(["Stateless<br/>API servers"])
     LB -->|"WebSocket ·<br/>live location"| WS(["Stateful<br/>WebSocket servers"])
 
-    WS -->|"latest location<br/>+ TTL"| CACHE(["Redis<br/>location cache"])
-    WS -->|"append"| HIST(["Location history DB<br/>Cassandra"])
-    WS -->|"publish to<br/>own channel"| PS(["Redis pub/sub<br/>channel per user"])
+    WS -->|"latest location<br/>+ TTL"| CACHE
+    CACHE@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    WS -->|"append"| HIST
+    HIST@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
+    WS -->|"publish to<br/>own channel"| PS
+    PS@{ icon: "logos:redis", form: "square", label: "Redis pub/sub", pos: "b", h: 44 }
     PS -->|"fan-out to<br/>friends' handlers"| WS
     API --> DB(["User / friends DB"])
 
     class U,LB io
     class API,DB req
     class WS train
-    class CACHE base
-    class HIST frozen
-    class PS mathOp
 ```
 
 Caption: the load balancer is the fork — cheap REST goes to stateless API servers, live
