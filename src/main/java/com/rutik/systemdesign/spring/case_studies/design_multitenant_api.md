@@ -120,10 +120,10 @@ flowchart TD
 
     subgraph PG["PostgreSQL"]
         direction TD
-        PUB["schema: public\ntenant registry, system tables"]
-        ACME["schema: tenant_acme\nACME Corp data"]
-        GLOBEX["schema: tenant_globex\nGlobex Corp data"]
-        INITECH["schema: tenant_initech\nInitech data"]
+        PUB[("schema: public\ntenant registry, system tables")]
+        ACME[("schema: tenant_acme\nACME Corp data")]
+        GLOBEX[("schema: tenant_globex\nGlobex Corp data")]
+        INITECH[("schema: tenant_initech\nInitech data")]
     end
 
     class INTERNET io
@@ -159,7 +159,7 @@ sequenceDiagram
         SEC->>APP: Controller -> Service -> Repository
         APP->>HIB: EntityManager operation
         HIB->>TC: CurrentTenantIdentifierResolver reads TenantContext
-        HIB->>DB: SchemaMultiTenantConnectionProvider sets search_path; unqualified table refs resolve to tenant schema
+        HIB->>DB: SchemaMultiTenantConnectionProvider sets search_path, unqualified table refs resolve to tenant schema
         DB-->>HIB: result set
         HIB-->>APP: entities
         APP-->>C: response
