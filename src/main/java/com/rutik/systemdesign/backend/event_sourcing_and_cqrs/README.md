@@ -90,15 +90,17 @@ flowchart LR
 
     store(Event Store) -.->|"events"| projSvc(Projection<br/>Service)
     projSvc --> handlers(Event handlers update<br/>denormalized read models)
-    handlers --> readModel(order_read_model<br/>PostgreSQL)
-    handlers --> searchIndex(order_search_index<br/>Elasticsearch)
+    handlers --> readModel
+    handlers --> searchIndex
     readModel --> getById([GET /orders/:id<br/>fast key lookup])
     searchIndex --> getSearch([GET /orders/search<br/>full-text search])
+
+    readModel@{ icon: "logos:postgresql", form: "square", label: "order_read_model<br/>PostgreSQL", pos: "b", h: 44 }
+    searchIndex@{ icon: "logos:elasticsearch", form: "square", label: "order_search_index<br/>Elasticsearch", pos: "b", h: 44 }
 
     class store base
     class projSvc req
     class handlers mathOp
-    class readModel,searchIndex base
     class getById,getSearch io
 ```
 
