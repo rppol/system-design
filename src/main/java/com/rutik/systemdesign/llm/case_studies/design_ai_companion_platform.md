@@ -107,57 +107,56 @@ Cost estimate (spot pricing):
 ## 3. High-Level Architecture
 
 ### Primary System Diagram
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["Clients<br/>Mobile / Web / API"])
+    cloudfront@{ icon: "logos:aws-cloudfront", form: "square", label: "CloudFront", pos: "b", h: 44 }
+    apigw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    router["Session Router<br/>consistent hashing"]
+    safetypre["Safety Pre-check<br/>rule-based, under 5ms"]
+
+    subgraph memsvc ["Memory Service"]
+        redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+        s3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+    end
+
+    subgraph charstore ["Character Store"]
+        postgres@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+        cache[("Cache")]
+    end
+
+    inference["Inference Cluster<br/>vLLM PagedAttention + RadixAttention<br/>INT8 Llama-3-70B, TP=8, 125 pods"]
+    safetypost["Safety Post-check<br/>LlamaGuard 2, crisis + COPPA gate"]
+    stream(["Stream to Client<br/>SSE"])
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    memupdate["Memory Update<br/>async, compress at session end"]
+
+    clients --> cloudfront --> apigw --> router
+    router --> safetypre
+    router --> memsvc
+    router --> charstore
+    safetypre --> inference
+    memsvc --> inference
+    charstore --> inference
+    inference --> safetypost
+    safetypost --> stream
+    safetypost -->|"analytics + moderation queue"| kafka
+    safetypost --> memupdate
+
+    class clients,stream io
+    class router,safetypre,safetypost,memupdate req
+    class inference,cache base
 ```
-Clients (Mobile / Web / API)
-         |
-         v
-+------------------+
-|    CloudFront     |  CDN: static assets, SSE buffering
-+------------------+
-         |
-         v
-+------------------+
-|   API Gateway     |  Auth (JWT), rate limiting per user, request dedup
-+------------------+
-         |
-         v
-+------------------------+
-|    Session Router       |  Sticky routing by (user_id, character_id) hash
-|  (consistent hashing)  |  -> same inference pod for KV cache locality
-+------------------------+
-         |
-         +------------------+--------------------+
-         |                  |                    |
-         v                  v                    v
-+----------------+  +----------------+  +-------------------+
-| Safety Pre-    |  | Memory Service |  | Character Store   |
-| check (fast)   |  | (Redis + S3)   |  | (Postgres + Cache)|
-| <5ms rule-base |  | episodic mem   |  | persona configs   |
-+----------------+  +----------------+  +-------------------+
-         |                  |                    |
-         v                  v                    v
-+--------------------------------------------------------+
-|             Inference Cluster                          |
-|  vLLM (PagedAttention + RadixAttention prefix cache)   |
-|  INT8 Llama-3-70B, TP=8 pods, 125 pods baseline       |
-|  Prefix cache: character system prompt (70% hit rate)  |
-+--------------------------------------------------------+
-         |
-         v
-+------------------+
-|  Safety Post-    |  LLamaGuard 2, Llama-3-8B judge, 15ms
-|  check (LLM)     |  crisis detection, COPPA content gate
-+------------------+
-         |
-         +------------------+--------------------+
-         |                  |                    |
-         v                  v                    v
-+----------------+  +----------------+  +-------------------+
-| Stream to      |  | Kafka          |  | Memory Update     |
-| Client (SSE)   |  | (Analytics,    |  | (async, compress  |
-|                |  |  Moderation Q) |  |  session at end)  |
-+----------------+  +----------------+  +-------------------+
-```
+
+CloudFront buffers SSE and serves static assets before the request hits the JWT-authenticated API Gateway; the Session Router then hashes on (user_id, character_id) so the same inference pod always serves a user's KV-cache-warm sessions, while Safety Pre-check, Memory Service, and Character Store are fanned out in parallel ahead of inference. Safety Post-check gates the response before it streams to the client, fans an event to Kafka for analytics/moderation, and triggers an async memory update — none of which sit on the hot path.
 
 ### Prefix Cache Hit vs Miss Path
 ```
