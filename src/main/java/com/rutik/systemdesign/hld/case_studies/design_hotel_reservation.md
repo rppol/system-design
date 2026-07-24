@@ -71,10 +71,10 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    C(["Clients<br/>Web / Mobile App"]) --> GW("API Gateway<br/>authn · rate limit · routing")
+    C(["Clients<br/>Web / Mobile App"]) --> GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
     GW --> SS("Search Service<br/>read path §4.4")
     GW --> BS("Booking Service<br/>write path / saga §4.2-4.3")
-    SS -.->|"cache-aside"| CACHE("Search Cache<br/>Redis · TTL 30-120s")
+    SS -.->|"cache-aside"| CACHE@{ icon: "logos:redis", form: "square", label: "Search Cache<br/>TTL 30-120s", pos: "b", h: 44 }
     CACHE -.->|"cache miss"| INV("Inventory Service<br/>source of truth §4.1-4.2")
     BS --> INV
     INV --> PAYSVC("Payment Service")
@@ -86,10 +86,9 @@ flowchart LR
     PMS -.->|"writes total_rooms, rates"| INV
 
     class C io
-    class GW req
     class SS,WORKER mathOp
     class BS train
-    class CACHE,INV base
+    class INV base
     class PAYSVC,PMS frozen
 ```
 
