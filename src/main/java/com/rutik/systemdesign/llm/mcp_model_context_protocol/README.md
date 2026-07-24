@@ -104,32 +104,32 @@ Sampling inverts the normal flow. A server can ask the client to run an LLM comp
 
 ### 5.1 Single-Host, Multi-Server Architecture
 
-```
-+--------------------------------------------------+
-|                  Host Application                |
-|  (Claude Desktop / IDE Plugin / Custom Agent)    |
-|                                                  |
-|  +------------+     +------------+               |
-|  | MCP Client |     | MCP Client |               |
-|  |     A      |     |     B      |               |
-|  +-----+------+     +-----+------+               |
-|        |                  |                      |
-+--------|------------------|----------------------+
-         | stdio            | HTTP/SSE
-         |                  |
-+--------v-------+  +-------v--------+  +----------+
-|  MCP Server A  |  |  MCP Server B  |  | MCP Srv C|
-|  (Filesystem)  |  |  (GitHub API)  |  | (Postgres|
-|                |  |                |  |  DB)     |
-| Resources:     |  | Resources:     |  |          |
-|  - files       |  |  - repos       |  | Tools:   |
-| Tools:         |  |  - issues      |  | - query  |
-|  - read_file   |  | Tools:         |  | - insert |
-|  - write_file  |  |  - create_pr   |  |          |
-|  - list_dir    |  |  - add_comment |  |          |
-+----------------+  +----------------+  +----------+
-        |                   |                |
-   Local FS            GitHub API       PostgreSQL
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Host["Host Application<br/>Claude Desktop / IDE Plugin / Custom Agent"]
+        clientA(["MCP Client A"])
+        clientB(["MCP Client B"])
+    end
+
+    clientA -- stdio --> srvA(["MCP Server A<br/>Filesystem<br/>read_file / write_file / list_dir"])
+    clientB -- HTTP/SSE --> srvB(["MCP Server B<br/>GitHub API<br/>create_pr / add_comment"])
+    clientB -- HTTP/SSE --> srvC(["MCP Server C<br/>query / insert"])
+
+    srvA --> fs(["Local FS"])
+    srvB --> gh(["GitHub API"])
+    srvC --> pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+
+    class clientA,clientB req
+    class srvA,srvB,srvC base
+    class fs,gh base
 ```
 
 ### 5.2 JSON-RPC Message Flow — Connection and Tool Call
@@ -771,38 +771,35 @@ A software engineering team wants to integrate an AI coding assistant into their
 
 #### Architecture Overview
 
-```
-+----------------------------------------------------------+
-|                 AI Coding Assistant (Host)               |
-|                 (IDE Plugin / CLI Agent)                 |
-|                                                          |
-|  +------------------+  +------------------+             |
-|  |   MCP Client 1   |  |   MCP Client 2   |  ...        |
-|  | (Filesystem Srv) |  |   (Git Server)   |             |
-|  +--------+---------+  +--------+---------+             |
-|           |                     |                        |
-+-----------+---------------------+------------------------+
-            |                     |
-     stdio  |              stdio  |    stdio        SSE/TLS
-            |                     |       |             |
-+-----------v---+  +--------------v-+  +--v---------+  +---v-----------+
-| Filesystem    |  | Git MCP Server |  | PostgreSQL |  | Docs Search   |
-| MCP Server    |  |                |  | MCP Server |  | MCP Server    |
-|               |  | Resources:     |  |            |  |               |
-| Resources:    |  |  - git_log     |  | Resources: |  | Resources:    |
-|  - file URIs  |  |  - diff        |  |  - schema  |  |  - doc pages  |
-| Tools:        |  |  - blame       |  | Tools:     |  | Tools:        |
-|  - read_file  |  | Tools:         |  |  - query   |  |  - search     |
-|  - write_file |  |  - git_diff    |  |  (SELECT   |  |  - get_doc    |
-|  - list_dir   |  |  - git_log     |  |   only)    |  |               |
-|  - search_    |  |  - create_     |  |            |  |               |
-|    content    |  |    commit      |  |            |  |               |
-|               |  |  - git_status  |  |            |  |               |
-+------+--------+  +-------+--------+  +-----+------+  +-------+-------+
-       |                   |                 |                  |
-   Local FS           Git Repo            PostgreSQL        Docs System
-   (scoped to         (project            (READ ONLY        (internal
-    project dir)       root)              connection)        wiki API)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Host["AI Coding Assistant / Host<br/>IDE Plugin / CLI Agent"]
+        c1(["MCP Client 1<br/>Filesystem Srv"])
+        c2(["MCP Client 2<br/>Git Server"])
+        cN(["additional clients"])
+    end
+
+    c1 -- stdio --> fsSrv(["Filesystem MCP Server<br/>read_file / write_file / list_dir"])
+    c2 -- stdio --> gitSrv(["Git MCP Server<br/>git_diff / git_log / create_commit / git_status"])
+    cN -- stdio --> pgSrv(["PostgreSQL MCP Server<br/>query - SELECT only"])
+    cN -- SSE/TLS --> docsSrv(["Docs Search MCP Server<br/>search / get_doc"])
+
+    fsSrv --> localfs(["Local FS<br/>scoped to project dir"])
+    gitSrv --> gitrepo(["Git Repo<br/>project root"])
+    pgSrv --> pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    docsSrv --> docs(["Docs System<br/>internal wiki API"])
+
+    class c1,c2,cN req
+    class fsSrv,gitSrv,pgSrv,docsSrv base
+    class localfs,gitrepo,docs base
 ```
 
 #### Key Design Decisions
