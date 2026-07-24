@@ -139,16 +139,28 @@ Studies that build on patterns from others — read prerequisites first.
 ```
 
 **New principal-template studies (4) and their dependencies:**
-```
-cross_cutting/feature_store_and_pit_correctness  ──> design_churn_prediction
-cross_cutting/model_calibration_and_thresholding ──> design_churn_prediction
-                                                  └─> design_credit_risk_scoring
-cross_cutting/responsible_ai_fairness            ──> design_credit_risk_scoring
-cross_cutting/experimentation_and_online_eval    ──> design_churn_prediction
-                                                  └─> design_eta_prediction
-                                                  └─> design_marketplace_matching
-cross_cutting/drift_monitoring_and_retraining    ──> all 4 principal-template studies
-model_selection_and_algorithm_choice             ──> all 4 principal-template studies
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    FS(["feature_store_and<br/>_pit_correctness"]) --> CHURN(["design_churn<br/>_prediction"])
+    MC(["model_calibration<br/>_and_thresholding"]) --> CHURN
+    MC --> CREDIT(["design_credit_risk<br/>_scoring"])
+    RAI(["responsible_ai<br/>_fairness"]) --> CREDIT
+    EXP(["experimentation<br/>_and_online_eval"]) --> CHURN
+    EXP --> ETA(["design_eta<br/>_prediction"])
+    EXP --> MKT(["design_marketplace<br/>_matching"])
+    DRIFT(["drift_monitoring<br/>_and_retraining"]) --> ALL4(["All 4 principal-template<br/>studies"])
+    MSEL(["model_selection_and<br/>_algorithm_choice"]) --> ALL4
+
+    class FS,MC,RAI,EXP,DRIFT,MSEL req
+    class CHURN,CREDIT,ETA,MKT,ALL4 base
 ```
 
 ---
