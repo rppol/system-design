@@ -89,7 +89,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    RIDER(["Rider App\nride request"]) --> BUS["Event Bus · Kafka\nrequests · driver GPS 5s\ntrip completions"]
+    RIDER(["Rider App\nride request"]) --> BUS
     DRIVER(["Driver App\nGPS stream"]) --> BUS
     BUS --> DEMAND["Demand Forecaster\nLightGBM · 15min horizon\nper geo-zone"]
     BUS --> SUPPLY["Supply State Manager\nreal-time driver position\navailability · ETA to zone"]
@@ -101,8 +101,10 @@ flowchart TD
     SUPPLY --> CAND
     OPT --> DISPATCH["Dispatch Service\nnotify driver · start timer\nupdate supply"]
 
+    BUS@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>requests · GPS · trips", pos: "b", h: 44 }
+
     class RIDER,DRIVER io
-    class BUS,SUPPLY base
+    class SUPPLY base
     class DEMAND,SCORER train
     class CAND,OPT mathOp
     class DISPATCH req
