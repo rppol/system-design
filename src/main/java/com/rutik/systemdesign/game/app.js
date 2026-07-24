@@ -5080,6 +5080,12 @@ function mmPolishSvg(n, ctype) {
   n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
   // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
   n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  // Stick-figure sequence actors (the `actor` keyword) draw their label with
+  // actorTextColor (#1a1a1a — meant for the light-blue participant BOX) but have
+  // NO box behind them, so the dark label is invisible on the black canvas.
+  // Recolour those labels to the neutral light text colour. Only matches sequence
+  // stick-figure labels; participant-box labels (.actor-box) stay dark-on-blue.
+  n.querySelectorAll('text[class~="actor-man"]').forEach(t => t.setAttribute("fill", "#abb2bf"));
   // Product-logo chips. A Mermaid icon node draws its background SQUARE in the
   // themed mainBkg (#1a1a1a), which makes dark/monochrome logos (Kafka #1a1919,
   // OpenAI, all simple-icons) invisible on the pitch-black reader surface. Fix:
