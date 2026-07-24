@@ -911,20 +911,27 @@ PCA is a linear projection onto the top-variance orthogonal directions, while an
 
 **Scenario: Customer segmentation for a 10M-user e-commerce platform.** The marketing team wants behavioral segments to drive targeted email campaigns. The pipeline reduces 50 behavioral features to principal components, then clusters with k-means (k=8) on RFM features (Recency, Frequency, Monetary). Segments are recomputed weekly on a Spark cluster and pushed to the campaign system.
 
-```
-50 behavioral features (page views, session length, category mix, ...)
-        |
-   StandardScaler  (zero mean, unit variance)
-        |
-   PCA -> 15 components (85% cumulative explained variance)
-        |
-   append RFM features (also standardized)
-        |
-   k-means (k=8, k-means++ init, 10 restarts)
-        |
-   silhouette score = 0.42  -> 8 named segments
-        |
-   campaign system (per-segment email templates)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    feats(["50 behavioral features<br/>page views, session length,<br/>category mix, ..."]) --> scale["StandardScaler<br/>zero mean, unit variance"]
+    scale --> pca["PCA -> 15 components<br/>85% cumulative explained variance"]
+    pca --> rfm["Append RFM features<br/>also standardized"]
+    rfm --> km["k-means<br/>k=8, k-means++ init, 10 restarts"]
+    km --> sil["Silhouette score = 0.42<br/>-> 8 named segments"]
+    sil --> camp(["Campaign system<br/>per-segment email templates"])
+
+    class feats,camp io
+    class scale,pca,rfm mathOp
+    class km train
+    class sil req
 ```
 
 Outcome: targeted campaigns based on segments produced a 15% CTR lift over the previous one-size-fits-all blast. The "high-value at-risk" segment (high Monetary, low Recency) became a retention-campaign target with measurable win-back.
