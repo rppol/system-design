@@ -86,7 +86,7 @@ flowchart TD
     flags["Feature flags / config\nLaunchDarkly, Statsig, Eppo"] --> assign["Assignment service\nhash(user_id, experiment_id)"]
     assign --> ctrl["Control group\nexisting model"]
     assign --> treat["Treatment group\nnew model / feature"]
-    ctrl --> log["Logging layer\nKafka"]
+    ctrl --> log@{ icon: "logos:kafka", form: "square", label: "Logging layer<br/>(Kafka)", pos: "b", h: 44 }
     treat --> log
     log --> proc["Event processing\nFlink / Spark Streaming"]
     proc --> metric["Metric computation\nOEC, guardrails,\nuser-level rollups"]
@@ -97,7 +97,6 @@ flowchart TD
     class assign,proc,metric,stat mathOp
     class ctrl frozen
     class treat train
-    class log base
     class dash io
 ```
 
