@@ -152,7 +152,8 @@ flowchart TD
     FW --> WGPU["WebGPU + WGSL\n(browser-sandboxed)"]
     FW --> OCL["OpenCL\n(legacy, verbose, C99 kernels)"]
 
-    CUDA --> NV["NVIDIA SM\n(warp = 32)"]
+    CUDA --> NV
+    NV@{ icon: "logos:nvidia", form: "square", label: "NVIDIA SM<br/>(warp = 32)", pos: "b", h: 44 }
     HIP --> AMD["AMD CU\n(wavefront = 64)"]
     SYCL --> NV
     SYCL --> AMD
@@ -167,7 +168,7 @@ flowchart TD
     class CUDA train
     class HIP,SYCL,OCL mathOp
     class METAL,WGPU req
-    class NV,AMD,INTEL,APPLEGPU,NATIVE base
+    class AMD,INTEL,APPLEGPU,NATIVE base
 ```
 
 Caption: the framework layer is where most engineers' portability decision actually lives — everything below it is a choice the framework's own backend maintainers made once; the further right a path runs (SYCL/OpenCL touching three hardware targets from one source), the more the abstraction has to assume nothing vendor-specific about any of them.
@@ -250,15 +251,15 @@ quadrantChart
     y-axis Low peak retained --> High peak retained
     quadrant-1 Ideal but rare
     quadrant-2 Native fast path
-    quadrant-3 Avoid: worst of both
+    quadrant-3 Avoid, worst of both
     quadrant-4 Broad-reach portable layer
     CUDA C++: [0.12, 0.95]
-    HIP (native-tuned): [0.30, 0.85]
-    HIP (hipify, untuned): [0.30, 0.65]
+    HIP native-tuned: [0.30, 0.85]
+    HIP hipify untuned: [0.30, 0.65]
     SYCL/oneAPI: [0.55, 0.62]
     OpenCL: [0.70, 0.45]
     WebGPU/WGSL: [0.85, 0.35]
-    Metal (Apple-only): [0.20, 0.80]
+    Metal Apple-only: [0.20, 0.80]
 ```
 
 Caption: nothing sits in the top-right — the further a layer reaches across vendors, the more peak it typically gives up; the practical strategy in §9 is to keep a CUDA (or native HIP) fast path for the workload that matters most and accept the portable layer's discount everywhere reach matters more than the last 10-20%.
