@@ -280,7 +280,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    kc["Kafka Consumer\nλ = 5000 rec/s"] --> q1["ArrayBlockingQueue(2000)"]
+    kc@{ icon: "logos:kafka", form: "square", label: "Kafka Consumer<br/>λ = 5000 rec/s", pos: "b", h: 44 }
+    kc --> q1["ArrayBlockingQueue(2000)"]
     q1 --> proc["Processor\nμ = 1000 rec/s"]
     proc --> q2["ArrayBlockingQueue(1000)"]
     q2 --> dbw["DB Writer\nμ = 500 rec/s"]
@@ -290,7 +291,7 @@ flowchart LR
     q1 -.->|"consumer pauses if full"| kc
     q2 -.->|"slows consumer"| proc
 
-    class kc,proc,dbw req
+    class proc,dbw req
     class q1,q2,q3 base
     class batch base
 ```
