@@ -95,9 +95,9 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    spark["Databricks\nSpark"] --> table["Feature\ntable"] --> gbm["LightGBM\nmulti-node train"] --> reg["MLflow Model\nRegistry"] --> deploy(["Deploy"])
+    spark@{ icon: "logos:apache-spark", form: "square", label: "Databricks<br/>Spark", pos: "b", h: 44 }
+    spark --> table["Feature\ntable"] --> gbm["LightGBM\nmulti-node train"] --> reg["MLflow Model\nRegistry"] --> deploy(["Deploy"])
 
-    class spark mathOp
     class table base
     class gbm train
     class reg base
