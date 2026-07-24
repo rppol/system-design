@@ -1203,20 +1203,21 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>logical→physical map<br/>TTL 1 day", pos: "b", h: 44 }
+    S3b@{ icon: "logos:aws-s3", form: "square", label: "S3 photo blobs", pos: "b", h: 44 }
+
     Client(["Mobile / web client"]) --> API["API server (Django)<br/>shard_id = user_id % 1000"]
-    API -->|"lookup shard_id → host"| Redis[("Redis<br/>logical→physical map<br/>TTL 1 day")]
+    API -->|"lookup shard_id → host"| Redis
     Redis --> PG1[("pg-01<br/>shards 0-9")]
     Redis --> PG2[("pg-02<br/>shards 10-19")]
     Redis --> PG99[("pg-99<br/>shards 990-999")]
-    PG1 --> S3b([S3 photo blobs])
+    PG1 --> S3b
     PG2 --> S3b
     PG99 --> S3b
 
     class Client io
     class API mathOp
-    class Redis base
     class PG1,PG2,PG99 frozen
-    class S3b base
 ```
 *Requests flow from the client through the API layer's shard_id formula, a Redis-cached logical-to-physical map (99.97% cache hit rate), to one of 100 PostgreSQL hosts (10 shards each); photo blobs live separately in S3.*
 
