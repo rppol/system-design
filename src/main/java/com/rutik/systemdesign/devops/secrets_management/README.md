@@ -377,8 +377,10 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     start(["Choose a secrets<br/>architecture"]) --> d1{"Need dynamic secrets,<br/>PKI, or multi-cloud?"}
-    d1 -->|"yes, can operate it"| vault("HashiCorp Vault")
+    d1 -->|"yes, can operate it"| vault
     d1 -->|"no, single-cloud"| cloudmgr("Cloud-native manager<br/>AWS / GCP / Azure")
+
+    vault@{ icon: "logos:vault", form: "square", label: "HashiCorp Vault", pos: "b", h: 44 }
 
     vault --> d2{"Kubernetes: must the<br/>secret live in Git?"}
     cloudmgr --> d2
@@ -387,7 +389,7 @@ flowchart LR
 
     class start io
     class d1,d2 mathOp
-    class vault,cloudmgr base
+    class cloudmgr base
     class gitenc frozen
     class eso req
 ```
