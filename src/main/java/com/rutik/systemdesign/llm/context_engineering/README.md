@@ -334,46 +334,27 @@ because it is nearest the generation point. The middle has neither, so it decays
 and "put it wherever the retriever emitted it" is not — the only genuinely bad position is the one
 naive RAG picks by default.
 
-```
-Context Engineering Pipeline (per request)
-============================================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- Incoming request
-       |
-       v
- Budget planner
- +-------------------------------------------+
- | total_budget = 32,000                     |
- | system_zone = 3,000 (fixed)               |
- | tools_zone = 2,000 (fixed, RAG-retrieved) |
- | few_shot_zone = 2,000 (fixed)             |
- | retrieval_zone = 7,000 (dynamic)          |
- | history_zone = 6,000 (with compaction)    |
- | user_msg_zone = 500 (current turn)        |
- | output_reserve = 4,000+                   |
- +-------------------------------------------+
-       |
-       v
- Tool retrieval (RAG over tool definitions)
- (only include tools relevant to this query)
-       |
-       v
- History compactor
- (summarize if history > 6,000 tokens)
-       |
-       v
- Document retrieval + reranker
- (fetch top-k, trim to retrieval_zone)
-       |
-       v
- Context assembler
- Order: system -> few-shot -> retrieved -> history -> user
-       |
-       v
- Token counter — abort if over budget
-       |
-       v
- LLM call
+    A(["Incoming<br/>Request"]) --> B(["Budget Planner<br/>total 32k - sys 3k, tools 2k,<br/>few-shot 2k, retrieval 7k,<br/>history 6k, user 500,<br/>output reserve 4k+"])
+    B --> C(["Tool Retrieval<br/>RAG over tool definitions"])
+    C --> D(["History Compactor<br/>summarize if over 6k tokens"])
+    D --> E(["Doc Retrieval + Reranker<br/>fetch top-k, trim to zone"])
+    E --> F(["Context Assembler<br/>system to few-shot to<br/>retrieved to history to user"])
+    F --> G(["Token Counter<br/>abort if over budget"])
+    G --> H(["LLM Call"])
+
+    class A,H io
+    class B base
+    class C,D,E,F,G req
 ```
 
 ---
