@@ -116,7 +116,7 @@ flowchart TD
     TTS["TTS Service\n(A10G fleet)"]
     LIP["Lip-sync Renderer\n(A10G)"]
     COMP["Compositor\n(FFmpeg GPU)"]
-    S3[["Asset Store (S3)\naudio/, base_video/, rendered/,\nfinal/, avatar_profiles/"]]
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Asset Store", pos: "b", h: 44 }
     CDN[["CDN\n(CloudFront / Fastly)"]]
     PLAYER([Client Player])
 
@@ -124,53 +124,56 @@ flowchart TD
     JS --> TTS
     JS --> LIP
     JS --> COMP
-    TTS --> S3
-    LIP --> S3
-    COMP --> S3
-    S3 --> CDN --> PLAYER
+    TTS --> s3
+    LIP --> s3
+    COMP --> s3
+    s3 --> CDN --> PLAYER
 
     class CL,PLAYER io
     class GW,JS req
     class TTS,LIP,COMP base
-    class S3,CDN frozen
+    class CDN frozen
 ```
 
 The Job Scheduler fans each job out across the three GPU stages (TTS, lip-sync, compositing); all three stages read and write the shared S3 asset store, and the finished MP4 is delivered to the client player through the CDN.
 
 ### Pipeline Stage Dependency Diagram
-```
- Script text
-     |
-     v
- [Script Validator]  <-- checks profanity, length, language detect
-     |
-     +---> [TTS Generator]  --------> audio.wav (streamed in 3s chunks)
-     |                                     |
-     +---> [Avatar Asset Cache] -----> base_frames (looping clip)
-                                           |
-                               audio.wav + base_frames
-                                           |
-                                           v
-                                  [Lip-Sync Renderer]
-                                  (SadTalker / Wav2Lip)
-                                           |
-                                      lip_synced.mp4
-                                           |
-                                           v
-                                  [Video Compositor]
-                              lip_synced + background + subtitles
-                                           |
-                                      composed.mp4
-                                           |
-                                           v
-                                    [Watermarker]
-                                    [C2PA Signer]
-                                           |
-                                       final.mp4
-                                           |
-                                     [CDN Upload]
-                                           |
-                                     delivery_url
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SCRIPT(["Script text"])
+    VALID["Script Validator<br/>profanity, length,<br/>language detect"]
+    TTSGEN["TTS Generator"]
+    CACHE["Avatar Asset Cache"]
+    LIPSYNC["Lip-Sync Renderer<br/>(SadTalker / Wav2Lip)"]
+    COMPOSITOR["Video Compositor<br/>+ background + subtitles"]
+    WATERMARK["Watermarker"]
+    C2PA["C2PA Signer"]
+    CDNUP["CDN Upload"]
+    DELIVERY(["delivery_url"])
+
+    SCRIPT --> VALID
+    VALID --> TTSGEN
+    VALID --> CACHE
+    TTSGEN -- audio.wav<br/>streamed 3s chunks --> LIPSYNC
+    CACHE -- base_frames<br/>looping clip --> LIPSYNC
+    LIPSYNC -- lip_synced.mp4 --> COMPOSITOR
+    COMPOSITOR -- composed.mp4 --> WATERMARK
+    WATERMARK --> C2PA
+    C2PA -- final.mp4 --> CDNUP
+    CDNUP -- delivery_url --> DELIVERY
+
+    class SCRIPT,DELIVERY io
+    class VALID req
+    class TTSGEN,CACHE,LIPSYNC,COMPOSITOR base
+    class WATERMARK,C2PA,CDNUP frozen
 ```
 
 ### Job State Machine
