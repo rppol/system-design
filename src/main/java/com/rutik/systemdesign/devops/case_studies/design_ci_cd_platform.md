@@ -175,12 +175,12 @@ flowchart LR
 
     subgraph ST["State and Storage"]
         direction LR
-        pg("Postgres<br/>jobs, DAG, tenant config")
-        rds("Redis<br/>queue, locks")
-        s3art("S3<br/>artifacts 1.4 PB")
+        pg@{ icon: "logos:postgresql", form: "square", label: "Postgres", pos: "b", h: 44 }
+        rds@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+        s3art@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
         s3cache("S3/EFS<br/>cache 6 TB")
         logs("Loki/S3<br/>logs 105 TB")
-        vault("Vault<br/>secrets")
+        vault@{ icon: "logos:vault", form: "square", label: "Vault", pos: "b", h: 44 }
     end
 
     subgraph SVC["Shared Data-Plane Services"]
@@ -204,7 +204,7 @@ flowchart LR
     class autoscaler mathOp
     class controller train
     class runners frozen
-    class pg,rds,s3art,s3cache,logs,vault base
+    class s3cache,logs base
     class cacheproxy,secretsbroker mathOp
     class artifactapi req
 ```
@@ -699,12 +699,11 @@ flowchart LR
 
     runner(["runner<br/>stdout/stderr"]) --> vector("Vector sidecar")
     vector --> ws(["WebSocket fan-out<br/>UI tail, under 2s"])
-    vector --> s3("S3 batched objects<br/>30-day retention")
+    vector --> s3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
 
     class runner io
     class vector mathOp
     class ws io
-    class s3 base
 ```
 
 Logs have two consumers with opposite needs: the UI wants a sub-2-second live tail; storage wants large batched objects, not millions of tiny writes. The pipeline forks.
