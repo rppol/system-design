@@ -880,20 +880,25 @@ Evaluation dimensions: (1) intent resolution rate — fraction of conversations 
 
 ### Test Architecture
 
-```
-+---------------------+    +---------------------+    +---------------------+
-|   Unit Tests        |    | Integration Tests   |    | E2E Evaluation      |
-|                     |    |                     |    |                     |
-| - prompt format     |    | - RAG pipeline      |    | - 200-example       |
-| - refusal behavior  |    | - retrieval quality |    |   golden dataset    |
-| - edge case handling|    | - chain error       |    | - LLM-as-judge      |
-| - mocked LLM        |    |   handling          |    | - all intent types  |
-| Every commit        |    | Per PR              |    | Weekly + on release |
-+---------------------+    +---------------------+    +---------------------+
-         |                          |                          |
-         v                          v                          v
-   CI pass/fail            CI pass/fail + cost        Quality trend report
-   (<30s, ~$0)             (~5min, ~$0.50)            (~30min, ~$5)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UNIT("Unit Tests<br/>- prompt format<br/>- refusal behavior<br/>- edge case handling<br/>- mocked LLM<br/>Every commit")
+    UNITRES("CI pass/fail<br/>(&lt;30s, ~$0)")
+    INTEG("Integration Tests<br/>- RAG pipeline<br/>- retrieval quality<br/>- chain error handling<br/>Per PR")
+    INTEGRES("CI pass/fail + cost<br/>(~5min, ~$0.50)")
+    E2E("E2E Evaluation<br/>- 200-example golden dataset<br/>- LLM-as-judge<br/>- all intent types<br/>Weekly + on release")
+    E2ERES("Quality trend report<br/>(~30min, ~$5)")
+
+    UNIT --> UNITRES
+    INTEG --> INTEGRES
+    E2E --> E2ERES
+
+    class UNIT,INTEG,E2E req
+    class UNITRES,INTEGRES,E2ERES base
 ```
 
 ### Golden Dataset Construction
@@ -911,8 +916,7 @@ Each example includes:
 
 ### Regression Test Results (before and after model upgrade)
 
-```
-claude-sonnet-4-6 → claude-opus-4-6 upgrade evaluation:
+`claude-sonnet-4-6 → claude-opus-4-6` upgrade evaluation:
 
 | Metric              | Baseline (Sonnet) | New (Opus) | Delta  |
 |---------------------|-------------------|-----------|--------|
@@ -930,7 +934,6 @@ Decision: APPROVE upgrade. All metrics improved except tone compliance
 but no-answer is 10% of traffic — acceptable tradeoff).
 
 Action: Tone prompt tuning before deployment + monitor no-answer rate.
-```
 
 ### CI/CD Integration Results
 
