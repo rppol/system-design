@@ -795,19 +795,29 @@ A plain seq2seq compresses the entire input into one fixed-size context vector (
 
 **Scenario: LSTM-based log anomaly detection for cloud infrastructure at 10k events/sec.** A platform team monitors 500 microservices generating 10k structured log events/sec. Manual log review is infeasible. An LSTM sequence model learns normal log token patterns from 90 days of history and flags sequences deviating from the learned distribution as anomalies. Latency SLA: detection within 2 seconds of log ingestion, false positive rate < 1%.
 
-```
 Log anomaly detection pipeline:
 
-  Kafka (10k events/sec)
-        │
-  [Tokenizer + sliding window (50 events)]
-        │
-  [LSTM anomaly model — inference 4ms p99]
-        │
-  ┌─────┴──────┐
-  [Normal]   [Anomaly score > threshold]
-                │
-          [PagerDuty alert + Kibana link]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>(10k events/sec)", pos: "b", h: 44 }
+    kafka --> tok["Tokenizer +<br/>sliding window<br/>(50 events)"]
+    tok --> lstm["LSTM anomaly model<br/>inference 4ms p99"]
+    lstm --> normal(["Normal"])
+    lstm --> anomaly["Anomaly score ><br/>threshold"]
+    anomaly --> alert(["PagerDuty alert +<br/>Kibana link"])
+
+    class tok,lstm train
+    class normal io
+    class anomaly lossN
+    class alert io
 ```
 
 **Model architecture and training:**
