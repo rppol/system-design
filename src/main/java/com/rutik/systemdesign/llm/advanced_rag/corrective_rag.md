@@ -455,51 +455,43 @@ A: CRAG is designed as a drop-in quality gate between retrieval and generation. 
 **Problem Statement**: A clinical decision support platform serves 1,200 physicians at a hospital network. Physicians ask clinical questions and expect answers grounded in current clinical guidelines, drug interaction databases, and recent trial data. The internal knowledge base contains 45,000 curated clinical guideline documents from USPSTF, ACC/AHA, and specialty societies, updated quarterly. However, 30-40% of physician queries involve recent guideline updates, off-label drug use, or rare conditions not well-represented in the quarterly-updated index. Standard RAG was generating confidently wrong answers for these out-of-KB queries — a patient safety risk.
 
 **Architecture Overview**:
-```
-Physician Query
-    |
-    v
-[Knowledge Base Retrieval]
-  45,000 guideline documents (quarterly updated)
-  Vector DB: Pinecone with text-embedding-3-large
-  Top-K = 5 documents retrieved
-    |
-    v
-[Relevance Evaluator]
-  Cross-encoder fine-tuned on medical (query, document, label) pairs
-  Model: cross-encoder/ms-marco-MiniLM-L-6-v2 fine-tuned on
-         500 physician-labeled (query, guideline_chunk, relevant: T/F) pairs
-  Scores each of 5 documents [0.0 - 1.0]
-    |
-    +-- All CORRECT (scores > 0.65)
-    |   [Use KB context directly]
-    |   → LLM Generation → Answer with guideline citations
-    |
-    +-- MIXED (some above 0.4, some below)
-    |   [Sentence-level refinement]
-    |   Extract relevant sentences from ambiguous documents
-    |   → LLM Generation → Answer with refined context
-    |
-    +-- All INCORRECT (all scores < 0.4)
-        [PubMed Search Fallback]
-        Query reformulation: "Remove clinical context artifacts; add MeSH terms"
-        PubMed API: search with clinical Boolean query
-        Fetch top-3 abstracts + results sections
-        Apply relevance evaluator to PubMed results
-        Filter: keep only articles with score > 0.4
-            |
-        [Combine any relevant KB + PubMed content]
-            |
-        [LLM Generation]
-        Answer with explicit source labeling:
-        "Based on PubMed literature (not official guidelines): ..."
-            |
-        [Safety Disclaimer]
-        If answer is from PubMed only: append mandatory disclaimer
-        "This answer is based on research literature; consult current
-         institutional guidelines before clinical application."
-            |
-        Physician-facing Answer with Source Attribution
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PQ(["Physician Query"]) --> KBR["Knowledge Base Retrieval<br/>45,000 guideline docs (quarterly updated)<br/>Vector DB: Pinecone, text-embedding-3-large<br/>Top-K = 5 documents retrieved"]
+    KBR --> RE{"Relevance Evaluator<br/>Cross-encoder fine-tuned on medical pairs<br/>ms-marco-MiniLM-L-6-v2, fine-tuned on 500<br/>physician-labeled pairs; scores [0.0-1.0]"}
+
+    RE -->|"All CORRECT<br/>(scores > 0.65)"| UKB["Use KB context directly"]
+    UKB --> GEN1["LLM Generation"]
+    GEN1 --> ANS1(["Answer with<br/>guideline citations"])
+
+    RE -->|"MIXED<br/>(some above 0.4, some below)"| SLR["Sentence-level refinement<br/>Extract relevant sentences from<br/>ambiguous documents"]
+    SLR --> GEN2["LLM Generation"]
+    GEN2 --> ANS2(["Answer with<br/>refined context"])
+
+    RE -->|"All INCORRECT<br/>(scores < 0.4)"| PMF["PubMed Search Fallback<br/>Query reformulation: strip clinical<br/>context artifacts, add MeSH terms"]
+    PMF --> PAPI["PubMed API<br/>clinical Boolean query search"]
+    PAPI --> FETCH["Fetch top-3 abstracts<br/>+ results sections"]
+    FETCH --> FILT["Apply relevance evaluator<br/>to PubMed results; keep score > 0.4"]
+    FILT --> COMB["Combine relevant<br/>KB + PubMed content"]
+    COMB --> GEN3["LLM Generation<br/>explicit source labeling:<br/>'Based on PubMed literature<br/>(not official guidelines)'"]
+    GEN3 --> DISC["Safety Disclaimer<br/>PubMed-only answers append a<br/>mandatory guideline-check notice"]
+    DISC --> ANS3(["Physician-facing Answer<br/>with Source Attribution"])
+
+    class PQ,ANS1,ANS2,ANS3 io
+    class KBR,UKB,SLR,COMB train
+    class RE,FILT mathOp
+    class GEN1,GEN2,GEN3 frozen
+    class PMF,PAPI,FETCH req
+    class DISC base
 ```
 
 **Key Design Decisions**:
