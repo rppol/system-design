@@ -1049,7 +1049,7 @@ flowchart LR
     Gateway("FastAPI, 8 pods<br/>slowapi + Redis")
     V1Router("v1_router<br/>offset")
     V2Router("v2_router<br/>cursor")
-    DB[("PostgreSQL: posts table<br/>index on created_at desc, id desc")]
+    DB@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>posts table", pos: "b", h: 44 }
 
     Mobile -->|"v1 clients: offset pagination"| Gateway
     Mobile -->|"v2 clients: cursor pagination"| Gateway
@@ -1062,7 +1062,6 @@ flowchart LR
     class Gateway mathOp
     class V1Router frozen
     class V2Router train
-    class DB base
 ```
 
 *FastAPI fans the same pod fleet out to two routers that share one Postgres index; v1 (purple,
