@@ -76,7 +76,7 @@ flowchart TD
     serve["Production serving"] -->|"log features + preds\n(5-10% sample)"| flog["Feature log\nKafka / S3"]
     flog --> engine["Drift computation engine\nSpark batch / Flink"]
     engine --> checks["PSI per feature\nKS + chi-squared\nscore-distribution shift"]
-    checks --> dash["Monitoring dashboard\nGrafana"]
+    checks --> dash@{ icon: "logos:grafana", form: "square", label: "Grafana<br/>dashboard", pos: "b", h: 44 }
     dash --> alert{"PSI over 0.2 or\nAUC drop ?"}
     alert -->|"no"| ok(["Healthy"])
     alert -->|"yes"| retrain["Retraining pipeline\nvalidate, train,\ntime-based holdout"]
@@ -86,7 +86,7 @@ flowchart TD
     class serve frozen
     class flog base
     class engine,checks,retrain mathOp
-    class dash,alert req
+    class alert req
     class ok,promote io
     class shadow train
 ```
