@@ -116,10 +116,10 @@ flowchart TD
 
     APP(["LLM App\n(instrumented with eval SDK)"])
     COL["Trace Collector API\nstateless, horizontally scaled, 32 partitions\nvalidate schema · hash PII fields · assign trace_id"]
-    KAF["Kafka: raw_traces topic\n115,740 traces/sec sustained"]
+    KAF@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>raw_traces topic", pos: "b", h: 44 }
     TP["Trace Processor\nenrich · deduplicate · hash PII\nwrite S3 (full text opt)"]
     OER["Online Eval Runner\n2% sample selection · heuristic scorers\nLLM judge dispatch · result → Kafka: eval_results"]
-    CH["ClickHouse\ntrace search · aggregations · eval results"]
+    CH@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
     HAQ["Human Annotation Queue\nlow-confidence evals, disputed scores\n→ DB + notification service"]
     DM["Dataset Manager\ncreate from trace filter\nversion/snapshot · drift check"]
     ET["Experiment Tracker\nA/B comparison · score diffs\ndeploy gating · baseline mgmt"]
@@ -139,7 +139,6 @@ flowchart TD
 
     class APP io
     class COL,TP,DM,ET,CI mathOp
-    class KAF,CH frozen
     class OER base
     class HAQ req
     class AL lossN
