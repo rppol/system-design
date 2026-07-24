@@ -56,35 +56,30 @@ Yields events as the agent runs — tool calls, text deltas, completion.
 
 ## 5. Architecture Diagrams
 
+**Strands Agent Execution** — `agent = Agent(model=BedrockModel("us.anthropic.claude-sonnet-4-..."), tools=[search, lookup, write_file])`, then `response = agent("user query")` drives one runtime pass:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    build(["Agent - model, tools"]) --> invoke(["Call agent with user query"])
+    invoke --> runtime(["Strands runtime:<br/>send prompt + tools schema<br/>Bedrock API call<br/>parse tool_use blocks<br/>execute tools in parallel<br/>loop"])
+    runtime --> response(["Response - final text + metadata"])
+
+    class build,invoke req
+    class runtime base
+    class response io
 ```
-Strands Agent Execution
-========================
 
-  agent = Agent(
-      model=BedrockModel("us.anthropic.claude-sonnet-4-..."),
-      tools=[search, lookup, write_file],
-  )
+**Multi-Agent Composition** — specialist agents wrapped as tools for an orchestrator:
 
-  response = agent("user query")
-
-       |
-       v
-  +----+------------------------+
-  | Strands runtime:            |
-  | - Send prompt + tools schema|
-  | - Bedrock API call          |
-  | - Parse tool_use blocks     |
-  | - Execute tools in parallel |
-  | - Loop                      |
-  +----+------------------------+
-       |
-       v
-  Response (final text + metadata)
-
-
-Multi-Agent Composition
-========================
-
+```
   Specialist agents:
     research_agent = Agent(model, tools=[web_search, read_url])
     coding_agent   = Agent(model, tools=[bash, write_file])
@@ -101,21 +96,27 @@ Multi-Agent Composition
   Orchestrator calls "research" or "code" tools;
   each invocation runs the specialist agent end-to-end
   and returns its result to the orchestrator.
+```
 
+**Bedrock Integration** — no API keys; IAM role authorization, VPC endpoints for private networking, CloudWatch for usage/cost dashboards:
 
-Bedrock Integration
-====================
+```mermaid
+flowchart LR
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Application                 AWS Account
-  +-----------+              +-----------------+
-  | Strands   | ---IAM----->| Bedrock         |
-  | Agent     |              | (Claude/Nova/   |
-  | (Python)  | <--TLS------|  Llama/Mistral) |
-  +-----------+              +-----------------+
+    subgraph app["Application"]
+        strandsAgent(["Strands Agent<br/>Python"])
+    end
+    subgraph awsacct["AWS Account"]
+        bedrock(["Bedrock<br/>Claude / Nova / Llama / Mistral"])
+    end
 
-  No API keys; IAM role authorization.
-  VPC endpoints for private networking.
-  CloudWatch for usage/cost dashboards.
+    strandsAgent -- IAM --> bedrock
+    bedrock -- TLS --> strandsAgent
+
+    class strandsAgent req
+    class bedrock base
 ```
 
 ---
