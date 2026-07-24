@@ -116,7 +116,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    clients(["External Clients"]) --> gw["Spring Cloud Gateway\n(Netty, WebFlux)"]
+    clients(["External Clients"]) --> gw
+    gw@{ icon: "logos:spring-icon", form: "square", label: "Spring Cloud<br/>Gateway", pos: "b", h: 44 }
     gw --> rpm["1. RoutePredicateHandlerMapping\nmatch request to route"]
     rpm --> gf["2. GlobalFilters (all routes)\nAuthenticationFilter, LoggingFilter, MetricsFilter"]
     gf --> rf["3. GatewayFilters (per route)\nRateLimiter (Redis, 100 req/s), CircuitBreaker,\nRewritePath, AddRequestHeader"]
@@ -128,7 +129,6 @@ flowchart TD
     order --> pod3["pod-3"]
 
     class clients req
-    class gw base
     class rpm,gf,rf mathOp
     class order,payment,user train
     class pod1,pod2,pod3 io
@@ -1177,7 +1177,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Client"]) --> gw["Spring Cloud Gateway"]
+    client(["Client"]) --> gw
+    gw@{ icon: "logos:spring-icon", form: "square", label: "Spring Cloud<br/>Gateway", pos: "b", h: 44 }
 
     subgraph filters ["Resilience filter chain"]
         direction LR
@@ -1194,7 +1195,7 @@ flowchart TD
     route --> notifications["Notifications\nEureka-registered, 1 instance"]
 
     class client req
-    class gw,route base
+    class route base
     class rl,cb,retry mathOp
     class orders,inventory,shipping,notifications train
 ```
