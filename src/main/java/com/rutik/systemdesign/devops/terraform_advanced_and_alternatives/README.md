@@ -438,7 +438,7 @@ flowchart LR
     Q2 -->|"yes"| PULUMI("Pulumi")
     Q2 -->|"no"| Q3{"BUSL license<br/>a blocker?"}
     Q3 -->|"yes"| TOFU("OpenTofu")
-    Q3 -->|"no"| TF("Terraform")
+    Q3 -->|"no"| TF@{ icon: "logos:terraform-icon", form: "square", label: "Terraform", pos: "b", h: 44 }
 
     class START io
     class Q1 mathOp
@@ -447,7 +447,6 @@ flowchart LR
     class CDK frozen
     class PULUMI train
     class TOFU train
-    class TF base
 ```
 
 This sub-decision only applies once the engine is genuinely the bottleneck: AWS-native drift detection favors CloudFormation/CDK, a language/abstraction need favors Pulumi, and a pure licensing objection favors OpenTofu over plain Terraform.
