@@ -717,36 +717,31 @@ A: A domain-specific benchmark construction process: (1) Task sampling — colle
 
 **Architecture**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PT(["Production Traffic<br/>5,000 tickets/day"]) --> AGENT["Customer Service Agent<br/>Claude 3.5 Sonnet<br/>Tools: CRM lookup, transaction DB,<br/>knowledge base search"]
+    AGENT --> LOGGER["Trace Logger<br/>all traces"]
+    AGENT --> SAMPLER["5% Sampler<br/>LLM Judge"]
+    AGENT --> NIGHTLY["Nightly Eval Run<br/>200-task suite"]
+    LOGGER --> DASH["Evaluation Dashboard<br/>Task success rate<br/>Cost per ticket median/P95<br/>Safety violation rate<br/>LLM judge scores, 4 dims<br/>Regression alerts"]
+    SAMPLER --> DASH
+    NIGHTLY --> DASH
+
+    class PT req
+    class AGENT base
+    class LOGGER,DASH io
+    class SAMPLER,NIGHTLY mathOp
 ```
-                    Production Traffic (5,000 tickets/day)
-                              |
-                              v
-                  ┌───────────────────────┐
-                  │  Customer Service Agent │
-                  │  (Claude 3.5 Sonnet)    │
-                  │  Tools: CRM lookup,     │
-                  │  transaction DB,        │
-                  │  knowledge base search  │
-                  └───────────┬─────────────┘
-                              |
-               ┌──────────────┼──────────────────┐
-               |              |                   |
-               v              v                   v
-     ┌─────────────┐  ┌──────────────┐   ┌──────────────────┐
-     │ Trace Logger │  │ 5% Sampler   │   │ Nightly Eval Run │
-     │ (all traces) │  │ (LLM Judge)  │   │ (200-task suite)  │
-     └──────┬──────┘  └──────┬───────┘   └────────┬─────────┘
-            |                |                     |
-            v                v                     v
-     ┌──────────────────────────────────────────────────┐
-     │              Evaluation Dashboard                 │
-     │  - Task success rate (daily, weekly, by category) │
-     │  - Cost per ticket (median, P95)                  │
-     │  - Safety violation rate                          │
-     │  - LLM judge scores (4 dimensions)                │
-     │  - Regression alerts                              │
-     └──────────────────────────────────────────────────┘
-```
+
+Traffic flows through the agent and fans out to three independent evaluation arms — full trace logging, a 5% LLM-judge sample, and a nightly 200-task regression run — which converge into a single dashboard.
 
 **Key Decisions**
 
