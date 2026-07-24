@@ -75,72 +75,63 @@ Related modules: [`../../evaluation_and_benchmarks/README.md`](../../evaluation_
 
 ### End-to-End Eval Pipeline
 
-```
-  Dataset Registry (versioned golden sets)
-          |
-          | load(version="v2.1.0")
-          v
-  +----------------+
-  |  Eval Runner   |  -- reads dataset, invokes application under test
-  |  (batch mode)  |
-  +----------------+
-          |
-          | (question, context, expected_answer, model_output)
-          v
-  +----------------------+
-  |  Judge Orchestrator  |  -- routes each example to correct judge tier
-  |  lexical / semantic  |
-  |  / LLM-as-judge      |
-  +----------------------+
-          |
-          | (scores per example per metric)
-          v
-  +--------------------+
-  |  Metric Aggregator |  -- computes mean, P10/P50/P90, pass rate
-  +--------------------+
-          |
-          v
-  +----------------------+
-  |  Regression Detector |  -- compares to baseline run; runs t-test
-  |  p < 0.05 threshold  |
-  +----------------------+
-          |
-     pass?   fail?
-       |         |
-       v         v
-  CI Gate     Block merge + notify Slack
-       |
-       v
-  Dashboard (Braintrust / LangSmith / Arize)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    registry(["Dataset Registry<br/>(versioned golden sets)"])
+    runner("Eval Runner<br/>(batch mode)")
+    judge("Judge Orchestrator<br/>lexical / semantic /<br/>LLM-as-judge")
+    aggregator("Metric Aggregator<br/>mean, P10/P50/P90,<br/>pass rate")
+    detector("Regression Detector<br/>t-test, p &lt; 0.05")
+    gate("CI Gate")
+    block("Block merge +<br/>notify Slack")
+    dashboard(["Dashboard<br/>(Braintrust / LangSmith / Arize)"])
+
+    registry -->|"load version=v2.1.0"| runner
+    runner -->|"question, context,<br/>expected_answer,<br/>model_output"| judge
+    judge -->|"scores per example<br/>per metric"| aggregator
+    aggregator --> detector
+    detector -->|pass| gate
+    detector -->|fail| block
+    gate --> dashboard
+
+    class registry,dashboard io
+    class runner,judge,aggregator,detector,gate,block base
 ```
 
 ### Online Shadow Eval Architecture
 
-```
-  Live Traffic (100% of requests)
-          |
-          +---------------------------+
-          |                           |
-          v                           v
-  Application Serving          Sampling Layer
-  Path (synchronous)           (2-5% sampled)
-          |                           |
-          v                           v
-  Response to User         Async Eval Queue
-                                      |
-                                      v
-                           +------------------+
-                           |  Shadow Eval     |
-                           |  Runner          |
-                           |  (async, no SLA) |
-                           +------------------+
-                                      |
-                                      v
-                           LLM Judge + Metrics
-                                      |
-                                      v
-                           Quality Dashboard
-                           + Drift Alerts
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    traffic(["Live Traffic<br/>(100% of requests)"])
+    serving("Application Serving Path<br/>(synchronous)")
+    response(["Response to User"])
+    sampling("Sampling Layer<br/>(2-5% sampled)")
+    queue("Async Eval Queue")
+    shadowrunner("Shadow Eval Runner<br/>(async, no SLA)")
+    judgemetrics("LLM Judge + Metrics")
+    dashboard(["Quality Dashboard<br/>+ Drift Alerts"])
+
+    traffic --> serving --> response
+    traffic --> sampling --> queue --> shadowrunner --> judgemetrics --> dashboard
+
+    class traffic,response,dashboard io
+    class serving,sampling,queue,shadowrunner,judgemetrics base
 ```
 
 ### Dataset Versioning Schema
