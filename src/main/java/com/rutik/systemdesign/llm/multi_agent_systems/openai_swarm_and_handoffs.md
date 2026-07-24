@@ -186,20 +186,25 @@ Billing Agent
 
 ### 5.4 Guardrail Position
 
-```
-User message
-    |
-    v
-[input_guardrail]  <-- runs BEFORE LLM; can block PII, injection attempts
-    |
-    v
-LLM generates response
-    |
-    v
-[output_guardrail] <-- runs AFTER LLM; can block toxic/off-policy output
-    |
-    v
-Delivered to caller
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UserMsg(["User message"]) --> InputG["input_guardrail<br/>runs BEFORE LLM<br/>blocks PII, injection attempts"]
+    InputG --> LLM["LLM generates response"]
+    LLM --> OutputG["output_guardrail<br/>runs AFTER LLM<br/>blocks toxic / off-policy output"]
+    OutputG --> Delivered(["Delivered to caller"])
+
+    class UserMsg,Delivered io
+    class InputG,OutputG lossN
+    class LLM base
 ```
 
 ---
@@ -799,21 +804,23 @@ standing between you and an unbounded bill.
 
 **Architecture:**
 
-```
-User
- |
- v
-Triage Agent (gpt-4o-mini, ~180-word instructions)
- |  tools: [lookup_account, classify_intent]
- |  input_guardrail: [pii_guardrail, injection_guardrail]
- |
- +--billing issue?--> Billing Agent (gpt-4o, ~220-word instructions)
- |                      tools: [get_invoices, issue_refund, get_payment_methods]
- |                      output_guardrail: [amount_sanity_guardrail]  <-- blocks refunds > $10,000
- |
- +--technical issue?-> Technical Agent (gpt-4o, ~200-word instructions)
-                        tools: [reset_password, check_service_status, create_ticket]
-                        output_guardrail: [length_guardrail]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    User(["User"]) --> Triage["Triage Agent<br/>gpt-4o-mini, ~180-word instructions<br/>tools: lookup_account, classify_intent<br/>input_guardrail: pii, injection"]
+    Triage -- "billing issue?" --> Billing["Billing Agent<br/>gpt-4o, ~220-word instructions<br/>tools: get_invoices, issue_refund,<br/>get_payment_methods<br/>output_guardrail: amount_sanity<br/>(blocks refunds &gt; $10,000)"]
+    Triage -- "technical issue?" --> Technical["Technical Agent<br/>gpt-4o, ~200-word instructions<br/>tools: reset_password, check_service_status,<br/>create_ticket<br/>output_guardrail: length_guardrail"]
+
+    class User io
+    class Triage,Billing,Technical base
 ```
 
 **Implementation highlights:**
