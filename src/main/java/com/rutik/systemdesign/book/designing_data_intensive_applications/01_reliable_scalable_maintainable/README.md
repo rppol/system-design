@@ -47,12 +47,13 @@ flowchart LR
 
     subgraph App["Application code (the data system to the user)"]
         direction LR
-        DB(["primary DB"]) -->|"invalidate"| Cache(["Redis cache"])
-        DB -->|"update index"| Index(["Elasticsearch /<br/>search index"])
+        Cache@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+        Index@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+        DB(["primary DB"]) -->|"invalidate"| Cache
+        DB -->|"update index"| Index
     end
 
     class DB base
-    class Cache,Index frozen
 ```
 
 Caption: the chapter's framing — your app is a composite data system, and the consistency
