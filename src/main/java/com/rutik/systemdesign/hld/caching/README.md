@@ -211,10 +211,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster", pos: "b", h: 44 }
+
     lb("Load Balancer") --> app1("App1")
     lb --> app2("App2")
     lb --> app3("App3")
-    app1 --> redis("Redis Cluster")
+    app1 --> redis
     app2 --> redis
     app3 --> redis
     redis --> shard1("Shard1")
@@ -224,7 +226,7 @@ flowchart TD
 
     class lb mathOp
     class app1,app2,app3 req
-    class redis,shard1,shard2,shard3,shard4 base
+    class shard1,shard2,shard3,shard4 base
 ```
 
 Every shard is a primary + replica pair; the load balancer fans requests out across stateless app servers that all share the same Redis cluster, so any app node can serve any key.
@@ -603,15 +605,17 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph Read["Read Path"]
+        redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>200 shards", pos: "b", h: 44 }
         client(["Client<br/>mobile/web"]) --> gateway("API Gateway")
         gateway --> timeline("Timeline Service<br/>L1 Caffeine")
-        timeline -->|"L1 MISS"| redis("Redis Cluster<br/>200 shards")
+        timeline -->|"L1 MISS"| redis
         timeline -.->|"L1 HIT"| returned(["Return timeline"])
         redis -.->|"L2 HIT"| returned
     end
 
     subgraph Write["Write Path"]
-        writeapi(["Tweet Write API"]) --> kafka("Kafka topic")
+        kafka@{ icon: "logos:kafka", form: "square", label: "Kafka topic", pos: "b", h: 44 }
+        writeapi(["Tweet Write API"]) --> kafka
         kafka --> fanout("Fan-out Worker")
     end
 
@@ -620,7 +624,6 @@ flowchart LR
 
     class client,writeapi,returned io
     class gateway,timeline req
-    class redis,kafka base
     class tweetdb frozen
     class fanout mathOp
 ```
