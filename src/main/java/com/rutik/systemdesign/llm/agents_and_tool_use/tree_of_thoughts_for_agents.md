@@ -200,14 +200,12 @@ UCB1 is a two-term sum, and reading it as two terms in tension is the whole tric
 
 ### Cost Comparison
 
-```
-Strategy      | Branching | Depth | LLM Calls (approx)
---------------|-----------|-------|--------------------
-BFS           |     4     |   3   | 4 + 16 + 64 = 84
-DFS           |     4     |   3   | up to 12 (best) / 84 (worst)
-Beam (B=3)    |     4     |   3   | 3*4=12 generate + 12 score = ~24
-MCTS (I=20)   |     4     |   3   | 20 iterations * ~3 calls = ~60
-```
+| Strategy | Branching | Depth | LLM Calls (approx) |
+|---|---|---|---|
+| BFS | 4 | 3 | 4 + 16 + 64 = 84 |
+| DFS | 4 | 3 | up to 12 (best) / 84 (worst) |
+| Beam (B=3) | 4 | 3 | 3*4=12 generate + 12 score = ~24 |
+| MCTS (I=20) | 4 | 3 | 20 iterations * ~3 calls = ~60 |
 
 **What the formula is telling you.** "Each strategy has a different shape of cost curve, and at `b=4, d=3` they happen to land within 7x of each other — which is exactly why this table is misleading if you read only this row."
 
@@ -893,16 +891,14 @@ ASCII view:
 
 Evaluated on 200 real GitHub pull requests with known bug annotations:
 
-```
-Metric                        | Greedy CoT | ToT Beam (B=3, d=3) | Delta
-------------------------------|------------|----------------------|------
-Issues found (recall@3)       |    61%     |         79%         |  +18%
-Redundant suggestions (%)     |    34%     |          9%         |  -25%
-Fix correctness (human eval)  |    52%     |         71%         |  +19%
-Avg LLM calls per review      |     3      |         43          |  +40
-Avg latency (parallel exec)   |    1.2 s   |        4.1 s        |  +2.9s
-Cost per review ($0.005/call) |   $0.015   |        $0.215       |  +$0.20
-```
+| Metric | Greedy CoT | ToT Beam (B=3, d=3) | Delta |
+|---|---|---|---|
+| Issues found (recall@3) | 61% | 79% | +18% |
+| Redundant suggestions (%) | 34% | 9% | -25% |
+| Fix correctness (human eval) | 52% | 71% | +19% |
+| Avg LLM calls per review | 3 | 43 | +40 |
+| Avg latency (parallel exec) | 1.2 s | 4.1 s | +2.9s |
+| Cost per review ($0.005/call) | $0.015 | $0.215 | +$0.20 |
 
 ToT improves issue recall by 18 percentage points and fix correctness by 19 points at 14x higher LLM call count. For a code review product where fix quality is the value driver and $0.20/review is within budget, this tradeoff is justified. For a high-volume automated linting tool processing 10K PRs/day ($2K/day cost delta), the greedy baseline with targeted ToT on high-complexity diffs is the right architecture.
 
