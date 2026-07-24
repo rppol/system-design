@@ -31,26 +31,32 @@ flowchart LR
 
     Client(["Client<br/>(mobile/web)"]) --> Gateway("API Gateway<br/>+ Rate Limiter")
     Gateway --> PaymentAPI("Payment API<br/>Service")
-    PaymentAPI <--> Idem("Idempotency Key Store<br/>(Redis)")
+    PaymentAPI <--> Idem
+    Idem@{ icon: "logos:redis", form: "square", label: "Idempotency Key Store<br/>(Redis)", pos: "b", h: 44 }
 
-    PaymentAPI --> Primary("PostgreSQL Primary<br/>(source of truth)")
-    Primary --> Replica1("PostgreSQL<br/>Replica 1")
-    Primary --> Replica2("PostgreSQL<br/>Replica 2")
+    PaymentAPI --> Primary
+    Primary@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Primary<br/>(source of truth)", pos: "b", h: 44 }
+    Primary --> Replica1
+    Replica1@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Replica 1", pos: "b", h: 44 }
+    Primary --> Replica2
+    Replica2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Replica 2", pos: "b", h: 44 }
 
-    PaymentAPI -.->|"continuous archiving"| WALG("WAL-G to S3<br/>(RPO ~ seconds)")
+    PaymentAPI -.->|"continuous archiving"| WALG
+    WALG@{ icon: "logos:aws-s3", form: "square", label: "WAL-G to S3<br/>(RPO ~ seconds)", pos: "b", h: 44 }
     PaymentAPI -.->|"HA failover"| Patroni("Patroni + etcd<br/>(RTO ~ 15-30s)")
-    PaymentAPI -.->|"async outbox relay"| Kafka("Kafka<br/>(outbox relay)")
+    PaymentAPI -.->|"async outbox relay"| Kafka
+    Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>(outbox relay)", pos: "b", h: 44 }
 
     Kafka --> Notify(["Notification<br/>Service"])
-    Kafka --> Reporting(["Reporting Service<br/>(ClickHouse)"])
-    Kafka --> Compliance(["Compliance Audit<br/>Stream (S3)"])
+    Kafka --> Reporting
+    Reporting@{ icon: "simple-icons:clickhouse", form: "square", label: "Reporting Service<br/>(ClickHouse)", pos: "b", h: 44 }
+    Kafka --> Compliance
+    Compliance@{ icon: "logos:aws-s3", form: "square", label: "Compliance Audit<br/>Stream (S3)", pos: "b", h: 44 }
 
     class Client io
-    class Gateway,Kafka req
+    class Gateway req
     class PaymentAPI,Patroni mathOp
-    class Idem base
-    class Primary train
-    class Replica1,Replica2,WALG,Notify,Reporting,Compliance frozen
+    class Notify frozen
 ```
 
 *System topology: the synchronous request path (solid arrows) runs Client to Payment API to the PostgreSQL primary and the Redis idempotency store; WAL archiving, Patroni/etcd failover, and the Kafka outbox relay all sit off the hot path (dotted arrows) so they never add latency to a payment.*
