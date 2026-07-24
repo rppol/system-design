@@ -124,7 +124,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    P(["Redis process<br/>serving live traffic"]) --> F("fork syscall<br/>50-500ms for 10GB")
+    P --> F("fork syscall<br/>50-500ms for 10GB")
     F --> C["Child: frozen view<br/>of all memory pages"]
     C --> D["Child writes full<br/>dataset to temp .rdb"]
     D --> SW(["Rename to dump.rdb<br/>atomic swap"])
@@ -133,7 +133,8 @@ flowchart LR
     W --> CW["Kernel copies page<br/>copy-on-write"]
     CW -.->|"worst case:<br/>memory doubles"| P2
 
-    class P io
+    P@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+
     class F mathOp
     class C,D frozen
     class SW io
