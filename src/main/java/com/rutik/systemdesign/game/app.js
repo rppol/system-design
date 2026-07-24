@@ -5048,6 +5048,19 @@ function mmPolishSvg(n, ctype) {
   n.querySelectorAll(".cluster rect").forEach(r => { r.setAttribute("rx", "12"); r.setAttribute("ry", "12"); });
   // Color arrowhead markers (marker fill is independent of lineColor themeVariable)
   n.querySelectorAll("marker path, marker polygon").forEach(m => { m.setAttribute("fill", "#61afef"); m.removeAttribute("stroke"); });
+  // Product-logo chips: a Mermaid icon node draws its background SQUARE in the
+  // themed mainBkg (#1a1a1a), which makes dark/monochrome logos (Kafka #1a1919,
+  // OpenAI, most simple-icons) invisible on the pitch-black reader surface.
+  // Recolor that square to a white chip so ANY logo reads. The glyph fills are a
+  // different value (e.g. #1a1919), so they are untouched; colored logos (S3, Redis)
+  // draw their own background over the chip, so it's hidden there. Scoped to
+  // .icon-shape only, so non-icon nodes are unaffected.
+  n.querySelectorAll(".icon-shape").forEach(g => {
+    g.querySelectorAll("path, rect").forEach(el => {
+      const f = (el.getAttribute("fill") || "").toLowerCase();
+      if (f === "#1a1a1a" || getComputedStyle(el).fill === "rgb(26, 26, 26)") el.setAttribute("fill", "#ffffff");
+    });
+  });
   if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
   mmTintPlain(n);
 }
