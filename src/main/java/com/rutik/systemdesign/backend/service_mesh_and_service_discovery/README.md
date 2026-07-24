@@ -66,11 +66,15 @@ flowchart TD
     xDS{"xDS API<br/>LDS · RDS · CDS · EDS"}
 
     subgraph PodA["Pod A"]
-        AppA(["App Container<br/>port 8080"]) --> EnvoyA["Envoy Sidecar<br/>15001/15006"]
+        AppA(["App Container<br/>port 8080"])
+        EnvoyA@{ icon: "logos:envoy", form: "square", label: "Envoy Sidecar<br/>15001/15006", pos: "b", h: 44 }
+        AppA --> EnvoyA
     end
 
     subgraph PodB["Pod B"]
-        AppB(["App Container<br/>port 8080"]) --> EnvoyB["Envoy Sidecar<br/>15001/15006"]
+        AppB(["App Container<br/>port 8080"])
+        EnvoyB@{ icon: "logos:envoy", form: "square", label: "Envoy Sidecar<br/>15001/15006", pos: "b", h: 44 }
+        AppB --> EnvoyB
     end
 
     Pilot --> xDS
@@ -83,7 +87,6 @@ flowchart TD
     class Pilot,Citadel,Galley base
     class xDS mathOp
     class AppA,AppB io
-    class EnvoyA,EnvoyB train
 ```
 *Istiod's three components compute the mesh configuration and push it to every Envoy sidecar over the xDS API (LDS, RDS, CDS, EDS); iptables then transparently redirects each pod's traffic into its local sidecar, and sidecars encrypt pod-to-pod traffic with mTLS.*
 
@@ -108,8 +111,11 @@ flowchart TD
 
     subgraph SS["Server-Side (AWS ALB)"]
         direction LR
-        ssA(["Service A"]) -->|"HTTP request"| ssALB["ALB"]
-        ssALB -->|"query target group"| ssB(["Service B instance"])
+        ssA(["Service A"])
+        ssALB@{ icon: "logos:aws-elb", form: "square", label: "ALB", pos: "b", h: 44 }
+        ssB(["Service B instance"])
+        ssA -->|"HTTP request"| ssALB
+        ssALB -->|"query target group"| ssB
     end
 
     subgraph DNSSD["DNS-Based (Kubernetes)"]
@@ -121,7 +127,7 @@ flowchart TD
 
     class csA,ssA,dnsA io
     class csB,ssB,dnsB io
-    class csReg,ssALB,dnsKube base
+    class csReg,dnsKube base
     class csPick,dnsIptables mathOp
 ```
 *Client-side discovery puts the registry query and load-balancing choice inside the caller; server-side and DNS-based discovery move that decision into shared infrastructure (the ALB or kube-dns) at the cost of one extra hop — see the tradeoffs in §8.*
