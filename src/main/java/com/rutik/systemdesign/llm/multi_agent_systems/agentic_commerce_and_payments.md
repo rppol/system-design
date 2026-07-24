@@ -206,42 +206,54 @@ sequenceDiagram
 
 ### 5.3 Human-Present vs. Human-Not-Present
 
-```
-  HUMAN-PRESENT                       HUMAN-NOT-PRESENT
-  -------------                       ------------------
-  Agent assembles cart                User signs Intent Mandate ONCE
-        |                                    (price ceiling, category,
-        v                                     merchant allowlist, expiry)
-  Cart Mandate shown to user                  |
-  human reviews, SIGNS in real time           v
-        |                              Agent runs autonomously:
-        v                              for each opportunity:
-  Payment proceeds                       assemble Cart Mandate
-                                          check: within Intent bounds?
-  (latency: seconds-to-minutes,             yes -> proceed, no human call
-   per transaction)                         no  -> escalate to human
-                                       (latency: near-zero per transaction,
-                                        bounded by how tight the Intent
-                                        Mandate's constraints are)
+```mermaid
+flowchart LR
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    subgraph HP["Human-Present — seconds-to-minutes latency, per transaction"]
+        direction LR
+        hp1["Agent assembles cart"] --> hp2["Cart Mandate<br/>shown to user"] --> hp3["Human reviews,<br/>signs in real time"] --> hp4["Payment proceeds"]
+    end
+
+    subgraph HNP["Human-Not-Present — near-zero latency, bounded by Intent Mandate tightness"]
+        direction LR
+        hnp1["User signs Intent<br/>Mandate once — price ceiling,<br/>category, allowlist, expiry"] --> hnp2["Agent runs<br/>autonomously"] --> hnp3["Assemble Cart<br/>Mandate"] --> hnp4{"Within Intent<br/>bounds?"}
+        hnp4 -->|"yes"| hnp5["Proceed,<br/>no human call"]
+        hnp4 -->|"no"| hnp6["Escalate<br/>to human"]
+    end
+
+    class hp1,hp2,hp3,hp4 req
+    class hnp1,hnp2,hnp3,hnp5 base
+    class hnp4 mathOp
+    class hnp6 lossN
 ```
 
 ### 5.4 Layered Architecture
 
-```
-  +--------------------------------------------------------------+
-  | Agent reasoning / decision layer (what to buy)                |
-  +--------------------------------------------------------------+
-  | Transport: A2A / MCP (how agents and tools communicate)       |
-  +--------------------------------------------------------------+
-  | Authorization: AP2 mandates (Intent -> Cart -> Payment)        |
-  |   OR: ACP product feed + Shared Payment Token                  |
-  +--------------------------------------------------------------+
-  | Identity (optional layer): Skyfire KYA -- "is this a real,    |
-  |   registered agent operated by who it claims?"                 |
-  +--------------------------------------------------------------+
-  | Settlement rail: card network (Visa/Mastercard agent tokens)   |
-  |   OR stablecoin (x402, USDC) OR bank transfer                  |
-  +--------------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    l1["Agent reasoning / decision layer<br/>what to buy"]
+    l2["Transport: A2A / MCP<br/>how agents and tools communicate"]
+    l3["Authorization: AP2 mandates<br/>Intent to Cart to Payment<br/>OR ACP product feed + Shared Payment Token"]
+    l4["Identity, optional layer: Skyfire KYA<br/>is this a real, registered agent<br/>operated by who it claims?"]
+    l5["Settlement rail: card network<br/>Visa/Mastercard agent tokens<br/>OR stablecoin x402, USDC OR bank transfer"]
+
+    l1 --> l2 --> l3 --> l4 --> l5
+
+    class l1 io
+    class l2 req
+    class l3 mathOp
+    class l4 frozen
+    class l5 base
 ```
 
 ---
