@@ -229,25 +229,40 @@ flowchart TD
 ```
 
 ### Self-RAG vs. Standard RAG Comparison
-```
-Standard RAG:
-  Query → Always Retrieve → Generate → Output
-  (always retrieves regardless of query type)
 
-Self-RAG:
-  Query → [Retrieve]/[No Retrieve] → Optional Retrieve
-                |
-                v
-           [Relevant]/[Irrelevant] per passage
-                |
-                v
-           Generate per relevant passage
-                |
-                v
-           [Supported]/[No Support] per statement
-                |
-                v
-           Select best output by support score
+Standard RAG always retrieves before generating; Self-RAG inserts a retrieval decision, a per-passage relevance check, and a per-statement support check into the same pipeline:
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SRAG["Standard RAG"]
+        direction LR
+        SQ(["Query"]) --> SR["Always Retrieve"] --> SG["Generate"] --> SO(["Output"])
+    end
+
+    subgraph SELF["Self-RAG"]
+        direction LR
+        FQ(["Query"]) --> FD{"Retrieve or<br/>No Retrieve?"}
+        FD --> FR["Optional Retrieve"]
+        FR --> FE["Relevant or Irrelevant<br/>per passage"]
+        FE --> FG["Generate per<br/>relevant passage"]
+        FG --> FS["Supported or No Support<br/>per statement"]
+        FS --> FSEL["Select best output<br/>by support score"]
+    end
+
+    class SQ,SO,FQ io
+    class SR,SG train
+    class FD mathOp
+    class FR,FE,FG frozen
+    class FS,FSEL req
 ```
 
 ---
