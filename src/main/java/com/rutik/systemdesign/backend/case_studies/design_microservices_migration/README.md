@@ -31,14 +31,16 @@ flowchart TD
 
     subgraph P1["Phase 1 · Gateway facade"]
         direction LR
-        client1([Client]) -->|all traffic| gw1{Spring Cloud<br/>Gateway}
+        client1([Client]) -->|all traffic| gw1
+        gw1@{ icon: "logos:spring-icon", form: "square", label: "Spring Cloud<br/>Gateway", pos: "b", h: 44 }
         gw1 -->|all routes| mono1(Monolith)
     end
 
     subgraph P2["Phase 2 · Extract search"]
         direction LR
         client2([Client]) --> gw2{Gateway}
-        gw2 -->|/api/search/*| search2(Search Service<br/>Elasticsearch)
+        gw2 -->|/api/search/*| search2
+        search2@{ icon: "logos:elasticsearch", form: "square", label: "Search Service<br/>Elasticsearch", pos: "b", h: 44 }
         gw2 -->|all other| mono2(Monolith)
     end
 
@@ -69,9 +71,9 @@ flowchart TD
     P4 -.->|migrate| PN
 
     class client0,client1,client2,client4,clientN io
-    class gw1,gw2,gw4,gwN mathOp
+    class gw2,gw4,gwN mathOp
     class mono0,mono1,mono2,mono4,stubN frozen
-    class search2,search4,searchN,inv4,invN,prodN,ordN,payN,usrN train
+    class search4,searchN,inv4,invN,prodN,ordN,payN,usrN train
 ```
 
 Each phase is independently rollbackable through the gateway's traffic weighting: Phase 2's search cutover runs both endpoints in parallel for 2 weeks while shifting weight 10% → 50% → 100%, and Phase 4's inventory cutover layers in Debezium CDC to replicate monolith writes throughout that parallel run, with cutover simply stopping CDC once the monolith starts delegating reads to the new service.
