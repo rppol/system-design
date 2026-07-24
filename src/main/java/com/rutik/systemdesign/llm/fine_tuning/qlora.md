@@ -378,15 +378,30 @@ GPU RAM (16GB RTX 4080):
 ```
 
 ### Dequantization On-the-Fly
-```
-Forward Pass:
-  4-bit NF4 weights ─[dequantize]─> BF16 weights ─[matmul]─> result
-                                     (temporary)     (compute)
-                                     (discarded immediately after use)
 
-  No BF16 weight copy stored permanently
-  4-bit storage, BF16 compute — best of both
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    nf4["4-bit NF4<br/>weights (stored)"]
+    deq(("Dequantize"))
+    bf16["BF16 weights<br/>(temporary, discarded<br/>after use)"]
+    mm(("Matmul"))
+    result(["Result<br/>(compute)"])
+
+    nf4 --> deq --> bf16 --> mm --> result
+
+    class nf4 frozen
+    class deq mathOp
+    class bf16 train
+    class mm mathOp
+    class result io
 ```
+
+No BF16 weight copy is stored permanently — 4-bit storage, BF16 compute, best of both.
 
 **What this actually says.** "Nothing about the arithmetic changes — the matmul is the same BF16 matmul it always was. All that changed is how many bytes had to cross the memory bus to feed it."
 
