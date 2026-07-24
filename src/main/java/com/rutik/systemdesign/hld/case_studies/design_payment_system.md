@@ -108,7 +108,7 @@ flowchart LR
         Ledger("Ledger Service<br/>append-only double-entry")
         Outbox["outbox table<br/>event: PaymentSucceeded"]
         Relay("Outbox Relay<br/>Debezium or polling")
-        Kafka("Kafka<br/>topic: payments.*")
+        Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>topic: payments.*", pos: "b", h: 44 }
     end
 
     subgraph Consumers["Downstream Consumers"]
@@ -136,7 +136,7 @@ flowchart LR
     class Client io
     class Gateway req
     class Validate,Risk,PSPAdapter,Relay mathOp
-    class LocalTxn,Outbox,Kafka base
+    class LocalTxn,Outbox base
     class PSP frozen
     class Ledger train
     class OrderSvc,NotifSvc,ReconSvc req
