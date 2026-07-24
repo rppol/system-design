@@ -88,7 +88,7 @@ flowchart TD
         matchingService("Matching Service<br/>Nearest driver search")
     end
 
-    redisGeo("Redis Geo Index<br/>GEOADD / GEORADIUS")
+    redisGeo@{ icon: "logos:redis", form: "square", label: "Redis Geo Index", pos: "b", h: 44 }
     tripService("Trip Service<br/>Trip state machine")
 
     subgraph Downstream["Downstream Services"]
@@ -111,7 +111,6 @@ flowchart TD
     class riderApp,driverApp io
     class gateway req
     class locationService,matchingService,surgeService mathOp
-    class redisGeo base
     class tripService train
     class notificationService req
     class paymentService lossN
@@ -144,8 +143,8 @@ flowchart LR
 
     driverApp(["Driver App"])
     locationService("Location Service<br/>validate + geohash")
-    redisGeo("Redis Geospatial Index<br/>GEOADD + HSET")
-    kafka("Kafka<br/>location_update topic")
+    redisGeo@{ icon: "logos:redis", form: "square", label: "Redis Geospatial Index", pos: "b", h: 44 }
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     tripService("Trip Service<br/>relay to rider")
     analyticsService("Analytics Service<br/>GPS trace + ETA model")
     surgeService("Surge Pricing Service<br/>density recalculation")
@@ -159,8 +158,6 @@ flowchart LR
 
     class driverApp io
     class locationService,analyticsService,surgeService mathOp
-    class redisGeo base
-    class kafka req
     class tripService train
 ```
 
@@ -523,7 +520,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    kafkaTopic(["Kafka<br/>trip_state_changed"])
+    kafkaTopic@{ icon: "logos:kafka", form: "square", label: "Kafka trip_state_changed", pos: "b", h: 44 }
     notifService("Notification Service<br/>type + tokens + prefs")
     apns("APNs<br/>iOS push")
     fcm("FCM<br/>Android push")
@@ -536,7 +533,6 @@ flowchart LR
     notifService -.->|"fallback"| sms
     notifService --> email
 
-    class kafkaTopic req
     class notifService mathOp
     class apns,fcm,sms,email frozen
 ```
