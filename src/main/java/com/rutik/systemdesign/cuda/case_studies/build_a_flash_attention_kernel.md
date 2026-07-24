@@ -220,19 +220,35 @@ The critical property this diagram makes visible: **there is no arrow from `QK`,
 
 ### Where This Sits in a Model's Forward Pass
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph L["Transformer decoder layer (one of L layers)"]
+        LN1(["LayerNorm"]) --> QKV(["Q,K,V<br/>projections"])
+        QKV --> FA(["FlashAttention<br/>kernel<br/>(this case study)"])
+        FA --> OP(["output<br/>projection"])
+        OP --> R1(["Residual add"])
+        R1 --> LN2(["LayerNorm"])
+        LN2 --> FFN(["FFN"])
+        FFN --> R2(["Residual add"])
+    end
+
+    class LN1,LN2,OP,R1,R2,FFN base
+    class QKV req
+    class FA mathOp
 ```
-Transformer decoder layer (one of L layers)
-+----------------------------------------------------------+
-|  LayerNorm -> [Q,K,V projections] -> FlashAttention kernel |  <- this case study
-|             (this file)            -> output projection    |
-|  Residual add -> LayerNorm -> FFN -> Residual add           |
-+----------------------------------------------------------+
 
 FlashAttention is invoked once per layer, per forward pass, per training step
 (and once per decode step at inference, against a growing KV cache). Everything
 above and below the kernel — projections, LayerNorm, FFN, the KV cache paging
 strategy across requests — is out of scope here; see Section 1's "Out of Scope."
-```
 
 ---
 
