@@ -46,15 +46,13 @@ Each point trades write-path latency for how much committed data can survive a c
 
 ## 4. Types / Architectures / Strategies
 
-```
-Category              | Systems                    | Use Case
-----------------------|----------------------------|---------------------------
-Key-Value Cache       | Redis, Memcached           | Session, cache, leaderboard
-In-Memory RDBMS       | VoltDB, H-Store, SAP HANA  | OLTP with ACID at microsecond speed
-Distributed Cache     | Apache Ignite, Hazelcast   | Distributed cache + compute grid
-In-Memory Analytics   | Apache Arrow, DuckDB       | Vectorized analytical queries in RAM
-Persistent Memory     | pmem-based stores          | NVMe DIMM, byte-addressable
-```
+| Category | Systems | Use Case |
+|----------|---------|----------|
+| Key-Value Cache | Redis, Memcached | Session, cache, leaderboard |
+| In-Memory RDBMS | VoltDB, H-Store, SAP HANA | OLTP with ACID at microsecond speed |
+| Distributed Cache | Apache Ignite, Hazelcast | Distributed cache + compute grid |
+| In-Memory Analytics | Apache Arrow, DuckDB | Vectorized analytical queries in RAM |
+| Persistent Memory | pmem-based stores | NVMe DIMM, byte-addressable |
 
 ---
 
@@ -124,25 +122,20 @@ flowchart LR
 
 ### Redis vs Memcached
 
-```
-Feature               | Redis                  | Memcached
-----------------------|------------------------|------------------
-Data structures       | String, List, Hash,    | String only
-                      | Set, Sorted Set,       |
-                      | HyperLogLog, Stream,   |
-                      | Bitmap, Geo            |
-Persistence           | RDB + AOF + hybrid     | None
-Cluster mode          | Redis Cluster (native) | None (client sharding)
-Replication           | Primary-replica        | None
-Lua scripting         | Yes (EVAL, atomic)     | No
-Pub/Sub               | Yes                    | No
-Transactions          | MULTI/EXEC (optimistic)| No
-Threading model       | Single cmd thread      | Multi-threaded
-Memory efficiency     | Slightly higher overhead| Slightly lower overhead
-Expiration            | Per-key TTL            | Per-key TTL
-Max key size          | 512MB                  | 250 bytes (key)
-Max value size        | 512MB                  | 1MB per item
-```
+| Feature | Redis | Memcached |
+|---------|-------|-----------|
+| Data structures | String, List, Hash, Set, Sorted Set, HyperLogLog, Stream, Bitmap, Geo | String only |
+| Persistence | RDB + AOF + hybrid | None |
+| Cluster mode | Redis Cluster (native) | None (client sharding) |
+| Replication | Primary-replica | None |
+| Lua scripting | Yes (EVAL, atomic) | No |
+| Pub/Sub | Yes | No |
+| Transactions | MULTI/EXEC (optimistic) | No |
+| Threading model | Single cmd thread | Multi-threaded |
+| Memory efficiency | Slightly higher overhead | Slightly lower overhead |
+| Expiration | Per-key TTL | Per-key TTL |
+| Max key size | 512MB | 250 bytes (key) |
+| Max value size | 512MB | 1MB per item |
 
 Memcached remains relevant for simple string caching at very high throughput where multi-threading matters and no persistence or data structure richness is needed. Redis dominates for all other use cases.
 
@@ -150,18 +143,16 @@ Memcached remains relevant for simple string caching at very high throughput whe
 
 When Redis reaches its `maxmemory` limit, it evicts keys according to the configured policy:
 
-```
-Policy              | Behavior
---------------------|--------------------------------------------------
-noeviction          | Return error on write when memory full (safe: no data loss, may block)
-allkeys-lru         | Evict least-recently-used key from all keys
-volatile-lru        | Evict LRU key from keys with TTL set only
-allkeys-lfu         | Evict least-frequently-used key from all keys (LFU)
-volatile-lfu        | Evict LFU key from keys with TTL set only
-allkeys-random      | Evict random key from all keys
-volatile-random     | Evict random key from keys with TTL only
-volatile-ttl        | Evict key with shortest remaining TTL
-```
+| Policy | Behavior |
+|--------|----------|
+| noeviction | Return error on write when memory full (safe: no data loss, may block) |
+| allkeys-lru | Evict least-recently-used key from all keys |
+| volatile-lru | Evict LRU key from keys with TTL set only |
+| allkeys-lfu | Evict least-frequently-used key from all keys (LFU) |
+| volatile-lfu | Evict LFU key from keys with TTL set only |
+| allkeys-random | Evict random key from all keys |
+| volatile-random | Evict random key from keys with TTL only |
+| volatile-ttl | Evict key with shortest remaining TTL |
 
 The policy name encodes a two-stage decision: which keys are eligible (`allkeys-*` vs `volatile-*`), then which one to pick within that pool.
 
@@ -264,17 +255,13 @@ Ignite persists data to native persistence (RocksDB-backed) or relies on an exte
 
 Cold start is a major operational concern for in-memory systems. Options:
 
-```
-Strategy          | Mechanism                           | Tradeoff
-------------------|-------------------------------------|---------------------------
-Lazy warming      | Cache misses populate cache on read | Slow initial requests
-Eager warming     | Pre-load data on startup            | Startup delay, memory spike
-Pre-warming job   | Background job fills cache before   | Complex, must run before
-                  | traffic is cut over                 | traffic shift
-Replica warming   | Serve traffic from old instance     | Requires blue-green deploy
-                  | while new one warms                 |
-Snapshot restore  | Load RDB snapshot on Redis start    | Fast (memory-mapped read)
-```
+| Strategy | Mechanism | Tradeoff |
+|----------|-----------|----------|
+| Lazy warming | Cache misses populate cache on read | Slow initial requests |
+| Eager warming | Pre-load data on startup | Startup delay, memory spike |
+| Pre-warming job | Background job fills cache before traffic is cut over | Complex, must run before traffic shift |
+| Replica warming | Serve traffic from old instance while new one warms | Requires blue-green deploy |
+| Snapshot restore | Load RDB snapshot on Redis start | Fast (memory-mapped read) |
 
 ---
 
@@ -292,19 +279,16 @@ Snapshot restore  | Load RDB snapshot on Redis start    | Fast (memory-mapped re
 
 ## 8. Tradeoffs
 
-```
-Concern            | In-Memory DB               | Disk-Backed DB
--------------------|----------------------------|-----------------------------
-Read latency       | ~1–100 microseconds        | ~1–10 milliseconds
-Write latency      | ~1–100 microseconds        | ~1–10 milliseconds (fsync)
-Durability         | Configurable (lossy–durable)| Default durable
-Memory cost        | ~$5–20/GB RAM/month (cloud) | ~$0.02–0.10/GB SSD/month
-Dataset size       | Limited to RAM (typically  | Virtually unlimited
-                   | < 1TB per node)            | (multi-TB per node)
-Cold start         | Warming required            | Hot from OS page cache
-ACID transactions  | Limited (Redis MULTI/EXEC) | Full ACID
-Complex queries    | Limited (Redis no JOIN)     | Full SQL
-```
+| Concern | In-Memory DB | Disk-Backed DB |
+|---------|--------------|----------------|
+| Read latency | ~1–100 microseconds | ~1–10 milliseconds |
+| Write latency | ~1–100 microseconds | ~1–10 milliseconds (fsync) |
+| Durability | Configurable (lossy–durable) | Default durable |
+| Memory cost | ~$5–20/GB RAM/month (cloud) | ~$0.02–0.10/GB SSD/month |
+| Dataset size | Limited to RAM (typically < 1TB per node) | Virtually unlimited (multi-TB per node) |
+| Cold start | Warming required | Hot from OS page cache |
+| ACID transactions | Limited (Redis MULTI/EXEC) | Full ACID |
+| Complex queries | Limited (Redis no JOIN) | Full SQL |
 
 **What the formula is telling you.** "You are buying roughly a 100x latency improvement for
 roughly a 200x storage price — so in-memory only pays off when the dataset is small and every
