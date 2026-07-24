@@ -234,47 +234,28 @@ index time.
 
 ## 5. Architecture Diagrams
 
+**Multi-layer LLM cache architecture.** A request cascades through three layers in order —
+exact-match, then semantic, then provider prompt cache — falling through to full inference only
+if all three miss:
+
+```mermaid
+flowchart TD
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    request(["Incoming LLM request"]) --> l1["L1: Exact-Match<br/>Key: SHA-256 of messages<br/>Store: Redis<br/>TTL: configurable"]
+    l1 -- HIT --> l1hit(["Return cached response"])
+    l1 -- MISS --> l2["L2: Semantic Cache<br/>Embed query, vector search<br/>threshold: 0.92"]
+    l2 -- HIT --> l2hit(["Return similar response"])
+    l2 -- MISS --> l3["L3: Prompt Cache<br/>Provider KV (Anthropic/OpenAI)<br/>auto prefix cache"]
+    l3 --> infer(["Full LLM inference"])
+    infer --> store(["Store in L1, L2"])
+
+    class request,l1hit,l2hit,infer,store req
+    class l1,l2,l3 base
 ```
-Multi-Layer LLM Cache Architecture
-=====================================
 
-          Incoming LLM request
-                 |
-                 v
-       +--------------------+
-       | L1: Exact-Match    |
-       | Key: SHA-256(msgs) |
-       | Store: Redis       |
-       | TTL: configurable  |
-       +--------------------+
-          HIT /       \ MISS
-         /               \
-    Return              |
-    cached               v
-    response   +--------------------+
-               | L2: Semantic Cache |
-               | Embed query ->     |
-               | vector search      |
-               | threshold: 0.92    |
-               +--------------------+
-                 HIT /       \ MISS
-                /               \
-           Return               |
-           similar response      v
-                       +--------------------+
-                       | L3: Prompt Cache   |
-                       | (Provider KV)      |
-                       | Anthropic/OpenAI   |
-                       | auto prefix cache  |
-                       +--------------------+
-                                  |
-                                  v
-                       Full LLM inference
-                                  |
-                                  v
-                       Store in L1, L2
-
-
+```
 Anthropic Prompt Caching — Prefix Layout
 ==========================================
 
