@@ -201,21 +201,30 @@ flowchart TD
 
 ### Majority Voting (No Communication)
 
-```
-Question
-   |
-   +----------+----------+----------+----------+----------+
-   |          |          |          |          |          |
-[inst-1]  [inst-2]  [inst-3]  [inst-4]  [inst-5]
-temp=0.7  temp=0.7  temp=0.7  temp=0.7  temp=0.7
-   |          |          |          |          |
- Ans_1      Ans_2      Ans_3      Ans_4      Ans_5
-   |          |          |          |          |
-   +----------+----------+----------+----------+
-                         |
-               Count most frequent answer
-                         |
-                   Final Answer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Question"]) --> I1 & I2 & I3 & I4 & I5
+    I1("Instance 1<br/>temp=0.7") --> A1("Ans_1")
+    I2("Instance 2<br/>temp=0.7") --> A2("Ans_2")
+    I3("Instance 3<br/>temp=0.7") --> A3("Ans_3")
+    I4("Instance 4<br/>temp=0.7") --> A4("Ans_4")
+    I5("Instance 5<br/>temp=0.7") --> A5("Ans_5")
+    A1 & A2 & A3 & A4 & A5 --> Count{"Count most<br/>frequent answer"}
+    Count --> Final(["Final Answer"])
+
+    class Q,Final io
+    class I1,I2,I3,I4,I5 train
+    class A1,A2,A3,A4,A5 req
+    class Count mathOp
 ```
 
 ### Token Cost Growth per Architecture
@@ -900,39 +909,38 @@ Monitor cost per query in production. Debate token cost grows superlinearly with
 
 **Architecture overview.**
 
-```
-Draft claim + source documents
-              |
-    +---------+---------+---------+
-    |                   |         |
-[Agent A]          [Agent B]  [Agent C]
-Verify claim       Verify     Verify
-temp=0.3           temp=0.7   temp=1.2
-"accountant"       "auditor"  "skeptic"
-    |                   |         |
-   Ans_A0              Ans_B0   Ans_C0
-    |                   |         |
-    +-------------------+---------+
-          (share round-0 responses)
-    |                   |         |
-   Ans_A1              Ans_B1   Ans_C1
-    |                   |         |
-    +-------------------+---------+
-                  |
-    Consensus check: all three agree?
-           |                 |
-          YES                NO
-           |                 |
-    Accept consensus    [Judge Agent]
-                        reads transcript
-                             |
-                       Verdict + confidence
-                             |
-                    confidence < medium?
-                         |       |
-                        YES      NO
-                  Flag for      Accept
-                  human review
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Draft(["Draft claim +<br/>source documents"]) --> A0 & B0 & C0
+    A0("Agent A accountant<br/>temp=0.3 -> Ans_A0")
+    B0("Agent B auditor<br/>temp=0.7 -> Ans_B0")
+    C0("Agent C skeptic<br/>temp=1.2 -> Ans_C0")
+    A0 & B0 & C0 --> Share("Share round-0<br/>responses")
+    Share --> A1 & B1 & C1
+    A1("Agent A -> Ans_A1")
+    B1("Agent B -> Ans_B1")
+    C1("Agent C -> Ans_C1")
+    A1 & B1 & C1 --> Consensus{"All three<br/>agree?"}
+    Consensus -- Yes --> Accept(["Accept<br/>consensus"])
+    Consensus -- No --> Judge("Judge Agent<br/>reads transcript")
+    Judge --> Verdict("Verdict +<br/>confidence")
+    Verdict --> ConfCheck{"Confidence<br/>below medium?"}
+    ConfCheck -- Yes --> Flag(["Flag for<br/>human review"])
+    ConfCheck -- No --> AutoAccept(["Accept"])
+
+    class Draft,Accept,Flag,AutoAccept io
+    class A0,B0,C0,A1,B1,C1,Judge train
+    class Share,Verdict req
+    class Consensus,ConfCheck mathOp
 ```
 
 **Key design decisions.**
