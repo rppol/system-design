@@ -268,15 +268,20 @@ flowchart LR
     H2 --> B2(["HTTP"])
     H3 --> B3(["DB"])
     H4 --> B4(["SMTP"])
-    H5 --> B5(["Kafka"])
-    H6 --> B6(["S3"])
-    H7 --> B7(["Redis"])
-    H8 --> B8(["SQS"])
+    H5 --> B5
+    H6 --> B6
+    H7 --> B7
+    H8 --> B8
+
+    B5@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    B6@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+    B7@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    B8@{ icon: "logos:aws-sqs", form: "square", label: "SQS", pos: "b", h: 44 }
 
     class PT io
     class BUS base
     class H1,H2,H3,H4,H5,H6,H7,H8 req
-    class B1,B2,B3,B4,B5,B6,B7,B8 frozen
+    class B1,B2,B3,B4 frozen
 ```
 
 *Guava's `AsyncEventBus` decouples the payment thread from all eight subscribers — `post()` returns in under 1ms while each handler runs independently on the 16-thread pool, so a slow fraud check can no longer stall billing or notifications.*
