@@ -194,21 +194,31 @@ sequenceDiagram
 
 ### 5.4 Multi-Agent System with Protocol Layers
 
-```
-+------------------+        A2A        +------------------+
-|  Orchestrator    |<----------------->|  Research Agent  |
-|  Agent           |                  |                  |
-|                  |        A2A        +------------------+
-|                  |<----------------->| Analyst Agent   |
-|                  |                  |                  |
-+--------+---------+                  +--------+---------+
-         |                                     |
-         | MCP                                 | MCP
-         |                                     |
-+--------+---------+                  +--------+---------+
-|  Tool Server     |                  |  Tool Server     |
-|  (web search)    |                  |  (database)      |
-+------------------+                  +------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ORCH(Orchestrator<br/>Agent)
+    RES(Research Agent)
+    ANA(Analyst Agent)
+    TOOLWEB(Tool Server<br/>web search)
+    TOOLDB(Tool Server<br/>database)
+
+    ORCH <-->|A2A| RES
+    ORCH <-->|A2A| ANA
+    ORCH -->|MCP| TOOLWEB
+    RES -->|MCP| TOOLDB
+    ANA -->|MCP| TOOLDB
+
+    class ORCH req
+    class RES,ANA train
+    class TOOLWEB,TOOLDB base
 ```
 
 ### 5.5 ANP Decentralized Discovery
@@ -230,25 +240,25 @@ No central registry is involved: resolving the DID over DNS + HTTPS (500ms–2s)
 
 ### 5.6 Trust Boundary Model
 
-```
-+---------------------------------------+
-|  TRUSTED ZONE (same process/host)     |
-|                                       |
-|  +----------+    direct call    +----------+  |
-|  | Agent A  |<----------------->| Agent B  |  |
-|  +----------+                   +----------+  |
-|                                       |
-+---------------------------------------+
-           |  network boundary
-+---------------------------------------+
-|  UNTRUSTED ZONE (remote agents)       |
-|                                       |
-|  +----------+  JWT + HTTPS   +----------+  |
-|  | Agent C  |<-------------->| Agent D  |  |
-|  | (local)  | signed request | (remote) |  |
-|  +----------+                +----------+  |
-|                                       |
-+---------------------------------------+
+```mermaid
+flowchart TB
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TRUSTED["TRUSTED ZONE<br/>(same process/host)"]
+        direction LR
+        A(Agent A) <-->|direct call| B(Agent B)
+    end
+
+    subgraph UNTRUSTED["UNTRUSTED ZONE<br/>(remote agents)"]
+        direction LR
+        C(Agent C<br/>local) <-->|JWT + HTTPS<br/>signed request| D(Agent D<br/>remote)
+    end
+
+    TRUSTED -.->|network boundary| UNTRUSTED
+
+    class A,B req
+    class C,D base
 ```
 
 ---
