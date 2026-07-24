@@ -992,92 +992,44 @@ The system handles 50,000 conversations per day. Regulatory requirements include
 
 ### Architecture
 
-```
-Customer (Mobile/Web)
-        |
-        v
-+------------------+
-| API Gateway      |
-| - Auth (OAuth2)  |
-| - Rate limit:    |
-|   100 req/hr/user|
-| - TLS 1.3        |
-+------------------+
-        |
-        v
-+------------------+     +-------------------+
-| Input Security   |     | Threat Detection  |
-| Layer            |---->| Service           |
-| - Unicode NFKC   |     | - ML injection    |
-| - Invisible char  |     |   classifier      |
-|   strip           |     | - Anomaly scoring |
-| - Length limit    |     | - Alert pipeline  |
-|   (2000 chars)    |     +-------------------+
-| - PII masking     |
-|   (card -> token) |
-+------------------+
-        |
-        v
-+------------------+     +-------------------+
-| Prompt           |     | RAG Retrieval     |
-| Construction     |<----| - Vector DB       |
-| - System prompt  |     | - Chunk sanitizer |
-|   (no secrets)   |     | - Provenance tag  |
-| - Delimited      |     | - Content scanner |
-|   user input     |     +-------------------+
-| - Canary tokens  |
-| - Masked PII     |
-+------------------+
-        |
-        v
-+------------------+
-| LLM Inference    |
-| - GPT-4 / Claude |
-| - T=0.3 (factual)|
-| - Tool schema:   |
-|   read_balance   |
-|   read_txns      |
-|   initiate_xfer  |
-|   update_address |
-+------------------+
-        |
-        v
-+------------------+     +-------------------+
-| Tool Executor    |     | Approval Service  |
-| - Read ops:      |     | (Human-in-Loop)   |
-|   auto-execute   |---->| - Transfers >$1K  |
-| - Write ops:     |     | - Address changes |
-|   require confirm|     | - Card actions    |
-| - Parameterized  |     +-------------------+
-|   queries only   |
-| - Result sanitize|
-+------------------+
-        |
-        v
-+------------------+
-| Output Security  |
-| Layer            |
-| - PII detection  |
-|   (SSN, card,    |
-|    account #)    |
-| - Canary check   |
-| - Response schema|
-|   validation     |
-| - Compliance     |
-|   keywords check |
-+------------------+
-        |
-        v
-+------------------+
-| Audit Logger     |
-| - Immutable store|
-| - 7-year retain  |
-| - SOX compliance |
-| - PCI-DSS fields |
-+------------------+
-        |
-        v
-Sanitized Response to Customer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CUST(["Customer<br/>(Mobile/Web)"])
+    GW["API Gateway<br/>Auth (OAuth2)<br/>Rate limit: 100 req/hr/user<br/>TLS 1.3"]
+    ISEC["Input Security Layer<br/>Unicode NFKC<br/>Invisible char strip<br/>Length limit (2000 chars)<br/>PII masking (card to token)"]
+    THREAT["Threat Detection Service<br/>ML injection classifier<br/>Anomaly scoring<br/>Alert pipeline"]
+    PROMPT["Prompt Construction<br/>System prompt (no secrets)<br/>Delimited user input<br/>Canary tokens<br/>Masked PII"]
+    RAG["RAG Retrieval<br/>Vector DB<br/>Chunk sanitizer<br/>Provenance tag<br/>Content scanner"]
+    LLM["LLM Inference<br/>GPT-4 / Claude<br/>T=0.3 (factual)<br/>Tool schema: read_balance,<br/>read_txns, initiate_xfer,<br/>update_address"]
+    EXEC["Tool Executor<br/>Read ops: auto-execute<br/>Write ops: require confirm<br/>Parameterized queries only<br/>Result sanitize"]
+    APPROVE["Approval Service<br/>(Human-in-Loop)<br/>Transfers over $1K<br/>Address changes<br/>Card actions"]
+    OSEC["Output Security Layer<br/>PII detection (SSN, card,<br/>account number)<br/>Canary check<br/>Response schema validation<br/>Compliance keywords check"]
+    AUDIT["Audit Logger<br/>Immutable store<br/>7-year retain<br/>SOX compliance<br/>PCI-DSS fields"]
+    RESP(["Sanitized Response<br/>to Customer"])
+
+    CUST --> GW --> ISEC
+    ISEC -->|scan| THREAT
+    ISEC --> PROMPT
+    RAG -->|context| PROMPT
+    PROMPT --> LLM --> EXEC
+    EXEC -->|write ops| APPROVE
+    EXEC --> OSEC --> AUDIT --> RESP
+
+    class CUST,RESP io
+    class GW,RAG,LLM,AUDIT base
+    class ISEC,PROMPT,OSEC mathOp
+    class EXEC train
+    class THREAT lossN
+    class APPROVE req
 ```
 
 ### Key Security Decisions
