@@ -64,43 +64,40 @@ Generic computer control (screenshot + click/type/key) — works on browsers but
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    task(["User task:<br/>Find a flight NYC to SF<br/>next Friday under $300"])
+    open["Open browser,<br/>navigate to search site"]
+    extract["Extract DOM /<br/>accessibility tree"]
+    sees["LLM sees:<br/>Heading: Search Flights<br/>Input role=textbox label=From<br/>Input role=textbox label=To<br/>Input role=textbox label=Date<br/>Button role=button text=Search"]
+    decide{"LLM decides next action:<br/>type NYC in From input"}
+    execute["Execute action<br/>via Playwright"]
+    verify["Verify<br/>new DOM state"]
+    continue_(["Continue until<br/>task complete"])
+
+    task --> open --> extract --> sees --> decide --> execute --> verify
+    verify -->|"not done, loop"| decide
+    verify -->|"done"| continue_
+
+    class task req
+    class open,execute base
+    class extract,sees io
+    class decide mathOp
+    class verify train
+    class continue_ req
 ```
-Browser Agent Loop
-===================
 
-  User task: "Find a flight from NYC to SF next Friday under $300"
-        |
-        v
-  Open browser, navigate to search site
-        |
-        v
-  +--------------------+
-  | Extract DOM /      |
-  | accessibility tree |
-  +--------------------+
-        |
-        v
-  LLM sees:
-    "Heading: Search Flights"
-    "Input role=textbox label='From'"
-    "Input role=textbox label='To'"
-    "Input role=textbox label='Date'"
-    "Button role=button text='Search'"
-        |
-        v
-  LLM decides next action:
-    type 'NYC' in From input
-        |
-        v
-  Execute action via Playwright
-        |
-        v
-  Verify (new DOM state)
-        |
-        v (loop)
-  Continue until task complete
+The browser agent loop extracts the accessibility tree, hands it to the LLM to pick the next action, executes it via Playwright, and verifies the result before looping back — the same cycle every step of a task repeats until the terminal state is reached.
 
-
+```
 DOM Extraction Strategies
 ==========================
 
@@ -498,58 +495,56 @@ Yes but with constraints. For 100s of concurrent browser sessions, use Browserba
 
 **Architecture:**
 
-```
-          ┌──────────────────────────────────────────────────┐
-          │             Order Management System (OMS)         │
-          │   PostgreSQL: pending_orders, portal_credentials  │
-          └──────────────────┬───────────────────────────────┘
-                             │  poll every 60s for new orders
-                             v
-          ┌──────────────────────────────────────────────────┐
-          │          Browser Agent Orchestrator (Python)      │
-          │   - Dequeue orders by portal                      │
-          │   - Load portal recipe (JSON config)              │
-          │   - Dispatch BrowserAgentWorker per order         │
-          │   - Collect result: success | retry | escalate    │
-          └──────────────────┬───────────────────────────────┘
-                             │  parallel (max 6 concurrent)
-          ┌──────────────────┼───────────────────────────────┐
-          │                  │                               │
-    ┌─────▼──────┐    ┌──────▼─────┐              ┌─────────▼──────┐
-    │  Worker 0  │    │  Worker 1  │   ...         │  Worker 5      │
-    │  Portal A  │    │  Portal B  │               │  Portal C      │
-    │ Browserbase│    │ Browserbase│               │ Browserbase    │
-    │  session   │    │  session   │               │  session       │
-    └─────┬──────┘    └──────┬─────┘              └────────┬───────┘
-          │                  │                             │
-          └──────────────────┼─────────────────────────────┘
-                             │
-          ┌──────────────────▼───────────────────────────────┐
-          │   Claude Sonnet 4 (Anthropic API)                 │
-          │   Input: accessibility tree + recipe hints        │
-          │   Output: action sequence (click/type/select)     │
-          └──────────────────────────────────────────────────┘
-                             │
-          ┌──────────────────▼───────────────────────────────┐
-          │   Audit Log + Screenshot Archive (S3)             │
-          │   Every step: action taken, DOM snapshot, screenshot│
-          │   Verification: confirmation-page screenshot →     │
-          │     Claude verifies order number visible           │
-          └──────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Portal Recipe (JSON per supplier):
-  {
-    "portal_id": "supplier_acme",
-    "login_url": "https://portal.acme-supply.com/login",
-    "username_selector": "input[label='Username']",
-    "password_vault_key": "acme/portal_password",
-    "search_flow": "type SKU in search bar, click first result",
-    "quantity_selector": "input[role='spinbutton', name='Quantity']",
-    "submit_hint": "button named 'Place Order' or 'Confirm'",
-    "success_signal": "text containing 'Order #' OR 'Confirmation'",
-    "known_quirks": ["wait 3s after login for SSO redirect",
-                     "quantity field resets on blur — tab away last"]
-  }
+    oms["Order Management System<br/>OMS"]
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>pending_orders, portal_credentials", pos: "b", h: 44 }
+    orch["Browser Agent Orchestrator<br/>Python<br/>dequeue - load recipe - dispatch<br/>collect: success / retry / escalate"]
+    w0["Worker 0<br/>Portal A<br/>Browserbase session"]
+    w1["Worker 1<br/>Portal B<br/>Browserbase session"]
+    w5["Worker 5<br/>Portal C<br/>Browserbase session"]
+    claude["Claude Sonnet 4<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
+    s3@{ icon: "logos:aws-s3", form: "square", label: "Audit Log +<br/>Screenshot Archive (S3)", pos: "b", h: 44 }
+
+    oms --> pg
+    oms -->|"poll every 60s"| orch
+    orch -->|"parallel, max 6 concurrent"| w0
+    orch -->|"parallel, max 6 concurrent"| w1
+    orch -->|"parallel, max 6 concurrent"| w5
+    w0 --> claude
+    w1 --> claude
+    w5 --> claude
+    claude -->|"verification: confirmation<br/>screenshot re-checked"| s3
+
+    class oms req
+    class orch base
+    class w0,w1,w5 train
+    class claude io
+```
+
+Portal recipe, one JSON config per supplier:
+
+```json
+{
+  "portal_id": "supplier_acme",
+  "login_url": "https://portal.acme-supply.com/login",
+  "username_selector": "input[label='Username']",
+  "password_vault_key": "acme/portal_password",
+  "search_flow": "type SKU in search bar, click first result",
+  "quantity_selector": "input[role='spinbutton', name='Quantity']",
+  "submit_hint": "button named 'Place Order' or 'Confirm'",
+  "success_signal": "text containing 'Order #' OR 'Confirmation'",
+  "known_quirks": ["wait 3s after login for SSO redirect",
+                   "quantity field resets on blur — tab away last"]
+}
 ```
 
 **Key implementation — 3 Python code blocks:**
