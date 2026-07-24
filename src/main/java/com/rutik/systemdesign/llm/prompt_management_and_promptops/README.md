@@ -96,46 +96,26 @@ injection.
 
 ## 5. Architecture Diagrams
 
-```
-Prompt Registry Architecture
-==============================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Engineers / PMs
-       |
-       v
-  Prompt Editor UI
-  (Langfuse / Humanloop)
-       |
-       |  create new version
-       v
-  Prompt Registry  <-------> Git (backup / audit)
-  +-----------+
-  | name      |
-  | version   |
-  | content   |
-  | metadata  |
-  +-----------+
-       |
-       |  eval-gated promotion
-       v
-  CI Eval Pipeline
-  +---------------------------+
-  | golden_dataset.jsonl      |
-  | expected_outputs.jsonl    |
-  | threshold: score >= 0.85  |
-  | judge: LLM-as-judge       |
-  +---------------------------+
-       |  pass?
-       v
-  Aliases:  canary -> v3  (5% traffic)
-             stable -> v2  (95% traffic)
-       |
-       v
-  LLM Application
-  +--------------------------------------------------+
-  | prompt = registry.get("cs-system", env="prod")  |
-  | response = llm.call(prompt=prompt, user_msg=..)  |
-  +--------------------------------------------------+
+    eng(["Engineers / PMs"]) -->|create new version| editor("Prompt Editor UI<br/>(Langfuse / Humanloop)")
+    editor --> registry[("Prompt Registry<br/>name, version,<br/>content, metadata")]
+    registry <--> git("Git<br/>backup / audit")
+    registry -->|eval-gated promotion| ci["CI Eval Pipeline<br/>golden_dataset.jsonl<br/>threshold >= 0.85<br/>LLM-as-judge"]
+    ci -->|pass?| aliases{"Aliases<br/>canary -> v3 5%<br/>stable -> v2 95%"}
+    aliases --> app(["LLM Application<br/>registry.get(...)<br/>llm.call(...)"])
+
+    class eng req
+    class editor,git base
+    class registry io
+    class ci mathOp
+    class aliases mathOp
+    class app io
 ```
 
 **Prompt CI/CD Pipeline**
