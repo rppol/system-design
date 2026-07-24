@@ -72,36 +72,36 @@ Semantic Kernel is the foundation of Microsoft's Copilot Stack, powering GitHub 
 
 ### Kernel Architecture
 
-```
-                        ┌─────────────────────────────────────────┐
-                        │                  Kernel                  │
-                        │                                         │
-┌──────────────┐        │  ┌─────────────┐  ┌─────────────────┐  │
-│  Chat OpenAI │◄──────►│  │  AI Services│  │     Plugins     │  │
-│  Claude 3    │        │  │  Registry   │  │  ┌───────────┐  │  │
-│  Gemini      │        │  │             │  │  │  Math     │  │  │
-└──────────────┘        │  └─────────────┘  │  │  Weather  │  │  │
-                        │                   │  │  Database │  │  │
-┌──────────────┐        │  ┌─────────────┐  │  │  Email    │  │  │
-│  Kernel      │◄──────►│  │   Filters   │  │  └───────────┘  │  │
-│  Filters     │        │  │  (logging,  │  └─────────────────┘  │
-│  (logging,   │        │  │  rate limit)|                        │
-│  audit)      │        │  └─────────────┘                        │
-└──────────────┘        └─────────────────────────────────────────┘
-                                        │
-                                        ▼
-                               ┌──────────────┐
-                               │   Planner     │
-                               │  (SequentialP)|
-                               └──────────────┘
-                                        │
-                          Goal: "Write and email a report"
-                                        │
-                                        ▼
-                               Plan:
-                               1. WritePlugin.DraftReport(topic)
-                               2. MathPlugin.CalculateStats(data)
-                               3. EmailPlugin.SendEmail(to, subject, body)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    aiServices(["AI Services<br/>Chat OpenAI · Claude 3 · Gemini"])
+    extFilters(["Kernel Filters<br/>logging, audit"])
+
+    subgraph kernelBox["Kernel"]
+        registry(["AI Services<br/>Registry"])
+        intFilters(["Filters<br/>logging, rate limit"])
+        plugins(["Plugins<br/>Math · Weather<br/>Database · Email"])
+    end
+
+    planner(["Planner<br/>SequentialPlanner"])
+    goal(["Goal:<br/>Write and email a report"])
+    plan(["Plan<br/>1. DraftReport - topic<br/>2. CalculateStats - data<br/>3. SendEmail - to, subject, body"])
+
+    aiServices <--> kernelBox
+    extFilters <--> kernelBox
+    kernelBox --> planner
+    planner --> goal
+    goal --> plan
+
+    class aiServices,extFilters,registry,intFilters,plugins,planner,goal,plan base
 ```
 
 ### Plugin Execution Flow
