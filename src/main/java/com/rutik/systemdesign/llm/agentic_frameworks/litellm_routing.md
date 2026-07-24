@@ -76,15 +76,19 @@ flowchart LR
     TB([Team B app]) --> PXY
     TC([Team C app]) --> PXY
     PXY --> ANT[["Anthropic API"]]
-    PXY --> OAI[["OpenAI API"]]
+    oai@{ icon: "logos:openai-icon", form: "square", label: "OpenAI", pos: "b", h: 44 }
+    PXY --> oai
     PXY --> BED[["Bedrock API"]]
-    PXY --> AZ[["Azure OpenAI"]]
-    PXY -.-> RD[["Redis\ncache, budgets, rate limits"]]
-    PXY -.-> PG[["Postgres\naudit log, spend"]]
+    az@{ icon: "logos:microsoft-azure", form: "square", label: "Azure OpenAI", pos: "b", h: 44 }
+    PXY --> az
+    rd@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    PXY -.-> rd
+    pg@{ icon: "logos:postgresql", form: "square", label: "Postgres", pos: "b", h: 44 }
+    PXY -.-> pg
 
     class TA,TB,TC req
     class PXY base
-    class ANT,OAI,BED,AZ,RD,PG frozen
+    class ANT,BED frozen
 ```
 
 All team apps hit the single proxy endpoint with their virtual keys; the proxy fans requests out across four provider backends and keeps shared state (budgets, cache, rate limits) in Redis with spend and audit records in Postgres.
