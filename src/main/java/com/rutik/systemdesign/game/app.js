@@ -301,7 +301,7 @@ const STUDY_ORDER = {
     "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
   ],
   technologies: [
-    "technologies/apache_airflow","technologies/nvidia_triton_inference_server",
+    "technologies/apache_airflow","technologies/nvidia_triton_inference_server","technologies/intel_openvino",
   ],
 };
 

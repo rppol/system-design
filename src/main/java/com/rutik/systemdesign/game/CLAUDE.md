@@ -104,7 +104,7 @@ The `game/` directory is an application, not study content — see
   pinning module/chapter order, but neither has an `interview` array — both are
   Full-only, and the toggle auto-hides when a section is absent from `STUDY_PATHS`.
   `book` is Full-only because a chapter-by-chapter summary has no interview subset to
-  cut; `technologies` is Full-only because it is too small (2 modules) for a
+  cut; `technologies` is Full-only because it is too small (3 modules) for a
   meaningful cut — it gains an interview array once it reaches >= 4 modules (see
   `technologies/CLAUDE.md`). Each interview path is added the same way (a subset
   array here + a README "Learning Paths" block).

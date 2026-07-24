@@ -33,12 +33,13 @@ say so on first mention.
 
 ---
 
-## Module List — 2 Modules
+## Module List — 3 Modules
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
 | [`apache_airflow/`](apache_airflow/README.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.0.x |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/README.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
+| [`intel_openvino/`](intel_openvino/README.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2025.2 |
 
 ---
 
@@ -109,8 +110,8 @@ release.
 
 ## Learning Paths (Full-only for now)
 
-There is **no `STUDY_PATHS.technologies` entry** in `game/app.js` — with only 2
-modules there's no meaningful interview-vs-full cut to make. The Study view's
+There is **no `STUDY_PATHS.technologies` entry** in `game/app.js` — with only 3
+modules there's still no meaningful interview-vs-full cut to make. The Study view's
 Full/Interview toggle **auto-hides** for any section absent from `STUDY_PATHS` (the
 `book` section is the existing precedent for this — see `game/app.js` and
 `game/CLAUDE.md`), so this is a correct, deliberate omission, not a gap. **Threshold

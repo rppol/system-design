@@ -1009,6 +1009,7 @@ A canonical, senior-engineer-level module per major infrastructure technology â€
 |--------|----------|-----------|
 | [apache_airflow](src/main/java/com/rutik/systemdesign/technologies/apache_airflow/README.md) | Workflow Orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler |
 | [nvidia_triton_inference_server](src/main/java/com/rutik/systemdesign/technologies/nvidia_triton_inference_server/README.md) | GPU Model Serving | Model repository + `config.pbtxt`, backends, dynamic batching, ensembles/BLS, `perf_analyzer` |
+| [intel_openvino](src/main/java/com/rutik/systemdesign/technologies/intel_openvino/README.md) | CPU/Edge Inference & Optimization | IR + `ovc`/`convert_model`, device plugins (CPU/GPU/NPU), AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, OVMS, `openvino-genai` |
 
 See the [Technologies Master Index](src/main/java/com/rutik/systemdesign/technologies/README.md) for the learning path, Knowledge-Question Map, and Study Plan.
 
