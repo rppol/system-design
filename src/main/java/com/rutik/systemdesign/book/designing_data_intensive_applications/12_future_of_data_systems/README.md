@@ -356,20 +356,20 @@ flowchart LR
 
     subgraph UNBUNDLED["UNBUNDLED: dataflow architecture"]
         W(["writes"]) --> LOG(("EVENT LOG<br/>= the public interface"))
-        LOG --> PG("Postgres<br/>system of record")
-        LOG --> ES("Elasticsearch<br/>search index<br/>derived")
-        LOG --> RD("Redis<br/>cache<br/>derived")
+        LOG --> PG
+        LOG --> ES
+        LOG --> RD
         LOG --> DW("Warehouse<br/>analytics<br/>derived")
     end
 
     MONO -.->|"turned<br/>inside out"| LOG
+    PG@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>system of record", pos: "b", h: 44 }
+    ES@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>search index", pos: "b", h: 44 }
+    RD@{ icon: "logos:redis", form: "square", label: "Redis<br/>cache", pos: "b", h: 44 }
 
     class MONO frozen
     class W io
     class LOG mathOp
-    class PG train
-    class ES base
-    class RD base
     class DW base
 ```
 
