@@ -1090,17 +1090,20 @@ flowchart TD
     Gateway --> TrendSvc["LeaderboardService"]
 
     ProductSvc --> ProductRepo["MongoRepository / MongoTemplate\n(indexed, paged, aggregation)"]
-    ProductRepo --> Mongo["MongoDB 7.0 replica set\n8M product documents"]
+    ProductRepo --> Mongo
 
     SessionSvc --> SessionRepo["@RedisHash Session\n(TTL, @Indexed userId)"]
     CartSvc --> CartOps["RedisTemplate.opsForHash\n(cart line items)"]
     TrendSvc --> ZSetOps["RedisTemplate.opsForZSet\n(trending leaderboard)"]
-    SessionRepo --> Redis["Redis 7.2 Cluster"]
+    SessionRepo --> Redis
     CartOps --> Redis
     ZSetOps --> Redis
 
     ProductSvc -->|"view event"| Stream["opsForStream + consumer group\n(recently-viewed fan-out)"]
     Stream --> Redis
+
+    Mongo@{ icon: "logos:mongodb", form: "square", label: "MongoDB 7.0<br/>replica set", pos: "b", h: 44 }
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis 7.2<br/>Cluster", pos: "b", h: 44 }
 ```
 
 ### Implementation
