@@ -115,8 +115,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    ev([Event stream]) --> stream["Stream processor\nFlink / Kafka"]
-    db([DB snapshots]) --> batch["Batch processor\nSpark / Hive"]
+    ev([Event stream]) --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    kafka --> stream@{ icon: "simple-icons:apacheflink", form: "square", label: "Stream Processor<br/>Flink", pos: "b", h: 44 }
+    db([DB snapshots]) --> batch@{ icon: "logos:apache-spark", form: "square", label: "Batch Processor<br/>Spark / Hive", pos: "b", h: 44 }
     logs([Logs]) --> batch
     stream --> fs["Feature store\nonline Redis (2-10ms)\noffline S3 / Hive (batch)"]
     batch --> fs
@@ -128,7 +129,6 @@ flowchart TD
     mon -.->|"retrain trigger"| tp
 
     class ev,db,logs io
-    class stream,batch mathOp
     class fs base
     class tp train
     class serve req
@@ -232,7 +232,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    hist([Historical table]) --> tf["Training feature\nSpark SQL window"]
+    hist([Historical table]) --> tf@{ icon: "logos:apache-spark", form: "square", label: "Training Feature<br/>Spark SQL window", pos: "b", h: 44 }
     live([Live event data]) --> sf["Serving feature\nPython function"]
     tf -.->|"subtly different logic"| sf
     tf --> model["Model trained on\ntraining-time values"]
@@ -241,7 +241,7 @@ flowchart TD
     pred --> skew
 
     class hist,live io
-    class tf,sf mathOp
+    class sf mathOp
     class model train
     class pred req
     class skew lossN
@@ -557,21 +557,30 @@ Automate model validation gates. No model should reach production without passin
 
 **Scenario: Real-time ad click-through-rate (CTR) prediction.** An ad exchange serves 5M ad impressions/hour. For each impression it must predict p(click) to rank ads and set bids, with a hard 10ms model-latency budget inside the bidding pipeline. We apply the 6-step ML system design framework end to end.
 
-```
-Step 2 data flow:
-  ad serving -> Kafka (impression + click events)
-       |
-   Flink streaming job (join impression<->click within attribution window)
-       |
-   Feature Store (Feast): online=Redis (2ms), offline=warehouse (training)
-       |
-   Step 3 model: LightGBM, AUC 0.78
-       |
-   Step 4 serving: ONNX Runtime, 2ms p99
-       |
-   Step 5 monitoring: PSI (feature drift), online AUC on hour-old labels
-       |
-   Step 6 retraining: daily full batch + hourly delta on fresh labels
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ad(["Ad serving"]) --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>impression + click events", pos: "b", h: 44 }
+    kafka --> flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink streaming job<br/>join within attribution window", pos: "b", h: 44 }
+    flink --> fs["Feature Store — Feast<br/>online Redis 2ms<br/>offline warehouse"]
+    fs --> model["Step 3 — LightGBM<br/>AUC 0.78"]
+    model --> serve["Step 4 — ONNX Runtime<br/>2ms p99"]
+    serve --> mon["Step 5 — Monitoring<br/>PSI, online AUC"]
+    mon --> retrain["Step 6 — Retraining<br/>daily full + hourly delta"]
+
+    class ad io
+    class fs base
+    class model train
+    class serve req
+    class mon mathOp
+    class retrain lossN
 ```
 
 **Read it like this.** "The daily full run is the safety net; the hourly delta is the freshness lever. What the cadence actually buys is a bound on how old the model scoring a live impression is allowed to be."
