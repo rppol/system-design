@@ -91,18 +91,26 @@ buy headroom on one machine:
    rest on disk — an in-memory cache in front of a disk-backed store. The working set stays fast;
    the long tail is still reachable.
 
-```
-                 single-server key-value store
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   client --get/put--> [ in-memory hash table ]   fast, but bounded by RAM
-                              |  spill
-                              v
-                       [ hot set in RAM ]  +  [ cold set on disk ]
-                       compression applied to both
+    CL(["client<br/>get / put"]) --> HT(["in-memory<br/>hash table<br/>(fast, bounded by RAM)"])
+    HT -->|"spill"| HOT(["hot set<br/>in RAM"])
+    HT -->|"spill"| COLD(["cold set<br/>on disk"])
+    HOT -.->|"compression<br/>applied to both"| COLD
+    COLD --> SPOF(["one box, one ceiling:<br/>capacity wall +<br/>single point of failure"])
 
-   Problem: traffic and data grow; one box hits its ceiling. No amount of
-   compression or tiering changes that a single server is a hard capacity wall
-   and a single point of failure.
+    class CL io
+    class HT train
+    class HOT,COLD base
+    class SPOF lossN
 ```
 
 *Caption: the single-server design is the baseline the rest of the chapter dismantles — compression
