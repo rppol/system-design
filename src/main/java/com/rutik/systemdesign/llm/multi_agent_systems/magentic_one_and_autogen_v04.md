@@ -1046,22 +1046,23 @@ A financial services company wants to automate competitive intelligence: given a
 
 **Architecture Overview**
 
-```
-User Request: "Competitor: Acme Corp. Generate competitive intelligence report."
-        |
-        v
-+-------------------+       Task Ledger:
-|   Orchestrator    |       facts: []
-|   (GPT-4o)        |       plan: [search_web, read_filings, analyze, write_report, save_pdf]
-+-------------------+       step_index: 0
-        |
-   +----|----+-----------+--------------------+
-   |         |           |                    |
-   v         v           v                    v
-WebSurfer  FileSurfer  Coder            ComputerTerminal
-(search    (read SEC   (analyze         (run wkhtmltopdf
-Acme news) filings     data, write      to produce PDF,
-           from /tmp)  HTML report)     save to /output)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Req(["User Request:<br/>Competitor: Acme Corp.<br/>Generate competitive<br/>intelligence report."]) --> Orch
+    Orch["Orchestrator (GPT-4o)<br/>Task Ledger:<br/>facts: []<br/>plan: [search_web, read_filings,<br/>analyze, write_report, save_pdf]<br/>step_index: 0"] --> WS & FS & Coder & CT
+    WS["WebSurfer<br/>search Acme news"]
+    FS["FileSurfer<br/>read SEC filings<br/>from /tmp"]
+    Coder["Coder<br/>analyze data, write<br/>HTML report"]
+    CT["ComputerTerminal<br/>run wkhtmltopdf to produce PDF,<br/>save to /output"]
+
+    classDef io   fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    class Req io
+    class Orch req
+    class WS,FS,Coder,CT base
 ```
 
 **Step-by-Step Execution**
