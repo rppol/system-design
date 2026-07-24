@@ -275,16 +275,17 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    prom(Prometheus TSDB<br/>2h blocks, 15-day retention) -->|remote_write| thanos(Thanos)
+    prom -->|remote_write| thanos(Thanos)
     prom -->|remote_write| cortex(Cortex)
     prom -->|remote_write| vm(VictoriaMetrics)
-    thanos --> store([S3 / GCS<br/>long-term storage])
+    thanos --> store
     cortex --> store
     vm --> store
 
-    class prom base
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus TSDB<br/>2h blocks, 15-day retention", pos: "b", h: 44 }
+    store@{ icon: "logos:aws-s3", form: "square", label: "S3 / GCS<br/>long-term storage", pos: "b", h: 44 }
+
     class thanos,cortex,vm frozen
-    class store io
 ```
 
 All three backends solve the same gap — Prometheus's own storage is deliberately short-term, so the real choice is scale and multi-tenancy, not whether to add one of them at all.
@@ -305,13 +306,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    src([IoT / Sensors / Apps]) -->|"write<br/>10M events/sec"| kafka(Kafka<br/>ingestion buffer)
+    src([IoT / Sensors / Apps]) -->|"write<br/>10M events/sec"| kafka
     kafka -->|consume| tsdb(ClickHouse / TimescaleDB<br/>/ InfluxDB)
     tsdb -->|"real-time<br/>aggregation"| mv(Materialized Views /<br/>Continuous Aggregates)
     mv -->|"query<br/>dashboards, alerts"| dash([Grafana / Kibana /<br/>dashboards])
 
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>ingestion buffer", pos: "b", h: 44 }
+
     class src,dash io
-    class kafka req
     class tsdb base
     class mv mathOp
 ```
@@ -576,13 +578,17 @@ flowchart LR
     gate -->|"no - updates,<br/>key lookups, joins"| other([Relational or<br/>key-value store])
     gate -->|yes| need{Primary need?}
     need -->|"SQL + ACID<br/>+ joins"| tsdb([TimescaleDB])
-    need -->|"pull-based<br/>app metrics"| prom([Prometheus])
-    need -->|"billions of rows,<br/>HTAP analytics"| ch([ClickHouse])
-    need -->|"Telegraf agents,<br/>simple metrics model"| influx([InfluxDB])
+    need -->|"pull-based<br/>app metrics"| prom
+    need -->|"billions of rows,<br/>HTAP analytics"| ch
+    need -->|"Telegraf agents,<br/>simple metrics model"| influx
+
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    ch@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
+    influx@{ icon: "logos:influxdb", form: "square", label: "InfluxDB", pos: "b", h: 44 }
 
     class wl io
     class gate,need mathOp
-    class tsdb,prom,ch,influx train
+    class tsdb train
     class other frozen
 ```
 
