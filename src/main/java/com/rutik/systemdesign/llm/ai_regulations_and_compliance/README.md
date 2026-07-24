@@ -126,14 +126,24 @@ Voluntary framework becoming de facto standard in US federal contracting and ent
 
 **Four Core Functions**:
 
-```
-GOVERN  -- Policies, accountability, culture of AI risk awareness
-   |
-MAP     -- Identify and classify AI risks in context of deployment
-   |
-MEASURE -- Analyze, assess, and benchmark identified risks
-   |
-MANAGE  -- Prioritize, respond to, and monitor AI risks
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    GOVERN(["GOVERN<br/>Policies, accountability,<br/>culture of AI risk awareness"])
+    MAP(["MAP<br/>Identify and classify AI risks<br/>in context of deployment"])
+    MEASURE(["MEASURE<br/>Analyze, assess, and benchmark<br/>identified risks"])
+    MANAGE(["MANAGE<br/>Prioritize, respond to, and<br/>monitor AI risks"])
+
+    GOVERN --> MAP --> MEASURE --> MANAGE
+
+    class GOVERN,MAP,MEASURE,MANAGE req
 ```
 
 **Govern** covers: AI risk policies; accountability structures; training and awareness; risk tolerance; organizational culture that treats AI risk as enterprise risk.
@@ -1166,29 +1176,43 @@ Additionally: GDPR Art. 22 applies because hiring decisions are decisions with "
 
 ### Human Oversight Architecture
 
-```
-Candidate submits application
-      |
-      v
-Resume parsing and feature extraction
-      |
-      v
-AI scoring model (HiringScore v2.1)
-      |
-      +-- Score + SHAP explanation generated
-      +-- Decision logged to immutable audit store
-      |
-      v
-SHORTLIST QUEUE (human recruiter review)
-      |
-      +-- Recruiter views: AI score, top 5 SHAP factors, candidate profile
-      +-- Recruiter can: approve (move to interview), reject (with override reason logged),
-          request additional information, escalate to hiring manager
-      |
-      v
-      +-- Human APPROVED: interview invitation sent
-      +-- Human REJECTED: rejection email sent
-          (system NEVER sends rejection without human confirmation)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CAND(["Candidate submits<br/>application"])
+    PARSE(["Resume parsing and<br/>feature extraction"])
+    AISCORE{"AI scoring model<br/>(HiringScore v2.1)"}
+    SHAP(["Score + SHAP<br/>explanation generated"])
+    AUDIT[("Decision logged to<br/>immutable audit store")]
+    QUEUE(["SHORTLIST QUEUE<br/>human recruiter review"])
+    VIEW(["Recruiter views: AI score,<br/>top 5 SHAP factors,<br/>candidate profile"])
+    ACTION(["Recruiter can: approve,<br/>reject (override reason logged),<br/>request info, or escalate"])
+    APPROVED(["Human APPROVED:<br/>interview invitation sent"])
+    REJECTED(["Human REJECTED:<br/>rejection email sent<br/>(never without human confirmation)"])
+
+    CAND --> PARSE --> AISCORE
+    AISCORE --> SHAP
+    AISCORE --> AUDIT
+    AISCORE --> QUEUE
+    QUEUE --> VIEW
+    QUEUE --> ACTION
+    QUEUE --> APPROVED
+    QUEUE --> REJECTED
+
+    class CAND,PARSE req
+    class AISCORE mathOp
+    class SHAP,AUDIT io
+    class QUEUE req
+    class VIEW,ACTION base
+    class APPROVED train
+    class REJECTED lossN
 ```
 
 **Override tracking**:
