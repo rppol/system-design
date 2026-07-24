@@ -518,15 +518,14 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     SRC(["Sources"]) --> CP["Collector pool<br/>stateless · auto-scaled"]
-    CP -->|"partition by<br/>metric name"| K[("Kafka<br/>durable buffer")]
+    CP -->|"partition by<br/>metric name"| K@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     K --> CONS["Consumers<br/>write TSDB"]
-    K --> AGG["Stream aggregator<br/>Flink"]
+    K --> AGG@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink", pos: "b", h: 44 }
     CONS --> TSDB[("Time-series DB")]
     AGG --> TSDB
 
     class SRC io
-    class CP,CONS,AGG req
-    class K frozen
+    class CP,CONS req
     class TSDB base
 ```
 
@@ -700,11 +699,22 @@ letting the raw data expire per the retention policy. Downsampling both shrinks 
 up long-range queries — a 1-year dashboard reads 1-hour points (8,760 points/series) instead of
 billions of raw ones.
 
-```
-raw (7d)            1-min rollup (30d)        1-hour rollup (1yr)
-──────────          ──────────────────        ───────────────────
-every 10s   ─────►  avg/min/max per minute ─►  avg/min/max per hour
-~8.6M pts/series/day   1440 pts/series/day       24 pts/series/day
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RAW(["Raw (7d)<br/>every 10s<br/>~8.6M pts/series/day"]) -->|"batch rollup"| MIN["1-min rollup (30d)<br/>avg/min/max per minute<br/>1,440 pts/series/day"]
+    MIN -->|"batch rollup"| HOUR[("1-hour rollup (1yr)<br/>avg/min/max per hour<br/>24 pts/series/day")]
+
+    class RAW io
+    class MIN mathOp
+    class HOUR base
 ```
 
 Caption: each rollup stage is a batch job that aggregates the finer series into coarser buckets;
@@ -917,23 +927,23 @@ flowchart LR
 
     SRC(["Sources<br/>~10M metrics"]) --> COLL["Collector pool<br/>pull / push"]
     SD[("Service discovery")] -.->|"targets"| COLL
-    COLL --> K[("Kafka buffer")]
+    COLL --> K@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     K --> WR["TSDB writers"]
-    K --> FLINK["Flink<br/>aggregation"]
+    K --> FLINK@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink", pos: "b", h: 44 }
     WR --> TSDB[("Time-series DB")]
     FLINK --> TSDB
     TSDB --> ROLL["Rollup jobs<br/>downsample"]
-    ROLL --> COLD[("Cold storage<br/>S3")]
+    ROLL --> COLD@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
     TSDB --> QS["Query service<br/>+ cache"]
     QS --> ALERT["Alerting"]
-    QS --> GRAF["Grafana<br/>dashboards"]
+    QS --> GRAF@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
     ALERT --> NOTIFY(["Email · PagerDuty<br/>webhooks"])
 
     class SRC,NOTIFY io
-    class SD,K frozen
+    class SD frozen
     class COLL,QS,WR req
-    class TSDB,COLD,GRAF base
-    class FLINK,ROLL mathOp
+    class TSDB base
+    class ROLL mathOp
     class ALERT lossN
 ```
 
