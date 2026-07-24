@@ -144,14 +144,13 @@ flowchart TD
 
     R(["Request"])
     IP["In-process limiter\nAtomicLong · ~0 latency\nshed obvious abuse cheaply\nlimit: 10x global Redis quota (generous, per-instance)"]
-    RL["Redis Lua limiter\n0.5 ms RTT\nenforce precise cluster-wide quota\nlimit: the contract quota (e.g. 1,000 req/sec)"]
+    RL@{ icon: "logos:redis", form: "square", label: "Redis Lua Limiter<br/>0.5ms RTT · cluster quota", pos: "b", h: 44 }
 
     R --> IP
     R --> RL
 
     class R req
     class IP mathOp
-    class RL frozen
 ```
 
 ---
