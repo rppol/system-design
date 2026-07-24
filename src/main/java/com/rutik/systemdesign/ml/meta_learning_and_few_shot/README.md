@@ -746,16 +746,26 @@ tieredImageNet splits its classes at the super-category level specifically to re
 
 **Architecture:** meta-train a Prototypical Network (Conv-4 backbone, later upgraded to ResNet-12) using 5-way 5-shot episodes sampled from the 50,000 existing categories, holding out a disjoint 2,000-category meta-validation pool to tune episode hyperparameters. The genuinely new micro-categories that arrive after deployment are the real meta-test set — disjoint by construction, since they did not exist during meta-training. At serving time, registering a new micro-category costs one forward pass over its five seller photos plus a mean; classifying a subsequent query photo costs one forward pass plus a nearest-prototype lookup, both well under 10ms.
 
-```
-50,000 existing categories (meta-train pool, 2,000 held out as meta-val)
-        |
-   5-way 5-shot episodes -- Conv-4/ResNet-12 encoder -- prototypical loss
-        |
-   meta-trained encoder, frozen at serving time
-        |
-   new micro-category arrives -- 5 seller photos -- register_new_category()
-        |
-   incoming query photos -- classify() -- nearest prototype -- routed
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["50,000 existing categories<br/>meta-train pool, 2,000 held out as meta-val"]) --> B["5-way 5-shot episodes:<br/>Conv-4/ResNet-12 encoder,<br/>prototypical loss"]
+    B --> C["Meta-trained encoder,<br/>frozen at serving time"]
+    C --> D["New micro-category arrives:<br/>5 seller photos,<br/>register_new_category()"]
+    D --> E(["Incoming query photos:<br/>classify -> nearest prototype -> routed"])
+
+    class A req
+    class B train
+    class C frozen
+    class D mathOp
+    class E io
 ```
 
 **Code — the serving-time registry, guarding against the leakage pattern from Section 6:**
