@@ -529,14 +529,14 @@ flowchart LR
 
     subgraph Fixed["Fixed: shared Redis counter"]
         direction LR
-        W4(Worker 1) --> Shared((Redis<br/>INCR / EXPIRE))
+        Shared@{ icon: "logos:redis", form: "square", label: "Redis<br/>INCR / EXPIRE", pos: "b", h: 44 }
+        W4(Worker 1) --> Shared
         W5(Worker 2) --> Shared
         W6(Worker 3) --> Shared
     end
 
     class W1,W2,W3 lossN
     class W4,W5,W6 req
-    class Shared base
 ```
 *Three workers each capping at `5/minute` in-process still let 15 requests per minute through in total; routing every worker's `INCR`/`EXPIRE` through one Redis instance enforces a single global `5/minute` limit.*
 
@@ -923,6 +923,9 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>invoices, users", pos: "b", h: 44 }
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>rate limit counters", pos: "b", h: 44 }
+
     Internet([Internet]) -->|"TLS offload"| CF(CloudFlare)
 
     subgraph App["FastAPI Application"]
@@ -941,14 +944,14 @@ flowchart LR
     end
 
     ExcHandler -->|"RFC 7807<br/>problem+json"| ClientOut([Client])
-    Fetch -.-> PG(PostgreSQL<br/>invoices, users)
-    RateLim -.-> Redis(Redis<br/>rate limit counters)
+    Fetch -.-> PG
+    RateLim -.-> Redis
 
     class Internet,ClientOut io
     class CF frozen
     class SecHead,ReqSize,RateLim,CORS,Route req
     class JWT,Handler mathOp
-    class Fetch,PG,Redis base
+    class Fetch base
     class BOLA,BFLA,ExcHandler lossN
     class Resp train
 ```
