@@ -34,17 +34,22 @@ flowchart LR
     gw --> inv("Inventory API")
     gw --> rec("Recommendation API")
 
-    detail --> redisL1("Redis L1 cache<br/>30min TTL")
-    redisL1 --> pg1("PostgreSQL")
-    search --> es("Elasticsearch<br/>cluster")
-    inv --> redisCtr("Redis counters<br/>DECR / INCR")
-    redisCtr -.->|"async sync"| pg2("PostgreSQL")
-    rec --> redisSS("Redis sorted sets<br/>precomputed pairs")
+    detail --> redisL1
+    redisL1@{ icon: "logos:redis", form: "square", label: "Redis L1<br/>30min TTL", pos: "b", h: 44 }
+    redisL1 --> pg1
+    pg1@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    search --> es
+    es@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>cluster", pos: "b", h: 44 }
+    inv --> redisCtr
+    redisCtr@{ icon: "logos:redis", form: "square", label: "Redis counters<br/>DECR/INCR", pos: "b", h: 44 }
+    redisCtr -.->|"async sync"| pg2
+    pg2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    rec --> redisSS
+    redisSS@{ icon: "logos:redis", form: "square", label: "Redis sorted sets", pos: "b", h: 44 }
 
     class client io
     class gw mathOp
     class detail,search,inv,rec req
-    class redisL1,redisCtr,redisSS,es,pg1,pg2 base
 ```
 
 *Read path: the gateway routes each request type to its own API, and each API leans on the store that matches its latency budget — Redis L1 ahead of PostgreSQL for product detail, Elasticsearch for faceted search, Redis counters ahead of PostgreSQL for inventory, and precomputed Redis sorted sets for recommendations.*
@@ -60,21 +65,24 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     merchant(["Merchant"]) --> updateApi("Product Update API")
-    updateApi --> pg("PostgreSQL<br/>source of truth")
+    updateApi --> pg
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>source of truth", pos: "b", h: 44 }
     pg -->|"WAL tail"| debezium("Debezium CDC")
-    debezium -->|"within 100ms"| kafka{"Kafka:<br/>product.events"}
+    debezium -->|"within 100ms"| kafka
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka:<br/>product.events", pos: "b", h: 44 }
     kafka --> esIdx("ES Indexer")
     kafka --> priceWriter("Price History<br/>Writer")
     kafka --> cacheInv("Cache Invalidator")
-    esIdx --> es2("Elasticsearch")
-    priceWriter --> ch("ClickHouse<br/>analytics")
-    cacheInv --> redisDel("Redis DEL")
+    esIdx --> es2
+    es2@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    priceWriter --> ch
+    ch@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>analytics", pos: "b", h: 44 }
+    cacheInv --> redisDel
+    redisDel@{ icon: "logos:redis", form: "square", label: "Redis DEL", pos: "b", h: 44 }
 
     class merchant io
-    class updateApi,kafka req
-    class pg,es2,ch base
+    class updateApi req
     class debezium,esIdx,priceWriter,cacheInv mathOp
-    class redisDel lossN
 ```
 
 *Write path (synchronization): Debezium tails the PostgreSQL WAL and publishes to Kafka within ~100ms; three independent consumers then keep search, price-history analytics, and the read cache eventually consistent, with 1-5 seconds typical end-to-end lag.*
@@ -269,9 +277,11 @@ flowchart LR
     luaGet --> enough{"available ≥<br/>requested?"}
     enough -->|"yes"| decrby("DECRBY<br/>atomic decrement")
     enough -->|"no"| shortfall("return -1<br/>insufficient stock")
-    decrby -.->|"every 5s"| pgSync("PostgreSQL<br/>UPDATE quantity")
+    decrby -.->|"every 5s"| pgSync
+    pgSync@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>UPDATE quantity", pos: "b", h: 44 }
 
-    flag -->|"yes, limited-edition"| pgLock("PostgreSQL<br/>SELECT ... FOR UPDATE")
+    flag -->|"yes, limited-edition"| pgLock
+    pgLock@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>SELECT FOR UPDATE", pos: "b", h: 44 }
     pgLock --> positive{"quantity<br/>positive?"}
     positive -->|"yes"| commit("UPDATE - 1<br/>COMMIT")
     positive -->|"no"| rollback("ROLLBACK<br/>insufficient stock")
@@ -280,7 +290,6 @@ flowchart LR
     class flag,luaGet,enough,positive mathOp
     class decrby,commit train
     class shortfall,rollback lossN
-    class pgSync,pgLock base
 ```
 
 *Two-tier inventory consistency: the Lua `DECRBY` fast path handles roughly 1M ops/second with brief oversell risk if Redis restarts before the 5-second sync to PostgreSQL; `strict_inventory=true` SKUs pay 5-10ms of `SELECT ... FOR UPDATE` latency (versus 0.5ms) for a hard zero-oversell guarantee, capped around 1K TPS per product.*
@@ -389,7 +398,8 @@ flowchart LR
     l1 -->|"no"| l2{"L2 Redis<br/>hit?"}
     l2 -->|"yes, 0.5ms"| fillL1("populate L1")
     fillL1 --> ret2(["return product"])
-    l2 -->|"no"| l3("L3 PostgreSQL<br/>query, 5-20ms")
+    l2 -->|"no"| l3
+    l3@{ icon: "logos:postgresql", form: "square", label: "L3 PostgreSQL<br/>5-20ms", pos: "b", h: 44 }
     l3 --> fillBoth("populate L2 + L1")
     fillBoth --> ret3(["return product"])
 
@@ -397,7 +407,6 @@ flowchart LR
     class l1,l2 mathOp
     class ret1,ret2,ret3 io
     class fillL1,fillBoth train
-    class l3 base
 ```
 
 *Cache cascade: each miss climbs one tier (under 0.1ms L1, then 0.5ms L2, then 5-20ms L3) and writes back to every faster tier it skipped, so a cold L3 read is the last time that product pays the full round trip until eviction.*
