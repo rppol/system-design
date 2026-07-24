@@ -77,17 +77,13 @@ measured key frequency, and read the table above to decide whether that memory i
 
 ## 4. Types / Architectures / Strategies
 
-```
-Pattern         | Read Path                  | Write Path            | Consistency
-----------------|----------------------------|-----------------------|-------------
-Cache-aside     | App checks cache, on miss  | App writes to DB only | Eventual (TTL)
-(Lazy loading)  | reads DB, populates cache  |                       |
-Read-through    | Cache checks DB on miss    | App writes to DB only | Eventual (TTL)
-Write-through   | Cache checks DB on miss    | App writes to both    | Strong (on write)
-Write-behind    | Cache checks DB on miss    | App writes to cache,  | Eventual (async)
-(Write-back)    |                            | async persist to DB   |
-Write-around    | App reads from DB (bypass) | App writes to DB only | N/A (no cache for writes)
-```
+| Pattern | Read Path | Write Path | Consistency |
+|---------|-----------|------------|-------------|
+| Cache-aside (Lazy loading) | App checks cache, on miss reads DB, populates cache | App writes to DB only | Eventual (TTL) |
+| Read-through | Cache checks DB on miss | App writes to DB only | Eventual (TTL) |
+| Write-through | Cache checks DB on miss | App writes to both | Strong (on write) |
+| Write-behind (Write-back) | Cache checks DB on miss | App writes to cache, async persist to DB | Eventual (async) |
+| Write-around | App reads from DB (bypass) | App writes to DB only | N/A (no cache for writes) |
 
 ---
 
@@ -117,12 +113,13 @@ flowchart LR
     subgraph Write["Write Path"]
         direction LR
         G(["Application"]) -->|"UPDATE row"| H["DB"]
-        H -->|"DEL key<br/>(or SET new value)"| I["Redis"]
+        H -->|"DEL key<br/>(or SET new value)"| I
+        I@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     end
 
     class A,G,C,F io
     class B mathOp
-    class D,H,E,I base
+    class D,H,E base
 ```
 
 Reads check Redis first and fall through to the database only on a miss, repopulating the cache with a TTL; writes go straight to the database and then invalidate (or update) the cache key.
@@ -140,11 +137,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     A(["Application"]) -->|"UPDATE row<br/>wait for commit"| B["DB"]
-    B -->|"SET key, value, TTL<br/>atomic with write"| C["Redis"]
+    B -->|"SET key, value, TTL<br/>atomic with write"| C
+    C@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     C -.->|"SET fails"| D["stale cache<br/>until TTL expires"]
 
     class A io
-    class B,C base
+    class B base
     class D lossN
 ```
 
@@ -162,13 +160,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["Application"]) -->|"SET key, value"| B["Redis"]
+    A(["Application"]) -->|"SET key, value"| B
+    B@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     B -->|"success<br/>returns immediately"| C(["response"])
     B -.->|"async background"| D["DB UPDATE<br/>persisted later"]
     D -.->|"crash before flush"| E["data loss"]
 
     class A,C io
-    class B,D base
+    class D base
     class E lossN
 ```
 
@@ -186,12 +185,13 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["10K requests<br/>same expired key"]) --> B["Redis: MISS"]
+    A(["10K requests<br/>same expired key"]) --> B
+    B@{ icon: "logos:redis", form: "square", label: "Redis: MISS", pos: "b", h: 44 }
     B --> C["10K DB queries<br/>at once"]
     C --> D["DB overloaded"]
 
     class A req
-    class B,C base
+    class C base
     class D lossN
 ```
 
@@ -218,14 +218,15 @@ flowchart LR
 
     subgraph LOCK["Mutex / Distributed Lock"]
         direction LR
-        E(["Redis GET key"]) --> F{"hit or<br/>miss?"}
+        E@{ icon: "logos:redis", form: "square", label: "Redis GET key", pos: "b", h: 44 }
+        E --> F{"hit or<br/>miss?"}
         F -->|"hit"| G(["return value"])
         F -->|"miss"| H{"SET lock<br/>NX PX=5000?"}
         H -->|"acquired"| I["query DB<br/>SET key, value, TTL<br/>DEL lock"]
         H -->|"already locked"| J["sleep 100ms<br/>retry"]
     end
 
-    class A,E,G,D io
+    class A,G,D io
     class B,F,H mathOp
     class C,I train
     class J lossN
@@ -413,7 +414,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["trending:top10<br/>500K ops/sec"]) --> B["single Redis node<br/>limit ~100K ops/sec"]
+    A(["trending:top10<br/>500K ops/sec"]) --> B
+    B@{ icon: "logos:redis", form: "square", label: "single Redis node<br/>limit ~100K ops/sec", pos: "b", h: 44 }
     B --> C["node CPU-bound<br/>latency spikes for all keys"]
 
     C -.-> D["1. Local L1 cache<br/>Caffeine, 100ms TTL"]
@@ -426,7 +428,7 @@ flowchart LR
     H --> I(["reads spread out<br/>slight replication lag"])
 
     class A req
-    class B,D,F base
+    class D,F base
     class C lossN
     class H frozen
     class E,G,I train
@@ -477,16 +479,13 @@ the node limit.
 
 ### Cache Invalidation Strategies
 
-```
-Strategy              | Mechanism                           | Tradeoff
-----------------------|-------------------------------------|----------------------------
-TTL (time-based)      | Entry expires after N seconds       | Simple; bounded staleness
-Event-driven          | Write event triggers cache DEL       | Low latency; complex routing
-CDC-based             | DB change → Debezium → cache DEL    | Accurate; infrastructure cost
-Version-based keys    | key = "user:42:v7" (include version)| No invalidation needed; old
-                      | Version in DB, incremented on write | versions naturally expire
-Two-level (L1+L2)     | Caffeine (local) + Redis (shared)   | High hit rate; stale risk
-```
+| Strategy | Mechanism | Tradeoff |
+|----------|-----------|----------|
+| TTL (time-based) | Entry expires after N seconds | Simple; bounded staleness |
+| Event-driven | Write event triggers cache DEL | Low latency; complex routing |
+| CDC-based | DB change → Debezium → cache DEL | Accurate; infrastructure cost |
+| Version-based keys | key = "user:42:v7" (include version); version in DB, incremented on write | No invalidation needed; old versions naturally expire |
+| Two-level (L1+L2) | Caffeine (local) + Redis (shared) | High hit rate; stale risk |
 
 **Version-based key approach**:
 ```java
@@ -556,15 +555,13 @@ The first request is a cache miss and gets a fresh response carrying Cache-Contr
 
 ## 8. Tradeoffs
 
-```
-Pattern          | Consistency     | Write Latency | Read Latency  | Complexity
------------------|-----------------|---------------|---------------|------------
-Cache-aside      | Eventual (TTL)  | DB only       | Cache + DB on miss | Low
-Read-through     | Eventual (TTL)  | DB only       | Cache + DB on miss | Medium
-Write-through    | Strong on write | Cache + DB    | Cache only    | Medium
-Write-behind     | Eventual        | Cache only    | Cache only    | High
-Write-around     | N/A             | DB only       | DB only       | Low
-```
+| Pattern | Consistency | Write Latency | Read Latency | Complexity |
+|---------|-------------|---------------|--------------|------------|
+| Cache-aside | Eventual (TTL) | DB only | Cache + DB on miss | Low |
+| Read-through | Eventual (TTL) | DB only | Cache + DB on miss | Medium |
+| Write-through | Strong on write | Cache + DB | Cache only | Medium |
+| Write-behind | Eventual | Cache only | Cache only | High |
+| Write-around | N/A | DB only | DB only | Low |
 
 ---
 
@@ -671,7 +668,7 @@ sequenceDiagram
     R-->>B: ack
     DB-->>A: return user v1
     A->>R: SET user key = v1
-    Note over R: delete already ran first;<br/>cache now holds stale v1 until TTL expiry
+    Note over R: delete already ran first,<br/>cache now holds stale v1 until TTL expiry
 ```
 
 Request A's read started first but is slow; Request B's update-and-delete completes while A's read is still in flight, so A's stale v1 arrives after the delete and repopulates the cache, leaving stale data until TTL expiry (the fix above: SET NX, or version-based keys).
@@ -858,13 +855,15 @@ flowchart LR
 
     A(["50K req/s"]) --> B["Layer 1: Caffeine<br/>JVM in-process, 500ms TTL"]
     B -->|"80% hit rate<br/>0.05ms, no network"| C(["return"])
-    B -.->|"miss"| D["Layer 2: Redis<br/>shared, 5-min TTL"]
+    B -.->|"miss"| D
+    D@{ icon: "logos:redis", form: "square", label: "Layer 2: Redis<br/>shared, 5-min TTL", pos: "b", h: 44 }
     D -->|"95% hit rate"| C
-    D -.->|"miss"| E["Layer 3: PostgreSQL<br/>cache-miss path only"]
+    D -.->|"miss"| E
+    E@{ icon: "logos:postgresql", form: "square", label: "Layer 3: PostgreSQL<br/>cache-miss path only", pos: "b", h: 44 }
     E -->|"~2,500 QPS<br/>5% miss x 50K req/s"| C
 
     class A req
-    class B,D,E base
+    class B base
     class C io
 ```
 
