@@ -44,7 +44,8 @@ flowchart TD
     end
     subgraph SV["Serving - P99 under 10ms"]
         REQ(["Auction: user + 10-100 ads"]) --> FS["Feature server\nGo / C++"]
-        FS --> RED[("Redis Cluster\n200GB emb, 20 shards")]
+        FS --> RED
+        RED@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>200GB emb, 20 shards", pos: "b", h: 44 }
         RED --> INF["ONNX + TensorRT GPU\nbatch up to 100"]
         INF --> CALS["Apply Platt scalar"]
         CALS --> RANK(["effective_cpc = bid × CTR"])
@@ -59,7 +60,7 @@ flowchart TD
 
     class LOG,REQ,RANK io
     class JOIN,HASH,SAMP,FS,CALS,SUM mathOp
-    class TD,RED base
+    class TD base
     class EMB,FM,DEEP,SIG,PLATT train
     class REL,MO lossN
     class INF frozen
@@ -825,16 +826,14 @@ def calibrate_for_sampling(
 
 ### Features That Drift Fastest
 
-```
-Feature                             Drift rate   Reason
-───────────────────────────────────────────────────────────────────────
-ad_id embedding (new campaigns)     Very high    New campaigns launch daily; old ones end
-hour_of_day CTR baseline            High         DST changes; seasonal shopping hours
-user interest signal (ad_category)  High         User interests shift; ad content changes
-publisher_id (new publishers)       Medium       New app/web inventory enters network
-user_age_bucket distribution        Very low     Changes only with data pipeline refresh
-device_type distribution            Low          Gradual mobile-to-desktop-back shifts
-```
+| Feature | Drift rate | Reason |
+|---------|-----------|--------|
+| ad_id embedding (new campaigns) | Very high | New campaigns launch daily; old ones end |
+| hour_of_day CTR baseline | High | DST changes; seasonal shopping hours |
+| user interest signal (ad_category) | High | User interests shift; ad content changes |
+| publisher_id (new publishers) | Medium | New app/web inventory enters network |
+| user_age_bucket distribution | Very low | Changes only with data pipeline refresh |
+| device_type distribution | Low | Gradual mobile-to-desktop-back shifts |
 
 ### Calibration Monitoring (Primary Signal)
 
@@ -885,19 +884,17 @@ CALIBRATION_THRESHOLDS = {
 
 ### Retraining Triggers and Cadence
 
-```
-Cadence        Trigger                                    Action
-──────────────────────────────────────────────────────────────────────────
-Daily          Scheduled (2 AM UTC)                       Full DeepFM retrain + Platt recalibration
-Hourly         Scheduled                                  Incremental fine-tune on last 3h impressions
-Every 5min     Calibration ratio outside (0.95, 1.05)     Alert on-call; apply scalar correction factor
-Triggered      ECE > 0.02                                 Emergency recalibration (Platt refit)
-Triggered      NE improvement < 0.5% vs baseline LR       Model may have degraded; investigate
-Triggered      Any Redis shard null-rate > 2%              Embedding fallback activated; alert
-Triggered      New major advertiser onboarding            Add advertiser prior CTR to fallback table
-Weekly         Scheduled                                  Feature importance audit; hash collision rate check
-Monthly        Scheduled                                  Full calibration audit per advertiser segment
-```
+| Cadence | Trigger | Action |
+|---------|---------|--------|
+| Daily | Scheduled (2 AM UTC) | Full DeepFM retrain + Platt recalibration |
+| Hourly | Scheduled | Incremental fine-tune on last 3h impressions |
+| Every 5min | Calibration ratio outside (0.95, 1.05) | Alert on-call; apply scalar correction factor |
+| Triggered | ECE > 0.02 | Emergency recalibration (Platt refit) |
+| Triggered | NE improvement < 0.5% vs baseline LR | Model may have degraded; investigate |
+| Triggered | Any Redis shard null-rate > 2% | Embedding fallback activated; alert |
+| Triggered | New major advertiser onboarding | Add advertiser prior CTR to fallback table |
+| Weekly | Scheduled | Feature importance audit; hash collision rate check |
+| Monthly | Scheduled | Full calibration audit per advertiser segment |
 
 ---
 
