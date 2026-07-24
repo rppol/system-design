@@ -262,15 +262,16 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>sorted set", pos: "b", h: 44 }
+
     client(["Game client"]) -->|"play &<br/>win match"| gs(["Game server<br/>validate win"])
     gs -->|"POST /v1/scores<br/>ZINCRBY +1"| ls(["Leaderboard<br/>service"])
     client -->|"GET top 10 /<br/>my rank+window"| ls
-    ls --> redis[("Redis<br/>sorted set")]
+    ls --> redis
     ls -->|"enrich names,<br/>avatars"| profile[("Profile store<br/>SQL / NoSQL")]
 
     class client,gs io
     class ls req
-    class redis train
     class profile base
 ```
 
@@ -634,20 +635,23 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Mobile client"]) --> apigw(["API Gateway<br/>routes 3 endpoints"])
-    apigw --> setL(["Lambda<br/>setScore"])
-    apigw --> getT(["Lambda<br/>getTop10"])
-    apigw --> getR(["Lambda<br/>getRelativeRank"])
-    setL --> cache[("ElastiCache<br/>Redis sorted set")]
+    apigw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    setL@{ icon: "logos:aws-lambda", form: "square", label: "Lambda<br/>setScore", pos: "b", h: 44 }
+    getT@{ icon: "logos:aws-lambda", form: "square", label: "Lambda<br/>getTop10", pos: "b", h: 44 }
+    getR@{ icon: "logos:aws-lambda", form: "square", label: "Lambda<br/>getRelativeRank", pos: "b", h: 44 }
+    cache@{ icon: "logos:aws-elasticache", form: "square", label: "ElastiCache<br/>Redis", pos: "b", h: 44 }
+    profile@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB<br/>profiles", pos: "b", h: 44 }
+
+    client(["Mobile client"]) --> apigw
+    apigw --> setL
+    apigw --> getT
+    apigw --> getR
+    setL --> cache
     getT --> cache
     getR --> cache
-    getR -->|"enrich"| profile[("DynamoDB<br/>profiles")]
+    getR -->|"enrich"| profile
 
     class client io
-    class apigw req
-    class setL,getT,getR train
-    class cache frozen
-    class profile base
 ```
 
 Caption: each endpoint maps to a Lambda; the functions share one ElastiCache sorted set. There are
