@@ -29,7 +29,8 @@ const VENDOR = path.join(REPO, "src/main/java/com/rutik/systemdesign/game/vendor
 // order; `logos` (full colour) is primary. simple-icons/devicon can be added
 // here for even broader coverage (monochrome — they inherit currentColor).
 const PACKS = [
-  { name: "logos", pkg: "@iconify-json/logos" },
+  { name: "logos", pkg: "@iconify-json/logos" },                 // full colour — preferred
+  { name: "simple-icons", pkg: "@iconify-json/simple-icons" },   // monochrome — fallback for products logos lacks
 ];
 
 fs.mkdirSync(VENDOR, { recursive: true });

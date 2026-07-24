@@ -5055,10 +5055,15 @@ function mmPolishSvg(n, ctype) {
   // different value (e.g. #1a1919), so they are untouched; colored logos (S3, Redis)
   // draw their own background over the chip, so it's hidden there. Scoped to
   // .icon-shape only, so non-icon nodes are unaffected.
+  // Tiered icon packs: `logos` are full-colour (explicit fills); `simple-icons`
+  // are monochrome via fill="currentColor", which resolves to the light theme text
+  // colour and is nearly invisible on the white chip. Recolour the chip AND darken
+  // currentColor glyphs so monochrome fallback logos read as dark-on-white.
   n.querySelectorAll(".icon-shape").forEach(g => {
     g.querySelectorAll("path, rect").forEach(el => {
       const f = (el.getAttribute("fill") || "").toLowerCase();
-      if (f === "#1a1a1a" || getComputedStyle(el).fill === "rgb(26, 26, 26)") el.setAttribute("fill", "#ffffff");
+      if (f === "#1a1a1a" || getComputedStyle(el).fill === "rgb(26, 26, 26)") el.setAttribute("fill", "#ffffff");  // chip
+      else if (f === "currentcolor") el.setAttribute("fill", "#1a1a1a");                                            // monochrome glyph -> dark
     });
   });
   if (sv) mmFixViewBox(sv);                              // widened rects may poke past the canvas
@@ -5356,7 +5361,7 @@ async function _mmRegisterIcons(m) {
   if (_mmIconsRegistered || !m || typeof m.registerIconPacks !== "function") return;
   _mmIconsRegistered = true;
   try {
-    const names = ["logos"];   // add more packs here (e.g. "simple-icons", "devicon") for wider coverage
+    const names = ["logos", "simple-icons"];   // tiered: logos (full colour) preferred, simple-icons (monochrome) fallback for coverage
     const packs = (await Promise.all(names.map((name) =>
       fetch("vendor/icons-" + name + ".json")
         .then((r) => (r.ok ? r.json() : null))

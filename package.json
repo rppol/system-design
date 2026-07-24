@@ -8,6 +8,7 @@
   },
   "devDependencies": {
     "@iconify-json/logos": "^1.2.11",
+    "@iconify-json/simple-icons": "^1.2.91",
     "puppeteer": "^23.10.4"
   }
 }
