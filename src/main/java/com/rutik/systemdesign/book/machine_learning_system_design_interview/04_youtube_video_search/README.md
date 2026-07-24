@@ -115,7 +115,8 @@ flowchart LR
 
     Q(["Text query"]) --> TE["Text encoder<br/>(transformer)"]
     TE --> VS["Visual search<br/>ANN over video<br/>embeddings"]
-    Q --> IX["Text search<br/>inverted index<br/>(Elasticsearch)"]
+    Q --> IX
+    IX@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>(inverted index)", pos: "b", h: 44 }
     VS --> FU(("fuse"))
     IX --> FU
     FU --> RR["Re-ranking<br/>business + integrity"]
@@ -123,7 +124,7 @@ flowchart LR
 
     class Q,OUT io
     class TE base
-    class VS,IX req
+    class VS req
     class FU mathOp
     class RR train
 ```
