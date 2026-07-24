@@ -89,122 +89,88 @@ MinHash LSH for near-duplicate detection on 3.3M examples/day:
 ## 3. High-Level Architecture
 
 ### Primary System Diagram
-```
-+------------------+     +-------------------+     +----------------------+
-|  Seed Data Store |     | Config & Template |     | Topic Tree Registry  |
-|  (S3 raw docs,   |     | Registry          |     | (2-level hierarchy,  |
-|   task library,  |     | (prompt templates,|     |  500 leaf nodes,     |
-|   domain seeds)  |     |  version tags)    |     |  diversity weights)  |
-+--------+---------+     +---------+---------+     +----------+-----------+
-         |                         |                          |
-         +-------------------------+--------------------------+
-                                   |
-                        +----------v-----------+
-                        |  Seed Data Composer  |
-                        |  (DiversitySampler,  |
-                        |   Evol-Instruct,     |
-                        |   Self-Instruct)     |
-                        +----------+-----------+
-                                   |
-                                   | GenerationRequest stream
-                                   |
-                        +----------v-----------+
-                        | Multi-Model Generation|
-                        | Fleet                |
-                        | (GPT-4o / Claude /   |
-                        |  Llama-3 self-hosted)|
-                        | Circuit breaker per  |
-                        | provider             |
-                        +----------+-----------+
-                                   |
-                                   | raw GenerationResult
-                                   |
-                        +----------v-----------+
-                        | Quality Filter       |
-                        | Pipeline (5 stages)  |
-                        | PASS rate: 30%       |
-                        +----------+-----------+
-                                   |
-                    +--------------+--------------+
-                    |                             |
-           +--------v-------+           +---------v------+
-           |  PASS bucket   |           |  FAIL bucket   |
-           |  (Kafka topic) |           |  (metrics +    |
-           |                |           |   dead-letter) |
-           +--------+-------+           +----------------+
-                    |
-         +----------v----------+
-         | Deduplicator         |
-         | (MinHash LSH,        |
-         |  bloom filter,       |
-         |  5ms/example)        |
-         +----------+----------+
-                    |
-         +----------v----------+
-         | Human Review Sampler |
-         | 500 examples/day     |
-         | routed to Surge/     |
-         | Labelbox queue       |
-         +----------+----------+
-                    |
-         +----------v----------+
-         | Dataset Registry     |
-         | (S3 immutable        |
-         |  snapshots, SHA-256  |
-         |  content hash,       |
-         |  lineage records)    |
-         +----------+----------+
-                    |
-         +----------v----------+
-         | Training Pipeline    |
-         | Consumer             |
-         | (reads versioned     |
-         |  dataset via         |
-         |  registry API)       |
-         +---------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    seed[(Seed Data Store<br/>S3 raw docs, task library,<br/>domain seeds)]
+    config[(Config and Template Registry<br/>prompt templates, version tags)]
+    topictree[(Topic Tree Registry<br/>2-level hierarchy, 500 leaf nodes,<br/>diversity weights)]
+    composer(Seed Data Composer<br/>DiversitySampler, Evol-Instruct,<br/>Self-Instruct)
+    fleet(Multi-Model Generation Fleet<br/>GPT-4o / Claude / Llama-3 self-hosted<br/>circuit breaker per provider)
+    qfilter(Quality Filter Pipeline<br/>5 stages, PASS rate 30%)
+    passb(PASS bucket<br/>Kafka topic)
+    failb(FAIL bucket<br/>metrics + dead-letter)
+    dedup(Deduplicator<br/>MinHash LSH, bloom filter,<br/>5ms/example)
+    human(Human Review Sampler<br/>500 examples/day<br/>routed to Surge/Labelbox queue)
+    registry[(Dataset Registry<br/>S3 immutable snapshots, SHA-256<br/>content hash, lineage records)]
+    training(Training Pipeline Consumer<br/>reads versioned dataset via<br/>registry API)
+
+    seed --> composer
+    config --> composer
+    topictree --> composer
+    composer -->|GenerationRequest stream| fleet
+    fleet -->|raw GenerationResult| qfilter
+    qfilter --> passb
+    qfilter --> failb
+    passb --> dedup
+    dedup --> human
+    human --> registry
+    registry --> training
+
+    class seed,config,topictree,registry req
+    class composer,fleet,dedup,human,training train
+    class qfilter mathOp
+    class passb io
+    class failb lossN
 ```
 
 ### Quality Filter Sub-Pipeline
-```
-GenerationResult
-       |
-  +----v-------------------------------+
-  | Stage 1: Format Check (rule-based) |  < 1ms   FAIL -> dead-letter
-  | - min length 50 tokens             |
-  | - no truncated response            |
-  | - valid UTF-8, no null bytes       |
-  +----+-------------------------------+
-       |
-  +----v-------------------------------+
-  | Stage 2: Toxicity Filter           |  ~ 5ms   FAIL -> dead-letter
-  | - keyword blocklist                |
-  | - DistilBERT safety classifier     |
-  | - threshold: P(toxic) > 0.15       |
-  +----+-------------------------------+
-       |
-  +----v-------------------------------+
-  | Stage 3: LLM-as-Judge              |  ~200ms  FAIL -> dead-letter
-  | - GPT-4o-mini judges on:           |
-  |   helpfulness, accuracy, clarity   |
-  | - Score 1-5; reject if < 3         |
-  +----+-------------------------------+
-       |
-  +----v-------------------------------+
-  | Stage 4: Embedding Diversity Check |  ~10ms   FAIL -> dead-letter
-  | - sentence-transformers embedding  |
-  | - cosine sim to 10 nearest         |
-  |   neighbors in running dataset     |
-  | - reject if max_sim > 0.95         |
-  +----+-------------------------------+
-       |
-  +----v-------------------------------+
-  | Stage 5: PII Scrubber              |  ~15ms   FLAG -> human review
-  | - presidio entity detection        |
-  | - replace with synthetic tokens    |
-  | - flag residual uncertainty        |
-  +----+-------------------------------+
-       |
-     PASS -> Kafka topic -> Deduplicator
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    genresult(GenerationResult)
+    s1(Stage 1: Format Check<br/>rule-based, under 1ms<br/>min length 50 tokens, no truncation,<br/>valid UTF-8)
+    s2(Stage 2: Toxicity Filter<br/>about 5ms<br/>keyword blocklist, DistilBERT classifier,<br/>threshold P toxic above 0.15)
+    s3(Stage 3: LLM-as-Judge<br/>about 200ms<br/>GPT-4o-mini judges helpfulness,<br/>accuracy, clarity; reject if score below 3)
+    s4(Stage 4: Embedding Diversity Check<br/>about 10ms<br/>sentence-transformers embedding,<br/>reject if max similarity above 0.95)
+    s5(Stage 5: PII Scrubber<br/>about 15ms<br/>presidio entity detection,<br/>replace with synthetic tokens)
+    deadletter[(Dead-letter store)]
+    humanreview(Human Review<br/>flagged for residual uncertainty)
+    kafkatopic@{ icon: "logos:kafka", form: "square", label: "Kafka topic", pos: "b", h: 44 }
+    dedup(Deduplicator)
+
+    genresult --> s1
+    s1 -->|PASS| s2
+    s1 -->|FAIL| deadletter
+    s2 -->|PASS| s3
+    s2 -->|FAIL| deadletter
+    s3 -->|PASS| s4
+    s3 -->|FAIL| deadletter
+    s4 -->|PASS| s5
+    s4 -->|FAIL| deadletter
+    s5 -->|PASS| kafkatopic
+    s5 -->|FLAG| humanreview
+    kafkatopic --> dedup
+
+    class genresult req
+    class s1,s2,s3,s4,s5 mathOp
+    class deadletter lossN
+    class humanreview base
+    class dedup train
 ```
 
 ---
