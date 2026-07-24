@@ -52,7 +52,7 @@ flowchart LR
         gcu --> rh["5. Route handler<br/>query projects / tasks"]
     end
 
-    pg[("PostgreSQL<br/>single DB")]
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
     tbl["tables: tenants, users,<br/>roles, projects, tasks"]
     rls{"RLS policy<br/>tenant_id = current_setting(...)"}
     pool[("Shared asyncpg<br/>connection pool")]
@@ -69,7 +69,7 @@ flowchart LR
     class mw,gt,gcu mathOp
     class gdb,rls lossN
     class rh train
-    class pg,tbl,pool base
+    class tbl,pool base
 ```
 
 **Request flow:**
