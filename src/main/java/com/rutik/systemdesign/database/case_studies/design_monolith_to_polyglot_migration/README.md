@@ -37,46 +37,53 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph P0["Phase 0 · Wk 1-4<br/>Instrumentation"]
-        M0[("MySQL<br/>primary")] --> D0["Debezium"] --> K0(["Kafka"])
+        M0 --> D0["Debezium"] --> K0
+        M0@{ icon: "logos:mysql", form: "square", label: "MySQL<br/>primary", pos: "b", h: 44 }
+        K0@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
         K0 -.->|"0% traffic"| SH{"Shadow read<br/>compare only"}
     end
 
     subgraph P1["Phase 1 · Wk 5-10<br/>New DBs Ready"]
-        D1["Debezium"] --> K1(["Kafka"])
-        K1 --> ES1["Elasticsearch<br/>product index"]
-        K1 --> CH1["ClickHouse<br/>events, activity"]
-        K1 --> PG1[("PostgreSQL<br/>orders, users")]
+        D1["Debezium"] --> K1
+        K1@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+        K1 --> ES1
+        ES1@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>product index", pos: "b", h: 44 }
+        K1 --> CH1
+        CH1@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>events, activity", pos: "b", h: 44 }
+        K1 --> PG1
+        PG1@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>orders, users", pos: "b", h: 44 }
     end
 
     subgraph P2["Phase 2 · Wk 11-20<br/>Strangler-Fig Shift"]
         RT2{"Router<br/>% by feature"}
-        RT2 -->|"search 0 to 100%"| ES2["Elasticsearch"]
-        RT2 -->|"analytics 100%"| CH2["ClickHouse"]
-        RT2 -->|"reads 0 to 100%"| PG2[("PostgreSQL")]
-        RT2 -.->|"dual-write"| MY2[("MySQL")]
+        RT2 -->|"search 0 to 100%"| ES2
+        ES2@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+        RT2 -->|"analytics 100%"| CH2
+        CH2@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
+        RT2 -->|"reads 0 to 100%"| PG2
+        PG2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+        RT2 -.->|"dual-write"| MY2
+        MY2@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
     end
 
     subgraph P3["Phase 3 · Wk 21-24<br/>Cutover"]
-        APP3(["Application"]) --> PG3[("PostgreSQL<br/>writes")]
-        MY3[("MySQL<br/>read-only<br/>4wk rollback")]
+        APP3(["Application"]) --> PG3
+        PG3@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>writes", pos: "b", h: 44 }
+        MY3@{ icon: "logos:mysql", form: "square", label: "MySQL<br/>read-only<br/>4wk rollback", pos: "b", h: 44 }
     end
 
     subgraph FS["Final State"]
-        PGF[("PostgreSQL<br/>source of truth")]
-        ESF["Elasticsearch<br/>search"]
-        CHF["ClickHouse<br/>analytics"]
-        RF[("Redis<br/>sessions, cache")]
+        PGF@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>source of truth", pos: "b", h: 44 }
+        ESF@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>search", pos: "b", h: 44 }
+        CHF@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>analytics", pos: "b", h: 44 }
+        RF@{ icon: "logos:redis", form: "square", label: "Redis<br/>sessions, cache", pos: "b", h: 44 }
     end
 
     P0 --> P1 --> P2 --> P3 --> FS
 
-    class M0,MY2,MY3 frozen
     class D0,D1 mathOp
-    class K0,K1 req
     class SH,RT2 mathOp
     class APP3 io
-    class ES1,ES2,ESF,CH1,CH2,CHF,RF base
-    class PG1,PG2,PG3,PGF train
 ```
 
 *Four phases over 24 weeks fan CDC out from MySQL to three purpose-built stores while the strangler-fig router shifts traffic percentage by percentage; MySQL ends as a 4-week, read-only rollback safety net before decommission.*
@@ -181,20 +188,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    MY[("MySQL<br/>5TB, 500M rows")] --> DMP["mydumper<br/>8 threads, no lock<br/>~7h"]
+    MY --> DMP["mydumper<br/>8 threads, no lock<br/>~7h"]
+    MY@{ icon: "logos:mysql", form: "square", label: "MySQL<br/>5TB, 500M rows", pos: "b", h: 44 }
     DMP --> LD["pgloader<br/>concurrent load<br/>~100 min"]
     LD --> IDX["CREATE INDEX<br/>CONCURRENTLY"]
     IDX --> VER{"Row counts<br/>match?"}
-    VER -->|"yes"| DONE[("PostgreSQL<br/>validated")]
+    VER -->|"yes"| DONE
+    DONE@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>validated", pos: "b", h: 44 }
     VER -.->|"no"| INVEST["Investigate<br/>discrepancy"]
 
     MY -.->|"binlog, in parallel"| CDC["Debezium<br/>streams new changes"]
     CDC -.-> LAG["Catch-up:<br/>8h lag to minutes"]
     LAG -.-> DONE
 
-    class MY frozen
     class DMP,LD,IDX,VER,CDC,LAG mathOp
-    class DONE train
     class INVEST lossN
 ```
 
