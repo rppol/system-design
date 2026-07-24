@@ -844,18 +844,46 @@ A fixed reference is frozen at a known-good baseline, while a sliding reference 
 
 **Scenario: Monitoring a production credit-scoring model.** A bank scores loan applications with a model whose inputs and outputs are regulated. The monitoring stack computes weekly PSI on 20 input features, a KS test for target drift (the default rate shifting), tracks SHAP feature-importance stability (a regulatory requirement), and computes online AUC on labeled outcomes that arrive with a 30-day lag. Dashboards run on Grafana fed by Evidently AI.
 
-```
-production scoring  -> log (features, score, decision)
-        |
-   weekly job:
-     +-- PSI per feature (20)        -> alert if PSI > 0.2 on >=3 features
-     +-- KS test on default rate     -> target drift alert
-     +-- SHAP importance drift        -> regulatory audit alert
-     |
-   30 days later (labels arrive):
-     +-- online AUC vs offline AUC    -> performance-drift alert
-        |
-   Grafana + Evidently dashboards -> on-call + model-risk committee
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    scoring(["Production scoring"]) --> log["Log: features,<br/>score, decision"]
+
+    subgraph weekly["Weekly job"]
+        psi["PSI per feature 20<br/>alert if PSI > 0.2<br/>on >= 3 features"]
+        ks["KS test on default rate<br/>target drift alert"]
+        shap["SHAP importance drift<br/>regulatory audit alert"]
+    end
+
+    log --> psi
+    log --> ks
+    log --> shap
+
+    subgraph lagged["30 days later - labels arrive"]
+        auc["Online AUC vs offline AUC<br/>performance-drift alert"]
+    end
+
+    log --> auc
+
+    dash["Grafana + Evidently<br/>dashboards"]
+    psi --> dash
+    ks --> dash
+    shap --> dash
+    auc --> dash
+    dash --> oncall(["On-call +<br/>model-risk committee"])
+
+    class scoring,oncall io
+    class log base
+    class psi,ks,shap mathOp
+    class auc lossN
+    class dash train
 ```
 
 PSI > 0.2 on a feature flags a meaningful population shift; the system alerts only when several features drift together to avoid noise. Online AUC, computed once labels mature at 30 days, is the ground-truth performance signal; everything else is an early warning that fires before AUC can.
