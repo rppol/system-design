@@ -312,34 +312,43 @@ flowchart LR
 
 Each node re-draws a fresh random subset of `m ≈ sqrt(p)` candidate features before choosing its split. Restricting the candidates node-by-node — not just once per tree — is what forces different trees down different decision paths and de-correlates their errors.
 
-### Full Random Forest Architecture
+### Full Random Forest Architecture with OOB Evaluation
 
-```
-                Training Data (N samples, p features)
-                           |
-        +------------------+------------------+
-        |                  |                  |
-   Bootstrap_1        Bootstrap_2        Bootstrap_B
-   (63.2% unique)    (63.2% unique)    (63.2% unique)
-        |                  |                  |
-  Decision Tree_1    Decision Tree_2    Decision Tree_B
-  (max_features=sqrt(p) at each split)
-        |                  |                  |
-   Prediction_1       Prediction_2       Prediction_B
-        |                  |                  |
-        +------------------+------------------+
-                           |
-                Classification:        Regression:
-                Majority vote          Mean of predictions
-                           |
-                    Final Prediction
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-OOB Evaluation:
-  For each sample i:
-    Collect trees where i was NOT in bootstrap
-    Average their predictions → OOB prediction for i
-  OOB error = metric(true_labels, OOB_predictions)
+    TDATA(["Training data<br/>N samples, p features"])
+    TDATA --> BS1["Bootstrap_1<br/>63.2% unique"]
+    TDATA --> BS2["Bootstrap_2<br/>63.2% unique"]
+    TDATA --> BSB["Bootstrap_B<br/>63.2% unique"]
+    BS1 --> DT1["Decision Tree_1<br/>max_features=sqrt(p)"]
+    BS2 --> DT2["Decision Tree_2<br/>max_features=sqrt(p)"]
+    BSB --> DTB["Decision Tree_B<br/>max_features=sqrt(p)"]
+    DT1 --> PR1(["Prediction_1"])
+    DT2 --> PR2(["Prediction_2"])
+    DTB --> PRB(["Prediction_B"])
+    PR1 --> COMB{"Classification: majority vote<br/>Regression: mean"}
+    PR2 --> COMB
+    PRB --> COMB
+    COMB --> FIN(["Final prediction"])
+    OOB["OOB evaluation:<br/>for sample i, average only<br/>trees where i was NOT<br/>in that tree's bootstrap"] -.-> COMB
+
+    class TDATA,FIN io
+    class BS1,BS2,BSB base
+    class DT1,DT2,DTB train
+    class PR1,PR2,PRB req
+    class COMB mathOp
+    class OOB base
 ```
+
+OOB error attaches to the same fan-out: for every sample `i`, only the trees whose bootstrap left `i` out are polled, their predictions are averaged (or majority-voted), and the result is compared to the true label — giving a validation estimate with no held-out split.
 
 ### Feature Importance (MDI) Computation
 
