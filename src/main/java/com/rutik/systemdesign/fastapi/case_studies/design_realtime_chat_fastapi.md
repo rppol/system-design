@@ -41,9 +41,9 @@ flowchart LR
 
     clientA(["Client A<br/>Room: #general"])
     pod1("FastAPI Pod 1<br/>ConnectionManager")
-    redis("Redis<br/>Pub/Sub broker<br/>channel: room:xyz")
+    redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>room:xyz", pos: "b", h: 44 }
     pod2("FastAPI Pod 2<br/>forward to<br/>local conns")
-    postgres("PostgreSQL<br/>messages table")
+    postgres@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>messages", pos: "b", h: 44 }
 
     clientA -->|"1. JWT auth on<br/>first message"| pod1
     pod1 -->|"2. subscribe to<br/>room channel"| redis
@@ -54,9 +54,7 @@ flowchart LR
 
     class clientA io
     class pod1 mathOp
-    class redis base
     class pod2 train
-    class postgres base
 ```
 
 Redis pub/sub fans a single publish out to every pod, including the sender — no pod ever holds more than its own slice of the 10,000 concurrent connections, and the PostgreSQL write happens off the critical path via a background task.
