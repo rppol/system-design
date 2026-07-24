@@ -590,41 +590,35 @@ A: Use a structured test matrix: (1) representative URL set — select 20-30 URL
 
 **Architecture Overview**:
 
-```
-QA Test Suite (200 scenarios as YAML)
-      |
-      v
-┌──────────────────────────────────────────────────────────────────┐
-│  TEST ORCHESTRATOR                                               │
-│  Reads test scenarios, dispatches to browser agents in parallel  │
-│  Max 10 concurrent agents (resource constraint)                  │
-└──────────────────────┬───────────────────────────────────────────┘
-                       │ (10 at a time)
-          ┌────────────┼────────────┐
-          v            v            v
-  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-  │ BROWSER      │ │ BROWSER      │ │ BROWSER      │
-  │ AGENT #1     │ │ AGENT #2     │ │ AGENT N      │
-  │              │ │              │ │              │
-  │ Playwright + │ │ Playwright + │ │ Playwright + │
-  │ Claude 3.5   │ │ Claude 3.5   │ │ Claude 3.5   │
-  │              │ │              │ │              │
-  │ Navigate     │ │ Navigate     │ │ Navigate     │
-  │ Fill forms   │ │ Fill forms   │ │ Fill forms   │
-  │ Verify state │ │ Verify state │ │ Verify state │
-  │ Capture bugs │ │ Capture bugs │ │ Capture bugs │
-  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-         │                │                │
-         v                v                v
-┌──────────────────────────────────────────────────────────────────┐
-│  BUG REPORTER                                                    │
-│  Aggregates results, creates bug reports with:                   │
-│  - Test scenario name + expected vs. actual outcome              │
-│  - Full action trajectory (steps taken)                          │
-│  - Screenshots: before failure, at failure point                 │
-│  - Reproduction steps in plain English                           │
-│  Posts to Jira + Slack                                           │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Suite(["QA Test Suite<br/>200 scenarios as YAML"]) --> Orch
+    Orch["Test Orchestrator<br/>Reads scenarios, dispatches to<br/>browser agents in parallel<br/>max 10 concurrent"] --> A1 & A2 & AN
+
+    subgraph Agents ["Browser Agents (up to 10 in parallel)"]
+        A1["Browser Agent #1<br/>Playwright + Claude 3.5<br/>Navigate / Fill / Verify / Capture bugs"]
+        A2["Browser Agent #2<br/>Playwright + Claude 3.5<br/>Navigate / Fill / Verify / Capture bugs"]
+        AN["Browser Agent N<br/>Playwright + Claude 3.5<br/>Navigate / Fill / Verify / Capture bugs"]
+    end
+
+    A1 --> Reporter
+    A2 --> Reporter
+    AN --> Reporter
+    Reporter["Bug Reporter<br/>Aggregates results: scenario + expected<br/>vs actual, action trajectory, screenshots,<br/>plain-English repro steps<br/>Posts to Jira + Slack"]
+
+    class Suite io
+    class Orch base
+    class A1,A2,AN base
+    class Reporter req
 ```
 
 **Key Design Decisions**:
