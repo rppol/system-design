@@ -33,7 +33,7 @@ flowchart LR
     subgraph rule["3-2-1: 3 copies, 2 media types, 1 offsite"]
         Primary(["Copy 1: Primary<br/>online, disk"])
         Replica(["Copy 2: Replica<br/>different AZ, disk"])
-        S3[("Copy 3: Object storage<br/>S3 / GCS, offsite")]
+        S3@{ icon: "logos:aws-s3", form: "square", label: "Copy 3: S3 / GCS<br/>offsite", pos: "b", h: 44 }
     end
 
     Primary -->|"same media"| Replica
@@ -41,7 +41,6 @@ flowchart LR
 
     class Primary train
     class Replica frozen
-    class S3 base
 ```
 
 The rule made concrete for databases: the online primary and an AZ-local replica are copies 1 and 2, both on disk media in the same region, while the object-storage backup is copy 3 on a different medium in a different datacenter — the only one of the three that survives a full-region failure.
@@ -54,16 +53,14 @@ The rule made concrete for databases: the online primary and an AZ-local replica
 
 ## 4. Types / Architectures / Strategies
 
-```
-Backup Type     | Mechanism                     | Lock?  | Size      | RTO
-----------------|-------------------------------|--------|-----------|----------
-Logical (pg_dump)| SQL/COPY output              | No     | Compressed| Hours
-Physical base   | Raw file copy (pg_basebackup) | No     | Full DB   | Minutes
-WAL archiving   | Continuous WAL segment archive| No     | Incremental| Minutes
-PITR            | Base backup + WAL replay      | No     | Full + WAL| Minutes
-Snapshot (cloud)| Storage volume snapshot       | No     | Full disk | Minutes
-Percona XtraBackup| Hot physical backup MySQL  | No     | Full DB   | Minutes
-```
+| Backup Type | Mechanism | Lock? | Size | RTO |
+|-------------|-----------|-------|------|-----|
+| Logical (pg_dump) | SQL/COPY output | No | Compressed | Hours |
+| Physical base | Raw file copy (pg_basebackup) | No | Full DB | Minutes |
+| WAL archiving | Continuous WAL segment archive | No | Incremental | Minutes |
+| PITR | Base backup + WAL replay | No | Full + WAL | Minutes |
+| Snapshot (cloud) | Storage volume snapshot | No | Full disk | Minutes |
+| Percona XtraBackup | Hot physical backup MySQL | No | Full DB | Minutes |
 
 ---
 
@@ -86,7 +83,7 @@ flowchart LR
     subgraph cont["Continuous Operation"]
         Replica(["Streaming replica<br/>HA, not backup"])
         WALG["WAL-G / pgBackRest"]
-        S3[("S3 / GCS bucket")]
+        S3@{ icon: "logos:aws-s3", form: "square", label: "S3 / GCS<br/>bucket", pos: "b", h: 44 }
         WALSeg["WAL segments<br/>16MB, continuous"]
         BaseBkp["Base backup<br/>weekly / daily"]
     end
@@ -108,7 +105,7 @@ flowchart LR
 
     class Primary,Promoted train
     class Replica frozen
-    class S3,WALSeg,BaseBkp base
+    class WALSeg,BaseBkp base
     class WALG,Cfg,Replay mathOp
     class Restore req
 ```
@@ -138,7 +135,7 @@ flowchart LR
         BPush["wal-g backup-push"]
     end
 
-    S3b[("S3 / GCS bucket")]
+    S3b@{ icon: "logos:aws-s3", form: "square", label: "S3 / GCS<br/>bucket", pos: "b", h: 44 }
 
     subgraph restore["Restore: PITR to 2h ago"]
         Fetch["wal-g backup-fetch LATEST"]
@@ -154,7 +151,6 @@ flowchart LR
 
     class PG train
     class Seg,Push,BPush mathOp
-    class S3b base
     class Fetch,WFetch,Local req
     class Replay2 train
 ```
@@ -519,16 +515,14 @@ repo1-cipher-pass=${BACKUP_ENCRYPTION_PASSWORD}  # from Vault/Secrets Manager
 
 ## 8. Tradeoffs
 
-```
-Method              | RPO         | RTO          | Storage    | Complexity
---------------------|-------------|--------------|------------|------------
-pg_dump daily       | 24 hours    | Hours        | Low        | Low
-WAL archiving (WAL-G)| Seconds    | 30-90 min    | Medium     | Medium
-Streaming replica   | Seconds     | 15-30s       | Full DB    | Medium
-Cloud snapshot      | 5-60 min    | 10-30 min    | Full disk  | Low
-Synchronous rep.    | 0           | 15-30s       | Full DB    | Medium
-Multi-region active | 0           | 0            | 2× DB      | Very High
-```
+| Method | RPO | RTO | Storage | Complexity |
+|--------|-----|-----|---------|------------|
+| pg_dump daily | 24 hours | Hours | Low | Low |
+| WAL archiving (WAL-G) | Seconds | 30-90 min | Medium | Medium |
+| Streaming replica | Seconds | 15-30s | Full DB | Medium |
+| Cloud snapshot | 5-60 min | 10-30 min | Full disk | Low |
+| Synchronous rep. | 0 | 15-30s | Full DB | Medium |
+| Multi-region active | 0 | 0 | 2× DB | Very High |
 
 ---
 
@@ -716,7 +710,7 @@ flowchart LR
 
     subgraph c2["2: WAL-G continuous archiving"]
         WALPush["wal-g wal-push<br/>every 1-5 min"]
-        S3wal[("S3 us-east-1<br/>WAL segments")]
+        S3wal@{ icon: "logos:aws-s3", form: "square", label: "S3 us-east-1<br/>WAL segments", pos: "b", h: 44 }
     end
 
     subgraph c3["3: Daily base backup"]
@@ -725,7 +719,7 @@ flowchart LR
     end
 
     subgraph c4["4: Weekly restore test"]
-        EC2["new EC2 instance"]
+        EC2@{ icon: "logos:aws-ec2", form: "square", label: "EC2", pos: "b", h: 44 }
         Verify{"checksum + row count<br/>match primary?"}
         Page["alert PagerDuty"]
         Terminate(["terminate instance"])
@@ -743,9 +737,7 @@ flowchart LR
     class Primary train
     class Patroni,WALPush,Cron mathOp
     class Replica frozen
-    class S3wal base
     class BackupPush req
-    class EC2 req
     class Verify mathOp
     class Page lossN
     class Terminate io
