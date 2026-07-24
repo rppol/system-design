@@ -69,17 +69,15 @@ practice.
 
 ## 4. Types / Architectures / Strategies
 
-```
-Pattern                    | Description                         | When to Use
----------------------------|-------------------------------------|------------------
-CQRS + separate stores     | Write to RDBMS; project to search   | Different read/write patterns
-Event sourcing + projections| Event store; derive read models      | Audit trail + multiple views
-CDC pipeline               | DB changes → Kafka → consumers      | Sync without dual-write
-Dual-write + outbox        | Write DB + outbox; relay publishes  | Guaranteed event delivery
-Read cache pattern         | Redis cache in front of PostgreSQL  | Hot data, sub-ms reads
-Search sidecar             | Elasticsearch alongside RDBMS       | Full-text + faceted search
-Polyglot SaaS              | Different DB per tenant type        | Enterprise vs SMB tenants
-```
+| Pattern | Description | When to Use |
+|---------|--------------|-------------|
+| CQRS + separate stores | Write to RDBMS; project to search | Different read/write patterns |
+| Event sourcing + projections | Event store; derive read models | Audit trail + multiple views |
+| CDC pipeline | DB changes → Kafka → consumers | Sync without dual-write |
+| Dual-write + outbox | Write DB + outbox; relay publishes | Guaranteed event delivery |
+| Read cache pattern | Redis cache in front of PostgreSQL | Hot data, sub-ms reads |
+| Search sidecar | Elasticsearch alongside RDBMS | Full-text + faceted search |
+| Polyglot SaaS | Different DB per tenant type | Enterprise vs SMB tenants |
 
 ---
 
@@ -98,25 +96,29 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph Write["Write Side - Commands"]
-        C1([Client]) --> API1(API) --> PG[("PostgreSQL<br/>source of truth")]
+        C1([Client]) --> API1(API) --> PG
         PG --> OB(Outbox table<br/>same transaction)
         OB -.-> DBZ{Debezium CDC}
-        DBZ -.-> KT1(["Kafka topic:<br/>product-events"])
+        DBZ -.-> KT1
         KT1 -.-> IDX(Elasticsearch Indexer)
-        IDX --> ESIX[("Elasticsearch<br/>index")]
+        IDX --> ESIX
     end
 
     subgraph Read["Read Side - Queries"]
-        C2([Client]) --> SAPI(Search API) --> ESREAD[("Elasticsearch<br/>read model")]
-        C2 --> DAPI(Detail API) --> PGREAD[("PostgreSQL<br/>source of truth, by id")]
+        C2([Client]) --> SAPI(Search API) --> ESREAD
+        C2 --> DAPI(Detail API) --> PGREAD
     end
+
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    KT1@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    ESIX@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    ESREAD@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    PGREAD@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
 
     class C1,C2 io
     class API1,SAPI,DAPI req
-    class PG,ESIX,ESREAD,PGREAD base
     class OB train
     class DBZ,IDX mathOp
-    class KT1 req
 ```
 
 *Write path: the client's write lands in PostgreSQL plus an outbox row in the same transaction; Debezium tails the WAL and republishes the change onto Kafka, which an indexer applies to Elasticsearch. Read path: search queries hit the Elasticsearch projection while detail lookups go straight to PostgreSQL. Consistency window (Debezium lag): 100ms-2s depending on transaction size.*
@@ -133,19 +135,23 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    CL([Client]) --> EV[("Events table<br/>PostgreSQL")]
+    CL([Client]) --> EV
     EV -.-> OC{OrderCreated<br/>projector}
-    OC --> ORD[("Orders read model<br/>PostgreSQL")]
-    OC --> INV[("Inventory read model<br/>Cassandra")]
+    OC --> ORD
+    OC --> INV
     OC --> ANA[("Analytics read model<br/>ClickHouse")]
 
     Q1(Order detail) --> ORD
     Q2(Inventory check) --> INV
     Q3(Sales report) --> ANA
 
+    EV@{ icon: "logos:postgresql", form: "square", label: "Events Table<br/>(PostgreSQL)", pos: "b", h: 44 }
+    ORD@{ icon: "logos:postgresql", form: "square", label: "Orders<br/>(PostgreSQL)", pos: "b", h: 44 }
+    INV@{ icon: "logos:cassandra", form: "square", label: "Inventory<br/>(Cassandra)", pos: "b", h: 44 }
+
     class CL io
     class Q1,Q2,Q3 req
-    class EV,ORD,INV,ANA base
+    class ANA base
     class OC mathOp
 ```
 
@@ -163,16 +169,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG2[("PostgreSQL<br/>primary")] -.->|"WAL stream,<br/>replication slot"| DBZ2(Debezium Connector<br/>Kafka Connect)
-    DBZ2 -->|"emits change<br/>events"| KT2(["Kafka Topics<br/>products / users / orders"])
-    KT2 --> ES2[("Elasticsearch<br/>index")]
+    PG2 -.->|"WAL stream,<br/>replication slot"| DBZ2(Debezium Connector<br/>Kafka Connect)
+    DBZ2 -->|"emits change<br/>events"| KT2
+    KT2 --> ES2
     KT2 --> CH2[("ClickHouse<br/>analytics table")]
-    KT2 --> RD2[("Redis cache<br/>invalidation")]
+    KT2 --> RD2
     KT2 -.-> DW2[("Data Warehouse<br/>BigQuery / Snowflake")]
 
-    class PG2,ES2,CH2,RD2 base
+    PG2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    KT2@{ icon: "logos:kafka", form: "square", label: "Kafka Topics", pos: "b", h: 44 }
+    ES2@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    RD2@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+
+    class CH2 base
     class DBZ2 mathOp
-    class KT2 req
     class DW2 frozen
 ```
 
@@ -283,7 +293,7 @@ sequenceDiagram
     PG-->>App: SUCCESS
     App--xES: 2. Write product
     Note over ES: NETWORK TIMEOUT
-    Note over PG,ES: PostgreSQL has the new product;<br/>Elasticsearch still has the stale one
+    Note over PG,ES: PostgreSQL has the new product,<br/>Elasticsearch still has the stale one
 ```
 
 *Result: the application serves search results inconsistent with reality. Fix today is a manual re-sync script - error-prone and manual.*
@@ -433,14 +443,19 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG[("PostgreSQL<br/>OLTP")] --> DBZ(Debezium) --> KT(["Kafka"])
-    KT --> S3[("S3<br/>Parquet")] --> GLUE(Glue Crawler) --> ATH(Athena SQL)
+    PG --> DBZ(Debezium) --> KT
+    KT --> S3 --> GLUE --> ATH
     KT --> BQ[("BigQuery")] --> LOOK([Looker dashboards])
     KT --> SF[("Snowflake")] --> DBT(dbt transformations)
 
-    class PG,S3,BQ,SF base
-    class DBZ,GLUE,DBT mathOp
-    class KT,ATH req
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    KT@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    S3@{ icon: "logos:aws-s3", form: "square", label: "S3 Parquet", pos: "b", h: 44 }
+    GLUE@{ icon: "logos:aws-glue", form: "square", label: "Glue Crawler", pos: "b", h: 44 }
+    ATH@{ icon: "logos:aws-athena", form: "square", label: "Athena SQL", pos: "b", h: 44 }
+
+    class BQ,SF base
+    class DBZ,DBT mathOp
     class LOOK io
 ```
 
@@ -462,16 +477,14 @@ flowchart LR
 
 ## 8. Tradeoffs
 
-```
-Pattern              | Read Benefit          | Write Complexity  | Consistency
----------------------|----------------------|-------------------|------------------
-Single DB (PG)       | None                  | None              | Strong
-PG + Redis cache     | Sub-ms hot reads      | Cache invalidation| Eventual (TTL/event)
-PG + Elasticsearch   | Full-text search      | Dual-write/CDC    | Eventual (sec-min)
-PG + ClickHouse      | OLAP queries          | CDC pipeline      | Eventual (sec-min)
-Event sourcing       | Rebuild any read model| Append-only easy  | Eventual per proj
-Full polyglot        | Optimized per pattern | Very high         | Varies per pair
-```
+| Pattern | Read Benefit | Write Complexity | Consistency |
+|---------|---------------|-------------------|-------------|
+| Single DB (PG) | None | None | Strong |
+| PG + Redis cache | Sub-ms hot reads | Cache invalidation | Eventual (TTL/event) |
+| PG + Elasticsearch | Full-text search | Dual-write/CDC | Eventual (sec-min) |
+| PG + ClickHouse | OLAP queries | CDC pipeline | Eventual (sec-min) |
+| Event sourcing | Rebuild any read model | Append-only easy | Eventual per proj |
+| Full polyglot | Optimized per pattern | Very high | Varies per pair |
 
 ---
 
@@ -620,14 +633,18 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG[("PostgreSQL<br/>products table<br/>source of truth")] --> DBZ(Debezium<br/>pgoutput) --> KT(["Kafka<br/>products.events"])
-    KT --> ESSINK(Elasticsearch<br/>Sink Connector) --> ES[("Elasticsearch<br/>search index")]
+    PG --> DBZ(Debezium<br/>pgoutput) --> KT
+    KT --> ESSINK(Elasticsearch<br/>Sink Connector) --> ES
     KT --> CHSINK(ClickHouse Kafka<br/>Engine table) --> CH[("ClickHouse<br/>analytics")]
-    KT --> RSINK(Redis Invalidation<br/>Consumer) -.->|"invalidate<br/>on update"| RD[("Redis<br/>product cache")]
+    KT --> RSINK(Redis Invalidation<br/>Consumer) -.->|"invalidate<br/>on update"| RD
 
-    class PG,ES,CH,RD base
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    KT@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    ES@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    RD@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+
+    class CH base
     class DBZ,ESSINK,CHSINK,RSINK mathOp
-    class KT req
 ```
 
 *PostgreSQL is the single source of truth; Debezium streams every change through Kafka to three independent sink consumers that keep Elasticsearch (search), ClickHouse (analytics), and Redis (cache) each eventually consistent with it.*
