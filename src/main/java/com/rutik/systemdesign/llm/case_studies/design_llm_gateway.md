@@ -74,60 +74,49 @@ Metrics time series:
 
 ## 3. High-Level Architecture
 
-```
-Clients (Apps, Services)
-    |
-    v
-[DNS / Load Balancer]
-  - Anycast routing (global edge PoPs)
-  - Health check failover
-    |
-    v
-[LLM Gateway Cluster] (stateless; horizontally scalable)
-  ┌───────────────────────────────────────┐
-  │                                       │
-  │  [Auth & Rate Limiting]               │
-  │   - Validate API key → tenant         │
-  │   - Check rate limit (Redis)          │
-  │   - Check budget quota (Redis)        │
-  │                                       │
-  │  [Request Preprocessing]              │
-  │   - Normalize API format              │
-  │   - Prompt injection detection        │
-  │   - Content safety check             │
-  │   - PII detection + redaction         │
-  │                                       │
-  │  [Semantic Cache Check]               │
-  │   - Embed query                       │
-  │   - Check cache (Redis + FAISS)       │
-  │   - If hit: return cached response    │
-  │                                       │
-  │  [Routing Engine]                     │
-  │   - Model selection rules             │
-  │   - A/B test assignment               │
-  │   - Failover logic                    │
-  │                                       │
-  │  [Provider Adapters]                  │
-  │   - OpenAI adapter                    │
-  │   - Anthropic adapter                 │
-  │   - Google adapter                    │
-  │   - Self-hosted adapter (vLLM)        │
-  │                                       │
-  │  [Response Processing]                │
-  │   - Normalize response format         │
-  │   - Token counting + cost calculation │
-  │   - Output safety filter             │
-  │   - Cache write (if cacheable)        │
-  │                                       │
-  └───────────────────────────────────────┘
-    |
-    ├──→ [Async Logging Service]
-    │       Kafka → S3 + ClickHouse
-    │
-    ├──→ [Metrics Service]
-    │       Prometheus → Grafana
-    │
-    └──→ Response to client
+Request path: clients enter through the DNS / load balancer, flow sequentially through the stateless gateway cluster's internal stages, and fan out to async logging, metrics, and the client response.
+
+```mermaid
+flowchart LR
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients([Clients<br/>Apps and Services])
+    lb(DNS / Load Balancer<br/>Anycast routing + health-check failover)
+
+    subgraph gw["LLM Gateway Cluster (stateless, horizontally scalable)"]
+        direction LR
+        auth[Auth and Rate Limiting<br/>validate API key, check rate limit and budget]
+        pre[Request Preprocessing<br/>normalize format, injection and safety and PII checks]
+        cache[Semantic Cache Check<br/>embed query, ANN lookup, return on hit]
+        route[Routing Engine<br/>model selection, A/B assignment, failover]
+        adapt[Provider Adapters<br/>OpenAI, Anthropic, Google, self-hosted vLLM]
+        resp[Response Processing<br/>normalize, cost calc, safety filter, cache write]
+        auth --> pre --> cache --> route --> adapt --> resp
+    end
+
+    logging[Async Logging Service]
+    metricsSvc[Metrics Service]
+    clientResp([Response to Client])
+
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+    clickhouse@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
+    prometheus@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
+    clients --> lb --> gw
+    gw --> logging
+    gw --> metricsSvc
+    gw --> clientResp
+    logging --> kafka
+    kafka --> s3
+    kafka --> clickhouse
+    metricsSvc --> prometheus
+    prometheus --> grafana
+
+    class clients,clientResp req
+    class lb,auth,pre,cache,route,adapt,resp,logging,metricsSvc base
 ```
 
 ---
@@ -189,31 +178,27 @@ Routing example:
 
 Cache-layer fundamentals (exact vs semantic, invalidation, hit-rate economics): [LLM Caching](../llm_caching/README.md).
 
-```
 Semantic cache enables reusing responses for similar (not identical) queries.
 
-Architecture:
-  [Incoming query] → embed(query) → q_vec (1536-dim)
-      |
-      v
-  FAISS index (10M cached query embeddings)
-      |
-  ANN search: nearest neighbor with similarity > 0.95 threshold
-      |
-  ┌──── Cache HIT (similarity > 0.95) ────┐
-  │                                        │
-  │  Return cached response                │
-  │  Log: cache_hit=True                   │
-  │  Update: cache hit count              │
-  └────────────────────────────────────────┘
-  OR
-  ┌──── Cache MISS (similarity < 0.95) ────┐
-  │                                         │
-  │  Forward to LLM provider               │
-  │  Store: {q_vec, response, metadata}    │
-  │  Index: add q_vec to FAISS             │
-  └─────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef io   fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
 
+    query([Incoming Query]) --> embed[Embed Query]
+    embed --> qvec[q_vec<br/>1536-dim]
+    qvec --> faiss[FAISS Index<br/>10M cached embeddings]
+    faiss --> ann{ANN Search<br/>nearest neighbor}
+    ann -->|"Hit: similarity > 0.95"| hit[Return Cached Response<br/>log cache_hit=true]
+    ann -->|"Miss: similarity < 0.95"| miss[Forward to LLM Provider<br/>store q_vec + response<br/>index into FAISS]
+
+    class query req
+    class embed,qvec,faiss,ann base
+    class hit,miss io
+```
+
+```
 Cache entry:
   {
     query_embedding: float[1536],
