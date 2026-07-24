@@ -68,43 +68,27 @@ This file is the decoding-*algorithm* half of the picture. For how a grammar mas
 
 ### 5.1 The sampler pipeline (canonical order)
 
-```
-raw logits [V]
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 1. Logit bias / grammar mask              │  add/subtract per-token offsets;
-│    (set disallowed tokens to -inf)        │  MUST run before truncation, else
-└──────────────────────────────────────────┘  masked tokens can dominate the nucleus
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 2. Repetition / presence / frequency      │  history-dependent logit adjustments
-│    penalties, no-repeat-ngram, DRY        │  (operate on raw logit SCALE)
-└──────────────────────────────────────────┘
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 3. Temperature scaling: logits / T        │  reshapes the distribution's
-└──────────────────────────────────────────┘  sharpness BEFORE truncation
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 4. Top-k truncation (if set)              │  fixed-count cut
-└──────────────────────────────────────────┘
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 5. Top-p (nucleus) truncation (if set)    │  cumulative-mass cut
-└──────────────────────────────────────────┘
-   │
-   v
-┌──────────────────────────────────────────┐
-│ 6. Min-p truncation (if set)              │  relative-to-mode cut
-└──────────────────────────────────────────┘
-   │
-   v
-softmax (renormalize survivors) -> sample -> token
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw logits<br/>(vocab size V)"]) --> mask["1. Logit bias /<br/>grammar mask"]
+    mask -->|"-inf disallowed tokens;<br/>must run before truncation"| pen["2. Repetition / presence /<br/>frequency penalties, DRY"]
+    pen -->|"history-dependent<br/>logit adjustments"| temp["3. Temperature scaling<br/>logits / T"]
+    temp -->|"reshapes sharpness<br/>before truncation"| topk["4. Top-k truncation<br/>(if set)"]
+    topk -->|"fixed-count cut"| topp["5. Top-p (nucleus)<br/>truncation (if set)"]
+    topp -->|"cumulative-mass cut"| minp["6. Min-p truncation<br/>(if set)"]
+    minp -->|"relative-to-mode cut"| out(["Softmax renormalize<br/>then sample token"])
+
+    class raw,out io
+    class mask req
+    class pen,temp,topk,topp,minp mathOp
 ```
 
 ### 5.2 Why shape matters: peaked vs. flat distributions
