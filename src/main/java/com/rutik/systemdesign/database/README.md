@@ -101,41 +101,27 @@ Phase 7: Architecture & Selection
 
 ## Phase Diagram (ASCII)
 
-```
-+----------------------------------------------------------+
-|  Phase 1: FOUNDATIONS                                    |
-|  fundamentals → storage_engines → indexing → locking    |
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 2: RELATIONAL                                     |
-|  postgresql → mysql → sql_opt → schema → migrations     |
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 3: NoSQL                                          |
-|  document → kv → wide_col → search → graph → timeseries|
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 4: EMERGING                                       |
-|  vector → newsql → in_memory                            |
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 5: DISTRIBUTED CONCEPTS                           |
-|  replication → sharding → dist_tx → consensus → caching |
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 6: PRODUCTION OPS                                 |
-|  conn_pool → perf_tuning → backup → security            |
-+----------------------------------------------------------+
-                         |
-+----------------------------------------------------------+
-|  Phase 7: ARCHITECTURE                                   |
-|  selection_framework → polyglot_persistence             |
-+----------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    p1("Phase 1: Foundations<br/>fundamentals -&gt; storage_engines -&gt;<br/>indexing -&gt; locking")
+    p2("Phase 2: Relational<br/>postgresql -&gt; mysql -&gt; sql_opt -&gt;<br/>schema -&gt; migrations")
+    p3("Phase 3: NoSQL<br/>document -&gt; kv -&gt; wide_col -&gt;<br/>search -&gt; graph -&gt; timeseries")
+    p4("Phase 4: Emerging<br/>vector -&gt; newsql -&gt; in_memory")
+    p5("Phase 5: Distributed Concepts<br/>replication -&gt; sharding -&gt; dist_tx -&gt;<br/>consensus -&gt; caching")
+    p6("Phase 6: Production Ops<br/>conn_pool -&gt; perf_tuning -&gt;<br/>backup -&gt; security")
+    p7("Phase 7: Architecture<br/>selection_framework -&gt;<br/>polyglot_persistence")
+
+    p1 --> p2 --> p3 --> p4 --> p5 --> p6 --> p7
+
+    class p1,p2,p3,p4,p5,p6,p7 req
 ```
 
 ---
