@@ -129,9 +129,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     ev(["Watch / like / skip<br/>survey events"])
-    kafka["Kafka<br/>engagement log"]
-    flink["Flink<br/>real-time video counters"]
-    rt["Redis<br/>views/watch-time 1h"]
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>engagement log", pos: "b", h: 44 }
+    flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink<br/>real-time video counters", pos: "b", h: 44 }
+    rt@{ icon: "logos:redis", form: "square", label: "Redis<br/>views/watch-time 1h", pos: "b", h: 44 }
     logs["Data lake<br/>labeled impressions"]
     train["Daily retrain<br/>two-tower + MMoE ranker"]
     reg["Model registry<br/>+ ANN index build"]
@@ -143,8 +143,7 @@ flowchart LR
     reg -.->|"daily"| serve
 
     class ev io
-    class kafka,rt,logs,reg base
-    class flink mathOp
+    class logs,reg base
     class train train
     class serve req
 ```
