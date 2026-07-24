@@ -115,53 +115,53 @@ flowchart TB
 
 Phase 3 (Performance Engineering, colored green as the "active" interview core) is the hinge the whole path pivots on: everything before it builds the mental model, and Phases 4/5 fan out in parallel afterward before both converge on Phase 6.
 
-```
-Phase 1 — GPU Foundations (why GPUs compute the way they do)
-+------------------------------------------------------------+
-|  gpu_computing_foundations     gpu_hardware_architecture   |
-|  cuda_toolkit_and_compilation                              |
-+------------------------------------------------------------+
-                               |
-                               v
-Phase 2 — Core CUDA Programming
-+------------------------------------------------------------+
-|  cuda_programming_model_and_kernels   warps_and_simt_      |
-|  cuda_memory_model_and_hierarchy      execution            |
-|  memory_management_and_data_transfer                       |
-+------------------------------------------------------------+
-                               |
-                               v
-Phase 3 — Performance Engineering (the interview core)
-+------------------------------------------------------------+
-|  memory_coalescing_and_access_patterns                     |
-|  shared_memory_and_bank_conflicts                          |
-|  occupancy_and_launch_configuration                        |
-|  synchronization_and_atomics                               |
-|  parallel_patterns_reduction_scan_histogram                |
-|  warp_level_primitives_and_cooperative_groups              |
-+------------------------------------------------------------+
-                               |
-            +------------------+------------------+
-            v                                     v
-Phase 4 — Advanced Execution          Phase 5 — Libraries & Tensor Cores
-+----------------------------+        +--------------------------+
-|  streams_events_and_       |        |  tensor_cores_and_mixed_ |
-|  concurrency               |        |  precision               |
-|  cuda_graphs               |        |  cuda_math_and_dnn_      |
-|  multi_gpu_programming_and_|        |  libraries               |
-|  nccl                      |        |  python_gpu_ecosystem    |
-|  dynamic_parallelism_and_  |        |  triton_and_kernel_dsls  |
-|  advanced_kernels          |        |                          |
-+-------------+--------------+        +------------+-------------+
-              |                                    |
-              +------------------+-----------------+
-                                 v
-Phase 6 — Profiling, Correctness & Portability
-+------------------------------------------------------------+
-|  profiling_and_performance_analysis                        |
-|  debugging_correctness_and_numerics                        |
-|  gpu_portability_hip_sycl_and_beyond                       |
-+------------------------------------------------------------+
+```mermaid
+flowchart TB
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SG1["Phase 1 - GPU Foundations"]
+        direction TB
+        m1("gpu_computing_foundations<br/>gpu_hardware_architecture<br/>cuda_toolkit_and_compilation")
+    end
+    subgraph SG2["Phase 2 - Core CUDA Programming"]
+        direction TB
+        m2("cuda_programming_model_and_kernels<br/>warps_and_simt_execution<br/>cuda_memory_model_and_hierarchy<br/>memory_management_and_data_transfer")
+    end
+    subgraph SG3["Phase 3 - Performance Engineering (interview core)"]
+        direction TB
+        m3("memory_coalescing_and_access_patterns<br/>shared_memory_and_bank_conflicts<br/>occupancy_and_launch_configuration<br/>synchronization_and_atomics<br/>parallel_patterns_reduction_scan_histogram<br/>warp_level_primitives_and_cooperative_groups")
+    end
+    subgraph SG4["Phase 4 - Advanced Execution"]
+        direction TB
+        m4("streams_events_and_concurrency<br/>cuda_graphs<br/>multi_gpu_programming_and_nccl<br/>dynamic_parallelism_and_advanced_kernels")
+    end
+    subgraph SG5["Phase 5 - Libraries & Tensor Cores"]
+        direction TB
+        m5("tensor_cores_and_mixed_precision<br/>cuda_math_and_dnn_libraries<br/>python_gpu_ecosystem<br/>triton_and_kernel_dsls")
+    end
+    subgraph SG6["Phase 6 - Profiling, Correctness & Portability"]
+        direction TB
+        m6("profiling_and_performance_analysis<br/>debugging_correctness_and_numerics<br/>gpu_portability_hip_sycl_and_beyond")
+    end
+
+    SG1 --> SG2 --> SG3
+    SG3 --> SG4
+    SG3 --> SG5
+    SG4 --> SG6
+    SG5 --> SG6
+
+    class m1 base
+    class m2 io
+    class m3 train
+    class m4 frozen
+    class m5 mathOp
+    class m6 lossN
 ```
 
 **Dependencies to note:**
