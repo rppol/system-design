@@ -177,15 +177,47 @@ Benefits:
 ### 4.4 Bi-Encoder vs Cross-Encoder
 
 **Bi-Encoder**: Query and document encoded separately → very fast (precompute document embeddings)
-```
-Query  → Encoder → q_vec  ]
-                           ] → cosine_similarity → score
-Doc    → Encoder → d_vec  ]
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(Query) --> ENC1(Encoder) --> QVEC(q_vec)
+    D(Doc) --> ENC2(Encoder) --> DVEC(d_vec)
+    QVEC --> COS(cosine_similarity) --> SCORE(score)
+    DVEC --> COS
+
+    class Q,D io
+    class ENC1,ENC2 train
+    class QVEC,DVEC req
+    class COS mathOp
+    class SCORE io
 ```
 
 **Cross-Encoder**: Query and document encoded together → much more accurate but slow (can't precompute)
-```
-[Query + Document] → Encoder → score (single pass through model)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    QD(Query + Document) --> ENC(Encoder) --> SCORE(score<br/>single pass through model)
+
+    class QD,SCORE io
+    class ENC train
 ```
 
 **Production pattern**: Bi-encoder for recall (fast ANN search), cross-encoder for reranking (top-K candidates)
@@ -534,21 +566,25 @@ PQ enables storing billions of vectors on a single server at the cost of ~5-10% 
 
 ### Embedding Fine-Tuning for Domain Adaptation
 
-```
-Pre-trained embedding model (e.g., BGE-base)
-     |
-     v
-Domain-specific training data:
-  - Positive pairs: (query, relevant doc) from your domain
-  - Hard negatives: (query, similar-but-irrelevant doc)
-     |
-     v
-Fine-tune with InfoNCE loss (few hundred steps, small LR)
-     |
-     v
-Domain-adapted embedding model
-  - Better recall for domain vocabulary
-  - Understands domain-specific relationships
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PRE(Pre-trained embedding model<br/>e.g. BGE-base) --> DATA(Domain-specific training data<br/>positive pairs + hard negatives)
+    DATA --> FT(Fine-tune with InfoNCE loss<br/>few hundred steps, small LR)
+    FT --> OUT(Domain-adapted embedding model<br/>better recall + domain understanding)
+
+    class PRE base
+    class DATA req
+    class FT train
+    class OUT io
 ```
 
 ### Embedding Drift Detection
@@ -729,32 +765,32 @@ Post-filtering retrieves top-K by vector similarity first and then applies the m
 **Problem:** E-commerce platform with 50M products. Users type natural language queries ("warm jacket for hiking in winter") but product descriptions use different vocabulary. BM25 keyword search misses semantically relevant results.
 
 **Architecture:**
-```
-Query: "warm jacket for hiking in winter"
-  |
-  v
-[BGE-M3 embedding, 1024 dim, query: prefix]
-  |
-  v
-[HNSW Index in Milvus, 50M vectors, M=32, ef_construction=200]
-  |
-  v
-Top-200 candidates (recall ~97%)
-  |
-  v
-[BM25 scores fetched from Elasticsearch]
-  |
-  v
-[RRF (Reciprocal Rank Fusion) hybrid merge]
-  |
-  v
-Top-50 candidates
-  |
-  v
-[BGE-reranker-large cross-encoder, GPU batch]
-  |
-  v
-Top-10 final results
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q("Query:<br/>'warm jacket for hiking in winter'") --> EMB(BGE-M3 embedding<br/>1024 dim, query: prefix)
+    EMB --> IDX(HNSW Index in Milvus<br/>50M vectors, M=32, ef_construction=200)
+    IDX --> C200(Top-200 candidates<br/>recall ~97%)
+    C200 --> BM25(BM25 scores<br/>fetched from Elasticsearch)
+    BM25 --> RRF(RRF hybrid merge<br/>Reciprocal Rank Fusion)
+    RRF --> C50(Top-50 candidates)
+    C50 --> RR(BGE-reranker-large<br/>cross-encoder, GPU batch)
+    RR --> TOP10(Top-10 final results)
+
+    class Q,TOP10 io
+    class EMB,RR train
+    class IDX,BM25 base
+    class C200,C50 req
+    class RRF mathOp
 ```
 
 **Infrastructure:**
