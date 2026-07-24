@@ -61,25 +61,45 @@ Some clients (Claude Desktop, Cursor) ship with built-in MCP servers (filesystem
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Publishers
+        anthropic(Anthropic)
+        microsoft(Microsoft)
+        community(Community /<br/>Individuals)
+        enterprises(Enterprises)
+    end
+
+    registries(Smithery, MCP Hub,<br/>GitHub awesome lists)
+    install(Install per<br/>client config)
+
+    subgraph Clients
+        desktop(Claude Desktop)
+        cursor(Cursor)
+        cline(Cline)
+        custom(Custom Agents)
+    end
+
+    anthropic --> registries
+    microsoft --> registries
+    community --> registries
+    enterprises --> registries
+    registries --> install
+    install --> desktop
+    install --> cursor
+    install --> cline
+    install --> custom
+
+    class anthropic,microsoft,community,enterprises base
+    class registries,install req
+    class desktop,cursor,cline,custom io
 ```
-Ecosystem Topology
-===================
 
-  Publishers           Registries              Clients
-
-  Anthropic ---+
-               |
-  Microsoft ---+
-               |
-  Community ---+--> Smithery, MCP Hub,         Claude Desktop
-  individuals  |    GitHub awesome lists       Cursor
-               |          |                    Cline
-  Enterprises -+          |                    Custom agents
-                          |
-                          v
-                    Install per client config
-
-
+```
 Install Flow (Smithery)
 ========================
 
