@@ -88,7 +88,7 @@ flowchart LR
     order["order-service\n(Config Client)"]
     payment["payment-service\n(Config Client)"]
     inventory["inventory-service\n(Config Client)"]
-    vault[("Vault (optional)\ndynamic secrets")]
+    vault@{ icon: "logos:vault", form: "square", label: "Vault", pos: "b", h: 44 }
 
     git <-->|"Git pull"| cs
     cs -->|"HTTP"| order
@@ -99,7 +99,6 @@ flowchart LR
     class git frozen
     class cs base
     class order,payment,inventory req
-    class vault frozen
 ```
 
 ### Property Resolution Order (highest to lowest priority)
@@ -175,7 +174,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    vault[("Vault Server\ndatabase/creds/my-role\nusername: v-usr-X, password: abc123\nTTL: 1 hour")]
+    vault@{ icon: "logos:vault", form: "square", label: "Vault", pos: "b", h: 44 }
     cs["Config Server\n(spring-cloud-vault-config)"]
     ds["DataSource\nusername / password\n(TTL 1h)"]
 
@@ -183,7 +182,6 @@ flowchart LR
     cs -->|"dynamic creds"| ds
     ds -.->|"lease renewal before expiry"| vault
 
-    class vault frozen
     class cs base
     class ds io
 ```
@@ -739,12 +737,12 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     git[("Git repo (config)")]
-    vault[("Vault (secrets)")]
+    vault@{ icon: "logos:vault", form: "square", label: "Vault", pos: "b", h: 44 }
     cs["Config Server cluster\n3 replicas, HA\nlocal Git clone fallback"]
     svc1["svc-001\n@RefreshScope"]
     svc2["svc-002\n@RefreshScope"]
     svcn["... svc-199, svc-200\n@RefreshScope"]
-    kafka{{"Kafka (springCloudBus)\nRefreshRemoteApplicationEvent fan-out"}}
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
 
     git --> cs
     vault --> cs
@@ -755,10 +753,9 @@ flowchart TD
     svc2 --> kafka
     svcn --> kafka
 
-    class git,vault frozen
+    class git frozen
     class cs base
     class svc1,svc2,svcn train
-    class kafka mathOp
 ```
 
 ### Bootstrap and Refresh Setup
