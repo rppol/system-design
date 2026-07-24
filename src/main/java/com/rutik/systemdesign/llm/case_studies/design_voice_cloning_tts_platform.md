@@ -117,14 +117,15 @@ flowchart TD
     TTS --> BUF
     BUF --> WM["Audio Watermarker\n(spread-spectrum)"]
     BUF --> C2PA["C2PA Metadata\nEmbedder (container)"]
-    BUF --> CDN[["CDN Edge (CloudFront)\nfor presigned download links"]]
+    BUF --> CDN
+    CDN@{ icon: "logos:aws-cloudfront", form: "square", label: "CloudFront<br/>(presigned links)", pos: "b", h: 44 }
     WM --> CL(["Client (WebSocket /\nSSE audio stream)"])
     C2PA --> CL
 
     class IN,CL io
     class GW,CV req
     class VR,BUF,WM,C2PA mathOp
-    class VE,CDN frozen
+    class VE frozen
     class TTS base
 ```
 
