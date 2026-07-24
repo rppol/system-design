@@ -21,7 +21,7 @@ flowchart TD
     B --> C["JPA EntityManager\n(jakarta.persistence)"]
     C --> D["Hibernate ORM\n(default JPA provider)"]
     D --> E["JDBC DataSource"]
-    E --> F["Database\n(PostgreSQL, MySQL, Oracle, etc.)"]
+    E --> F[("Database\n(PostgreSQL, MySQL, Oracle, etc.)")]
 
     class A io
     class B req
@@ -897,14 +897,13 @@ flowchart TD
     Controller --> Service["OrderService\n@Transactional boundaries"]
     Service -->|"read (readOnly)"| OrderRepo["OrderRepository\nEntityGraph / JOIN FETCH / Projections"]
     Service -->|"write (PESSIMISTIC_WRITE)"| InvRepo["InventoryRepository\nSELECT ... FOR UPDATE"]
-    OrderRepo --> DB["PostgreSQL 15\norders 50M rows, partitioned by created_at month"]
+    OrderRepo --> DB@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL 15<br/>orders 50M rows, partitioned by created_at month", pos: "b", h: 44 }
     InvRepo --> DB
 
     class Client io
     class Controller req
     class Service train
     class OrderRepo,InvRepo base
-    class DB frozen
 ```
 
 ### Implementation
