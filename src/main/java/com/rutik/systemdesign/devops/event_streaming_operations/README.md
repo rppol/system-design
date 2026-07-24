@@ -141,13 +141,13 @@ flowchart LR
     B1 -.->|metadata| KR
     B2 -.->|metadata| KR
 
-    B0 -.->|"cold segments<br/>over 6h old"| S3([S3 tiered storage])
+    S3@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+    B0 -.->|"cold segments<br/>over 6h old"| S3
 
     class OP mathOp
     class B0 train
     class B1,B2 frozen
     class KR base
-    class S3 frozen
 ```
 Topic `orders` partition 0 (RF=3): broker-0 leads and replicates one-per-rack to broker-1 and broker-2, so losing a whole AZ still leaves 2 ISR and the partition stays online.
 
