@@ -142,20 +142,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    R53("Route53 DNS<br/>failover routing policy<br/>health check every 30s")
+    R53@{ icon: "logos:aws-route53", form: "square", label: "Route53<br/>Failover DNS", pos: "b", h: 44 }
 
     subgraph USE1["us-east-1 (PRIMARY)"]
         direction TB
-        ALB1(["ALB"]) --> ASG1("ASG 20 nodes<br/>full capacity")
-        ASG1 --> AUR1[("Aurora PRIMARY writer<br/>RPO target under 1s")]
-        S3_1[("S3 bucket<br/>assets")]
+        ALB1@{ icon: "logos:aws-elb", form: "square", label: "ALB", pos: "b", h: 44 } --> ASG1("ASG 20 nodes<br/>full capacity")
+        ASG1 --> AUR1@{ icon: "logos:aws-aurora", form: "square", label: "Aurora<br/>Primary Writer", pos: "b", h: 44 }
+        S3_1@{ icon: "logos:aws-s3", form: "square", label: "S3 Bucket", pos: "b", h: 44 }
     end
 
     subgraph USW2["us-west-2 (DR / WARM)"]
         direction TB
-        ALB2(["ALB"]) --> ASG2("ASG 2 nodes<br/>scaled-down, live")
-        ASG2 --> AUR2[("Aurora replica RO<br/>promote on failover")]
-        S3_2[("S3 DR bucket")]
+        ALB2@{ icon: "logos:aws-elb", form: "square", label: "ALB", pos: "b", h: 44 } --> ASG2("ASG 2 nodes<br/>scaled-down, live")
+        ASG2 --> AUR2@{ icon: "logos:aws-aurora", form: "square", label: "Aurora<br/>Replica (RO)", pos: "b", h: 44 }
+        S3_2@{ icon: "logos:aws-s3", form: "square", label: "S3 DR Bucket", pos: "b", h: 44 }
     end
 
     R53 -->|"PRIMARY"| ALB1
@@ -163,12 +163,8 @@ flowchart LR
     AUR1 -.->|"async replica lag"| AUR2
     S3_1 -.->|"S3 CRR<br/>under 15min p99.99"| S3_2
 
-    class R53 mathOp
-    class ALB1,ALB2 io
-    class ASG1,AUR1 train
-    class ASG2,AUR2 frozen
-    class S3_1 base
-    class S3_2 frozen
+    class ASG1 train
+    class ASG2 frozen
 ```
 
 Failover timeline (warm standby):
