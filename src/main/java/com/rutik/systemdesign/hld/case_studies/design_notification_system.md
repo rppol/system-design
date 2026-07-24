@@ -106,22 +106,22 @@ flowchart LR
     Router{Priority Router<br/>transactional vs marketing}
 
     subgraph PushCh["Push Channel"]
-        KPush(Kafka topic:<br/>push)
+        KPush@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>push", pos: "b", h: 44 }
         WPush(Push Worker Pool)
         KPush --> WPush
     end
     subgraph SmsCh["SMS Channel"]
-        KSms(Kafka topic:<br/>sms)
+        KSms@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>sms", pos: "b", h: 44 }
         WSms(SMS Worker Pool)
         KSms --> WSms
     end
     subgraph EmailCh["Email Channel"]
-        KEmail(Kafka topic:<br/>email)
+        KEmail@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>email", pos: "b", h: 44 }
         WEmail(Email Worker Pool)
         KEmail --> WEmail
     end
     subgraph InAppCh["In-App Channel"]
-        KInApp(Kafka topic:<br/>in-app)
+        KInApp@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>in-app", pos: "b", h: 44 }
         WInApp(In-app Worker Pool)
         KInApp --> WInApp
     end
@@ -167,7 +167,6 @@ flowchart LR
     class Order,Chat,Campaign io
     class NotifAPI req
     class PrefSvc,DedupChk,Router mathOp
-    class KPush,KSms,KEmail,KInApp req
     class WPush,WSms,WEmail,WInApp train
     class FcmApns,Twilio,Ses,WsHub frozen
     class StatusDB,Warehouse,TemplateSvc,SchedulerSvc base
@@ -567,7 +566,7 @@ flowchart LR
 
     Segment([100M-user segment<br/>streamed, not materialized])
     Producer(Fan-out Producer<br/>token bucket, 145K/sec cap)
-    Topic(push.marketing<br/>Kafka topic)
+    Topic@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>push.marketing", pos: "b", h: 44 }
     Workers(Push Worker Pool)
     Fcm([FCM batch API<br/>500 tokens/request])
     LagMonitor{consumer lag<br/>over 2 min?}
@@ -581,7 +580,6 @@ flowchart LR
 
     class Segment io
     class Producer mathOp
-    class Topic req
     class Workers train
     class Fcm frozen
     class LagMonitor mathOp
