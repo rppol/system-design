@@ -92,19 +92,22 @@ flowchart TD
     AP([APAC User]) --> LB
 
     subgraph reu["eu-west-1"]
-        E1["Envoy Proxy\nsession hash"] --> P1a["pod0\nGPU · KV cache"]
+        E1@{ icon: "logos:envoy", form: "square", label: "Envoy Proxy", pos: "b", h: 44 }
+        E1 --> P1a["pod0\nGPU · KV cache"]
         E1 --> P1b["pod1\nGPU · KV cache"]
-        R1[["Redis\n(session hist)"]]
+        R1@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     end
     subgraph rus["us-east-1"]
-        E2["Envoy Proxy\nsession hash"] --> P2a["pod0\nGPU · KV cache"]
+        E2@{ icon: "logos:envoy", form: "square", label: "Envoy Proxy", pos: "b", h: 44 }
+        E2 --> P2a["pod0\nGPU · KV cache"]
         E2 --> P2b["pod1\nGPU · KV cache"]
-        R2[["Redis\n(session hist)"]]
+        R2@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     end
     subgraph rap["ap-northeast-1"]
-        E3["Envoy Proxy\nsession hash"] --> P3a["pod0\nGPU · KV cache"]
+        E3@{ icon: "logos:envoy", form: "square", label: "Envoy Proxy", pos: "b", h: 44 }
+        E3 --> P3a["pod0\nGPU · KV cache"]
         E3 --> P3b["pod1\nGPU · KV cache"]
-        R3[["Redis\n(session hist)"]]
+        R3@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     end
 
     LB --> E1
@@ -114,9 +117,8 @@ flowchart TD
     R2 <-.->|"cross-region replication\n(async, lag ~100-300 ms)"| R3
 
     class EU,US,AP req
-    class LB,E1,E2,E3 mathOp
+    class LB mathOp
     class P1a,P1b,P2a,P2b,P3a,P3b base
-    class R1,R2,R3 frozen
 ```
 
 The anycast LB picks the nearest healthy region while honoring `X-Session-ID`; inside each region an Envoy ring-hash maps the session to the pod holding its KV cache. Only the Redis session history crosses regions — asynchronously, with ~100–300 ms lag — so the expensive per-GPU KV cache never has to.
