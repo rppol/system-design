@@ -262,11 +262,24 @@ Flickr's real-world design: a **centralized `auto_increment` feature in a single
 server** (the "ticket server"). Any node that needs an ID makes a call to the ticket server, which
 atomically bumps its counter and returns the next number.
 
-```
- app node 1 --\
- app node 2 ---->  [ Ticket Server ]  --> REPLACE INTO Tickets ...; SELECT LAST_INSERT_ID();
- app node 3 --/     single auto_increment
-                    counter of record
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP1(["App node 1"]) --> TICKET(["Ticket Server<br/>single auto_increment counter"])
+    APP2(["App node 2"]) --> TICKET
+    APP3(["App node 3"]) --> TICKET
+    TICKET --> SQL(["REPLACE INTO Tickets ...<br/>SELECT LAST_INSERT_ID()"])
+
+    class APP1,APP2,APP3 req
+    class TICKET base
+    class SQL mathOp
 ```
 
 Caption: one central counter hands out globally ordered numeric IDs — simple and correct, but every
