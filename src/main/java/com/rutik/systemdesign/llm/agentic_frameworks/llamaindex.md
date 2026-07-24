@@ -636,33 +636,46 @@ Three patterns: (1) Full rebuild — delete and rebuild the entire index on a sc
 
 ### Architecture
 
-```
-INGESTION PIPELINE (runs nightly):
-  Legal PDFs (contracts, filings, case docs)
-       |
-  [LlamaParse]  (handles complex PDF layouts, tables of contents)
-       |
-  [HierarchicalNodeParser] (chunk_sizes=[2048, 512, 128])
-       |
-  [TitleExtractor + KeywordExtractor]  (adds document type, parties, date to metadata)
-       |
-  [OpenAIEmbedding]
-       |
-  [Pinecone]  (metadata: matter_id, doc_type, date, parties)
-  + [SimpleDocumentStore]  (stores parent nodes for auto-merging)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-QUERY ENGINE (per user request):
-  Query + user.matter_ids
-       |
-  MetadataFilters(matter_id IN user.matter_ids)  (access control)
-       |
-  AutoMergingRetriever  (retrieves from Pinecone, merges related nodes)
-       |
-  CohereRerank(top_n=4)
-       |
-  GPT-4o Synthesizer (with citation format)
-       |
-  Answer + Source Citations (file, page, section)
+    subgraph ING["INGESTION PIPELINE (runs nightly)"]
+        PDFS(["Legal PDFs<br/>contracts · filings · case docs"])
+        LP["LlamaParse<br/>complex PDF layouts, TOCs"]
+        HNP["HierarchicalNodeParser<br/>chunk_sizes=[2048, 512, 128]"]
+        EXT["TitleExtractor + KeywordExtractor<br/>doc type, parties, date -> metadata"]
+        oaiEmbed@{ icon: "logos:openai-icon", form: "square", label: "OpenAI Embedding", pos: "b", h: 44 }
+        PC[("Pinecone<br/>metadata: matter_id, doc_type,<br/>date, parties")]
+        DS[("SimpleDocumentStore<br/>parent nodes for auto-merging")]
+        PDFS --> LP --> HNP --> EXT --> oaiEmbed
+        oaiEmbed --> PC
+        oaiEmbed --> DS
+    end
+
+    subgraph QRY["QUERY ENGINE (per user request)"]
+        Q(["Query + user.matter_ids"])
+        MF["MetadataFilters<br/>matter_id IN user.matter_ids<br/>(access control)"]
+        AMR["AutoMergingRetriever<br/>merges related nodes"]
+        CR["CohereRerank(top_n=4)"]
+        SYN["GPT-4o Synthesizer<br/>with citation format"]
+        ANS(["Answer + Source Citations<br/>file, page, section"])
+        Q --> MF --> AMR --> CR --> SYN --> ANS
+    end
+
+    PC -.-> AMR
+
+    class PDFS,Q,ANS io
+    class LP,EXT,MF,CR mathOp
+    class HNP,SYN base
+    class PC,DS frozen
+    class AMR req
 ```
 
 ### Multi-Document Comparison
