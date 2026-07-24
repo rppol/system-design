@@ -160,24 +160,48 @@ The synchronous request path (solid arrows) is gateway → router → GPU cluste
 
 ### Multi-Region Topology
 
-```
-                         Anycast DNS
-                              |
-           +------------------+------------------+
-           |                                     |
-    us-east-1 (primary)                 eu-west-1 (secondary)
-    +---------------------+             +---------------------+
-    | API GW              |             | API GW              |
-    | Model Router        |             | Model Router        |
-    | H100 Cluster (200)  |             | H100 Cluster (80)   |
-    | A10G Cluster (80)   |             | A10G Cluster (40)   |
-    | PostgreSQL (primary)|             | PostgreSQL (replica)|
-    | Redis (primary)     |             | Redis (replica)     |
-    | Kafka (primary)     |             | Kafka (mirror)      |
-    +---------------------+             +---------------------+
-           |                                     |
-           +------------- S3 CRR ---------------+
-                  (model weights replicated)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DNS(["Anycast DNS"])
+
+    subgraph US["us-east-1 (primary)"]
+        USGW["API GW"]
+        USRT["Model Router"]
+        USH["H100 Cluster (200)"]
+        USA["A10G Cluster (80)"]
+        uspg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>primary", pos: "b", h: 44 }
+        usredis@{ icon: "logos:redis", form: "square", label: "Redis<br/>primary", pos: "b", h: 44 }
+        uskafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>primary", pos: "b", h: 44 }
+    end
+
+    subgraph EU["eu-west-1 (secondary)"]
+        EUGW["API GW"]
+        EURT["Model Router"]
+        EUH["H100 Cluster (80)"]
+        EUA["A10G Cluster (40)"]
+        eupg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>replica", pos: "b", h: 44 }
+        euredis@{ icon: "logos:redis", form: "square", label: "Redis<br/>replica", pos: "b", h: 44 }
+        eukafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>mirror", pos: "b", h: 44 }
+    end
+
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3 CRR<br/>model weights replicated", pos: "b", h: 46 }
+
+    DNS --> US
+    DNS --> EU
+    US --> s3
+    EU --> s3
+
+    class DNS io
+    class USGW,USRT,EUGW,EURT req
+    class USH,USA,EUH,EUA base
 ```
 
 See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for fleet cost modeling and spot-vs-on-demand blending analysis.
