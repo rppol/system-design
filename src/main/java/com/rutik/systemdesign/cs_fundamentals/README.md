@@ -88,65 +88,35 @@ This section teaches concepts at the **language-agnostic CS-theory level**. Wher
 
 ## 4. 5-Phase Learning Path
 
-```
-Phase 1 — Complexity & Computation Foundations
-+--------------------------------------------------------------+
-|  complexity_analysis_and_big_o                               |
-|  number_systems_and_bit_manipulation                         |
-|  recursion_and_problem_solving_patterns                      |
-+--------------------------------------------------------------+
-                             |
-                             v
-Phase 2 — Data Structures (build on Phase 1 complexity vocabulary)
-+--------------------------------------------------------------+
-|  arrays_strings_and_hashing   linked_lists_stacks_and_queues |
-|  trees_and_binary_search_trees    heaps_and_priority_queues  |
-|  graphs_tries_and_advanced_structures                        |
-+--------------------------------------------------------------+
-                             |
-                             v
-Phase 3 — Algorithms (build on Phase 2 structures)
-+--------------------------------------------------------------+
-|  sorting_and_searching        dynamic_programming            |
-|  greedy_and_divide_and_conquer                               |
-|  graph_and_string_algorithms                                 |
-+--------------------------------------------------------------+
-                             |
-              +--------------+------------------+
-              v                                 v
-Phase 4 — Operating Systems        Phase 5 — Systems & Security Foundations
-+-----------------------------+    +------------------------------------+
-|  processes_threads_and_     |    |  computer_architecture_and_        |
-|  context_switching          |    |  memory_hierarchy                  |
-|  cpu_scheduling_algorithms  |    |  networking_fundamentals           |
-|  memory_management_and_     |    |  database_and_storage_fundamentals |
-|  virtual_memory             |    |  cryptography_fundamentals         |
-|  deadlocks_and_             |    |  character_encoding_deep_dive      |
-|  synchronization            |    +------------------------------------+
-+-----------------------------+
-              |                                 |
-              +------------------+--------------+
-                                 v
-                     Case Studies (all phases)
-              +--------------------------------------------+
-              |  design_lru_cache                          |
-              |  top_k_and_streaming_problems              |
-              |  dynamic_programming_patterns              |
-              |  graph_traversal_and_shortest_path         |
-              |  autocomplete_and_string_search            |
-              |  interval_and_scheduling_problems          |
-              +--------------------------------------------+
-                                 |
-                                 v
-              DSA Pattern Playbooks (Phases 1-3 prerequisite)
-              +--------------------------------------------+
-              |  dsa_patterns/README.md  ← recognition    |
-              |  engine: decision tree + cue-pattern table |
-              |  22 per-pattern playbooks (templates +     |
-              |  problem banks with LeetCode links)        |
-              |  interview_execution_playbook.md           |
-              |  study_plans.md (Blind 75 + NeetCode 150)  |
-              +--------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    p1("Phase 1 - Complexity and Computation Foundations<br/>complexity_analysis_and_big_o<br/>number_systems_and_bit_manipulation<br/>recursion_and_problem_solving_patterns")
+    p2("Phase 2 - Data Structures, builds on Phase 1 vocabulary<br/>arrays_strings_and_hashing, linked_lists_stacks_and_queues<br/>trees_and_binary_search_trees, heaps_and_priority_queues<br/>graphs_tries_and_advanced_structures")
+    p3("Phase 3 - Algorithms, builds on Phase 2 structures<br/>sorting_and_searching, dynamic_programming<br/>greedy_and_divide_and_conquer<br/>graph_and_string_algorithms")
+    p4("Phase 4 - Operating Systems<br/>processes_threads_and_context_switching<br/>cpu_scheduling_algorithms<br/>memory_management_and_virtual_memory<br/>deadlocks_and_synchronization")
+    p5("Phase 5 - Systems and Security Foundations<br/>computer_architecture_and_memory_hierarchy<br/>networking_fundamentals<br/>database_and_storage_fundamentals<br/>cryptography_fundamentals<br/>character_encoding_deep_dive")
+    cs("Case Studies, all phases<br/>design_lru_cache, top_k_and_streaming_problems<br/>dynamic_programming_patterns, graph_traversal_and_shortest_path<br/>autocomplete_and_string_search, interval_and_scheduling_problems")
+    dsap("DSA Pattern Playbooks, Phases 1-3 prerequisite<br/>dsa_patterns/README.md - recognition engine:<br/>decision tree + cue-pattern table<br/>22 per-pattern playbooks - templates + problem banks with LeetCode links<br/>interview_execution_playbook.md, study_plans.md - Blind 75 + NeetCode 150")
+
+    p1 --> p2 --> p3
+    p3 --> p4
+    p3 --> p5
+    p4 --> cs
+    p5 --> cs
+    cs --> dsap
+
+    class p1,p2,p3 req
+    class p4,p5 base
+    class cs train
+    class dsap io
 ```
 
 **Dependencies to note:**
