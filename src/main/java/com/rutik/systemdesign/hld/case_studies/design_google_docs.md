@@ -77,9 +77,9 @@ flowchart LR
     Client(["Client Browser<br/>local echo under 100ms"])
     Gateway{"Routing / Gateway<br/>consistent hash on doc_id"}
     Collab("Collab Server shard<br/>single owner per doc_id<br/>OT or CRDT engine")
-    OpLog[("Operation Log<br/>Kafka, partitioned by doc_id")]
+    OpLog@{ icon: "logos:kafka", form: "square", label: "Operation Log<br/>(Kafka)", pos: "b", h: 44 }
     Snap[("Snapshot / Blob Storage<br/>S3-style, periodic")]
-    Redis("Redis Pub/Sub<br/>cross-shard presence fan-out")
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis Pub/Sub", pos: "b", h: 44 }
 
     Client -->|"ops, acks, presence<br/>over WebSocket"| Gateway
     Gateway --> Collab
@@ -90,9 +90,7 @@ flowchart LR
     class Client io
     class Gateway mathOp
     class Collab train
-    class OpLog base
     class Snap frozen
-    class Redis req
 ```
 
 **Routing**: Consistent hashing on `doc_id` (see [Consistent Hashing](../consistent_hashing/README.md)) ensures every client editing the same document connects — directly or via gateway redirect — to the *same* collab-server shard. This single-writer-per-document property is what allows the collab server to assign a simple incrementing global sequence number to every operation without distributed consensus.
