@@ -1019,36 +1019,35 @@ An enterprise DevOps agent platform integrates with 380 tools across GitHub, Git
 
 **Architecture Overview**
 
-```
-User Query
-    |
-    v
-[Query Classifier - DistilBERT, 45ms]
-    |
-    +--------> category: "code_and_devops" (score 0.87)
-    +--------> category: "monitoring"      (score 0.62)
-    |
-    v
-Filter: 380 tools -> 95 tools (code_and_devops + monitoring)
-    |
-    v
-[FAISS Retrieval, k=12, 8ms]
-    |
-    v
-12 relevant tool schemas (~3360 tokens)
-    |
-    v
-[GPT-4o Agent]
-    |
-    +----> tool call: "github_create_pr"
-    |          |
-    |          v
-    |      GitHub API -> PR created
-    |
-    +----> tool call: "datadog_create_monitor"
-               |
-               v
-           Datadog API -> Monitor created
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Query([User Query]) --> Classifier["Query Classifier<br/>DistilBERT, 45ms"]
+    Classifier --> CatDevOps["category: code_and_devops<br/>score 0.87"]
+    Classifier --> CatMonitoring["category: monitoring<br/>score 0.62"]
+    CatDevOps --> Filter["Filter<br/>380 tools -> 95 tools<br/>(code_and_devops + monitoring)"]
+    CatMonitoring --> Filter
+    Filter --> Retrieve["FAISS Retrieval<br/>k=12, 8ms"]
+    Retrieve --> Schemas["12 relevant tool schemas<br/>(~3360 tokens)"]
+    Schemas --> Agent["GPT-4o Agent"]
+    Agent --> Call1["tool call:<br/>github_create_pr"]
+    Agent --> Call2["tool call:<br/>datadog_create_monitor"]
+    Call1 --> GH["GitHub API -> PR created"]
+    Call2 --> DD["Datadog API -> Monitor created"]
+
+    class Query,Agent io
+    class Classifier train
+    class CatDevOps,CatMonitoring,Filter,Retrieve,Schemas mathOp
+    class Call1,Call2 req
+    class GH,DD base
 ```
 
 **Key Design Decisions**
