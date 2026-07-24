@@ -40,10 +40,10 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    SRC(["Metrics sources\nhosts / containers / DBs"]) --> KAF[("Kafka\n8 part, 3 replica, 7d")]
-    KAF --> F1["Flink: normalize\nz-score rolling 1h"]
-    KAF --> F2["Flink: feature extract\nlag, rolling windows"]
-    KAF --> F3["Flink: STL decomp\ntrend + seasonal + residual"]
+    SRC(["Metrics sources\nhosts / containers / DBs"]) --> KAF
+    KAF --> F1
+    KAF --> F2
+    KAF --> F3
     subgraph SCORE["Anomaly Scoring Layer"]
         S1["3-sigma - fast path"]
         S2["CUSUM - drift"]
@@ -56,11 +56,15 @@ flowchart TD
     F3 --> SCORE
     SCORE --> CORR["Alert correlation\ngraph grouping + 5-min dedup"]
     CORR --> PD(["PagerDuty / Slack"])
-    CORR --> UI(["Grafana / internal UI"])
+    CORR --> UI
 
-    class SRC,PD,UI io
-    class KAF base
-    class F1,F2,F3 mathOp
+    KAF@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>8 part, 3 replica, 7d", pos: "b", h: 44 }
+    F1@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink<br/>Normalize", pos: "b", h: 44 }
+    F2@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink<br/>Feature Extract", pos: "b", h: 44 }
+    F3@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink<br/>STL Decomp", pos: "b", h: 44 }
+    UI@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
+    class SRC,PD io
     class S1,S2 mathOp
     class S3,S4,S5 train
     class CORR lossN
