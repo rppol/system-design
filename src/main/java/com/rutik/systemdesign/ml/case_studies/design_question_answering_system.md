@@ -73,7 +73,7 @@ flowchart TD
 
     subgraph RET["Hybrid Retriever"]
         FAISS["FAISS IVF\ndense"] --> RRF["RRF merge\nto top-100"]
-        BM25["BM25 sparse\n(Elasticsearch)"] --> RRF
+        BM25@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>(BM25 sparse)", pos: "b", h: 44 } --> RRF
     end
 
     RRF --> RR["Cross-Encoder Reranker\nMiniLM: top-100 to top-20"]
@@ -84,7 +84,7 @@ flowchart TD
     class Q,RESP io
     class QP req
     class ENC,RRF,RR,SEL mathOp
-    class FAISS,BM25 base
+    class FAISS base
     class RD lossN
 ```
 
