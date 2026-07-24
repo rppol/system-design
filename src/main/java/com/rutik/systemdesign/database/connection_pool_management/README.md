@@ -26,18 +26,16 @@ A connection pool is like a taxi fleet. Each taxi (connection) takes time to sum
 
 ## 4. Types / Architectures / Strategies
 
-```
-Layer                | Technology          | Role
----------------------|---------------------|---------------------------
-Application pool     | HikariCP, c3p0,     | Per-application-instance pool
-                     | DBCP2               | Java-managed connections
-External proxy pool  | PgBouncer           | Multiplexes many app connections
-                     | ProxySQL            | to few DB connections
-                     | Odyssey             |
-Pooling modes        | Session pooling      | 1 server conn per client session
-(PgBouncer)          | Transaction pooling  | Server conn released after each txn
-                     | Statement pooling    | Server conn released after each stmt
-```
+| Layer | Technology | Role |
+|-------|------------|------|
+| Application pool | HikariCP, c3p0, | Per-application-instance pool |
+| | DBCP2 | Java-managed connections |
+| External proxy pool | PgBouncer | Multiplexes many app connections |
+| | ProxySQL | to few DB connections |
+| | Odyssey | |
+| Pooling modes | Session pooling | 1 server conn per client session |
+| (PgBouncer) | Transaction pooling | Server conn released after each txn |
+| | Statement pooling | Server conn released after each stmt |
 
 ---
 
@@ -67,7 +65,8 @@ flowchart LR
     bag --> e4["PoolEntry 4<br/>IDLE"]
     bag --> e5["PoolEntry 5<br/>IDLE"]
 
-    e1 --> pg(["PostgreSQL<br/>5 backend processes"])
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>5 backends", pos: "b", h: 44 }
+    e1 --> pg
     e2 --> pg
     e3 --> pg
     e4 --> pg
@@ -77,7 +76,6 @@ flowchart LR
     class bag mathOp
     class e1,e2 train
     class e3,e4,e5 base
-    class pg frozen
     class ex lossN
 ```
 
@@ -99,11 +97,11 @@ flowchart LR
     a2(["App Instance 2"]) --> pb
     a3(["App Instance 3"]) --> pb
     aN(["...97 more<br/>app instances"]) --> pb
-    pb -->|"10 server<br/>connections"| pg(["PostgreSQL primary"])
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Primary", pos: "b", h: 44 }
+    pb -->|"10 server<br/>connections"| pg
 
     class a1,a2,a3,aN req
     class pb mathOp
-    class pg frozen
 ```
 
 Transaction pooling: Client 1 borrows a server connection, executes its transaction, and returns it; Client 2 immediately gets that same connection for its own transaction. 100 client connections share 10 server connections — a 10:1 multiplexing ratio.
@@ -492,20 +490,21 @@ flowchart LR
         p1(["Pod A"]) --> pb1["Node-local<br/>PgBouncer"]
         p2(["Pod B"]) --> pb1
         p3(["Pod C"]) --> pb1
-        pb1 --> pg1(["PostgreSQL<br/>fixed server pool"])
+        pg1@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>fixed pool", pos: "b", h: 44 }
+        pb1 --> pg1
     end
 
     subgraph SC["Solution 2: PgBouncer Sidecar"]
         direction LR
         p4(["Pod A"]) --> pb2["Sidecar<br/>PgBouncer"]
         p5(["Pod B"]) --> pb3["Sidecar<br/>PgBouncer"]
-        pb2 --> pg2(["PostgreSQL<br/>pool 2-5 per pod"])
+        pg2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>pool 2-5/pod", pos: "b", h: 44 }
+        pb2 --> pg2
         pb3 --> pg2
     end
 
     class p1,p2,p3,p4,p5 req
     class pb1,pb2,pb3 mathOp
-    class pg1,pg2 frozen
 ```
 
 DaemonSet placement (one PgBouncer per node, shared over a localhost socket by every pod on that node) keeps a fixed server pool regardless of pod count — scale-out only adds PgBouncer clients. Sidecar placement (one PgBouncer per pod, `pool_size=2-5`) barely helps: 100 pods × 5 still yields 500 PostgreSQL connections, since each pod's PgBouncer is not shared. DaemonSet is the better default; sidecar rarely reduces connection count.
@@ -526,16 +525,14 @@ DaemonSet placement (one PgBouncer per node, shared over a localhost socket by e
 
 ## 8. Tradeoffs
 
-```
-Concern              | No pooling          | App-level pool     | PgBouncer proxy
----------------------|---------------------|--------------------|-----------------
-Connection overhead  | Per-request         | Amortized          | Amortized (lower)
-DB connections held  | 1 per active req    | pool_size per inst | server_pool_size
-Prepared statements  | Per connection      | Per connection     | Lost in txn mode
-Session variables    | Per connection      | Per connection     | Lost in txn mode
-Operational overhead | None               | Low                | Medium (extra service)
-Kubernetes compat.   | Poor               | Medium             | Good (DaemonSet)
-```
+| Concern | No pooling | App-level pool | PgBouncer proxy |
+|---------|------------|-----------------|------------------|
+| Connection overhead | Per-request | Amortized | Amortized (lower) |
+| DB connections held | 1 per active req | pool_size per inst | server_pool_size |
+| Prepared statements | Per connection | Per connection | Lost in txn mode |
+| Session variables | Per connection | Per connection | Lost in txn mode |
+| Operational overhead | None | Low | Medium (extra service) |
+| Kubernetes compat. | Poor | Medium | Good (DaemonSet) |
 
 ---
 
