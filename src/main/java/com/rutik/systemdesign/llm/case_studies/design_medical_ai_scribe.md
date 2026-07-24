@@ -97,80 +97,47 @@ PHI boundary: all audio, transcripts, interim LLM context processed within
 
 ## 3. High-Level Architecture
 
-```
-+-------------------------------+
-|  Physician App (iOS/Android)  |
-|  - Encounter start/stop       |
-|  - Note review + sign-off     |
-|  - Addendum workflow          |
-+-------------------------------+
-               |
-   Audio stream (TLS 1.3, chunked upload)
-               |
-               v
-+-------------------------------+     +------------------------+
-|   HIPAA Ingestion Gateway     |     |   PHI Vault            |
-|   - mTLS authentication       |<--->|   - Audio encrypted    |
-|   - Encounter_id generation   |     |     at rest AES-256-GCM|
-|   - Audio chunk buffering     |     |   - Transcript archive |
-|   - Rate limiting per clinic  |     |   - 7-year retention   |
-+-------------------------------+     |   - S3 Object Lock     |
-               |                      +------------------------+
-               v
-+-------------------------------+
-|   STT Pipeline                |
-|   (self-hosted Whisper        |
-|    large-v3 on A10G fleet     |
-|    within VPC, no egress)     |
-|   - Medical fine-tune         |
-|   - Word-level timestamps     |
-|   - Confidence scores         |
-+-------------------------------+
-               |
-               v
-+-------------------------------+
-|   Speaker Diarization         |
-|   (Pyannote.audio / NeMo)     |
-|   - 2-speaker segmentation    |
-|   - Physician voice matching  |
-+-------------------------------+
-               |
-               v
-+-------------------------------+     +------------------------+
-|   Clinical NLP Pipeline       |     |   ICD-10/CPT           |
-|   - SOAP note generation      |<--->|   Validator            |
-|   - LLM: GPT-4o via Azure     |     |   (2024 code database) |
-|     OpenAI (BAA in place)     |     |   - Reject hallucinated|
-|   - Translation (multilingual)|     |     codes immediately  |
-+-------------------------------+     +------------------------+
-               |
-               v
-+-------------------------------+
-|   Physician Review UI         |
-|   - Note display + edit       |
-|   - Code confirmation         |
-|   - Sign-off with biometric   |
-|   - Addendum workflow         |
-+-------------------------------+
-               |
-       Physician sign-off event
-               |
-               v
-+-------------------------------+     +------------------------+
-|   EHR Integration Layer       |     |   Audit Log            |
-|   - FHIR R4 DocumentReference |<--->|   (S3 Object Lock,     |
-|   - SMART on FHIR OAuth2      |     |    immutable 6yr+)     |
-|   - Async retry queue         |     |   - Every PHI access   |
-|   - Epic / Cerner / Athena    |     |   - Every EHR write    |
-+-------------------------------+     +------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Supporting systems (off critical path):
-+-------------------------------+     +------------------------+
-|   Eval Pipeline               |     |   Observability        |
-|   - Daily WER benchmark       |     |   - OTel traces        |
-|   - ICD-10 accuracy check     |     |   - Prometheus metrics |
-|   - Physician acceptance rate |     |   - PagerDuty alerts   |
-+-------------------------------+     +------------------------+
+    app("Physician App (iOS/Android)<br/>Encounter start/stop<br/>Note review + sign-off<br/>Addendum workflow")
+    gateway("HIPAA Ingestion Gateway<br/>mTLS auth, encounter_id gen<br/>Audio chunk buffering<br/>Rate limiting per clinic")
+    vault[("PHI Vault<br/>Audio encrypted AES-256-GCM<br/>Transcript archive, 7yr retention<br/>S3 Object Lock")]
+    stt("STT Pipeline<br/>Self-hosted Whisper large-v3<br/>on A10G fleet, in-VPC, no egress<br/>Medical fine-tune + confidence")
+    diar("Speaker Diarization<br/>Pyannote.audio / NeMo<br/>2-speaker segmentation<br/>Physician voice matching")
+    nlp("Clinical NLP Pipeline<br/>SOAP note generation<br/>LLM: GPT-4o via Azure OpenAI BAA<br/>Multilingual translation")
+    icd("ICD-10/CPT Validator<br/>2024 code database<br/>Reject hallucinated codes")
+    review("Physician Review UI<br/>Note display + edit<br/>Code confirmation<br/>Sign-off with biometric")
+    ehr("EHR Integration Layer<br/>FHIR R4 DocumentReference<br/>SMART on FHIR OAuth2<br/>Epic / Cerner / Athena")
+    audit[("Audit Log<br/>S3 Object Lock, immutable 6yr+<br/>Every PHI access + EHR write")]
+
+    app -->|"Audio stream<br/>TLS 1.3, chunked upload"| gateway
+    gateway <--> vault
+    gateway --> stt --> diar --> nlp
+    nlp <--> icd
+    nlp --> review
+    review -->|"Physician sign-off event"| ehr
+    ehr <--> audit
+
+    subgraph supporting["Supporting systems (off critical path)"]
+        direction LR
+        evalp("Eval Pipeline<br/>Daily WER benchmark<br/>ICD-10 accuracy check<br/>Physician acceptance rate")
+        observ("Observability<br/>OTel traces<br/>Prometheus metrics<br/>PagerDuty alerts")
+    end
+
+    class app,review req
+    class gateway req
+    class vault,audit base
+    class stt,diar,nlp train
+    class icd mathOp
+    class ehr io
+    class evalp,observ frozen
 ```
 
 ### Multi-Clinic Data Isolation
