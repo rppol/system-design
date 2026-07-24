@@ -87,7 +87,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Client Traffic<br/>100%"]) --> svc["Kubernetes Service"]
+    client(["Client Traffic<br/>100%"]) --> svc
+    svc@{ icon: "logos:kubernetes", form: "square", label: "Kubernetes Service", pos: "b", h: 44 }
     svc -->|"90%"| v1["Deployment v1<br/>(stable) Pod-1..3"]
     svc -->|"10%"| v2["Deployment v2<br/>(canary) Pod-4"]
     v2 --> mon{"Monitor v2:<br/>error rate, p99"}
@@ -95,7 +96,6 @@ flowchart LR
     mon -.->|"errors"| rollback["Rollback to 0%<br/>no new pods needed"]
 
     class client io
-    class svc mathOp
     class v1 train
     class v2 req
     class mon mathOp
