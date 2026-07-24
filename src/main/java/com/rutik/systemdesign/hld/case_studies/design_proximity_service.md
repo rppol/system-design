@@ -75,8 +75,8 @@ flowchart TD
         ClientR(["Client<br/>lat, lng, radius, filters"])
         Gateway("API Gateway /<br/>Load Balancer")
         Orchestrator("Proximity Search Service<br/>orchestrator")
-        GeoIdx("Geo-Index<br/>Redis GEO, ~1.2GB")
-        SearchIdx("Search / Attributes Index<br/>Elasticsearch, ~100GB")
+        GeoIdx@{ icon: "logos:redis", form: "square", label: "Geo-Index<br/>Redis GEO", pos: "b", h: 44 }
+        SearchIdx@{ icon: "logos:elasticsearch", form: "square", label: "Search Index<br/>Elasticsearch", pos: "b", h: 44 }
         AttrCache("Attributes Cache<br/>long TTL: hours")
         StatusCacheRP("Status Cache<br/>short TTL: 30-60s")
 
@@ -93,8 +93,8 @@ flowchart TD
         direction LR
         Owner(["Business Owner /<br/>Admin CMS"])
         ListingSvc("Listing Service<br/>validation, geocoding")
-        PrimaryDB("Primary DB<br/>PostgreSQL, source of truth")
-        Kafka("Message Queue<br/>Kafka: listing_updates")
+        PrimaryDB@{ icon: "logos:postgresql", form: "square", label: "Primary DB<br/>PostgreSQL", pos: "b", h: 44 }
+        Kafka@{ icon: "logos:kafka", form: "square", label: "Message Queue<br/>Kafka", pos: "b", h: 44 }
         GeoUpdater("Geo-Index Updater<br/>GEOADD / remove old cell")
         SearchUpdater("Search-Index Updater<br/>re-index full document")
 
@@ -108,15 +108,15 @@ flowchart TD
         direction LR
         OwnerToggle(["Business Owner<br/>toggles closed for today"])
         StatusSvc("Status Service<br/>webhook / API")
-        StatusCacheFP("Status Cache<br/>Redis, TTL 30-60s<br/>+ pub/sub invalidation")
+        StatusCacheFP@{ icon: "logos:redis", form: "square", label: "Status Cache<br/>Redis", pos: "b", h: 44 }
 
         OwnerToggle --> StatusSvc --> StatusCacheFP
     end
 
     class ClientR,Owner,OwnerToggle io
-    class Gateway,Kafka req
+    class Gateway req
     class Orchestrator,ListingSvc,GeoUpdater,SearchUpdater,StatusSvc mathOp
-    class GeoIdx,SearchIdx,AttrCache,StatusCacheRP,PrimaryDB,StatusCacheFP base
+    class AttrCache,StatusCacheRP base
 ```
 
 The same infrastructure runs three independent flows: the read-heavy **Search path** (client through the two-phase geo-index/search-index lookup to the split-TTL caches, §4.1-§4.2), the low-rate **Write path** (a listing edit propagates via CDC/outbox to both indexes, §4.6), and the tight-SLA **Fast path** (an "open now" toggle bypasses everything else and writes straight to the short-TTL Status Cache, §4.5).
