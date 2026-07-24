@@ -220,68 +220,86 @@ negatives for free (cell values illustrative):
    (each positive is contrasted against 32,767 negatives in the same step).
 ```
 
+**CLIP Dual Encoder (Training)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    imgBatch(["Image Batch<br/>I1..IN"]) --> vit["ViT-L/14<br/>(patch embed)"]
+    vit --> clsPool["CLS pooling"] --> linProjI["Linear proj"] --> l2I["L2 normalize"] --> imgEmb(["img_embeds (N x 512)"])
+
+    txtBatch(["Text Batch<br/>T1..TN"]) --> txtEnc["Transformer<br/>(token embed)"]
+    txtEnc --> eosPool["EOS pooling"] --> linProjT["Linear proj"] --> l2T["L2 normalize"] --> txtEmb(["txt_embeds (N x 512)"])
+
+    imgEmb --> simMat["sim_matrix (N x N)<br/>diag = positive, off-diag = negative"]
+    txtEmb --> simMat
+    simMat --> loss(("Loss: CE rows<br/>+ CE cols"))
+
+    class imgBatch,txtBatch,imgEmb,txtEmb io
+    class vit,txtEnc train
+    class clsPool,eosPool,linProjI,linProjT,l2I,l2T,simMat mathOp
+    class loss lossN
 ```
-CLIP Dual Encoder (Training)
-============================================================
 
-  Image Batch           Text Batch
-  [I1, I2, ..., IN]     [T1, T2, ..., TN]
-       |                      |
-  ViT-L/14              Transformer
-  (patch embed)         (token embed)
-       |                      |
-  [CLS] pooling         [EOS] pooling
-       |                      |
-  Linear proj           Linear proj
-       |                      |
-  L2 normalize          L2 normalize
-       |                      |
-  img_embeds[N,512]     txt_embeds[N,512]
-       \                     /
-        \                   /
-         sim_matrix[N, N] = img_embeds @ txt_embeds.T / tau
-         (diagonal = positive pairs, off-diagonal = negatives)
-         Loss: CE on rows + CE on columns simultaneously
+**CLIP Inference (Image Retrieval)**
 
-============================================================
-CLIP Inference (Image Retrieval)
-============================================================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Query text: "red sneakers with white sole"
-       |
-  Text Encoder -> text_emb [512-d]
-       |
-  Cosine similarity against 50M cached image embeddings
-       |
-  Top-K results (ANN search via FAISS or similar)
+    query(["Query text:<br/>'red sneakers with white sole'"]) --> textEnc["Text Encoder"]
+    textEnc --> textEmb(["text_emb (512-d)"])
+    textEmb --> cosSim["Cosine similarity vs<br/>50M cached image embeddings"]
+    cosSim --> topk(["Top-K results<br/>(ANN via FAISS)"])
 
-============================================================
-LLaVA Architecture (Inference)
-============================================================
+    class query,textEmb,topk io
+    class textEnc frozen
+    class cosSim mathOp
+```
 
-  Input Image (336x336 for LLaVA-1.5)
-       |
-  CLIP ViT-L/14 (FROZEN)
-       |
-  196 visual patch tokens (each 1024-d)
-       |
-  2-Layer MLP Projection (TRAINED, Stage 1 only)
-       |
-  196 projected visual tokens (LLM hidden size, e.g. 4096-d)
-       |
-  [SYSTEM prompt tokens]
-  [196 visual tokens]          <- prepended before user text
-  [USER: "what is in this image?"]
-  [ASSISTANT:]
-       |
-  Llama-3-8B or Vicuna-13B (FROZEN Stage 1, UNFROZEN Stage 2)
-       |
-  Autoregressive token generation
+**LLaVA Architecture (Inference)**
 
-============================================================
-LLaVA-1.6 High-Resolution Tiling
-============================================================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    inputImg(["Input Image<br/>336x336"]) --> vitFrozen["CLIP ViT-L/14<br/>(FROZEN)"]
+    vitFrozen --> patchTok(["196 visual patch tokens<br/>(1024-d each)"])
+    patchTok --> mlp["2-Layer MLP Projection<br/>(TRAINED, Stage 1)"]
+    mlp --> projTok(["196 projected tokens<br/>(4096-d)"])
+    projTok --> prompt["Prompt: SYSTEM + 196 visual<br/>tokens + USER + ASSISTANT"]
+    prompt --> llm["Llama-3-8B / Vicuna-13B<br/>(FROZEN S1, UNFROZEN S2)"]
+    llm --> output(["Autoregressive<br/>token generation"])
+
+    class inputImg,patchTok,projTok,output io
+    class vitFrozen frozen
+    class mlp train
+    class prompt req
+    class llm base
+```
+
+**LLaVA-1.6 High-Resolution Tiling**
+
+```
   High-res image (e.g. 1344x336)
        |
   Divide into dynamic tiles
@@ -295,11 +313,11 @@ LLaVA-1.6 High-Resolution Tiling
   MLP projection -> concatenated -> LLM
 
   Result: ~4x more visual detail than LLaVA-1.5
+```
 
-============================================================
-ViT Patch Embedding Detail
-============================================================
+**ViT Patch Embedding Detail**
 
+```
   224x224 image, patch_size=16
   +--+--+--+--+--+-  14 patches per row
   |p |p |p |p |p |..
@@ -315,20 +333,28 @@ ViT Patch Embedding Detail
   Final ViT output: [CLS, p1, p2, ..., p196] = 197 tokens
   CLIP uses [CLS] only for global embedding
   LLaVA uses [p1..p196] (all patch tokens) for spatial detail
+```
 
-============================================================
-VQA Inference Pipeline
-============================================================
+**VQA Inference Pipeline**
 
-  User query: "How many red apples are on the table?"
-       |
-  Image tokenization (ViT)
-       |               \
-  Visual tokens     Text tokens ("How many red apples...")
-       |               /
-  Cross-attention (LLM processes interleaved sequence)
-       |
-  Autoregressive decoding: "There are 4 red apples on the table."
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    userQ(["User query:<br/>'How many red apples...?'"]) --> imgTok["Image tokenization (ViT)"]
+    imgTok --> visTok(["Visual tokens"]) --> crossAttn["Cross-attention<br/>(LLM, interleaved sequence)"]
+    userQ --> txtTok(["Text tokens"]) --> crossAttn
+    crossAttn --> answer(["'There are 4 red apples<br/>on the table.'"])
+
+    class userQ,visTok,txtTok,answer io
+    class imgTok frozen
+    class crossAttn mathOp
 ```
 
 ---
@@ -951,36 +977,30 @@ Nothing about vector search is mysterious at the storage layer. The whole IVF-PQ
 
 #### System Architecture
 
-```
-User Upload
-    |
-    v
-Image Upload Service (S3 + CDN)
-    |
-    +------------+------------+
-    |                         |
-    v                         v
-CLIP Embedding Service    LLaVA Description Service
-(GPU: A10G x 2)           (GPU: A10G x 5)
-    |                         |
-    v                         |
-ANN Search (FAISS)            |
-50M indexed embeddings        |
-    |                         |
-    v                         v
-Top-100 candidates    Product description text
-    |                         |
-    +------------+------------+
-                 |
-                 v
-         Multi-Modal Ranker
-         (CLIP score + text score)
-                 |
-                 v
-            Top-10 Results + Description
-                 |
-                 v
-            API Response to User
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    upload(["User Upload"]) --> uploadSvc["Image Upload Service<br/>(S3 + CDN)"]
+    uploadSvc --> clipSvc["CLIP Embedding Service<br/>(2x A10G)"]
+    uploadSvc --> llavaSvc["LLaVA Description Service<br/>(5x A10G)"]
+    clipSvc --> annSearch["ANN Search (FAISS)<br/>50M indexed embeddings"]
+    annSearch --> top100(["Top-100 candidates"])
+    llavaSvc --> descText(["Product description text"])
+    top100 --> ranker["Multi-Modal Ranker<br/>(CLIP score + text score)"]
+    descText --> ranker
+    ranker --> results(["Top-10 Results<br/>+ Description"])
+    results --> apiResp(["API Response to User"])
+
+    class upload,top100,descText,results,apiResp io
+    class uploadSvc,clipSvc,llavaSvc base
+    class annSearch,ranker mathOp
 ```
 
 ---
