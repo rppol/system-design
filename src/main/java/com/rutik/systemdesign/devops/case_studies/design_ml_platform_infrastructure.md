@@ -194,11 +194,11 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Route53{"Route 53<br/>latency / weighted routing<br/>health-checked"}
+    Route53@{ icon: "logos:aws-route53", form: "square", label: "Route 53", pos: "b", h: 44 }
     EastStack["us-east-1 (primary)<br/>EKS + serving NodePool<br/>KServe endpoints · MIG A100s"]
     WestStack["us-west-2 (active)<br/>EKS + serving NodePool<br/>KServe endpoints · MIG A100s"]
-    S3Primary["S3 models bucket"]
-    S3Replica["S3 models bucket<br/>(replica)"]
+    S3Primary@{ icon: "logos:aws-s3", form: "square", label: "S3 (primary)", pos: "b", h: 44 }
+    S3Replica@{ icon: "logos:aws-s3", form: "square", label: "S3 (replica)", pos: "b", h: 44 }
     TrainNote(["Training pinned single-region<br/>us-east-1 only — data gravity"])
 
     Route53 --> EastStack
@@ -209,10 +209,8 @@ flowchart TD
     S3Replica -.-> WestStack
     EastStack -.-> TrainNote
 
-    class Route53 mathOp
     class EastStack,WestStack train
-    class S3Primary base
-    class S3Replica,TrainNote frozen
+    class TrainNote frozen
 ```
 *Serving is active-active across two regions (Route 53 health-checked routing, RTO under 2 min on failover); training stays pinned to us-east-1 because moving petabyte datasets is cost-prohibitive — only the trained model artifact replicates via async S3 CRR.*
 
