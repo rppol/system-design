@@ -900,6 +900,14 @@ body.reader-resizing #reader { animation: none; }
 #reader .reader-nav.on { color: var(--od-text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .reader-close { background: transparent; color: var(--od-muted); font-size: 22px; line-height: 1; padding: 1px 10px; border: 1px solid var(--od-line); border-radius: 8px; }
 .reader-close:hover { color: var(--od-text); border-color: var(--accent); }
+/* APK: the system back gesture already closes the reader, so the ✕ pill is
+   redundant. Hidden at all widths on the APK build only (html.is-apk, stamped by
+   MainActivity.onPageFinished); web/Pages keeps the close pill unchanged. */
+html.is-apk .reader-close { display: none; }
+/* Bottom action bar + the popover Size row exist only on the APK phone build.
+   Base = hidden, so web/Pages output is byte-identical (these nodes never show). */
+.reader-bottombar { display: none; }
+.rtp-size { display: none; }
 /* Phones: the head's full control set is wider than the screen — let the row
    scroll horizontally so Contents/immersive/close stay reachable. */
 @media (max-width: 899px) {
@@ -1015,6 +1023,74 @@ mark.rd-find-cur { background: var(--accent); color: #05070d; }
 .reader-typepop .rtp-seg button:first-child { border-left: none; }
 .reader-typepop .rtp-seg button:hover { color: var(--od-text); }
 .reader-typepop .rtp-seg button.on { color: var(--od-text); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+
+/* ---- APK reader chrome redesign (phone only) ------------------------------
+   All rules gated on html.is-apk (stamped by MainActivity.onPageFinished) AND
+   the <=639px phone breakpoint, so web/Pages and the APK on tablets/desktop are
+   untouched. Moves the cramped top-bar controls into a thumb-reach bottom action
+   bar, floats the slim head so it can auto-hide on scroll, and surfaces the Size
+   row in the Aa popover. Reader color tokens are never touched. */
+@media (max-width: 639px) {
+  /* Slim head floats above the scrolling body so auto-hide reclaims its height
+     (a transform on an in-flow child would leave a blank strip instead). */
+  html.is-apk .reader-head {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 42;
+    padding-top: calc(11px + env(safe-area-inset-top));
+    transition: transform 0.22s var(--ease-out);
+  }
+  /* thin progress line pinned to the very top edge, above the head */
+  html.is-apk .reader-progress { position: absolute; top: 0; left: 0; right: 0; z-index: 43; }
+  /* body clears the floating head (top) and the bottom action bar (bottom) */
+  html.is-apk .reader-body {
+    padding-top: calc(52px + env(safe-area-inset-top));
+    padding-bottom: calc(var(--tabbar-h) + 72px + env(safe-area-inset-bottom));
+  }
+  /* the moved top-bar controls now live in the bottom bar */
+  html.is-apk .reader-head #readerPrev,
+  html.is-apk .reader-head #readerNext,
+  html.is-apk .reader-head #readerFsDn,
+  html.is-apk .reader-head #readerFsUp,
+  html.is-apk .reader-head #readerFindBtn,
+  html.is-apk .reader-head #readerIdx,
+  html.is-apk .reader-head #readerFull,
+  html.is-apk .reader-head #readerMod { display: none; }
+
+  /* thumb-reach bottom action bar, anchored inside #reader */
+  html.is-apk .reader-bottombar {
+    display: flex; align-items: stretch; justify-content: space-around;
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 43;
+    height: var(--tabbar-h); padding-bottom: env(safe-area-inset-bottom);
+    background: var(--od-bg2); border-top: 1px solid var(--od-line);
+    transition: transform 0.22s var(--ease-out);
+  }
+  html.is-apk .reader-bottombar .reader-bnav {
+    flex: 1 1 0; min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; color: var(--od-muted);
+    border: none; font-size: 20px; line-height: 1;
+  }
+  html.is-apk .reader-bottombar .reader-bnav:disabled { opacity: 0.3; }
+  html.is-apk .reader-bottombar .reader-bnav:active:not(:disabled) { color: var(--od-text); }
+
+  /* Size row surfaces in the Aa popover (A-/A+ moved off the slim head) */
+  html.is-apk .rtp-size { display: flex; }
+
+  /* keep the back-to-top button clear of the bottom bar */
+  html.is-apk .reader-top { bottom: calc(var(--tabbar-h) + 14px + env(safe-area-inset-bottom)); }
+
+  /* auto-hide chrome on scroll (normal reading mode; immersive keeps its own
+     head-peek). chrome-hide is toggled unconditionally by the scroll handler. */
+  html.is-apk #reader.chrome-hide:not(.full) .reader-head { transform: translateY(-100%); }
+  html.is-apk #reader.chrome-hide:not(.full) .reader-bottombar { transform: translateY(100%); }
+
+  /* immersive (.full): the bottom bar hides with the head and is revealed with it
+     via the existing head-peek tap strip */
+  html.is-apk #reader.full .reader-bottombar { transform: translateY(100%); }
+  html.is-apk #reader.full.head-peek .reader-bottombar { transform: none; }
+}
+@media (max-width: 639px) and (prefers-reduced-motion: reduce) {
+  html.is-apk .reader-head, html.is-apk .reader-bottombar { transition: none; }
+}
 
 .reader-modules, .reader-toc {
   position: sticky; top: 0; flex-shrink: 0; align-self: flex-start;

@@ -6057,16 +6057,26 @@ function openReaderTypeMenu(anchorBtn) {
   const pop = document.createElement("div");
   pop.id = "readerTypePop"; pop.className = "reader-typepop"; pop.setAttribute("role", "menu");
   pop.innerHTML =
+    // Size row: only surfaced on the APK phone build (CSS keeps .rtp-size hidden
+    // elsewhere), where the top-bar A-/A+ buttons are moved off the slim head.
+    // Drives the existing font-size handler and does NOT close the popover.
+    `<div class="rtp-row rtp-size"><span class="rtp-lbl">Size</span><div class="rtp-seg"><button data-fs="-1" aria-label="Smaller text">A&#8722;</button><button data-fs="1" aria-label="Larger text">A+</button></div></div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Font</span>${seg("sd_reader_font", [["sans", "Sans"], ["serif", "Serif"]], font)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Width</span>${seg("sd_reader_measure", [["narrow", "Narrow"], ["cozy", "Cozy"], ["wide", "Wide"], ["default", "Auto"]], measure)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>`;
   panel.appendChild(pop);
-  pop.querySelectorAll(".rtp-seg").forEach((s) => s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    safeSet(s.dataset.k, b.dataset.v);
-    s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-    if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
-  })));
+  pop.querySelectorAll(".rtp-seg").forEach((s) => {
+    if (!s.dataset.k) return;   // the Size seg drives font-size directly (below), not a pref key
+    s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+      safeSet(s.dataset.k, b.dataset.v);
+      s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
+    }));
+  });
+  // Size row: bump the font and keep the popover open (no `done()` call).
+  pop.querySelectorAll(".rtp-size button[data-fs]").forEach((b) =>
+    b.addEventListener("click", () => applyReaderFont(parseInt(b.dataset.fs, 10))));
   const release = trapFocus(pop, { restoreTo: anchorBtn });
   pop._release = release;
   setTimeout(() => {
@@ -6786,6 +6796,16 @@ async function openReaderPath(path, title, navCtx, frag) {
   const navBtns = nav
     ? `<button class="reader-nav" id="readerPrev" title="Previous topic" ${nav.idx <= 0 ? "disabled" : ""}>&lsaquo; Prev</button>
        <button class="reader-nav" id="readerNext" title="Next topic" ${nav.idx >= nav.list.length - 1 ? "disabled" : ""}>Next &rsaquo;</button>` : "";
+  // Thumb-reach bottom action bar. Only ever visible on the APK phone build
+  // (html.is-apk + narrow width; base CSS keeps .reader-bottombar display:none),
+  // so this node is inert on web — the buttons mirror the moved top-bar controls.
+  const bottomBar = `<div class="reader-bottombar" role="toolbar" aria-label="Reader actions">
+      ${nav ? `<button class="reader-bnav" id="readerModB" aria-label="Module list">&#9776;</button>` : ""}
+      ${nav ? `<button class="reader-bnav" id="readerPrevB" aria-label="Previous topic" ${nav.idx <= 0 ? "disabled" : ""}>&lsaquo;</button>` : ""}
+      <button class="reader-bnav" id="readerIdxB" aria-label="Contents">&#8801;</button>
+      ${nav ? `<button class="reader-bnav" id="readerNextB" aria-label="Next topic" ${nav.idx >= nav.list.length - 1 ? "disabled" : ""}>&rsaquo;</button>` : ""}
+      <button class="reader-bnav" id="readerFindB" aria-label="Find in page">&#8981;</button>
+    </div>`;
   panel.innerHTML = `<div class="reader-grip" id="readerGrip"></div>
     <div class="reader-peek" aria-hidden="true"></div>
     <div class="reader-head">
@@ -6801,6 +6821,7 @@ async function openReaderPath(path, title, navCtx, frag) {
       <button class="reader-close" id="readerClose" title="Close (Esc)">&times;</button>
     </div>
     <div class="reader-progress" aria-hidden="true"><i id="readerProg"></i></div>
+    ${bottomBar}
     <button class="reader-exit" id="readerExit" title="Exit immersive reading (Esc)" aria-label="Exit immersive reading">&#10530; Exit</button>
     <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>
     <button class="reader-top" id="readerTop" title="Back to top" aria-label="Back to top">&uarr;</button>`;
@@ -6821,7 +6842,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     // scrollspy read heading offsets, forcing a synchronous reflow per scroll
     // event — visible jitter on phones. Progress moves via transform (scaleX),
     // which the compositor animates without touching layout at all.
-    let scrollRaf = 0;
+    let scrollRaf = 0, lastST = 0;
     body.addEventListener("scroll", () => {
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
@@ -6832,6 +6853,13 @@ async function openReaderPath(path, title, navCtx, frag) {
         maybeMarkRead(reader.path, body);            // reading feeds the game (Phase 6)
         prog.style.transform = `scaleX(${max > 0 ? st / max : 0})`;
         top.classList.toggle("show", st > 600);
+        // Auto-hide the reader chrome while scrolling down; reveal when scrolling
+        // up or near either edge. Unconditional JS; the `chrome-hide` class is
+        // CSS-gated to html.is-apk phones, so it is inert on web/desktop.
+        const nearBottom = max > 0 && st > max - 8;
+        if (st > 80 && st > lastST && !nearBottom) panel.classList.add("chrome-hide");
+        else if (st < lastST || st <= 80 || nearBottom) panel.classList.remove("chrome-hide");
+        lastST = st;
         if (panel.classList.contains("head-peek")) panel.classList.remove("head-peek");
         scheduleScrollSave(reader.path, st);
         if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
@@ -6840,18 +6868,23 @@ async function openReaderPath(path, title, navCtx, frag) {
     top.addEventListener("click", () => body.scrollTo({ top: 0, behavior: REDUCED() ? "auto" : "smooth" }));
   }
   if (nav) {
-    el("#readerMod").addEventListener("click", () => {
+    const toggleModules = () => {
       reader.modules = !reader.modules;
       safeSet("sd_reader_modules", reader.modules ? "1" : "0");
       applyReaderModes();
-    });
+    };
+    el("#readerMod").addEventListener("click", toggleModules);
+    const modB = el("#readerModB"); if (modB) modB.addEventListener("click", toggleModules);
   }
-  el("#readerIdx").addEventListener("click", () => {
+  const toggleToc = () => {
     reader.toc = !reader.toc; safeSet("sd_reader_toc", reader.toc ? "1" : "0"); applyReaderModes();
-  });
+  };
+  el("#readerIdx").addEventListener("click", toggleToc);
+  { const idxB = el("#readerIdxB"); if (idxB) idxB.addEventListener("click", toggleToc); }
   el("#readerFull").addEventListener("click", () => setReaderFull(!reader.full));
   el("#readerExit").addEventListener("click", () => setReaderFull(false));
   el("#readerFindBtn").addEventListener("click", openReaderFind);
+  { const findB = el("#readerFindB"); if (findB) findB.addEventListener("click", openReaderFind); }
   // Touch has no hover: tapping the top peek strip momentarily reveals the head
   // (so font/nav/close stay reachable without leaving immersive). Auto-hides on
   // the next scroll or a second tap.
@@ -6861,8 +6894,12 @@ async function openReaderPath(path, title, navCtx, frag) {
   }
   if (backBtn) el("#readerBack").addEventListener("click", () => { const p = reader.back.pop(); if (p) openReaderPath(p.path, p.title, p.nav); });
   if (nav) {
-    el("#readerPrev").addEventListener("click", () => { if (nav.idx > 0) openReaderPath(nav.list[nav.idx - 1].path, nav.list[nav.idx - 1].title, { list: nav.list, idx: nav.idx - 1 }); });
-    el("#readerNext").addEventListener("click", () => { if (nav.idx < nav.list.length - 1) openReaderPath(nav.list[nav.idx + 1].path, nav.list[nav.idx + 1].title, { list: nav.list, idx: nav.idx + 1 }); });
+    const goPrev = () => { if (nav.idx > 0) openReaderPath(nav.list[nav.idx - 1].path, nav.list[nav.idx - 1].title, { list: nav.list, idx: nav.idx - 1 }); };
+    const goNext = () => { if (nav.idx < nav.list.length - 1) openReaderPath(nav.list[nav.idx + 1].path, nav.list[nav.idx + 1].title, { list: nav.list, idx: nav.idx + 1 }); };
+    el("#readerPrev").addEventListener("click", goPrev);
+    el("#readerNext").addEventListener("click", goNext);
+    const prevB = el("#readerPrevB"); if (prevB) prevB.addEventListener("click", goPrev);
+    const nextB = el("#readerNextB"); if (nextB) nextB.addEventListener("click", goNext);
   }
   try {
     if (readerCache[path] == null) {
@@ -6878,6 +6915,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     buildModuleNav(el("#readerModules"), reader.nav, path);
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
+    { const idxB = el("#readerIdxB"); if (idxB) idxB.style.display = headCount >= 3 ? "" : "none"; }
     buildMasthead(main, path);                     // badge + title + rule + "~N min read"
     wireReaderBody(main);
     wireRecallPrompts(main);                       // think-first: collapse §12 answers

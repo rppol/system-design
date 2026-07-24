@@ -319,6 +319,12 @@ not the hostname, that the code needs:
   The bridge returns success synchronously, and the export is only recorded on
   `true` so a failed write cannot suppress the backup nudge.
 
+The `html.is-apk` class (stamped on `<html>` by `MainActivity.onPageFinished`) is
+a wrapper-injected, presentation-only CSS hook — not a fourth `app.js` seam:
+app.js logic never branches on it; it only lets `style.css` adapt the reader
+chrome for the phone WebView (slim head, thumb-reach bottom bar, no redundant
+close pill), and every such rule collapses to `display:none` on web.
+
 Progress does not carry over automatically between the Pages site and the APK
 (separate `localStorage`); a one-time Export (Pages) / Import (APK) carries it
 across. No Play Store — sideload the APK directly, or point **Obtainium** at

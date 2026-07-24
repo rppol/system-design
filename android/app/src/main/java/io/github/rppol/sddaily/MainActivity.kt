@@ -90,7 +90,13 @@ class MainActivity : ComponentActivity() {
     // whole session's hash history one press at a time.
     private val backCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
-            if (webView.canGoBack()) webView.goBack() else finish()
+            // Never finish() from mid-reader (process-death restore can land the
+            // user straight in a chapter with no WebView back-history). Route to
+            // Home instead: onHashChange closes the reader, and the callback
+            // disables itself at #/home (see doUpdateVisitedHistory) so a second
+            // predictive back-gesture exits the app cleanly from Home.
+            if (webView.canGoBack()) webView.goBack()
+            else webView.evaluateJavascript("location.hash='#/home'", null)
         }
     }
 
@@ -243,11 +249,24 @@ class MainActivity : ComponentActivity() {
                 isReload: Boolean
             ) {
                 val frag = url?.substringAfter('#', "") ?: ""
-                backCallback.isEnabled =
-                    view.canGoBack() && frag.isNotEmpty() && frag != "/home"
+                // Enable on any non-Home route, even without WebView back-history:
+                // a process-death restore reopens a chapter with an empty history
+                // stack, and the handler routes to Home rather than finish()ing.
+                backCallback.isEnabled = frag.isNotEmpty() && frag != "/home"
                 if (frag.startsWith("/") && Uri.parse(url ?: "").host == INTERNAL_HOST) {
                     lastRoute = frag
                 }
+            }
+
+            // Presentation-only hook for the APK build: stamp `html.is-apk` so the
+            // reader CSS can adapt its chrome for the WebView (slim top bar, bottom
+            // action bar, no redundant close pill). Re-applied on every page load,
+            // including after recreate(), and never branches app.js logic.
+            override fun onPageFinished(view: WebView, url: String?) {
+                view.evaluateJavascript(
+                    "document.documentElement.classList.add('is-apk');",
+                    null
+                )
             }
 
             // Without this, a crashed WebView renderer (OOM on a huge doc + heavy

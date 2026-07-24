@@ -75,3 +75,20 @@ share. To carry existing browser progress into the app once:
 
 After that, keep using the APK; its progress is independent and preserved across
 updates.
+
+## Reader chrome & back behavior (APK-only)
+
+On the APK, `MainActivity.onPageFinished` stamps `html.is-apk` on the page so the
+reader CSS can adapt for the phone WebView: the redundant close (✕) pill is
+hidden (the system back gesture closes the reader), the top bar is slimmed, and
+the moved controls (Prev/Next, Contents, Find, module list) live in a
+thumb-reach **bottom action bar** that, with the slim head, auto-hides while you
+scroll down and returns on scroll-up. This is presentation-only — a CSS hook, not
+an `app.js` seam (the app never branches on `html.is-apk`), and it is inert on
+web (every rule is `display:none` outside the APK phone width).
+
+The hardware/gesture **Back** button walks in-app history while away from Home;
+at `#/home` the callback disables itself so predictive back-to-home exits the
+app. Back is enabled on any non-Home route even with no WebView history — so a
+process-death restore that reopens a chapter never dead-ends: Back there routes
+to `#/home` (which closes the reader) instead of calling `finish()`.

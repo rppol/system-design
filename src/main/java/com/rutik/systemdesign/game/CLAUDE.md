@@ -70,6 +70,14 @@ The `game/` directory is an application, not study content — see
   runtime) is a sanctioned exception to the no-runtime-deps rule, alongside the
   Pages Mermaid CDN import — but since Mermaid pre-rendering landed, the engine on
   BOTH surfaces is only a **fallback** for un-baked fences, so it is rarely loaded.
+- **`html.is-apk` is NOT a fourth seam.** The class is wrapper-injected
+  (`MainActivity.onPageFinished` stamps it on `<html>`) and is a presentation-only
+  CSS hook: `app.js` logic never branches on it — it only lets `style.css` adapt the
+  reader chrome for the phone WebView (slim head, thumb-reach bottom action bar, no
+  redundant close pill, scroll auto-hide), and every such rule is `display:none` on
+  web, so Pages output stays byte-identical. Add APK presentation via an
+  `html.is-apk`-scoped CSS rule, never a new `IS_APK` branch (`grep -c IS_APK
+  app.js` must stay **4**).
 - **Pages-only (2026-07-03): `localStorage` `sd_progress` is the single source of
   truth and the single write path for all progress.** There is no server, no
   `/api`, no database, and no local scheduling stack. Every `localStorage` write —
