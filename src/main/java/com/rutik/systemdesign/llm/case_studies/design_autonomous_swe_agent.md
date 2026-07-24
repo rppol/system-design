@@ -104,50 +104,37 @@ Fleet at 70% utilization target:
 
 ## 3. High-Level Architecture
 
-```
-                        GitHub Issue URL / Task Text
-                                    |
-                                    v
-                    +-------------------------------+
-                    |     Task Ingestion API         |
-                    |  - validate issue URL          |
-                    |  - extract repo + issue body   |
-                    |  - assign task_id (UUIDv4)     |
-                    |  - enqueue to Redis task queue |
-                    +-------------------------------+
-                                    |
-                          Task Queue (Redis)
-                                    |
-                                    v
-                    +-------------------------------+
-                    |     Agent Orchestrator         |
-                    |  - dequeue task                |
-                    |  - restore checkpoint if any   |
-                    |  - run DurableTaskRunner       |
-                    |  - enforce $20 cost ceiling    |
-                    +-------------------------------+
-                         |          |           |
-                         v          v           v
-                  +----------+ +--------+ +-----------+
-                  |  Repo    | |  LLM   | |  Tool     |
-                  | Manager  | | Client | | Registry  |
-                  | (git     | |(GPT-4o/| |(bash, file|
-                  |  clone,  | |Claude) | | search,   |
-                  |  PR)     | |        | | test run) |
-                  +----------+ +--------+ +-----------+
-                         |          |           |
-                         +----→ Checkpoint Store (Postgres) ←-+
-                                        |
-                           Sandbox Manager (Firecracker VM)
-                                        |
-                                  Test Runner
-                                  (pytest / jest)
-                                        |
-                           Self-Correction Loop (max 5 iters)
-                                        |
-                                 PR Creator (GitHub API)
-                                        |
-                              Draft PR opened for human review
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ISSUE(["GitHub Issue URL /<br/>Task Text"]) --> INGEST["Task Ingestion API<br/>validate URL, extract repo + issue,<br/>assign task_id (UUIDv4)"]
+    INGEST --> REDISQ
+    REDISQ@{ icon: "logos:redis", form: "square", label: "Redis Task Queue", pos: "b", h: 44 }
+    REDISQ --> ORCH["Agent Orchestrator<br/>dequeue task, restore checkpoint,<br/>run DurableTaskRunner,<br/>enforce $20 cost ceiling"]
+    ORCH --> REPO["Repo Manager<br/>(git clone, PR)"]
+    ORCH --> LLMC["LLM Client<br/>(GPT-4o / Claude)"]
+    ORCH --> TOOLS["Tool Registry<br/>(bash, file search,<br/>test run)"]
+    REPO --> CKPT
+    LLMC --> CKPT
+    TOOLS --> CKPT
+    CKPT@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>Checkpoint Store", pos: "b", h: 44 }
+    CKPT --> SANDBOX["Sandbox Manager<br/>(Firecracker VM)"]
+    SANDBOX --> TESTRUN["Test Runner<br/>(pytest / jest)"]
+    TESTRUN --> CORRECT["Self-Correction Loop<br/>(max 5 iters)"]
+    CORRECT --> PRCREATE["PR Creator<br/>(GitHub API)"]
+    PRCREATE --> DRAFT(["Draft PR opened<br/>for human review"])
+
+    class ISSUE req
+    class INGEST,ORCH,REPO,LLMC,TOOLS,SANDBOX,TESTRUN,PRCREATE base
+    class CORRECT mathOp
+    class DRAFT io
 ```
 
 ### Self-Correction Sub-Loop
