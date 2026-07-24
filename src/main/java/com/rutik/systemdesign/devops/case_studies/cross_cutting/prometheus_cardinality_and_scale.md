@@ -145,9 +145,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph reps ["Prometheus Replicas A / B / C"]
-        promA("Prometheus A<br/>2h local TSDB<br/>+ Thanos sidecar")
-        promB("Prometheus B<br/>2h local TSDB<br/>+ Thanos sidecar")
-        promC("Prometheus C<br/>2h local TSDB<br/>+ Thanos sidecar")
+        promA@{ icon: "logos:prometheus", form: "square", label: "Prometheus A<br/>2h local TSDB<br/>+ Thanos sidecar", pos: "b", h: 44 }
+        promB@{ icon: "logos:prometheus", form: "square", label: "Prometheus B<br/>2h local TSDB<br/>+ Thanos sidecar", pos: "b", h: 44 }
+        promC@{ icon: "logos:prometheus", form: "square", label: "Prometheus C<br/>2h local TSDB<br/>+ Thanos sidecar", pos: "b", h: 44 }
     end
 
     objStore[("Object Storage<br/>S3 / GCS")]
@@ -164,7 +164,6 @@ flowchart LR
     storeGW -->|"historical"| querier
     querier -->|"PromQL"| grafana
 
-    class promA,promB,promC train
     class objStore base
     class compactor,querier mathOp
     class storeGW frozen
@@ -235,9 +234,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph functional ["Functional Shard (by domain)"]
-        fp("Prom-payments")
-        fs("Prom-search")
-        fi("Prom-infra")
+        fp@{ icon: "logos:prometheus", form: "square", label: "Prom-payments", pos: "b", h: 44 }
+        fs@{ icon: "logos:prometheus", form: "square", label: "Prom-search", pos: "b", h: 44 }
+        fi@{ icon: "logos:prometheus", form: "square", label: "Prom-infra", pos: "b", h: 44 }
     end
 
     subgraph hashmod ["Hashmod Shard (by hash)"]
@@ -252,7 +251,6 @@ flowchart LR
     functional -->|"global query"| querier
     hashmod -->|"global query"| querier
 
-    class fp,fs,fi train
     class target req
     class hashfn mathOp
     class bucket0,bucket1,bucket2 base
