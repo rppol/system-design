@@ -40,16 +40,17 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Client([Client]) --> Gateway(API Gateway)
+    Client([Client]) --> Gateway
     Gateway --> FeedSvc(Feed Service<br/>read path)
-    FeedSvc --> ZSet(Redis ZSet<br/>feed:uid)
+    FeedSvc --> ZSet
     FeedSvc --> Merger((Feed Merger<br/>pull users))
     Merger --> PostSvc(Post Service<br/>fetch post details)
 
+    Gateway@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    ZSet@{ icon: "logos:redis", form: "square", label: "Redis ZSet<br/>feed:uid", pos: "b", h: 44 }
+
     class Client io
-    class Gateway req
     class FeedSvc mathOp
-    class ZSet base
     class Merger mathOp
     class PostSvc base
 ```
@@ -67,16 +68,19 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PostSvc([Post Service]) -->|publish| Kafka(Kafka<br/>post-published)
+    PostSvc([Post Service]) -->|publish| Kafka
     Kafka --> Worker(Fan-out Worker<br/>consumer group)
-    Worker --> Z1(Redis feed:uid1<br/>ZADD)
-    Worker --> Z2(Redis feed:uid2<br/>ZADD)
-    Worker --> Z3(Redis feed:uid3<br/>ZADD)
+    Worker --> Z1
+    Worker --> Z2
+    Worker --> Z3
+
+    Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>post-published", pos: "b", h: 44 }
+    Z1@{ icon: "logos:redis", form: "square", label: "feed:uid1<br/>ZADD", pos: "b", h: 44 }
+    Z2@{ icon: "logos:redis", form: "square", label: "feed:uid2<br/>ZADD", pos: "b", h: 44 }
+    Z3@{ icon: "logos:redis", form: "square", label: "feed:uid3<br/>ZADD", pos: "b", h: 44 }
 
     class PostSvc io
-    class Kafka req
     class Worker mathOp
-    class Z1,Z2,Z3 train
 ```
 
 **Write Path — Fan-out-on-read** (celebrities, >= 10,000 followers): the post is written once to the
@@ -92,12 +96,13 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PostSvc([Post Service]) -->|publish| Kafka(Kafka<br/>celebrity-posts)
-    Kafka -.->|no fan-out| Timeline(celebrity_timeline:uid<br/>Redis ZSet)
+    PostSvc([Post Service]) -->|publish| Kafka
+    Kafka -.->|no fan-out| Timeline
+
+    Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>celebrity-posts", pos: "b", h: 44 }
+    Timeline@{ icon: "logos:redis", form: "square", label: "celebrity_timeline:uid<br/>Redis ZSet", pos: "b", h: 44 }
 
     class PostSvc io
-    class Kafka req
-    class Timeline frozen
 ```
 
 **Read Path — Hybrid Merge** for a user following celebrities: the pre-built feed ZSet and each
