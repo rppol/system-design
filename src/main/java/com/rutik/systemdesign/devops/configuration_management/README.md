@@ -131,13 +131,13 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     tmpl("Packer template<br/>+ Ansible provisioner") -->|"packer build"| ami(["golden AMI<br/>ami-0abc · versioned"])
-    ami --> lt("Terraform<br/>launch template")
+    ami --> lt
+    lt@{ icon: "logos:terraform-icon", form: "square", label: "Terraform", pos: "b", h: 44 }
     lt --> asg("Auto Scaling<br/>Group")
     asg -->|"new AMI: drain +<br/>terminate old"| fleet(["fleet of IDENTICAL<br/>instances"])
 
     class tmpl io
     class ami frozen
-    class lt base
     class asg mathOp
     class fleet train
 ```
