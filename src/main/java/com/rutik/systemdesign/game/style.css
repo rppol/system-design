@@ -13,10 +13,10 @@
 /* ---------- 1. Tokens & themes ------------------------------------------ */
 
 :root {
-  /* Midnight (default) — deep blue-black, pure blue/violet spectrum */
+  /* Midnight (default) — lifted blue-navy, pure blue/violet spectrum */
   color-scheme: dark;
-  --bg: #06070d;
-  --bg-2: #0b0d15;
+  --bg: #0d1022;
+  --bg-2: #151933;
   --text: #eef2fa;
   --muted: #a3adc4;
   --faint: #6d7890;
@@ -95,19 +95,19 @@
 }
 
 [data-theme="ember"] {
-  /* Ember — warm near-black, red/orange spectrum */
-  --bg: #0e0709;
-  --bg-2: #170c0f;
-  --text: #f7efe9;
-  --muted: #bda9a1;
-  --faint: #8d7b74;
+  /* Ember — warm dark (lifted from near-black), glowing red/orange fire spectrum */
+  --bg: #1a100b;
+  --bg-2: #251710;
+  --text: #f8efe8;
+  --muted: #c9b1a5;
+  --faint: #9b867b;
   --accent: #fb923c;
   --accent-2: #f87171;
   --accent-ink: #1d0c02;
-  --mesh-1: #e8564a;
-  --mesh-2: #e89a45;
-  --mesh-3: #cf4468;
-  --mesh-o: 0.20;
+  --mesh-1: #f4634f;
+  --mesh-2: #f59e42;
+  --mesh-3: #ec5d7e;
+  --mesh-o: 0.30;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
@@ -129,36 +129,36 @@
 }
 
 [data-theme="ocean"] {
-  /* Ocean — deep teal-black, cyan/sky spectrum */
-  --bg: #040d12;
-  --bg-2: #08151c;
-  --text: #e6f4fa;
-  --muted: #9fbecb;
-  --faint: #6a8592;
-  --accent: #22d3ee;
-  --accent-2: #38bdf8;
-  --accent-ink: #041520;
-  --mesh-1: #0ea5e9;
-  --mesh-2: #22d3ee;
-  --mesh-3: #2563eb;
-  --mesh-o: 0.22;
+  /* Ocean — deep navy-blue, cyan + blue spectrum (no green/teal cast) */
+  --bg: #060f1c;
+  --bg-2: #0b1728;
+  --text: #e8f2fc;
+  --muted: #a6c1da;
+  --faint: #7089a3;
+  --accent: #38bdf8;
+  --accent-2: #22d3ee;
+  --accent-ink: #041020;
+  --mesh-1: #3b82f6;
+  --mesh-2: #38bdf8;
+  --mesh-3: #22d3ee;
+  --mesh-o: 0.24;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
 [data-theme="rose"] {
-  /* Rose — deep rose-black, rose/fuchsia spectrum */
-  --bg: #100609;
-  --bg-2: #1a0b10;
-  --text: #faedf1;
-  --muted: #d0a6b4;
-  --faint: #997079;
-  --accent: #fb7185;
-  --accent-2: #e879f9;
-  --accent-ink: #260610;
-  --mesh-1: #f43f5e;
-  --mesh-2: #ec4899;
-  --mesh-3: #d946ef;
-  --mesh-o: 0.20;
+  /* Rose — soft pink-rose; lighter than the other dark themes and distinctly pink (not tomato-red) */
+  --bg: #1b0e16;
+  --bg-2: #271322;
+  --text: #fdeff5;
+  --muted: #e2b5c8;
+  --faint: #b08296;
+  --accent: #fda4af;
+  --accent-2: #f0abfc;
+  --accent-ink: #2c0813;
+  --mesh-1: #f472b6;
+  --mesh-2: #e879f9;
+  --mesh-3: #fb7185;
+  --mesh-o: 0.32;
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
@@ -1631,10 +1631,13 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .theme-opt .tcheck { margin-left: auto; color: var(--accent); font-weight: 800; visibility: hidden; }
 .theme-opt[aria-checked="true"] .tcheck { visibility: visible; }
 .swatch { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.25); }
-.swatch.sw-midnight { background: linear-gradient(135deg, #3a5fe0, #7448e0 55%, #06070d); }
+.swatch.sw-midnight { background: linear-gradient(135deg, #3a5fe0, #7448e0 55%, #0d1022); }
 .swatch.sw-orchid { background: linear-gradient(135deg, #c084fc, #e05fb4 55%, #0c0611); }
-.swatch.sw-ember { background: linear-gradient(135deg, #e8564a, #e89a45 55%, #0e0709); }
+.swatch.sw-ember { background: linear-gradient(135deg, #f4634f, #f59e42 55%, #1a100b); }
 .swatch.sw-daylight { background: linear-gradient(135deg, #7cb1ff, #f7a8d8 55%, #eef1f7); border-color: rgba(13, 23, 44, 0.18); }
+.swatch.sw-forest { background: linear-gradient(135deg, #34d399, #a3e635 55%, #060f0a); }
+.swatch.sw-ocean { background: linear-gradient(135deg, #38bdf8, #22d3ee 55%, #060f1c); }
+.swatch.sw-rose { background: linear-gradient(135deg, #fda4af, #f0abfc 55%, #1b0e16); }
 
 /* [E1] streak detail popover — same glass-popover pattern as the theme picker,
    positioned under its anchor (JS-computed top/left) instead of a fixed corner. */

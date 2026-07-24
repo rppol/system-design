@@ -445,13 +445,13 @@ function setStudyPath(section, path) {
 // data-theme on <html> drives every color token in style.css. The inline script
 // in index.html applies the saved theme before first paint (no flash).
 const THEMES = [
-  { id: "midnight", name: "Midnight" },
-  { id: "orchid", name: "Orchid" },
-  { id: "ember", name: "Ember" },
-  { id: "forest", name: "Forest" },
-  { id: "ocean", name: "Ocean" },
-  { id: "rose", name: "Rose" },
-  { id: "daylight", name: "Daylight" },
+  { id: "midnight", name: "Midnight" },   // blue (default)
+  { id: "ocean", name: "Ocean" },         // cyan
+  { id: "forest", name: "Forest" },       // green
+  { id: "ember", name: "Ember" },         // orange
+  { id: "rose", name: "Rose" },           // pink
+  { id: "orchid", name: "Orchid" },       // purple
+  { id: "daylight", name: "Daylight" },   // light
 ];
 // A ?theme= URL override wins for this session; picking from the popover saves.
 // Unknown/retired ids (e.g. a saved "aurora") fall back to midnight.
@@ -3820,7 +3820,7 @@ function palVerbs() {
   const flash = deckMode() === "flash";
   out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
     run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
-  for (const t of ["midnight", "orchid", "ember", "forest", "ocean", "rose", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
+  for (const t of ["midnight", "ocean", "forest", "ember", "rose", "orchid", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
   out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
   return out;
 }
@@ -6050,15 +6050,27 @@ function mdRender(src) {
     // paragraph right after it is its answer. Colour them distinctly.
     let p = para.join(" ").trim();
     const isQ = /^\*\*[\s\S]+\*\*$/.test(p) && (p.match(/\*\*/g) || []).length === 2;
+    // Normalize the §12 question label: numbered "**Q1:/**Q2:" and "**Q:" all
+    // display as a uniform "Q: " (CLAUDE.md convention). Only rewrites an existing
+    // Q:/Qn: label at the very start of the leading bold — bare questions and
+    // bold "**Term**:" definitions are left untouched (no false matches).
+    const normQ = (t) => t.replace(/^(\*\*\s*)Q\d*\s*[:.]\s*/i, "$1Q: ");
     let pcls = "";
-    if (isQ) { pcls = ' class="md-q"'; qaPending = true; }
+    if (isQ) {
+      pcls = ' class="md-q"'; qaPending = true;
+      p = normQ(p);
+      // A bare fully-bold question that ENDS with "?" gets a uniform "Q: " too, so
+      // every §12 question reads "Q: ...". The "?" gate keeps bold non-question
+      // labels ("**Key insight:**") from wrongly getting the prefix.
+      if (!/^\*\*\s*Q:/i.test(p) && /\?\s*\*\*$/.test(p)) p = p.replace(/^\*\*\s*/, "**Q: ");
+    }
     else if (qaPending) {
       pcls = ' class="md-a"'; qaPending = false;
       p = p.replace(/^:\s*/, "");   // strip markdown definition-list ": answer" prefix
     }
     else if (/^\*\*[^*]+?\*\*[^*]/.test(p)) {
       pcls = ' class="md-qa"';
-      p = p.replace(/^(\*\*[^*]+?\*\*):/, "$1");  // strip ": " label separator — display:block already gives the line break
+      p = normQ(p).replace(/^(\*\*[^*]+?\*\*):/, "$1");  // normalize Q label; strip ": " def-list separator
     }
     out.push(`<p${pcls}>${mdInline(p)}</p>`);
   }
