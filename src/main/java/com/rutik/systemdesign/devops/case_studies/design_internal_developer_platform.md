@@ -161,9 +161,9 @@ flowchart TD
         fe --> searchB
     end
 
-    catDB[("Catalog DB<br/>Postgres")]
+    catDB@{ icon: "logos:postgresql", form: "square", label: "Catalog DB<br/>Postgres", pos: "b", h: 44 }
     git("Git provider<br/>GitHub / GitLab")
-    s3[("S3<br/>docs")]
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>docs", pos: "b", h: 44 }
     opa{{"OPA / perms<br/>policy engine"}}
 
     eng --> fe
@@ -195,7 +195,7 @@ flowchart TD
 
     class eng io
     class fe,catB,scafB,docB,searchB req
-    class catDB,s3,reg,obs base
+    class reg,obs base
     class git,cloud frozen
     class opa,ci,gitops,xplane mathOp
     class mrs train
@@ -253,7 +253,7 @@ flowchart LR
     repo(["catalog-info.yaml<br/>repo: payments/checkout"])
     parse["Catalog backend<br/>parse + validate"]
     rel["Build relations<br/>ownedBy → Group:team-payments<br/>dependsOn → Component:ledger<br/>providesApi → API:checkout-api<br/>consumesApi → API:fraud-score"]
-    pg[("Postgres<br/>upsert")]
+    pg@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>upsert", pos: "b", h: 44 }
     out(["Searchable +<br/>UI-rendered"])
 
     repo -- "org-scan discovery" --> parse
@@ -263,7 +263,6 @@ flowchart LR
 
     class repo,out io
     class parse,rel mathOp
-    class pg base
 ```
 
 The relation-building step is what turns a flat YAML file into typed graph edges at ingest time — the reason a blast-radius query (who depends on `ledger-api`?) answers in milliseconds instead of a manual search.
@@ -469,7 +468,7 @@ flowchart LR
 
     subgraph comp["Platform's Composition"]
         direction LR
-        rds["RDSInstance<br/>provider-aws"]
+        rds@{ icon: "logos:aws-rds", form: "square", label: "RDSInstance<br/>provider-aws", pos: "b", h: 44 }
         subnet["DBSubnetGroup"]
         sg["SecurityGroup<br/>ingress from app"]
         iam["IAMRole<br/>RDS auth"]
@@ -492,7 +491,7 @@ flowchart LR
 
     class claim req
     class xrd mathOp
-    class rds,subnet,sg,iam,secret train
+    class subnet,sg,iam,secret train
     class aws frozen
 ```
 
