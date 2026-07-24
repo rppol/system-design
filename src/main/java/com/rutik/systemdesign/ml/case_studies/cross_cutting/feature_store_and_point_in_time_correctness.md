@@ -48,15 +48,18 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    raw(["Raw data\nS3 / DWH"]) --> pipe["Feature pipeline\nSpark / dbt"]
+    raw@{ icon: "logos:aws-s3", form: "square", label: "Raw Data<br/>S3 / DWH", pos: "b", h: 44 }
+    pipe@{ icon: "logos:apache-spark", form: "square", label: "Feature Pipeline<br/>Spark / dbt", pos: "b", h: 44 }
+
+    raw --> pipe
     pipe --> store["Offline store\nParquet / Delta Lake"]
     store --> join["PIT join\nat training time"]
     join --> ds(["Training dataset"])
     ds --> model["Model"]
 
-    class raw,ds io
+    class ds io
     class store base
-    class pipe,join mathOp
+    class join mathOp
     class model train
 ```
 
@@ -66,23 +69,32 @@ Simplest architecture. Works when models are trained daily and features tolerate
 
 ### 4.2 Dual-Store Architecture (Training + Serving)
 
-```
-Raw Events (Kafka)
-        |
-    +---+---+
-    |       |
-Batch     Stream
-Pipeline   Pipeline
-(Spark)    (Flink)
-    |       |
-    v       v
-Offline   Online
-Store     Store
-(S3/BQ)  (Redis)
-    |       |
-    v       v
-Training  Serving
-Pipeline  API
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    events@{ icon: "logos:kafka", form: "square", label: "Raw Events<br/>Kafka", pos: "b", h: 44 }
+    batch@{ icon: "logos:apache-spark", form: "square", label: "Batch Pipeline<br/>Spark", pos: "b", h: 44 }
+    stream@{ icon: "simple-icons:apacheflink", form: "square", label: "Stream Pipeline<br/>Flink", pos: "b", h: 44 }
+    off@{ icon: "logos:aws-s3", form: "square", label: "Offline Store<br/>S3 / BQ", pos: "b", h: 44 }
+    on@{ icon: "logos:redis", form: "square", label: "Online Store<br/>Redis", pos: "b", h: 44 }
+    train(["Training<br/>Pipeline"])
+    serve(["Serving<br/>API"])
+
+    events --> batch
+    events --> stream
+    batch --> off
+    stream --> on
+    off --> train
+    on --> serve
+
+    class train,serve io
 ```
 
 Features are computed twice: once by a batch pipeline for historical joins, once by a stream pipeline for real-time serving. Risk: the two pipelines can drift if they implement slightly different logic.
@@ -173,13 +185,16 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    batch["Batch pipeline\nSpark / dbt"] -->|write| off["Offline store\nS3 Parquet\nhistorical time series"]
-    stream["Stream pipeline\nFlink"] -->|write| on["Online store\nRedis\ncurrent value only"]
+    batch@{ icon: "logos:apache-spark", form: "square", label: "Batch Pipeline<br/>Spark / dbt", pos: "b", h: 44 }
+    stream@{ icon: "simple-icons:apacheflink", form: "square", label: "Stream Pipeline<br/>Flink", pos: "b", h: 44 }
+    off@{ icon: "logos:aws-s3", form: "square", label: "Offline Store<br/>S3 Parquet<br/>historical time series", pos: "b", h: 44 }
+    on@{ icon: "logos:redis", form: "square", label: "Online Store<br/>Redis<br/>current value only", pos: "b", h: 44 }
+
+    batch -->|write| off
+    stream -->|write| on
     off --> tj(["Training join\nPIT query"])
     on --> sl(["Serving lookup\np99 under 5ms"])
 
-    class batch,stream mathOp
-    class off,on base
     class tj,sl req
 ```
 
