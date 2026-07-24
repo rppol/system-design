@@ -43,11 +43,11 @@ flowchart LR
 
     Client(["POST /orders"])
     Handler("FastAPI Handler<br/>under 200 ms")
-    Queue[("Redis Queue<br/>arq:default · arq:high")]
+    Queue@{ icon: "logos:redis", form: "square", label: "Redis Queue<br/>arq:default/high", pos: "b", h: 44 }
     Workers("ARQ Workers<br/>N processes<br/>send_email · gen_invoice · update_erp")
-    Idem[("Idempotency Layer<br/>Redis SET NX EX<br/>blocks duplicate retries")]
-    Results[("Redis Result Backend<br/>result:job_id · TTL 24h")]
-    DLQ[("DLQ<br/>arq:dlq Redis List")]
+    Idem@{ icon: "logos:redis", form: "square", label: "Redis<br/>Idempotency Store", pos: "b", h: 44 }
+    Results@{ icon: "logos:redis", form: "square", label: "Redis<br/>Result Backend", pos: "b", h: 44 }
+    DLQ@{ icon: "logos:redis", form: "square", label: "Redis DLQ<br/>arq:dlq list", pos: "b", h: 44 }
 
     Client --> Handler
     Handler -->|"enqueue(order_id, task_name, payload)"| Queue
@@ -58,10 +58,7 @@ flowchart LR
 
     class Client io
     class Handler mathOp
-    class Queue req
     class Workers mathOp
-    class Idem,Results base
-    class DLQ lossN
 ```
 
 The handler responds in under 200 ms after enqueueing three independent jobs; workers dequeue,
