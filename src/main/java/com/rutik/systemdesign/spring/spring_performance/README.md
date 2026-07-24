@@ -142,12 +142,11 @@ flowchart TD
 
     R["HTTP Request"] --> T["Tomcat Thread Pool\nmax: 200 threads"]
     T -->|"thread acquires DB connection"| H["HikariCP Connection Pool\nmaximumPoolSize: 10\n10 idle, up to 190 pending"]
-    H -->|"JDBC connection"| D["PostgreSQL Database\nmax_connections: 100"]
+    H -->|"JDBC connection"| D@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>max_connections: 100", pos: "b", h: 44 }
 
     class R req
     class T mathOp
     class H frozen
-    class D base
 ```
 
 Saturation scenario: 200 Tomcat threads all blocked waiting on HikariCP (pool size 10) leaves 190 threads in the pending queue, so `connection-timeout` is exceeded for late arrivals and `SQLTimeoutException` is thrown to callers.
