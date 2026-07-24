@@ -160,20 +160,21 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Internet([Internet]) --> R53("Route 53<br/>latency / failover routing")
+    R53@{ icon: "logos:aws-route53", form: "square", label: "Route 53", pos: "b", h: 44 }
+    Internet([Internet]) --> R53
 
     subgraph VPC["VPC 10.0.0.0/16"]
         subgraph AZa["AZ-a"]
             ALBa(["ALB node<br/>public subnet"])
             Appa("EC2 / EKS pods<br/>private subnet")
-            DBa[("RDS primary<br/>private DB subnet")]
+            DBa@{ icon: "logos:aws-rds", form: "square", label: "RDS primary", pos: "b", h: 44 }
             ALBa -->|"443 from internet"| Appa
             Appa -->|"app port from ALB SG"| DBa
         end
         subgraph AZb["AZ-b"]
             ALBb(["ALB node<br/>public subnet"])
             Appb("EC2 / EKS pods<br/>private subnet")
-            DBb[("RDS standby<br/>private DB subnet")]
+            DBb@{ icon: "logos:aws-rds", form: "square", label: "RDS standby", pos: "b", h: 44 }
             ALBb -->|"443 from internet"| Appb
             Appb -->|"app port from ALB SG"| DBb
         end
@@ -194,7 +195,7 @@ flowchart TD
         P6("Sustainability")
     end
 
-    S3d[("S3<br/>regional storage")]
+    S3d@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
 
     R53 --> ALBa
     R53 --> ALBb
@@ -202,11 +203,9 @@ flowchart TD
     VPC -.-> WA
 
     class Internet,IGW io
-    class R53 mathOp
     class ALBa,ALBb req
     class Appa,Appb train
-    class DBa,S3d base
-    class DBb,P1,P2,P3,P4,P5,P6 frozen
+    class P1,P2,P3,P4,P5,P6 frozen
     class NAT lossN
 ```
 
