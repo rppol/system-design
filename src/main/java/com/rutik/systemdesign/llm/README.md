@@ -254,11 +254,15 @@ covers context-window budget allocation, compaction, and the retrieval-vs-long-c
 decision matrix — essential before building agents or production systems.
 
 ### Phase 4 — Agents & Frameworks
-```
-Agents & Tool Use  -->  Agentic Workflow Patterns  -->  Agentic Frameworks  -->  Multi-Agent Systems
-        |
-        +--> MCP (Model Context Protocol)
-        +--> Coding Agents  -->  Voice Agents  -->  Browser Agents Deep Dive
+```mermaid
+flowchart LR
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    atu(Agents & Tool Use) --> awp(Agentic Workflow<br/>Patterns) --> af(Agentic Frameworks) --> mas(Multi-Agent Systems)
+    atu --> mcp(MCP<br/>Model Context Protocol)
+    atu --> ca(Coding Agents) --> va(Voice Agents) --> bad(Browser Agents<br/>Deep Dive)
+
+    class atu,awp,af,mas,mcp,ca,va,bad base
 ```
 Build autonomous systems that take actions, use tools, and coordinate. Agentic Workflow Patterns
 covers the Anthropic taxonomy (chaining, routing, parallelization, orchestrator-workers,
