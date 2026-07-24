@@ -85,45 +85,42 @@ At LLM scale the loop must additionally handle: gradient accumulation to simulat
 
 ### Single Training Step with Gradient Accumulation
 
-```
-Step counter: 0 ... accum_steps-1 (e.g., 0..7 for accum=8)
+Each micro-step (0 to `accum_steps-1`, e.g. 0..7 for `accum=8`) runs forward, loss,
+and backward but skips the optimizer update; dividing the loss by `accum_steps`
+before `backward()` is the critical step — skipping it silently scales the
+effective learning rate by `accum_steps` (see the broken-loop example in
+Section 6).
 
-For each micro-step i in [0, accum_steps):
-                                              
-  [DataLoader] --> batch_i (B=4 sequences)   
-       |                                     
-       v                                     
-  [Forward Pass]                             
-  model(input_ids) --> logits                
-       |                                     
-       v                                     
-  [Loss Computation]                         
-  loss = cross_entropy(logits, labels)       
-  loss = loss / accum_steps   <-- CRITICAL   
-       |                                     
-       v                                     
-  [Backward Pass]  (autograd)                
-  loss.backward()  accumulates .grad tensors 
-       |                                     
-  (no optimizer step yet)                    
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-After accum_steps micro-steps:
-       |
-       v
-  [Gradient Clipping]
-  clip_grad_norm_(model.params, max_norm=1.0)
-       |
-       v
-  [Optimizer Step]
-  optimizer.step()   -- updates weights
-       |
-       v
-  [LR Scheduler Step]
-  scheduler.step()
-       |
-       v
-  [Zero Gradients]
-  optimizer.zero_grad(set_to_none=True)
+    subgraph loopBlock["Micro-step i, repeated 0..accum_steps-1"]
+        direction LR
+        dl(["DataLoader<br/>batch_i, B=4 sequences"])
+        fwd("Forward Pass<br/>model call to logits")
+        loss("Loss Computation<br/>cross-entropy<br/>loss /= accum_steps CRITICAL")
+        bwd("Backward Pass<br/>loss.backward<br/>accumulates .grad")
+        dl --> fwd --> loss --> bwd
+    end
+
+    clip("Gradient Clipping<br/>max_norm = 1.0")
+    opt("Optimizer Step<br/>optimizer.step")
+    sched("LR Scheduler Step<br/>scheduler.step")
+    zero("Zero Gradients<br/>set_to_none = True")
+
+    bwd -- "after accum_steps<br/>micro-steps" --> clip --> opt --> sched --> zero
+
+    class dl io
+    class fwd,bwd mathOp
+    class loss lossN
+    class clip,opt,sched,zero train
 ```
 
 ### FSDP All-Gather / Reduce-Scatter Pattern (8 GPUs)
