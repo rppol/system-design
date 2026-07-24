@@ -117,9 +117,11 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    CL(["Client (Browser/API)"]) --> GW["API Gateway\nAuth + Rate Limit"]
+    CL(["Client (Browser/API)"]) --> GW
+    GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway<br/>Auth + Rate Limit", pos: "b", h: 50 }
     GW --> ORCH["Query Orchestrator\n(tenant context, query planner)"]
-    ORCH --> XBRL["XBRL Fact DB\n(PostgreSQL)\nGAAP fast path"]
+    ORCH --> XBRL
+    XBRL@{ icon: "logos:postgresql", form: "square", label: "XBRL Fact DB<br/>(PostgreSQL)<br/>GAAP fast path", pos: "b", h: 50 }
     ORCH --> RET["Semantic Retriever\n(Qdrant per-tenant + reranker)"]
     ORCH --> CV["Citation Verifier\n(post-gen gate)"]
     XBRL --> CA["Context Assembler\n(table + prose, token budget)"]
@@ -128,9 +130,8 @@ flowchart TD
     LLM --> MEMO["Memo Generator\n(inline citation formatter)"]
     MEMO --> CV
 
-    class CL,GW req
+    class CL req
     class ORCH mathOp
-    class XBRL base
     class RET,CA,MEMO train
     class LLM frozen
     class CV lossN
@@ -140,42 +141,36 @@ The orchestrator fans out to the XBRL fast path (8 ms lookups serving ~60% of GA
 
 ### Document Ingestion Pipeline
 
-```
-S3 Upload
-    |
-    v
-+---+-------------------+
-| Document Intake Queue  |  (SQS, per-tenant partition)
-+---+-------------------+
-    |
-    +-------+-------+
-    |               |
-+---v---+     +-----v------+
-| PDF   |     | XBRL iXBRL |
-| Parser|     | Extractor  |
-| (pdf  |     | (EDGAR     |
-| plumb)|     |  download) |
-+---+---+     +-----+------+
-    |               |
-    v               v
-+---+---------------+---+
-| Section / Table chunks |
-| (filing_id, page,      |
-|  table_type, text)     |
-+---+-------------------+
-    |
-+---v-------------------+
-| Embedding Service      |  (text-embedding-3-large, 1536 dims)
-+---+-------------------+
-    |
-+---v-------------------+
-| Qdrant (per-tenant     |  upsert chunks with metadata
-| collection)            |
-+---+-------------------+
-    |
-+---v-------------------+
-| PostgreSQL             |  chunk_metadata + xbrl_facts tables
-+------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s3@{ icon: "logos:aws-s3", form: "square", label: "S3 Upload", pos: "b", h: 44 }
+    queue@{ icon: "logos:aws-sqs", form: "square", label: "Document Intake Queue<br/>(SQS, per-tenant<br/>partition)", pos: "b", h: 44 }
+    pdfp["PDF Parser<br/>(pdfplumber)"]
+    xbrlx["XBRL iXBRL Extractor<br/>(EDGAR download)"]
+    chunks["Section / Table Chunks<br/>(filing_id, page,<br/>table_type, text)"]
+    embed["Embedding Service<br/>(text-embedding-3-large,<br/>1536 dims)"]
+    qdrant["Qdrant<br/>(per-tenant collection)<br/>upsert chunks + metadata"]
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>chunk_metadata +<br/>xbrl_facts tables", pos: "b", h: 44 }
+
+    s3 --> queue
+    queue --> pdfp
+    queue --> xbrlx
+    pdfp --> chunks
+    xbrlx --> chunks
+    chunks --> embed
+    embed --> qdrant
+    qdrant --> pg
+
+    class pdfp,xbrlx,chunks,embed train
+    class qdrant base
 ```
 
 ### Multi-Region Topology
