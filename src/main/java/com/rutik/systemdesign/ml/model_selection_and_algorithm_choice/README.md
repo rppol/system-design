@@ -189,14 +189,12 @@ prune the shortlist before any accuracy number is compared.
 
 ### Data-Regime Model Map
 
-```
-  rows\features  | Few (<20) | Many (20–200) | Very Many (>200, sparse)
-  ---------------|-----------|---------------|------------------------
-  <10k           | Ridge/LR  | L1 Logistic   | Linear SVM / L1 Logistic
-  10k – 1M       | LightGBM  | LightGBM      | GBDT + hashing tricks
-  >1M            | LightGBM  | LightGBM/DL   | Wide & Deep / DLRM
-  Unstructured   | —         | —             | Pretrained DL backbone
-```
+| rows\features | Few (<20) | Many (20–200) | Very Many (>200, sparse) |
+|---|---|---|---|
+| <10k | Ridge/LR | L1 Logistic | Linear SVM / L1 Logistic |
+| 10k – 1M | LightGBM | LightGBM | GBDT + hashing tricks |
+| >1M | LightGBM | LightGBM/DL | Wide & Deep / DLRM |
+| Unstructured | — | — | Pretrained DL backbone |
 
 ---
 
