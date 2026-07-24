@@ -353,18 +353,31 @@ flowchart TD
 
 ### Tool Chaining
 
-```
-Task: "Search for articles about LLM scaling laws, then summarize the top 3"
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Step 1: search("LLM scaling laws") → returns 5 article URLs + snippets
-        |
-Step 2: For each of top 3 URLs:
-  fetch_article(url_1) ──┐
-  fetch_article(url_2) ──┤ parallel
-  fetch_article(url_3) ──┘
-        |
-Step 3: (no tool call — summarize from context)
-  "Based on the three articles..."
+    TASK(["Task: search LLM scaling laws,<br/>then summarize the top 3"])
+    S1["Step 1: search('LLM scaling laws')<br/>returns 5 article URLs + snippets"]
+    F1["fetch_article(url_1)"]
+    F2["fetch_article(url_2)"]
+    F3["fetch_article(url_3)"]
+    S3(["Step 3: no tool call<br/>summarize from context"])
+
+    TASK --> S1
+    S1 --> F1 & F2 & F3
+    F1 & F2 & F3 --> S3
+
+    class TASK,S3 io
+    class S1 base
+    class F1,F2,F3 req
 ```
 
 ---
