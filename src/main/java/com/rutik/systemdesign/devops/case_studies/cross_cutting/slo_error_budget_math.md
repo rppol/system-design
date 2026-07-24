@@ -147,7 +147,7 @@ flowchart LR
     Instr --> SLI("PromQL SLI<br/>5xx rate / total rate")
     SLI --> Rec("recording rule<br/>slo:sli_error:ratio_rate5m")
     SLI --> Alert("burn-rate alert rules<br/>multi-window multi-burn")
-    Rec --> Graf(["Grafana SLO panel"])
+    Rec --> Graf@{ icon: "logos:grafana", form: "square", label: "Grafana<br/>SLO panel", pos: "b", h: 44 }
     Alert --> AM("Alertmanager") --> Page(["PagerDuty / ticket"])
 
     class Req req
@@ -155,7 +155,7 @@ flowchart LR
     class Rec base
     class Alert lossN
     class AM mathOp
-    class Graf,Page io
+    class Page io
 ```
 
 The same SLI ratio forks into two consumers: a recording rule that feeds the Grafana budget panel, and the multi-burn alert rules that route through Alertmanager to PagerDuty or a ticket queue.
