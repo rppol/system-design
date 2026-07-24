@@ -77,7 +77,7 @@
   --tabbar-h: 58px;              /* [E2] mobile bottom tab bar height (< 640px only) */
 }
 
-[data-theme="orchid"] {
+:root[data-theme="orchid"] {
   /* Orchid — lifted purple, purple/pink spectrum */
   --bg: #170e22;
   --bg-2: #221533;
@@ -94,7 +94,7 @@
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
-[data-theme="ember"] {
+:root[data-theme="ember"] {
   /* Ember — warm dark (lifted from near-black), glowing red/orange fire spectrum */
   --bg: #1a100b;
   --bg-2: #251710;
@@ -111,7 +111,7 @@
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
-[data-theme="forest"] {
+:root[data-theme="forest"] {
   /* Forest — lifted green, emerald/lime spectrum */
   --bg: #0e1a13;
   --bg-2: #16271d;
@@ -128,7 +128,7 @@
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
-[data-theme="ocean"] {
+:root[data-theme="ocean"] {
   /* Ocean — lifted navy-blue, cyan + blue spectrum (no green/teal cast) */
   --bg: #0c1627;
   --bg-2: #14233a;
@@ -145,7 +145,7 @@
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
-[data-theme="rose"] {
+:root[data-theme="rose"] {
   /* Rose — soft pink-rose; lighter than the other dark themes and distinctly pink (not tomato-red) */
   --bg: #1b0e16;
   --bg-2: #271322;
@@ -162,37 +162,69 @@
   --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
 }
 
-[data-theme="daylight"] {
+:root[data-theme="fire"] {
+  /* Fire — pure red -> orange -> gold flame (distinct from Ember's muted orange) */
+  --bg: #190809;
+  --bg-2: #251211;
+  --text: #fceceb;
+  --muted: #d6aba7;
+  --faint: #a37c79;
+  --accent: #f5484e;
+  --accent-2: #ff8c42;
+  --accent-ink: #1f0605;
+  --mesh-1: #ef4444;
+  --mesh-2: #f97316;
+  --mesh-3: #facc15;
+  --mesh-o: 0.34;
+  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+:root[data-theme="obsidian"] {
+  /* Obsidian — monochrome: pitch-black + shiny silver in dark, grey-white in light */
+  --bg: #050506;
+  --bg-2: #101114;
+  --text: #eef0f4;
+  --muted: #a8adb8;
+  --faint: #71767f;
+  --accent: #cbd1dc;
+  --accent-2: #8b93a3;
+  --accent-ink: #0a0b0e;
+  --mesh-1: #4b5566;
+  --mesh-2: #8b93a3;
+  --mesh-3: #2c333f;
+  --mesh-o: 0.20;
+  --topbar-bg: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+/* Light MODE — applied on top of ANY colour theme via data-mode="light". It
+   overrides only the SURFACE tokens (bg/text/glass/shadows) to light; the colour
+   theme keeps its accent/mesh identity, and the light background is subtly tinted
+   by that accent. Placed after every [data-theme] block so its --bg wins over each
+   theme's dark --bg (equal specificity -> source order decides). Reader stays
+   pitch-black #000 / #fff in every mode (hard limit, game/CLAUDE.md) — no --rd-*. */
+:root[data-mode="light"] {
   color-scheme: light;
-  --bg: #eef1f7;
+  --bg: color-mix(in srgb, var(--accent) 7%, #eef1f7);
   --bg-2: #ffffff;
   --text: #0e1526;
   --muted: #5c6780;
   --faint: #616c86;
-  --accent: #3b82f6;
-  --accent-text: #2563eb;
-  --accent-2: #8b5cf6;
-  --accent-ink: #ffffff;
+  --accent-text: color-mix(in srgb, var(--accent) 58%, #0a1020);   /* darken accent for text on light */
   --good: #087a52;
   --bad: #c2222f;
   --warn: #a04a06;
   --flame: #c2410c;
-
-  --mesh-1: #7cb1ff;
-  --mesh-2: #f7a8d8;
-  --mesh-3: #8ff0d4;
-  --mesh-o: 0.46;
+  --mesh-o: 0.42;
   --grid-line: rgba(15, 23, 42, 0.05);
   --spot: color-mix(in srgb, var(--accent) 10%, transparent);
-
   --glass: rgba(255, 255, 255, 0.60);
-  --glass-2: rgba(255, 255, 255, 0.80);
+  --glass-2: rgba(255, 255, 255, 0.82);
   --glass-brd: rgba(13, 23, 44, 0.09);
   --glass-brd-hi: rgba(13, 23, 44, 0.22);
   --glass-hilite: inset 0 1px 0 rgba(255, 255, 255, 0.75);
   --shadow: 0 24px 60px rgba(15, 23, 42, 0.10), 0 4px 16px rgba(15, 23, 42, 0.06);
   --shadow-sm: 0 10px 30px rgba(15, 23, 42, 0.08);
-  --topbar-bg: rgba(255, 255, 255, 0.55);
+  --topbar-bg: rgba(255, 255, 255, 0.62);
   /* NOTE: no reader token overrides here — the reader is pitch black with
      One Dark prose in every theme (hard limit, game/CLAUDE.md). */
 }
@@ -745,9 +777,9 @@ button:active { transform: scale(0.98); }
 .tier.bronze { color: #f0c089; background: rgba(205, 127, 50, 0.16); border: 1px solid #cd7f32; }
 .tier.silver { color: #d8e0ec; background: rgba(192, 192, 192, 0.14); border: 1px solid #9aa6b8; }
 .tier.gold { color: #ffe08a; background: rgba(251, 191, 36, 0.16); border: 1px solid #fbbf24; }
-[data-theme="daylight"] .tier.bronze { color: #8a5a1c; }
-[data-theme="daylight"] .tier.silver { color: #5a6678; }
-[data-theme="daylight"] .tier.gold { color: #8a6d00; }
+:root[data-mode="light"] .tier.bronze { color: #8a5a1c; }
+:root[data-mode="light"] .tier.silver { color: #5a6678; }
+:root[data-mode="light"] .tier.gold { color: #8a6d00; }
 
 .stat.lvl {
   padding: 2px 10px; border-radius: 999px;
@@ -1612,7 +1644,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .theme-pop {
   position: fixed; top: 58px; right: 18px; z-index: 60;
   min-width: 210px; padding: 8px;
-  background: var(--glass-2);
+  background: color-mix(in srgb, var(--bg-2) 92%, transparent);   /* near-opaque so labels stay crisp over the mesh backdrop */
   -webkit-backdrop-filter: blur(26px) saturate(1.6);
   backdrop-filter: blur(26px) saturate(1.6);
   border: 1px solid var(--glass-brd-hi); border-radius: var(--radius);
@@ -1630,11 +1662,17 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .theme-opt .tcheck { margin-left: auto; color: var(--accent); font-weight: 800; visibility: hidden; }
 .theme-opt[aria-checked="true"] .tcheck { visibility: visible; }
+/* Light/Dark mode segmented toggle at the top of the theme picker */
+.mode-seg { display: flex; gap: 4px; padding: 4px; margin: 2px 2px 8px; border-radius: 11px; background: var(--glass); border: 1px solid var(--glass-brd); }
+.mode-opt { flex: 1 1 0; padding: 7px 8px; border-radius: 8px; text-align: center; font-size: 13px; font-weight: 700; color: var(--muted); background: transparent; border: none; cursor: pointer; }
+.mode-opt:hover { color: var(--text); }
+.mode-opt[aria-checked="true"] { color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
 .swatch { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.25); }
 .swatch.sw-midnight { background: linear-gradient(135deg, #3a5fe0, #7448e0 55%, #0d1022); }
 .swatch.sw-orchid { background: linear-gradient(135deg, #c084fc, #e05fb4 55%, #170e22); }
 .swatch.sw-ember { background: linear-gradient(135deg, #f4634f, #f59e42 55%, #1a100b); }
-.swatch.sw-daylight { background: linear-gradient(135deg, #7cb1ff, #f7a8d8 55%, #eef1f7); border-color: rgba(13, 23, 44, 0.18); }
+.swatch.sw-fire { background: linear-gradient(135deg, #f5484e, #ff8c42 55%, #190809); }
+.swatch.sw-obsidian { background: linear-gradient(135deg, #cbd1dc, #8b93a3 55%, #050506); }
 .swatch.sw-forest { background: linear-gradient(135deg, #34d399, #a3e635 55%, #0e1a13); }
 .swatch.sw-ocean { background: linear-gradient(135deg, #38bdf8, #22d3ee 55%, #0c1627); }
 .swatch.sw-rose { background: linear-gradient(135deg, #fda4af, #f0abfc 55%, #1b0e16); }
@@ -2480,9 +2518,9 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 .c-gaunt-card h2 { margin: 3px 0 2px; font-size: 19px; letter-spacing: -0.01em; }
 .c-gaunt-card .msg { color: var(--muted); margin: 0; font-size: 14px; }
 .c-gaunt-go { font-weight: 700; color: #ffe08a; white-space: nowrap; }
-[data-theme="daylight"] .c-gaunt-go { color: #8a6d00; }
+:root[data-mode="light"] .c-gaunt-go { color: #8a6d00; }
 .eyebrow.gold { color: #fbbf24; }
-[data-theme="daylight"] .eyebrow.gold { color: #8a6d00; }
+:root[data-mode="light"] .eyebrow.gold { color: #8a6d00; }
 .c-gaunt-seal {
   width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%;
   background: radial-gradient(circle at 40% 35%, #b4432a, #7d1f12 70%);
@@ -2499,7 +2537,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 /* ---- [C] chips ---- */
 .c-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
 .c-chip.pass { color: #ffe08a; background: rgba(251, 191, 36, 0.16); border: 1px solid #fbbf24; }
-[data-theme="daylight"] .c-chip.pass { color: #8a6d00; }
+:root[data-mode="light"] .c-chip.pass { color: #8a6d00; }
 .c-chip.pass.sm { font-size: 10px; padding: 1px 6px; }
 .c-chip.practice { margin: 0; color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
 .c-chip.lock { color: var(--faint); background: var(--glass); border: 1px dashed var(--glass-brd-hi); }
@@ -2554,7 +2592,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 .lg-t { font-weight: 700; font-size: 13px; }
 .lg-d { font-family: var(--mono); font-size: 11px; color: var(--good); }
 .ledger-chip.earned.pass .lg-d { color: #ffe08a; }
-[data-theme="daylight"] .ledger-chip.earned.pass .lg-d { color: #8a6d00; }
+:root[data-mode="light"] .ledger-chip.earned.pass .lg-d { color: #8a6d00; }
 .lg-h { font-size: 11px; color: var(--muted); }
 
 /* ---- [C] interviewer ---- */

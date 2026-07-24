@@ -444,21 +444,34 @@ function setStudyPath(section, path) {
 /* ---------- themes ---------- */
 // data-theme on <html> drives every color token in style.css. The inline script
 // in index.html applies the saved theme before first paint (no flash).
+// Theme = COLOUR (spectrum) and MODE = light/dark are independent axes: any of the
+// 8 colours renders in either mode (16 combos). data-theme drives accent tokens,
+// data-mode drives the surface (light/dark). Both persist; index.html applies both
+// before first paint.
 const THEMES = [
   { id: "midnight", name: "Midnight" },   // blue (default)
   { id: "ocean", name: "Ocean" },         // cyan
   { id: "forest", name: "Forest" },       // green
   { id: "ember", name: "Ember" },         // orange
+  { id: "fire", name: "Fire" },           // red
   { id: "rose", name: "Rose" },           // pink
   { id: "orchid", name: "Orchid" },       // purple
-  { id: "daylight", name: "Daylight" },   // light
+  { id: "obsidian", name: "Obsidian" },   // monochrome
 ];
 // A ?theme= URL override wins for this session; picking from the popover saves.
-// Unknown/retired ids (e.g. a saved "aurora") fall back to midnight.
+// The retired "daylight" theme migrates to Midnight + light mode. Unknown ids
+// fall back to midnight.
 const curTheme = () => {
-  const t = new URLSearchParams(location.search).get("theme") ||
+  let t = new URLSearchParams(location.search).get("theme") ||
     localStorage.getItem("sd_theme") || "midnight";
+  if (t === "daylight") t = "midnight";
   return THEMES.some((x) => x.id === t) ? t : "midnight";
+};
+const curMode = () => {
+  // NB: sd_mode is the quiz/flash deck mode — light/dark uses its own sd_theme_mode key.
+  // one-time migration: a saved "daylight" theme meant light mode.
+  if (localStorage.getItem("sd_theme") === "daylight" && !localStorage.getItem("sd_theme_mode")) return "light";
+  return localStorage.getItem("sd_theme_mode") === "light" ? "light" : "dark";
 };
 
 function applyTheme(id, save = true) {
@@ -466,6 +479,14 @@ function applyTheme(id, save = true) {
   if (save) safeSet("sd_theme", id);
   document.querySelectorAll(".theme-opt").forEach((b) =>
     b.setAttribute("aria-checked", b.dataset.theme === id ? "true" : "false"));
+}
+
+function applyMode(mode, save = true) {
+  mode = mode === "light" ? "light" : "dark";
+  document.documentElement.dataset.mode = mode;
+  if (save) safeSet("sd_theme_mode", mode);
+  document.querySelectorAll(".mode-opt").forEach((b) =>
+    b.setAttribute("aria-checked", b.dataset.mode === mode ? "true" : "false"));
 }
 
 function closeThemePop() {
@@ -478,10 +499,17 @@ function closeThemePop() {
 // Shared theme-radio option markup — single source used by both the topbar
 // popover and the <=640px More sheet, so the two stay identical.
 function themeOptionsHTML() {
-  return THEMES.map((t) =>
+  const mode = curMode();
+  const modeSeg =
+    `<div class="mode-seg" role="radiogroup" aria-label="Light or dark mode">
+       <button class="mode-opt" role="radio" data-mode="dark" aria-checked="${mode === "dark"}">Dark</button>
+       <button class="mode-opt" role="radio" data-mode="light" aria-checked="${mode === "light"}">Light</button>
+     </div>`;
+  const colors = THEMES.map((t) =>
     `<button class="theme-opt" role="radio" data-theme="${t.id}" aria-checked="${curTheme() === t.id}">
        <span class="swatch sw-${t.id}" aria-hidden="true"></span>${t.name}<span class="tcheck">✓</span>
      </button>`).join("");
+  return modeSeg + colors;
 }
 
 function toggleThemePop() {
@@ -496,6 +524,10 @@ function toggleThemePop() {
   pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.theme);
     pop._radioSync?.();
+  }));
+  pop.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
+    applyMode(b.dataset.mode);
+    pop.querySelectorAll(".mode-opt").forEach((x) => x.setAttribute("aria-checked", x === b ? "true" : "false"));
   }));
   wireRadioGroup(pop);
   pop._release = trapFocus(pop, { initial: '[aria-checked="true"]', restoreTo: tb });
@@ -3359,7 +3391,7 @@ function backupNudgeHTML() {
 // (recovery artifact — never re-imported).
 const BACKUP_KEYS = [
   "sd_progress", "sd_gauntlet", "sd_coach", "sd_study_path",
-  "sd_theme", "sd_mode", "sd_mute", "sd_deck_len", "sd_prime_opt",
+  "sd_theme", "sd_theme_mode", "sd_mode", "sd_mute", "sd_deck_len", "sd_prime_opt",
   "sd_reader_w", "sd_modules_w", "sd_toc_w", "sd_reader_fs", "sd_reader_full",
   "sd_reader_toc", "sd_reader_modules", "sd_reader_scroll", "sd_last_read",
   "sd_reader_font", "sd_reader_measure", "sd_reader_dropcap", "sd_reader_recall",
@@ -3508,6 +3540,10 @@ function openMoreSheet() {
   themeGrp.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
     applyTheme(b.dataset.theme);
     themeGrp._radioSync?.();
+  }));
+  themeGrp.querySelectorAll(".mode-opt").forEach((b) => b.addEventListener("click", () => {
+    applyMode(b.dataset.mode);
+    themeGrp.querySelectorAll(".mode-opt").forEach((x) => x.setAttribute("aria-checked", x === b ? "true" : "false"));
   }));
   wireRadioGroup(themeGrp);
 
@@ -3820,7 +3856,8 @@ function palVerbs() {
   const flash = deckMode() === "flash";
   out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
     run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
-  for (const t of ["midnight", "ocean", "forest", "ember", "rose", "orchid", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
+  for (const t of ["midnight", "ocean", "forest", "ember", "fire", "rose", "orchid", "obsidian"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
+  for (const m of ["dark", "light"]) out.push({ label: `Mode: ${m}`, hint: "theme", run: () => applyMode(m) });
   out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
   return out;
 }
@@ -8573,6 +8610,7 @@ async function boot() {
   if (helpB) helpB.addEventListener("click", toggleHelp);
   restoreReaderWidth();
   applyTheme(curTheme(), false);   // don't persist a ?theme= URL override
+  applyMode(curMode(), false);     // light/dark surface mode (independent of colour)
   const tb = el("#themeBtn");
   if (tb) tb.addEventListener("click", toggleThemePop);
   const skb = el("#streakChip");                    // [E1] streak detail popover

@@ -5,12 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>LORA — Learn Often, Recall Always</title>
   <script>
-    // Apply the saved theme before first paint so there is no color flash.
-    // ?theme=<id> overrides for quick previews/sharing without touching the saved pick.
+    // Apply the saved colour theme + light/dark mode before first paint (no flash).
+    // ?theme=<id> overrides the colour for quick previews without touching the saved pick.
     var _t = new URLSearchParams(location.search).get("theme") ||
       localStorage.getItem("sd_theme") || "midnight";
-    if (!/^(midnight|orchid|ember|daylight)$/.test(_t)) _t = "midnight";  // retired ids fall back
+    var _m = localStorage.getItem("sd_theme_mode");
+    if (_t === "daylight") { _t = "midnight"; if (!_m) _m = "light"; }   // migrate retired daylight
+    if (!/^(midnight|ocean|forest|ember|fire|rose|orchid|obsidian)$/.test(_t)) _t = "midnight";
     document.documentElement.dataset.theme = _t;
+    document.documentElement.dataset.mode = (_m === "light") ? "light" : "dark";
   </script>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="stylesheet" href="style.css" />
