@@ -198,12 +198,13 @@ flowchart TD
         M2["ConnectionManager<br/>ws_C"]
     end
 
-    M1 -->|"SUBSCRIBE / PUBLISH"| R(("Redis Pub/Sub<br/>channel: room:1"))
-    M2 -->|"SUBSCRIBE / PUBLISH"| R
+    M1 -->|"SUBSCRIBE / PUBLISH<br/>channel: room:1"| R
+    M2 -->|"SUBSCRIBE / PUBLISH<br/>channel: room:1"| R
+
+    R@{ icon: "logos:redis", form: "square", label: "Redis Pub/Sub", pos: "b", h: 44 }
 
     class A,B,C io
     class M1,M2 req
-    class R base
 ```
 
 When any pod calls `PUBLISH`, Redis delivers to all subscribers. Each pod then sends the
