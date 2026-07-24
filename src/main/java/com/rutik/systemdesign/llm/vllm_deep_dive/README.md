@@ -42,32 +42,46 @@
 
 vLLM separates concerns into three layers:
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   API Server                        │
-│  FastAPI + OpenAI-compatible endpoints              │
-│  /v1/completions  /v1/chat/completions  /v1/models  │
-└────────────────────┬────────────────────────────────┘
-                     │  AsyncEngine
-┌────────────────────▼────────────────────────────────┐
-│                LLM Engine                           │
-│  ┌──────────────┐  ┌──────────────────────────────┐ │
-│  │  Scheduler   │  │   KV Cache Manager           │ │
-│  │  (FCFS/      │  │   (BlockAllocator,           │ │
-│  │   Priority)  │  │    PagedAttention blocks)    │ │
-│  └──────┬───────┘  └──────────────────────────────┘ │
-│         │ sequence groups                            │
-└─────────┼───────────────────────────────────────────┘
-          │
-┌─────────▼───────────────────────────────────────────┐
-│                 Worker(s)                           │
-│  ┌─────────────────────────────────────────────┐   │
-│  │  ModelRunner                                │   │
-│  │  - forward() with PagedAttention kernels    │   │
-│  │  - Sampler (temperature, top-p, top-k)      │   │
-│  └─────────────────────────────────────────────┘   │
-│  GPU 0          GPU 1          GPU N                │
-└─────────────────────────────────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    api(API Server<br/>FastAPI, OpenAI-compatible endpoints<br/>/v1/completions, /v1/chat/completions, /v1/models)
+
+    subgraph engineGrp["LLM Engine"]
+        direction LR
+        sched(Scheduler<br/>FCFS / Priority)
+        kvmgr(KV Cache Manager<br/>BlockAllocator, PagedAttention blocks)
+    end
+
+    subgraph workerGrp["Worker Pool"]
+        direction TB
+        runner(ModelRunner<br/>forward pass + PagedAttention kernels<br/>Sampler: temperature, top-p, top-k)
+        gpu0(GPU 0)
+        gpu1(GPU 1)
+        gpuN(GPU N)
+    end
+
+    api -- "AsyncEngine" --> engineGrp
+    sched -- "sequence groups" --> runner
+    runner --> gpu0
+    runner --> gpu1
+    runner --> gpuN
+
+    class api io
+    class sched req
+    class kvmgr base
+    class runner train
+    class gpu0 mathOp
+    class gpu1 mathOp
+    class gpuN mathOp
 ```
 
 **Key objects:**
@@ -1781,30 +1795,40 @@ Chunked prefill (§7) keeps prefill and decode on the SAME GPU pool and interlea
 
 **Architecture:**
 
-```
-                  ┌──────────────────────────────────────┐
-                  │           Load Balancer (L7)          │
-                  │    nginx + least-connections           │
-                  └──────────────┬───────────────────────┘
-                                 │
-          ┌──────────────────────┼──────────────────────┐
-          │                      │                      │
-   ┌──────▼──────┐        ┌──────▼──────┐       ┌──────▼──────┐
-   │  vLLM Pod 0 │        │  vLLM Pod 1 │       │  vLLM Pod 2 │
-   │  TP=2       │        │  TP=2       │       │  TP=2       │
-   │  GPU 0,1    │        │  GPU 2,3    │       │  GPU 4,5    │
-   │  + 1 spare  │        │  + 1 spare  │       │  GPU 6,7    │
-   └─────────────┘        └─────────────┘       └─────────────┘
-          │                      │                      │
-          └──────────────────────┼──────────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │  Prometheus + Grafana    │
-                    │  vllm:num_requests_running
-                    │  vllm:gpu_cache_usage_pct
-                    │  vllm:num_preemptions_total
-                    └─────────────────────────┘
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    lb@{ icon: "logos:nginx", form: "square", label: "Load Balancer L7", pos: "b", h: 44 }
+    pod0(vLLM Pod 0<br/>TP=2, GPU 0-1<br/>+1 spare)
+    pod1(vLLM Pod 1<br/>TP=2, GPU 2-3<br/>+1 spare)
+    pod2(vLLM Pod 2<br/>TP=2, GPU 4-7)
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    graf@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
+    lb -- "least-connections" --> pod0
+    lb --> pod1
+    lb --> pod2
+    pod0 --> prom
+    pod1 --> prom
+    pod2 --> prom
+    prom --> graf
+
+    class pod0 req
+    class pod1 req
+    class pod2 req
+```
+
+Metrics scraped from each pod: `vllm:num_requests_running`, `vllm:gpu_cache_usage_pct`, `vllm:num_preemptions_total`.
+
+```
 PagedAttention block layout (per GPU, 70B FP8):
   GPU VRAM: 80 GB
   Model weights (FP8, TP=2): ~35 GB
