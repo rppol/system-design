@@ -242,15 +242,14 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    start(["JVM start (surefire fork)"]) --> pg["Static @Container postgres starts\nruns once per JVM fork"]
-    start --> kafka["Static @Container kafka starts"]
+    start(["JVM start (surefire fork)"]) --> pg@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>Static @Container<br/>runs once per JVM fork", pos: "b", h: 44 }
+    start --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>Static @Container starts", pos: "b", h: 44 }
     pg --> t1["Test class 1 methods run\n@Transactional rolls back after each test"]
     kafka --> t1
     t1 --> t2["Test class 2 methods run\nsame containers reused"]
     t2 --> exit(["JVM exits -> containers stopped automatically by Ryuk"])
 
     class start,exit io
-    class pg,kafka frozen
     class t1,t2 train
 ```
 
