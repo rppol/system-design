@@ -938,13 +938,16 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    RC@{ icon: "logos:redis", form: "square", label: "Redis<br/>geohash to ids", pos: "b", h: 44 }
+    BC@{ icon: "logos:redis", form: "square", label: "Redis<br/>business objects", pos: "b", h: 44 }
+
     U([User / App]) --> DNS(["Geo<br/>DNS"])
     DNS --> LB(["Load<br/>Balancer"])
     LB -->|"search"| LBS(["Location-Based<br/>Service"])
     LB -->|"CRUD + detail"| BS(["Business<br/>Service"])
-    LBS -->|"9-cell lookup"| RC(["Redis<br/>geohash to ids"])
+    LBS -->|"9-cell lookup"| RC
     LBS -->|"cache miss"| GRR(["Geo-index<br/>Read Replicas"])
-    LBS -->|"hydrate detail"| BC(["Redis<br/>business objects"])
+    LBS -->|"hydrate detail"| BC
     BS -->|"write"| PDB(["Primary DB<br/>business + index"])
     BS -->|"invalidate"| RC
     BS -->|"invalidate"| BC
@@ -953,7 +956,6 @@ flowchart LR
     class U,DNS,LB io
     class LBS req
     class BS train
-    class RC,BC base
     class GRR frozen
     class PDB lossN
 ```
