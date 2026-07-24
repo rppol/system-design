@@ -105,118 +105,91 @@ Change event queue: 50M events/day x 2KB = 100GB/day throughput (Kafka)
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req      fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base     fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef mathOp   fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    user(["User<br/>Editor / Search Bar / AI Panel"])
+    gw["API Gateway + Auth<br/>validate session, extract user_id,<br/>workspace_id, tier"]
+    aisearch["AI Search Service<br/>full workspace content search"]
+    qa["QA Service<br/>answers questions from workspace docs"]
+    write["Writing Assist Service<br/>inline generation, summarize, translate"]
+    permres["Permission Resolver<br/>workspace, teams, page tree, shared pages<br/>output: permission bitmap<br/>cache: Redis, TTL 5 min"]
+    qu["Query Understanding<br/>rewriting, workspace terms,<br/>scope detection"]
+    dense["Dense Search<br/>Qdrant semantic search<br/>filtered by permission bitmap"]
+    sparse@{ icon: "logos:elasticsearch", form: "square", label: "Sparse Search<br/>Elasticsearch BM25", pos: "b", h: 44 }
+    struct@{ icon: "logos:postgresql", form: "square", label: "Structured Query<br/>PostgreSQL", pos: "b", h: 44 }
+    merge(("Hybrid Merge<br/>RRF"))
+    rerank["Reranking Service<br/>cross-encoder top-50 to top-8<br/>+ permission re-validation"]
+    ctx["Context Assembly<br/>expand to parent page context,<br/>breadcrumb, linked snippets, citations"]
+    llm["LLM Generation Service<br/>GPT-4o / Claude 3.5 Sonnet<br/>streaming, grounded in context"]
+    post["Response Post-Processing<br/>citations, source links,<br/>safety filter, hallucination check"]
+    resp(["User Response<br/>answer + page links"])
+
+    user --> gw
+    gw --> aisearch
+    gw --> qa
+    gw --> write
+    aisearch --> permres
+    qa --> permres
+    write --> permres
+    permres --> qu
+    qu --> dense
+    qu --> sparse
+    qu --> struct
+    dense --> merge
+    sparse --> merge
+    struct --> merge
+    merge --> rerank
+    rerank --> ctx
+    ctx --> llm
+    llm --> post
+    post --> resp
+
+    class user,resp io
+    class gw,aisearch,qa,write,permres,qu,rerank,ctx,post req
+    class dense,llm base
+    class merge mathOp
 ```
-                            User (Editor / Search Bar / AI Panel)
-                                         |
-                                         v
-                              [API Gateway + Auth]
-                              Validate session, extract user_id,
-                              workspace_id, subscription tier
-                                         |
-                    ┌────────────────────┼────────────────────┐
-                    |                    |                    |
-                    v                    v                    v
-             [AI Search          [Q&A Service]        [Writing Assist
-              Service]           "What is our          Service]
-             Full workspace       refund policy?"     Inline generation,
-             content search                           summarize, translate
-                    |                    |                    |
-                    └────────────────────┼────────────────────┘
-                                         |
-                                         v
-                          ┌──────────────────────────────┐
-                          |     Permission Resolver      |
-                          |  Resolve user's full access  |
-                          |  set: workspace -> teams ->  |
-                          |  page tree -> shared pages   |
-                          |  Output: permission bitmap   |
-                          |  Cache: Redis, TTL 5 min     |
-                          └──────────────────────────────┘
-                                         |
-                                         v
-                          ┌──────────────────────────────┐
-                          |     Query Understanding      |
-                          |  - Query rewriting           |
-                          |  - Workspace-specific terms  |
-                          |  - Scope detection (page /   |
-                          |    database / full workspace) |
-                          └──────────────────────────────┘
-                                         |
-                          ┌──────────────┼──────────────┐
-                          |              |              |
-                          v              v              v
-                   [Dense Search]  [Sparse Search]  [Structured
-                    Qdrant          Elasticsearch    Query]
-                    (semantic)      (keyword/BM25)   PostgreSQL
-                    filtered by     filtered by      (database
-                    permission      permission       properties)
-                    bitmap          bitmap
-                          |              |              |
-                          └──────────────┼──────────────┘
-                                         | Hybrid merge (RRF)
-                                         v
-                          ┌──────────────────────────────┐
-                          |     Reranking Service        |
-                          |  Cross-encoder: top-50 -> 8  |
-                          |  + permission re-validation  |
-                          └──────────────────────────────┘
-                                         |
-                                         v
-                          ┌──────────────────────────────┐
-                          |    Context Assembly          |
-                          |  - Expand chunks to parent   |
-                          |    page context              |
-                          |  - Include page hierarchy    |
-                          |    breadcrumb                |
-                          |  - Add linked page snippets  |
-                          |  - Format with citations     |
-                          └──────────────────────────────┘
-                                         |
-                                         v
-                          ┌──────────────────────────────┐
-                          |    LLM Generation Service    |
-                          |  GPT-4o / Claude 3.5 Sonnet  |
-                          |  Streaming response          |
-                          |  Grounded in retrieved context|
-                          └──────────────────────────────┘
-                                         |
-                                         v
-                          ┌──────────────────────────────┐
-                          |    Response Post-Processing  |
-                          |  - Citation formatting       |
-                          |  - Source page links          |
-                          |  - Safety filter             |
-                          |  - Hallucination check       |
-                          └──────────────────────────────┘
-                                         |
-                                         v
-                                  User Response
-                              (answer + page links)
 
+*Query-serving path: every branch (search, Q&A, writing assist) is resolved to a permission bitmap before any retrieval happens, and reranking re-validates permissions a second time before context assembly.*
 
-==========================================================================
-                       INDEXING PIPELINE (Async)
-==========================================================================
+#### Indexing Pipeline (Async)
 
-Page Created/Edited/Deleted
-         |
-         v
-  [Notion Core DB] --CDC--> [Kafka: content-changes topic]
-         |                           |
-         | (permission changes)      | (content changes)
-         v                           v
-  [Kafka: permission-changes]  [Content Indexing Workers]
-         |                      - Parse block tree
-         v                      - Hierarchical chunking
-  [Permission Index             - Embed chunks (batch)
-   Updater]                     - Upsert to Qdrant + ES
-  - Recompute affected          - Update metadata in PG
-    user permission sets              |
-  - Invalidate Redis cache            v
-  - Propagate to children       [Qdrant]  [Elasticsearch]  [PostgreSQL]
-    (page tree inheritance)      Dense      Sparse           Metadata +
-                                 vectors    BM25 index       permissions
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req      fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base     fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    change(["Page Created / Edited / Deleted"])
+    coredb["Notion Core DB"]
+    ckafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>content-changes topic", pos: "b", h: 44 }
+    pkafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>permission-changes topic", pos: "b", h: 44 }
+    workers["Content Indexing Workers<br/>parse block tree, hierarchical chunking,<br/>embed chunks batch,<br/>upsert Qdrant + ES, update PG metadata"]
+    permup["Permission Index Updater<br/>recompute affected user permission sets,<br/>invalidate Redis cache,<br/>propagate to children (page tree inheritance)"]
+    qdrant["Qdrant<br/>dense vectors"]
+    es@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch<br/>BM25 index", pos: "b", h: 44 }
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>metadata + permissions", pos: "b", h: 44 }
+
+    change --> coredb
+    coredb -->|CDC| ckafka
+    coredb -->|permission changes| pkafka
+    ckafka -->|content changes| workers
+    pkafka --> permup
+    workers --> qdrant
+    workers --> es
+    workers --> pg
+
+    class change io
+    class coredb,workers,permup req
+    class qdrant base
 ```
+
+*Content and permission changes flow through separate Kafka topics partitioned by workspace_id; the indexing workers fan out to all three stores while the permission updater invalidates the Redis cache independently.*
 
 ---
 
