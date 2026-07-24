@@ -32,16 +32,14 @@ Mental model: NewSQL = distributed Raft consensus + SQL planner + MVCC, stacked 
 
 ## 4. Types / Architectures / Strategies
 
-```
-System          | Storage Layer         | Consensus   | SQL Compat     | CAP Position
-----------------|----------------------|-------------|----------------|-------------
-Google Spanner  | Colossus (proprietary)| Paxos       | Google SQL     | CP (TrueTime)
-CockroachDB     | RocksDB + Raft        | Raft        | PostgreSQL     | CP
-TiDB            | TiKV (RocksDB+Raft)   | Raft        | MySQL          | CP
-YugabyteDB      | DocDB (RocksDB+Raft)  | Raft        | PostgreSQL+YCQL| CP
-Amazon Aurora   | Shared log store      | Custom      | MySQL/Postgres  | CP (regional)
-PlanetScale     | Vitess + MySQL        | External    | MySQL          | Eventual (by shard)
-```
+| System         | Storage Layer          | Consensus | SQL Compat      | CAP Position       |
+|----------------|-------------------------|-----------|-----------------|--------------------|
+| Google Spanner | Colossus (proprietary)  | Paxos     | Google SQL      | CP (TrueTime)      |
+| CockroachDB    | RocksDB + Raft          | Raft      | PostgreSQL      | CP                 |
+| TiDB           | TiKV (RocksDB+Raft)     | Raft      | MySQL           | CP                 |
+| YugabyteDB     | DocDB (RocksDB+Raft)    | Raft      | PostgreSQL+YCQL | CP                 |
+| Amazon Aurora  | Shared log store        | Custom    | MySQL/Postgres  | CP (regional)      |
+| PlanetScale    | Vitess + MySQL          | External  | MySQL           | Eventual (by shard)|
 
 **Aurora vs true distributed SQL**: Aurora uses a shared log-structured storage layer with a single writer and read replicas — it scales reads but not writes across regions the way Spanner does.
 
@@ -171,7 +169,8 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    clients(["MySQL clients"]) --> tidb("TiDB<br/>stateless SQL layer<br/>MySQL wire protocol")
+    clients(["MySQL clients"]) --> tidb
+    tidb@{ icon: "simple-icons:tidb", form: "square", label: "TiDB", pos: "b", h: 44 }
     tidb --> pd("Placement Driver<br/>metadata · scheduling · TSO")
     pd --> tikv1("TiKV<br/>RocksDB + Raft")
     pd --> tikv2("TiKV<br/>RocksDB + Raft")
@@ -180,7 +179,7 @@ flowchart TD
     tikv2 -.->|"Raft learner"| tiflash2("TiFlash<br/>columnar replica")
 
     class clients io
-    class tidb,pd mathOp
+    class pd mathOp
     class tikv1,tikv2,tikv3 base
     class tiflash1,tiflash2 frozen
 ```
@@ -358,18 +357,16 @@ SELECT /*+ READ_FROM_STORAGE(tiflash[orders]) */ ...
 
 ## 8. Tradeoffs
 
-```
-Aspect                 | PostgreSQL + replicas | CockroachDB/TiDB     | Google Spanner
------------------------|-----------------------|----------------------|------------------
-Write throughput       | Vertical limit        | Horizontal            | Horizontal
-Cross-region writes    | Not supported         | High latency (~100ms) | High latency (~100ms)
-Single-region latency  | ~0.1-1ms              | ~2-5ms               | ~5ms (commit-wait)
-ACID guarantees        | Node-local            | Distributed          | Distributed
-SQL compatibility      | Full PostgreSQL        | 95% PostgreSQL/MySQL | Subset SQL
-Operational complexity | Low                   | Medium               | Low (managed only)
-Cost (self-hosted)     | Low                   | Medium               | N/A (cloud only)
-Maturity               | Decades               | ~10 years            | ~12 years (internal)
-```
+| Aspect                 | PostgreSQL + replicas | CockroachDB/TiDB      | Google Spanner        |
+|------------------------|------------------------|-----------------------|-----------------------|
+| Write throughput       | Vertical limit          | Horizontal            | Horizontal            |
+| Cross-region writes    | Not supported           | High latency (~100ms) | High latency (~100ms) |
+| Single-region latency  | ~0.1-1ms                | ~2-5ms                | ~5ms (commit-wait)    |
+| ACID guarantees        | Node-local              | Distributed           | Distributed           |
+| SQL compatibility      | Full PostgreSQL         | 95% PostgreSQL/MySQL  | Subset SQL            |
+| Operational complexity | Low                     | Medium                | Low (managed only)    |
+| Cost (self-hosted)     | Low                     | Medium                | N/A (cloud only)      |
+| Maturity               | Decades                 | ~10 years             | ~12 years (internal)  |
 
 ---
 
@@ -532,11 +529,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    regions(["All regions<br/>NA · EU · AP"]) -->|"sync writes"| primary("us-east-1<br/>PostgreSQL primary")
+    regions(["All regions<br/>NA · EU · AP"]) -->|"sync writes"| primary
+    primary@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>us-east-1", pos: "b", h: 44 }
     primary -.->|"async reads"| replicas("us-east-1<br/>read replicas")
 
     class regions io
-    class primary lossN
     class replicas frozen
 ```
 
