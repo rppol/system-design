@@ -109,14 +109,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DEV([developer]) -->|PR| MAIN(main<br/>manifests repo)
-    MAIN -.->|"webhook / poll"| ARGO("ArgoCD / Flux")
-    ARGO -->|reconcile| K8S(Kubernetes<br/>cluster)
+    MAIN -.->|"webhook / poll"| ARGO@{ icon: "logos:argo", form: "square", label: "ArgoCD/Flux", pos: "b", h: 44 }
+    ARGO -->|reconcile| K8S@{ icon: "logos:kubernetes", form: "square", label: "Kubernetes", pos: "b", h: 44 }
     K8S -.->|"drift detection"| ARGO
 
     class DEV io
     class MAIN base
-    class ARGO mathOp
-    class K8S train
 ```
 
 A merge to `main` is the only deploy trigger: ArgoCD/Flux continuously reconciles the cluster to match Git, and drift detection re-triggers reconciliation if the live state ever diverges.
