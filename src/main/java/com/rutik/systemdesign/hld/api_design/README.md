@@ -625,12 +625,13 @@ flowchart TD
     pg --> persist["Persist final response<br/>+ result to Redis (24h)"]
     card --> persist
 
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    pg@{ icon: "logos:postgresql", form: "square", label: "Postgres", pos: "b", h: 44 }
+
     class client io
-    class gw req
     class mw,psm mathOp
     class cached,persist train
     class lock,card frozen
-    class pg base
 ```
 
 A Redis-backed idempotency check either short-circuits with a cached response (hit) or acquires a 60-second distributed lock before invoking the payment state machine and the card network (miss); the successful result then persists to Postgres and back to Redis for 24 hours.
