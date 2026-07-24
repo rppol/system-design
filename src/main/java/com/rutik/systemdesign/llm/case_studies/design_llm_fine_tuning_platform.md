@@ -112,7 +112,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     USER(["User (Dashboard / CLI / API)"])
-    GW["API Gateway + Auth\nrate limit, tenant ID"]
+    GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway<br/>rate limit, tenant ID", pos: "b", h: 50 }
     DS["Data Service"]
     TS["Training Service"]
     MR["Model Registry"]
@@ -120,7 +120,7 @@ flowchart TD
     TBOX["Job Scheduler\nGPU Allocator\nCheckpoint Mgr\nMetrics Collector\nCost Tracker"]
     RBOX["Artifact Store (S3 + metadata)\nVersion Control\nPromotion Gates\nLineage Tracker"]
     GPU["GPU Cluster\nNode 1 … Node 200: 8x A100 80GB\n(1,600 GPUs total)\nOrchestrator: Kubernetes + SLURM"]
-    OBJ[["Object Store (S3)\nraw datasets · tokenized data\nLoRA adapters · full model weights\ncheckpoints"]]
+    OBJ@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>raw + tokenized data<br/>adapters · checkpoints", pos: "b", h: 50 }
     MET[["Metrics Store\ntraining loss · eval metrics\nGPU utilization · cost per job"]]
     EVAL["Evaluation Service\ngolden dataset comparison\nLLM-as-judge scoring\nregression detection\nbefore/after reports"]
     DEP["Deployment Service\nprovision inference endpoint\nload LoRA adapter onto base model\nhealth check + smoke test\ntraffic shifting (canary)"]
@@ -140,12 +140,12 @@ flowchart TD
     EVAL --> DEP
 
     class USER io
-    class GW,DEP req
+    class DEP req
     class DS,TS,MR base
     class DPIPE,TBOX mathOp
     class RBOX frozen
     class GPU train
-    class OBJ,MET io
+    class MET io
     class EVAL lossN
 ```
 
@@ -476,15 +476,16 @@ Mode 2: Golden Dataset Comparison (runs in 10-30 minutes)
       Extraction: precision, recall of extracted entities
       Generation: BLEU, ROUGE, BERTScore
   - Report: side-by-side comparison table
-    +------------------+------------+-----------+--------+
-    | Metric           | Base Model | Fine-Tuned| Delta  |
-    +------------------+------------+-----------+--------+
-    | Exact Match      | 42%        | 78%       | +36%   |
-    | ROUGE-L          | 0.51       | 0.74      | +0.23  |
-    | Avg Latency      | 1.2s       | 1.2s      | +0ms   |
-    | Token Cost/Query | $0.015     | $0.015    | $0     |
-    +------------------+------------+-----------+--------+
+```
 
+| Metric | Base Model | Fine-Tuned | Delta |
+|--------|------------|------------|-------|
+| Exact Match | 42% | 78% | +36% |
+| ROUGE-L | 0.51 | 0.74 | +0.23 |
+| Avg Latency | 1.2s | 1.2s | +0ms |
+| Token Cost/Query | $0.015 | $0.015 | $0 |
+
+```
 Mode 3: LLM-as-Judge Quality Scoring (runs in 15-45 minutes)
   - Sample 200 examples from golden dataset
   - For each example, generate response with both base and fine-tuned model
