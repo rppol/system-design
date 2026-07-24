@@ -172,7 +172,7 @@ flowchart LR
         KV("Key-Value<br/>Store")
         DID("Distributed<br/>Unique ID")
         MQ("Message<br/>Queue")
-        OBJ("Object Storage<br/>S3")
+        OBJ@{ icon: "logos:aws-s3", form: "square", label: "Object<br/>Storage", pos: "b", h: 44 }
     end
 
     subgraph AN["Analytics and Aggregation"]
@@ -243,7 +243,7 @@ flowchart LR
     GD -.->|"file vs<br/>op-level"| GDOC
 
     class URL,NF,SAC,LB req
-    class KV,DID,MQ,OBJ base
+    class KV,DID,MQ base
     class PAY,DW,HR train
     class UB,GM,PROX,WC,ADCLK,MM,GDOC,GD mathOp
     class TW,WA,NS,SNOW frozen
