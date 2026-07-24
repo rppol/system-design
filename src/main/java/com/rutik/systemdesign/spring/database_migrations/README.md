@@ -12,7 +12,7 @@ Migrations solve a problem that is easy to underestimate: a schema is not a file
 flowchart LR
     A["Migration files\n(db/migration/*.sql or\ndb/changelog/*.yaml)"] --> B["Flyway / Liquibase\n(build/deploy-time, DDL)"]
     B --> C["JDBC DataSource"]
-    C --> D["Database schema"]
+    C --> D[("Database schema")]
     E["@Entity classes"] --> F["Spring Data JPA / Hibernate\n(runtime, DML)"]
     F --> C
 
