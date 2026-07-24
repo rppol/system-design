@@ -85,12 +85,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    kafka([Event stream\nKafka]) --> stream["Stream processor · Flink\nfreshness under 60s"]
-    cdc([DB snapshots\nCDC]) --> batch["Batch processor · Spark\nfreshness hours"]
+    kafka@{ icon: "logos:kafka", form: "square", label: "Event Stream<br/>Kafka", pos: "b", h: 44 } --> stream@{ icon: "simple-icons:apacheflink", form: "square", label: "Stream Processor<br/>Flink · under 60s", pos: "b", h: 44 }
+    cdc([DB snapshots\nCDC]) --> batch@{ icon: "logos:apache-spark", form: "square", label: "Batch Processor<br/>Spark · hours", pos: "b", h: 44 }
     api([Third-party APIs]) --> batch
 
-    stream -->|"real-time features"| online["Online store · Redis\nP99 under 5ms, TTL per feature"]
-    batch -->|"batch features"| offline["Offline store · S3 + Delta\npoint-in-time history, by date"]
+    stream -->|"real-time features"| online@{ icon: "logos:redis", form: "square", label: "Online Store<br/>Redis · P99 under 5ms", pos: "b", h: 44 }
+    batch -->|"batch features"| offline@{ icon: "logos:aws-s3", form: "square", label: "Offline Store<br/>S3 + Delta", pos: "b", h: 44 }
     offline -.->|"materialize"| online
 
     online --> serveapi["get_online_features\nserving path"]
@@ -99,9 +99,7 @@ flowchart TD
     serveapi --> model([Model serving\nrequest time])
     trainapi --> trainp([Training pipeline\noffline batch])
 
-    class kafka,cdc,api,model,trainp io
-    class stream,batch mathOp
-    class online,offline base
+    class cdc,api,model,trainp io
     class serveapi,trainapi req
 ```
 
@@ -213,12 +211,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    topic([Kafka topic\nuser.events]) --> flink["Flink streaming job\nwindowed count(views, 1h)"]
-    flink -->|"lag under 60s"| redis["Redis cluster\nSET user:u1:views_1h 23\nEXPIRE, TTL 2h"]
-
-    class topic io
-    class flink mathOp
-    class redis base
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka Topic<br/>user.events", pos: "b", h: 44 } --> flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink Streaming Job<br/>windowed count(views, 1h)", pos: "b", h: 44 }
+    flink -->|"lag under 60s"| redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>SET views_1h, TTL 2h", pos: "b", h: 44 }
 ```
 
 Streaming aggregates land in Redis within ~60s. The TTL is set to twice the update interval so a stalled Flink job lets stale values expire instead of serving them silently.
