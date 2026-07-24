@@ -112,11 +112,11 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     events(["Click / view / purchase events"])
-    kafka["Kafka\nclick-event topic"]
-    flink["Flink · Session Feature Updater\nsub-second latency"]
-    redisSess["Redis\nsession features"]
-    spark["Spark · daily batch\nrecompute user embeddings"]
-    redisHist["Redis\nhistorical features"]
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>click-event topic", pos: "b", h: 44 }
+    flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink · Session<br/>Feature Updater", pos: "b", h: 44 }
+    redisSess@{ icon: "logos:redis", form: "square", label: "Redis<br/>session features", pos: "b", h: 44 }
+    spark@{ icon: "logos:apache-spark", form: "square", label: "Spark · daily batch<br/>recompute embeddings", pos: "b", h: 44 }
+    redisHist@{ icon: "logos:redis", form: "square", label: "Redis<br/>historical features", pos: "b", h: 44 }
     retrain["Weekly retrain\ntwo-tower + scoring model"]
     models["Deployed models\nquery tower · FAISS · LightGBM"]
     serve(["Serving path\nreads all features"])
@@ -129,8 +129,6 @@ flowchart LR
     models -.->|"weekly"| serve
 
     class events io
-    class kafka,redisSess,redisHist base
-    class flink,spark mathOp
     class retrain train
     class models frozen
     class serve req
