@@ -155,7 +155,7 @@ flowchart LR
 
     subgraph surge["Transport / Surge Buffer"]
         direction LR
-        kafka("Kafka topic logs.raw<br/>256 partitions, RF=3, lz4<br/>retention=8h, peak=4h x2")
+        kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>logs.raw", pos: "b", h: 44 }
     end
 
     subgraph proc["Processing Tier - Vector/Bytewax"]
@@ -170,7 +170,7 @@ flowchart LR
         direction LR
         loki("Loki hot 30d<br/>labels + chunks in S3<br/>index in TSDB")
         osrch("OpenSearch<br/>security / high-value<br/>subset only")
-        s3c("S3 cold 1yr<br/>parquet/json<br/>by day/tenant")
+        s3c@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Cold Tier", pos: "b", h: 44 }
     end
 
     qt(["Query Tier<br/>Grafana LogQL /<br/>OpenSearch Dashboards"])
@@ -191,11 +191,10 @@ flowchart LR
 
     class src io
     class fb,vec req
-    class dbuf,kafka,loki,osrch base
+    class dbuf,loki,osrch base
     class parse,norm,pii,enrich,route,rh mathOp
     class ok train
     class dlq lossN
-    class s3c frozen
     class qt io
 ```
 
@@ -243,13 +242,13 @@ flowchart LR
         logf(["/var/log/containers/<br/>*.log"])
         tailin("INPUT: tail<br/>inotify + offset DB")
         fsbuf("FILESYSTEM BUFFER<br/>8 GB<br/>overflow spills to disk,<br/>never /dev/null")
-        out(["OUTPUT: Kafka<br/>acks=all"])
+        out@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>acks=all", pos: "b", h: 44 }
         logf -->|"tail"| tailin
         tailin -->|"in-mem ring, small"| fsbuf
         fsbuf --> out
     end
 
-    class logf,out io
+    class logf io
     class tailin mathOp
     class fsbuf base
 ```
@@ -507,9 +506,9 @@ flowchart LR
     dist("Loki distributor")
     ingest("Loki ingester")
     chunks("chunks")
-    hots3("S3 hot bucket")
+    hots3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Hot Bucket", pos: "b", h: 44 }
     tsdb("index TSDB<br/>on S3/gp3")
-    coldsink("S3 cold sink<br/>parquet by dt/tenant")
+    coldsink@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Cold Sink", pos: "b", h: 44 }
     expire(("hot expires<br/>at 30d"))
     ia("Standard-IA<br/>0-90d")
     glacier("Glacier IR<br/>90-365d")
@@ -524,7 +523,7 @@ flowchart LR
 
     class parsed io
     class dist,ingest mathOp
-    class chunks,tsdb,hots3,coldsink base
+    class chunks,tsdb base
     class ia,glacier frozen
     class expire,delete lossN
 ```
