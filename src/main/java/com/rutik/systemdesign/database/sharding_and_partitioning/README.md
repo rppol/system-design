@@ -28,24 +28,20 @@ Imagine a library that has grown too large for one building. Sharding is putting
 
 ## 4. Types / Architectures / Strategies
 
-```
-Strategy            | Mechanism                        | Hotspot Risk | Range Query
---------------------|----------------------------------|--------------|------------
-Range sharding      | Key range → shard                | High (skewed)| Efficient
-Hash sharding       | Hash(key) % N → shard            | Low          | Scatter-gather
-Directory sharding  | Lookup table key → shard         | None (custom)| Depends
-Consistent hashing  | Hash ring, virtual nodes         | Low          | Scatter-gather
-Geographic sharding | Region/country → shard           | Medium       | Regional only
-```
+| Strategy | Mechanism | Hotspot Risk | Range Query |
+|----------|-----------|--------------|-------------|
+| Range sharding | Key range → shard | High (skewed) | Efficient |
+| Hash sharding | Hash(key) % N → shard | Low | Scatter-gather |
+| Directory sharding | Lookup table key → shard | None (custom) | Depends |
+| Consistent hashing | Hash ring, virtual nodes | Low | Scatter-gather |
+| Geographic sharding | Region/country → shard | Medium | Regional only |
 
 **Partitioning types (within one DB)**:
-```
-Type      | PostgreSQL syntax                     | Use case
-----------|---------------------------------------|----------------------------
-Range     | PARTITION BY RANGE (created_at)       | Time-series, date-based
-List      | PARTITION BY LIST (region)            | Categorical, small enum
-Hash      | PARTITION BY HASH (user_id)           | Even distribution, OLTP
-```
+| Type | PostgreSQL syntax | Use case |
+|------|--------------------|----------|
+| Range | PARTITION BY RANGE (created_at) | Time-series, date-based |
+| List | PARTITION BY LIST (region) | Categorical, small enum |
+| Hash | PARTITION BY HASH (user_id) | Even distribution, OLTP |
 
 ---
 
@@ -265,13 +261,12 @@ flowchart LR
     C(["Client"]) --> VG{"VTGate<br/>routing proxy"}
     VG -->|"shard-specific"| VT1["VTTablet<br/>shard 1"]
     VG -.->|"scatter-gather"| VT2["VTTablet<br/>shard 2"]
-    VT1 --> M1("MySQL")
-    VT2 --> M2("MySQL")
+    VT1 --> M1@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
+    VT2 --> M2@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
 
     class C io
     class VG mathOp
     class VT1,VT2 req
-    class M1,M2 base
 ```
 
 A single-shard query flows client to VTGate to one VTTablet to MySQL; a cross-shard query takes the dotted scatter-gather path to every VTTablet, and VTGate merges the results before replying.
@@ -484,18 +479,16 @@ The four strategies trade router cost for schema cost: scatter-gather fans out a
 
 ## 8. Tradeoffs
 
-```
-Concern              | Single DB + partitioning | Sharded (horizontal)
----------------------|--------------------------|----------------------
-Max write throughput | 1 primary's capability   | N primaries' capability
-Max dataset size     | Single server RAM+disk   | N servers combined
-Cross-partition join | Efficient (local)        | Scatter-gather (expensive)
-ACID transactions    | Full                     | Limited to single shard
-Operational overhead | Low                      | High (N×operations)
-Schema changes       | Single ALTER TABLE       | Apply to N shards
-Monitoring           | Single DB to watch       | N DBs, aggregate metrics
-Cost                 | Lower                    | Higher
-```
+| Concern | Single DB + partitioning | Sharded (horizontal) |
+|---------|---------------------------|------------------------|
+| Max write throughput | 1 primary's capability | N primaries' capability |
+| Max dataset size | Single server RAM+disk | N servers combined |
+| Cross-partition join | Efficient (local) | Scatter-gather (expensive) |
+| ACID transactions | Full | Limited to single shard |
+| Operational overhead | Low | High (N×operations) |
+| Schema changes | Single ALTER TABLE | Apply to N shards |
+| Monitoring | Single DB to watch | N DBs, aggregate metrics |
+| Cost | Lower | Higher |
 
 ---
 
