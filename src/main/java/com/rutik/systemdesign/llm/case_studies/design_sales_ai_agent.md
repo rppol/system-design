@@ -109,80 +109,50 @@ Cold archival in Postgres:
 
 ## 3. High-Level Architecture
 
-```
-                    Prospect Import
-                  (CSV / CRM / API)
-                         |
-                         v
-              +---------------------+
-              |  Prospect Researcher |
-              |  Clay / Hunter.io   |
-              |  LinkedIn data      |
-              |  Company news API   |
-              +---------------------+
-                         |
-                  ProspectContext
-                  (enriched profile)
-                         |
-                         v
-              +---------------------+
-              | Personalization     |
-              | Engine (LLM)        |
-              | - subject A/B test  |
-              | - 80-120 word body  |
-              +---------------------+
-                         |
-                         v
-              +---------------------+
-              | Sequence State      |
-              | Machine             |
-              | Redis (hot) +       |
-              | Postgres (durable)  |
-              +---------------------+
-                         |
-            +------------+------------+
-            |            |            |
-            v            v            v
-       +--------+   +--------+   +--------+
-       | Email  |   |LinkedIn|   |  SMS   |
-       | Sender |   |DM Bot  |   | Sender |
-       |SendGrid|   |Phantom |   |Twilio  |
-       +--------+   +--------+   +--------+
-            |            |            |
-            +------------+------------+
-                         |
-                         v
-              +---------------------+
-              |   Reply Monitor     |
-              | - email webhook     |
-              | - LinkedIn polling  |
-              | - SMS webhook       |
-              +---------------------+
-                         |
-                         v
-              +---------------------+
-              |  Reply Classifier   |
-              | - POSITIVE_INTEREST |
-              | - OBJECTION         |
-              | - HARD_NO / OOO     |
-              | - UNSUBSCRIBE       |
-              +---------------------+
-                    |         |
-           Opt-out  |         |  Positive / Objection
-           path     v         v
-         +--------+    +--------------------+
-         |  DNC   |    | Response Generator |
-         |Scrubber|    | - objection answer |
-         | record |    | - meeting booking  |
-         | opt-out|    | - human handoff    |
-         +--------+    +--------------------+
-                               |
-                               v
-                    +---------------------+
-                    | CRM Sync            |
-                    | Salesforce/HubSpot  |
-                    | write-back          |
-                    +---------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    import(["Prospect Import<br/>CSV / CRM / API"])
+    researcher(["Prospect Researcher<br/>Clay, Hunter.io,<br/>LinkedIn data, News API"])
+    persona(["Personalization Engine LLM<br/>subject A/B test<br/>80-120 word body"])
+    seqstate(["Sequence State Machine"])
+    redis@{ icon: "logos:redis", form: "square", label: "Redis (hot)", pos: "b", h: 44 }
+    pg@{ icon: "logos:postgresql", form: "square", label: "Postgres (durable)", pos: "b", h: 44 }
+    emailSender(["Email Sender<br/>SendGrid"])
+    liDM(["LinkedIn DM Bot<br/>PhantomBuster"])
+    smsSender(["SMS Sender<br/>Twilio"])
+    replyMonitor(["Reply Monitor<br/>email / LinkedIn / SMS"])
+    replyClassifier(["Reply Classifier<br/>POSITIVE_INTEREST / OBJECTION<br/>HARD_NO or OOO / UNSUBSCRIBE"])
+    dnc(["DNC Scrubber<br/>record opt-out"])
+    responseGen(["Response Generator<br/>objection answer, meeting<br/>booking, human handoff"])
+    crmSync(["CRM Sync<br/>Salesforce / HubSpot write-back"])
+
+    import --> researcher --> persona --> seqstate
+    seqstate --- redis
+    seqstate --- pg
+    seqstate --> emailSender
+    seqstate --> liDM
+    seqstate --> smsSender
+    emailSender --> replyMonitor
+    liDM --> replyMonitor
+    smsSender --> replyMonitor
+    replyMonitor --> replyClassifier
+    replyClassifier -->|opt-out| dnc
+    replyClassifier -->|positive / objection| responseGen
+    responseGen --> crmSync
+
+    class import,researcher,persona,emailSender,liDM,smsSender,replyMonitor,responseGen base
+    class seqstate req
+    class replyClassifier mathOp
+    class dnc lossN
+    class crmSync io
 ```
 
 ### Supporting Systems
