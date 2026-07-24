@@ -1246,21 +1246,29 @@ Standard metrics: (1) NDCG@K (Normalized Discounted Cumulative Gain): rewards re
 
 **System Design:**
 
-```
-Query: "impact of fed rate hikes on mortgage rates 2024"
-         |                          |
-    [BM25 on Elasticsearch]    [Dense: E5-large-v2]
-    k1=1.5, b=0.75             (FAISS IVFFlat, nprobe=50)
-    top-200 docs               top-200 docs
-         |                          |
-              [RRF Fusion, k=60]
-                    |
-               top-200 fused
-                    |
-    [Cross-encoder: cross-encoder/ms-marco-MiniLM-L-6-v2]
-    Fine-tuned on 5K in-domain pairs
-                    |
-               top-10 results
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Query: 'impact of fed rate hikes<br/>on mortgage rates 2024'"]) --> BM["BM25 on Elasticsearch<br/>k1=1.5, b=0.75<br/>top-200 docs"]
+    Q --> DN["Dense: E5-large-v2<br/>FAISS IVFFlat, nprobe=50<br/>top-200 docs"]
+    BM --> RRF["RRF Fusion, k=60"]
+    DN --> RRF
+    RRF --> FUSED["top-200 fused"]
+    FUSED --> XE["Cross-encoder:<br/>ms-marco-MiniLM-L-6-v2<br/>fine-tuned on 5K in-domain pairs"]
+    XE --> OUT(["top-10 results"])
+
+    class Q,OUT io
+    class BM,DN base
+    class RRF mathOp
+    class FUSED frozen
+    class XE train
 ```
 
 **Implementation and results:**
