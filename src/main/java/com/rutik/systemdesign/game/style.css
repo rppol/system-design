@@ -1287,29 +1287,42 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   padding: 1px 5px; font-size: var(--fs-sm); font-family: var(--mono); color: var(--md-code-fg);
   overflow-wrap: anywhere;   /* long inline tokens break instead of forcing page h-scroll on phones */
 }
+/* overflow-y:hidden is explicit for the same spec reason as .md-tablewrap:
+   overflow-x:auto alone would compute overflow-y to `auto`, making pre a vertical
+   scroll container that can trap the page scroll. overflow-x:auto stays for the
+   one block type that keeps horizontal scroll — ASCII diagrams. */
 .md-body pre {
   background: #0a0d13; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px;
-  padding: 14px; overflow-x: auto; margin: 12px 0; position: relative;
+  padding: 14px; overflow-x: auto; overflow-y: hidden; margin: 12px 0; position: relative;
 }
 .md-body pre code {
   background: none; border: none; padding: 0; font-size: var(--fs-sm); line-height: 1.5;
   white-space: pre; color: #e6e6e6;
 }
-/* Phones: wrap long code lines rather than trapping them behind a horizontal
-   scroll — reading source one line-fragment at a time on a narrow screen is
-   painful. ASCII diagrams (.diagram) are EXEMPT: their monospace column
-   alignment carries the meaning, so they keep white-space: pre and h-scroll. */
-@media (max-width: 640px) {
-  .md-body pre code:not(.diagram) {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
+/* Wrap long code lines on BOTH web and app rather than trapping them behind a
+   horizontal scroll — reading source one line-fragment at a time is painful, and
+   it keeps the page as the single scroll surface. ASCII diagrams (.diagram) are
+   EXEMPT: their monospace column alignment carries the meaning, so they keep
+   white-space: pre and their own horizontal scroll. */
+.md-body pre code:not(.diagram) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .md-body hr { border: none; border-top: 1px solid var(--od-line); margin: 16px 0; }
 .md-body blockquote { border-left: 3px solid var(--md-quote); margin: 10px 0; padding: 4px 14px; color: var(--od-muted); }
-.md-tablewrap { overflow-x: auto; overscroll-behavior: contain; margin: 12px 0; }
+/* Tables wrap their cell text to fit the reader column (best effort) so the
+   PAGE is what scrolls, not an inner box. overflow-y MUST be explicit: with only
+   overflow-x:auto, the spec computes overflow-y from `visible` to `auto`, making
+   this a vertical scroll container too — which, with overscroll-behavior:contain,
+   TRAPS the page scroll (finger on the table rubber-bands it instead of scrolling
+   the page). Pinning overflow-y:hidden + overscroll-x:contain leaves overflow-x
+   only as a safety net for a table too wide to wrap, and lets vertical gestures
+   chain up to the reader body. */
+.md-tablewrap { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; margin: 12px 0; }
 .md-body table { border-collapse: collapse; margin: 0; font-size: 13px; display: table; }
-.md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; }
+/* overflow-wrap:anywhere lets long unbreakable tokens (URLs, code, snake_case)
+   break so a cell wraps instead of forcing the table wider than the column. */
+.md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 .md-body th { background: var(--od-bg2); color: var(--od-text); }
 
 /* copy button on code fences (injected by the reader) */
