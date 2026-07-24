@@ -364,33 +364,25 @@ stop reacting to the world.
 
 ### 5.4 Dual-System Architecture (Helix / GR00T style)
 
-```
-+------------------------------------------------------------------+
-|                        SYSTEM 2 (slow, ~7-9 Hz)                    |
-|   Large VLM: scene understanding, task decomposition, language    |
-|   instruction grounding                                            |
-|   Input: camera images + language instruction                     |
-|   Output: compact LATENT vector (task/goal representation)        |
-+------------------------------------------------------------------+
-                              |
-                  latent updates ~every 110-140ms
-                              |
-                              v
-+------------------------------------------------------------------+
-|                        SYSTEM 1 (fast, ~100-200 Hz)                |
-|   Small network (e.g., MLP/small transformer): consumes the        |
-|   latest System 2 latent + CURRENT proprioception + CURRENT vision |
-|   Output: immediate low-level joint/end-effector commands          |
-+------------------------------------------------------------------+
-                              |
-                              v
-                    Robot actuators (joints, grippers,
-                    individual fingers for humanoids)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  System 2 sets the "what/why" (updated ~10x/sec); System 1 handles the
-  "how, right now" (updated ~100-200x/sec) -- directly analogous to an
-  orchestrator (slow, deliberative) delegating to a fast reactive worker.
+    sys2["SYSTEM 2 (slow, ~7-9 Hz)<br/>Large VLM: scene understanding,<br/>task decomposition, language grounding<br/>In: camera images + instruction<br/>Out: compact LATENT vector"] -->|"latent updates<br/>~every 110-140ms"| sys1["SYSTEM 1 (fast, ~100-200 Hz)<br/>Small network (MLP / small transformer)<br/>consumes latest latent + CURRENT<br/>proprioception + CURRENT vision<br/>Out: low-level joint/end-effector cmds"]
+    sys1 --> act(["Robot actuators<br/>joints, grippers, individual<br/>fingers (humanoids)"])
+
+    class sys2 base
+    class sys1 train
+    class act io
 ```
+
+System 2 sets the "what/why" (updated ~10x/sec); System 1 handles the "how, right now" (updated ~100-200x/sec) -- directly analogous to an orchestrator (slow, deliberative) delegating to a fast reactive worker.
 
 ### 5.5 Cross-Embodiment Training Data Pipeline (Open X-Embodiment)
 
@@ -1055,20 +1047,26 @@ def control_loop_fixed(vla_model, robot, safety: SafetyLayer):
 
 ### Production Architecture
 
-```
-+------------------+     +-------------------+     +--------------------+
-|  Cameras +       |---->|  OpenVLA-7B        |---->|  Safety Layer       |
-|  Proprioception  |     |  (fine-tuned,      |     |  - joint limits     |
-+------------------+     |   chunk_size=12)   |     |  - workspace bounds |
-                         +-------------------+     |  - collision check  |
-                                                    +--------------------+
-                                                              |
-                                          validated  /        \  rejected
-                                                     v          v
-                                          +------------------+ +----------------+
-                                          | Robot Controller | | hold_position() |
-                                          | (30Hz)           | | + re-plan       |
-                                          +------------------+ +----------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cam(["Cameras +<br/>Proprioception"]) --> openvla["OpenVLA-7B<br/>(fine-tuned,<br/>chunk_size=12)"]
+    openvla --> safety["Safety Layer<br/>- joint limits<br/>- workspace bounds<br/>- collision check"]
+    safety -->|"validated"| ctrl["Robot Controller<br/>(30Hz)"]
+    safety -->|"rejected"| hold["hold_position()<br/>+ re-plan"]
+
+    class cam io
+    class openvla base
+    class safety mathOp
+    class ctrl train
+    class hold lossN
 ```
 
 ### Results
