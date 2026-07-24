@@ -29,18 +29,20 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     sdk(["SDK<br/>web / mobile / server"]) --> api["Event API<br/>stateless"]
-    api --> kafka("Kafka<br/>100K msg/s · 7-day retention")
-    kafka --> ckhkafka["ClickHouse<br/>Kafka Engine Table"]
-    kafka --> rediscounters("Redis Counters<br/>real-time")
-    kafka --> s3raw[["S3 Raw Events<br/>cold archive"]]
-    ckhkafka --> mvs["ClickHouse<br/>Materialized Views"]
+    api --> kafka
+    kafka --> ckhkafka
+    kafka --> rediscounters
+    kafka --> s3raw
+    ckhkafka --> mvs
+
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>100K msg/s · 7-day retention", pos: "b", h: 44 }
+    ckhkafka@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>Kafka Engine Table", pos: "b", h: 44 }
+    rediscounters@{ icon: "logos:redis", form: "square", label: "Redis Counters<br/>real-time", pos: "b", h: 44 }
+    s3raw@{ icon: "logos:aws-s3", form: "square", label: "S3 Raw Events<br/>cold archive", pos: "b", h: 44 }
+    mvs@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse<br/>Materialized Views", pos: "b", h: 44 }
 
     class sdk io
     class api req
-    class kafka,rediscounters base
-    class ckhkafka mathOp
-    class s3raw frozen
-    class mvs train
 ```
 *Ingest path — one Kafka topic (100 partitions, 100K msg/s peak) fans out to three independent consumers: the ClickHouse Kafka Engine table for durable storage, Redis for real-time counters, and S3 for a raw cold archive.*
 
@@ -55,13 +57,15 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     dash(["Customer<br/>Dashboard"]) --> qapi["Query API"]
-    qapi --> rcache("Redis<br/>dashboard cache · 30s TTL")
-    rcache -.->|"cache miss"| ckh("ClickHouse")
+    qapi --> rcache
+    rcache -.->|"cache miss"| ckh
     ckh -->|"WHERE org_id = ?<br/>partition pruning"| merged(["Merged<br/>Result"])
+
+    rcache@{ icon: "logos:redis", form: "square", label: "Redis<br/>dashboard cache · 30s TTL", pos: "b", h: 44 }
+    ckh@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
 
     class dash,merged io
     class qapi req
-    class rcache,ckh base
 ```
 *Query path — dashboards hit the 30-second Redis cache first; on a miss, ClickHouse serves the query, but every query is required to filter on `org_id`, which prunes the scan to that tenant's partitions only.*
 
@@ -75,13 +79,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    kafka2("Kafka") --> flink["Stream Processor<br/>Flink"]
-    flink --> rwin("Redis<br/>5-min windows")
+    kafka2 --> flink
+    flink --> rwin
     getreq(["GET /active-users"]) --> hll["PFCOUNT<br/>HyperLogLog estimate"]
     rwin --> hll
 
-    class kafka2,rwin base
-    class flink mathOp
+    kafka2@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Stream Processor<br/>Flink", pos: "b", h: 44 }
+    rwin@{ icon: "logos:redis", form: "square", label: "Redis<br/>5-min windows", pos: "b", h: 44 }
+
     class getreq io
     class hll train
 ```
@@ -97,12 +103,13 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    ckh2("ClickHouse") --> exp["Export Service"]
-    exp --> s3out[["S3<br/>hourly Parquet per org"]]
+    ckh2 --> exp["Export Service"]
+    exp --> s3out
 
-    class ckh2 base
+    ckh2@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
+    s3out@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>hourly Parquet per org", pos: "b", h: 44 }
+
     class exp req
-    class s3out frozen
 ```
 *Export — hourly batch jobs read ClickHouse and write one Parquet file per org directly to that customer's S3 bucket.*
 
