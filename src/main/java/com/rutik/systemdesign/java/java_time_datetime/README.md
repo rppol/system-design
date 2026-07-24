@@ -637,18 +637,23 @@ Use `ChronoUnit` for a single unit — `ChronoUnit.DAYS.between(start, end)` or 
 
 **Scenario.** A consumer app lets **8M users** set reminders ("remind me every weekday at 09:00," "one-off on 2026-03-08 at 07:30"). Peak fan-out is **~4,000 reminders/sec** at the top of each minute. Users are spread across 40+ time zones, travel between them, and expect a reminder set for "9am" to fire at 9am *local* — including across DST transitions and after a phone's zone changes. The original build stored each reminder as a `LocalDateTime` in the server's default zone and advanced recurring ones with `Duration.ofHours(24)`. Twice a year it misfired every daily reminder by an hour, and users who flew across zones got reminders at the wrong local time.
 
-```
-  set reminder (local intent)                      minute-tick scheduler (UTC)
-        |                                                   |
-        v                                                   v
-  ┌───────────────────────────┐                   ┌───────────────────────────┐
-  │ store:                    │                   │ every minute:             │
-  │  - LocalTime 09:00        │  --- persist -->  │  now = Instant.now(clock) │
-  │  - recurrence rule        │                   │  find due rows where      │
-  │  - ZoneId (user's)        │                   │  next_fire_utc <= now     │
-  │  - next_fire_utc (Instant)│                   │  -> enqueue notification  │
-  └───────────────────────────┘                   │  -> recompute next_fire   │
-                                                   └───────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SET("Set reminder (local intent)<br/>store:<br/>- LocalTime 09:00<br/>- recurrence rule<br/>- ZoneId (user's)<br/>- next_fire_utc (Instant)")
+    SCHED("Minute-tick scheduler (UTC)<br/>every minute:<br/>- now = Instant.now(clock)<br/>- find due rows where next_fire_utc <= now<br/>- enqueue notification<br/>- recompute next_fire")
+
+    SET -->|persist| SCHED
+
+    class SET req
+    class SCHED base
 ```
 
 The invariant: **the queue and the "due?" check run entirely in `Instant`/UTC**, while the *local intent* (a `LocalTime` + `ZoneId` + recurrence) is stored so the next UTC fire time can always be recomputed correctly, even if tzdata or the user's zone changes.
