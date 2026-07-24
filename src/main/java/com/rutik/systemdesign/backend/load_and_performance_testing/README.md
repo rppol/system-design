@@ -77,15 +77,17 @@ flowchart LR
     gen(["k6 / Gatling<br/>VUs drive load"]) --> lb{"Load Balancer"}
     lb --> i1["Instance 1"]
     lb --> i2["Instance 2"]
-    i1 --> pg["PostgreSQL"]
-    i1 --> rc["Redis"]
+    i1 --> pg
+    i1 --> rc
     i2 --> pg
     i2 --> rc
+
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    rc@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
 
     class gen req
     class lb mathOp
     class i1,i2 train
-    class pg,rc base
 ```
 
 *The load generator's VUs drive traffic through the load balancer to both instances, which share a single PostgreSQL and Redis. Monitor four layers together during the run: API (p50/p95/p99/p999, error rate, RPS), JVM (GC pause, heap, thread count), DB (connections, slow query log, lock waits), and System (CPU%, memory, network/disk I/O).*
