@@ -956,31 +956,30 @@ ComplementNB estimates each class's parameters from the complement of that class
 **Why MultinomialNB**: logistic regression with 100,000 TF-IDF features would require matrix operations on each email (100,000-dimension dot product). MultinomialNB prediction is a sparse sum over only the words present in the email — O(d_email) where d_email is the unique word count of the email (typically 20-200 words), not the vocabulary size. Training is a single pass over the data computing word counts. Incremental training via partial_fit allows nightly retraining without re-processing historical data.
 
 **Architecture**:
-```
-Incoming email
-    |
-    v
-Preprocessing (1ms)
-    |--- strip HTML tags
-    |--- lowercase, tokenize
-    |--- remove stopwords
-    |
-    v
-HashingVectorizer(n_features=2^20, alternate_sign=False)
-    |--- avoids vocabulary memory overhead
-    |--- hash collision rate < 0.1% at 2^20 buckets for typical email vocabulary
-    |
-    v
-MultinomialNB(alpha=0.01) — loaded from model store (pickle, 8MB)
-    |--- predict_proba in < 1ms
-    |--- P(spam | email) > 0.7 → quarantine
-    |--- P(spam | email) > 0.95 → reject
-    |
-    v
-Daily retraining via partial_fit
-    |--- stream 10M labeled emails through the model in 45-second batches
-    |--- total daily retraining time: ~8 minutes on 8 CPU cores
-    |--- new model deployed with atomic file replacement (zero downtime)
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    email(["Incoming email"]) --> prep["Preprocessing 1ms<br/>strip HTML tags<br/>lowercase, tokenize<br/>remove stopwords"]
+    prep --> hv["HashingVectorizer<br/>n_features=2^20, alternate_sign=False<br/>hash collision rate under 0.1% at 2^20 buckets"]
+    hv --> mnb["MultinomialNB alpha=0.01<br/>loaded from model store, pickle 8MB<br/>predict_proba in under 1ms"]
+    mnb -->|"P(spam) over 0.7"| quarantine(["Quarantine"])
+    mnb -->|"P(spam) over 0.95"| reject(["Reject"])
+    mnb -.->|"nightly"| retrain["Retraining via partial_fit<br/>10M labeled emails, 45s batches<br/>about 8 min total on 8 CPU cores<br/>atomic zero-downtime deploy"]
+
+    class email io
+    class prep,hv mathOp
+    class mnb base
+    class quarantine,reject lossN
+    class retrain train
 ```
 
 **Interpretability**: for any flagged email, extract the top 10 words by their per-word log-likelihood ratio: log P(word | spam) - log P(word | ham). These are the words most responsible for the spam prediction. Display to human reviewer: "Flagged because: 'free_trial', 'click_here', 'unsubscribe_immediately' have high spam association."
