@@ -888,23 +888,28 @@ The two towers never interact until the final dot product, so the model cannot l
 
 **Architecture**:
 
-```
-USER TOWER                              ITEM TOWER
-  user_id embed (64-dim)                video_id embed (64-dim)
-  age group embed (16-dim)              genre embed (32-dim)
-  country embed (16-dim)                director embed (16-dim)
-  device embed (8-dim)                  text embed from BERT (128-dim, frozen)
-  recent_10_videos (avg pool, 64-dim)   release_year (1-dim, normalized)
-  dense: [watch_rate, days_since       dense: [avg_rating, n_views_log]
-          signup, n_watches_log]
-         |                                      |
-   [MLP: 400->256->256]               [MLP: 341->256->256]
-         |                                      |
-   L2-normalize                         L2-normalize
-         |                                      |
-         |___________dot product_______________|
-                          |
-                 in-batch loss (T=0.07)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    uf(["User tower inputs<br/>user_id (64), age group (16)<br/>country (16), device (8)<br/>recent_10_videos avg pool (64)<br/>dense: watch_rate, days_since_signup, n_watches_log"]) --> umlp["User MLP<br/>400 -> 256 -> 256"]
+    umlp --> un["L2-normalize"]
+    itf(["Item tower inputs<br/>video_id (64), genre (32)<br/>director (16), BERT text embed (128, frozen)<br/>release_year (1, normalized)<br/>dense: avg_rating, n_views_log"]) --> imlp["Item MLP<br/>341 -> 256 -> 256"]
+    imlp --> inz["L2-normalize"]
+    un --> dot(("dot product"))
+    inz --> dot
+    dot --> loss(["in-batch loss<br/>T = 0.07"])
+
+    class uf,itf,loss io
+    class umlp,imlp train
+    class un,inz,dot mathOp
 ```
 
 **Training**: 500M watch events, 90-day window, 30 negative samples per positive (20 in-batch + 10 hard). Trained on 8xA100 for 48 hours.
