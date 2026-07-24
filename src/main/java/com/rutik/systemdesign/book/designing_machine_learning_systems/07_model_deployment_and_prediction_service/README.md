@@ -679,8 +679,8 @@ flowchart LR
 
     subgraph FW["Frameworks (M front-ends)"]
         direction TB
-        TF([TensorFlow])
-        PT([PyTorch])
+        TF@{ icon: "logos:tensorflow", form: "square", label: "TensorFlow", pos: "b", h: 44 }
+        PT@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch", pos: "b", h: 44 }
         JX([JAX])
     end
     HIR["High-level IR<br/>computation graph<br/>ONNX-style"]
@@ -699,7 +699,7 @@ flowchart LR
     OPT --> GPU
     OPT --> NPU
 
-    class TF,PT,JX,CPU,GPU,NPU io
+    class JX,CPU,GPU,NPU io
     class HIR frozen
     class LIR train
     class OPT mathOp
