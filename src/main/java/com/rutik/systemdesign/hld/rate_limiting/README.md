@@ -581,12 +581,13 @@ flowchart LR
     gw --> svcA(["Service A"])
     gw --> svcB(["Service B"])
     gw --> svcC(["Service C"])
-    gw --> redis[("Redis")]
+    gw --> redis
+
+    redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
 
     class client io
     class gw mathOp
     class svcA,svcB,svcC train
-    class redis base
 ```
 
 The gateway is the single chokepoint: it checks Redis once per request, then fans out to whichever service the route targets. This is the most common production architecture. The gateway handles:
@@ -612,14 +613,15 @@ flowchart LR
     gw -->|"extract client id"| check{"Rate check<br/>rl:user:123<br/>84/100"}
     check -->|"within limit"| backend(["Backend Services<br/>+ X-RateLimit headers"])
     check -->|"exceeds limit"| reject(["429 Too Many Requests<br/>+ Retry-After"])
-    gw -->|"INCR rl:key:window"| redis[("Redis Cluster<br/>HA")]
+    gw -->|"INCR rl:key:window"| redis
+
+    redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>HA", pos: "b", h: 44 }
 
     class client io
     class gw mathOp
     class check mathOp
     class backend train
     class reject lossN
-    class redis base
 ```
 
 The gateway extracts the client ID, increments the count in Redis, and branches on the result: within limit forwards to the backend with rate-limit headers attached, over limit returns 429 with `Retry-After`.
@@ -634,11 +636,12 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    primary[("Redis Primary<br/>writes")] -->|replication| replica1[("Redis Replica 1<br/>reads")]
-    primary -->|replication| replica2[("Redis Replica 2<br/>reads")]
+    primary -->|replication| replica1
+    primary -->|replication| replica2
 
-    class primary train
-    class replica1,replica2 frozen
+    primary@{ icon: "logos:redis", form: "square", label: "Redis Primary<br/>writes", pos: "b", h: 44 }
+    replica1@{ icon: "logos:redis", form: "square", label: "Redis Replica 1<br/>reads", pos: "b", h: 44 }
+    replica2@{ icon: "logos:redis", form: "square", label: "Redis Replica 2<br/>reads", pos: "b", h: 44 }
 ```
 
 Writes always go to the primary; reads can be served from either replica. Redis Sentinel or Cluster promotes a replica to primary automatically on failure.
@@ -658,13 +661,14 @@ flowchart LR
     client(["Client SDK<br/>self-throttle"]) --> gw("Edge / API Gateway<br/>Kong / AWS / NGINX")
     gw --> sidecar("Service Mesh Sidecar<br/>Envoy / Istio local")
     sidecar --> app(["Application Code<br/>business-aware"])
-    gw --- redis[("Redis / ratelimit service<br/>shared counters & policy")]
+    gw --- redis
+
+    redis@{ icon: "logos:redis", form: "square", label: "Redis / ratelimit<br/>shared counters", pos: "b", h: 44 }
 
     class client io
     class gw mathOp
     class sidecar mathOp
     class app train
-    class redis base
 ```
 
 Each layer can reject early (saving downstream resources) or pass through with headers for the next layer to make a finer decision. Most production systems combine at least two of these layers.
@@ -721,13 +725,11 @@ Rate limiting can be applied at multiple granularities:
 
 ### Multi-Tenancy Example
 
-```
-Tier       | Requests/min | Burst | Monthly Quota
------------|--------------|-------|---------------
-Free       | 60           | 10    | 10,000
-Pro        | 600          | 100   | 500,000
-Enterprise | 6,000        | 1,000 | Unlimited
-```
+| Tier | Requests/min | Burst | Monthly Quota |
+|------|--------------|-------|----------------|
+| Free | 60 | 10 | 10,000 |
+| Pro | 600 | 100 | 500,000 |
+| Enterprise | 6,000 | 1,000 | Unlimited |
 
 **Key design decision:** Use composite keys to apply multiple limits simultaneously.
 
@@ -1107,13 +1109,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    merchant(["Merchant integrations"]) --> gw("API Gateway<br/>NGINX + Lua<br/>authenticates, extracts key")
-    gw -->|"EVALSHA script_sha<br/>key:api_key:endpoint"| redis[("Redis Cluster<br/>6 nodes, RF=2")]
+    merchant(["Merchant integrations"]) --> gw
+    gw -->|"EVALSHA script_sha<br/>key:api_key:endpoint"| redis
     redis -->|"allow / deny<br/>+ headers"| svc(["API Service<br/>charges, etc."])
 
+    gw@{ icon: "logos:nginx", form: "square", label: "NGINX + Lua<br/>extracts key", pos: "b", h: 44 }
+    redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>6 nodes, RF=2", pos: "b", h: 44 }
+
     class merchant io
-    class gw mathOp
-    class redis base
     class svc train
 ```
 
