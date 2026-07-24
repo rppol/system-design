@@ -375,25 +375,33 @@ flowchart TD
 The student model loop persists knowledge state across sessions; the Socratic method constraint lives in the system prompt, which is re-injected on every turn.
 
 ### Multi-Domain LLM Platform
-```
-Domain-Specific LLM Applications
 
-Healthcare    Legal       Finance     Education    Customer Support
-    |             |           |            |              |
-    v             v           v            v              v
-[Domain Fine-Tuned Models or Domain RAG Indices]
-    |
-    v
-[Common Infrastructure Layer]
-  Gateway | Auth | Rate Limiting | Logging | Guardrails
-    |
-    v
-[Model Tier]
-  GPT-4o / Claude 3.5 / Gemini / Self-hosted
-    |
-    v
-[Data Layer]
-  Vector DBs | Knowledge Bases | User Data | Audit Logs
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Healthcare(["Healthcare"]) --> Domain
+    Legal(["Legal"]) --> Domain
+    Finance(["Finance"]) --> Domain
+    Education(["Education"]) --> Domain
+    Support(["Customer Support"]) --> Domain
+    Domain["Domain Fine-Tuned Models<br/>or Domain RAG Indices"] --> Infra
+    Infra["Common Infrastructure Layer<br/>Gateway | Auth | Rate Limiting<br/>Logging | Guardrails"] --> Model
+    Model["Model Tier<br/>GPT-4o / Claude 3.5 / Gemini / Self-hosted"] --> Data
+    Data["Data Layer<br/>Vector DBs | Knowledge Bases<br/>User Data | Audit Logs"]
+
+    class Healthcare,Legal,Finance,Education,Support io
+    class Domain mathOp
+    class Infra frozen
+    class Model base
+    class Data train
 ```
 
 ---
