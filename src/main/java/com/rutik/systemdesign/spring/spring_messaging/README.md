@@ -103,12 +103,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    svc["Spring Service\nKafkaTemplate.send(topic, k, v)"] --> broker["Apache Kafka Broker Cluster\nTopic: orders\npartition 0 / 1 / 2"]
+    svc["Spring Service\nKafkaTemplate.send(topic, k, v)"] --> broker@{ icon: "logos:kafka", form: "square", label: "Kafka Broker<br/>orders (3 partitions)", pos: "b", h: 44 }
     broker --> listener["@KafkaListener consumer group\npartition 0 -> T1\npartition 1 -> T2\npartition 2 -> T3"]
     broker -- "on processing failure" --> dlt["Dead Letter Topic\norders.DLT"]
 
     class svc req
-    class broker frozen
     class listener train
     class dlt lossN
 ```
@@ -164,10 +163,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    topicIn(["Kafka Topic\norders-in"]) --> fn["Function bean: Order -> Receipt\nSpring Cloud Stream binder maps input binding to topic"]
-    fn --> topicOut(["Kafka Topic\norders-out"])
+    topicIn@{ icon: "logos:kafka", form: "square", label: "Kafka Topic<br/>orders-in", pos: "b", h: 44 } --> fn["Function bean: Order -> Receipt\nSpring Cloud Stream binder maps input binding to topic"]
+    fn --> topicOut@{ icon: "logos:kafka", form: "square", label: "Kafka Topic<br/>orders-out", pos: "b", h: 44 }
 
-    class topicIn,topicOut frozen
     class fn train
 ```
 
