@@ -585,14 +585,13 @@ RadixAttention is especially effective for **tree-structured programs** (e.g., L
 
 When the KV cache fills GPU memory, older or less-important entries must be evicted. **LRU** (evict the request used longest ago, vLLM's default for preemption) is simple but request-grained — it can evict an entire long, expensive-to-recompute prefix. Within a single request's cache, attention-aware methods exploit the fact that a small fraction of tokens ("heavy hitters") and the first few tokens ("attention sinks") receive most of the attention mass:
 
-```
 Production numbers (LLaMA 3 70B, 128K context, full KV cache ~40 GB/request):
-  Method       | Memory kept | Quality loss | Overhead        | Adaptive?
-  -------------|-------------|-------------|-----------------|----------
-  H2O          | ~3% (~10GB) | <1%         | 5-10% per step  | Yes (dynamic)
-  SnapKV       | ~20% (~8GB) | <1%         | 2-5% one-time   | No (static)
-  StreamingLLM | ~5-20%      | 2-5%        | ~0%             | No (fixed sink+window)
-```
+
+| Method | Memory kept | Quality loss | Overhead | Adaptive? |
+|---|---|---|---|---|
+| H2O | ~3% (~10GB) | <1% | 5-10% per step | Yes (dynamic) |
+| SnapKV | ~20% (~8GB) | <1% | 2-5% one-time | No (static) |
+| StreamingLLM | ~5-20% | 2-5% | ~0% | No (fixed sink+window) |
 
 → **Deep dive**: [KV Cache Optimization](kv_cache_optimization.md) covers H2O, SnapKV, StreamingLLM/attention sinks, and Scissorhands mechanics in full, the static-vs-dynamic tradeoff, why naive sliding windows without sink tokens cause a perplexity cliff, cross-layer KV sharing (YOCO/CLA), and a worked case study of serving 128K context under KV-OOM pressure.
 
@@ -704,23 +703,25 @@ vLLM default: swap to CPU. Recompute is better when prefill is cheap (short inpu
 ```
 
 **Production systems combine all strategies:**
-```
-Incoming request
-    |
-    v
-[Priority classifier] → premium | standard | batch tier
-    |
-    v
-[Length estimator] → assign to length bucket
-    |
-    v
-[Chunked prefill scheduler] → interleave with ongoing decode
-    |
-    v
-[KV cache monitor] → if > 90% full → preempt lowest priority
-    |
-    v
-[Continuous batching] → add to active batch at next iteration boundary
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    incoming(["Incoming<br/>request"]) --> classify("Priority<br/>classifier")
+    classify -->|"premium /<br/>standard /<br/>batch tier"| length("Length<br/>estimator")
+    length -->|"assign length<br/>bucket"| chunked("Chunked prefill<br/>scheduler")
+    chunked -->|"interleave with<br/>ongoing decode"| monitor("KV cache<br/>monitor")
+    monitor -->|"if >90% full,<br/>preempt lowest<br/>priority"| batching("Continuous<br/>batching")
+
+    class incoming req
+    class classify,length,chunked,monitor,batching base
 ```
 
 ### 4.13 Streaming Architectures
