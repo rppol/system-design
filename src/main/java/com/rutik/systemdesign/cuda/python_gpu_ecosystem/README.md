@@ -115,9 +115,9 @@ flowchart TD
     NP["NumPy code\n(CPU only, no GPU)"]
     CP["CuPy\ndrop-in NumPy on GPU"]
     NB["Numba @cuda.jit\nPython-authored kernels"]
-    PT["PyTorch ops\n(ATen / cuBLAS / cuDNN)"]
+    PT@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch ops<br/>(ATen / cuBLAS / cuDNN)", pos: "b", h: 44 }
     TC["torch.compile / Inductor\nauto-generated fused kernels"]
-    EXT["PyTorch C++/CUDA extension\nhand-written .cu op"]
+    EXT@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch C++/CUDA<br/>extension (.cu op)", pos: "b", h: 44 }
     TR["Triton\nPython-embedded kernel DSL"]
     PC["PyCUDA\nraw driver API"]
     CC["CUDA C++\nfull manual control"]
@@ -131,9 +131,9 @@ flowchart TD
     EXT -.->|"often re-targets"| TR --> K
     CC --> K
 
-    class NP,PT highLevel
+    class NP highLevel
     class CP,NB,TC midLevel
-    class EXT,TR escape
+    class TR escape
     class PC,CC lowLevel
     class K kernelNode
 ```
@@ -264,6 +264,7 @@ flowchart LR
     Q2{"Needs PyTorch<br/>autograd?"}
     Q3{"torch.compile<br/>fuses it already?"}
     Q4{"Novel kernel or<br/>driver-level need?"}
+    EXT@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch C++/<br/>CUDA extension", pos: "b", h: 44 }
 
     Q1 -->|yes| CP(["CuPy"])
     Q1 -->|"no, custom<br/>kernel logic"| NB(["Numba @cuda.jit"])
@@ -272,13 +273,13 @@ flowchart LR
     Q2 -->|yes| Q3
     Q3 -->|yes| TC(["torch.compile"])
     Q3 -->|no| Q4
-    Q4 -->|"needs autograd,<br/>fused op"| EXT(["PyTorch C++/<br/>CUDA extension"])
+    Q4 -->|"needs autograd,<br/>fused op"| EXT
     Q4 -->|"portable DSL,<br/>autotuned"| TR(["Triton"])
     Q4 -->|"driver-level<br/>control only"| PC(["PyCUDA"])
 
     class Q1,Q2,Q3,Q4 kernelNode
     class CP,NB,TC midLevel
-    class EXT,TR escape
+    class TR escape
     class PC lowLevel
 ```
 
@@ -296,7 +297,7 @@ quadrantChart
     quadrant-3 Low control, low productivity
     quadrant-4 High control, low productivity
     CuPy: [0.20, 0.85]
-    Numba @cuda.jit: [0.55, 0.55]
+    Numba cuda.jit: [0.55, 0.55]
     Triton: [0.60, 0.65]
     PyTorch extension: [0.80, 0.35]
     PyCUDA: [0.90, 0.20]
@@ -871,17 +872,29 @@ Wrapping a kernel in a friendlier Python API changes how much code you had to wr
 
 **Diagram — where the tax is hiding:**
 
-```
-   CuPy preprocessing (GPU)  --.get()-->  NumPy array (HOST, pageable RAM)
-                                              |
-                                       torch.tensor(..., device="cuda")
-                                              |
-                                              v
-                                  PyTorch tensor (GPU) -- back where it started
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Two real PCIe/NVLink transfers (device->host, host->device) for 4096 x 512
-   float32 = ~8 MB per batch that was ALREADY resident on the GPU the entire time.
+    CP(["CuPy preprocessing<br/>(GPU)"])
+    NP["NumPy array<br/>(host, pageable RAM)"]
+    PT@{ icon: "logos:pytorch-icon", form: "square", label: "PyTorch tensor<br/>(GPU)", pos: "b", h: 44 }
+
+    CP -->|".get()"| NP -->|"torch.tensor(..., device='cuda')"| PT
+
+    class CP req
+    class NP base
 ```
+
+Two real PCIe/NVLink transfers (device-to-host, then host-to-device) for 4096 x 512
+float32 = ~8 MB per batch that was ALREADY resident on the GPU the entire time — the
+PyTorch tensor ends up back on the same device it started on.
 
 **BROKEN — CuPy-to-PyTorch handoff via a host round-trip:**
 
