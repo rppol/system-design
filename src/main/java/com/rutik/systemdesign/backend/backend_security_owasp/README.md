@@ -698,12 +698,12 @@ flowchart LR
 
     app(["Mobile App<br/>JWT Bearer token"]) -->|"HTTPS"| gw["API Gateway<br/>rate limit 100 req/min per user"]
     gw --> svc["Spring Boot Transfer Service<br/>AuthN: JWT RS256 via JWKS<br/>AuthZ: PreAuthorize owns-check<br/>Input: JSR-380 validation<br/>Persistence: JPA + PreparedStatement<br/>Secrets: Vault dynamic credential"]
-    svc --> db("PostgreSQL<br/>dedicated account<br/>INSERT/UPDATE on transfers only")
+    svc --> db
+    db@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>transfers table only", pos: "b", h: 44 }
 
     class app io
     class gw mathOp
     class svc train
-    class db base
 ```
 
 Every hop narrows trust: the gateway throttles per user, the transfer service re-derives the caller's identity from the validated JWT rather than a client-supplied field, and the database account can only INSERT/UPDATE its own table.
