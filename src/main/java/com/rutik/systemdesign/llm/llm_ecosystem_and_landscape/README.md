@@ -200,22 +200,16 @@ Phi (Microsoft):
 
 ### 4.8 Licensing Landscape
 
-```
-License Type            | Example Models                      | Commercial Use
-─────────────────────────────────────────────────────────────────────────────────
-Apache 2.0 (fully open) | Mistral 7B, Mixtral 8x7B, Gemma 2  | Yes, unrestricted
-MIT                     | DeepSeek-V3, DeepSeek-R1            | Yes, unrestricted
-Llama Community         | LLaMA 3.x                           | Yes, if <700M MAU
-                        |                                     | Cannot use to train competing LLMs
-CC-BY-NC                | Some research models                | Non-commercial only
-Proprietary API only    | GPT-4, Claude, Gemini               | API access; no weights
-Research only           | Various academic models             | No commercial use
+| License Type | Example Models | Commercial Use |
+|---|---|---|
+| Apache 2.0 (fully open) | Mistral 7B, Mixtral 8x7B, Gemma 2 | Yes, unrestricted |
+| MIT | DeepSeek-V3, DeepSeek-R1 | Yes, unrestricted |
+| Llama Community | LLaMA 3.x | Yes, if <700M MAU; cannot use to train competing LLMs |
+| CC-BY-NC | Some research models | Non-commercial only |
+| Proprietary API only | GPT-4, Claude, Gemini | API access; no weights |
+| Research only | Various academic models | No commercial use |
 
-Key distinction:
-  "Open weights" != "Open source"
-  LLaMA 3 weights are public but license restricts competition training
-  True open source: Apache 2.0, MIT — few frontier models qualify
-```
+**Key distinction**: "Open weights" != "Open source". LLaMA 3 weights are public but the license restricts competition training. True open source: Apache 2.0, MIT — few frontier models qualify.
 
 ---
 
@@ -724,27 +718,26 @@ Prompt caching lets a provider store the model's internal state for a stable pro
 
 **Architecture Overview**
 
-```
-                        Incoming Request
-                               |
-                    +----------+-----------+
-                    |  Request Classifier  |
-                    |  (LLaMA 3.2 3B,     |
-                    |   fine-tuned)        |
-                    +----------+-----------+
-                               |
-             +-----------------+-----------------+
-             |                 |                 |
-      Short copy        Long-form post      Style analysis
-             |                 |                 |
-      gpt-4o-mini       claude-3.5-sonnet   LLaMA 3 8B
-      (API, fast)       (API, quality)      (self-hosted,
-                                             fine-tuned,
-                                             batch)
-             |                 |                 |
-             +-----------------+-----------------+
-                               |
-                   Unified Response (via LiteLLM)
+```mermaid
+flowchart TD
+    classDef io   fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req  fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Request(["Incoming Request"]) --> Classifier["Request Classifier<br/>(LLaMA 3.2 3B,<br/>fine-tuned)"]
+    Classifier --> Short["Short copy"]
+    Classifier --> Long["Long-form post"]
+    Classifier --> Style["Style analysis"]
+    Short --> ShortModel["gpt-4o-mini<br/>(API, fast)"]
+    Long --> LongModel["claude-3.5-sonnet<br/>(API, quality)"]
+    Style --> StyleModel["LLaMA 3 8B<br/>(self-hosted, fine-tuned,<br/>batch)"]
+    ShortModel --> Response(["Unified Response<br/>(via LiteLLM)"])
+    LongModel --> Response
+    StyleModel --> Response
+
+    class Request,Response io
+    class Classifier,Short,Long,Style req
+    class ShortModel,LongModel,StyleModel base
 ```
 
 **Key Design Decisions**
