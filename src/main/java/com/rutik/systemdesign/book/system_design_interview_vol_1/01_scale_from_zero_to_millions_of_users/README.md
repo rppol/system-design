@@ -815,19 +815,17 @@ data, a **hash function** is used to find the corresponding shard. The book uses
 the hash function; if the result equals 0, shard 0 is used to store and fetch data; if it equals 1,
 shard 1 is used; and so on.
 
-```
-        hash function:  shard_id = user_id % 4   (4 shards)
+Hash function: `shard_id = user_id % 4` (4 shards)
 
-   user_id  |  user_id % 4  |  goes to
-   ---------+---------------+----------
-      0     |      0        |  Shard 0
-      1     |      1        |  Shard 1
-      2     |      2        |  Shard 2
-      3     |      3        |  Shard 3
-      4     |      0        |  Shard 0
-      5     |      1        |  Shard 1
-      ...   |     ...       |   ...
-```
+| user_id | user_id % 4 | goes to |
+|---------|-------------|---------|
+| 0 | 0 | Shard 0 |
+| 1 | 1 | Shard 1 |
+| 2 | 2 | Shard 2 |
+| 3 | 3 | Shard 3 |
+| 4 | 0 | Shard 0 |
+| 5 | 1 | Shard 1 |
+| ... | ... | ... |
 
 Caption: the sharding key `user_id` is hashed with `% 4` to pick one of four shards; every shard has
 the identical schema but holds a disjoint slice of the users, so read/write load spreads across four
