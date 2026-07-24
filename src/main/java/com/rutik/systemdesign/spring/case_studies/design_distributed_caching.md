@@ -99,7 +99,8 @@ flowchart TD
     L1Q -->|MISS| L2Q{L2 Redis check}
     L2Q -->|HIT| PROM2["promote L1\n(Caffeine.put)"]
     PROM2 --> RET
-    L2Q -->|MISS| DB[(PostgreSQL DB)]
+    L2Q -->|MISS| DB
+    DB@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
     DB --> POP["populate L2\n(Redis SET with TTL)"]
     POP --> PROM1["promote L1\n(Caffeine.put for future requests)"]
     PROM1 --> RET
@@ -107,7 +108,8 @@ flowchart TD
     subgraph WRITE["Write / Invalidation Path"]
         CP["@CachePut:\nupdate L2 (Redis)"] --> EV["@CacheEvict\nL1 locally"]
         EV --> PUB["CacheInvalidationPublisher\n.publishInvalidation()"]
-        PUB --> CH[["Redis Pub/Sub:\ncache-invalidation channel"]]
+        PUB --> CH
+        CH@{ icon: "logos:redis", form: "square", label: "Redis Pub/Sub", pos: "b", h: 44 }
         CH --> I1["Instance 1:\nevict L1 (less than 5ms)"]
         CH --> I2["Instance 2:\nevict L1 (less than 5ms)"]
         CH --> I3["Instance 3-5:\nevict L1 (less than 5ms)"]
@@ -117,9 +119,7 @@ flowchart TD
     class SVC,MGR base
     class L1Q,L2Q mathOp
     class PROM1,PROM2,POP train
-    class DB frozen
     class CP,EV,PUB base
-    class CH frozen
     class I1,I2,I3 req
 ```
 
