@@ -551,9 +551,7 @@ flowchart LR
 
 ## 8. Tradeoffs
 
-```
-Full Comparison Matrix
-========================
+**Full Comparison Matrix**
 
 | Feature          | PostgreSQL | MongoDB | Redis  | Cassandra | Elasticsearch | Neo4j  | CockroachDB |
 |-----------------|-----------|---------|--------|-----------|---------------|--------|-------------|
@@ -566,7 +564,6 @@ Full Comparison Matrix
 | Joins            | Yes        | No      | No     | No        | No (nested)   | Traversal | Yes    |
 | Transactions     | Full ACID  | Multi-doc | No   | LWT only  | No            | ACID   | Full ACID   |
 | Best use case    | Financial  | Content | Cache  | IoT/Log   | Search        | Social | Global SQL  |
-```
 
 ---
 
@@ -584,16 +581,23 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Start{"What's the primary<br/>access pattern?"} -->|"ACID + complex<br/>joins, single node"| PG(["PostgreSQL"])
+    Start{"What's the primary<br/>access pattern?"} -->|"ACID + complex<br/>joins, single node"| PG
     Start -->|"SQL + horizontal<br/>scale, geo-distributed"| CRDB(["CockroachDB"])
-    Start -->|"flexible or<br/>hierarchical schema"| Mongo(["MongoDB"])
-    Start -->|"sub-ms cache,<br/>session, leaderboard"| Redis(["Redis"])
-    Start -->|"write-heavy<br/>time-series, TTL"| Cass(["Cassandra"])
-    Start -->|"full-text search,<br/>log analytics"| ES(["Elasticsearch"])
-    Start -->|"relationship-centric<br/>traversal"| Neo(["Neo4j"])
+    Start -->|"flexible or<br/>hierarchical schema"| Mongo
+    Start -->|"sub-ms cache,<br/>session, leaderboard"| Redis
+    Start -->|"write-heavy<br/>time-series, TTL"| Cass
+    Start -->|"full-text search,<br/>log analytics"| ES
+    Start -->|"relationship-centric<br/>traversal"| Neo
+
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    Mongo@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    Cass@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
+    ES@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    Neo@{ icon: "logos:neo4j", form: "square", label: "Neo4j", pos: "b", h: 44 }
 
     class Start mathOp
-    class PG,CRDB,Mongo,Redis,Cass,ES,Neo io
+    class CRDB io
 ```
 
 **Relational (PostgreSQL)**: use for financial transactions (ACID required), systems with complex queries and ad-hoc reporting, data with complex relationships and referential integrity constraints. Do NOT use when horizontal write scaling is required (partitioned writes across many nodes), when schema changes must happen without downtime at very large scale, or when the primary access pattern is always by a single key.
