@@ -101,12 +101,12 @@ flowchart LR
 
     subgraph READ["Read Path (hot, under 100ms p99)"]
         LB{"Load Balancer"}
-        Redis["Redis hot-prefix<br/>cache"]
+        Redis@{ icon: "logos:redis", form: "square", label: "Redis hot-prefix<br/>cache", pos: "b", h: 44 }
         TS["Typeahead Service<br/>Replica 1..N<br/>full trie, ~1.25GB"]
     end
 
     subgraph WRITE["Write / Update Path (offline)"]
-        Kafka(["Kafka Topic<br/>query-log events"])
+        Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka Topic<br/>query-log events", pos: "b", h: 44 }
         Agg["Aggregator Pipeline<br/>Spark/Flink, ~10 min"]
         Trend["Trending Detector<br/>~1-min window"]
     end
@@ -123,9 +123,7 @@ flowchart LR
 
     class Client io
     class LB mathOp
-    class Redis base
     class TS train
-    class Kafka base
     class Agg mathOp
     class Trend mathOp
 ```
@@ -371,7 +369,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    K(["Kafka topic<br/>query-log"]) --> R["Read 10-min window<br/>+ decayed history"]
+    K@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>query-log", pos: "b", h: 44 } --> R["Read 10-min window<br/>+ decayed history"]
 
     subgraph BATCH["Spark/Flink batch job (~10 min)"]
         R --> AGG["Aggregate frequency<br/>per query string"]
@@ -385,7 +383,6 @@ flowchart LR
     SWAP --> GC["Old trie<br/>garbage collected"]
     GC -.->|"repeats every ~10 min"| K
 
-    class K base
     class R,AGG,BUILD,SER mathOp
     class DIST req
     class LOAD frozen
@@ -418,7 +415,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    K(["Kafka<br/>query-log stream"]) --> W["Maintain ~1-min<br/>sliding window"]
+    K@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>query-log stream", pos: "b", h: 44 } --> W["Maintain ~1-min<br/>sliding window"]
     W --> CMP["Compare count vs<br/>historical baseline"]
     CMP --> D{"Spike over 20x baseline<br/>and above min floor?"}
     D -->|"no"| MISS["Not flagged<br/>(noise)"]
@@ -426,7 +423,6 @@ flowchart LR
     FLAG --> STORE(["Trending-overrides<br/>store"])
     STORE --> OVERLAY["Typeahead Service<br/>overlays onto top-K"]
 
-    class K base
     class W,CMP mathOp
     class D mathOp
     class MISS lossN
