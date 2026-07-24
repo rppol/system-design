@@ -257,28 +257,26 @@ after t0.
 
 ### 5.3 Trust Zones (extends Agent-to-Agent Protocols §5.6)
 
-```
-  +---------------------------------------------------------------+
-  | UNTRUSTED-DATA ZONE                                            |
-  |  Agents here process external content (web, email, documents) |
-  |  Output: structured "findings" (data only -- no free-form     |
-  |  instructions are ever extracted as actionable directives)     |
-  +---------------------------------------------------------------+
-                  | findings (DATA, schema-validated, §6.2)
-                  v
-  +---------------------------------------------------------------+
-  | REASONING ZONE                                                 |
-  |  Agents here plan/decide using findings as DATA inputs.        |
-  |  Cannot directly invoke privileged actions.                    |
-  +---------------------------------------------------------------+
-                  | action requests + CAPABILITY TOKENS (§3.7)
-                  v
-  +---------------------------------------------------------------+
-  | PRIVILEGED-ACTION ZONE                                         |
-  |  Non-LLM controller validates capability token scope before    |
-  |  executing ANY action (send email, make payment, write file).  |
-  |  No path back to Untrusted-Data Zone.                          |
-  +---------------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UDZ["UNTRUSTED-DATA ZONE<br/>Agents here process external content --<br/>web, email, documents<br/>Output: structured findings, data only --<br/>no free-form instructions are ever<br/>extracted as actionable directives"]
+    RZONE["REASONING ZONE<br/>Agents here plan and decide using<br/>findings as DATA inputs<br/>Cannot directly invoke privileged actions"]
+    PAZ["PRIVILEGED-ACTION ZONE<br/>Non-LLM controller validates capability<br/>token scope before executing any action --<br/>send email, make payment, write file<br/>No path back to Untrusted-Data Zone"]
+
+    UDZ -->|"findings -- DATA, schema-validated, §6.2"| RZONE
+    RZONE -->|"action requests + CAPABILITY TOKENS, §3.7"| PAZ
+
+    class UDZ lossN
+    class RZONE base
+    class PAZ io
 ```
 
 ### 5.4 Dual-LLM / CaMeL Pattern
