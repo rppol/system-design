@@ -37,8 +37,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Client(["Client"]) -->|"POST /predict or<br/>/predict/stream"| App("FastAPI App<br/>Uvicorn + async workers")
-    App -->|"cache lookup<br/>cosine sim at least 0.95"| Cache[("Semantic Cache<br/>Redis + sentence-embed")]
+    App@{ icon: "logos:fastapi", form: "square", label: "FastAPI App<br/>Uvicorn workers", pos: "b", h: 44 }
+    Cache@{ icon: "logos:redis", form: "square", label: "Redis<br/>Semantic Cache", pos: "b", h: 44 }
+
+    Client(["Client"]) -->|"POST /predict or<br/>/predict/stream"| App
+    App -->|"cache lookup<br/>cosine sim at least 0.95"| Cache
     Cache -->|"cache miss"| Queue("Micro-Batch Queue<br/>up to 8 items, 10ms flush")
     Queue -->|"batched tensor"| Model(("Model Inference<br/>BERT on GPU"))
     Model --> Single(["Single result<br/>JSON response"])
@@ -54,8 +57,6 @@ flowchart LR
     Model -.->|"admin swap, async"| Slots
 
     class Client io
-    class App req
-    class Cache base
     class Queue mathOp
     class Model train
     class Single io
