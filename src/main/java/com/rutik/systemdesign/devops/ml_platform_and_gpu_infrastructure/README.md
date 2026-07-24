@@ -103,8 +103,8 @@ flowchart TD
         operator --> devplugin --> dcgm --> migmgr --> hw
     end
 
-    prom("Prometheus")
-    grafana(["Grafana / alerts"])
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
 
     control -->|"creates PyTorchJob /<br/>RayJob / InferenceService"| api
     api -.->|"scale-up:<br/>no GPU node fits"| karpenter
@@ -115,8 +115,7 @@ flowchart TD
 
     class control req
     class api,karpenter mathOp
-    class operator,devplugin,dcgm,migmgr,hw,prom base
-    class grafana io
+    class operator,devplugin,dcgm,migmgr,hw base
 ```
 
 MIG vs time-slicing on a single A100:
