@@ -916,7 +916,7 @@ flowchart TD
     PC["Model Pool C\nClaude Opus · GPT-4\n(Tier 3 - front)"]
     RH["Response Handler"]
     QS["Quality Sampler\nsamples 2% for LLM-as-judge scoring"]
-    MS["Metrics Store\nper-route quality, cost, latency dashboards"]
+    MS[("Metrics Store\nper-route quality, cost, latency dashboards")]
 
     REQ --> GW --> RSG
     RSG --> PA
