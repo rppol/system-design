@@ -105,81 +105,42 @@ Retention: 3 years for enterprise, 1 year for free tier
 
 ### Two Capture Paths
 
-```
-BOT-IN-MEETING PATH (Fireflies, Otter.ai)
------------------------------------------
-User's Zoom/Meet/Teams
-        |
-        | (Zoom SDK / bot joins as participant)
-        v
-  +------------------+
-  |   Bot Server     |  <-- Kubernetes pod per active meeting
-  |  (bot-runner)    |      captures mixed system audio stream
-  +------------------+
-        |
-        | audio chunks (16 kHz PCM, 5s intervals)
-        v
-  +------------------+     +--------------------+
-  |   VAD Filter     | --> |   STT Service      |
-  | (Silero VAD)     |     | (Whisper large-v3, |
-  +------------------+     |  self-hosted)      |
-                           +--------------------+
-                                    |
-                           rolling transcript segments
-                                    |
-                                    v
-                           +--------------------+
-                           |  Transcript Store  |
-                           | (Postgres + S3)    |
-                           +--------------------+
-                                    |
-                           +--------------------+
-                           |  LLM Pipeline      |
-                           | (post-meeting)     |
-                           +--------------------+
-                                    |
-                           +--------------------+
-                           |  Delivery Layer    |
-                           | (WebSocket to UI,  |
-                           |  Slack/Notion push)|
-                           +--------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    subgraph BOTPATH["Bot-in-Meeting Path - Fireflies, Otter.ai"]
+        direction LR
+        ZM(["User's Zoom / Meet / Teams"]) -->|"bot joins<br/>as participant"| BS(["Bot Server<br/>k8s pod per meeting"])
+        BS -->|"audio chunks<br/>16kHz PCM, 5s"| VAD1(["VAD Filter<br/>Silero VAD"])
+        VAD1 --> STT1(["STT Service<br/>Whisper large-v3<br/>self-hosted"])
+        STT1 -->|"rolling<br/>transcript segments"| TS(["Transcript Store<br/>Postgres + S3"])
+        TS --> LLM1(["LLM Pipeline<br/>post-meeting"])
+        LLM1 --> DL(["Delivery Layer<br/>WebSocket, Slack/Notion push"])
+    end
 
-LOCAL-PROCESS PATH (Granola, macOS / Windows)
-----------------------------------------------
-CoreAudio (macOS) or WASAPI (Windows)
-        |
-        | per-process audio taps (Zoom audio, mic separately)
-        v
-  +------------------+
-  |  Local Agent     |  <-- native app, runs on user machine
-  |  (Swift / Rust)  |
-  +------------------+
-        |
-        | VAD-filtered speech segments only
-        | (raw audio NEVER leaves device)
-        v
-  +------------------+     +--------------------+
-  |  Local VAD       | --> |   STT API call     |
-  | (WebRTC VAD or   |     | (cloud Whisper or  |
-  |  Silero on-dev)  |     |  local whisper.cpp)|
-  +------------------+     +--------------------+
-                                    |
-                           transcript text only
-                                    |
-                                    v
-                           +--------------------+
-                           |  LLM Pipeline      |
-                           | (GPT-4o-mini API   |
-                           |  or Claude Haiku)  |
-                           +--------------------+
-                                    |
-                           summary, action items
-                                    v
-                           +--------------------+
-                           |  Local App UI +    |
-                           |  Cloud Sync (opt.) |
-                           +--------------------+
+    subgraph LOCALPATH["Local-Process Path - Granola, macOS/Windows"]
+        direction LR
+        OSAUD(["CoreAudio macOS or<br/>WASAPI Windows"]) -->|"per-process<br/>audio taps"| LA(["Local Agent<br/>Swift / Rust"])
+        LA -->|"VAD-filtered speech only<br/>raw audio never leaves device"| VAD2(["Local VAD<br/>WebRTC or Silero on-device"])
+        VAD2 --> STT2(["STT API call<br/>cloud Whisper or<br/>local whisper.cpp"])
+        STT2 -->|"transcript<br/>text only"| LLM2(["LLM Pipeline<br/>GPT-4o-mini API<br/>or Claude Haiku"])
+        LLM2 -->|"summary,<br/>action items"| UI(["Local App UI +<br/>Cloud Sync optional"])
+    end
+
+    class ZM,OSAUD req
+    class BS,LA io
+    class VAD1,VAD2 mathOp
+    class STT1,STT2 base
+    class TS frozen
+    class LLM1,LLM2 train
+    class DL,UI lossN
 ```
 
 ### Full System Component Map
