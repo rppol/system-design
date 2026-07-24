@@ -1074,7 +1074,7 @@ flowchart LR
 
     subgraph LIFESPAN["lifespan (app scope)"]
         POOL["app.state.pool<br/>asyncpg.Pool<br/>min=5, max=20"]
-        REDIS["app.state.redis<br/>aioredis.Redis<br/>max_connections=20"]
+        REDIS@{ icon: "logos:redis", form: "square", label: "Redis<br/>max_connections=20", pos: "b", h: 44 }
         HTTPC["app.state.http_client<br/>httpx.AsyncClient<br/>persistent, keep-alive"]
     end
 
@@ -1088,7 +1088,7 @@ flowchart LR
     REDIS -->|"shared reference<br/>no cleanup"| GRED
     HTTPC -->|"shared reference<br/>plain dep"| GHTTP
 
-    class POOL,REDIS,HTTPC base
+    class POOL,HTTPC base
     class CONN req
     class GRED,GHTTP io
 ```
