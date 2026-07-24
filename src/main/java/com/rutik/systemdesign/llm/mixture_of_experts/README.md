@@ -757,39 +757,32 @@ A company needs to serve Mixtral 8x7B in production at 1000 requests per second 
 
 #### Architecture Overview
 
-```
-  Client Requests (1000 req/s)
-           |
-  [Load Balancer / API Gateway]
-           |
-     [LLM Gateway]
-     - Request batching (continuous batching)
-     - Routing to replica group
-     - Dropped token rate monitoring
-           |
-    -------+-------
-    |       |      |
- Replica  Replica  Replica  (3 replicas x 4x A100 80GB per replica)
-   |         |       |
-   v         v       v
-  [vLLM serving process, expert parallelism=4]
-  [4x A100 80GB, NVLink interconnect]
-  [Mixtral 8x7B in bfloat16, ~90GB across 4 GPUs]
-           |
-  All-to-All via NVLink for expert dispatch/gather per MoE layer
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Client(["Client Requests<br/>1,000 req/s"]) --> LB["Load Balancer /<br/>API Gateway"]
+    LB --> Gateway["LLM Gateway<br/>continuous batching, routing,<br/>dropped-token monitoring"]
+    Gateway --> R1["Replica 1"] & R2["Replica 2"] & R3["Replica 3"]
+    R1 & R2 & R3 --> Serve["vLLM serving process<br/>expert parallelism = 4<br/>4x A100 80GB, NVLink<br/>Mixtral 8x7B bfloat16 ~90GB"]
+    Serve --> AllToAll(["All-to-All via NVLink<br/>expert dispatch/gather per MoE layer"])
 
+    classDef io   fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm  fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Client,AllToAll io
+    class LB,Gateway llm
+    class R1,R2,R3,Serve proc
+```
 
 Expert distribution per replica (4 GPUs):
-  GPU-0: Expert {0, 1}   + full attention layers
-  GPU-1: Expert {2, 3}   + full attention layers
-  GPU-2: Expert {4, 5}   + full attention layers
-  GPU-3: Expert {6, 7}   + full attention layers
 
-  Each token: router selects top-2 experts
-  All-to-All: tokens go to GPU holding their expert
-  Processing: each GPU runs its expert on received tokens
-  All-to-All back: combined outputs return to origin GPU
-```
+- GPU-0: Expert {0, 1} + full attention layers
+- GPU-1: Expert {2, 3} + full attention layers
+- GPU-2: Expert {4, 5} + full attention layers
+- GPU-3: Expert {6, 7} + full attention layers
+
+Each token: router selects top-2 experts. All-to-All: tokens go to the GPU holding their expert. Processing: each GPU runs its expert on the received tokens. All-to-All back: combined outputs return to the origin GPU.
 
 #### Key Design Decisions
 
