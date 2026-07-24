@@ -276,18 +276,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    src(["Log Servers<br/>emit click events<br/>~10K/s avg, 50K/s peak"]) --> q1(["Kafka topic 1<br/>ad_click_events<br/>partitioned by ad_id"])
+    src(["Log Servers<br/>emit click events<br/>~10K/s avg, 50K/s peak"]) --> q1
+    q1@{ icon: "logos:kafka", form: "square", label: "Kafka Topic 1<br/>ad_click_events<br/>partitioned by ad_id", pos: "b", h: 44 }
     q1 --> agg("Aggregation Service<br/>MapReduce-style DAG<br/>map / aggregate / reduce")
     q1 -.->|"also archived"| raw[("Raw Data Store<br/>Cassandra / S3<br/>~100 GB/day")]
-    agg --> q2(["Kafka topic 2<br/>ad_click_counts<br/>+ top-N per minute"])
+    agg --> q2
+    q2@{ icon: "logos:kafka", form: "square", label: "Kafka Topic 2<br/>ad_click_counts<br/>+ top-N per minute", pos: "b", h: 44 }
     q2 --> writer("DB Writer")
-    writer --> aggdb[("Aggregation DB<br/>Cassandra<br/>per-minute counts + top-N")]
+    writer --> aggdb
+    aggdb@{ icon: "logos:cassandra", form: "square", label: "Aggregation DB<br/>Cassandra", pos: "b", h: 44 }
     aggdb --> query(["Query Service<br/>2 APIs"])
 
     class src io
-    class q1,q2 req
     class agg mathOp
-    class raw,aggdb base
+    class raw base
     class writer train
     class query io
 ```
