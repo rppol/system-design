@@ -121,86 +121,60 @@ Configuration store:
 
 ## 3. High-Level Architecture
 
-```
-[GitHub / GitLab / Bitbucket]
-  PR event (webhook: opened, synchronize, reopened)
-         |
-         v
-[Webhook Receiver] (stateless, auto-scaled)
-  - Verify webhook signature (HMAC-SHA256)
-  - Parse event type + PR metadata
-  - Enqueue review job
-         |
-         v
-[Job Queue] (Redis Streams / SQS)
-  - Priority: org tier (enterprise > team > free)
-  - Dedup: skip if same PR head SHA already queued
-         |
-         v
-[Review Orchestrator] (worker pool, 200 concurrent workers)
-  ┌──────────────────────────────────────────────────────┐
-  │                                                      │
-  │  [Diff Parser]                                       │
-  │   - Fetch PR diff via Git provider API               │
-  │   - Parse hunks: file, line range, added/removed     │
-  │   - Identify file types, languages                   │
-  │                                                      │
-  │  [Context Loader]                                    │
-  │   - Fetch full file content for changed files        │
-  │   - Resolve imports -> fetch imported modules         │
-  │   - Fetch class/interface definitions referenced      │
-  │   - Fetch related test files                         │
-  │   - Load .codereview.yml config (ignore rules, etc.) │
-  │                                                      │
-  │  [Context Assembler]                                 │
-  │   - Budget token allocation across files             │
-  │   - Prioritize: changed code > direct imports >      │
-  │     type definitions > test files > distant deps     │
-  │   - Chunk large PRs into reviewable segments         │
-  │                                                      │
-  │  [Analysis Pipeline] (parallel passes)               │
-  │   ┌─────────────┐ ┌─────────────┐ ┌──────────────┐  │
-  │   │  Security   │ │ Performance │ │  Logic/Bug   │  │
-  │   │  Analyzer   │ │  Analyzer   │ │  Analyzer    │  │
-  │   └─────────────┘ └─────────────┘ └──────────────┘  │
-  │   ┌─────────────┐ ┌─────────────┐                   │
-  │   │   Style     │ │   Secret    │                   │
-  │   │  Analyzer   │ │  Scanner    │                   │
-  │   └─────────────┘ └─────────────┘                   │
-  │         |               |              |             │
-  │         v               v              v             │
-  │  [Finding Aggregator]                                │
-  │   - Merge findings from all passes                   │
-  │   - Deduplicate overlapping findings                 │
-  │   - Confidence scoring (0.0 - 1.0)                   │
-  │   - Filter below org sensitivity threshold           │
-  │   - Prioritize: critical > warning > suggestion      │
-  │                                                      │
-  │  [Comment Generator]                                 │
-  │   - Format findings as PR review comments            │
-  │   - Generate code suggestion blocks                  │
-  │   - Group related findings per file                  │
-  │   - Cap total comments (max 25 per review)           │
-  │                                                      │
-  └──────────────────────────────────────────────────────┘
-         |
-         v
-[PR API Client]
-  - Post review comments via GitHub/GitLab API
-  - Set review status (approve / request changes / comment)
-  - Respect API rate limits (5,000 req/hour GitHub)
-         |
-         v
-[Feedback Collector] (async)
-  - Track: comment resolved, suggestion accepted, comment hidden
-  - Store in PostgreSQL for learning pipeline
-         |
-         v
-[Learning Pipeline] (offline, daily batch)
-  - Analyze acceptance/dismissal patterns
-  - Update confidence calibration model
-  - Identify high false-positive rule categories
-  - Generate org-specific tuning recommendations
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    git(["GitHub / GitLab / Bitbucket<br/>PR event: opened, synchronize, reopened"])
+    receiver(["Webhook Receiver<br/>HMAC-SHA256 verify + enqueue"])
+    queue[["Job Queue<br/>Redis Streams / SQS<br/>priority + head-SHA dedup"]]
+
+    subgraph orch["Review Orchestrator (200 concurrent workers)"]
+        direction TD
+        diffparser(["Diff Parser<br/>fetch diff, parse hunks, ID languages"])
+        ctxloader(["Context Loader<br/>fetch files, imports, types, tests"])
+        ctxassembler(["Context Assembler<br/>token budget + chunking"])
+        subgraph passes["Analysis Pipeline (parallel passes)"]
+            direction LR
+            security(["Security<br/>Analyzer"])
+            perfan(["Performance<br/>Analyzer"])
+            logicAn(["Logic/Bug<br/>Analyzer"])
+            styleAn(["Style<br/>Analyzer"])
+            secretAn(["Secret<br/>Scanner"])
+        end
+        aggregator(["Finding Aggregator<br/>merge, dedup, confidence score"])
+        commentgen(["Comment Generator<br/>suggestions, capped at 25/review"])
+        diffparser --> ctxloader --> ctxassembler --> passes
+        security --> aggregator
+        perfan --> aggregator
+        logicAn --> aggregator
+        styleAn --> aggregator
+        secretAn --> aggregator
+        aggregator --> commentgen
+    end
+
+    prapi(["PR API Client<br/>post review + status via provider API"])
+    feedback(["Feedback Collector<br/>async: resolved / accepted / hidden"])
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    learning(["Learning Pipeline<br/>offline daily batch"])
+
+    git --> receiver --> queue --> orch
+    orch --> prapi --> feedback
+    feedback --> pg
+    feedback --> learning
+
+    class git,receiver req
+    class queue base
+    class diffparser,ctxloader,ctxassembler base
+    class security,perfan,logicAn,styleAn,secretAn mathOp
+    class aggregator,commentgen train
+    class prapi,feedback,learning io
 ```
 
 ---
