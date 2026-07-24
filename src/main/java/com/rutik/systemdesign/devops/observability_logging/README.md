@@ -97,20 +97,20 @@ flowchart LR
     A(["Pods<br/>stdout / stderr"]) --> B("Node log files<br/>/var/log/containers/*.log")
     B --> C("Fluent Bit / Vector<br/>DaemonSet: tail + enrich")
     C --> D("Parse JSON, enrich<br/>redact PII, sample")
-    D --> E[("Elasticsearch/OpenSearch<br/>full-text index + Kibana")]
+    D --> E
+    E@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch /<br/>OpenSearch + Kibana", pos: "b", h: 44 }
     D --> F[("Loki<br/>label index + S3 chunks + Grafana")]
     E --> G(["Alerts / dashboards / search"])
     F --> G
-    G -.->|"trace_id"| H("Tempo / Jaeger<br/>correlated trace")
+    G -.->|"trace_id"| H
+    H@{ icon: "simple-icons:jaeger", form: "square", label: "Tempo / Jaeger", pos: "b", h: 44 }
 
     class A io
     class B req
     class C mathOp
     class D mathOp
-    class E base
     class F base
     class G io
-    class H frozen
 ```
 
 *Every pod's stdout/stderr is tailed by a node-level DaemonSet, parsed and enriched once, then fanned out to whichever backend a team chose — dashboards and alerts pivot back to a trace via the shared `trace_id`.*
@@ -133,7 +133,8 @@ flowchart LR
 
     subgraph LOKI["Loki: index labels only"]
         L1(["Labels: app, ns, level"]) --> L2("Tiny index")
-        L2 --> L3[("Compressed chunk<br/>in S3")]
+        L2 --> L3
+        L3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>compressed chunk", pos: "b", h: 44 }
         L3 -.->|"grep in window"| L4("Label + time<br/>scoped search")
     end
 
@@ -141,7 +142,6 @@ flowchart LR
     class E2 lossN
     class L1 io
     class L2 base
-    class L3 frozen
     class L4 train
 ```
 
