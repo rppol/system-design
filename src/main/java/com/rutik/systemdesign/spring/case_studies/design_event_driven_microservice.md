@@ -102,7 +102,8 @@ flowchart TD
 
     Client["Client HTTP"] --> OrderSvc["Order Service\nINSERT orders + INSERT outbox_events\n(same DB TX, PostgreSQL)"]
     OrderSvc --> OutboxPub["OutboxPublisher\n(@Scheduled 100ms)"]
-    OutboxPub --> Kafka1["Kafka: order.created"]
+    OutboxPub --> Kafka1
+    Kafka1@{ icon: "logos:kafka", form: "square", label: "Kafka: order.created", pos: "b", h: 44 }
     Kafka1 --> PaymentSvc["Payment Service\nconsumes order.created\ncharges customer via gateway"]
     Kafka1 --> InventorySvc["Inventory Service\nconsumes order.created\nreserves SKUs"]
     PaymentSvc -->|"payment.completed OR payment.failed"| SagaHandler["Order Service\nsaga handler"]
@@ -115,7 +116,6 @@ flowchart TD
 
     class Client io
     class OrderSvc,OutboxPub,OrderShipped base
-    class Kafka1 frozen
     class PaymentSvc,InventorySvc,FulfillmentSvc req
     class SagaHandler,Decision mathOp
     class Refund,CompDone lossN
