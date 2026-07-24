@@ -238,13 +238,12 @@ flowchart LR
     ca([Client A]) --> s1["API Server #1"]
     cb([Client B]) --> s2["API Server #2"]
     cc([Client C]) --> s3["API Server #3"]
-    s1 --> redis[("Redis Cluster<br/>atomic INCR / ZADD")]
+    s1 --> redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster", pos: "b", h: 44 }
     s2 --> redis
     s3 --> redis
 
     class ca,cb,cc io
     class s1,s2,s3 req
-    class redis base
 ```
 
 *All three API servers share one counter in Redis; a Lua script executes `ZADD` + `ZREMRANGEBYSCORE` + `ZCARD` atomically, so no race condition is possible across instances.*
@@ -943,7 +942,7 @@ flowchart LR
     alb --> s1["API #1"]
     alb --> s2["API #2"]
     alb --> s3["API #3<br/>...20 total"]
-    s1 --> redis[("Redis Cluster<br/>6 nodes, sliding window")]
+    s1 --> redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster", pos: "b", h: 44 }
     s2 --> redis
     s3 --> redis
 
@@ -951,7 +950,6 @@ flowchart LR
     class cf frozen
     class alb mathOp
     class s1,s2,s3 req
-    class redis base
 ```
 
 *Three defense layers: the external Cloudflare edge filters bots by IP before origin, the ALB terminates TLS and routes to 20 Spring Boot instances, and every instance enforces tier limits against a shared 6-node Redis cluster (3 primary, 3 replica) averaging 0.8ms latency (2ms p99).*
