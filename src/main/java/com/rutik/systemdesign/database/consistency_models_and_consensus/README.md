@@ -30,20 +30,14 @@ Consensus is the mechanism for these employees to agree: "We all confirm: entry 
 
 ## 4. Types / Architectures / Strategies
 
-```
-Model                | Guarantee                                  | Cost
----------------------|--------------------------------------------|-----------
-Linearizability      | Reads see the most recent write; total     | Highest
-                     | order consistent with real time            |
-Sequential           | All nodes see operations in the same order | High
-                     | (not necessarily real-time ordered)        |
-Causal               | Causally related ops seen in causal order  | Medium
-                     | Concurrent ops may differ across nodes     |
-Read-your-writes     | A client always sees its own writes        | Low
-Monotonic reads      | Reads never go backward in time            | Low
-Eventual             | All replicas converge to same value        | Lowest
-                     | (no timing guarantee)                      |
-```
+| Model | Guarantee | Cost |
+|-------|-----------|------|
+| Linearizability | Reads see the most recent write; total order consistent with real time | Highest |
+| Sequential | All nodes see operations in the same order (not necessarily real-time ordered) | High |
+| Causal | Causally related ops seen in causal order<br/>Concurrent ops may differ across nodes | Medium |
+| Read-your-writes | A client always sees its own writes | Low |
+| Monotonic reads | Reads never go backward in time | Low |
+| Eventual | All replicas converge to same value (no timing guarantee) | Lowest |
 
 ---
 
@@ -317,19 +311,15 @@ Concurrent add and remove: the add wins (because the add tag is not in the remov
 
 ### Paxos vs Raft
 
-```
-Aspect              | Paxos                       | Raft
---------------------|-----------------------------|--------------------------
-Design goal         | Correctness proof            | Understandability
-Leader              | Not required (multi-Paxos   | Required (all writes via
-                    | adds it), flexible           | leader)
-Log gaps            | Allowed                      | Not allowed (sequential)
-Phases per write    | 2 (prepare + accept)         | 1 (AppendEntries after
-                    |                              | leader established)
-Implementation      | Many correct variants exist  | Canonical implementation
-Understanding       | Hard (many edge cases)       | Easier (structured)
-Used in             | Google Spanner, Chubby       | etcd, CockroachDB, TiKV
-```
+| Aspect | Paxos | Raft |
+|--------|-------|------|
+| Design goal | Correctness proof | Understandability |
+| Leader | Not required (multi-Paxos adds it), flexible | Required (all writes via leader) |
+| Log gaps | Allowed | Not allowed (sequential) |
+| Phases per write | 2 (prepare + accept) | 1 (AppendEntries after leader established) |
+| Implementation | Many correct variants exist | Canonical implementation |
+| Understanding | Hard (many edge cases) | Easier (structured) |
+| Used in | Google Spanner, Chubby | etcd, CockroachDB, TiKV |
 
 ### Read Repair and Anti-Entropy
 
@@ -435,15 +425,13 @@ nodetool repair manually triggers this Merkle-tree comparison; comparing root ha
 
 ## 8. Tradeoffs
 
-```
-Model              | Availability | Latency  | Throughput | Complexity
--------------------|--------------|----------|------------|------------
-Linearizable       | CP           | High     | Low        | High
-Sequential         | CP           | High     | Low-Medium | High
-Causal             | Available    | Medium   | Medium     | Medium
-Eventual (CRDT)    | Available    | Low      | High       | Medium
-Eventual (LWW)     | Available    | Low      | High       | Low (with clock sync)
-```
+| Model | Availability | Latency | Throughput | Complexity |
+|-------|--------------|---------|------------|------------|
+| Linearizable | CP | High | Low | High |
+| Sequential | CP | High | Low-Medium | High |
+| Causal | Available | Medium | Medium | Medium |
+| Eventual (CRDT) | Available | Low | High | Medium |
+| Eventual (LWW) | Available | Low | High | Low (with clock sync) |
 
 ```mermaid
 quadrantChart
