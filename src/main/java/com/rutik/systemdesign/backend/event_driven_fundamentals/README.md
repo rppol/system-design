@@ -162,8 +162,10 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    BK1@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+
     subgraph CHORO["Choreography (no service knows the others)"]
-        OS(["Order Svc"]) -->|"OrderPlaced"| BK1("Broker (Kafka)")
+        OS(["Order Svc"]) -->|"OrderPlaced"| BK1
         BK1 -->|"OrderPlaced"| IV1(["Inventory Svc"])
         BK1 -->|"OrderPlaced"| PV1(["Payment Svc"])
         IV1 -.->|"InventoryReserved"| BK1
@@ -180,7 +182,7 @@ flowchart LR
     end
 
     class OS io
-    class BK1,BK2 base
+    class BK2 base
     class IV1,PV1 req
     class SO mathOp
     class IV2,PV2 train
@@ -633,7 +635,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    CUST(["Customer"]) --> OSVC(["Order Service"]) --> KFK("Kafka:<br/>orders.placed")
+    KFK@{ icon: "logos:kafka", form: "square", label: "Kafka:<br/>orders.placed", pos: "b", h: 44 }
+
+    CUST(["Customer"]) --> OSVC(["Order Service"]) --> KFK
 
     KFK --> ISO(["Inventory Saga<br/>Orchestrator"])
     KFK --> NSV(["Notification Svc<br/>(choreography)"])
@@ -647,7 +651,6 @@ flowchart TD
 
     class CUST io
     class OSVC,ISO mathOp
-    class KFK base
     class NSV,ASV req
     class INV,PAY train
     class SSM lossN
