@@ -30,28 +30,33 @@ flowchart TD
 
     subgraph postFlow["POST new post"]
         direction LR
-        pClient(["Client"]) --> pApi("API") --> pPg[("PostgreSQL<br/>posts, user_profiles")]
+        pClient(["Client"]) --> pApi("API") --> pPg
+        pPg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>posts, user_profiles", pos: "b", h: 44 }
         pApi -.->|"outbox event<br/>PostCreated"| pFanout{"Fan-out Service<br/>reads follower list"}
-        pFanout -->|"under 10K followers<br/>fan-out on write"| pCass[("Cassandra<br/>write to each<br/>follower's feed")]
+        pFanout -->|"under 10K followers<br/>fan-out on write"| pCass
+        pCass@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>write to each<br/>follower's feed", pos: "b", h: 44 }
         pFanout -->|"10K or more followers<br/>fan-out on read"| pAgg("Aggregate at read time<br/>celebrity feed + regular feed")
     end
 
     subgraph readFlow["READ feed"]
         direction LR
-        rClient(["Client"]) --> rApi("API") --> rRedis[("Redis feed cache<br/>top 50 posts, 60s TTL")]
+        rClient(["Client"]) --> rApi("API") --> rRedis
+        rRedis@{ icon: "logos:redis", form: "square", label: "Redis feed cache<br/>top 50 posts, 60s TTL", pos: "b", h: 44 }
         rRedis -->|"cache hit"| rReturn(["Return to client"])
-        rRedis -.->|"cache miss"| rCass[("Cassandra<br/>user_feed partition")]
+        rRedis -.->|"cache miss"| rCass
+        rCass@{ icon: "logos:cassandra", form: "square", label: "Cassandra<br/>user_feed partition", pos: "b", h: 44 }
         rCass --> rPaginate("Paginate by<br/>timestamp cursor") --> rFetch("Fetch post details<br/>Redis or PostgreSQL") --> rMerge("Merge celebrity posts<br/>fan-out on read") --> rReturn
     end
 
     subgraph trendFlow["Trending pipeline"]
         direction LR
-        tPost(["Post created"]) --> tKafka(["Kafka"]) --> tAgg("Trending Aggregator") --> tScore{"score = likes + comments<br/>+ shares, decay function"} --> tZset[("Redis Sorted Set<br/>trending:global, trending:tech")]
+        tPost(["Post created"]) --> tKafka --> tAgg("Trending Aggregator") --> tScore{"score = likes + comments<br/>+ shares, decay function"} --> tZset
+        tKafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+        tZset@{ icon: "logos:redis", form: "square", label: "Redis Sorted Set<br/>trending:global, trending:tech", pos: "b", h: 44 }
     end
 
     class pClient,rClient,rReturn,tPost io
-    class pApi,rApi,tKafka req
-    class pPg,pCass,rRedis,rCass,tZset base
+    class pApi,rApi req
     class pFanout,rPaginate,rFetch,rMerge,tAgg,tScore mathOp
     class pAgg frozen
 ```
