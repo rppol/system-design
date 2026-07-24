@@ -26,7 +26,8 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph Data["Data Pipeline"]
-        UP(["Seller upload (S3)"]) --> VAL["Validate\ncorrupt, small, NSFW"]
+        UP@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>Upload", pos: "b", h: 44 }
+        UP --> VAL["Validate\ncorrupt, small, NSFW"]
         VAL --> PRE["Ray preprocess\nresize 224 + normalize"]
         PRE --> DS[("DVC dataset\n10M + 1M/day")]
     end
@@ -38,8 +39,11 @@ flowchart TD
         ONX["ONNX opset 17"] --> TRT["TensorRT FP16/INT8\n8000 img/s per GPU"]
     end
     subgraph Serve["Serving - 100K QPS, P99 under 50ms"]
-        LB["NGINX load balancer"] --> GW["FastAPI gateway"]
-        GW --> CACHE{"Redis MD5 cache\n40% hit, 7d TTL"}
+        LB@{ icon: "logos:nginx", form: "square", label: "NGINX", pos: "b", h: 44 }
+        GW@{ icon: "logos:fastapi", form: "square", label: "FastAPI", pos: "b", h: 44 }
+        CACHE@{ icon: "logos:redis", form: "square", label: "Redis Cache<br/>40% hit, 7d TTL", pos: "b", h: 44 }
+        LB --> GW
+        GW --> CACHE
         CACHE -->|hit| RESP(["category + top5"])
         CACHE -->|miss| TS["TorchServe 20 GPU\nbatch 64 / 5ms delay"]
         TS --> RESP
@@ -52,12 +56,11 @@ flowchart TD
     TRT --> TS
     RESP --> DRIFT
 
-    class UP,RESP io
-    class VAL,PRE,GW,LB mathOp
+    class RESP io
+    class VAL,PRE mathOp
     class DS,MLF base
     class P1,P2 train
     class ONX,TRT,TS frozen
-    class CACHE req
     class DRIFT lossN
 ```
 
