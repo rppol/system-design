@@ -91,9 +91,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     act(["User actions\nclick, like, share, dwell, skip"])
-    kafka["Kafka\nevent stream"]
-    flink["Flink label construction\njoin actions to impressions, 48h window"]
-    fstore["Feature Store\nonline Redis / offline Hive"]
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    flink@{ icon: "simple-icons:apacheflink", form: "square", label: "Flink", pos: "b", h: 44 }
+    fstore[("Feature Store\nonline Redis / offline Hive")]
     mtrain["MMOE Training\nPyTorch 4xA100, 6h/week"]
     reg["Model Registry\nMLflow"]
     serve(["TorchServe"])
@@ -101,7 +101,6 @@ flowchart LR
     act --> kafka --> flink --> fstore --> mtrain --> reg --> serve
 
     class act,serve io
-    class kafka,flink mathOp
     class fstore base
     class mtrain train
     class reg base
