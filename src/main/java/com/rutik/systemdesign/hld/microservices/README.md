@@ -271,13 +271,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    pay("Payment Service") -->|"payment.completed"| topic("Kafka Topic<br/>payment-events")
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+
+    pay("Payment Service") -->|"payment.completed"| topic
     topic --> ord("Order Service<br/>update order status")
     topic --> notif("Notification Service<br/>send email")
     topic --> ana("Analytics Service<br/>record revenue")
 
     class pay train
-    class topic base
     class ord,notif,ana req
 ```
 
@@ -299,12 +300,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    user("User Service") --> udb("Users DB<br/>Postgres")
-    order("Order Service") --> odb("Orders DB<br/>MySQL")
-    payment("Payment Service") --> pdb("Payments DB<br/>Mongo")
+    udb@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    odb@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
+    pdb@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
+
+    user("User Service") --> udb
+    order("Order Service") --> odb
+    payment("Payment Service") --> pdb
 
     class user,order,payment train
-    class udb,odb,pdb base
 ```
 
 No cross-service arrows exist by design — each service's database is reachable only through that service's own API.
@@ -331,9 +335,11 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    wdb@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+
     subgraph WP["Write Path"]
         direction LR
-        c1([Client]) --> cmdapi("Command API") --> dom("Domain Model") --> wdb("Write DB<br/>Postgres")
+        c1([Client]) --> cmdapi("Command API") --> dom("Domain Model") --> wdb
     end
 
     subgraph RP["Read Path"]
@@ -349,7 +355,7 @@ flowchart LR
     class c1,c2 io
     class cmdapi,qapi req
     class dom,eh mathOp
-    class wdb,rdb base
+    class rdb base
     class eb mathOp
     class rm io
 ```
@@ -474,17 +480,24 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    mysql@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
+    mongo@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
+    bus@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
+    graf@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
     ext([External Clients<br/>Web Browser, Mobile]) --> gw("API GATEWAY<br/>Auth · Rate Limit<br/>Routing · SSL Term")
 
     gw --> user("User Service")
     gw --> order("Order Service")
     gw --> product("Product Service")
 
-    user --> pg("PostgreSQL")
-    order --> mysql("MySQL")
-    product --> mongo("MongoDB")
+    user --> pg
+    order --> mysql
+    product --> mongo
 
-    mysql --> bus("Event Bus<br/>Kafka")
+    mysql --> bus
 
     bus --> payment("Payment Service")
     bus --> notif("Notification Service")
@@ -495,17 +508,16 @@ flowchart TD
     subgraph OBS["Observability Layer (crosses all services)"]
         direction LR
         jaeger("Jaeger<br/>Tracing")
-        prom("Prometheus<br/>Metrics")
+        prom
         elk("ELK Stack<br/>Logs")
-        graf("Grafana<br/>Dashboards")
+        graf
     end
 
     class ext io
     class gw mathOp
     class user,order,product,payment,notif,analytics train
-    class pg,mysql,mongo,paydb base
-    class bus base
-    class jaeger,prom,elk,graf frozen
+    class paydb base
+    class jaeger,elk frozen
 ```
 
 Every request flows top to bottom through the gateway into a service and its own database; the Kafka event bus is the only path from the synchronous request-serving tier into the asynchronous Payment/Notification/Analytics tier. The observability layer sits outside the request path but instruments every one of these services.
@@ -865,25 +877,30 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    search@{ icon: "logos:elasticsearch", form: "square", label: "Elasticsearch", pos: "b", h: 44 }
+    udb@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    pdb@{ icon: "logos:mongodb", form: "square", label: "MongoDB", pos: "b", h: 44 }
+    odb@{ icon: "logos:mysql", form: "square", label: "MySQL", pos: "b", h: 44 }
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+
     browser([Browser / App]) --> gw("API Gateway<br/>Kong")
 
     gw --> user("User Svc")
     gw --> product("Product Catalog")
     gw --> order("Order Svc")
-    gw --> search("Search<br/>Elasticsearch")
+    gw --> search
 
-    user --> udb("Users DB<br/>Postgres")
-    product --> pdb("Products DB<br/>Mongo")
-    order --> odb("Orders DB<br/>MySQL")
+    user --> udb
+    product --> pdb
+    order --> odb
 
-    odb --> topic("Kafka<br/>order-events")
+    odb --> topic
     topic --> notif("Notification Svc")
     topic --> analytics("Analytics Svc")
 
     class browser io
     class gw mathOp
-    class user,product,order,search train
-    class udb,pdb,odb,topic base
+    class user,product,order train
     class notif,analytics req
 ```
 
