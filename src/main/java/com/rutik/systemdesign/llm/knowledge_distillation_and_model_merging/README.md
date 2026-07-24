@@ -580,32 +580,40 @@ flowchart TD
 
 ### Pruning Pipeline
 
-```
-Trained Model (7B params, FP16, 14GB)
-         |
-         v
-[Calibration Data Collection]  <-- 128 examples from representative distribution
-         |
-         v
-[Importance Scoring]
-  |-- Magnitude: |W_ij|
-  |-- Wanda:     |W_ij| * ||X_j||
-  |-- SparseGPT: Hessian-based optimal selection
-         |
-         v
-[Pruning Decision]
-  |-- Unstructured 50%: Remove individual weights (needs sparse HW)
-  |-- Structured: Remove entire heads/neurons (works on any HW)
-  |-- 2:4 Semi-structured: NVIDIA A100+ hardware acceleration
-         |
-         v
-[Recovery Fine-Tuning]  <-- 1-5% of original training compute
-         |
-         v
-[Evaluation]  <-- Compare to dense baseline
-         |
-         v
-Pruned Model (3.5B effective params, ~8GB, 1.5-2x faster)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TM(["Trained Model<br/>7B params, FP16, 14GB"])
+    CAL["Calibration Data Collection<br/>128 examples, representative distribution"]
+    SCORE["Importance Scoring<br/>Magnitude: |W_ij|<br/>Wanda: |W_ij| x ||X_j||<br/>SparseGPT: Hessian-based"]
+    DECIDE{"Pruning Decision"}
+    UNSTR["Unstructured 50%<br/>needs sparse HW"]
+    STRUCT["Structured<br/>works on any HW"]
+    SEMI["2:4 Semi-structured<br/>NVIDIA A100+ HW accel"]
+    RECOV["Recovery Fine-Tuning<br/>1-5% of original training compute"]
+    EVAL["Evaluation<br/>compare to dense baseline"]
+    PM(["Pruned Model<br/>3.5B effective params, ~8GB<br/>1.5-2x faster"])
+
+    TM --> CAL --> SCORE --> DECIDE
+    DECIDE --> UNSTR --> RECOV
+    DECIDE --> STRUCT --> RECOV
+    DECIDE --> SEMI --> RECOV
+    RECOV --> EVAL --> PM
+
+    class TM,PM io
+    class CAL req
+    class SCORE mathOp
+    class DECIDE base
+    class UNSTR,STRUCT,SEMI frozen
+    class RECOV,EVAL train
 ```
 
 **Stated plainly.** "The sparsity percentage is a claim about how many weights became zero. It is not a claim about the file size, and it is definitely not a claim about the speed — those depend entirely on whether the zeros can be *thrown away* or merely *stored*."
