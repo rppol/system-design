@@ -865,18 +865,17 @@ public class OrderService {
 
 ### Performance Benchmark: Clone Mechanisms for Large Objects (Java 17 LTS)
 
-```
 Benchmark: 10,000 clones of a GameEntity with:
-  - byte[] spriteAtlas: 2 MB (shared reference — not deep copied)
-  - BehaviorTree with HashMap of 20 state entries
-  - PhysicsBody with 6 float fields
+- byte[] spriteAtlas: 2 MB (shared reference — not deep copied)
+- BehaviorTree with HashMap of 20 state entries
+- PhysicsBody with 6 float fields
 
-Method                                | Time per clone | GC pressure | Correctness
---------------------------------------|----------------|-------------|------------
-Object.clone() shallow                |    ~0.05 µs    | very low    | BROKEN (shared mutable state)
-Copy constructor (deep, custom)       |    ~0.8  µs    | low         | Correct
-Serialization (ObjectOutputStream)    |   ~250   µs    | high        | Correct (if all Serializable)
-Jackson ObjectMapper.copy() approach  |   ~180   µs    | high        | Correct
+| Method | Time per clone | GC pressure | Correctness |
+|--------|-----------------|-------------|-------------|
+| Object.clone() shallow | ~0.05 µs | very low | BROKEN (shared mutable state) |
+| Copy constructor (deep, custom) | ~0.8 µs | low | Correct |
+| Serialization (ObjectOutputStream) | ~250 µs | high | Correct (if all Serializable) |
+| Jackson ObjectMapper.copy() approach | ~180 µs | high | Correct |
 
 Key numbers:
 - Custom deep clone via copy constructor: 0.8 µs × 500 spawns/sec = 0.4ms CPU / sec — negligible
@@ -887,7 +886,6 @@ Key numbers:
 Recommendation: use copy constructors for production game entity cloning.
 Serialization is acceptable only for infrequent deep-copy of complex object graphs
 (e.g., configuration snapshots copied once per minute, not 500/sec).
-```
 
 ### Migration Story: When to Use Prototype and When to Replace It
 
