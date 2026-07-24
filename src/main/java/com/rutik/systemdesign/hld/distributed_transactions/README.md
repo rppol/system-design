@@ -214,7 +214,8 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client([Client]) --> gw["API Gateway"]
+    client([Client]) --> gw
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API<br/>Gateway", pos: "b", h: 44 }
     gw --> orch
 
     subgraph orch["Saga Orchestrator<br/>(Temporal / Camunda / custom)"]
@@ -227,17 +228,16 @@ flowchart LR
     orch --> invDb[("Inventory DB<br/>+ outbox")]
     orch --> payDb[("Payment DB<br/>+ outbox")]
 
-    orderDb --> kafka(["Kafka (events)"])
+    orderDb --> kafka
     invDb --> kafka
     payDb --> kafka
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     kafka --> consumers["idempotent consumers"]
 
     class client io
-    class gw req
     class s1,s2,s3,s4 mathOp
     class comp lossN
     class orderDb,invDb,payDb base
-    class kafka base
     class consumers req
 ```
 
@@ -259,7 +259,7 @@ sequenceDiagram
     P-->>Co: 4. VOTE_YES<br/>(or VOTE_NO on lock/constraint failure)
     Note over Co: 5. collect votes from all participants<br/>6. write GLOBAL_COMMIT if ALL YES,<br/>else GLOBAL_ABORT, to durable log
     Co->>P: 7. send decision
-    Note over P: 8. apply decision - commit = durable<br/>writes + release locks;<br/>abort = discard + release locks
+    Note over P: 8. apply decision - commit = durable<br/>writes + release locks,<br/>abort = discard + release locks
     P-->>Co: 9. ACK
     Note over Co: 10. once all ACKs received,<br/>discard log entry for txn_id
 ```
@@ -494,9 +494,9 @@ quadrantChart
     x-axis Non-blocking --> Blocking
     y-axis Eventual --> Strong
     quadrant-1 Strong but blocking
-    quadrant-2 Strong and non-blocking (rare)
+    quadrant-2 Strong and non-blocking — rare
     quadrant-3 Eventual and non-blocking
-    quadrant-4 Eventual but blocking (avoid)
+    quadrant-4 Eventual but blocking — avoid
     "2PC": [0.92, 0.95]
     "3PC": [0.55, 0.78]
     "TCC": [0.3, 0.68]
@@ -846,7 +846,8 @@ flowchart TD
     end
 
     client --> walletSvc1
-    walletSvc1 -.->|"Debezium CDC<br/>tails outbox"| kafka(["Kafka topic<br/>wallet.funds-debited"])
+    walletSvc1 -.->|"Debezium CDC<br/>tails outbox"| kafka
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>wallet.funds-debited", pos: "b", h: 44 }
 
     subgraph paymentsSvc["payments-service (Saga step 2 - choreography)"]
         direction TB
@@ -867,7 +868,6 @@ flowchart TD
 
     class client io
     class w1,w2,w3 train
-    class kafka base
     class p1,p2 train
     class p3 mathOp
     class p4 train
