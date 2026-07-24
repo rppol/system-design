@@ -28,17 +28,15 @@ Imagine a hotel booking: reserve a flight (airline system), a hotel (hotel syste
 
 ## 4. Types / Architectures / Strategies
 
-```
-Pattern              | Consistency    | Coupling    | Failure Handling
----------------------|----------------|-------------|------------------
-2PC                  | Strong (ACID)  | Tight       | Coordinator SPOF, blocking
-3PC                  | Strong         | Tight       | Non-blocking, but not partition-safe
-XA Transactions      | Strong         | Tight       | Performance overhead, SPOF
-Saga (Choreography)  | Eventual       | Loose       | Compensating transactions
-Saga (Orchestration) | Eventual       | Medium      | Orchestrator manages rollback
-Outbox Pattern       | Eventual       | Loose       | At-least-once, idempotent consumer
-TCC (Try-Confirm-Cancel) | Strong     | Medium      | Reserve → confirm/cancel lifecycle
-```
+| Pattern | Consistency | Coupling | Failure Handling |
+|---------|-------------|----------|-------------------|
+| 2PC | Strong (ACID) | Tight | Coordinator SPOF, blocking |
+| 3PC | Strong | Tight | Non-blocking, but not partition-safe |
+| XA Transactions | Strong | Tight | Performance overhead, SPOF |
+| Saga (Choreography) | Eventual | Loose | Compensating transactions |
+| Saga (Orchestration) | Eventual | Medium | Orchestrator manages rollback |
+| Outbox Pattern | Eventual | Loose | At-least-once, idempotent consumer |
+| TCC (Try-Confirm-Cancel) | Strong | Medium | Reserve → confirm/cancel lifecycle |
 
 ---
 
@@ -110,13 +108,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     txn[("Order DB<br/>1 txn: order + outbox<br/>status PENDING")] --> relay("Relay / CDC<br/>Debezium tails WAL<br/>or polls")
-    relay -->|"publish, mark<br/>PUBLISHED"| topic(["Kafka topic<br/>order-events"])
+    relay -->|"publish, mark<br/>PUBLISHED"| topic@{ icon: "logos:kafka", form: "square", label: "Kafka topic<br/>order-events", pos: "b", h: 44 }
     topic --> inv("Inventory Service<br/>dedup by event_id")
     topic --> notif("Notification Service<br/>dedup by event_id")
 
     class txn base
     class relay mathOp
-    class topic req
     class inv,notif io
 ```
 
@@ -530,14 +527,12 @@ The lock's TTL expires mid-pause, so both clients briefly believe they hold it; 
 
 ## 8. Tradeoffs
 
-```
-Pattern     | Consistency  | Latency   | Complexity | Rollback     | Use case
-------------|--------------|-----------|------------|--------------|-------------------
-2PC         | Strong ACID  | High      | Medium     | Automatic    | Same-org services
-Saga        | Eventual     | Low       | High       | Compensating | Microservices
-Outbox      | Eventual     | ~100ms    | Medium     | N/A (events) | Reliable messaging
-TCC         | Strong       | Medium    | High       | Cancel phase | Financial reserves
-```
+| Pattern | Consistency | Latency | Complexity | Rollback | Use case |
+|---------|-------------|---------|------------|----------|----------|
+| 2PC | Strong ACID | High | Medium | Automatic | Same-org services |
+| Saga | Eventual | Low | High | Compensating | Microservices |
+| Outbox | Eventual | ~100ms | Medium | N/A (events) | Reliable messaging |
+| TCC | Strong | Medium | High | Cancel phase | Financial reserves |
 
 ---
 
