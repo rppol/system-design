@@ -160,8 +160,8 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     src([Raw sources · DB, events, APIs]) --> compute["Offline batch pipeline\ne.g. 30-day rolling avg spend"]
-    compute --> off["Offline Store · parquet\ntraining data"]
-    compute --> on["Online Store · Redis/DDB\nlow-latency serving sub-5ms"]
+    compute --> off[("Offline Store · parquet\ntraining data")]
+    compute --> on[("Online Store · Redis/DDB\nlow-latency serving sub-5ms")]
     reg["Feature Registry\nname, version, owner"] -.-> off
     reg -.-> on
     off --> tj["Training jobs\nbatch fetch"]
