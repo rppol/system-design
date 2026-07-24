@@ -273,14 +273,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    es([Event Source]) --> sns(SNS Topic)
-    sns --> q1(SQS Queue 1) --> l1(["Lambda<br/>billing"])
-    sns --> q2(SQS Queue 2) --> l2(["Lambda<br/>inventory"])
-    sns --> q3(SQS Queue 3) --> l3(["Lambda<br/>notification"])
+    es([Event Source]) --> sns
+    sns --> q1 --> l1
+    sns --> q2 --> l2
+    sns --> q3 --> l3
+
+    sns@{ icon: "logos:aws-sns", form: "square", label: "SNS Topic", pos: "b", h: 44 }
+    q1@{ icon: "logos:aws-sqs", form: "square", label: "SQS Queue 1", pos: "b", h: 44 }
+    q2@{ icon: "logos:aws-sqs", form: "square", label: "SQS Queue 2", pos: "b", h: 44 }
+    q3@{ icon: "logos:aws-sqs", form: "square", label: "SQS Queue 3", pos: "b", h: 44 }
+    l1@{ icon: "logos:aws-lambda", form: "square", label: "Lambda billing", pos: "b", h: 44 }
+    l2@{ icon: "logos:aws-lambda", form: "square", label: "Lambda inventory", pos: "b", h: 44 }
+    l3@{ icon: "logos:aws-lambda", form: "square", label: "Lambda notification", pos: "b", h: 44 }
 
     class es io
-    class sns,q1,q2,q3 base
-    class l1,l2,l3 req
 ```
 *One event triggers three independent Lambda consumers in parallel — the classic SNS fan-out to per-purpose SQS queues.*
 
@@ -768,7 +774,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    rider(["Rider App"]) --> gw("API Gateway")
+    rider(["Rider App"]) --> gw
     driver(["Driver App"]) --> gw
     gw --> locTopic("location-updates topic<br/>128 partitions, keyed by city")
 
@@ -782,8 +788,10 @@ flowchart LR
     locTopic --> eta["ETA Service<br/>Consumer Group: eta"]
     locTopic --> surge["Surge Pricing<br/>Consumer Group: surge"]
 
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+
     class rider,driver io
-    class gw,match mathOp
+    class match mathOp
     class locTopic,rideTopic base
     class dispatch,eta,surge,notify,billing,analytics req
 ```
