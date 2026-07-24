@@ -94,17 +94,18 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus<br/>server", pos: "b", h: 44 }
+
     t1(["node_exporter<br/>:9100"]) -->|"scrape 15s"| prom
     t2(["app<br/>:8080/metrics"]) -->|"scrape 15s"| prom
     t3(["kube-state-metrics"]) -->|"scrape 15s"| prom
-    sd["Service discovery<br/>k8s / EC2 + relabel"] --> prom["Prometheus server<br/>scrape → TSDB head<br/>→ 2h blocks<br/>rule eval"]
+    sd["Service discovery<br/>k8s / EC2 + relabel"] --> prom
     prom -->|"PromQL"| dash(["Dashboards<br/>Grafana / API"])
     prom -->|"firing alerts"| am["Alertmanager<br/>dedupe / group / route"]
     am --> recv(["PagerDuty<br/>Slack / email"])
 
     class t1,t2,t3,dash,recv io
     class sd,am mathOp
-    class prom base
 ```
 
 Targets expose `/metrics`; Prometheus scrapes them every 15s (default `scrape_interval`) directly or via service discovery, evaluates rules, and routes firing alerts to Alertmanager while PromQL serves dashboards straight from the TSDB.
@@ -121,8 +122,12 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    promA["Prom A"] --> sideA["sidecar"]
-    promB["Prom B"] --> sideB["sidecar"]
+    promA@{ icon: "logos:prometheus", form: "square", label: "Prometheus A", pos: "b", h: 44 }
+    promB@{ icon: "logos:prometheus", form: "square", label: "Prometheus B", pos: "b", h: 44 }
+    grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
+
+    promA --> sideA["sidecar"]
+    promB --> sideB["sidecar"]
     sideA -->|"ship 2h blocks"| objStore(["S3 / GCS<br/>object storage"])
     sideB -->|"ship 2h blocks"| objStore
     compactor["Compactor<br/>dedupe + downsample<br/>5m / 1h"] --> objStore
@@ -130,12 +135,10 @@ flowchart LR
     sideA -->|"StoreAPI recent"| querier["Thanos Querier<br/>fan-out + dedupe HA"]
     sideB -->|"StoreAPI recent"| querier
     storeGW --> querier
-    querier --> grafana(["Grafana"])
+    querier --> grafana
 
-    class promA,promB base
     class sideA,sideB,compactor,storeGW,querier mathOp
     class objStore frozen
-    class grafana io
 ```
 
 Each Prometheus ships 2h blocks to S3/GCS through a sidecar; the Compactor dedupes and downsamples them (5m/1h), and the Thanos Querier fans out across sidecars (recent data via StoreAPI) and the Store Gateway (historical data from S3) while deduping the HA replica pair before Grafana queries it.
