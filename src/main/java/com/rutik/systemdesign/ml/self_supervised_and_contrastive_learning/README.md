@@ -902,19 +902,31 @@ Dimensional collapse is when embeddings span only a low-dimensional subspace, wa
 
 **Scenario: Self-supervised pretraining for product image embeddings.** An e-commerce platform has a 50M-product catalog but only 100k labeled images. SimCLR with an NT-Xent contrastive loss pretrains a ResNet-50 backbone on 200M unlabeled product images, producing 256-dim embeddings. The pretrained encoder powers visual search and a category classifier that reaches strong accuracy with very few labels.
 
-```
-200M unlabeled product images
-        |
-   two augmented views per image (crop, color jitter, blur)
-        |
-   ResNet-50 encoder f(.) -> 2048d -> projection head g(.) -> 256d
-        |
-   NT-Xent loss: pull the two views together, push all others apart
-        |
-   freeze/fine-tune encoder
-        |
-   +--> visual search: cosine kNN  (recall@100 = 0.87)
-   +--> category head: 1k labels   (acc 0.94 vs 0.71 from scratch)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    img(["200M unlabeled<br/>product images"]) --> views["two augmented views<br/>crop, color jitter, blur"]
+    views --> enc["ResNet-50 encoder f(.)<br/>2048d"]
+    enc --> proj["projection head g(.)<br/>256d"]
+    proj --> loss["NT-Xent loss<br/>pull views together,<br/>push all others apart"]
+    loss --> ft["freeze / fine-tune<br/>encoder"]
+    ft --> vs(["visual search: cosine kNN<br/>recall@100 = 0.87"])
+    ft --> cat(["category head: 1k labels<br/>acc 0.94 vs 0.71 from scratch"])
+
+    class img io
+    class views base
+    class enc,proj train
+    class loss lossN
+    class ft base
+    class vs,cat io
 ```
 
 Downstream: visual search top-10 recall@100 = 0.87; category classification reaches 0.94 accuracy with only 1k labeled samples, versus 0.71 training from scratch on the same 1k labels. The label efficiency, 23 points from pretraining, is the whole point of SSL here.
