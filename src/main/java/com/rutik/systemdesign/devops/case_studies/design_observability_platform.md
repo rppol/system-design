@@ -192,7 +192,7 @@ flowchart TD
     s3l --> lq("querier +<br/>index-gateway")
     s3t --> tq("query-frontend +<br/>tempo querier")
 
-    mq --> grafana(["Grafana<br/>dashboards / Explore / alerting"])
+    mq --> grafana@{ icon: "logos:grafana", form: "square", label: "Grafana<br/>dashboards / Explore / alerting", pos: "b", h: 44 }
     lq --> grafana
     tq --> grafana
 
@@ -206,7 +206,7 @@ flowchart TD
     class mcomp,lcomp,tcomp mathOp
     class s3m,s3l,s3t base
     class mq,lq,tq req
-    class grafana,am,page io
+    class am,page io
 ```
 
 *Telemetry flows agent to gateway to a per-pillar distributor/ingester/compactor stack, lands in S3, and is read back through queriers into Grafana, with Alertmanager routing alerts out to PagerDuty/Slack.*
@@ -357,7 +357,7 @@ flowchart LR
 
     rw(["remote_write<br/>5M samples/s<br/>Snappy proto"]) --> dist("distributor<br/>validate + limits")
     dist -->|"hash(tenant+labels)<br/>ring shard RF=3"| ing("ingester × 20<br/>TSDB head + WAL fsync")
-    ing -->|"flush block<br/>every 2h"| s3[("S3<br/>blocks")]
+    ing -->|"flush block<br/>every 2h"| s3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>blocks", pos: "b", h: 44 }
     s3 -->|"read"| comp(("compactor<br/>merge / dedup /<br/>downsample"))
     comp -->|"write back"| s3
     s3 --> sg("store-gateway<br/>index-header cache")
@@ -367,7 +367,6 @@ flowchart LR
     class dist req
     class ing train
     class comp mathOp
-    class s3 base
     class sg req
     class q io
 ```
@@ -430,7 +429,7 @@ flowchart LR
 
     logs(["log lines (OTLP)<br/>20 TB/day"]) --> dist("distributor<br/>validate")
     dist -->|"hash ring RF=3<br/>stream = label set"| ing("ingester<br/>build + compress chunk")
-    ing -->|"flush at 1.5MB"| s3[("S3<br/>chunks + TSDB index")]
+    ing -->|"flush at 1.5MB"| s3@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>chunks + TSDB index", pos: "b", h: 44 }
     s3 --> ig("index-gateway<br/>cache")
     ig --> q("querier")
     q --> lq(["query (LogQL)"])
@@ -438,7 +437,6 @@ flowchart LR
     class logs io
     class dist req
     class ing train
-    class s3 base
     class ig req
     class q req
     class lq io
@@ -497,7 +495,7 @@ flowchart LR
 
     spans(["spans<br/>post tail-sample<br/>100K spans/s"]) --> dist("distributor")
     dist --> ing("ingester")
-    ing -->|"per-tenant block"| s3[("S3 block<br/>trace_id index")]
+    ing -->|"per-tenant block"| s3@{ icon: "logos:aws-s3", form: "square", label: "S3 block<br/>trace_id index", pos: "b", h: 44 }
     ing -.->|"span stream"| mg("metrics-generator")
     mg -.-> red(["RED metrics +<br/>service graph"])
     s3 --> q("querier<br/>fetch block by id")
@@ -506,7 +504,6 @@ flowchart LR
     class spans io
     class dist req
     class ing train
-    class s3 base
     class mg mathOp
     class red io
     class q req
@@ -682,7 +679,7 @@ flowchart TD
     select --> ingq("ingester.query<br/>recent data")
     select --> sgs("store-gateway.series<br/>S3 blocks")
     select --> sgm("store-gateway.merge")
-    sgs --> s3get("s3.getobject<br/>block chunk fetch")
+    sgs --> s3get@{ icon: "logos:aws-s3", form: "square", label: "s3.getobject<br/>block chunk fetch", pos: "b", h: 44 }
 
     class root io
     class split,merge mathOp
@@ -690,7 +687,6 @@ flowchart TD
     class select mathOp
     class ingq train
     class sgs,sgm req
-    class s3get base
 ```
 
 Golden signals to alarm on for the platform itself:
