@@ -98,8 +98,8 @@ flowchart TD
     App(["Application\n(any framework)"]) --> SDK
     SDK["Langfuse SDK\n(langfuse.observe decorator / manual)\nin-process async queue"] -- "batch HTTP (non-blocking, retries)" --> Server
     Server["Langfuse Server\n(self-hosted or cloud.langfuse.com)"] --> PG & CH
-    PG["PostgreSQL\n(metadata)"]
-    CH["ClickHouse\n(events / analytics)"]
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
+    CH@{ icon: "simple-icons:clickhouse", form: "square", label: "ClickHouse", pos: "b", h: 44 }
     PG & CH --> UI
     UI["Langfuse UI\n– Traces, Sessions\n– Metrics (cost, latency, quality)\n– Evals (human + LLM-as-judge)\n– Prompt management"]
 
@@ -109,7 +109,7 @@ flowchart TD
 
     class App io
     class SDK proc
-    class Server,PG,CH store
+    class Server store
     class UI proc
 ```
 
