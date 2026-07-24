@@ -455,14 +455,14 @@ flowchart LR
     Cron([cron]) --> BackupSh(backup.sh)
     BackupSh --> PgDump(pg_dump<br/>bad creds, empty stdout)
     PgDump -. "no pipefail:<br/>failure masked" .-> Gzip(gzip<br/>empty stream to tiny .gz)
-    Gzip --> S3Cp(aws s3 cp<br/>uploads empty .gz)
+    Gzip --> S3Cp
+    S3Cp@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
     S3Cp --> FalseGreen(["exit 0, monitoring shows success"])
 
     class Cron req
     class BackupSh mathOp
     class PgDump lossN
     class Gzip mathOp
-    class S3Cp base
     class FalseGreen lossN
 ```
 
