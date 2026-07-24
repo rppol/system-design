@@ -81,7 +81,8 @@ flowchart TD
         RLF["RateLimitFilter\nextract client key\ncall RedisRateLimiter\nset X-RateLimit-* headers"]
     end
 
-    RLF --> Redis[("Redis Cluster\ntoken bucket keys\nLua atomic decrement\nTTL-based key expiry")]
+    RLF --> Redis
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis Cluster<br/>token bucket keys<br/>Lua atomic decrement<br/>TTL-based key expiry", pos: "b", h: 60 }
     Redis --> Decision{"tokens available?"}
     Decision -->|"allowed"| Controller["Downstream Controller\n(business logic)"]
     Decision -->|"429 too many requests"| Resp429(["HTTP 429 + Retry-After header"])
@@ -89,7 +90,6 @@ flowchart TD
 
     class Req io
     class RLF base
-    class Redis frozen
     class Decision mathOp
     class Controller req
     class Resp429 lossN
