@@ -89,16 +89,16 @@ flowchart LR
     end
 
     subgraph STORE["Storage & Cache"]
-        tweetStore(Tweet Store<br/>Cassandra)
-        timelineCache(Timeline Cache<br/>Redis)
+        tweetStore@{ icon: "logos:cassandra", form: "square", label: "Tweet Store<br/>Cassandra", pos: "b", h: 44 }
+        timelineCache@{ icon: "logos:redis", form: "square", label: "Timeline Cache<br/>Redis", pos: "b", h: 44 }
         userGraph(User Graph Service)
-        objStore(Object Store<br/>S3 + CDN)
+        objStore@{ icon: "logos:aws-s3", form: "square", label: "Object Store<br/>S3 + CDN", pos: "b", h: 44 }
     end
 
-    mq(Message Queue<br/>Kafka)
+    mq@{ icon: "logos:kafka", form: "square", label: "Message Queue<br/>Kafka", pos: "b", h: 44 }
 
     subgraph CONSUMERS["Async Consumers"]
-        search(Search Service<br/>Elasticsearch)
+        search@{ icon: "logos:elasticsearch", form: "square", label: "Search Service<br/>Elasticsearch", pos: "b", h: 44 }
         notif(Notification Service)
         analytics(Analytics Service)
     end
@@ -117,10 +117,10 @@ flowchart LR
 
     class dns io
     class lb,fanoutSvc mathOp
-    class apiWrite,apiRead,mq req
+    class apiWrite,apiRead req
     class tweetSvc,timelineSvc train
-    class tweetStore,timelineCache,userGraph,objStore base
-    class search,notif,analytics mathOp
+    class userGraph base
+    class notif,analytics mathOp
 ```
 *Write path (blue-to-teal) lands tweets in Cassandra and hands off to the Fanout Service via Kafka; read path resolves through the Timeline Service straight to the Redis cache. Search/Notification/Analytics are all async Kafka consumers off the same event stream — none sit in the request-response critical path.*
 
@@ -184,7 +184,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Client requests<br/>home timeline"]) --> redisFetch(Fetch cached timeline<br/>Redis)
+    client(["Client requests<br/>home timeline"]) --> redisFetch@{ icon: "logos:redis", form: "square", label: "Fetch cached<br/>timeline (Redis)", pos: "b", h: 44 }
     client --> identify(Identify celebrity<br/>followees)
     identify --> celebFetch(Fetch celebrity tweets<br/>Tweet Store)
     redisFetch --> merge((Merge<br/>+ Rank))
@@ -192,7 +192,7 @@ flowchart LR
     merge --> response(["Ranked feed<br/>returned to client"])
 
     class client,response io
-    class redisFetch,celebFetch base
+    class celebFetch base
     class identify,merge mathOp
 ```
 *This is the read-time half of the hybrid model: the precomputed Redis timeline and a handful of live celebrity fetches (~5 per user, per "Why this works" above) run in parallel and converge at a single merge-and-rank step before the response goes back to the client.*
@@ -208,20 +208,17 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    tweetSvc(Tweet Service<br/>write + publish) --> cassandra(Cassandra)
-    tweetSvc --> kafka(Kafka<br/>tweet_event)
+    tweetSvc(Tweet Service<br/>write + publish) --> cassandra@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
+    tweetSvc --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>tweet_event", pos: "b", h: 44 }
     kafka --> fanout(Fanout Service<br/>consumes event)
     fanout --> userGraphSvc(User Graph Service<br/>lookup followers)
     userGraphSvc --> decision{Follower<br/>count?}
-    decision -->|"under 10K"| push(Push tweet_id to<br/>each follower's Redis)
+    decision -->|"under 10K"| push@{ icon: "logos:redis", form: "square", label: "Push to<br/>follower Redis", pos: "b", h: 44 }
     decision -->|"10K or more"| skip(Skip push<br/>pull at read time)
 
     class tweetSvc train
-    class cassandra base
-    class kafka req
     class fanout,decision mathOp
     class userGraphSvc base
-    class push train
     class skip frozen
 ```
 *The fan-out worker runs asynchronously off Kafka: it writes the tweet durably, then branches on follower count — the green push path for normal accounts, the purple skip-and-pull-later path for celebrities (the same threshold discussed in Option C above).*
@@ -380,17 +377,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    firehose(["Tweet Firehose"]) --> kafkaPart(Kafka<br/>partitioned by hashtag)
+    firehose(["Tweet Firehose"]) --> kafkaPart@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>by hashtag", pos: "b", h: 44 }
     kafkaPart --> streamCount(Stream Processing<br/>sliding window count)
     streamCount --> aggregator(Central Aggregator<br/>flush counts)
     aggregator --> topK(Top-K Selection<br/>heap / Count-Min Sketch)
-    topK --> redisTrending(Redis<br/>trending:region, TTL)
+    topK --> redisTrending@{ icon: "logos:redis", form: "square", label: "Redis<br/>trending:region", pos: "b", h: 44 }
     redisTrending --> api(["Trending API<br/>per region"])
 
     class firehose,api io
-    class kafkaPart req
     class streamCount,aggregator,topK mathOp
-    class redisTrending base
 ```
 *The four steps above form one pipeline: hashtag partitioning gives counting parallelism, the sliding window bounds memory to 12 buckets, and only the winning top-K survive into the Redis-served, per-region result set.*
 
@@ -447,7 +442,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     userAction(["User Action"]) --> actionSvc(Action Service<br/>writes to DB)
-    actionSvc --> kafka(Kafka<br/>notification_events)
+    actionSvc --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>notification_events", pos: "b", h: 44 }
     kafka --> notifSvc(Notification Service<br/>consumer)
     notifSvc --> prefCheck(Preference Check<br/>DND, frequency)
     prefCheck --> aggregation(Aggregation<br/>batch similar events)
@@ -458,7 +453,6 @@ flowchart LR
 
     class userAction io
     class actionSvc train
-    class kafka req
     class notifSvc,prefCheck,aggregation,router mathOp
     class push,email io
     class inapp base
@@ -495,19 +489,17 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     client(["Client"]) --> uploadSvc(Media Upload Service<br/>pre-signed URL)
-    uploadSvc --> s3Raw(S3<br/>raw upload)
-    s3Raw --> kafka(Kafka<br/>media_uploaded)
+    uploadSvc --> s3Raw@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>raw upload", pos: "b", h: 44 }
+    s3Raw --> kafka@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>media_uploaded", pos: "b", h: 44 }
     kafka --> mediaProc(Media Processing<br/>Service, async)
     mediaProc --> imgProc(Image: resize,<br/>compress, thumbnails)
     mediaProc --> vidProc(Video: transcode,<br/>extract thumbnail)
-    imgProc --> s3Processed(S3<br/>processed versions)
+    imgProc --> s3Processed@{ icon: "logos:aws-s3", form: "square", label: "S3<br/>processed", pos: "b", h: 44 }
     vidProc --> s3Processed
-    s3Processed --> cdn(["CDN<br/>CloudFront / Fastly"])
+    s3Processed --> cdn@{ icon: "logos:aws-cloudfront", form: "square", label: "CDN<br/>CloudFront/Fastly", pos: "b", h: 44 }
 
-    class client,cdn io
+    class client io
     class uploadSvc,mediaProc,imgProc,vidProc mathOp
-    class s3Raw,s3Processed base
-    class kafka req
 ```
 *The client uploads directly to S3 via a pre-signed URL (bypassing the app servers for the heavy bytes); processing is fully async off a Kafka event, and the CDN is the only thing that ever talks to end users for media reads.*
 
