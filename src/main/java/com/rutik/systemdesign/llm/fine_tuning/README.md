@@ -306,36 +306,30 @@ two-GPU job into one that runs on a single consumer card. This is the whole reas
 fine-tuning became accessible outside research labs.
 
 ### Fine-Tuning Pipeline
-```
-Pre-trained Base Model
-          |
-          v
-[Dataset Preparation]
-  Format into prompt template
-  Tokenize + create attention masks
-  Pack sequences for efficiency
-          |
-          v
-[PEFT Configuration]
-  LoRA: target_modules=["q_proj", "v_proj"]
-  r=16, alpha=32, dropout=0.05
-          |
-          v
-[Training Loop]
-  LR: 2e-4 (LoRA params only)
-  Epochs: 2-3
-  Batch: 4-16 with gradient accumulation
-  Warmup: 3% of steps
-          |
-          v
-[Evaluation]
-  Held-out test set
-  Task-specific metrics
-          |
-          v
-[Merge + Export]
-  Merge LoRA weights into base model
-  Export to GGUF / SafeTensors
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    BASEM(["Pre-trained<br/>Base Model"])
+    DATA["Dataset Prep<br/>Format prompt template<br/>Tokenize + pack sequences"]
+    PEFT["PEFT Config<br/>target_modules=q_proj,v_proj<br/>r=16, alpha=32, dropout=0.05"]
+    TRAIN["Training Loop<br/>LR 2e-4, epochs 2-3<br/>batch 4-16 + grad accum, 3% warmup"]
+    EVAL["Evaluation<br/>Held-out test set<br/>Task-specific metrics"]
+    MERGE(["Merge + Export<br/>GGUF / SafeTensors"])
+
+    BASEM --> DATA --> PEFT --> TRAIN --> EVAL --> MERGE
+
+    class BASEM,MERGE io
+    class DATA,PEFT req
+    class TRAIN train
+    class EVAL base
 ```
 
 ---
