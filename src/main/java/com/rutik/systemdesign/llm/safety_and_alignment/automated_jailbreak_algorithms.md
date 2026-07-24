@@ -334,22 +334,31 @@ flowchart TD
 
 ### 5.3 TAP Tree Search with Pruning
 
-```
-                    [root: initial harmful request]
-                              |
-            +-----------------+-----------------+
-            v                 v                 v
-       [child 1]          [child 2]         [child 3]
-     attacker-LLM       attacker-LLM       attacker-LLM
-       refinement         refinement         refinement
-            |                 |                 |
-       judge score:       judge score:      judge score:
-       on-topic, low      on-topic, med     OFF-TOPIC -> PRUNED
-       jailbreak score    jailbreak score        x
-            |                 |
-       expand further    expand further
-       (depth+1)         (depth+1, becomes
-                          best candidate)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Root(["Root: initial harmful request"]) --> C1
+    Root --> C2
+    Root --> C3
+    C1["Child 1<br/>attacker-LLM refinement"] --> J1
+    C2["Child 2<br/>attacker-LLM refinement"] --> J2
+    C3["Child 3<br/>attacker-LLM refinement"] --> J3
+    J1{"Judge: on-topic<br/>low jailbreak score"} --> E1["Expand further<br/>depth+1"]
+    J2{"Judge: on-topic<br/>med jailbreak score"} --> E2["Expand further<br/>depth+1<br/>becomes best candidate"]
+    J3{"Judge: OFF-TOPIC<br/>pruned"} --> P3(["Branch discarded"])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+    classDef warn   fill:#1e2127,stroke:#e06c75,color:#abb2bf
+
+    class Root io
+    class C1,C2,C3 llm
+    class J1,J2 decide
+    class J3 warn
+    class E1,E2 proc
+    class P3 warn
 ```
 
 ### 5.4 Layered Defense Pipeline
