@@ -63,66 +63,81 @@ Durability is especially critical — and qualitatively different from ordinary 
 
 ### Checkpoint Lifecycle and Crash Recovery
 
-```
-NORMAL EXECUTION:
-                  +---------+     +---------+     +---------+
-  Start  -------> | Tool 1  | --> | Tool 2  | --> | Tool 3  |
-                  +---------+     +---------+     +---------+
-                       |               |               |
-                  CHECKPOINT       CHECKPOINT       CHECKPOINT
-                  (step=1)         (step=2)         (step=3)
-                  written to DB    written to DB    written to DB
-                       |               |               |
-                       v               v               v
-                  +-----------------------------------------+
-                  |         Checkpoint Store (Postgres)     |
-                  | thread_id | step | state_json | ts      |
-                  +-----------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-CRASH AT STEP 2:
-  Process crash between Tool 2 and Tool 3.
-  DB holds checkpoint at step=2.
+    subgraph Normal["Normal Execution"]
+        direction LR
+        start(["Start"]) --> t1["Tool 1"] --> t2["Tool 2"] --> t3["Tool 3"]
+        t1 -.-> cp1["Checkpoint<br/>step = 1"]
+        t2 -.-> cp2["Checkpoint<br/>step = 2"]
+        t3 -.-> cp3["Checkpoint<br/>step = 3"]
+        cp1 --> pg
+        cp2 --> pg
+        cp3 --> pg
+        pg@{ icon: "logos:postgresql", form: "square", label: "Checkpoint Store<br/>thread_id · step · state_json · ts", pos: "b", h: 44 }
+    end
 
-RECOVERY:
-  Process restart
-       |
-       v
-  Load checkpoint (thread_id) from DB
-       |
-  state.current_step == 2
-       |
-  Skip Tool 1, Tool 2 (already in tool_calls_made)
-       |
-  Resume at Tool 3
-       |
-  Continue to completion
+    subgraph Crash["Crash at Step 2"]
+        direction LR
+        crash["Process crash<br/>between Tool 2 and Tool 3"] --> held["DB holds checkpoint<br/>at step = 2"]
+    end
+
+    subgraph Recovery["Recovery"]
+        direction LR
+        restart(["Process restart"]) --> load["Load checkpoint<br/>thread_id from DB"]
+        load --> chk{"state.current_step<br/>== 2 ?"}
+        chk -->|"yes"| skip["Skip Tool 1, Tool 2<br/>already in tool_calls_made"]
+        skip --> resume["Resume at Tool 3"]
+        resume --> done(["Continue to completion"])
+    end
+
+    pg -.-> held
+    held --> restart
+
+    class start,done io
+    class t1,t2,t3,resume train
+    class cp1,cp2,cp3,skip,chk mathOp
+    class crash,held lossN
+    class restart,load req
 ```
 
 ### Idempotency Flow for Write-Side-Effect Tool Calls
 
-```
-Agent issues write tool call with idempotency_key:
-  key = SHA256("git_commit:" + diff_hash)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-          +-------------------------------------+
-          |  IdempotentToolExecutor.execute()   |
-          |                                     |
-          |  1. CHECK Redis:                    |
-          |     GET idempotency:{key}           |
-          |                                     |
-          |  2a. Cache HIT (TTL 24h):           |
-          |      return cached ToolResult       |
-          |      (NO tool re-execution)         |
-          |                                     |
-          |  2b. Cache MISS:                    |
-          |      execute tool                   |
-          |      SET idempotency:{key} = result |
-          |      EXPIRE key 86400               |
-          |      return ToolResult              |
-          +-------------------------------------+
-                         |
-                    ToolResult returned to agent
-                    Agent checkpoints state with result
+    issue["Agent issues write tool call<br/>idempotency_key = SHA256(git_commit + diff_hash)"] --> check["IdempotentToolExecutor.execute()<br/>1. CHECK cache: GET idempotency:{key}"]
+    check --> redis
+    redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+    redis --> hit{"Cache hit?<br/>TTL 24h"}
+    hit -->|"HIT"| cached["Return cached ToolResult<br/>NO tool re-execution"]
+    hit -->|"MISS"| exec["Execute tool<br/>SET idempotency:{key} = result<br/>EXPIRE key 86400"]
+    exec --> result["Return ToolResult"]
+    cached --> agentResult["ToolResult returned to agent"]
+    result --> agentResult
+    agentResult --> ckpt["Agent checkpoints state<br/>with result"]
+
+    class issue,check req
+    class hit mathOp
+    class cached train
+    class exec,result base
+    class agentResult io
+    class ckpt lossN
 ```
 
 ### Temporal Workflow for Durable Agent Execution
