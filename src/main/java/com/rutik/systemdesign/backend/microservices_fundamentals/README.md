@@ -173,13 +173,12 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    OrderSvc(["Order Service"]) --> OrderDB[("Order Postgres")]
-    PaymentSvc(["Payment Service"]) --> PaymentDB[("Payment Postgres")]
-    UserSvc(["User Service"]) --> UserDB[("User MySQL")]
+    OrderSvc(["Order Service"]) --> OrderDB@{ icon: "logos:postgresql", form: "square", label: "Order<br/>Postgres", pos: "b", h: 44 }
+    PaymentSvc(["Payment Service"]) --> PaymentDB@{ icon: "logos:postgresql", form: "square", label: "Payment<br/>Postgres", pos: "b", h: 44 }
+    UserSvc(["User Service"]) --> UserDB@{ icon: "logos:mysql", form: "square", label: "User<br/>MySQL", pos: "b", h: 44 }
     OrderSvc -.->|"HTTP or event<br/>never direct DB"| PaymentSvc
 
     class OrderSvc,PaymentSvc,UserSvc train
-    class OrderDB,PaymentDB,UserDB base
 ```
 *Rule: Service A never connects to Service B's database directly — it calls Service B's API (or reacts to its events) to get data.*
 
@@ -232,13 +231,12 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Order(["Order Service"]) -.->|"order.placed event"| Kafka["Kafka Topic"]
+    Order(["Order Service"]) -.->|"order.placed event"| Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka Topic", pos: "b", h: 44 }
     Kafka --> Notify["Notification Svc<br/>(sends email)"]
     Kafka --> Analytics["Analytics Svc<br/>(records event)"]
     Kafka --> Loyalty["Loyalty Svc<br/>(adds points)"]
 
     class Order train
-    class Kafka req
     class Notify,Analytics,Loyalty train
 ```
 *Order Service publishes once and returns immediately; three independent consumers react on their own schedule without blocking order creation.*
@@ -652,7 +650,7 @@ flowchart LR
 
     subgraph After["After"]
         direction LR
-        C2(["Client"]) --> N2{"Nginx"}
+        C2(["Client"]) --> N2@{ icon: "logos:nginx", form: "square", label: "Nginx", pos: "b", h: 44 }
         N2 --> M2["Rails Monolith<br/>(other routes)"]
         N2 -->|"/api/v1/payments"| PS2["Spring Boot<br/>Payment Service"]
         PS2 --> DB2[("payments_postgres")]
@@ -660,7 +658,6 @@ flowchart LR
 
     class C1,C2 io
     class M1,M2 frozen
-    class N2 mathOp
     class PS2 train
     class DB1,DB2 base
 ```
@@ -695,7 +692,7 @@ flowchart TD
     Payment --> PaymentDB[("payments_pg")]
     Customer --> CustomerDB[("users_pg")]
 
-    Order -.->|"order.placed"| Kafka["Kafka"]
+    Order -.->|"order.placed"| Kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     Kafka --> Notify["Notification<br/>Service"]
     Kafka --> Inventory["Inventory Svc<br/>(reserve stock)"]
 
@@ -703,7 +700,6 @@ flowchart TD
     class GW mathOp
     class Catalog,Order,Payment,Customer train
     class CatalogDB,OrderDB,PaymentDB,CustomerDB base
-    class Kafka req
     class Notify,Inventory train
 ```
 *Twelve months in: four gateway-routed services each own their database, and the order.placed event fans out to two more downstream consumers — the monolith is gone from this path entirely.*
