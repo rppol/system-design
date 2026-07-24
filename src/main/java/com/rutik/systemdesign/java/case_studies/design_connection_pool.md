@@ -108,7 +108,7 @@ flowchart TD
     AT["Application Threads\nthread-1 · thread-2 · thread-3 · ... · thread-N"]
     CP["ConnectionPool\navailable: ArrayBlockingQueue of PooledConnection (bounded)\nallConnections: ConcurrentHashMap.newKeySet()\npoolSize: AtomicInteger (CAS-guarded creation)\nleakTracker: ConcurrentHashMap of PooledConnection to LeakInfo\nclosed: volatile boolean"]
     SES["ScheduledExecutorService\n(daemon, pool-health-check)\nruns every 30 s\ndrainTo, then isValid(2), then requeue"]
-    DB["Database (PostgreSQL / MySQL)\neach PooledConnection = 1 TCP socket\n+ 1 backend process"]
+    DB[("Database (PostgreSQL / MySQL)\neach PooledConnection = 1 TCP socket\n+ 1 backend process")]
 
     AT -->|"acquire()"| CP
     AT -->|"release()"| CP
