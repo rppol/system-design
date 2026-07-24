@@ -184,8 +184,8 @@ flowchart TD
 
     subgraph Shared["Shared Services"]
         direction LR
-        cache["Cache<br/>Redis"]
-        queue["Queue<br/>Kafka"]
+        cache@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
+        queue@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
     end
 
     join1 --> cache
@@ -205,8 +205,6 @@ flowchart TD
     class cdn base
     class lb mathOp
     class s1,s2,s3 train
-    class cache base
-    class queue req
     class dbp base
     class dbr frozen
     class join1 mathOp
@@ -603,16 +601,19 @@ flowchart TD
     gw --> wspool["Gateway WS Pool<br/>sharded by guild_id"]
     sess --> shard["Guild Shard<br/>Erlang/Elixir actor<br/>1 process per guild"]
     wspool --> shard
-    shard --> cass[("Cassandra<br/>messages")]
+    shard --> cass
     shard --> scylla[("ScyllaDB<br/>members")]
-    shard --> redis[("Redis<br/>presence")]
+    shard --> redis
+
+    cass@{ icon: "logos:cassandra", form: "square", label: "Cassandra", pos: "b", h: 44 }
+    redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
 
     class cf frozen
     class gw io
     class sess mathOp
     class wspool req
     class shard train
-    class cass,scylla,redis base
+    class scylla base
 ```
 
 Cloudflare (purple) is the external edge dependency; the gateway routes each connection by two independent keys — sticky by `user_id` for session affinity, sharded by `guild_id` for the WebSocket pool — both funneling into the per-guild actor (green), which is the only process that touches the three backing stores (gold).
