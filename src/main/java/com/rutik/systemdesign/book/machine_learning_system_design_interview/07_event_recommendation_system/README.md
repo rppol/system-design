@@ -895,17 +895,24 @@ build one, which is exactly why §7.4's attribute features do the heavy lifting.
 
 **The three-stage funnel, by candidate count.**
 
-```
-1,000,000 events
-   │  event filtering  (geo radius + date window + user filters — cheap, no model)
-   ▼
-   ~300 candidates
-   │  ranking service  (hydrate features, score P(register), sort — the model runs here)
-   ▼
-   ~100 ranked
-   │  re-ranking       (diversity, dedup, remove already-registered — business logic)
-   ▼
-   final feed
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["1,000,000<br/>events"]) -->|"event filtering<br/>geo + date + user filters"| B(["~300<br/>candidates"])
+    B -->|"ranking service<br/>hydrate + score P(register)"| C(["~100<br/>ranked"])
+    C -->|"re-ranking<br/>diversity · dedup · remove registered"| D(["Final<br/>feed"])
+
+    class A io
+    class B req
+    class C mathOp
+    class D base
 ```
 
 Caption: each stage is more expensive per item than the last, so the pipeline spends its cheap filter
