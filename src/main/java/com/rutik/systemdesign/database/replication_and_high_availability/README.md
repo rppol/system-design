@@ -30,20 +30,18 @@ High availability adds a protocol: when the master ledger is lost, the most up-t
 
 ## 4. Types / Architectures / Strategies
 
-```
-Topology            | Description                      | Use Case
---------------------|----------------------------------|----------------------------
-Single-primary      | One writer, N readers            | Most OLTP workloads
-Multi-primary       | Multiple writers, conflict mgmt  | Multi-region active-active
-Leaderless          | Any node accepts writes          | Dynamo, Cassandra, Riak
-Cascading           | Replica of a replica             | Reduce primary load
+| Topology | Description | Use Case |
+|----------|--------------|----------|
+| Single-primary | One writer, N readers | Most OLTP workloads |
+| Multi-primary | Multiple writers, conflict mgmt | Multi-region active-active |
+| Leaderless | Any node accepts writes | Dynamo, Cassandra, Riak |
+| Cascading | Replica of a replica | Reduce primary load |
 
-Replication Method  | Description                      | Lag Profile
---------------------|----------------------------------|----------------------------
-Streaming (physical)| Raw WAL bytes, page-level changes| Lowest lag (sub-second)
-Logical             | Row-level change events (CDC)    | Slightly higher lag, selective
-Statement-based     | SQL statements                   | Non-deterministic (avoid)
-```
+| Replication Method | Description | Lag Profile |
+|---------------------|--------------|--------------|
+| Streaming (physical) | Raw WAL bytes, page-level changes | Lowest lag (sub-second) |
+| Logical | Row-level change events (CDC) | Slightly higher lag, selective |
+| Statement-based | SQL statements | Non-deterministic (avoid) |
 
 ---
 
@@ -68,17 +66,19 @@ flowchart TD
         AG3(Agent 3<br/>replica)
     end
     DCS -->|"leader lease"| Agents
-    AG1 --> PG1(PostgreSQL<br/>Primary)
-    AG2 --> PG2(PostgreSQL<br/>Standby)
-    AG3 --> PG3(PostgreSQL<br/>Standby)
+    AG1 --> PG1
+    AG2 --> PG2
+    AG3 --> PG3
     PG1 -.->|"WAL stream"| PG2
     PG1 -.->|"WAL stream"| PG3
+
+    PG1@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Primary", pos: "b", h: 44 }
+    PG2@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Standby", pos: "b", h: 44 }
+    PG3@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>Standby", pos: "b", h: 44 }
 
     class DCS base
     class AG1 train
     class AG2,AG3 frozen
-    class PG1 train
-    class PG2,PG3 frozen
 ```
 
 **Failover sequence.** Losing the primary's heartbeat is only the first of six state transitions Patroni walks through before traffic reaches a new primary.
@@ -406,16 +406,14 @@ SHOW REPLICA STATUS\G
 
 ## 8. Tradeoffs
 
-```
-Mode                    | RPO      | RTO         | Throughput Impact | Complexity
-------------------------|----------|-------------|-------------------|------------
-Async replication       | Seconds  | 30-120s     | None              | Low
-Sync (1 standby, LAN)   | 0        | 30-60s      | +1ms/write        | Medium
-Sync (1 standby, WAN)   | 0        | 30-60s      | +50-200ms/write   | Medium
-Multi-primary (active)  | 0        | 0 (no fail) | Conflict overhead | Very High
-Patroni HA              | Seconds  | 15-30s      | None              | Medium
-Cloud HA (RDS Multi-AZ) | 0        | 60-120s     | None (+3ms AZ)    | Low (managed)
-```
+| Mode | RPO | RTO | Throughput Impact | Complexity |
+|------|-----|-----|--------------------|------------|
+| Async replication | Seconds | 30-120s | None | Low |
+| Sync (1 standby, LAN) | 0 | 30-60s | +1ms/write | Medium |
+| Sync (1 standby, WAN) | 0 | 30-60s | +50-200ms/write | Medium |
+| Multi-primary (active) | 0 | 0 (no fail) | Conflict overhead | Very High |
+| Patroni HA | Seconds | 15-30s | None | Medium |
+| Cloud HA (RDS Multi-AZ) | 0 | 60-120s | None (+3ms AZ) | Low (managed) |
 
 The RTO column converts directly into the availability number the business actually signs up for:
 
