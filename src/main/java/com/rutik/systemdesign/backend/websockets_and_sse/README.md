@@ -189,7 +189,7 @@ flowchart TD
     subgraph withredis["With Redis Pub/Sub"]
         direction LR
         alice2(["Alice sends<br/>to Room 1"]) --> srv1b["Server 1"]
-        srv1b -->|"PUBLISH room:1"| redis["Redis Pub/Sub"]
+        srv1b -->|"PUBLISH room:1"| redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
         redis -->|"broadcast"| srv2b["Server 2<br/>subscribed to room:1"]
         srv2b --> delivered(["Charlie, Dave<br/>receive it"])
     end
@@ -199,7 +199,6 @@ flowchart TD
     class alice1,alice2 io
     class srv1a,srv1b,srv2b mathOp
     class srv2a,lost lossN
-    class redis base
     class delivered train
 ```
 
@@ -590,14 +589,13 @@ flowchart LR
     lb --> s2["WebSocket Server 2<br/>10k connections"]
     lb --> s3["WebSocket Server 3<br/>10k connections"]
 
-    feed(["Price Feed Service"]) -->|"PUBLISH AAPL:151.23:151.24"| redis["Redis Pub/Sub"]
+    feed(["Price Feed Service"]) -->|"PUBLISH AAPL:151.23:151.24"| redis@{ icon: "logos:redis", form: "square", label: "Redis", pos: "b", h: 44 }
     redis -.->|"broadcast"| s1
     redis -.->|"broadcast"| s2
     redis -.->|"broadcast"| s3
 
     class lb,feed io
     class s1,s2,s3 train
-    class redis base
 ```
 
 Sticky routing only decides which of the 3 servers a trader's connection lands on; delivery itself goes through Redis, so any server can publish a price tick and every server — and therefore every subscribed trader — receives it.
