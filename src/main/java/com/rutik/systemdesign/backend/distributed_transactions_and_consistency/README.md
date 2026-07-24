@@ -375,12 +375,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     svc("Service write path<br/>DB Transaction:<br/>INSERT orders +<br/>INSERT outbox_events") -->|"DB WAL<br/>/ binlog"| connector("Debezium Connector<br/>tails WAL")
-    connector --> topic(["Kafka Topic"])
+    connector --> topic
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka Topic", pos: "b", h: 44 }
     topic --> consumer(["Consumer<br/>idempotent inbox"])
 
     class svc req
     class connector mathOp
-    class topic req
     class consumer io
 ```
 
