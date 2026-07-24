@@ -96,7 +96,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    CL(["Clients<br/>mobile / web app"]) -->|"POST /transfers,<br/>Idempotency-Key"| GW("API Gateway<br/>authn, rate limit, TLS")
+    CL(["Clients<br/>mobile / web app"]) -->|"POST /transfers,<br/>Idempotency-Key"| GW
 
     GW --> WTS("Wallet Transfer Service<br/>P2P, §4.1-§4.3")
     GW --> TUS("Top-Up Service<br/>bank/card to wallet, async")
@@ -109,17 +109,19 @@ flowchart LR
     PSPC --> BCN(["Bank / Card Network<br/>settles in minutes to days"])
     PSPR --> BRTP(["Bank ACH/RTP<br/>1-3 days standard, minutes instant"])
 
-    LDB -->|outbox| KFK(["Kafka<br/>topic: wallet.*"])
+    LDB -->|outbox| KFK
 
     KFK --> NOT(["Notification Service<br/>push: you got paid"])
     KFK --> FRD{"Fraud / AML Engine<br/>§4.6"}
     KFK --> REC("Reconciliation Service<br/>nightly ledger vs balance")
 
+    GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    KFK@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+
     class CL io
-    class GW mathOp
     class WTS train
     class TUS,WDS req
-    class LDB,KFK base
+    class LDB base
     class PSPC,PSPR,BCN,BRTP frozen
     class NOT io
     class FRD,REC mathOp
