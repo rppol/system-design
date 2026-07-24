@@ -546,14 +546,13 @@ means the run is degrading (bad data, LR too high); a curve that flattens *early
 saturated what this model size can extract and the fix is a bigger `N`, not more `D`.
 
 **Loss spike classification:**
-```
-Spike Type          | Magnitude  | Duration       | Cause                          | Action
---------------------|------------|----------------|--------------------------------|------------------
-Transient spike     | 1-5%       | 10-50 steps    | Bad data batch                 | Self-recovers; log and investigate batch
-Moderate spike      | 5-20%      | 50-500 steps   | Data corruption or LR issue    | Roll back checkpoint, skip data
-Divergence          | >20%       | Does not recover| LR too high, NaN gradients     | Stop training, diagnose, restart
-Plateau             | 0% change  | 500+ steps     | Underfitting or data exhaustion | Check data pipeline, adjust LR
-```
+
+| Spike Type | Magnitude | Duration | Cause | Action |
+|------------|-----------|----------|-------|--------|
+| Transient spike | 1-5% | 10-50 steps | Bad data batch | Self-recovers; log and investigate batch |
+| Moderate spike | 5-20% | 50-500 steps | Data corruption or LR issue | Roll back checkpoint, skip data |
+| Divergence | >20% | Does not recover | LR too high, NaN gradients | Stop training, diagnose, restart |
+| Plateau | 0% change | 500+ steps | Underfitting or data exhaustion | Check data pipeline, adjust LR |
 
 **Gradient norm monitoring**: Sudden gradient norm spikes precede loss spikes by approximately 100 steps, providing an early warning signal. Tracking per-layer gradient norms helps isolate which part of the network is destabilizing — attention layers and the final output projection are common culprits.
 
