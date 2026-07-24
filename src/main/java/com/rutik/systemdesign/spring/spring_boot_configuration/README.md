@@ -606,14 +606,14 @@ flowchart TD
 
     subgraph CS["Config Server (Spring Cloud Config + Vault backend)"]
         Git["Git repo\n(env branches)"]
-        Vault["HashiCorp Vault\n(db creds, JWT keys)"]
+        Vault@{ icon: "logos:vault", form: "square", label: "HashiCorp Vault", pos: "b", h: 44 }
     end
 
     CS -->|"HTTP (TLS mutual auth)"| SA["Service A"]
     CS -->|"HTTP (TLS mutual auth)"| SB["Service B"]
     CS -->|"HTTP (TLS mutual auth)"| SN["Service N"]
 
-    class Git,Vault frozen
+    class Git frozen
     class CS base
     class SA,SB,SN req
 ```
