@@ -115,15 +115,19 @@ flowchart TD
     classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
     classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
 
-    CM["CacheManager"] --> Redis["RedisCacheManager"]
+    CM["CacheManager"] --> Redis
     CM --> Caffeine["CaffeineCacheManager"]
-    Redis --> RP["RedisCache: products\nTTL=10min"]
-    Redis --> RU["RedisCache: users\nTTL=60min"]
+    Redis --> RP
+    Redis --> RU
     Caffeine --> CS["CaffeineCache: sessions\nmaxSize=10000, expireAfterAccess=30min"]
 
+    Redis@{ icon: "logos:redis", form: "square", label: "RedisCacheManager", pos: "b", h: 44 }
+    RP@{ icon: "logos:redis", form: "square", label: "RedisCache: products<br/>TTL=10min", pos: "b", h: 44 }
+    RU@{ icon: "logos:redis", form: "square", label: "RedisCache: users<br/>TTL=60min", pos: "b", h: 44 }
+
     class CM base
-    class Redis,Caffeine train
-    class RP,RU,CS frozen
+    class Caffeine train
+    class CS frozen
 ```
 
 **Redis serialization pipeline** — how a cached Java object becomes a Redis key/value pair on the wire:
@@ -137,11 +141,13 @@ flowchart LR
     A["Java Object"] --> B["Jackson2JsonRedisSerializer\n(value)"]
     B --> C["JSON payload:\ncom.example.Product::id-1-name-Laptop"]
     C --> D["StringRedisSerializer (key):\nproducts::1"]
-    D --> E["Redis SETEX products::1 600 (serialized-json)"]
+    D --> E
+
+    E@{ icon: "logos:redis", form: "square", label: "Redis SETEX<br/>products::1 600", pos: "b", h: 44 }
 
     class A io
     class B,D mathOp
-    class C,E frozen
+    class C frozen
 ```
 
 ---
@@ -682,13 +688,14 @@ flowchart TD
     classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
 
     Client["storefront (25k req/sec)"] --> App["@Cacheable('catalog') / @Cacheable('pricing')"]
-    App -->|"hit 98.5%"| Redis["Redis\ncatalog TTL=1h, pricing TTL=5m"]
-    App -->|"miss 1.5% / early-refresh on hot keys"| DB["ProductRepository (DB)"]
+    App -->|"hit 98.5%"| Redis
+    App -->|"miss 1.5% / early-refresh on hot keys"| DB[("ProductRepository (DB)")]
     DB -->|"@CachePut('catalog') on create\n@CacheEvict on update"| Redis
+
+    Redis@{ icon: "logos:redis", form: "square", label: "Redis<br/>catalog TTL=1h, pricing TTL=5m", pos: "b", h: 44 }
 
     class Client io
     class App req
-    class Redis frozen
     class DB lossN
 ```
 
