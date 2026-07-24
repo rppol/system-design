@@ -779,14 +779,13 @@ flowchart TD
     Mint -->|"mTLS + internal JWT"| Tasks("tasks<br/>service")
     Mint -->|"mTLS + internal JWT"| Billing("billing<br/>service")
 
-    Projects --> PDB[("Postgres<br/>RLS: tenant_id filter")]
-    Tasks --> TDB[("Postgres<br/>RLS: tenant_id filter")]
-    Billing --> BDB[("Postgres<br/>RLS: tenant_id filter")]
+    Projects --> PDB@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>RLS: tenant_id filter", pos: "b", h: 44 }
+    Tasks --> TDB@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>RLS: tenant_id filter", pos: "b", h: 44 }
+    Billing --> BDB@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>RLS: tenant_id filter", pos: "b", h: 44 }
 
     class User,ThirdParty io
     class OIDC,APIKey,Mint mathOp
     class Projects,Tasks,Billing train
-    class PDB,TDB,BDB base
 ```
 
 RLS enforcement happens at the database layer, not just in application code (Design Decision #2). All databases use envelope encryption at rest (§6.5), with a dedicated CMK per tenant for the largest enterprise customers (a contractual requirement) and shared, regularly-rotated CMKs for the remaining tenants.
