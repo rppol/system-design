@@ -159,40 +159,33 @@ Trace: agent-run-7c9d4e
 
 ### Data Pipeline: App to Backend
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app("LLM App Code<br/>tracer + span API")
+    collector["OTel Collector<br/>batch, sample, redact"]
+    jaeger@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger", pos: "b", h: 44 }
+    tempo[("Tempo<br/>traces")]
+    langfuse[("Langfuse<br/>eval + traces")]
+
+    app -->|"OTLP :4317/4318<br/>batch, 5s flush"| collector
+    collector -->|traces| jaeger
+    collector -->|traces| tempo
+    collector -->|"eval + traces"| langfuse
+
+    class app io
+    class collector mathOp
+    class tempo,langfuse base
 ```
-  Application Process
-  +---------------------------+
-  | LLM App Code              |
-  |  tracer.start_span(...)   |
-  |  span.set_attribute(...)  |
-  |  span.add_event(...)      |
-  +---------------------------+
-             |
-             | OTLP/gRPC (port 4317) or OTLP/HTTP (port 4318)
-             | batch export, default 5-second flush interval
-             v
-  +---------------------------+
-  | OTel Collector            |
-  |  receivers: otlp          |
-  |  processors:              |
-  |    - batch (512 spans)    |
-  |    - memory_limiter       |
-  |    - tail_sampler         |
-  |    - attributes (redact   |
-  |      gen_ai.prompt)       |
-  |  exporters:               |
-  |    - jaeger / tempo       |
-  |    - langfuse (OTLP)      |
-  |    - prometheus (metrics) |
-  +---------------------------+
-       |              |
-       v              v
-  +----------+   +-----------+
-  | Jaeger / |   | Langfuse  |
-  | Tempo    |   | (eval +   |
-  | (traces) |   |  traces)  |
-  +----------+   +-----------+
-```
+
+The application emits spans over OTLP to the Collector, which batches, tail-samples, and redacts `gen_ai.*` content before fanning out to Jaeger, Tempo, and Langfuse; the exporters list also includes a `prometheus` metrics path (omitted above for clarity, see the YAML config in Section 11).
 
 ---
 
