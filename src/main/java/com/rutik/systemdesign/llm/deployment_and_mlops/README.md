@@ -191,7 +191,7 @@ flowchart TD
     LB["Load Balancer\n(Nginx / AWS ALB)"]
     GW["LLM Gateway Cluster\nauth · rate limit · cache · route · log · cost track"]
     VLLM["vLLM Cluster\nself-hosted models"]
-    OAI["OpenAI API\n(overflow)"]
+    OAI@{ icon: "logos:openai-icon", form: "square", label: "OpenAI API<br/>(overflow)", pos: "b", h: 44 }
     EMB["Embedding Servers\n(dedicated)"]
     GPU["GPU Pool\nA100/H100 auto-scaling"]
     MON["Monitoring Stack\nlatency · cost · quality · drift · error rates"]
@@ -203,7 +203,6 @@ flowchart TD
     class CLI io
     class LB,GW mathOp
     class VLLM,EMB,GPU base
-    class OAI frozen
     class MON req
 ```
 
@@ -238,21 +237,32 @@ flowchart TD
 ```
 
 ### Blue-Green for Model Serving
-```
-                    [Load Balancer / Ingress]
-                           |
-              +------------+------------+
-              |                         |
-         [Blue Stack]             [Green Stack]
-         Model v2.1               Model v2.2
-         3x A100 nodes            3x A100 nodes
-         (serving 100%)           (pre-warmed, 0%)
-                                       |
-                              [Eval Suite Passes]
-                                       |
-                              [Switch traffic: Blue 0%, Green 100%]
-                                       |
-                              [Keep Blue alive 24h for rollback]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    LB(["Load Balancer / Ingress"])
+    BLUE["Blue Stack<br/>Model v2.1 · 3x A100 nodes<br/>(serving 100%)"]
+    GREEN["Green Stack<br/>Model v2.2 · 3x A100 nodes<br/>(pre-warmed, 0%)"]
+    EVAL["Eval Suite Passes"]
+    SWITCH["Switch traffic<br/>Blue 0%, Green 100%"]
+    KEEP["Keep Blue alive 24h<br/>for rollback"]
+
+    LB --> BLUE & GREEN
+    GREEN --> EVAL --> SWITCH --> KEEP
+
+    class LB io
+    class BLUE base
+    class GREEN mathOp
+    class EVAL req
+    class SWITCH,KEEP train
 ```
 
 ---
