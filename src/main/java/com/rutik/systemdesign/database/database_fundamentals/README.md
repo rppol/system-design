@@ -180,21 +180,16 @@ Read the bottom row carefully: a globally distributed linearizable store can ser
 
 SQL standard defines four isolation levels, each preventing certain anomalies:
 
-```
-+------------------+---------------+-------------------+---------------+----------------+
-| Isolation Level  | Dirty Read    | Non-Repeatable    | Phantom Read  | Write Skew     |
-|                  |               | Read              |               |                |
-+------------------+---------------+-------------------+---------------+----------------+
-| READ UNCOMMITTED | Possible      | Possible          | Possible      | Possible       |
-| READ COMMITTED   | Not possible  | Possible          | Possible      | Possible       |
-| REPEATABLE READ  | Not possible  | Not possible      | Possible (*)  | Possible       |
-| SERIALIZABLE     | Not possible  | Not possible      | Not possible  | Not possible   |
-+------------------+---------------+-------------------+---------------+----------------+
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew |
+|---|---|---|---|---|
+| READ UNCOMMITTED | Possible | Possible | Possible | Possible |
+| READ COMMITTED | Not possible | Possible | Possible | Possible |
+| REPEATABLE READ | Not possible | Not possible | Possible (*) | Possible |
+| SERIALIZABLE | Not possible | Not possible | Not possible | Not possible |
 
 (*) InnoDB prevents phantom reads at REPEATABLE READ via next-key locks.
-    PostgreSQL REPEATABLE READ (Snapshot Isolation) allows phantom reads technically,
-    but prevents them in practice for most workloads.
-```
+PostgreSQL REPEATABLE READ (Snapshot Isolation) allows phantom reads technically,
+but prevents them in practice for most workloads.
 
 **Anomaly Definitions:**
 
