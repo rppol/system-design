@@ -647,21 +647,23 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["Client<br/>mobile/web"]) --> gw{"API Gateway"}
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    ddb@{ icon: "logos:aws-dynamodb", form: "square", label: "DynamoDB", pos: "b", h: 44 }
+    kafka@{ icon: "logos:kafka", form: "square", label: "Kafka", pos: "b", h: 44 }
+
+    client(["Client<br/>mobile/web"]) --> gw
     gw -->|"balance /<br/>transfer"| ledger("Ledger Service<br/>CP")
     gw -->|"activity<br/>feed"| feed("Feed Service<br/>AP")
     ledger --> spanner("Spanner<br/>external consistency")
-    feed --> ddb("DynamoDB<br/>Global Tables")
+    feed --> ddb
     spanner --> outbox("Outbox table<br/>same txn")
-    outbox -.->|"Kafka Connect"| kafka("Kafka")
+    outbox -.->|"Kafka Connect"| kafka
     kafka -.->|"stream, async<br/>1-5s lag"| ddb
 
     class client io
-    class gw mathOp
     class ledger train
     class feed req
-    class spanner,ddb,outbox base
-    class kafka req
+    class spanner,outbox base
 ```
 
 *The ledger (Spanner, CP) and activity feed (DynamoDB Global Tables, AP) are separate stores stitched together by an outbox + Kafka Connect bridge — the dotted edges are the asynchronous, eventually-consistent path, matching the outbox pattern described below.*
