@@ -134,8 +134,8 @@ flowchart LR
 
     subgraph AWS["AWS"]
         direction LR
-        a1([Route 53]) --> a2(ALB) --> a3(EKS<br/>private subnets) --> a4([Aurora<br/>Multi-AZ])
-        a3 -.->|"Gateway Endpoint"| a5([S3])
+        a1 --> a2(ALB) --> a3 --> a4
+        a3 -.->|"Gateway Endpoint"| a5
     end
 
     subgraph GCP["GCP"]
@@ -150,11 +150,16 @@ flowchart LR
         z3 -.->|"Private Endpoint"| z5([Blob])
     end
 
-    class a1,g1,z1 io
+    a1@{ icon: "logos:aws-route53", form: "square", label: "Route 53", pos: "b", h: 44 }
+    a3@{ icon: "logos:aws-eks", form: "square", label: "EKS", pos: "b", h: 44 }
+    a4@{ icon: "logos:aws-aurora", form: "square", label: "Aurora", pos: "b", h: 44 }
+    a5@{ icon: "logos:aws-s3", form: "square", label: "S3", pos: "b", h: 44 }
+
+    class g1,z1 io
     class a2,g2,z2 req
-    class a3,g3,z3 mathOp
-    class a4,g4,z4 base
-    class a5,g5,z5 frozen
+    class g3,z3 mathOp
+    class g4,z4 base
+    class g5,z5 frozen
 ```
 
 **Resource hierarchy: GCP vs Azure.** IAM (GCP) and RBAC (Azure) both inherit downward — a role granted on `prod` (or on the Management Group) cascades to every Project/Resource Group beneath it, which is exactly the over-permissioning trap in Pitfall 2 below.
