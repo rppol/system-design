@@ -1127,19 +1127,20 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A(["FastAPI<br/>POST /orders/<br/>HTTP 202 in 8ms"]) -->|"~2ms"| B("ARQ Job Queue<br/>arq:queue")
+    A@{ icon: "logos:fastapi", form: "square", label: "FastAPI<br/>202 in 8ms", pos: "b", h: 44 }
+    D3@{ icon: "logos:postgresql", form: "square", label: "Postgres<br/>Points DB", pos: "b", h: 44 }
+    K@{ icon: "logos:redis", form: "square", label: "Redis<br/>TTL 24h", pos: "b", h: 44 }
+
+    A -->|"~2ms"| B("ARQ Job Queue<br/>arq:queue")
     B --> C("ARQ Workers<br/>4 processes<br/>50 jobs each")
     C --> D1("Email SMTP<br/>SES")
     C --> D2("Webhook<br/>httpx")
-    C --> D3("Points DB<br/>Postgres")
-    C -.->|"idempotency<br/>guard"| K("email_sent:12345<br/>Redis TTL 24h")
+    C --> D3
+    C -.->|"idempotency<br/>guard"| K
 
-    class A io
     class B base
     class C train
     class D1,D2 frozen
-    class D3 base
-    class K base
 ```
 
 Redis absorbs the write in about 2ms so the HTTP response returns in 8ms total; each of the three fan-out jobs — email, webhook, loyalty points — carries its own idempotency guard so a retried order never double-sends.
