@@ -799,36 +799,45 @@ A discount factor below 1 keeps the infinite-horizon return finite and expresses
 **Scenario:** A streaming music platform (180M monthly active users) needs to improve playlist recommendation CTR. The current collaborative filtering model has CTR of 6.8% but suffers from the exploration-exploitation tradeoff: it over-exploits popular tracks and under-explores new releases (cold-start problem). The goal: implement a contextual bandit system serving 8,000 recommendation requests per second at p99 < 30ms, comparing LinUCB (linear upper confidence bound) against Thompson Sampling, targeting CTR >= 9.0% with cold-start track coverage >= 25%.
 
 **Architecture:**
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ctx(["User Context — real-time, 128d<br/>session · profile · engagement signals"])
+    feat["Track Feature Store<br/>30M tracks, 64d each<br/>audio · popularity · contextual"]
+    ctx --> feat
+
+    subgraph bandit["Bandit Policy Engine — 8K RPS, p99 &lt; 30ms"]
+        linucb["LinUCB (Disjoint)<br/>ridge inverse A_k^-1<br/>UCB bonus alpha · sqrt(x' A_k^-1 x)"]
+        thompson["Thompson Sampling<br/>Beta posteriors per arm<br/>sample Beta(alpha, beta)"]
+    end
+    feat --> bandit
+
+    rank["Top-K Ranking, K=10<br/>0.4 bandit + 0.6 CF blend"]
+    bandit --> rank
+
+    reward(["Reward Signal — deferred, async<br/>play 30s+ = 1, skip under 10s = 0<br/>30-day window, recency-weighted"])
+    rank --> reward
+
+    class ctx io
+    class feat base
+    class linucb,thompson mathOp
+    class rank train
+    class reward lossN
 ```
-User Context (real-time features, 128d)
-  - Session: current track, session duration, skip rate, time-of-day
-  - Profile: genre affinity vector (32d), playlist completion rate, device
-  - Engagement: 7-day play history, recent likes, listening streak
-         |
-         v
-Track Feature Store (30M tracks, 64d each)
-  - Audio: tempo, energy, valence, danceability (Spotify features)
-  - Popularity: global/local play count percentile, release age
-  - Contextual: trend score, region popularity, editorial tags
-         |
-         v
-Bandit Policy Engine (8K RPS, p99 < 30ms)
-  +-----------------------------+----------------------------------+
-  |  LinUCB (Disjoint)          |  Thompson Sampling               |
-  |  A_k^{-1} ridge inverse     |  Beta posteriors per arm         |
-  |  UCB bonus: alpha * sqrt(x' |  Sample from Beta(alpha, beta)   |
-  |  A_k^{-1} x)                |  for binary reward               |
-  +-----------------------------+----------------------------------+
-                   |
-                   v
-Top-K Ranking (K=10 per request)
-  Bandit score blended with CF score (0.4 bandit + 0.6 CF)
-                   |
-                   v
-Reward Signal (deferred, async)
-  Played >= 30s -> reward=1, skip < 10s -> reward=0
-  30-day reward window, weighted recency
-```
+
+The context and feature stages feed a bandit policy engine running LinUCB and
+Thompson Sampling side by side, whose top-K ranking is blended with the
+existing collaborative-filtering score before a deferred play/skip reward
+signal is logged for each request.
 
 **Step-by-step implementation:**
 
