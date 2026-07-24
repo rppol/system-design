@@ -964,33 +964,27 @@ Use k-fold cross-validation (typically 5-fold or 10-fold, stratified for imbalan
 **Dataset**: 800,000 historical claims over 3 years. Features include: claim amount, claim type (11 categories), days since policy start, number of prior claims, geographic region, adjuster ID, time between incident and filing, relationship of claimant to policy holder.
 
 **Pipeline**:
-```
-Raw claim JSON
-    |
-    v
-Feature Engineering
-    |--- log(claim_amount)              (right-skewed: log normalizes)
-    |--- days_since_policy_start        (continuous)
-    |--- prior_claims_count             (count feature, capped at 10)
-    |--- filing_delay_days              (days between incident and filing)
-    |--- claim_type (OHE, 11 categories)
-    |--- region (target-encoded, 50 states)
-    |
-    v
-StandardScaler (fit on 80% training portion of 2-year window)
-    |
-    v
-LogisticRegression(
-    C=0.01,           # strong regularization — 50+ features, prevent overfit
-    penalty="l2",
-    max_iter=1000,
-    class_weight="balanced",  # 3% positive rate
-    solver="lbfgs",
-)
-    |
-    v
-Threshold calibration: 0.30 (custom threshold based on cost matrix:
-    FP cost = $200 investigator time; FN cost = $4,500 average fraud loss)
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["Raw claim JSON"]) --> fe["Feature Engineering<br/>log(claim_amount) — right-skewed<br/>days_since_policy_start<br/>prior_claims_count (capped at 10)<br/>filing_delay_days<br/>claim_type (OHE, 11 categories)<br/>region (target-encoded, 50 states)"]
+    fe --> scaler["StandardScaler<br/>fit on 80% training portion<br/>of 2-year window"]
+    scaler --> lr["LogisticRegression<br/>C=0.01, penalty=l2, max_iter=1000<br/>class_weight=balanced, solver=lbfgs"]
+    lr --> thresh["Threshold calibration: 0.30<br/>FP=$200 investigator time<br/>FN=$4,500 avg fraud loss"]
+
+    class raw io
+    class fe req
+    class scaler base
+    class lr train
+    class thresh lossN
 ```
 
 **Results**:
