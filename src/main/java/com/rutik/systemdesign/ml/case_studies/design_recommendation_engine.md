@@ -27,12 +27,15 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph Offline["Offline Pipeline (daily / hourly)"]
-        EV(["User events (Kafka)"]) --> ETL["Spark ETL"]
+        EV --> ETL
+        EV@{ icon: "logos:kafka", form: "square", label: "User Events<br/>(Kafka)", pos: "b", h: 44 }
+        ETL@{ icon: "logos:apache-spark", form: "square", label: "Spark ETL", pos: "b", h: 44 }
         ETL --> IM["Interaction matrix (Hive)"]
         ETL --> FSO["Feature store (Hive offline)"]
         ETL --> TDA["Training data: pos pairs + neg samples"]
         IM --> ALS["ALS collaborative filtering"]
-        FSO --> TT["Two-Tower model (PyTorch, GPU)"]
+        FSO --> TT
+        TT@{ icon: "logos:pytorch-icon", form: "square", label: "Two-Tower<br/>(PyTorch, GPU)", pos: "b", h: 44 }
         TDA --> LGB["LightGBM ranker (200 features)"]
         ALS --> EMB["User + item embeddings (256-dim)"]
         TT --> EMB
@@ -41,8 +44,10 @@ flowchart TD
     end
 
     subgraph Online["Online Serving (100ms P99)"]
-        REQ(["Client request: user_id + context"]) --> GW["API Gateway"]
-        GW --> FSV["Feature server (Redis, sub-10ms)"]
+        REQ(["Client request: user_id + context"]) --> GW
+        GW@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+        GW --> FSV
+        FSV@{ icon: "logos:redis", form: "square", label: "Feature Server<br/>(Redis, sub-10ms)", pos: "b", h: 44 }
         FSV --> RET["Retrieval: Two-Tower encoder + FAISS ANN, top-500 (25ms)"]
         RET --> RANK["Ranking: LightGBM, 500 to 20 (30ms)"]
         RANK --> RRN["Re-rank: MMR + freshness + rules (5ms)"]
@@ -52,11 +57,10 @@ flowchart TD
     FAISS -.-> RET
     REG -.-> RANK
 
-    class EV,REQ,RESP io
-    class ETL,IM,FSO,TDA frozen
-    class ALS,TT,LGB train
+    class REQ,RESP io
+    class IM,FSO,TDA frozen
+    class ALS,LGB train
     class EMB,FAISS,REG base
-    class GW,FSV req
     class RET,RANK,RRN mathOp
 ```
 
