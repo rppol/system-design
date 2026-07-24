@@ -1052,26 +1052,30 @@ Decision: ModernBERT-large for contracts flagged as "long" (>512 tokens), DeBERT
 
 **Phase 4 — Production Deployment**
 
-```
-Contract ingestion
-      |
-      v
-[Clause segmentation service: spaCy sentence boundaries]
-      |
-      v
-[Length check: tokens > 512?]
-     /                  \
-  No (95%)            Yes (5%)
-    |                    |
-[DeBERTa-v3-base]  [ModernBERT-large]
-    |                    |
-    +---------+----------+
-              |
-     [Risk classification]
-              |
-     [Threshold: P(High) > 0.7 → High-Risk flag]
-              |
-     [Priority queue: High-Risk to human review]
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ingest(["Contract ingestion"]) --> seg["Clause segmentation service<br/>spaCy sentence boundaries"]
+    seg --> check{"Length check<br/>tokens &gt; 512?"}
+    check -->|"No - 95%"| deberta["DeBERTa-v3-base"]
+    check -->|"Yes - 5%"| modernbert["ModernBERT-large"]
+    deberta --> risk["Risk classification"]
+    modernbert --> risk
+    risk --> thresh["High-Risk threshold<br/>prob of High &gt; 0.7"]
+    thresh --> queue(["Priority queue<br/>High-Risk to human review"])
+
+    class ingest,queue io
+    class seg,risk,thresh base
+    class check mathOp
+    class deberta,modernbert train
 ```
 
 **Results:**
