@@ -138,7 +138,10 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    app(["FastAPI App<br/>3 instances"]) -->|"producer.send(orders)"| topic["Kafka Topic: orders<br/>6 partitions, RF=3"]
+    app@{ icon: "logos:fastapi", form: "square", label: "FastAPI App<br/>3 instances", pos: "b", h: 44 }
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka Topic: orders<br/>6 partitions, RF=3", pos: "b", h: 44 }
+
+    app -->|"producer.send(orders)"| topic
 
     subgraph grp["Consumer Group: order-svc"]
         c1["Consumer-1<br/>P-0, P-1"]
@@ -153,8 +156,6 @@ flowchart LR
     c2 -.-> dlt
     c3 -.-> dlt
 
-    class app io
-    class topic base
     class c1,c2,c3 req
     class dlt lossN
 ```
@@ -173,16 +174,17 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    route(["FastAPI Route"]) -->|"1 SQLAlchemy txn"| insOrders["INSERT INTO orders"]
+    route@{ icon: "logos:fastapi", form: "square", label: "FastAPI Route", pos: "b", h: 44 }
+    producer@{ icon: "logos:kafka", form: "square", label: "AIOKafkaProducer<br/>.send()", pos: "b", h: 44 }
+
+    route -->|"1 SQLAlchemy txn"| insOrders["INSERT INTO orders"]
     route -->|"1 SQLAlchemy txn"| insOutbox["INSERT INTO outbox<br/>sent = False"]
     insOutbox -.->|"background task"| poller["Outbox Poller<br/>SELECT ... WHERE sent = False<br/>LIMIT 100"]
-    poller --> producer["AIOKafkaProducer<br/>.send()"]
+    poller --> producer
     producer --> update["UPDATE outbox<br/>SET sent = True"]
 
-    class route io
     class insOrders,insOutbox train
     class poller mathOp
-    class producer req
     class update train
 ```
 
@@ -800,9 +802,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    client(["POST /orders"]) --> fastapi["FastAPI, 3 replicas<br/>create_order(): 1 txn<br/>INSERT orders + INSERT outbox"]
+    fastapi@{ icon: "logos:fastapi", form: "square", label: "FastAPI, 3 replicas<br/>create_order(): 1 txn<br/>INSERT orders + outbox", pos: "b", h: 44 }
+    topic@{ icon: "logos:kafka", form: "square", label: "Kafka Topic: orders<br/>12 partitions, RF=3<br/>retention = 7d", pos: "b", h: 44 }
+
+    client(["POST /orders"]) --> fastapi
     fastapi -->|"DB commit (PostgreSQL)"| poller["Outbox Poller<br/>poll every 500ms<br/>SELECT ... FOR UPDATE SKIP LOCKED"]
-    poller -->|"send_and_wait, mark sent"| topic["Kafka Topic: orders<br/>12 partitions, RF=3<br/>retention = 7d"]
+    poller -->|"send_and_wait, mark sent"| topic
 
     topic --> invoiceSvc["invoice-svc<br/>group: invoice<br/>manual commit, idempotent"]
     topic --> inventorySvc["inventory-svc<br/>group: invnty<br/>manual commit, idempotent"]
@@ -811,9 +816,7 @@ flowchart TD
     invoiceSvc -.->|"3 retries exhausted"| dlt["orders.DLT topic"]
 
     class client io
-    class fastapi req
     class poller mathOp
-    class topic base
     class invoiceSvc,inventorySvc,notifySvc train
     class dlt lossN
 ```
