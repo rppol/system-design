@@ -4015,11 +4015,16 @@ function renderStudy() {
          <div><div class="eyebrow">Continue reading</div><h2>${esc(lastRead.title || lastRead.path)}</h2></div>
          <span class="review-go">Open &rarr;</span>
        </button>` : "";
-  const tiles = Object.keys(secs).sort().map((s) =>
-    `<button class="tile" data-section="${s}">
+  const tiles = Object.keys(secs).sort().map((s) => {
+    const id = SECTION_IDENTITY[s];
+    const av = id ? id.accent : "var(--accent)";
+    const gl = id ? id.glyph : "";
+    return `<button class="tile sec-tile" data-section="${s}" style="--tile-accent:${av}">
+       ${gl ? `<span class="tile-glyph" aria-hidden="true">${gl}</span>` : ""}
        <span class="tname">${esc(label(s))}</span>
        <span class="tmeta">${secs[s]} Qs &middot; read the notes</span>
-     </button>`).join("");
+     </button>`;
+  }).join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
     <div class="study-head"><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
@@ -4250,8 +4255,10 @@ async function openStudySection(sectionPath) {
         ${pathOpts.map((o) => `<button class="pathopt${studyPath === o.v ? " on" : ""}" role="radio" aria-checked="${studyPath === o.v}" data-path="${o.v}">${o.label}</button>`).join("")}
       </div>` : "";
   const bookMeta = bookScope ? (BOOK_LABELS[bookScope] || {}) : null;
+  const _secId = sectionIdentity(section);
+  const _secAccent = _secId ? _secId.accent : "var(--accent)";
   app.innerHTML = `
-    <div class="path-screen">
+    <div class="path-screen" style="--tile-accent:${_secAccent}">
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
       <p>${casesMode
         ? `${mods.length} case studies &middot; read-only &mdash; ${singleColumnPath() ? "work through them top to bottom" : "the path snakes across each row"} in the section's suggested order.`

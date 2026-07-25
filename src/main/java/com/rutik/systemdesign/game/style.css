@@ -35,7 +35,7 @@
   --mesh-o: 0.25;
   --grid-line: rgba(255, 255, 255, 0.032);
 
-  --spot: rgba(255, 255, 255, 0.09);   /* pointer-spotlight tint on glass */
+  --spot: rgba(255, 255, 255, 0.14);   /* pointer-spotlight tint on glass */
   --glass: rgba(255, 255, 255, 0.055);
   --glass-2: rgba(255, 255, 255, 0.09);
   --glass-brd: rgba(255, 255, 255, 0.10);
@@ -488,6 +488,48 @@ button:active { transform: scale(0.98); }
 }
 .tile .tname { font-weight: 700; letter-spacing: -0.01em; }
 .tile .tmeta { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* Study-grid section tiles — per-section accent identity + liquid-glass rim.
+   --tile-accent is set inline per tile from SECTION_IDENTITY (app.js); the glyph
+   is that section's symbol. Turns one green wall into a palette without leaving
+   the active colour theme (accent only tints the rim/glow/glyph, not the pane). */
+.sec-tile {
+  --spot: color-mix(in srgb, var(--tile-accent) 26%, transparent);
+  border-color: color-mix(in srgb, var(--tile-accent) 24%, var(--glass-brd));
+  box-shadow: var(--glass-hilite),
+    inset 0 -16px 26px -20px color-mix(in srgb, var(--tile-accent) 42%, transparent);
+  transition: transform 0.28s var(--ease-out), border-color 0.28s ease,
+    box-shadow 0.28s ease, background 0.28s ease;
+}
+.sec-tile .tname { transition: color 0.28s ease; }
+/* accent glyph watermark — quiet until hover */
+.sec-tile .tile-glyph {
+  position: absolute; top: 9px; right: 13px; font-size: 30px; line-height: 1;
+  font-family: var(--mono); font-weight: 700; color: var(--tile-accent);
+  opacity: 0.16; pointer-events: none;
+  transition: opacity 0.3s ease, transform 0.3s var(--ease-out);
+}
+/* liquid-glass rim: accent gradient masked to the 1.4px border ring, tracking the
+   cursor via --mx/--my (set on pointermove, app.js §ambient graphics). */
+.sec-tile::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.4px;
+  background: radial-gradient(180px circle at var(--mx, 50%) var(--my, 50%),
+    var(--tile-accent), transparent 62%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  opacity: 0; transition: opacity 0.3s ease; pointer-events: none; z-index: 1;
+}
+.sec-tile:hover {
+  transform: translateY(-3px) scale(1.015);
+  border-color: color-mix(in srgb, var(--tile-accent) 55%, transparent);
+  box-shadow: var(--shadow-sm), var(--glass-hilite),
+    0 12px 42px -16px color-mix(in srgb, var(--tile-accent) 65%, transparent);
+}
+.sec-tile:hover::before { opacity: 0.95; }
+.sec-tile:hover .tile-glyph { opacity: 0.44; transform: scale(1.08) rotate(-3deg); }
+.sec-tile:hover .tname { color: color-mix(in srgb, var(--tile-accent) 42%, var(--text)); }
 
 /* freeze chip / saved banner */
 .freeze-chip {
@@ -2039,6 +2081,15 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.2s ease, transform 0.12s ease;
 }
 .pathnode:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); transform: translateY(-1px); }
+/* map nodes pick up the section's accent (--tile-accent set on .path-screen):
+   accent-tinted cursor spotlight + an accent halo on hover. The retention
+   edge-bar owns ::before, so the halo rides box-shadow, not a masked ring. */
+.pathnode { --spot: color-mix(in srgb, var(--tile-accent) 22%, transparent); }
+.pathnode:hover {
+  border-color: color-mix(in srgb, var(--tile-accent) 50%, var(--glass-brd-hi));
+  box-shadow: 0 9px 28px -14px color-mix(in srgb, var(--tile-accent) 62%, transparent),
+    var(--glass-hilite);
+}
 
 .pn-main {
   flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 9px;
