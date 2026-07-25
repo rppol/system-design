@@ -29,22 +29,27 @@ const SECTION_LABELS = {
 // the pitch-black reader surface) + a short glyph monogram. Consumed as the
 // `--sec-accent` custom property set on #reader per opened path — every accent
 // consumer falls back to var(--accent), so unknown sections degrade cleanly.
+// Per-section identity: a hue + a glyph. Accents are spread evenly around the
+// wheel (~20deg+ apart) so no two sections read alike, keeping the semantic
+// anchors that matter (Java red, Python gold, NVIDIA-lime CUDA, FastAPI teal,
+// DevOps blue, LLD purple). The accent is applied to BORDERS only (grid tiles,
+// map nodes) and to the reader's --sec-accent; glyphs render neutral.
 const SECTION_IDENTITY = {
-  lld:             { accent: "#c678dd", glyph: "{ }" },
-  hld:             { accent: "#61afef", glyph: "◇" },
-  backend:         { accent: "#56b6c2", glyph: "≋" },
-  database:        { accent: "#98c379", glyph: "▤" },
-  java:            { accent: "#e06c75", glyph: "J" },
-  spring:          { accent: "#7ee787", glyph: "S" },
-  python:          { accent: "#e5c07b", glyph: "λ" },
-  fastapi:         { accent: "#4ec9b0", glyph: "F" },
-  ml:              { accent: "#d19a66", glyph: "Σ" },
-  llm:             { accent: "#b180f0", glyph: "Ψ" },
-  devops:          { accent: "#6cb6ff", glyph: "∞" },
-  cuda:            { accent: "#9ece6a", glyph: "▦" },
-  cs_fundamentals: { accent: "#f2917e", glyph: "∴" },
-  book:            { accent: "#c0a36e", glyph: "¶" },
-  technologies:    { accent: "#ff7eb6", glyph: "⌗" },
+  java:            { accent: "#e06c75", glyph: "J" },     // 355  red
+  cs_fundamentals: { accent: "#ef8666", glyph: "∴" },     //  15  coral
+  ml:              { accent: "#e79a4f", glyph: "Σ" },     //  35  orange
+  python:          { accent: "#e8bd54", glyph: "λ" },     //  52  gold
+  book:            { accent: "#c9be63", glyph: "¶" },     //  70  parchment
+  cuda:            { accent: "#9bcf5a", glyph: "▦" },     // 110  lime
+  database:        { accent: "#5fc47e", glyph: "▤" },     // 135  green
+  spring:          { accent: "#45cfa2", glyph: "S" },     // 160  mint
+  fastapi:         { accent: "#3ec5c4", glyph: "F" },     // 182  teal
+  backend:         { accent: "#47b2dc", glyph: "≋" },     // 202  cyan
+  devops:          { accent: "#5aa4f2", glyph: "∞" },     // 222  sky
+  hld:             { accent: "#7b8ff2", glyph: "◇" },     // 244  indigo
+  llm:             { accent: "#a67cf2", glyph: "Ψ" },     // 270  violet
+  lld:             { accent: "#c778e4", glyph: "{ }" },   // 295  purple
+  technologies:    { accent: "#ee76c2", glyph: "⌗" },     // 320  magenta
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
