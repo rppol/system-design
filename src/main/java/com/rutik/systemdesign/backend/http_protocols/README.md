@@ -22,7 +22,7 @@ HTTP/1.1 added persistent connections and chunked transfer but remained fundamen
 
 ## 3. Core Principles
 
-- **Request-response**: HTTP is fundamentally request-response, though HTTP/2 enables concurrent requests on one connection and HTTP/3 stream independence eliminates HoL blocking.
+- **Request-response**: HTTP is fundamentally request-response, though HTTP/2 enables concurrent requests on one connection and HTTP/3 stream independence removes *transport-level* HoL blocking (loss on one QUIC stream no longer stalls the others; loss within a stream, and QPACK dynamic-table references, can still block that stream — RFC 9204 §2).
 - **Stateless**: Each request contains all information needed to process it. Sessions are implemented via cookies or tokens — not TCP connection state.
 - **Header-driven semantics**: Content-Type, Accept, Cache-Control, Authorization — HTTP behavior is controlled by headers, not protocol version (mostly).
 - **Caching**: HTTP caching (ETag, Cache-Control, Vary) can eliminate server load for identical requests. A well-cached API can serve 90% of requests from cache.
@@ -36,24 +36,27 @@ HTTP/1.1 added persistent connections and chunked transfer but remained fundamen
 
 | Feature | HTTP/1.0 | HTTP/1.1 | HTTP/2 | HTTP/3 |
 |---------|---------|---------|--------|--------|
+| Current spec | RFC 1945 (informational) | RFC 9112 + 9110/9111 | RFC 9113 | RFC 9114 |
 | Persistent connections | No | Yes (default) | Yes (required) | Yes (QUIC) |
 | Multiplexing | No | No (pipelining, rarely used) | Yes (streams) | Yes (QUIC streams) |
-| Header compression | No | No | HPACK | QPACK |
-| Server push | No | No | Yes | Yes (rarely used) |
-| Transport | TCP | TCP | TCP | QUIC (UDP) |
-| HoL blocking | Per connection | Per connection | At TCP level | None |
-| TLS | Optional | Optional | Practical requirement | Mandatory |
+| Header compression | No | No | HPACK (RFC 7541) | QPACK (RFC 9204) |
+| Server push | No | No | Spec'd; off by default in Chrome since 106 | Spec'd (RFC 9114 §4.6); not implemented by major browsers |
+| Transport | TCP | TCP | TCP | QUIC (UDP, RFC 9000) |
+| HoL blocking | Per connection | Per connection | Application-layer HoL removed; TCP-layer HoL remains | Transport HoL removed; per-stream loss and QPACK blocked streams remain |
+| TLS | Optional | Optional | Practical requirement | Mandatory (TLS 1.3, RFC 9001) |
 | Binary framing | No | No | Yes | Yes |
+
+RFC 9110 (HTTP Semantics), 9111 (HTTP Caching) and 9112 (HTTP/1.1) — all June 2022 — obsolete the RFC 7230-7235 series, which in turn had obsoleted RFC 2616. RFC 9113 obsoletes RFC 7540. Cite the 911x numbers, not the older ones.
 
 ### 4.2 TLS Version Comparison
 
 | TLS Version | Status | Handshake RTTs | Notes |
 |-------------|--------|---------------|-------|
-| SSL 3.0 | Deprecated (POODLE) | 2 RTTs | Broken, never use |
-| TLS 1.0 | Deprecated (PCI DSS) | 2 RTTs | RC4, BEAST vulnerable |
-| TLS 1.1 | Deprecated (RFC 8996) | 2 RTTs | Removed 2021 |
-| TLS 1.2 | Still widely used | 2 RTTs (or 1 with session resumption) | AES-GCM, ChaCha20 |
-| TLS 1.3 | Current standard | 1 RTT (0-RTT on resumption) | Forward secrecy required |
+| SSL 3.0 | Deprecated (RFC 7568, POODLE) | 2 RTTs | Broken, never use |
+| TLS 1.0 | MUST NOT be used (RFC 8996, 2021) | 2 RTTs | RC4, BEAST vulnerable |
+| TLS 1.1 | MUST NOT be used (RFC 8996, 2021) | 2 RTTs | Disabled by default across Chrome/Firefox/Safari/Edge during 2020 |
+| TLS 1.2 | Still widely used (RFC 5246) | 2 RTTs (or 1 with session resumption) | AES-GCM, ChaCha20 |
+| TLS 1.3 | Current standard (RFC 8446, 2018) | 1 RTT (0-RTT on resumption) | Forward secrecy required — static RSA and static DH key exchange removed |
 
 ---
 
@@ -265,15 +268,17 @@ ETag: "abc123xyz"
 Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
 Vary: Accept-Encoding, Accept-Language
 
-# Cache-Control directives:
+# Cache-Control directives (core set: RFC 9111 section 5.2):
 # max-age=N      : cache for N seconds
 # public         : cacheable by CDNs/proxies
-# private        : cacheable only by browser (not CDN)
-# no-cache       : must revalidate with origin before using
-# no-store       : must not cache at all
-# immutable      : resource will never change (for versioned assets)
-# s-maxage=N     : CDN cache duration (overrides max-age for shared caches)
-# stale-while-revalidate=N : serve stale while revalidating in background
+# private        : MUST NOT be stored by a shared cache (browser-only)
+# no-cache       : may be stored, but MUST be revalidated before reuse
+# no-store       : MUST NOT be stored at all, request or response
+# s-maxage=N     : shared-cache duration (overrides max-age for shared caches)
+#
+# Extension directives — defined OUTSIDE RFC 9111, support is not universal:
+# immutable      : resource will never change, skip revalidation (RFC 8246)
+# stale-while-revalidate=N : serve stale while revalidating in background (RFC 5861)
 
 # Conditional request (ETag-based revalidation):
 GET /api/users/123 HTTP/1.1
@@ -285,7 +290,8 @@ ETag: "abc123xyz"
 # No body — saves bandwidth
 
 # Vary header:
-# Tells caches to store separate responses for different header values
+# Tells ANY cache -- shared and private/browser alike -- to store separate
+# responses for different values of the listed request headers
 Vary: Accept-Encoding
 # Browser requesting gzip gets a different cache entry than one requesting br
 ```
@@ -359,6 +365,10 @@ HSTS tells browsers to only use HTTPS for this domain for the next `max-age` sec
 | DELETE | No | Yes | No | Delete resource |
 | POST | No | No | Yes | Create resource, submit data |
 | PATCH | No | No | Yes | Partial update |
+| TRACE | Yes | Yes | No | Loopback of the request path (usually disabled) |
+| CONNECT | No | No | No | Tunnel establishment (proxies) |
+
+Safe and idempotent per RFC 9110 Table 7: safe = GET, HEAD, OPTIONS, TRACE; idempotent = those four plus PUT and DELETE. PATCH is defined in RFC 5789, is not in Table 7, and is neither safe nor idempotent. The "Body" column above records what the method *defines a use for* — RFC 9110 says a client SHOULD NOT generate content in GET, HEAD or DELETE, and permits content on OPTIONS (with a Content-Type) while defining no use for it.
 
 Idempotent: sending the same request N times has the same effect as sending it once. This property is critical for retry logic in distributed systems.
 
@@ -369,7 +379,9 @@ Idempotent: sending the same request N times has the same effect as sending it o
 **Nginx HTTP/2 configuration**:
 ```nginx
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;            # nginx >= 1.25.1. The old `listen ... http2` parameter
+                         # is deprecated in favour of this directive.
     server_name api.example.com;
 
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -381,8 +393,10 @@ server {
     # Enable HSTS
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # HTTP/2 push (limited use case)
-    # http2_push /css/main.css;
+    # Do NOT use http2_push -- obsolete since nginx 1.25.1, and Chrome has
+    # ignored HTTP/2 push since Chrome 106. Use 103 Early Hints instead
+    # (nginx >= 1.29.0; the directive takes a condition string, not on/off):
+    #   early_hints $early_hints;
 }
 ```
 
@@ -412,11 +426,13 @@ public ResponseEntity<Product> getProduct(
 
 ## 8. Tradeoffs
 
-| HTTP Version | Connection overhead | HoL blocking | CPU (parsing) | Support |
-|-------------|---------------------|-------------|----------------|---------|
-| HTTP/1.1 | High (multiple connections) | Per connection | Low | Universal |
-| HTTP/2 | Low (1 connection) | At TCP level | Medium (HPACK) | Wide (95%+) |
-| HTTP/3 | Low (QUIC) | None | Higher (QUIC) | Growing (85%+) |
+| HTTP Version | Connection overhead | HoL blocking | CPU (parsing) | Browser support | Site adoption |
+|-------------|---------------------|-------------|----------------|---------|---------|
+| HTTP/1.1 | High (multiple connections) | Per connection | Low | Universal | Universal fallback |
+| HTTP/2 | Low (1 connection) | TCP-layer only | Medium (HPACK) | 96.7% | 34.8% |
+| HTTP/3 | Low (QUIC) | Per-stream + QPACK only | Higher (QUIC, userspace) | 92.4% | 40.0% |
+
+Browser support from caniuse.com; site adoption from W3Techs, July 2026 (W3Techs counts each site at its highest negotiated version, which is why HTTP/3 now exceeds HTTP/2 there). Both figures move — treat them as a snapshot, not a constant.
 
 | TLS Version | RTTs | Security | Performance |
 |-------------|------|---------|-------------|
@@ -431,7 +447,7 @@ public ResponseEntity<Product> getProduct(
 
 **HTTP/3**: Use for public-facing endpoints serving mobile or high-latency users. Requires infrastructure support (UDP on port 443). Fall back gracefully to HTTP/2. Not needed for internal service-to-service communication on reliable networks.
 
-**TLS 1.3**: Use for all new deployments. Disable TLS 1.0 and 1.1 (required by PCI DSS 4.0). TLS 1.2 is acceptable but should be upgraded.
+**TLS 1.3**: Use for all new deployments. Disable TLS 1.0 and 1.1 — RFC 8996 (BCP 195) says they MUST NOT be used or negotiated. PCI DSS does not name a TLS version; it requires "strong cryptography" and its FAQ states that SSL and early TLS (TLS 1.0/1.1) do not qualify, which is what forces TLS 1.2 or higher in card environments. TLS 1.2 is acceptable but should be upgraded.
 
 **no-store vs no-cache**: Use `no-store` only when responses must never be stored (sensitive data like bank statements). Use `no-cache` when responses can be stored but must be revalidated — this enables conditional GET (304) optimization.
 
@@ -441,9 +457,9 @@ public ResponseEntity<Product> getProduct(
 
 **HTTP/2 and load balancers**: Some legacy load balancers only support HTTP/1.1 between themselves and backends. They terminate HTTP/2 from clients but speak HTTP/1.1 to backends — losing multiplexing benefits at the LB-backend hop. Verify that your LB supports HTTP/2 for upstream connections.
 
-**Vary header causing cache fragmentation**: An overly broad `Vary: *` or `Vary: User-Agent` causes CDNs to cache a separate response for every User-Agent string — potentially thousands of cache entries for the same resource. Use `Vary: Accept-Encoding` for compressed responses and nothing else for most APIs.
+**Vary header causing cache fragmentation**: `Vary: User-Agent` makes every cache — CDN *and* browser, since RFC 9111 binds Vary for any cache, not just shared ones — store a separate response for every User-Agent string, potentially thousands of entries for the same resource. `Vary: *` is worse in a different way: RFC 9111 §4.1 says a stored response whose Vary value contains `*` "always fails to match", so the response may still be stored but can never be reused, guaranteeing a miss on every request. Use `Vary: Accept-Encoding` for compressed responses and nothing else for most APIs.
 
-**HPACK dynamic table size and header size limits**: HTTP/2 has a `SETTINGS_HEADER_TABLE_SIZE` (default 4096 bytes) and servers enforce `SETTINGS_MAX_HEADER_LIST_SIZE`. Spring Boot defaults to max header size of 8 KB for HTTP/1.1 but the HTTP/2 default in Tomcat/Netty may be lower. Applications with large cookies or JWT tokens in headers can hit this limit and receive 431 (Request Header Fields Too Large).
+**HPACK dynamic table size and header size limits**: HTTP/2 has a `SETTINGS_HEADER_TABLE_SIZE` (default 4096 octets) and servers enforce `SETTINGS_MAX_HEADER_LIST_SIZE`. Spring Boot's `server.max-http-request-header-size` defaults to 8KB, but the Spring Boot docs warn that the limit is applied differently per server: Netty applies it to each individual header, while Tomcat applies it to the combined size of the request line plus all header names and values — so the same 8KB setting is far stricter on Tomcat. Applications with large cookies or JWT tokens in headers can hit this limit and receive 431 (Request Header Fields Too Large).
 
 **Missing Content-Type on REST responses**: HTTP/1.1 clients that receive JSON without `Content-Type: application/json` may treat the response as text. Proxies may not compress it. Always set Content-Type explicitly.
 
@@ -472,10 +488,10 @@ public ResponseEntity<Product> getProduct(
 ## 12. Interview Questions with Answers
 
 **Q: What are the main improvements HTTP/2 provides over HTTP/1.1?**
-HTTP/2 provides multiplexing (multiple streams on one TCP connection, eliminating the need for 6 parallel connections per domain), HPACK header compression (repeated headers like Authorization are sent as 2-byte references after first request, reducing bandwidth 70-90%), binary framing (replaces text parsing with structured frames), and built-in flow control per stream. HTTP/1.1 with pipelining was supposed to solve serialization but was so broken in practice it was almost never enabled.
+HTTP/2 adds four things HTTP/1.1 lacks: stream multiplexing, HPACK header compression, binary framing, and per-stream flow control. Multiplexing puts many concurrent streams on one TCP connection, removing the need for the ~6 parallel connections per origin browsers used to open. HPACK sends a repeated header like Authorization as a short table reference after the first request; Cloudflare measured 76% compression on ingress headers and 69% on egress headers across its edge, cutting total ingress traffic by 53%. Binary framing replaces line-oriented text parsing with fixed 9-byte frame headers. HTTP/1.1 pipelining was supposed to solve serialization but was so broken in practice it was almost never enabled.
 
 **Q: Explain the head-of-line blocking problem in HTTP/2.**
-HTTP/2 multiplexes all streams over one TCP connection. If a TCP segment is lost, TCP's in-order delivery guarantee means no data from any stream can be delivered to the application until the lost segment is retransmitted and received. All HTTP/2 streams stall, even those whose data arrived successfully. This is TCP-level HoL blocking. HTTP/3 solves this by running over QUIC, where each stream is independently sequenced.
+HTTP/2 multiplexes all streams over one TCP connection. If a TCP segment is lost, TCP's in-order delivery guarantee means no data from any stream can be delivered to the application until the lost segment is retransmitted and received. All HTTP/2 streams stall, even those whose data arrived successfully. This is TCP-level HoL blocking; RFC 9113 states outright that "TCP head-of-line blocking is not addressed by this protocol." HTTP/2 removed only the *application-layer* HoL blocking of HTTP/1.1, where a slow response blocked the whole connection. HTTP/3 removes the transport-level case by running over QUIC, where each stream is independently sequenced — though loss inside one stream still blocks that stream, and QPACK dynamic-table references can block a stream until the referenced insert arrives.
 
 **Q: How does TLS 1.3 reduce latency compared to TLS 1.2?**
 TLS 1.2 requires 2 RTTs for a full handshake (1 RTT for TCP, 2 for TLS = 3 RTTs before data). TLS 1.3 reduced this to 1 RTT for TLS (2 RTTs total). TLS 1.3 also supports 0-RTT session resumption (sending application data in the first packet). TLS 1.3 mandatory forward secrecy eliminated export-grade ciphers and simplified cipher suite negotiation, improving security alongside performance.
@@ -499,13 +515,13 @@ HSTS (Strict-Transport-Security) tells browsers to only connect via HTTPS for th
 301 (Moved Permanently) is cacheable and instructs browsers to update bookmarks. Subsequent requests go directly to the new URL. 302 (Found, temporary redirect) is not permanently cacheable — the browser asks the original URL each time (though some browsers cache 302 with a short duration). Use 301 for permanent moves (old API versions, www to non-www). Use 302 for temporary moves or feature flags. Incorrect use of 301 makes rollbacks painful (cached redirect).
 
 **Q: How does HTTP/2 server push work, and why was it deprecated in Chrome?**
-HTTP/2 server push allowed a server to proactively send resources (CSS, JS) to the client before it requests them, using PUSH_PROMISE frames. In theory, this eliminated round trips for critical resources. In practice, servers couldn't know what was already in the browser cache — they would push resources the browser already had, wasting bandwidth. Chrome removed server push in Chrome 106. The preload link header with `<link rel="preload">` is more effective.
+HTTP/2 server push allowed a server to proactively send resources (CSS, JS) to the client before it requests them, using PUSH_PROMISE frames. In theory, this eliminated round trips for critical resources. In practice, servers couldn't know what was already in the browser cache — they would push resources the browser already had, wasting bandwidth. Chrome's removal notice reported push was used by only about 1.25% of HTTP/2 sites and that analysis showed no clear net performance gain, with regressions in many cases; Chrome 106 (stable September 2022) disabled HTTP/2 and gQUIC push by default. Push is still specified for HTTP/3 in RFC 9114 but no major browser implements it. Use `<link rel="preload">` or 103 Early Hints instead.
 
 **Q: What are the HTTP methods and which are idempotent?**
-GET, HEAD, OPTIONS, PUT, DELETE are idempotent (same request N times has same effect as once). POST and PATCH are not idempotent (submitting the same POST twice creates two resources). Safe methods (GET, HEAD, OPTIONS) do not modify server state. Idempotency is critical for retry logic in distributed systems — safely retrying a PUT or DELETE after a network failure cannot create inconsistency.
+Per RFC 9110 Table 7, GET, HEAD, OPTIONS, TRACE, PUT and DELETE are idempotent — sending the request N times has the same effect as sending it once. POST and CONNECT are not idempotent, and neither is PATCH (defined separately in RFC 5789), so submitting the same POST twice creates two resources. Safe methods — GET, HEAD, OPTIONS, TRACE — do not modify server state; every safe method is also idempotent, but not the reverse (PUT and DELETE are idempotent and unsafe). Idempotency is critical for retry logic in distributed systems — safely retrying a PUT or DELETE after a network failure cannot create inconsistency.
 
 **Q: What is the Vary header and when does it cause problems?**
-The Vary header tells caches to store separate responses for different values of the listed headers. `Vary: Accept-Encoding` causes caches to store different responses for gzip, br, and uncompressed clients. `Vary: User-Agent` causes caches to store thousands of responses per URL (one per User-Agent), destroying cache hit rates. `Vary: *` means nothing can be cached. Only include headers in Vary that genuinely produce different responses.
+The Vary header tells caches to store separate responses for different values of the listed headers. It binds any cache, shared and private alike — RFC 9111 does not restrict it to CDNs and proxies. `Vary: Accept-Encoding` causes caches to store different responses for gzip, br, and uncompressed clients. `Vary: User-Agent` causes caches to store thousands of responses per URL (one per User-Agent), destroying cache hit rates. `Vary: *` does not forbid storage — RFC 9111 §4.1 says such a stored response "always fails to match", so it can never be selected for reuse, which is a permanent miss rather than a ban on caching. Only include headers in Vary that genuinely produce different responses.
 
 **Q: What is the difference between HTTP long polling and WebSocket?**
 Long polling: the client sends an HTTP request; the server holds it open until data is available (or timeout), then responds; the client immediately sends another request. It uses standard HTTP semantics but creates connection churn and overhead. WebSocket: the client upgrades the connection (101 Switching Protocols), and then both sides can send frames at any time over the persistent connection. WebSocket has lower overhead per message, better performance, but requires explicit infrastructure support (load balancers, proxies).
@@ -514,7 +530,7 @@ Long polling: the client sends an HTTP request; the server holds it open until d
 HTTP/2 has flow control at two levels: per-connection and per-stream. Each stream has an initial window size (default 65,535 bytes). When the receiver processes DATA frames, it sends WINDOW_UPDATE frames to increase the window. The sender cannot send more data than the window allows. Connection-level flow control aggregates all streams. This prevents a fast sender from overwhelming a slow receiver's buffers, analogous to TCP's receive window but at the application layer.
 
 **Q: What is the HTTP/2 SETTINGS frame and what can it configure?**
-SETTINGS frames are exchanged at connection setup and can be sent anytime to update settings. Key parameters: HEADER_TABLE_SIZE (HPACK dynamic table size, default 4096), ENABLE_PUSH (server push, 0 to disable), MAX_CONCURRENT_STREAMS (default unlimited; typically 100-1000 in practice), INITIAL_WINDOW_SIZE (flow control window, default 65535), MAX_FRAME_SIZE (max DATA frame, default 16384 bytes), MAX_HEADER_LIST_SIZE (max header set size). Misconfiguring these causes 429/431 errors or poor performance.
+SETTINGS frames are exchanged at connection setup and can be sent anytime to update settings. Key parameters, with the RFC 9113 §6.5.2 defaults: HEADER_TABLE_SIZE (HPACK dynamic table size, default 4096 octets), ENABLE_PUSH (server push, default 1, set 0 to disable), MAX_CONCURRENT_STREAMS (no limit initially; the RFC recommends servers advertise at least 100, and 100-1000 is typical in practice), INITIAL_WINDOW_SIZE (flow control window, default 65,535 octets, max 2^31-1), MAX_FRAME_SIZE (default 16,384 octets, valid range 2^14 to 2^24-1), MAX_HEADER_LIST_SIZE (advisory, unlimited by default). Setting these too low costs you either 431 Request Header Fields Too Large or stream-level REFUSED_STREAM resets, not 429 — 429 is application rate limiting and has nothing to do with SETTINGS.
 
 ---
 
@@ -533,60 +549,70 @@ SETTINGS frames are exchanged at connection setup and can be sent anytime to upd
 
 ## 14. Case Study
 
+> **This case study is an illustrative composite**, not a published incident report. The protocol mechanics and the round-trip arithmetic below are exact and reproducible; the app, the timings and the "measured" before/after figures are constructed to make the mechanics concrete.
+
 **Problem**: A mobile API had slow load times on first launch despite fast database queries and minimal processing. Cold start on mobile was 3.5–5 seconds. Warm launch (subsequent) was 200ms.
 
 **Investigation**:
-1. Charles Proxy capture showed the initial TLS handshake was taking 600ms on mobile (high latency links).
-2. After TLS, 8 parallel HTTP/1.1 requests to 2 domains (6 to api.example.com, 2 to cdn.example.com).
-3. The API was returning large headers (800-byte JWT in Authorization response, 400 bytes of debugging headers in dev mode accidentally shipped to prod).
+1. A proxy capture showed roughly 600ms elapsing before the first response byte on a 150ms-RTT mobile link.
+2. After TLS, 8 HTTP/1.1 requests to 2 domains (6 to api.example.com, 2 to cdn.example.com), each on its own connection.
+3. Every request carried an oversized header set: an 800-byte JWT in the `Authorization` request header plus ~400 bytes of debugging headers from a dev-mode build accidentally shipped to prod, so ~1.2 KB of headers per request, uncompressed, on every one of the 8 requests.
 
 **Root Cause**: Three compounding issues:
-1. TLS 1.2 (2 RTTs) on a 150ms mobile link = 300ms just for TLS.
-2. HTTP/1.1 with 6 connections to api.example.com — 6 TLS handshakes = 6 * 300ms = 1.8 seconds of TLS overhead.
-3. 8 KB headers per request with uncompressed headers.
+1. TLS 1.2 needs 2 RTTs, on top of TCP's 1 RTT, so 3 x 150ms = 450ms of handshake before the first byte of the first request can even be sent.
+2. HTTP/1.1 opened 6 connections to api.example.com. Those handshakes run **concurrently**, so the wall-clock cost is one handshake, not six — the real penalty is that each connection starts its own congestion window at the RFC 6928 initial window of 10 segments (~14.6 KB) and has to ramp from scratch, and that only 6 of the 8 requests fit in the first wave.
+3. ~1.2 KB of uncompressed headers x 8 requests = ~9.6 KB of uplink header bytes per cold start, sent on connections whose windows have not yet opened.
 
-**Stated plainly.** "Each connection pays the full handshake price on its own, so opening six of them costs six handshakes — the RTT bill multiplies by connection count, not by bytes transferred."
+**Stated plainly.** "Six parallel connections do not cost six handshakes of wall clock — they overlap. What they do cost is six cold congestion windows and six sets of uncompressed headers."
 
-This is the single most useful mental model for mobile performance work. The fix is never "send less data" first; it is "stop paying the same fixed toll six times."
+That distinction is the whole lesson. The naive model — multiply the handshake by the connection count — overstates the handshake and hides where the time actually goes.
 
 | Symbol | What it is |
 |--------|------------|
 | RTT (150 ms) | One round trip on the mobile link — set by radio latency, not bandwidth |
-| TLS 1.2 = 2 RTTs | Handshake round trips before the first encrypted byte |
-| 6 connections | HTTP/1.1's per-origin parallelism limit in browsers |
-| TLS overhead | `connections × RTTs × RTT` — the number that dominated the cold start |
+| TCP = 1 RTT, TLS 1.2 = 2 RTTs | Round trips before the first encrypted application byte |
+| 6 connections | HTTP/1.1's per-origin parallelism limit in browsers (de facto, not spec'd) |
+| Initial window | 10 segments / ~14.6 KB per *new* connection (RFC 6928) — paid once per connection |
 
 **Walk one example.** Price the before and after on the same 150 ms link:
 
 ```
-  BEFORE -- HTTP/1.1 + TLS 1.2, 6 connections to api.example.com
-    per-connection handshake = 2 RTTs x 150 ms          =  300 ms
-    x 6 independent connections                          = 1800 ms
+  BEFORE -- HTTP/1.1 + TLS 1.2, 6 connections opened in parallel
+    TCP handshake            1 RTT x 150 ms  =  150 ms
+    TLS 1.2 handshake        2 RTT x 150 ms  =  300 ms
+    first request/response   1 RTT x 150 ms  =  150 ms
+    ------------------------------------------------------
+    time to first byte                       =  600 ms
+    the 6 handshakes OVERLAP: 6 x 450 ms of work, ~450 ms of wall clock
+    only 6 of the 8 requests fit the first wave; the last 2
+      wait for a connection to free up               = +150 ms
+    ------------------------------------------------------
+    all 8 responses started by                       =  750 ms
 
   AFTER -- HTTP/2 + TLS 1.3, 1 connection, all 8 requests multiplexed
-    per-connection handshake = 1 RTT  x 150 ms          =  150 ms
-    x 1 connection                                       =  150 ms
+    TCP handshake            1 RTT x 150 ms  =  150 ms
+    TLS 1.3 handshake        1 RTT x 150 ms  =  150 ms
+    all 8 requests in one round trip         =  150 ms
+    ------------------------------------------------------
+    all 8 responses started by               =  450 ms
+    warm start with TLS 1.3 0-RTT resumption =  150 ms  (TCP only)
 
-    saved on a cold start = 1800 - 150                   = 1650 ms
-    on a warm start (0-RTT resumption)                   =    0 ms
-
-  cross-check against the measured result:
-    cold start 3500 ms -> 900 ms = 2600 ms removed
-    of which handshake elimination alone accounts for   = 1650 ms  (63%)
-    the remaining ~950 ms came from HPACK + header cleanup
+    round-trip saving on a cold start = 750 - 450       =  300 ms
+      of which the TLS 1.2 -> 1.3 bump                  =  150 ms
+      of which killing the second request wave          =  150 ms
 ```
 
-Two levers moved independently here, and the arithmetic shows their relative weight: `6 -> 1` connections is worth 1500 ms, while `TLS 1.2 -> 1.3` is worth only 150 ms per connection. **Connection consolidation was 10x more valuable than the TLS version bump** — a ranking that is invisible until you actually multiply it out, and the reason HTTP/2 migration is the higher-priority fix of the two.
+So round trips account for only ~300 ms of the ~2600 ms improvement. The rest is bytes and congestion windows, not handshakes: 8 KB of the ~9.6 KB uplink header total disappears once the debug headers are dropped and HPACK indexes the JWT, and a single connection's window ramps once and stays warm for all 8 requests instead of six windows each starting cold at ~14.6 KB. **Connection consolidation still beats the TLS version bump — but through congestion-window sharing and header compression, not through saved handshakes.** That ranking is invisible if you model six parallel handshakes as six serial ones.
 
 **Fixes applied**:
-1. Migrated to TLS 1.3 with session resumption: TLS handshake reduced to 1 RTT (150ms), 0-RTT on resume (0ms).
-2. Enabled HTTP/2 on the API server: reduced 6 TLS handshakes to 1. All 8 requests multiplexed.
-3. Removed debug headers from production responses: headers reduced from 800 bytes to 180 bytes.
-4. Enabled HPACK compression: after first request, repeated headers sent as 2-byte references.
+1. Migrated to TLS 1.3 with session resumption: handshake reduced from 2 RTTs to 1 (300ms to 150ms), 0-RTT on resume.
+2. Enabled HTTP/2 on the API server: 6 connections collapsed to 1, all 8 requests multiplexed on one already-ramped congestion window.
+3. Removed debug headers from production requests: ~1.2 KB down to ~800 bytes per request.
+4. HPACK then indexed the repeated JWT: request 1 carries it in full, requests 2-8 reference it in a couple of bytes, so ~9.6 KB of header bytes per cold start drops to roughly 1 KB.
 
-**Results**:
+**Results** (illustrative, from the composite above — not a published measurement):
 - Cold start: 3.5s → 0.9s (74% reduction)
 - Warm start: 200ms → 95ms (53% reduction, primarily from 0-RTT TLS + HPACK)
-- Bandwidth per request: reduced 60% due to HPACK and header cleanup
+- Uplink header bytes per cold start: ~9.6 KB → ~1 KB
 
-**Lesson**: HTTP protocol version and TLS version have multiplicative effects on mobile performance. Every RTT on a 150ms mobile link costs 150ms. Eliminating unnecessary RTTs (TLS 1.3, HTTP/2 connection reuse) and unnecessary bytes (HPACK, clean headers) directly translates to perceived app speed.
+**Lesson**: On a high-latency link, count round trips *and* count cold congestion windows — they are different costs and the second one is usually larger. Parallel connections hide their handshakes behind each other but cannot hide their slow starts or their duplicated headers, which is exactly what HTTP/2 multiplexing and HPACK remove.

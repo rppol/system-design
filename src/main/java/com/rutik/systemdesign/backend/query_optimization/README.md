@@ -22,7 +22,8 @@ This module covers EXPLAIN ANALYZE plan reading, the N+1 detection and fix workf
 
 ## 3. Core Principles
 
-- **Selectivity**: The fraction of rows matching a predicate. High selectivity (few matching rows) → index scan. Low selectivity (many matching rows) → sequential scan.
+- **Selectivity**: The fraction of rows matching a predicate. A highly selective predicate (few matching rows) favours an index scan; an unselective one (most rows match) favours a sequential scan. Selectivity is only an *input*, though — the planner compares the **total estimated cost** of each whole plan, so a highly selective predicate can still get a seq scan (tiny table, or the index scan's random I/O outweighs the win) and an unselective one can still get an index scan (cheap `random_page_cost`, index-only scan, or a required sort order). There is no built-in "more than N% of the rows means sequential scan" constant.
+- **Cost units**: `seq_page_cost` is 1.0 by definition and `random_page_cost` defaults to 4.0; `cpu_tuple_cost` 0.01, `cpu_index_tuple_cost` 0.005, `cpu_operator_cost` 0.0025. Because the index/seq crossover falls out of those numbers, lowering `random_page_cost` (SSD-backed storage) moves it — measured on a 1.25M-row uncorrelated column: the switch to Seq Scan happened past roughly 62% of rows at `random_page_cost=1.1`, roughly 40% at the default 4.0, and roughly 25% at 10.0.
 - **Join algorithms**: Hash join (build hash table from smaller side, probe with larger), Merge join (both inputs sorted), Nested loop join (for small inputs). Wrong join choice causes catastrophic slowdown.
 - **Push predicates early**: Filter as early as possible in the plan to minimize rows flowing through subsequent operations.
 - **Statistics**: The planner uses column statistics (histograms, n_distinct, correlation). Stale statistics → wrong cardinality estimates → wrong plans.
@@ -35,10 +36,10 @@ This module covers EXPLAIN ANALYZE plan reading, the N+1 detection and fix workf
 
 | Node | Description | Good/Bad |
 |------|-------------|---------|
-| Seq Scan | Full table scan | OK for small tables or >15% selectivity |
-| Index Scan | B-tree traverse + heap fetch | Good for high selectivity |
-| Bitmap Heap Scan | Bitmap of pages, then heap fetch | Good for moderate selectivity |
-| Index Only Scan | B-tree only, no heap | Best (with covering index) |
+| Seq Scan | Full table scan | Fine for small tables, and correct whenever its total cost beats every index plan — there is no fixed row-percentage cutoff |
+| Index Scan | B-tree traverse + heap fetch | Good when few rows match, or when the index also supplies the required sort order |
+| Bitmap Heap Scan | Bitmap of pages, then heap fetch in physical order | Good for moderate selectivity — trades random heap I/O for sequential |
+| Index Only Scan | B-tree only; skips the heap **only for pages the visibility map marks all-visible** | Best case, but check `Heap Fetches:` — a table not recently vacuumed still visits the heap |
 | Hash Join | Build hash table from smaller side | Good for large unsorted inputs |
 | Merge Join | Merge two sorted inputs | Good if inputs already sorted |
 | Nested Loop | For each outer row, scan inner | Good when outer is small |
@@ -61,10 +62,12 @@ This module covers EXPLAIN ANALYZE plan reading, the N+1 detection and fix workf
 
 | Strategy | Throughput | Notes |
 |---------|-----------|-------|
-| COPY (PostgreSQL) | Highest | Bypasses WAL; for bulk load |
+| COPY (PostgreSQL) | Highest | Single-statement bulk path with far less per-row overhead. It does **not** bypass WAL — the docs' no-WAL case needs `wal_level = minimal` *and* the COPY to run in the same transaction as the `CREATE TABLE`/`TRUNCATE`. Measured on the default `wal_level = replica`, a 200,000-row COPY still generated ~4.8 MB of WAL |
 | multi-row VALUES INSERT | Very high | `INSERT INTO t VALUES (a),(b),(c),...` |
-| JDBC batch execute | High | Groups statements, still goes through WAL |
+| JDBC batch execute | High | Groups statements into fewer round trips; same WAL volume |
 | Individual INSERTs | Low | One round-trip per row |
+
+Run `ANALYZE` on the table after any bulk load — the planner's statistics are stale until you do.
 
 ---
 
@@ -82,32 +85,45 @@ GROUP BY u.id, u.name
 ORDER BY order_count DESC
 LIMIT 10;
 
--- Output:
+-- Output (note the nesting: every child sits one level deeper than its parent):
 Limit  (cost=5678.34..5678.36 rows=10) (actual time=234.123..234.125 rows=10)
   -> Sort  (cost=5678.34..5698.34 rows=8000) (actual time=234.123..234.124 rows=10)
         Sort Key: (count(o.id)) DESC
         Sort Method: top-N heapsort  Memory: 25kB          <- efficient
-  -> HashAggregate  (cost=5234.00..5314.00 rows=8000)
-                    (actual time=233.789..233.950 rows=8213)
-        -> Hash Join  (cost=1234.00..4234.00 rows=200000)
-                      (actual time=56.789..200.456 rows=245678)
-              Hash Cond: (o.user_id = u.id)
-              -> Seq Scan on orders o                      <- missing index
-                    (actual rows=1245678 loops=1)
-              -> Hash  (cost=1100.00..1100.00 rows=10720)
-                    -> Index Scan on users u               <- index used
-                          (actual rows=10720 loops=1)
-                          Index Cond: (created_at > '2024-01-01')
+        -> HashAggregate  (cost=5234.00..5314.00 rows=8000)
+                          (actual time=233.789..233.950 rows=8213)
+              -> Hash Join  (cost=1234.00..4234.00 rows=200000)
+                            (actual time=56.789..200.456 rows=245678)
+                    Hash Cond: (o.user_id = u.id)
+                    -> Seq Scan on orders o                <- reads every row
+                          (actual rows=1245678 loops=1)
+                    -> Hash  (cost=1100.00..1100.00 rows=10720)
+                          -> Index Scan on users u         <- index used
+                                (actual rows=10720 loops=1)
+                                Index Cond: (created_at > '2024-01-01')
 
 Reading the output:
   (cost=X..Y):  estimated startup cost X, total cost Y
   (actual time=A..B): actual startup ms A, total ms B
   rows=N: estimated rows. actual rows=M: actual rows.
   Large gap between N and M → bad statistics or complex predicate
-
-  "Seq Scan on orders" with 1.2M rows = bottleneck!
-  Fix: CREATE INDEX ON orders (user_id) or covering index
 ```
+
+**A Seq Scan is not automatically the bug.** The reflex fix here — `CREATE INDEX ON orders (user_id)` —
+does nothing for *this* query, and that was verified rather than assumed: on a PostgreSQL 16.9
+instance holding 100,000 users and 1,250,000 orders, adding `orders(user_id)` left the plan
+byte-for-byte identical (still `Seq Scan on orders` feeding a `Hash Join`). The reason is that the
+`created_at` predicate keeps ~59% of the users, so the join has to touch essentially every order
+row; 59,000 index descents cost far more than one 83 MB sequential read, and the planner is
+comparing those two *total costs*, not applying a selectivity rule of thumb.
+
+The same index becomes decisive the moment the driving predicate narrows. Tightening the filter to
+333 users on the same data flipped the plan to `Nested Loop` + `Index Scan using orders_user_id_idx`
+(`loops=333`) and execution time from 680 ms to 30 ms. **The index was never missing — the
+predicate was never selective.** Before prescribing an index, check whether the plan's *other* rows
+are the real cost: in the measured run the Seq Scan itself accounted for 68 ms of 680 ms, while the
+`HashAggregate` spilling to disk (`Batches: 5  Disk Usage: 3848kB`) accounted for most of the rest,
+and raising `work_mem` — not adding an index — was what removed the spill.
 
 **The idea behind it.** "`cost` is what the planner *guessed* before running anything, `actual`
 is what really happened — and the single most useful thing in the whole plan is the ratio
@@ -135,17 +151,18 @@ same plan, or compare `rows` against `actual rows`.
   Hash (users)                10,720          10,720     1.000     statistics perfect
   Hash Join                  200,000         245,678     1.228     acceptable drift
   HashAggregate                8,000           8,213     1.027     fine
-  Seq Scan on orders               -       1,245,678         -     THE bottleneck
+  Seq Scan on orders               -       1,245,678         -     widest node
 
-  Total actual time = 234.125 ms, and the Seq Scan feeding 1,245,678 rows into
-  the join accounts for nearly all of it. Every estimate above is accurate --
-  so this is NOT a stale-statistics problem, it is a missing-index problem.
+  Total actual time = 234.125 ms. Every estimate above is accurate, so this is
+  NOT a stale-statistics problem -- the planner knew exactly what it was doing.
 ```
 
 That distinction is the point of the audit. Estimates close to actuals mean the planner knew
-what it was doing and simply had no better option — fix it with an index or a rewrite. Estimates
+what it was doing and simply had no cheaper option — so the fix is a rewrite, a narrower
+predicate, more `work_mem`, or accepting the plan; an index only helps if it changes the *cost*
+comparison, which is why you re-run EXPLAIN after creating one instead of assuming. Estimates
 off by 100x or 1000x mean the planner was *misinformed*, and the fix is `ANALYZE`, a raised
-statistics target, or an extended statistics object, not a new index.
+`default_statistics_target` (default 100), or an extended statistics object, not a new index.
 
 **Why `loops` is the field that catches people out.** A node showing `actual time=0.8..0.9`
 with `loops=1000` did not take 0.9 ms — it took `0.9 x 1000 = 900` ms. PostgreSQL reports
@@ -177,7 +194,7 @@ flowchart LR
     class LM io
 ```
 
-Execution flows bottom-up through the plan tree, matching the "read innermost first" rule above: the two leaf scans run first — Index Scan on users is fast at 10,720 rows, while Seq Scan on orders is the bottleneck at 1.25M rows with no index — then Hash Join, HashAggregate, Sort, and Limit narrow the 245,678 joined rows down to the 10 rows actually returned.
+Execution flows bottom-up through the plan tree, matching the "read innermost first" rule above: the two leaf scans run first — Index Scan on users is fast at 10,720 rows, while Seq Scan on orders is the widest node at 1.25M rows — then Hash Join, HashAggregate, Sort, and Limit narrow the 245,678 joined rows down to the 10 rows actually returned. Width is not the same as blame: as the measured run above showed, the seq scan can be the biggest row count in the plan and still be the cheapest way to get those rows.
 
 ### N+1 Problem Pattern and Fix
 
@@ -369,20 +386,36 @@ WHERE (created_at, id) < ('2024-05-01', 456)  -- composite comparison
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
 
--- Or separate conditions (more readable, same effect):
+-- DO NOT use the OR rewrite. It returns the same rows but is NOT the same plan:
 SELECT * FROM orders
 WHERE created_at < '2024-05-01'
-   OR (created_at = '2024-05-01' AND id < 456)
+   OR (created_at = '2024-05-01' AND id < 456)   -- planner cannot turn OR into an Index Cond
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
 
 -- Required index for keyset:
 CREATE INDEX ON orders (created_at DESC, id DESC);
-
--- Performance comparison:
--- OFFSET 200000: ~800ms
--- Keyset with same data: ~1ms
 ```
+
+**Measured (PostgreSQL 16.9, 1.25M `orders` rows, warm cache, index above present).** Numbers are
+hardware- and cache-dependent — what transfers is the *shape*, not the milliseconds:
+
+| Query | Plan | Rows scanned | Buffers | Time |
+|---|---|---|---|---|
+| `LIMIT 20 OFFSET 0` | Index Scan | 20 | 23 | 0.04 ms |
+| `LIMIT 20 OFFSET 200000` | Index Scan | 200,020 | 200,771 | 71 ms |
+| `LIMIT 20 OFFSET 1200000` | Index Scan | 1,200,020 | 1,204,519 | 399 ms |
+| keyset, **row comparison** `(created_at, id) < (?, ?)` | Index Scan, cursor as `Index Cond` | 20 | 23 | **0.16 ms** |
+| keyset, **OR rewrite** (same cursor, same data) | Index Scan + `Filter`, 1,200,001 `Rows Removed by Filter` | 1,200,020 | 1,204,520 | **571 ms** |
+
+Two things fall out of that table. First, OFFSET is linear in the offset — cost per row is constant,
+so 6x the offset is 6x the time, and no index removes it because the rows genuinely have to be
+produced and thrown away. Second, **the row-comparison form of keyset pagination is the load-bearing
+detail.** The OR rewrite is not "more readable, same effect": PostgreSQL can push `(a, b) < (?, ?)`
+into the index as an `Index Cond` and seek straight to the cursor, but it cannot do that with the
+equivalent `OR`, which degrades to scanning the index from the top and discarding 1.2M rows in a
+`Filter`. On this data that is a 3,600x difference — and it is exactly the class of "fix" that looks
+right in review and disappears in the plan.
 
 ```mermaid
 xychart-beta
@@ -392,7 +425,7 @@ xychart-beta
     bar [0.001, 0.8, 45]
 ```
 
-*Keyset pagination costs about 1ms at any depth — an O(1) index seek on the cursor — while OFFSET pagination degrades with page depth: about 800ms at OFFSET 200,000, climbing to the 45-second timeouts a SaaS export endpoint hit at OFFSET 9,900,000 before switching to keyset.*
+*Illustrative, not measured: the chart uses the export-endpoint scenario from section 7 (about 800ms at OFFSET 200,000, climbing to 45-second timeouts at OFFSET 9,900,000) to show the shape. Keyset stays flat at any depth because it is a single index seek on the cursor; OFFSET grows linearly with depth. The absolute values depend on row width, cache state and storage — the measured table above records 71ms at OFFSET 200,000 and 0.16ms for keyset on a warm 1.25M-row table.*
 
 ### 6.4 Batch Inserts with JDBC and Spring
 
@@ -437,8 +470,10 @@ public void batchInsert(List<Order> orders) {
     });
 }
 
-// For very large inserts (millions of rows): use COPY with PostgreSQL
-public void bulkCopy(List<Order> orders) throws SQLException {
+// For very large inserts (millions of rows): use COPY with PostgreSQL.
+// CopyManager.copyIn(String, Reader) is declared "throws SQLException, IOException" --
+// both must be handled or rethrown or this will not compile.
+public void bulkCopy(List<Order> orders) throws SQLException, IOException {
     Connection conn = dataSource.getConnection();
     CopyManager copyManager = new CopyManager((BaseConnection) conn);
     StringBuilder sb = new StringBuilder();
@@ -467,20 +502,29 @@ stmt.executeQuery(sql);
 
 // FIX: PreparedStatement with parameter binding
 String sql = "SELECT * FROM orders WHERE user_id = ?";
-PreparedStatement ps = conn.prepareStatement(sql);  // plan cached at driver level
+PreparedStatement ps = conn.prepareStatement(sql);  // no server round trip yet (pgJDBC)
 ps.setLong(1, userId);
 ps.executeQuery();
 
-// PostgreSQL server-side prepared statements:
-// The driver sends PREPARE once, then EXECUTE for each invocation
-// Avoids repeated parse+plan on the DB server
-// HikariCP + PgSQL driver uses server-side PreparedStatements by default
+// PostgreSQL server-side prepared statements -- what actually happens:
+//  - prepareStatement() alone sends nothing; pgJDBC uses the unnamed extended-protocol
+//    statement (parse+bind+execute per call) at first.
+//  - Only after the SAME PreparedStatement has been executed prepareThreshold times
+//    (default 5) on the SAME physical connection does the driver switch to a named
+//    server-side statement and reuse it. Cross-connection reuse requires the pool to
+//    hand back the same physical connection.
+//  - HikariCP deliberately does NOT cache statements ("an anti-pattern" per its README);
+//    all statement/plan caching here is the driver's and the server's, not the pool's.
+//  - Server side: the first 5 executions get custom (parameter-specific) plans; then a
+//    generic plan is built and used only if its estimated cost is not much higher than
+//    the average custom-plan cost. Override with plan_cache_mode.
 
-// Spring JdbcTemplate uses PreparedStatement internally:
+// Spring JdbcTemplate uses PreparedStatement internally.
+// Use the varargs overload -- query(String, Object[], RowMapper) is @Deprecated since 5.3:
 jdbcTemplate.query(
     "SELECT * FROM orders WHERE user_id = ?",
-    new Object[]{userId},
-    rowMapper
+    rowMapper,
+    userId
 );
 
 // Check server-side prepared statements:
@@ -491,9 +535,9 @@ SELECT * FROM pg_prepared_statements;
 
 ## 7. Real-World Examples
 
-**GitHub's query optimization**: GitHub's Rails application historically had severe N+1 issues in their contribution graph. They instrumented every controller action with query counting and set a budget of N queries per action. Any action exceeding the budget required an architectural fix — not a band-aid. This discipline, applied consistently, kept their database load manageable despite massive data growth.
+**Query budgets as a regression gate**: The durable practice in large Rails and Spring codebases is to instrument every controller action or HTTP handler with a query counter and fail the build when an endpoint exceeds its budget. The point is that an N+1 is invisible in a code review and obvious in a counter, so the counter is where you enforce it — any endpoint over budget gets an architectural fix (eager load, batched `IN`, denormalized read model), not a band-aid. Ruby ecosystems use Bullet or Prosopite for this; JVM ecosystems use datasource-proxy or p6spy (see section 6.2).
 
-**Offset pagination cliff**: A SaaS company's "export all records" feature worked fine in development (1,000 records). In production with 10M records, the last pages (OFFSET 9,900,000 LIMIT 100) each took 45 seconds, timing out and causing user complaints. Migrating to keyset pagination reduced export time from hours to minutes.
+**Offset pagination cliff** (illustrative composite, not a public incident report): an "export all records" feature works fine in development with 1,000 records. In production with 10M records the last pages (`OFFSET 9,900,000 LIMIT 100`) take tens of seconds each and time out, because every one of those pages re-produces and discards ~9.9M rows. Migrating to keyset pagination makes each page cost the same as the first.
 
 ---
 
@@ -534,17 +578,26 @@ SELECT * FROM pg_prepared_statements;
 // BROKEN: query inside loop
 for (Long userId : userIds) {
     List<Order> orders = jdbcTemplate.query(
-        "SELECT * FROM orders WHERE user_id = ?", userId);  // N queries
+        "SELECT * FROM orders WHERE user_id = ?", orderRowMapper, userId);  // N queries
 }
-// FIX:
-jdbcTemplate.query(
-    "SELECT * FROM orders WHERE user_id IN (?)",
-    userIds);  // 1 query
+
+// BROKEN FIX: a single '?' cannot bind a List. Plain JdbcTemplate binds it as one
+// value and you get "operator does not exist: bigint = record" or a silent wrong result.
+// jdbcTemplate.query("SELECT * FROM orders WHERE user_id IN (?)", rm, userIds);
+
+// FIX: named parameter, expanded by NamedParameterJdbcTemplate into IN (?,?,?...)
+List<Order> orders = namedJdbcTemplate.query(
+    "SELECT * FROM orders WHERE user_id IN (:userIds)",
+    Map.of("userIds", userIds),
+    orderRowMapper);  // 1 query
+
+// Chunk userIds (e.g. 1,000 at a time) for very large lists: each distinct list length
+// is a distinct SQL text, so unbounded IN lists also blow out the plan cache.
 ```
 
 **Sort without index causes sort spill to disk**: `ORDER BY last_name, first_name` on a 10M row table without an index on those columns does an in-memory sort (up to `work_mem` bytes). If the sort exceeds work_mem, PostgreSQL spills to disk — dramatically slower. EXPLAIN output shows "Sort Method: external merge Disk: 45678kB". Fix: add index on the sorted columns, or increase work_mem for specific queries (`SET LOCAL work_mem = '256MB'` inside a transaction).
 
-**Implicit type casting preventing index use**: A query `WHERE user_id = '123'` on a column of type integer may not use the index — the database casts each row's integer to text for comparison, making the index unusable. Always use the correct type in parameters. In JPA, this is handled by parameter binding; in raw JDBC, use the correct setXxx method.
+**Type mismatch on an indexed column — but know which engine does what**: The pitfall is real and the two major engines fail in opposite directions, so the generic advice "a quoted number breaks the index" is wrong for PostgreSQL. In **PostgreSQL** a bare literal is untyped at parse time, so `WHERE user_id = '123'` on a `bigint` column resolves the literal to `bigint` and uses the index normally (verified: `Index Cond: (user_id = '123'::bigint)`); if the value instead arrives with an explicit text type — a JDBC `setString` on an integer column, since pgJDBC's default `stringtype=varchar` — PostgreSQL does not silently cast per row, it raises `ERROR: operator does not exist: bigint = character varying`. What *does* silently cost you the index in PostgreSQL is a function or cast applied to the **column**: `WHERE created_at::date = DATE '2023-06-01'` gets a Parallel Seq Scan, while the sargable range form `created_at >= '2023-06-01' AND created_at < '2023-06-02'` uses the index. In **MySQL** the classic trap is the reverse: comparing an indexed *string* column to a *number* (`WHERE str_col = 1`) compares both as floats, and the manual states outright that "MySQL cannot use an index on the column to look up the value quickly". Always bind with the column's own type, and never wrap the indexed column in a function.
 
 ---
 
@@ -561,14 +614,14 @@ jdbcTemplate.query(
 | `Hibernate generate_statistics` | Query count and timing statistics |
 | `EXPLAIN ANALYZE` in DBeaver/DataGrip | GUI plan visualization |
 | depesz EXPLAIN | Online PostgreSQL plan formatter |
-| `USE INDEX` / `pg_hint_plan` | Force index hints when planner chooses wrong plan |
+| `pg_hint_plan` (PostgreSQL) / `USE INDEX` (MySQL) | Per-query plan hints. PostgreSQL has no native hint syntax — the extension is the only per-query mechanism |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: How do you read a PostgreSQL EXPLAIN ANALYZE output?**
-Each line is a plan node (operation). Read from the innermost (deepest indentation) outward — inner nodes execute first. Key fields: cost=X..Y (estimated startup..total cost), rows=N (estimated), actual time=A..B ms (measured startup..total), actual rows=M. Large gap between rows=N (estimated) and actual rows=M indicates outdated statistics. The widest actual time lines are bottlenecks. Look for Seq Scan on large tables (should be Index Scan for high-selectivity queries), Sort with Disk methods (sort exceeded work_mem), and Hash Join with memory pressure.
+Each line is a plan node (operation). Read from the innermost (deepest indentation) outward — inner nodes execute first. Key fields: cost=X..Y (estimated startup..total cost), rows=N (estimated), actual time=A..B ms (measured startup..total), actual rows=M. Large gap between rows=N (estimated) and actual rows=M indicates outdated statistics. The widest actual time lines are bottlenecks — note that `actual time` is per loop, so multiply by `loops` before comparing nodes. Look for Sort or Aggregate nodes reporting Disk usage (they exceeded work_mem), Hash nodes with `Batches > 1`, and Seq Scans on large tables — but a Seq Scan is only a defect if an index plan would genuinely be cheaper, so confirm by creating the index and re-running EXPLAIN rather than assuming.
 
 **Q: What is the N+1 problem and how do you detect it in a Spring application?**
 N+1: a query fetches N entities (1 query), then for each entity fetches a related collection (N queries) = N+1 queries total. In JPA, this occurs with LAZY-loaded collections accessed outside the repository. Detection: enable `hibernate.generate_statistics=true`, use datasource-proxy to count queries per HTTP request, or use p6spy to log all SQL with stack traces. In tests, assert a maximum query count per operation.
@@ -580,13 +633,13 @@ Option 1: `@Query("SELECT u FROM User u LEFT JOIN FETCH u.orders WHERE u.id IN :
 OFFSET N requires the database to generate all rows 0 through N+LIMIT-1 and discard 0 through N-1. For OFFSET 1,000,000 LIMIT 20, the database generates 1,000,020 rows and discards 1,000,000. Performance is O(OFFSET) — doubling the page number doubles the query time. At deep pages (export, large dataset), this becomes unbearably slow. Keyset pagination avoids this: `WHERE id > last_id LIMIT 20` uses the index directly, O(1) regardless of depth.
 
 **Q: How does keyset pagination work?**
-Keyset pagination uses the values from the last row of the current page as the cursor for the next page. For a list sorted by `(created_at DESC, id DESC)`, the next page query is: `WHERE (created_at, id) < (last_created_at, last_id) ORDER BY created_at DESC, id DESC LIMIT 20`. The composite WHERE condition acts as a cursor. An index on (created_at DESC, id DESC) makes this O(1). The tradeoff: cannot jump to arbitrary pages — you can only page forward (or backward with reversed comparison).
+Keyset pagination uses the values from the last row of the current page as the cursor for the next page. For a list sorted by `(created_at DESC, id DESC)`, the next page query is: `WHERE (created_at, id) < (last_created_at, last_id) ORDER BY created_at DESC, id DESC LIMIT 20`. The composite WHERE condition acts as a cursor. Write it as a **row comparison**, not as `a < ? OR (a = ? AND b < ?)` — PostgreSQL pushes `(a, b) < (?, ?)` into the index as an `Index Cond` and seeks straight to the cursor, but the OR form becomes a `Filter` over a full index scan (measured: 0.16 ms vs 571 ms at a 1.2M-row-deep cursor). An index on (created_at DESC, id DESC) then makes this O(1). The tradeoff: cannot jump to arbitrary pages — you can only page forward (or backward with reversed comparison).
 
 **Q: What JDBC patterns should you use for bulk inserts?**
-Best performance: COPY (PostgreSQL) or LOAD DATA INFILE (MySQL) — bypasses row-by-row WAL overhead. For general use: JDBC batch execute (`PreparedStatement.addBatch(); executeBatch()`) groups statements for fewer round trips. With Hibernate: set `hibernate.jdbc.batch_size=100`, `hibernate.order_inserts=true`, and use `saveAll()`. Never: loop calling `save()` individually — this is N round trips for N rows.
+Best performance: COPY (PostgreSQL) or LOAD DATA INFILE (MySQL), which strip the per-row statement overhead. Note what COPY does *not* do: it does not bypass the WAL. The PostgreSQL docs' no-WAL case requires `wal_level = minimal` *and* the COPY running in the same transaction as the `CREATE TABLE` or `TRUNCATE`; on the default `wal_level = replica` a 200,000-row COPY still generated ~4.8 MB of WAL in a measured run. For general use: JDBC batch execute (`PreparedStatement.addBatch(); executeBatch()`) groups statements for fewer round trips. With Hibernate: set `hibernate.jdbc.batch_size=100`, `hibernate.order_inserts=true`, and use `saveAll()`. Never: loop calling `save()` individually — this is N round trips for N rows. Run `ANALYZE` after any bulk load.
 
 **Q: How does a PreparedStatement improve performance?**
-PreparedStatement separates query planning from execution. First call: `prepareStatement(sql)` sends the SQL to the database for parsing and planning, returning a statement handle. Subsequent executions: send only the handle and parameters — the database uses the cached plan. Benefits: (1) eliminates repeated parse and plan overhead for the same query shape; (2) prevents SQL injection (parameters cannot change the query structure). With PostgreSQL: after the 5th execution of the same prepared statement, the server switches from parameter-specific plans to generic plans that are cached more aggressively.
+PreparedStatement separates query planning from execution, so the same query shape is parsed and planned once instead of on every call. The nuance interviewers probe is that `prepareStatement(sql)` does not itself talk to the server in pgJDBC: the driver only promotes the statement to a named server-side prepared statement after it has been executed `prepareThreshold` times (default 5) on the same physical connection, and HikariCP contributes nothing here because it deliberately does no statement caching of its own. Once a server-side statement exists, PostgreSQL runs the first five executions with custom, parameter-specific plans, then builds a generic plan and adopts it only if its estimated cost is not much higher than the average custom-plan cost (`plan_cache_mode` overrides this; `pg_prepared_statements.generic_plans`/`custom_plans` shows what it chose). Benefits: (1) eliminates repeated parse and plan overhead for the same query shape; (2) prevents SQL injection, since parameters cannot change the query structure.
 
 **Q: What is a Cartesian product in JPA and when does it occur?**
 When JOIN FETCHing multiple collections on the same entity (e.g., `User FETCH JOIN orders FETCH JOIN tags`), the SQL JOIN multiplies the result set: each user row is combined with each order and each tag. A user with 100 orders and 20 tags produces 100 * 20 = 2,000 rows, which Hibernate deduplicates in memory. The network traffic and memory used is 2,000 rows even though only 120 entities exist. Fix: use separate queries for each collection, connected via IN clause.
@@ -598,7 +651,7 @@ PostgreSQL: (1) Enable `pg_stat_statements` — aggregates all executed queries 
 `work_mem` (PostgreSQL) is the memory available per sort or hash operation per query execution. If a sort exceeds work_mem, PostgreSQL spills to disk (external merge sort). EXPLAIN ANALYZE shows "Sort Method: external merge Disk: XKIB". Signs of work_mem pressure: sorts and hash joins taking unexpectedly long, high temp file usage in pg_stat_database. Fix: increase work_mem for specific queries (`SET LOCAL work_mem = '256MB'`), or add an index to eliminate the sort, or redesign the query. Be careful: work_mem is per-operation per-query, and a complex query can have many operations.
 
 **Q: What query hints are available in PostgreSQL?**
-PostgreSQL has limited native hints. `enable_seqscan = off` (session level) disables seq scans — forces index use. `enable_hashjoin = off` disables hash joins. These are global settings and dangerous in production. Better: use `pg_hint_plan` extension for per-query hints: `/*+ SeqScan(orders) */` or `/*+ IndexScan(orders orders_user_id_idx) */`. Also: `SET LOCAL enable_nestloop = off` inside a transaction. For most cases, fixing statistics (ANALYZE) or adjusting planner cost parameters is better than hints.
+PostgreSQL has no native per-query hints, only the `enable_*` planner GUCs, and those *discourage* rather than disable. Setting `enable_seqscan = off` adds a huge penalty (the plan's cost jumps to `10000000000.00..10000023147.00` in a measured run) so an index plan wins if one exists — but with no alternative the planner still emits the Seq Scan; the docs say plainly that "it is impossible to suppress sequential scans entirely". Same for `enable_hashjoin`, `enable_nestloop`, `enable_sort`. These are per-session GUCs, not global server settings, so `SET LOCAL enable_nestloop = off` inside a transaction is the safe scoping — but they are still blunt, because they apply to every node in the query, not the one you meant. For real per-query hints use the `pg_hint_plan` extension: `/*+ SeqScan(orders) */` or `/*+ IndexScan(orders orders_user_id_idx) */`. For most cases, fixing statistics (`ANALYZE`, a higher `default_statistics_target`, extended statistics) or correcting `random_page_cost` for your storage is better than any hint.
 
 **Q: How do you count queries in a Spring test to prevent N+1 regression?**
 Use datasource-proxy or a custom JDBC connection wrapper. Configure a QueryCountHolder ThreadLocal that counts SQL executions. In tests:
@@ -611,7 +664,7 @@ assertThat(QueryCountHolder.getGrandTotal()).isLessThanOrEqualTo(2);
 This prevents regression: if someone adds a lazy access that triggers N+1, the test fails. Run these in all repository/service integration tests.
 
 **Q: What is the difference between INNER JOIN and LEFT JOIN performance-wise?**
-INNER JOIN: only returns rows where the join condition matches in both tables. LEFT JOIN: returns all rows from the left table, with NULLs for unmatched right table rows. Performance: INNER JOIN generally performs better — it can eliminate non-matching rows earlier in the plan. LEFT JOIN must preserve all left rows, preventing some filter pushdowns. When you use LEFT JOIN but then filter on the right table's columns in WHERE (making it effectively an INNER JOIN), use INNER JOIN explicitly to allow the planner to optimize better.
+INNER JOIN returns only rows matching on both sides; LEFT JOIN returns every left row, null-extending the unmatched ones. The performance difference is not that one is inherently faster on the same rows — it is that INNER JOIN gives the planner more freedom. Inner joins are commutative and associative, so the planner can reorder them freely and push predicates down through them; an outer join fixes which side must be preserved, so it constrains join order and blocks some pushdowns. The practical rule: if you write a LEFT JOIN and then filter on the right table's columns in the WHERE clause, you have written an INNER JOIN with extra steps — the WHERE discards the null-extended rows anyway. PostgreSQL can often detect and convert that case, but writing INNER JOIN explicitly states the intent and guarantees the freer plan space.
 
 **Q: How do you debug a query that is suddenly slow in production?**
 Systematic approach: (1) Get the execution plan from production: `EXPLAIN (ANALYZE, BUFFERS) <query>`. (2) Compare estimated vs actual rows — large gap = stale statistics. Run `ANALYZE tablename`. (3) Check if an index is being used: look for Seq Scan where an Index Scan is expected. (4) Check buffer hit rate in EXPLAIN BUFFERS output: low hit rate = working set exceeds buffer pool. (5) Check for lock contention: `SELECT * FROM pg_locks JOIN pg_stat_activity ON pg_locks.pid = pg_stat_activity.pid WHERE granted = false`. (6) Compare with a known-good plan: `EXPLAIN (ANALYZE)` from before the slowdown and compare cardinality estimates.
@@ -620,7 +673,7 @@ Systematic approach: (1) Get the execution plan from production: `EXPLAIN (ANALY
 Changing to EAGER stops the exception but converts an occasional N+1 into a permanent one, because every query that loads the parent entity now also loads the collection whether or not it's needed. LazyInitializationException happens when a lazy collection is accessed after the Hibernate session that could fetch it has already closed; switching the mapping to EAGER "fixes" that specific stack trace, but it does so by eager-loading the collection on every single query against that entity type, everywhere in the codebase, forever. The correct fix is scoped to the query that actually needs the data — a `JOIN FETCH` or `@EntityGraph` on that specific repository method — leaving the mapping itself LAZY for every other query path. Reserve EAGER mappings for the rare case where a collection is genuinely needed on nearly every load of its parent, and default to LAZY plus targeted fetch strategies everywhere else.
 
 **Q: Why might `WHERE user_id = '123'` fail to use an index even though user_id is indexed?**
-If the value reaches an integer column as a JDBC `setString` parameter, it arrives text-typed, and Postgres casts every row's value before comparing, defeating the index on that column. This is specifically a bind-parameter problem: a bare SQL literal like `WHERE user_id = '123'` typed directly in the query is usually resolved to `int4` by Postgres's parser at parse time, so no per-row cast happens and the index is used normally — the per-row cast only shows up when the parameter's type is fixed as text before the planner ever sees the query, which is exactly what `setString` does. EXPLAIN on the parameterized case shows a Seq Scan despite the index existing, because the comparison is no longer a direct integer-to-integer match the index can satisfy — it's an integer-to-text cast applied per row. This is easy to introduce accidentally by concatenating a path parameter or JSON field (which arrives as a string) directly into a JDBC call without converting it to the column's actual type first. Always bind parameters with the correct type — JPA parameter binding does this automatically from the entity's field type, while raw JDBC requires calling the matching setter such as `setLong` instead of `setString`.
+In PostgreSQL that exact query does not fail — the quoted literal is untyped at parse time and resolves to the column's type, so the index is used. Verified on PostgreSQL 16.9 against a `bigint` column with a b-tree index, the plan is a Bitmap Index Scan with `Index Cond: (user_id = '123'::bigint)`. The failure mode people are reaching for is a *bind parameter* whose type is already fixed to text before the planner sees it — a JDBC `setString` on an integer column, since pgJDBC sends `varchar` by default — but PostgreSQL does not silently cast per row in that case either; it refuses outright with `ERROR: operator does not exist: bigint = character varying`. So the honest answer has three parts. In PostgreSQL, what actually costs you the index is a function or cast applied to the **column** rather than the literal: `WHERE created_at::date = DATE '2023-06-01'` plans as a Parallel Seq Scan, while the sargable rewrite `created_at >= '2023-06-01' AND created_at < '2023-06-02'` uses the index. In MySQL, the trap runs the other way — an indexed *string* column compared to a *number* forces a float comparison and the manual states the index cannot be used. And in either engine the fix is the same: bind with the column's own type (`setLong`, not `setString`; JPA infers this from the entity field) and never wrap the indexed column in a function or a cast.
 
 ---
 
@@ -639,7 +692,7 @@ If the value reaches an integer column as a JDBC `setString` parameter, it arriv
 
 ## 14. Case Study
 
-**Problem**: An order management system had a "Get Orders with Customer Details" endpoint that was taking 8 seconds for managers reviewing 50 orders. The service handled 200 managers simultaneously, causing 40,000 DB queries per second.
+**Problem** (illustrative walkthrough; the numbers are internally consistent, not a published incident): An order management system had a "Get Orders with Customer Details" endpoint taking 8 seconds to return 50 orders. The dashboard auto-refreshed roughly once a second for about 200 concurrent managers, so ~200 requests/s x 51 queries per request ≈ **10,200 DB queries/s**.
 
 **Investigation**:
 1. datasource-proxy logging showed 51 queries per request (50 orders + 1 for order list).
@@ -663,4 +716,4 @@ Subsequent requests: 1 query (orders) + cache hits (customers). 180ms → 25ms.
 **Fix 3: Pagination**:
 Original endpoint returned all open orders (up to 10,000). Added cursor-based pagination (20 per page). Most managers only look at page 1. Query time stable regardless of total open orders.
 
-**Final result**: 40,000 DB queries/s → 200 queries/s. p99 latency 8s → 90ms. Database CPU 85% → 12%.
+**Final result**: ~10,200 DB queries/s → ~200 queries/s (51 queries per request down to 1, at the same ~200 requests/s). p99 latency 8s → 90ms. Database CPU 85% → 12%.

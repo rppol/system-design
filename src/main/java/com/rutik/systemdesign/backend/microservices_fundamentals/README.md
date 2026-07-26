@@ -18,7 +18,7 @@ One-line analogy: a city divided into specialized districts (banking district, h
 
 Mental model: each microservice is a small application that owns a database, exposes an API, and can be deployed by a team of 6-8 people without coordinating with other teams.
 
-Why it matters: Conway's Law states that organizations produce systems that mirror their communication structures. If you have 10 independent product teams, a monolith forces all 10 teams to coordinate deployments, schema migrations, and releases. Microservices let each team ship independently.
+Why it matters: Conway's Law (Melvin Conway, 1968) states that any organization designing a system produces a design whose structure copies the organization's communication structure. If you have 10 independent product teams, a monolith forces all 10 teams to coordinate deployments, schema migrations, and releases. Microservices let each team ship independently.
 
 Key insight: the unit of deployment is the unit of independent scaling and independent team ownership. A payment service that handles Black Friday spikes should scale independently of a user-profile service that has steady traffic.
 
@@ -60,7 +60,7 @@ A bounded context is a linguistic boundary where a model applies uniformly. The 
 DDD identifies core subdomains (competitive advantage — invest heavily), supporting subdomains (necessary but not differentiating — build simply), and generic subdomains (commodity — buy or use open source). Core subdomains warrant careful microservice design. Generic subdomains should use SaaS (email via SendGrid, payments via Stripe).
 
 **Strangler Fig Pattern**
-Incrementally migrate a monolith to microservices. Route traffic for specific features through an API gateway. Implement those features as new microservices behind the gateway. Once a feature is fully migrated, remove it from the monolith. Over time, the monolith "strangles" as its responsibilities shrink to zero.
+Incrementally migrate a monolith to microservices. Martin Fowler's formulation only requires some seam you can intercept at; in practice that interception layer is an API gateway or reverse proxy. Route traffic for specific features through it and implement those features as new microservices behind it. Once a feature is fully migrated, remove it from the monolith. Over time, the monolith "strangles" as its responsibilities shrink to zero.
 
 ```mermaid
 flowchart TD
@@ -333,7 +333,7 @@ flowchart LR
     B --> C{"Order exists,<br/>payment never processed"}
     C --> D["DATA<br/>INCONSISTENCY"]
 
-    D -.-> S1["Saga choreography:<br/>compensating events<br/>roll back prior steps"]
+    D -.-> S1["Saga choreography:<br/>compensating events<br/>semantically undo prior steps"]
     D -.-> S2["Saga orchestration:<br/>coordinator sends commands<br/>+ compensation"]
     D -.-> S3["Outbox pattern:<br/>event + domain change,<br/>same DB txn"]
 
@@ -343,7 +343,7 @@ flowchart LR
     class D lossN
     class S1,S2,S3 train
 ```
-*A partial failure between the order commit and the payment call leaves the system inconsistent; Saga (choreography or orchestration) and the outbox pattern are the three standard fixes, guaranteeing at-least-once delivery without a distributed transaction.*
+*A partial failure between the order commit and the payment call leaves the system inconsistent; Saga (choreography or orchestration) and the outbox pattern are the three standard fixes. Saga compensation undoes a step semantically — it restores an acceptable approximation of the prior state (Garcia-Molina & Salem, 1987), not an exact rollback — while the outbox gives at-least-once event delivery without a distributed transaction.*
 
 ### Outbox Pattern (Prevents Lost Events)
 
@@ -373,13 +373,13 @@ public Order placeOrder(PlaceOrderCommand cmd) {
 
 ## 7. Real-World Examples
 
-**Amazon**: each product page aggregates data from ~150 microservices. Product info, reviews, pricing, inventory, recommendations — all separate services. A failure in recommendations does not break add-to-cart.
+**Amazon**: the Dynamo paper (DeCandia et al., SOSP 2007, §2.2) states that "a page request to one of the e-commerce sites typically requires the rendering engine to construct its response by sending requests to over 150 services." Product info, reviews, pricing, inventory, recommendations — all separate services. A failure in recommendations does not break add-to-cart. Note the date: 150+ is Amazon's *2007* figure, and Amazon has never published a current count.
 
-**Netflix**: decomposed DVD rental monolith to 700+ microservices after a database corruption incident in 2008 took down the entire service. Each microservice runs in AWS, auto-scales independently, and has its own circuit breaker.
+**Netflix**: migrated its monolithic datacenter application to AWS after an August 2008 incident in which, in Netflix's own words, "we experienced a major database corruption and for three days could not ship DVDs to our members." Netflix describes the result as a move "from a monolithic app to hundreds of micro-services" (Netflix, "Completing the Netflix Cloud Migration", 2016-02-11). Widely repeated counts like "700+" or "1,000+" do not come from Netflix and should not be quoted as such.
 
-**Uber**: started as a monolith ("God app"). By 2014, the monolith had 15-second build times and deployments required all teams to coordinate. Decomposed to services per domain: dispatch, mapping, payments, driver, rider.
+**Uber**: ran "primarily two monolithic services" circa 2012-2013, where "a single regression within a monolithic code base can bring the whole system (in this case, all of Uber) down." Uber decomposed by domain and reports having grown to "around 2,200 critical microservices" — enough sprawl that it introduced a domain layer on top to manage it (Adam Gluck, "Introducing Domain-Oriented Microservice Architecture", Uber Engineering, 2020-07-23).
 
-**Shopify**: stayed on a Rails monolith but uses "modular monolith" architecture with strict module boundaries enforced by Packwerk. Proves microservices are not the only path to maintainability.
+**Shopify**: stayed on a Rails monolith but uses "modular monolith" architecture with strict module boundaries enforced by Packwerk, its open-source static-analysis tool that flags dependency and privacy violations between packages ("Enforcing Modularity in Rails Apps with Packwerk", Shopify Engineering, 2020-09-23). Proves microservices are not the only path to maintainability.
 
 ---
 
@@ -453,7 +453,7 @@ flowchart LR
 **The Distributed Monolith**
 The most dangerous anti-pattern. Services are deployed separately but are tightly coupled: ServiceA calls ServiceB synchronously, which calls ServiceC synchronously, which calls ServiceD. All share a database via a common library. You get all the complexity of microservices (network failures, distributed tracing, deployment coordination) with none of the benefits (independent deployment, team autonomy). Symptoms: you must deploy all services together; a schema change requires coordinating five teams; a timeout in ServiceD takes down ServiceA.
 
-Production war story: a financial services company split their monolith into 12 "microservices" over 18 months. Each service called three others synchronously. Average call chain depth was 6 hops. A database query optimization in ServiceH required changes in ServiceA through ServiceG because all services shared the same "shared-models" library. Deployments still required coordinating all 12 teams. They had built a distributed monolith with 10x the operational complexity.
+Production war story (illustrative composite — not a published, attributable incident): a financial services company split their monolith into 12 "microservices" over 18 months. Each service called three others synchronously. Average call chain depth was 6 hops. A database query optimization in ServiceH required changes in ServiceA through ServiceG because all services shared the same "shared-models" library. Deployments still required coordinating all 12 teams. They had built a distributed monolith with 10x the operational complexity.
 
 ```mermaid
 flowchart LR
@@ -550,7 +550,7 @@ A bug is reported: "the payment page is slow sometimes." You have 15 services. W
 | API gateway | Spring Cloud Gateway, Kong, AWS API Gateway, Nginx, Envoy |
 | Distributed tracing | Jaeger, Zipkin, AWS X-Ray, Micrometer Tracing + OpenTelemetry |
 | Log aggregation | ELK stack (Elasticsearch, Logstash, Kibana), Grafana Loki, Splunk |
-| Circuit breaker | Resilience4j, Hystrix (deprecated), Istio (service mesh level) |
+| Circuit breaker | Resilience4j, Hystrix (maintenance mode — "no longer in active development", final release 1.5.18; Netflix points new projects at Resilience4j), Istio (service mesh level) |
 | Saga orchestration | Temporal, Apache Camel, custom Kafka-based state machine |
 | Container orchestration | Kubernetes, AWS ECS, Nomad |
 | Service mesh | Istio, Linkerd, Consul Connect |
@@ -569,10 +569,10 @@ Each service owns its own database and no other service accesses it directly. Th
 A distributed monolith is a system deployed as separate services but tightly coupled via synchronous call chains, shared databases, or shared code libraries. It has the worst properties of both architectures: the complexity of distributed systems with the coupling of a monolith. Avoid it by enforcing database-per-service, preferring asynchronous communication for non-blocking workflows, keeping shared libraries to pure utilities (no domain logic), and measuring actual deployment independence (can a team deploy without coordinating with another team?).
 
 **Q: Explain the strangler fig pattern.**
-The strangler fig pattern migrates a monolith incrementally by routing new or extracted features behind an API gateway to new microservices, while the monolith handles remaining features. Over time, features are extracted one by one until the monolith is fully replaced. This avoids the risk of a big-bang rewrite. The key is to start with the strangler fig from day one — retroactively adding a gateway to a tightly coupled monolith is itself a large project.
+The strangler fig pattern migrates a monolith incrementally by routing new or extracted features behind an API gateway to new microservices, while the monolith handles remaining features. Over time, features are extracted one by one until the monolith is fully replaced. This avoids the risk of a big-bang rewrite. Fowler's original formulation does not mandate a gateway — it needs only a seam you can intercept at — but a gateway or reverse proxy is the usual choice. The key is to put that interception layer in place before the first extraction; retroactively adding one to a tightly coupled monolith is itself a large project.
 
 **Q: How do you handle data consistency across services when you cannot use a single ACID transaction?**
-Use the Saga pattern. In a choreography-based saga, each service publishes an event on success; downstream services listen and react, publishing their own events or compensation events on failure. In an orchestration-based saga, a central coordinator sends commands to services and handles compensation. The outbox pattern ensures events are reliably published: write the event to a local outbox table in the same transaction as the domain change, then relay the outbox to the message broker asynchronously. This guarantees at-least-once delivery without distributed transactions.
+Use the Saga pattern. In a choreography-based saga, each service publishes an event on success; downstream services listen and react, publishing their own events or compensation events on failure. In an orchestration-based saga, a central coordinator sends commands to services and handles compensation. Compensation is semantic, not a rollback: it restores an acceptable approximation of the prior state (Garcia-Molina & Salem, 1987), so a shipped item is returned or refunded rather than un-shipped. The outbox pattern ensures events are reliably published: write the event to a local outbox table in the same transaction as the domain change, then relay the outbox to the message broker asynchronously. This guarantees at-least-once delivery without distributed transactions.
 
 **Q: What is a bounded context in DDD and how does it map to a microservice?**
 A bounded context is a boundary within which a domain model is consistent and unambiguous. The word "order" in the order context means one thing (items, shipping address, status); in the inventory context it may mean something else. Each bounded context should map to one microservice (or a small cluster of services). The mapping ensures teams have clear ownership and domain models do not bleed across service boundaries.
@@ -584,7 +584,7 @@ REST uses HTTP/1.1 or HTTP/2 with JSON. gRPC uses HTTP/2 with Protocol Buffers (
 Identify what the business does, not how the code is organized. A typical e-commerce system has capabilities: product catalog, order management, payment processing, inventory, shipping, customer management, notifications, search. Each capability becomes a service candidate. Validate by asking: does this capability have a clear owner? Does it have well-defined inputs and outputs? Can it be deployed independently? Would different teams reasonably own it? If yes to all, it is a valid service boundary.
 
 **Q: What is the two-pizza team rule and why does it matter for microservices?**
-Amazon's rule: if a team cannot be fed by two pizzas (6-8 people), it is too large. In microservices, this means one team owns one service end-to-end: development, deployment, on-call. Too many people on one service creates coordination overhead. Too few and you cannot sustain the operational burden. The rule enforces that each service is small enough for a small team to own completely, driving autonomous deployment and clear accountability.
+Amazon's rule, in Jeff Bezos's words, is to "create teams that are no larger than can be fed by two pizzas" — commonly read as roughly 5 to 10 people. Amazon has never published a fixed headcount, so treat any specific number as a gloss rather than the rule itself. In microservices, this means one team owns one service end-to-end: development, deployment, on-call. Too many people on one service creates coordination overhead. Too few and you cannot sustain the operational burden. The rule enforces that each service is small enough for a small team to own completely, driving autonomous deployment and clear accountability.
 
 **Q: How do you handle a scenario where Service A needs data owned by Service B?**
 Option 1: Service A calls Service B's API at request time (synchronous). Simple but creates a runtime dependency — if B is down, A is degraded. Option 2: Service A subscribes to events from Service B and maintains a read-model (local cache of B's data). A is independent at request time but data is eventually consistent. Option 3: API composition at the gateway level aggregates data from A and B for the client. The right choice depends on consistency requirements: if A needs real-time data from B for a critical operation, use synchronous; if A needs reference data for display, use async with local read-model.
@@ -625,6 +625,8 @@ Three pillars: logs, metrics, traces. Logs: structured JSON logs with correlatio
 ## 14. Case Study
 
 ### E-Commerce Platform Migration: Monolith to Microservices via Strangler Fig
+
+This walkthrough is an **illustrative composite**, not a public record of a named company — the timings, instance counts, and deploy frequencies are representative figures chosen to make the arithmetic concrete.
 
 **Context**: A retail platform with 50 engineers running on a 6-year-old Rails monolith. The monolith has 400k lines of code, 15-minute test suites, and requires all teams to coordinate releases. Black Friday requires vertically scaling the entire monolith because the product catalog and checkout have different peak times.
 

@@ -78,7 +78,7 @@ Combine two adjacent fixed windows to approximate a sliding window without stori
 current_count = previous_window_count * (1 - elapsed_fraction) + current_window_count
 ```
 
-Where `elapsed_fraction` is how far into the current window we are (0.0 to 1.0). This approximation is accurate to within ~1% in practice and requires only two counters per identity instead of per-request storage.
+Where `elapsed_fraction` is how far into the current window we are (0.0 to 1.0). It needs only two counters per identity instead of per-request storage. Cloudflare, which runs this algorithm at its edge, published the only large-scale accuracy measurement: over 400 million requests, 0.003% were wrongly allowed or wrongly rate limited, with an average 6% gap between the real rate and the approximated one.
 
 **What the formula is telling you.** "Keep whatever fraction of the previous window still
 overlaps the last 60 seconds, and add everything in the current one."
@@ -135,10 +135,10 @@ xychart-beta
     title "Token Bucket Fill Level (refill 10 tokens/sec, capacity 100)"
     x-axis ["t=0", "t=1s", "t=5s", "t=10s"]
     y-axis "Tokens available" 0 --> 100
-    bar [10, 19, 50, 100]
+    bar [10, 20, 60, 100]
 ```
 
-*At t=0 the bucket holds 10 tokens after 1 request is consumed. A 20-request burst at t=1s drains the refilled 19 tokens to 0 (1 rejected). By t=5s a 50-request burst is fully absorbed. By t=10s the bucket is capped at its 100-token capacity, so only 100 of 101 requests are allowed.*
+*The bucket refills at 10 tokens/s toward a 100-token cap. At t=0 a burst has just drained it to 10 tokens; with no further requests it earns 10 more every second — 20 at t=1s, 60 at t=5s. By t=10s it has earned 100 more, but the capacity clamp discards the excess and holds it at 100: an idle client cannot bank more burst than `capacity`.*
 
 ### Fixed Window Boundary Burst
 
@@ -246,7 +246,7 @@ flowchart LR
     class s1,s2,s3 req
 ```
 
-*All three API servers share one counter in Redis; a Lua script executes `ZADD` + `ZREMRANGEBYSCORE` + `ZCARD` atomically, so no race condition is possible across instances.*
+*All three API servers share one counter in Redis; a Lua script executes `ZREMRANGEBYSCORE` + `ZCARD` + `ZADD` atomically — trim the window, count what is left, then admit — so no race condition is possible across instances.*
 
 ### Rate Limit Response Headers
 
@@ -303,7 +303,7 @@ flowchart LR
     class skip lossN
 ```
 
-*The client tracks its own requests and accepts; as the server's rejection rate rises, `throttle_probability` climbs and a per-request random draw decides whether to self-throttle — stopping the retry storm on the client side before the server is overwhelmed. K=2 tolerates roughly a 33% server rejection rate before the client begins throttling itself.*
+*The client tracks its own requests and accepts; as the server's rejection rate rises, `throttle_probability` climbs and a per-request random draw decides whether to self-throttle — stopping the retry storm on the client side before the server is overwhelmed. The probability only leaves zero once `requests > K * accepts`, so K=2 means the client tolerates the backend rejecting up to half its requests before it begins throttling itself.*
 
 ---
 
@@ -402,12 +402,20 @@ tokens and let one client replay a whole hour of quota in a single second.
 -- ARGV[1]: current timestamp in milliseconds
 -- ARGV[2]: window size in milliseconds  (e.g., 60000 for 60 seconds)
 -- ARGV[3]: max allowed requests in window
+-- ARGV[4]: unique member for THIS request (e.g. a client-generated UUID).
+--          The sorted set is keyed by member, so two requests landing in the
+--          same millisecond with the same member overwrite each other and the
+--          window silently under-counts. Do NOT mint the member from a second
+--          Redis key such as INCR key..':seq': that key is not in KEYS, so it
+--          breaks on Redis Cluster (different hash slot) and, because nothing
+--          ever sets a TTL on it, it leaks one immortal key per identity.
 -- Returns: 1 = allowed, 0 = rejected, also returns remaining count
 
 local key     = KEYS[1]
 local now     = tonumber(ARGV[1])
 local window  = tonumber(ARGV[2])
 local limit   = tonumber(ARGV[3])
+local member  = ARGV[4]
 
 -- Remove all timestamps that are outside the current window
 redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
@@ -416,10 +424,10 @@ redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
 local count = redis.call('ZCARD', key)
 
 if count < limit then
-    -- Add current request timestamp as score and a unique member
-    -- Using now + random suffix to handle multiple requests at the same millisecond
-    redis.call('ZADD', key, now, now .. ':' .. redis.call('INCR', key .. ':seq'))
-    -- Set expiry to avoid orphaned keys
+    -- Score = timestamp (drives the window trim); member = the caller's unique id
+    redis.call('ZADD', key, now, member)
+    -- Set expiry to avoid orphaned keys. Refreshed on every admitted request,
+    -- so an idle identity's key disappears one window after its last request.
     redis.call('PEXPIRE', key, window)
     return {1, limit - count - 1}  -- allowed, remaining after this request
 else
@@ -478,10 +486,16 @@ public class RateLimitingFilter extends OncePerRequestFilter {
         "local now = tonumber(ARGV[1])\n" +
         "local window = tonumber(ARGV[2])\n" +
         "local limit = tonumber(ARGV[3])\n" +
+        // ARGV[4] is a caller-generated unique member. Do not use math.random()
+        // for it: before Redis 7.0 the Lua PRNG is re-seeded identically on every
+        // script execution unless effects replication is active, so two requests
+        // in the same millisecond can produce the same member, overwrite each
+        // other in the sorted set, and undercount the window.
+        "local member = ARGV[4]\n" +
         "redis.call('ZREMRANGEBYSCORE', key, 0, now - window)\n" +
         "local count = redis.call('ZCARD', key)\n" +
         "if count < limit then\n" +
-        "  redis.call('ZADD', key, now, now .. ':' .. math.random())\n" +
+        "  redis.call('ZADD', key, now, member)\n" +
         "  redis.call('PEXPIRE', key, window)\n" +
         "  return {1, limit - count - 1}\n" +
         "else return {0, 0} end";
@@ -489,6 +503,14 @@ public class RateLimitingFilter extends OncePerRequestFilter {
     private final RedisTemplate<String, String> redisTemplate;
     private final DefaultRedisScript<List> script;
     private final RateLimitProperties properties;
+
+    public RateLimitingFilter(RedisTemplate<String, String> redisTemplate,
+                              DefaultRedisScript<List> script,
+                              RateLimitProperties properties) {
+        this.redisTemplate = redisTemplate;
+        this.script = script;
+        this.properties = properties;
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
@@ -506,7 +528,8 @@ public class RateLimitingFilter extends OncePerRequestFilter {
             List.of(redisKey),
             String.valueOf(now),
             String.valueOf(windowMs),
-            String.valueOf(tier.getLimit()));
+            String.valueOf(tier.getLimit()),
+            UUID.randomUUID().toString());
 
         boolean allowed = result.get(0) == 1L;
         long remaining = result.get(1);
@@ -562,7 +585,20 @@ public class RateLimitingFilter extends OncePerRequestFilter {
 http {
     limit_req_zone $http_x_api_key zone=api_limit:10m rate=100r/s;
     limit_req_zone $binary_remote_addr zone=ip_limit:10m rate=10r/s;
-    limit_req_zone $http_x_api_key zone=write_limit:10m rate=10r/s;
+
+    # limit_req is only valid in http / server / location context -- NOT inside
+    # an `if` block, where nginx refuses to start with "limit_req directive is
+    # not allowed here". Select write methods with a map instead: nginx does not
+    # account a request whose limit_req_zone key evaluates to the empty string,
+    # so reads pass through the write zone without consuming any budget.
+    map $request_method $write_key {
+        default   "";
+        POST      $http_x_api_key;
+        PUT       $http_x_api_key;
+        PATCH     $http_x_api_key;
+        DELETE    $http_x_api_key;
+    }
+    limit_req_zone $write_key zone=write_limit:10m rate=10r/s;
 
     # Return 429 (not 503) for rate limit rejections
     limit_req_status 429;
@@ -580,11 +616,10 @@ http {
             proxy_pass http://backend;
         }
 
-        # Tighter limits for write operations
+        # Tighter limits for write operations -- the $write_key map above makes
+        # this a no-op for GET/HEAD, so no `if` is needed (or permitted) here.
         location ~* ^/api/(users|orders|payments) {
-            if ($request_method ~* "^(POST|PUT|PATCH|DELETE)$") {
-                limit_req zone=write_limit burst=10 nodelay;
-            }
+            limit_req zone=write_limit burst=10 nodelay;
             proxy_pass http://backend;
         }
 
@@ -603,12 +638,17 @@ http {
 public class AdaptiveThrottler {
     // Google SRE adaptive throttling
     // throttle_probability = max(0, (requests - K * accepts) / (requests + 1))
-    // K = 2 is recommended. Lower K = more aggressive throttling.
-    // K = 1 = client allows ~50% acceptance rate before throttling
-    // K = 2 = client allows ~33% rejection rate before throttling
+    // The probability only leaves zero once requests > K * accepts, i.e. once
+    // the accept ratio drops below 1/K. So:
+    //   K = 1 -> throttles as soon as ANY request is rejected (accept < 100%)
+    //   K = 2 -> throttles once the backend rejects more than half (accept < 50%)
+    // K = 2 is what the SRE book recommends. Lower K throttles more aggressively
+    // and wastes fewer backend resources, but propagates backend state to the
+    // client more slowly.
 
     private static final double K = 2.0;
     private static final int WINDOW_SECONDS = 120;
+    private static final long MIN_SAMPLES = 10;   // warm-up before throttling
 
     private final AtomicLong totalRequests = new AtomicLong(0);
     private final AtomicLong acceptedRequests = new AtomicLong(0);
@@ -621,20 +661,21 @@ public class AdaptiveThrottler {
     }
 
     public boolean shouldSendRequest() {
-        long requests = totalRequests.get();
+        // The SRE definition of "requests" is every attempt made by the
+        // application layer ON TOP of the throttler -- including the ones this
+        // method rejects locally. Counting only the requests actually sent (the
+        // common mistake) makes the ratio self-correcting in the wrong
+        // direction: locally dropped attempts stop pushing the probability up,
+        // so the client under-throttles exactly when the backend is worst off.
+        long requests = totalRequests.incrementAndGet();
         long accepts  = acceptedRequests.get();
 
-        if (requests == 0) return true;  // no history, send
+        if (requests <= MIN_SAMPLES) return true;  // not enough history yet
 
         double throttleProbability = Math.max(0.0,
             (requests - K * accepts) / (requests + 1.0));
 
-        boolean throttled = ThreadLocalRandom.current().nextDouble() < throttleProbability;
-
-        if (!throttled) {
-            totalRequests.incrementAndGet();
-        }
-        return !throttled;
+        return ThreadLocalRandom.current().nextDouble() >= throttleProbability;
     }
 
     public void recordResult(boolean accepted) {
@@ -683,7 +724,7 @@ Slack's published limits are the clearest example of choosing the *unit of isola
 | Leaky bucket             | No (smoothing) | No                     | O(queue_depth)      | Exact      | Medium                    |
 | Fixed window counter     | Partial        | Yes (2x burst)         | O(1)                | Approximate | Low                      |
 | Sliding window log       | Yes            | No                     | O(limit)            | Exact      | Medium                    |
-| Sliding window counter   | Partial        | Minimal (~1% error)    | O(1)                | ~99% accurate | Medium               |
+| Sliding window counter   | Partial        | Minimal (interpolated) | O(1)                | 0.003% wrong decisions over 400M reqs (Cloudflare) | Medium |
 
 ### Rate Limiting Location Comparison
 
@@ -783,7 +824,7 @@ if (count == null || count < limit) {
 }
 ```
 
-Under high concurrency, 50 threads could all read `count = 999`, all decide the limit (1000) had not been reached, and all increment — resulting in a final count of 1049 for that window. In production, this allowed clients to exceed their rate limit by up to 300% under sustained load. The fix: use a Lua script or Redis `MULTI/EXEC` transaction to make the check-and-increment atomic.
+Under high concurrency, 50 threads could all read `count = 999`, all decide the limit (1000) had not been reached, and all increment — resulting in a final count of 1049 for that window. The overshoot repeats every window under sustained concurrency, so the effective limit sits well above the configured one; how far above depends on thread count and Redis round-trip time, so treat any single multiple as illustrative rather than a constant. The fix: use a Lua script or Redis `MULTI/EXEC` transaction to make the check-and-increment atomic.
 
 ```java
 // FIX: atomic increment + check with Lua script
@@ -878,7 +919,7 @@ public class RateLimitService {
 ## 12. Interview Questions with Answers
 
 **Q: What is the boundary burst problem with fixed window counters and how do sliding windows solve it?**
-In a fixed window counter, a client can send `limit` requests in the last millisecond of one window and `limit` requests in the first millisecond of the next window — effectively `2 * limit` requests in a very short time. This happens because the counter resets hard at the boundary. A sliding window tracks requests over a rolling window ending at the current moment, so the window always contains at most `limit` requests in the most recent `windowSize` duration, regardless of where the clock boundary falls.
+A fixed window counter lets a client extract `2 * limit` requests in a very short span by straddling the window boundary. It sends `limit` requests in the last millisecond of one window and `limit` more in the first millisecond of the next, because the counter resets hard at the boundary. A sliding window tracks requests over a rolling window ending at the current moment, so the window always contains at most `limit` requests in the most recent `windowSize` duration, regardless of where the clock boundary falls.
 
 **Q: Explain the token bucket algorithm. How does it differ from a leaky bucket?**
 The token bucket accumulates tokens at a fixed rate up to a maximum capacity. Each request consumes one or more tokens. Requests are allowed when tokens are available and rejected when the bucket is empty. This allows bursts up to the bucket capacity while enforcing a long-run average equal to the refill rate. The leaky bucket processes requests at a constant outflow rate regardless of input rate — it does not allow bursts, it smooths them by queueing. Token bucket: variable output, constant average, burst-friendly. Leaky bucket: constant output, no burst, smoothing-focused.
@@ -896,7 +937,7 @@ Enterprise customers often have hundreds or thousands of employees behind a shar
 Assign a cost to each field and operation based on complexity (number of database queries it triggers, depth of nested resolvers, number of objects returned). Limit by total cost points per window rather than by request count. For example, a simple field lookup costs 1 point; a paginated list query costs 10 points per page; a query that fetches nested relationships costs multiplicatively. A client with a budget of 1,000 points per minute can make many simple queries but only a few complex ones. GitHub's GraphQL API uses this exact approach.
 
 **Q: What is the sliding window counter approximation and what is its error bound?**
-The sliding window counter uses two adjacent fixed-window counters and a weighted average: `estimated = prev_count * (1 - elapsed_fraction) + curr_count`, where `elapsed_fraction` is how far through the current window we are. This assumes traffic was uniformly distributed in the previous window. The maximum error is about 1–2% in practice for typical traffic distributions, because actual traffic is rarely perfectly uniform. The error is worst at the exact window boundary and decreases as the window progresses.
+It approximates a sliding window from two adjacent fixed-window counters, discounting the previous one by how much of it still overlaps. The formula is `estimated = prev_count * (1 - elapsed_fraction) + curr_count`, where `elapsed_fraction` is how far through the current window you are. The error comes entirely from assuming the previous window's traffic was spread evenly across it, and it over-counts when that traffic was front-loaded — so the limiter errs toward failing closed, the right direction. The only large-scale published measurement is Cloudflare's: across 400 million requests, 0.003% were wrongly allowed or wrongly limited, with an average 6% gap between the real rate and the approximated one.
 
 **Q: How does Google's adaptive throttling work and why is it superior to static rate limiting for preventing cascading failures?**
 Google's adaptive throttling tracks requests and accepts on the client side. The client probabilistically skips sending requests when `throttle_probability = max(0, (requests - K * accepts) / (requests + 1))` is high. When the server starts rejecting requests, the client automatically reduces its send rate proportionally — before the server is overwhelmed with retries. Static server-side rate limiting returns 429 errors, which well-behaved clients retry after a delay. Adaptive throttling prevents the retry storm itself: clients that are already seeing rejections do not send new requests, reducing load automatically.
@@ -1025,4 +1066,4 @@ rate-limiting:
 - Rate limiter adds 1.2ms average latency (0.8ms Redis round-trip + 0.4ms Lua execution)
 - Zero race conditions: atomic Lua scripts eliminate all boundary violations
 - During a credential leak incident, the compromised API key's burst of 50,000 requests in 10 seconds was blocked after 100 requests (free tier limit). Without rate limiting, the leak would have scraped 50,000 records.
-- Layered edge-then-origin limiting meant the CDN's IP rules absorbed the overwhelming majority of a volumetric HTTP flood and Nginx `limit_req` caught the residue, so no attack traffic reached the application servers. For scale context, the published records for HTTP request floods are Cloudflare's 17.2M rps (2021), 26M rps (2022), 71M rps (Feb 2023) and just over 201M rps (Aug 2023, HTTP/2 Rapid Reset), while volumetric records are measured in Tbps — Cloudflare reported 7.3 Tbps in Q2 2025 and 31.4 Tbps by Q4 2025. Size the edge tier against those numbers, not against origin capacity.
+- Layered edge-then-origin limiting meant the CDN's IP rules absorbed the overwhelming majority of a volumetric HTTP flood and Nginx `limit_req` caught the residue, so no attack traffic reached the application servers. For scale context, the published records for HTTP request floods are Cloudflare's 17.2M rps (2021), 26M rps (2022), 71M rps (Feb 2023) and just over 201M rps (Aug 2023, HTTP/2 Rapid Reset) — a level the Aisuru-Kimwolf botnet reached again in December 2025, with HTTP floods Cloudflare reports as exceeding 200M rps. Volumetric records are measured in Tbps: Cloudflare blocked 7.3 Tbps in May 2025 and a record 31.4 Tbps in Q4 2025. Size the edge tier against those numbers, not against origin capacity.

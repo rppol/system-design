@@ -69,9 +69,9 @@ After the wait duration expires, the circuit allows `permittedNumberOfCallsInHal
 
 ### Sliding Window Types
 
-**COUNT_BASED:** Tracks the last N calls. The failure rate is computed over the last `slidingWindowSize` calls. Simpler and lower memory overhead. Does not account for bursts of traffic (100 calls in 1 second vs. 100 calls in 1 hour have equal weight).
+**COUNT_BASED:** Tracks the last N calls. The failure rate is computed over the last `slidingWindowSize` calls. Implemented as a circular array of N individual measurements, so memory is O(N) in the number of calls. Does not account for bursts of traffic (100 calls in 1 second vs. 100 calls in 1 hour have equal weight).
 
-**TIME_BASED:** Tracks calls in the last N seconds. More accurate for bursty traffic patterns. Higher memory overhead because the number of calls in a window is unbounded.
+**TIME_BASED:** Tracks calls in the last N seconds. More accurate for bursty traffic patterns: an idle period ages calls out of the window, which a COUNT_BASED window never does. Memory is *not* proportional to traffic — Resilience4j implements it as a circular array of N one-second partial aggregations (three ints plus one long each), so call outcomes are never stored individually and consumption is nearly constant O(N) in *seconds*, independent of request rate.
 
 ### Retry Strategies
 
@@ -81,7 +81,9 @@ After the wait duration expires, the circuit allows `permittedNumberOfCallsInHal
 
 **Exponential backoff with full jitter:** Randomize the delay in the range [0, min(cap, base * 2^attempt)]. This is the gold standard. It fully desynchronizes retries across thousands of clients.
 
-**Exponential backoff with equal jitter:** Halfway between exponential and full jitter: base/2 + random(0, base/2). Guarantees a minimum wait but still decorrelates retries.
+**Exponential backoff with equal jitter:** Halfway between exponential and full jitter. Writing `v = min(cap, base * 2^attempt)` for the capped exponential value, the delay is `v/2 + random(0, v/2)`. Guarantees a minimum wait of `v/2` but still decorrelates retries.
+
+**Decorrelated jitter:** Feeds the previous delay back in: `sleep = min(cap, random(base, sleep * 3))`, seeded with `sleep = base`. It spreads clients at least as well as full jitter while keeping a floor of `base` on every delay.
 
 ### Bulkhead Strategies
 
@@ -193,16 +195,6 @@ flowchart LR
 ## 6. How It Works — Detailed Mechanics
 
 ### Resilience4j Circuit Breaker Configuration
-
-Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
-down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
-itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
-`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
-
-Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
-down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
-itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
-`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
 
 Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
 down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
@@ -330,19 +322,23 @@ FIX — jitter desynchronizes retries. Note carefully which *kind* of jitter eac
 // but it does NOT implement AWS "full jitter". It applies a randomization
 // factor (DEFAULT_RANDOMIZATION_FACTOR = 0.5) around the exponential value:
 //   delay = uniform(interval * (1 - f), interval * (1 + f))
-// so with f = 0.5 the delay lands in [0.5x, 1.5x] of the ceiling, never near 0.
-//   attempt 0: uniform( 50ms, 150ms)
-//   attempt 1: uniform(100ms, 300ms)
-//   attempt 2: uniform(200ms, 600ms)
+// so with f = 0.5 the delay lands in [0.5x, 1.5x] of the exponential interval
+// for that attempt, never near 0. Note the randomization is applied AROUND the
+// already-capped interval, so a drawn delay can exceed maxInterval by up to 1.5x.
+//   attempt 1: uniform( 50ms, 150ms)
+//   attempt 2: uniform(100ms, 300ms)
+//   attempt 3: uniform(200ms, 600ms)
 // That is bounded jitter — good enough for most services, and it keeps a
 // minimum wait, but it spreads clients less than full jitter does.
 
-RetryConfig retryConfig = RetryConfig.custom()
+// Type the builder so retryOnResult sees your response type: RetryConfig.custom()
+// alone infers Builder<Object> and the lambda below would not compile.
+RetryConfig retryConfig = RetryConfig.<HttpResponse>custom()
     .maxAttempts(3)
     .intervalFunction(IntervalFunction.ofExponentialRandomBackoff(
         Duration.ofMillis(100),  // base delay
         2.0,                     // multiplier
-        Duration.ofSeconds(10))) // cap
+        Duration.ofSeconds(10))) // maxInterval
     .retryOnException(e -> e instanceof IOException || e instanceof TimeoutException)
     .retryOnResult(response -> response.getStatusCode() == 429)  // also retry on rate limit
     .build();
@@ -534,20 +530,23 @@ public class ResilientPaymentService {
         Supplier<CompletableFuture<PaymentResponse>> futureSupplier =
             () -> CompletableFuture.supplyAsync(() -> paymentClient.charge(request));
 
-        Supplier<CompletableFuture<PaymentResponse>> timeLimited =
+        // TimeLimiter.decorateFutureSupplier returns Callable<T> — it unwraps the
+        // Future and applies the timeout. It does NOT return Supplier<CompletableFuture<T>>.
+        Callable<PaymentResponse> timeLimited =
             TimeLimiter.decorateFutureSupplier(timeLimiter, futureSupplier);
 
-        Supplier<CompletableFuture<PaymentResponse>> cbProtected =
-            CircuitBreaker.decorateSupplier(circuitBreaker, timeLimited);
+        // The remaining decorators are Callable-based, so the breaker records the
+        // real outcome of the call rather than the mere creation of a future.
+        Callable<PaymentResponse> cbProtected =
+            CircuitBreaker.decorateCallable(circuitBreaker, timeLimited);
 
-        Supplier<CompletableFuture<PaymentResponse>> retried =
-            Retry.decorateSupplier(retry, cbProtected);
+        Callable<PaymentResponse> retried =
+            Retry.decorateCallable(retry, cbProtected);
 
-        Supplier<CompletableFuture<PaymentResponse>> bulkheaded =
-            Bulkhead.decorateSupplier(bulkhead, retried);
+        Callable<PaymentResponse> bulkheaded =
+            Bulkhead.decorateCallable(bulkhead, retried);
 
-        return Try.ofSupplier(bulkheaded)
-            .flatMap(f -> Try.of(f::get))
+        return Try.ofCallable(bulkheaded)
             .recover(ex -> cacheService.getLastSuccessful(request.getUserId()))
             .getOrElseThrow(ex -> new ServiceUnavailableException("Payment service unavailable", ex));
     }
@@ -629,11 +628,13 @@ During the April 2011 US-East EC2/EBS outage, the amplifying feedback loop came 
 
 ### DoorDash Bulkhead Failure Pattern
 
-DoorDash's publicly documented May 12, 2022 outage is the canonical modern example of a misconfigured breaker making things worse rather than better. Routine database maintenance briefly raised read/write latency; that latency propagated upstream as timeouts, the elevated error rate tripped a **misconfigured circuit breaker**, and the result was a roughly three-and-a-half-hour system-wide outage in which Dashers could not accept deliveries and consumers could not order. The lesson DoorDash drew was not "add more breakers" but that per-team, hand-rolled reliability controls do not compose: they moved Layer 7 circuit breaking and load shedding out of application code and into a **service mesh**, so the policy is uniform and centrally observable.
+DoorDash's publicly documented May 12, 2022 outage is the canonical modern example of a misconfigured breaker making things worse rather than better. Routine database maintenance briefly raised read/write latency; that latency propagated upstream as timeouts, and the elevated load tripped **Envoy circuit breakers left at their defaults**. DoorDash's own postmortem timeline runs from the 4:12 pm alert on Envoy circuit-breaker limits, through turning consumer traffic off at the edge at 5:30 pm and a partial recovery to 80% of normal order volume between 6:00 and 6:22 pm, to services being healthy and stable at 7:30 pm — a multi-hour, system-wide outage.
+
+The mechanism detail is the one worth carrying into an interview, and DoorDash flags it themselves: Envoy's "circuit breakers" are **not** failure-rate state machines at all. They are per-cluster concurrency ceilings — `max_connections`, `max_pending_requests`, `max_requests`, `max_retries` — with modest defaults (1,024 connections per cluster). Nothing measures a failure rate; a cluster simply stops admitting work once its connection or request count is exceeded, and because the breaking was shared, one service under heavy load shed traffic for unrelated services too. Immediate remediation was to disable shared circuit breaking. The longer-term lesson DoorDash drew was not "add more breakers" but that per-team, hand-rolled reliability controls do not compose: they moved Layer 7, metrics-aware circuit breaking and load shedding out of application code and into a **service mesh**, so the policy is uniform and centrally observable.
 
 ### Google's Client-Side Throttling
 
-Google's SRE book treats retry amplification as a first-class cascading-failure mode (see "Handling Overload" and "Addressing Cascading Failures") rather than as one named incident. The arithmetic is what matters: a 10% failure rate with clients retrying 3 times each adds 30% to total request volume, which pushes the failure rate higher and produces more retries in a feedback loop. Google's documented answer is **client-side adaptive throttling**: each client task tracks `requests` and `accepts` over the last two minutes and begins rejecting requests locally once `requests > K * accepts`, with `K = 2` as Google's stated preference — self-throttling before sending requests that are statistically likely to be rejected.
+Google's SRE book treats retry amplification as a first-class cascading-failure mode (see "Handling Overload" and "Addressing Cascading Failures") rather than as one named incident. The arithmetic is what matters. Work it yourself: a 10% failure rate with each failed request retried 3 times adds 0.10 x 3 = 30% to total request volume, which pushes the failure rate higher and produces more retries in a feedback loop. The book states the worst case for the same policy — when a backend is failing broadly, a per-request budget of three attempts grows the request rate "to somewhere just below 3x", and it is per-*client* retry budgets that hold the growth near 1.1x. Google's documented answer is **client-side adaptive throttling**: each client task tracks `requests` (attempted by the application layer) and `accepts` (accepted by the backend) over the last two minutes and begins rejecting requests locally once `requests` exceeds `K * accepts`, rejecting with probability `max(0, (requests - K * accepts) / (requests + 1))`. The book says of `K` that "we generally prefer the 2x multiplier" — self-throttling before sending requests that are statistically likely to be rejected.
 
 ---
 
@@ -643,9 +644,9 @@ Google's SRE book treats retry amplification as a first-class cascading-failure 
 
 | Dimension            | COUNT_BASED                          | TIME_BASED                            |
 |----------------------|--------------------------------------|---------------------------------------|
-| Memory usage         | Fixed: O(windowSize)                 | Variable: O(calls per window second)  |
+| Memory usage         | O(windowSize) individual measurements | O(windowSize) one-second aggregations — independent of traffic |
 | Traffic sensitivity  | Insensitive to time distribution     | Accounts for bursty traffic patterns  |
-| Accuracy             | Equal weight to old and recent calls | Recent calls dominate                 |
+| Accuracy             | An arbitrarily old call still counts until N newer ones arrive | Only calls inside the last N seconds count; idle time clears the window |
 | Best for             | Steady-state traffic                 | Bursty or variable traffic            |
 
 ### Retry Strategies Comparison
@@ -656,7 +657,7 @@ Google's SRE book treats retry amplification as a first-class cascading-failure 
 | Exponential backoff         | Low               | Yes                    | Low        |
 | Full jitter                 | High              | No (can be 0)          | Medium     |
 | Equal jitter                | Medium            | Yes (base/2)           | Medium     |
-| Decorrelated jitter         | Very high         | No                     | High       |
+| Decorrelated jitter         | Very high         | Yes (`base`)           | High       |
 
 ### Bulkhead: Semaphore vs. Thread Pool
 
@@ -670,7 +671,7 @@ Google's SRE book treats retry amplification as a first-class cascading-failure 
 
 ### Hystrix vs. Resilience4j
 
-| Dimension              | Hystrix (deprecated)            | Resilience4j                        |
+| Dimension              | Hystrix (maintenance mode)      | Resilience4j                        |
 |------------------------|---------------------------------|-------------------------------------|
 | Threading model        | Thread-per-command (heavy)      | Lightweight, decorator-based        |
 | Reactive support       | RxJava only                     | Project Reactor, RxJava, plain Java |
@@ -719,9 +720,9 @@ Google's SRE book treats retry amplification as a first-class cascading-failure 
 
 ## 10. Common Pitfalls
 
-### Pitfall 1: Retrying Non-Idempotent Operations (Production War Story)
+### Pitfall 1: Retrying Non-Idempotent Operations (Illustrative Incident Pattern)
 
-An e-commerce company's order service used a retry decorator on all outbound HTTP calls globally. One day, the payment processor began intermittently returning 503 after successfully processing the payment (the response was lost in a network partition). The retry logic retried the request, which succeeded again — charging the customer twice. The incident affected 3,400 orders before the on-call engineer disabled retries for the payment path. The fix: never apply retry decorators globally. Tag payment endpoints with a `@NonRetryable` annotation or use idempotency keys with the payment processor so duplicate submissions are detected server-side.
+The following is a composite of a recurring failure pattern, not a specific published incident; the volume figure is illustrative. An e-commerce company's order service used a retry decorator on all outbound HTTP calls globally. One day, the payment processor began intermittently returning 503 after successfully processing the payment (the response was lost in a network partition). The retry logic retried the request, which succeeded again — charging the customer twice. Thousands of orders were double-charged before the on-call engineer disabled retries for the payment path. The fix: never apply retry decorators globally. Tag payment endpoints with a `@NonRetryable` annotation or use idempotency keys with the payment processor so duplicate submissions are detected server-side.
 
 ### Pitfall 2: Circuit Breaker Without Fallback (Cascading Failure)
 
@@ -729,7 +730,13 @@ A team deployed circuit breakers on all downstream calls but did not implement f
 
 ### Pitfall 3: Forgetting `minimumNumberOfCalls` (Flapping Circuit Breaker)
 
-A team set `failureRateThreshold=50%` but left `minimumNumberOfCalls` at the default of 100. On service startup, the first two health-check calls failed (the downstream service was slow to start). The failure rate was 100%, but only 2 calls had been made. The circuit breaker opened immediately, blocking all real traffic for 60 seconds on every deployment. The fix: always set `minimumNumberOfCalls` to a value that represents a statistically meaningful sample size for your traffic level (typically 20–50 for low-traffic services).
+`minimumNumberOfCalls` cuts both ways, and both directions are live failure modes. Resilience4j's default is 100, not 1 — so the classic mistakes are symmetric.
+
+*Too low.* A team set `failureRateThreshold=50%` and `minimumNumberOfCalls=2` on the theory that faster tripping is safer. On service startup the first two health-check calls failed because the downstream was still warming up. The failure rate was 100% over a two-call sample, the breaker opened immediately, and real traffic was blocked for the full 60-second `waitDurationInOpenState` on every deployment.
+
+*Too high.* The mirror image is leaving the default of 100 on a low-traffic endpoint: 30 consecutive failures out of 30 calls is a 100% failure rate the breaker never acts on, because it is still waiting for call number 100.
+
+The fix: set `minimumNumberOfCalls` to a statistically meaningful sample for your actual traffic level (typically 20–50 for low-traffic services), and pair it with a startup readiness gate rather than asking the breaker to absorb warmup failures.
 
 ### Pitfall 4: Timeout Mismatch (Silent Data Loss)
 
@@ -778,7 +785,7 @@ Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident
 | Technology            | Role                                                          | Notes                                       |
 |-----------------------|---------------------------------------------------------------|---------------------------------------------|
 | Resilience4j          | Circuit breaker, retry, bulkhead, time limiter, rate limiter  | Lightweight, modular, Micrometer integration |
-| Spring Cloud CircuitBreaker | Abstraction layer over Resilience4j (or Sentinel)       | Use when you want to swap implementations   |
+| Spring Cloud CircuitBreaker | Abstraction layer over a pluggable implementation        | Current supported implementations are Resilience4J, Spring Retry and Framework Retry (Spring Framework 7 native retry). The Hystrix and Sentinel implementations were dropped |
 | Hystrix               | Circuit breaker (Netflix OSS)                                 | Maintenance mode since Nov 2018, last release 1.5.18; do not use for new projects |
 | Sentinel (Alibaba)    | Circuit breaking + flow control + hotspot detection           | Popular in Chinese tech stack                |
 | Failsafe              | Retry, circuit breaker, timeout, hedge                        | Lightweight alternative to Resilience4j     |
@@ -842,7 +849,7 @@ CLOSED is the normal state where all requests pass through; it transitions to OP
 Fixed-delay retry causes synchronized retry storms. If 10,000 clients all encounter a failure at the same time (e.g., a brief service restart), they all retry at exactly t+1s, t+2s, t+3s. This creates a thundering herd that can overwhelm the recovering service with 10,000 simultaneous requests every second, potentially preventing it from ever recovering. The fix is exponential backoff with full jitter, which desynchronizes retries by randomizing the delay across the range [0, exponential_cap].
 
 **Q: What is the difference between COUNT_BASED and TIME_BASED sliding windows?**
-COUNT_BASED tracks the last N calls regardless of when they happened; TIME_BASED tracks all calls that occurred in the last N seconds. COUNT_BASED is simpler and has fixed memory overhead but treats a single failure in 1 second the same as a single failure spread over 10 minutes. TIME_BASED is more accurate for bursty traffic and gives more weight to recent failures, but has variable memory usage because the number of calls in a window depends on traffic volume.
+COUNT_BASED tracks the last N calls regardless of when they happened; TIME_BASED tracks all calls that occurred in the last N seconds. COUNT_BASED is simpler and treats a single failure in 1 second the same as a single failure spread over 10 minutes; an old failure keeps counting until N newer calls push it out, so a low-traffic service can stay tripped on stale evidence. TIME_BASED ages calls out on the clock instead, which suits bursty traffic. Memory is not the deciding factor: COUNT_BASED stores N individual measurements, while TIME_BASED stores N one-second partial aggregations (three ints and a long each) rather than individual call outcomes, so its footprint is nearly constant in the window length and does not grow with request rate.
 
 **Q: When should you use a semaphore bulkhead vs. a thread pool bulkhead?**
 Use a semaphore bulkhead when your code is already non-blocking or reactive, since it only limits concurrency without adding threads. The semaphore bulkhead does not actually isolate the caller's thread — if the call blocks, the caller's thread is still tied up, just limited in count. Use a thread pool bulkhead when making blocking synchronous calls (JDBC, blocking HTTP clients) and you need full thread isolation. The thread pool bulkhead executes the call in a separate thread pool, so a hung downstream call only consumes a thread in that pool, not in the main application thread pool.
@@ -860,10 +867,10 @@ A retry storm occurs when a large number of clients simultaneously retry request
 Use idempotency keys. The client generates a unique UUID per logical operation and sends it with every attempt. The server stores processed idempotency keys (in Redis or a database) with a TTL and returns the cached response if it receives a key it has already processed. This allows the client to safely retry on network errors without risk of double processing. Payment processors like Stripe, Braintree, and Adyen all support idempotency keys. A secondary approach is to make the operation idempotent by design: instead of "debit $50", send "debit $50 for order-id-123" with a unique order ID that is rejected on duplicate submission.
 
 **Q: What happens when a Resilience4j circuit breaker is OPEN and a request comes in?**
-The circuit breaker throws `CallNotPermittedException` immediately, without making any network call. The exception propagates up the call stack. If a fallback is configured (via `.recover(CallNotPermittedException.class, ...)` in `Try` or via `@CircuitBreaker(fallbackMethod=...)` in Spring), the fallback is invoked. If no fallback is configured, the exception propagates to the caller. Metrics are recorded: the circuit breaker emits a `call.not.permitted` event which Micrometer exposes as `resilience4j.circuitbreaker.calls` with `kind=not_permitted`.
+The circuit breaker throws `CallNotPermittedException` immediately, without making any network call. The exception propagates up the call stack. If a fallback is configured (via `.recover(CallNotPermittedException.class, ...)` in `Try` or via `@CircuitBreaker(fallbackMethod=...)` in Spring), the fallback is invoked. If no fallback is configured, the exception propagates to the caller. Metrics are recorded: the breaker publishes a `CircuitBreakerOnCallNotPermittedEvent` (event type `NOT_PERMITTED`), which Micrometer exposes as its own counter, `resilience4j.circuitbreaker.not.permitted.calls`, tagged `kind=not_permitted`. Note this is a *separate* meter from the `resilience4j.circuitbreaker.calls` timer, whose `kind` tag only ever takes the values `successful`, `failed` and `ignored` — rejected calls never appear there, which is why dashboards built only on `.calls` go quiet exactly when the breaker is doing its job.
 
 **Q: How should you configure circuit breakers for startup and warmup scenarios?**
-Set `minimumNumberOfCalls` high enough that the circuit breaker does not trip on the first few calls during startup. A common mistake is leaving `minimumNumberOfCalls=1` (or a low value), causing the circuit to open immediately if the first health-check call to a warming-up service fails. For services that take 10–30 seconds to warm up, combine: a startup health gate (don't accept traffic until the service is ready), a higher `minimumNumberOfCalls` (e.g., 50), and `waitDurationInOpenState` long enough for the downstream service to fully start (e.g., 90s vs. default 60s).
+Set `minimumNumberOfCalls` high enough that the circuit breaker does not trip on the first few calls during startup. A common mistake is deliberately lowering it to 1 or 2 on the theory that faster tripping is safer, which causes the circuit to open immediately if the first health-check call to a warming-up service fails (Resilience4j's own default is 100, so this is always a hand-made mistake). For services that take 10–30 seconds to warm up, combine: a startup health gate (don't accept traffic until the service is ready), a higher `minimumNumberOfCalls` (e.g., 50), and `waitDurationInOpenState` long enough for the downstream service to fully start (e.g., 90s vs. default 60s).
 
 **Q: What is the Bulkhead pattern's relationship to Amdahl's Law?**
 Amdahl's Law states that parallelism is limited by the sequential portion of a program. In the context of bulkheads, if one integration's thread pool is saturated, the overall system throughput is limited by that bottleneck regardless of how many threads other components have. Bulkheads enforce explicit capacity partitions so that one slow integration cannot capture more than its allotted share of resources. This is directly analogous to Amdahl's sequential bottleneck — without bulkheads, one synchronous dependency can serialize all requests through a single bottleneck.
@@ -872,10 +879,10 @@ Amdahl's Law states that parallelism is limited by the sequential portion of a p
 A fallback is an immediate alternative response that is returned when the primary call fails — it does not undo anything, it just provides a substitute result. A compensating transaction is a business-level mechanism that undoes a previously committed operation when a subsequent operation in the same saga fails (e.g., if payment succeeded but inventory reservation failed, the compensating transaction refunds the payment). Fallbacks are a resilience pattern; compensating transactions are a data consistency pattern in distributed transactions and sagas.
 
 **Q: How does Resilience4j differ from Hystrix architecturally?**
-Hystrix uses a thread-per-command model: each command type runs in its own dedicated thread pool, which provides isolation but adds significant thread overhead (thousands of threads for services with many integration points). Resilience4j uses a lightweight decorator model with no threads of its own — it wraps your existing callables with metrics and state management using Java 8 functional interfaces. Resilience4j is modular (you can include only circuit breaker, or only retry, without pulling in the rest), integrates natively with Micrometer, and supports reactive types (Mono, Flux) natively. Hystrix's reactive support was limited to RxJava 1.x.
+Hystrix uses a thread-per-command model while Resilience4j uses a lightweight functional decorator model. In Hystrix each command type runs in its own dedicated thread pool, which provides isolation but adds significant thread overhead (thousands of threads for services with many integration points). Resilience4j instead uses a decorator model with no threads of its own — it wraps your existing callables with metrics and state management using Java 8 functional interfaces. Resilience4j is modular (you can include only circuit breaker, or only retry, without pulling in the rest), integrates natively with Micrometer, and supports reactive types (Mono, Flux) natively. Hystrix's reactive support was limited to RxJava 1.x.
 
 **Q: How do you test circuit breaker behavior in integration tests?**
-Use Resilience4j's `CircuitBreakerRegistry` to manually transition the circuit breaker to OPEN for testing fallback paths. Use WireMock or MockServer to simulate downstream failures (502, 503, connection refused, slow responses via response delays). Test all three states explicitly: CLOSED with success, CLOSED with failures accumulating, OPEN with fallback, HALF_OPEN with probe failures (stays OPEN), and HALF_OPEN with probe successes (transitions to CLOSED). Use Testcontainers with Toxiproxy to simulate network failures in realistic container-to-container calls.
+Drive the state machine directly using the transition methods on the `CircuitBreaker` instance rather than manufacturing a real failure rate. Resolve the instance from the `CircuitBreakerRegistry`, then call `transitionToOpenState()`, `transitionToHalfOpenState()` or `transitionToClosedState()` to assert each fallback path. Use WireMock or MockServer to simulate downstream failures (502, 503, connection refused, slow responses via response delays). Test all three states explicitly: CLOSED with success, CLOSED with failures accumulating, OPEN with fallback, HALF_OPEN with probe failures (stays OPEN), and HALF_OPEN with probe successes (transitions to CLOSED). Use Testcontainers with Toxiproxy to simulate network failures in realistic container-to-container calls.
 
 **Q: What is adaptive throttling and when does it outperform static circuit breakers?**
 Adaptive throttling (Google's approach) tracks the ratio of accepted to total requests from the client side and self-throttles before sending requests that are statistically likely to be rejected. The formula is: `throttle_probability = max(0, (requests - K * accepts) / (requests + 1))` where K is typically 2. When the server starts rejecting requests, the client automatically reduces its request rate proportionally. This is superior to static circuit breakers in scenarios with partial degradation — if the server is rejecting 30% of requests, adaptive throttling reduces client load by 30% proportionally, whereas a static circuit breaker only trips after the failure rate exceeds a fixed threshold (e.g., 50%).
@@ -945,7 +952,7 @@ flowchart TD
     class INV,PAY,SHIP lossN
     class PRC,FRD train
 ```
-*Bulkhead A (10 threads) isolates the no-fallback critical path — inventory, payment, shipping — from Bulkhead B (5 threads); a slow fraud-detection model reload can never block checkout. This split is what took the error rate during downstream degradation from 100% to under 3% (see Results below).*
+*Bulkhead A (10 threads) isolates the no-fallback critical path — inventory, payment, shipping — from Bulkhead B (5 threads); a slow fraud-detection model reload can never block checkout. This split is what turns a total outage during downstream degradation into a partial one confined to the failed dependency (see Results below).*
 
 **Key Design Decisions:**
 
@@ -997,4 +1004,4 @@ public class ResilienceConfig {
 }
 ```
 
-**Results:** After deploying this architecture, the checkout service's error rate during downstream degradation events dropped from 100% (complete outage) to under 3% (only payment-dependent checkouts fail when the payment provider is down). Mean time to detection of downstream failures dropped from 4 minutes (human-observed from dashboards) to under 30 seconds (circuit breaker opens and fires an alert). Recovery from fraud detection ML model reloads became invisible to users — the static rule fallback handles traffic for the 15–45 seconds the model takes to reload.
+**Results (illustrative — this case study is a worked design exercise, not a published postmortem; the figures below are the expected shape of the improvement, not measured outcomes at a named company):** the checkout service's error rate during downstream degradation events falls from 100% (complete outage) to only the share of traffic that genuinely depends on the failed provider, because every other path has a fallback. Mean time to detection drops from minutes (human-observed from dashboards) to seconds, since the circuit breaker opens and fires an alert rather than waiting for someone to notice. Recovery from fraud-detection model reloads becomes invisible to users, because the static rule fallback serves traffic for the duration of the reload.

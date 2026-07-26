@@ -198,7 +198,7 @@ Choreography fans the same event out to every subscriber and no service is aware
 ├──────────────────────────────────────────────────────────┤
 │ eventId       : UUID (globally unique)                   │
 │ eventType     : "com.example.order.OrderPlaced"          │
-│ occurredOn    : ISO-8601 timestamp (UTC)                  │
+│ occurredOn    : ISO-8601 timestamp (UTC)                 │
 │ aggregateId   : "order-abc-123"                          │
 │ aggregateType : "Order"                                  │
 │ version       : 1                                        │
@@ -224,9 +224,9 @@ flowchart LR
     subgraph LG["Sticky Note Legend"]
         L1(["Orange<br/>Domain Event"])
         L2(["Blue<br/>Command"])
-        L3(["Yellow<br/>Aggregate"])
-        L4(["Pink<br/>Policy"])
-        L5(["Purple<br/>External System"])
+        L3(["Big Yellow<br/>Aggregate"])
+        L4(["Lilac<br/>Policy"])
+        L5(["Wide Pink<br/>External System"])
     end
 
     subgraph TL["Timeline Example"]
@@ -237,11 +237,11 @@ flowchart LR
     class L1,E1 mathOp
     class L2,C1 io
     class L3,A1 base
-    class L4,P1 lossN
-    class L5 frozen
+    class L4,P1 frozen
+    class L5 lossN
 ```
 
-The legend's sticky-note colors carry straight into the timeline: the orange UserRegistered domain event triggers the blue SendWelcomeEmail command under a pink policy rule, landing on the yellow Email aggregate.
+The legend follows Brandolini's official EventStorming palette (orange domain event, blue command, big yellow aggregate, lilac policy, wide pink external system), and those colors carry straight into the timeline: the orange UserRegistered domain event triggers the blue SendWelcomeEmail command under a lilac policy rule, landing on the yellow Email aggregate.
 
 ---
 
@@ -360,7 +360,8 @@ public class OrderPlacedIntegrationEvent {
    - Surface duplicates and synonyms
 
 3. MARK PAIN POINTS (15 min)
-   - Red stickies on events that are unclear, controversial, or problematic
+   - Hot spots: neon-pink stickies turned 45 degrees, placed on events that are
+     unclear, controversial, or problematic
    - These are the most valuable discovery points
 
 4. ADD COMMANDS (30 min)
@@ -369,16 +370,16 @@ public class OrderPlacedIntegrationEvent {
    - ProcessPayment → PaymentProcessed or PaymentFailed
 
 5. ADD AGGREGATES (20 min)
-   - Yellow stickies: group commands and events by the aggregate that owns them
+   - Big yellow stickies: group commands and events by the aggregate that owns them
    - Order aggregate owns: PlaceOrder, ConfirmOrder, CancelOrder
 
 6. ADD POLICIES (20 min)
-   - Pink stickies: "When [event] THEN [command]" — automation rules
+   - Lilac stickies: "When [event] THEN [command]" — automation rules
    - "When PaymentFailed THEN NotifyCustomer"
    - "When InventoryReserved AND PaymentCharged THEN ShipOrder"
 
 7. ADD EXTERNAL SYSTEMS (15 min)
-   - Purple stickies: external systems that trigger commands or receive events
+   - Wide pink stickies: external systems that trigger commands or receive events
    - "Stripe" → PaymentCharged event
    - "SendGrid" receives NotifyCustomer command
 ```
@@ -387,13 +388,13 @@ public class OrderPlacedIntegrationEvent {
 
 ## 7. Real-World Examples
 
-**Netflix — Choreography at scale**: Netflix uses a choreography model with Kafka where hundreds of services subscribe to event streams. The `video-encoded` event triggers subtitle generation, thumbnail creation, CDN propagation, and recommendation updates — all independently. No orchestrator coordinates this.
+**Netflix — orchestration, adopted precisely because choreography stopped scaling**: Netflix built and open-sourced Conductor, a microservices orchestration engine, for its content pipeline. The engineering blog is explicit about the motivation: "With peer to peer task choreography, we found it was harder to scale with growing business needs and complexities. Pub/sub model worked for simplest of the flows, but quickly highlighted some of the issues associated with the approach" — process flows embedded in the code of multiple applications, tight coupling around input/output and SLAs, and no systematic visibility into a flow's completion status. The workflows it lists as orchestrated include studio partner integration and IMF content ingestion, setting up new titles, and content ingestion, encoding, and deployment to CDN. Treat this as the counter-example to assuming a large event-driven shop must be choreographed end to end. (Netflix archived the Conductor OSS repository in December 2023; the community `conductor-oss` fork continues development.)
 
-**Uber — Orchestration for critical flows**: Uber's trip dispatch uses orchestration-style sagas. The "MatchRider" orchestrator sends commands to geolocation, driver-matching, and ETA services and compensates if any step fails. The financial criticality and compensation complexity justify an orchestrator.
+**Uber — durable orchestration for long-running workflows**: Uber built Cadence, a distributed, durable workflow orchestration engine, and open-sourced it in 2017 (v1.0 announced June 2023). Uber describes it as powering over 1,000 services across T0 to T5 criticality tiers, for long-running workflows, microservice orchestration, batch processing, distributed cron, data pipelines, and model training. Multi-step flows with compensation — sign-up, order fulfillment — are the shape an orchestrator suits; real-time ride matching (DISCO) is a matching service, not a saga.
 
-**Amazon — Event-Carried State Transfer for order events**: Amazon's fulfillment pipeline uses fat events (ECST) so downstream systems (warehouse, logistics, customer notifications) can build their own projections without calling back to the order service. Order events carry full item details, shipping addresses, and pricing.
+**Event-Carried State Transfer as a pattern**: Martin Fowler defines ECST as the pattern that "shows up when you want to update clients of a system in such a way that they don't need to contact the source system in order to do further work". The stated benefits are resilience (recipients keep working when the source is unavailable), lower latency, and reduced load on the source; the stated costs are "lots of data schlepped around and lots of copies" plus more complexity on the receiver, which now maintains its own state. A fulfillment pipeline is the canonical illustration: order events carry full item details, shipping addresses, and pricing so warehouse, logistics, and notification services can build their own projections — this is a worked example of the pattern, not a description of any specific company's internal design.
 
-**Airbnb — Event storming for service decomposition**: Airbnb used event storming workshops to identify bounded contexts when decomposing their monolith. The exercise revealed that "Booking" and "Payment" were distinct aggregates with different lifecycles, leading to separate services.
+**Capital One — event storming for service decomposition**: Andrew Bonham (Distinguished Engineer, Capital One) documented using event storming to decompose a monolith into microservices, published on the Capital One Tech blog in November 2019. The method identifies bounded contexts — clusters of related events — as the basis for service boundaries, on the principle "if it changes together it should go together"; a shift in the language used between event clusters signals a different bounded context, and therefore a different service.
 
 ---
 
@@ -492,6 +493,8 @@ Service count is the practical signal for picking a pattern: 2-3 stable services
 
 ## 10. Common Pitfalls
 
+The incidents below are anonymized illustrative composites of recurring failure patterns, not citable public post-mortems; the failure mechanism in each is the part to learn, not the specific figures.
+
 **Pitfall 1 — Commands disguised as events.**
 A team named their Kafka messages "PlaceOrderEvent" and "SendEmailEvent". These are commands, not events. Consumers treated them as facts and did not validate pre-conditions. Result: emails were sent for orders that were subsequently rejected in the same millisecond by a validation race. Fix: events describe what happened; validate invariants before emitting.
 
@@ -515,14 +518,14 @@ A producer team renamed the field `customerId` to `userId` in an integration eve
 ## 11. Technologies and Tools
 
 **Message Brokers**
-- Apache Kafka — high-throughput, durable, replay-capable. De facto standard for integration events at scale. KRaft mode removes ZooKeeper dependency (Kafka 3.3+ production-ready).
-- RabbitMQ — smart broker with routing, exchange types (direct, topic, fanout, headers). Better for complex routing logic. No native replay.
-- Amazon SQS/SNS — managed, serverless. SQS for point-to-point queuing, SNS for fan-out. No consumer groups or replay.
+- Apache Kafka — high-throughput, durable, replay-capable. De facto standard for integration events at scale. KRaft (Kafka's own Raft-based metadata quorum) removes the ZooKeeper dependency: production-ready for new clusters since 3.3, and the ONLY supported mode since Kafka 4.0 (18 March 2025), which shipped without ZooKeeper entirely. A 3.x cluster must migrate to KRaft on 3.9 before it can upgrade to 4.x.
+- RabbitMQ — smart broker with routing, exchange types (direct, topic, fanout, headers). Better for complex routing logic. Classic and quorum queues are destructive-read (a consumed message is gone), but stream queues, added in RabbitMQ 3.9, are an append-only log with non-destructive consumption: consumers attach at an absolute offset or a timestamp and can re-read the same data, so replay is available if you choose that queue type.
+- Amazon SQS/SNS — managed, serverless. SQS for point-to-point queuing, SNS for fan-out. Neither offers Kafka-style consumer groups. SQS has no replay — a message is gone once deleted. SNS replay exists only for FIFO topics with an archive policy (retention 1 to 365 days, launched October 2023); a subscriber then sets a replay policy over a start/end point in that archive.
 - Amazon EventBridge — event bus with schema registry, archive, replay, and cross-account routing.
 - Apache Pulsar — multi-tenant, geo-replication, tiered storage. Suitable for multi-region event streaming.
 
 **Schema Management**
-- Confluent Schema Registry — Avro, Protobuf, JSON Schema. Compatibility enforcement modes: BACKWARD, FORWARD, FULL, NONE.
+- Confluent Schema Registry — Avro, Protobuf, JSON Schema. Compatibility modes: BACKWARD (the default), BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL, FULL_TRANSITIVE, NONE. The non-transitive modes check a new schema only against the latest registered version; the `_TRANSITIVE` variants check it against every previous version.
 - AWS Glue Schema Registry — managed schema registry for AWS ecosystem.
 
 **Event Storming**
@@ -554,7 +557,7 @@ Domain events are internal to a bounded context and carry rich domain meaning. I
 In choreography, services react autonomously to events with no central coordinator — each service subscribes to relevant topics and decides its reaction independently. In orchestration, a central saga orchestrator sends commands to participant services and listens for response events to drive the flow forward. Choreography is simpler for small stable flows; orchestration is preferable for complex multi-step flows where compensation logic is significant and traceability is required.
 
 **Q: What fields must an event envelope contain?**
-The mandatory fields are: eventId (UUID for deduplication), eventType (fully qualified string), occurredOn (UTC timestamp), aggregateId (the business identifier of the aggregate that changed), aggregateType, version (schema version), correlationId (trace ID spanning the entire distributed flow), causationId (eventId of the event that caused this one to be emitted), and payload (domain-specific content). The correlationId and causationId are frequently omitted in early implementations and cause severe debugging pain in production incidents.
+An envelope must carry an identity, a type, a timestamp, the subject aggregate, a schema version, the causal trace fields, and the payload. Concretely: eventId (UUID, used for deduplication), eventType (fully qualified string), occurredOn (UTC timestamp), aggregateId (the business identifier of the aggregate that changed), aggregateType, version (schema version), correlationId (trace ID spanning the entire distributed flow), causationId (eventId of the event that caused this one to be emitted), and payload (domain-specific content). The correlationId and causationId are frequently omitted in early implementations and cause severe debugging pain in production incidents.
 
 **Q: Why must event consumers tolerate unknown fields?**
 This is the principle of forward compatibility. When a producer adds a new field to an event schema, old consumers that have not yet been deployed with the new schema must not break. Jackson's `@JsonIgnoreProperties(ignoreUnknown = true)` and Avro's schema evolution rules both support this. If consumers throw on unknown fields, every schema change requires coordinated simultaneous deployment of all consumers before the producer, which defeats the purpose of decoupled services.
@@ -563,7 +566,7 @@ This is the principle of forward compatibility. When a producer adds a new field
 Backward compatibility means the new version of a schema can read data written with the old schema — achieved by only adding optional fields with defaults, never removing required fields. Forward compatibility means the old version of a schema can read data written with the new schema — achieved because consumers ignore unknown fields. Full compatibility (FULL mode in Schema Registry) requires both. In practice, always aim for FULL compatibility for integration events.
 
 **Q: What is event storming and when do you use it?**
-Event storming is a collaborative workshop technique invented by Alberto Brandolini where business and technical stakeholders collaboratively map domain events on a timeline using color-coded sticky notes. Orange stickies are domain events, blue are commands, yellow are aggregates, pink are policies, and purple are external systems. It is used when designing new services, decomposing a monolith, or aligning business and technical understanding of a complex domain. A well-run event storming session can surface bounded context boundaries and aggregate designs in a day that would take weeks of documentation-only analysis.
+Event storming is a collaborative workshop technique invented by Alberto Brandolini where business and technical stakeholders collaboratively map domain events on a timeline using color-coded sticky notes. The official palette is orange for domain events, blue for commands, big yellow for aggregates, lilac for policies, wide pink for external systems, green for read models, small yellow for actors, and neon pink for hot spots. It is used when designing new services, decomposing a monolith, or aligning business and technical understanding of a complex domain. A well-run event storming session can surface bounded context boundaries and aggregate designs in a day that would take weeks of documentation-only analysis.
 
 **Q: What is the notification event pattern and when should you use it over ECST?**
 A notification event carries only the aggregate identifier (and event type), no payload data. The consumer must call back to the producer's API to fetch current state. Use it when the consumer always needs the absolute latest state (not the state at the time of the event), when events are high-frequency and payload size matters, or when multiple events for the same aggregate may be batched and only the final state matters. Use ECST (Event-Carried State Transfer) when you want maximum consumer autonomy and can tolerate slight staleness.
@@ -584,7 +587,7 @@ Domain events are optimized for internal bounded context semantics. They may ref
 Fine-grained events (`OrderItemAdded`, `ShippingAddressUpdated`) give consumers maximum flexibility to react only to what changed, but increase event volume and complexity. Coarse-grained events (`OrderUpdated` carrying full state) are simpler to consume but trigger unnecessary processing when consumers only care about specific changes. The rule of thumb: use fine-grained events for high-value business facts that many consumers react to differently; use coarse-grained ECST events when most consumers need the full state anyway.
 
 **Q: What is the difference between a policy and a reaction in event storming?**
-A policy (pink sticky) is an automation rule: "When [event] THEN [command]". It is a business rule, not a technical one. "When PaymentFailed THEN NotifyCustomer AND CancelOrder." A reaction is the technical implementation of a policy — the consumer code that executes when the event arrives. The distinction matters in event storming because policies belong on the business level and should be validated with domain experts, not assumed by engineers.
+A policy (lilac sticky) is an automation rule: "When [event] THEN [command]". It is a business rule, not a technical one. "When PaymentFailed THEN NotifyCustomer AND CancelOrder." A reaction is the technical implementation of a policy — the consumer code that executes when the event arrives. The distinction matters in event storming because policies belong on the business level and should be validated with domain experts, not assumed by engineers.
 
 **Q: How does CQRS relate to events, commands, and queries?**
 CQRS separates the write model (command side) from the read model (query side) at the architectural level. Commands flow to the write model which validates business invariants, changes state, and emits domain events. Those events are consumed by projectors that build denormalized read models optimized for specific query patterns. Queries flow only to the read models and never touch the write model. This enables the write side to be strongly consistent and the read side to be eventually consistent, independently scalable, and freely denormalized.
@@ -677,7 +680,7 @@ public class OrderPlacedIntegrationEvent {
 
 **Outcomes**:
 - Inventory service outages no longer affect order placement — orders queue in Kafka, inventory reserves when it recovers.
-- Consumer lag monitoring (Grafana dashboard on Kafka consumer group lag) alerts the team when any consumer falls behind by more than 10,000 messages.
-- The notification service is independently deployable and scalable — during peak season, it scales to 10 instances consuming from `orders.placed` in parallel.
+- Consumer lag monitoring (Grafana dashboard on Kafka consumer group lag) alerts the team when any consumer falls behind by more than 1,000 messages. Size the threshold against the arrival rate, not by feel: 50,000 orders/day is ~0.58 orders/sec averaged over 24 hours, so 1,000 messages of lag is already about 29 minutes of backlog at the daily mean — a 10,000-message threshold on this volume would let a consumer sit nearly 5 hours behind before anyone was paged.
+- The notification service is independently deployable and scalable — during peak season, it scales to 10 instances consuming from `orders.placed` in parallel. That only helps because the topic is partitioned 12 ways: a Kafka consumer group cannot use more consumers than the topic has partitions, so instances beyond the partition count sit idle.
 - Schema Registry with FULL compatibility mode prevents any engineer from accidentally publishing a schema change that breaks consumers — the CI pipeline rejects non-compatible changes before merge.
 - The first major incident: a developer removed the `currency` field from the integration event (considered it redundant). Schema Registry rejected the change in CI. The field was retained with a default of `"USD"` for backward compatibility. Estimated production impact if it had shipped: payment service failures for all non-USD orders.

@@ -71,6 +71,8 @@ URI versioning is most pragmatic for public APIs. Internal APIs can use header v
 
 ### 4.3 HTTP Status Code Reference
 
+Names and semantics below follow **RFC 9110** (HTTP Semantics, 2022), which obsoleted RFC 7231 and RFC 2616 — cite 9110, not the retired documents. 429 is still defined by RFC 6585.
+
 | Code | Name | Use Case |
 |------|------|---------|
 | 200 | OK | Successful GET, PUT, PATCH |
@@ -86,7 +88,7 @@ URI versioning is most pragmatic for public APIs. Internal APIs can use header v
 | 405 | Method Not Allowed | HTTP method not supported for this resource |
 | 409 | Conflict | Conflict with current state (duplicate, optimistic lock) |
 | 410 | Gone | Resource permanently deleted (stronger than 404) |
-| 422 | Unprocessable Entity | Semantic validation errors (not syntax) |
+| 422 | Unprocessable Content | Semantic validation errors (not syntax). RFC 9110 §15.5.21 renamed it from "Unprocessable Entity", its WebDAV name (RFC 4918) |
 | 429 | Too Many Requests | Rate limit exceeded (include Retry-After header) |
 | 500 | Internal Server Error | Unhandled server error |
 | 502 | Bad Gateway | Upstream service returned invalid response |
@@ -101,7 +103,7 @@ URI versioning is most pragmatic for public APIs. Internal APIs can use header v
 | Keyset | ?after_id=100&size=20 | Efficient, consistent, stable | Cannot go backward easily |
 | Seek/Keyset | WHERE id > 100 ORDER BY id LIMIT 20 | Most efficient for DB | Same as keyset |
 
-Offset pagination at page 1000 with page size 20 executes `OFFSET 20000` in SQL — the database scans and discards 20,000 rows. This causes query time proportional to page number, not page size.
+Offset pagination at page 1000 with page size 20 executes `OFFSET 19980` in SQL — the database reads and discards 19,980 rows before the first row it returns, touching 20,000 rows to deliver 20. This causes query time proportional to page number, not page size.
 
 ```mermaid
 xychart-beta
@@ -112,7 +114,7 @@ xychart-beta
     line [20, 20, 20, 20]
 ```
 
-The offset line reuses the two concrete numbers already in this module: page 1000 scans and discards 20,000 rows (above), and the equivalent `OFFSET 500000` query scans 500,000 rows (Section 10). Keyset/cursor pagination touches only the page size, 20 rows, at any depth.
+The offset line reuses the two concrete numbers already in this module: page 1000 touches 20,000 rows to return 20 (above), and the equivalent `OFFSET 500000` query discards 500,000 rows (Section 10). Keyset/cursor pagination touches only the page size, 20 rows, at any depth.
 
 **What this actually says.** "`OFFSET N` does not mean 'jump to row N.' It means 'read N rows, throw them all away, then start returning results.' The database has no way to skip rows it has not read."
 
@@ -178,7 +180,9 @@ sequenceDiagram
 
 The first request is served entirely from the CDN edge cache. The second forces revalidation against the origin, but a matching ETag still returns a bodyless 304 instead of the full payload.
 
-### RFC 7807 Problem Details Error Response
+### RFC 9457 Problem Details Error Response
+
+RFC 9457 (2023) obsoleted RFC 7807; the media type is unchanged (`application/problem+json`), so cite 9457 in new work.
 
 ```json
 {
@@ -264,8 +268,10 @@ HATEOAS decouples clients from API structure — clients navigate via links, not
 
 ### 6.3 OpenAPI 3 Specification
 
+The current release is **OpenAPI 3.2.0** (published 2025-09-19, the first minor bump since 3.1.0 in February 2021). 3.0.x and 3.1.x remain widely deployed, so check what your tooling accepts before declaring `3.2.0`.
+
 ```yaml
-openapi: 3.0.3
+openapi: 3.2.0
 info:
   title: Order API
   version: 1.0.0
@@ -305,13 +311,19 @@ paths:
 // Request: GET /api/v1/orders?cursor=eyJpZCI6MTAwfQ&size=20
 // cursor is base64({"id":100})
 
+// CursorPage is your own DTO — do NOT reuse Spring Data's Page, which is an
+// interface (cannot be instantiated) and carries offset/total-count semantics.
+
 @GetMapping("/orders")
-public Page<OrderDto> listOrders(
+public CursorPage<OrderDto> listOrders(
         @RequestParam(required = false) String cursor,
         @RequestParam(defaultValue = "20") int size) {
 
     Long afterId = cursor != null ? decodeCursor(cursor) : 0L;
 
+    // PageRequest.of(0, ...) here is a LIMIT, not an OFFSET: the page number is
+    // pinned at 0 forever and the WHERE id > afterId clause does the seeking.
+    // size + 1 fetches one extra row purely to detect whether a next page exists.
     List<Order> orders = orderRepository
         .findByIdGreaterThanOrderByIdAsc(afterId, PageRequest.of(0, size + 1));
 
@@ -324,7 +336,7 @@ public Page<OrderDto> listOrders(
         ? encodeCursor(orders.get(orders.size() - 1).getId())
         : null;
 
-    return new Page<>(
+    return new CursorPage<>(
         orders.stream().map(orderMapper::toDto).toList(),
         nextCursor,
         hasNext
@@ -342,9 +354,9 @@ private String encodeCursor(Long id) {
 
 ## 7. Real-World Examples
 
-**GitHub REST API**: Uses URI versioning implicitly (v3 in the path), ETag for all responses, Link header for pagination (cursor-based with rel=next/prev/first/last), standard 422 for validation errors with a `message` + `errors` array structure. Their idempotency key pattern is used for payment APIs.
+**GitHub REST API**: Versions via the date-based `X-GitHub-Api-Version` request header, not a path segment — there is no `/v3/` in `api.github.com` URLs, and requests that omit the header default to `2022-11-28`. Unsupported versions get a 410 Gone, and each version is supported for at least 24 months after its successor ships. It sends ETags for conditional GETs and a `Link` header with `rel=next/prev/first/last`; the underlying scheme is per-endpoint — `page`/`per_page` (offset) on most endpoints, `before`/`after` cursors or `since` timestamps on others. Validation errors return 422 with a `message` + `errors` array.
 
-**Stripe API**: The gold standard for API design. Uses idempotency keys for all POST requests, cursor-based pagination with starting_after, RFC 7807-compatible error format, and webhook signatures with HMAC-SHA256. Their versioning uses dates (2023-08-16) rather than integers.
+**Stripe API**: A widely copied reference for API design. Uses idempotency keys for POST requests, cursor-based pagination with `starting_after`/`ending_before`, and webhook signatures with HMAC-SHA256 in the `Stripe-Signature` header. Its errors are **not** RFC 9457 Problem Details — Stripe uses its own envelope, `{"error": {"type", "code", "message", "param", "doc_url", ...}}`. Versioning is date-based with a release name: major releases carry a codename and monthly releases reuse it, giving strings like `2026-06-24.dahlia`.
 
 ---
 
@@ -384,7 +396,7 @@ private String encodeCursor(Long id) {
 
 **Offset pagination in production**: An application that works fine at launch fails when the database grows to millions of rows. `SELECT * FROM orders ORDER BY created_at OFFSET 500000 LIMIT 20` scans and discards 500,000 rows. Migrate to keyset pagination before this becomes a problem.
 
-**Inconsistent error formats**: Different endpoints returning different error structures (some with "message", others with "error", others with "detail") make client error handling a mess of special cases. Adopt RFC 7807 Problem Details across all endpoints from day one.
+**Inconsistent error formats**: Different endpoints returning different error structures (some with "message", others with "error", others with "detail") make client error handling a mess of special cases. Adopt RFC 9457 Problem Details (which obsoleted RFC 7807) across all endpoints from day one.
 
 ---
 
@@ -406,31 +418,31 @@ private String encodeCursor(Long id) {
 ## 12. Interview Questions with Answers
 
 **Q: What are the REST architectural constraints?**
-Stateless (no server-side session), uniform interface (standard HTTP methods and status codes, resource-based URLs), client-server separation (independent evolution), cacheable (responses declare cacheability), layered system (client does not know about intermediaries), and optionally code-on-demand (server-provided executable code). The most important for API design are stateless, uniform interface, and cacheable.
+Fielding's 2000 dissertation defines five required constraints plus one optional: stateless, uniform interface, client-server, cacheable, layered system, and optionally code-on-demand. Stateless means no server-side session; uniform interface means standard HTTP methods and status codes over resource-based URLs; client-server means the two evolve independently; cacheable means responses declare their own cacheability; layered system means the client cannot tell whether it is talking to the origin or an intermediary; code-on-demand means the server may ship executable code. The most important for API design are stateless, uniform interface, and cacheable.
 
 **Q: What is the difference between PUT and PATCH?**
-PUT replaces the entire resource with the provided representation — fields not included in the request are set to null/default. PATCH applies a partial update — only the fields provided are changed. PUT is idempotent; PATCH can be idempotent or not depending on the patch format (JSON Patch per RFC 6902 is idempotent; a "increment counter" PATCH is not). For most REST APIs, PATCH is more practical for updates.
+PUT replaces the entire resource with the provided representation — fields not included in the request are set to null/default. PATCH applies a partial update — only the fields provided are changed. PUT is idempotent (RFC 9110 §9.3.4); PATCH (RFC 5789) is not idempotent by default — idempotency depends on the patch document. JSON Merge Patch (RFC 7396) is idempotent because it states target values outright, whereas JSON Patch (RFC 6902) is not guaranteed idempotent: RFC 6902 makes no such claim, and `{"op": "add", "path": "/items/-"}` appends a new element on every replay. An "increment counter" PATCH is likewise not idempotent. For most REST APIs, PATCH is more practical for updates.
 
 **Q: How do you version a REST API and what are the tradeoffs?**
 URI versioning (/v1/, /v2/) is most common: visible, easy to route at the CDN/load balancer, easy to test in a browser. Header versioning (Accept: application/vnd.api.v2+json) is more RESTful but harder to test and less visible. Query parameter (?version=2) is easy to add but not standard. For public APIs, URI versioning is the pragmatic choice. Never remove a version without at least 6-12 months deprecation notice with Sunset headers.
 
 **Q: What is idempotency and why does it matter for API design?**
-Idempotency means sending the same request N times has the same side effect as sending it once. GET, PUT, DELETE are idempotent. POST is not. Idempotency matters because network timeouts can cause clients to retry — a non-idempotent POST retry creates duplicate resources. Adding an Idempotency-Key header to POST endpoints allows clients to safely retry: the server deduplicates based on the key and returns the original response for subsequent calls.
+Idempotency means sending the same request N times has the same side effect as sending it once. Per RFC 9110 §9.2.2 the idempotent methods are GET, HEAD, PUT, DELETE, OPTIONS and TRACE; POST is not, and PATCH is not idempotent by default. Idempotency is about the effect on server state, not the response: a second DELETE /users/123 correctly returns 404 while the state — "user 123 does not exist" — is identical to after the first call, so DELETE is still idempotent. Idempotency matters because network timeouts can cause clients to retry — a non-idempotent POST retry creates duplicate resources. Adding an Idempotency-Key header to POST endpoints allows clients to safely retry: the server deduplicates based on the key and returns the original response for subsequent calls.
 
 **Q: What is the difference between 401 and 403?**
 401 Unauthorized means the client is not authenticated — no valid credentials were provided (missing or invalid token). Despite the name, it really means "unauthenticated." The client should authenticate and retry. 403 Forbidden means the client is authenticated but not authorized — the identity is known but lacks permission for the requested resource. The client should not retry with the same credentials.
 
 **Q: How would you design pagination for a high-volume feed?**
-Use cursor-based (keyset) pagination: instead of OFFSET N, use WHERE id > last_seen_id LIMIT 20. This is O(1) regardless of page depth. The cursor is an opaque base64-encoded value (e.g., JSON with id and timestamp) so the implementation can change. Provide a next_cursor field in responses. This is what Twitter/X, Instagram, and GitHub use for their feed APIs.
+Use cursor-based (keyset) pagination: instead of OFFSET N, use WHERE id > last_seen_id LIMIT 20. This costs O(log n + page size) — one B-tree descent plus a sequential read of the page — at any depth, instead of the O(offset) walk that OFFSET forces. The cursor is an opaque base64-encoded value (e.g., JSON with id and timestamp) so the implementation can change. Provide a next_cursor field in responses. Large feed and log APIs converge on this pattern; Stripe (`starting_after`) and several GitHub endpoints (`before`/`after`) are public examples.
 
-**Q: What is RFC 7807 Problem Details?**
-RFC 7807 defines a standard error response format for HTTP APIs. It includes: type (URI identifying the error class), title (human-readable summary), status (HTTP status code), detail (specific explanation for this occurrence), and instance (URI of the specific request). Additional fields can be added. Using Problem Details ensures all errors have a consistent, machine-parseable format across endpoints.
+**Q: What is RFC 9457 Problem Details?**
+RFC 9457 defines the standard error response format for HTTP APIs, and it obsoleted RFC 7807 in 2023. The media type is unchanged (`application/problem+json`), so citing 7807 is not wrong on the wire, just out of date. The members are: type (URI identifying the error class), title (human-readable summary), status (HTTP status code), detail (specific explanation for this occurrence), and instance (URI identifying this occurrence). Additional extension members can be added. Using Problem Details ensures all errors have a consistent, machine-parseable format across endpoints.
 
 **Q: How do you design a REST API for a file upload?**
 For small files (<10 MB): multipart/form-data POST with the file as a form field. For large files: use a signed URL pattern — client requests a signed upload URL from the API, uploads directly to object storage (S3, GCS), then notifies the API of completion. This offloads bandwidth from the API server and enables resumable uploads. Never buffer large files in the API server's memory.
 
 **Q: What HTTP caching headers should a REST API set?**
-For mutable resources: `ETag` (version identifier) + `Cache-Control: no-cache` (must revalidate, but can store) or `Cache-Control: max-age=60, private`. For immutable versioned resources: `Cache-Control: max-age=31536000, immutable`. For sensitive data: `Cache-Control: no-store`. Always set `Vary: Accept-Encoding` if responses are compressed. The `Vary` header tells caches which request headers affect the response.
+For mutable resources: `ETag` (version identifier) + `Cache-Control: no-cache` (must revalidate, but can store) or `Cache-Control: max-age=60, private`. For immutable versioned resources: `Cache-Control: max-age=31536000, immutable`. For sensitive data: `Cache-Control: no-store`. Always set `Vary: Accept-Encoding` if responses are compressed. The `Vary` header tells caches which request headers affect the response. The same ETag does double duty for conditional requests (RFC 9110 §8.8, §13): clients send `If-None-Match` on GET to get a bodyless 304, and `If-Match` on PUT/PATCH/DELETE for optimistic concurrency — a mismatch returns 412 Precondition Failed. Note that `If-None-Match` uses weak comparison so a weak validator (`W/"v3"`) works, while `If-Match` uses strong comparison and a weak ETag will never match, so byte-exact strong ETags are required for the write path.
 
 **Q: What is HATEOAS and is it practical?**
 HATEOAS (Hypermedia As The Engine Of Application State) means responses include links to related resources and available actions, enabling clients to navigate the API without out-of-band documentation. In theory it allows client-server evolution. In practice it is rarely implemented because: (1) generating links is complex, especially for conditional actions; (2) most clients use generated SDKs from OpenAPI specs rather than following links; (3) it does not solve versioning problems. Understand it for interviews; use OpenAPI in production.
@@ -442,7 +454,7 @@ POST /jobs returns 202 Accepted with a Location header pointing to a job status 
 Clients need a user and their 50 orders. Naive approach: GET /users/123, then GET /orders/123, GET /orders/124... = 51 requests. Solutions: (1) include sub-resources in the response via an `include` or `embed` query parameter; (2) provide a batch endpoint (POST /orders/batch with list of IDs); (3) switch to GraphQL which resolves this structurally. The N+1 problem in REST APIs is the main argument for GraphQL in complex data-access scenarios.
 
 **Q: How do you handle breaking changes in a REST API?**
-(1) Add fields without removing (clients ignore unknown fields if using lenient deserialization). (2) Never change field types. (3) Never remove required request fields. (4) Deprecate via Sunset header: `Sunset: Sat, 01 Jan 2027 00:00:00 GMT` + `Deprecation: true`. (5) When breaking changes are unavoidable, increment the major version (/v2/). (6) Run both versions in parallel for at least 6 months. (7) Monitor usage of deprecated endpoints via metrics.
+(1) Add fields without removing (clients ignore unknown fields if using lenient deserialization). (2) Never change field types. (3) Never remove required request fields. (4) Deprecate via the Sunset header (RFC 8594), an HTTP-date: `Sunset: Fri, 01 Jan 2027 00:00:00 GMT`, alongside the Deprecation header (RFC 9745), whose value is a structured-field Date, not a boolean: `Deprecation: @1785542400` (2026-08-01T00:00:00Z) — `Deprecation: true` is pre-standard and invalid. (5) When breaking changes are unavoidable, increment the major version (/v2/). (6) Run both versions in parallel for at least 6 months. (7) Monitor usage of deprecated endpoints via metrics.
 
 **Q: What is content negotiation in REST?**
 The client uses the Accept header to specify acceptable response formats: `Accept: application/json, application/xml;q=0.9`. The server responds with the best match and includes `Content-Type` in the response. This allows one endpoint to serve multiple formats without separate URLs. Java Spring MVC's content negotiation via `produces` on @RequestMapping handles this automatically.
@@ -457,7 +469,7 @@ Implement at the API gateway or a filter/middleware layer. Return 429 Too Many R
 - Use nouns for resource URLs; HTTP methods express the operation.
 - Return the created resource in the POST response body (not just a 201 with Location).
 - Include a trace/correlation ID in every error response for debugging.
-- Adopt RFC 7807 Problem Details for all error responses from day one.
+- Adopt RFC 9457 Problem Details (`application/problem+json`) for all error responses from day one; RFC 7807 is obsolete.
 - Implement Idempotency-Key for all state-changing POST endpoints that create resources.
 - Use cursor-based pagination from the start; migrating later is painful.
 - Set ETag + Cache-Control on all GET responses — even short-lived cache headers (max-age=5) dramatically reduce origin load.
@@ -519,8 +531,10 @@ public ResponseEntity<Order> checkout(
             .body(cached.get().getBody());
     }
 
-    // Acquire distributed lock on idempotency key
-    try (Lock lock = lockService.lock(idempotencyKey, 60, SECONDS)) {
+    // Acquire distributed lock on idempotency key.
+    // CloseableLock is your own AutoCloseable wrapper — java.util.concurrent.locks.Lock
+    // is NOT AutoCloseable and cannot be used in try-with-resources.
+    try (CloseableLock lock = lockService.lock(idempotencyKey, 60, SECONDS)) {
         // Double-check after acquiring lock
         cached = idempotencyStore.get(idempotencyKey);
         if (cached.isPresent()) {

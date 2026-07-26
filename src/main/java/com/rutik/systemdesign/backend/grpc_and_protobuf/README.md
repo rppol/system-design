@@ -4,7 +4,7 @@
 
 gRPC is a high-performance, open-source remote procedure call (RPC) framework developed by Google. It uses Protocol Buffers (protobuf) as the interface definition language and serialization format, and HTTP/2 as the transport. gRPC generates type-safe client and server stubs from .proto files in 10+ languages, making it ideal for polyglot microservice communication.
 
-Protocol Buffers serialize structured data into a compact binary format — typically 3–10x smaller than equivalent JSON and 20–100x faster to parse. gRPC provides four communication modes (unary, server-streaming, client-streaming, bidirectional), built-in deadline propagation, interceptors (middleware), and a health-checking protocol. It is the primary choice for internal service-to-service communication at Google, Netflix, and most large-scale microservices deployments.
+Protocol Buffers serialize structured data into a compact binary format that is normally smaller and cheaper to parse than the equivalent JSON, though the actual ratio depends entirely on message shape (the widely-quoted "3–10x smaller, 20–100x faster" figure is Google's protobuf-vs-**XML** claim, not a protobuf-vs-JSON benchmark — see the field-by-field comparison in Section 5). gRPC provides four communication modes (unary, server-streaming, client-streaming, bidirectional), built-in deadline propagation, interceptors (middleware), and a health-checking protocol. It is widely used for internal service-to-service communication, including at Google and Netflix.
 
 ---
 
@@ -49,15 +49,15 @@ Protocol Buffers serialize structured data into a compact binary format — typi
 | int32/int64 | Varint | Negative numbers inefficient (use sint32/sint64) |
 | sint32/sint64 | Varint (zigzag) | Efficient for negative numbers |
 | bool | Varint | |
-| fixed32/sfixed32 | 32-bit | Use when values always > 2^28 |
+| fixed32/sfixed32 | 32-bit | `fixed32` beats `uint32` when values are often > 2^28 |
 | fixed64/sfixed64 | 64-bit | |
 | float | 32-bit | |
 | double | 64-bit | |
 | string | Length-delimited | UTF-8 |
 | bytes | Length-delimited | Arbitrary binary |
 | message | Length-delimited | Nested message |
-| repeated | Multiple values | Array |
-| map | Key-value pairs | Key must be scalar; not nested maps |
+| repeated | Per-element, or length-delimited if packed | In proto3, repeated scalar *numeric* fields are packed by default (one LEN record for the whole array); strings, bytes and messages cannot be packed |
+| map | Key-value pairs | Key must be integral or string (no float, bytes, enum or message); value can be anything except another map |
 
 ---
 
@@ -76,7 +76,7 @@ sequenceDiagram
     C->>S: userService.getUser(id=123)
     Note over S: serialize to protobuf bytes<br/>set method=POST, path=/users.UserService/GetUser
     S->>H: send over multiplexed TLS stream
-    H->>G: forward frame (Netty / Undertow)
+    H->>G: forward frame (Netty / OkHttp)
     Note over G: deserialize protobuf<br/>apply interceptors (auth, logging, tracing)
     G->>I: dispatch getUser(request, StreamObserver)
     I-->>G: build response
@@ -135,17 +135,17 @@ Note: Field names are NOT in the wire format.
       This is why field numbers must never be reused.
 ```
 
-**The idea behind it.** "Every field is announced by one packed byte that carries two facts at once — which field this is, and how to read what comes next — and then the value follows with no name attached."
+**The idea behind it.** "Every field is announced by a packed tag varint that carries two facts at once — which field this is, and how to read what comes next — and then the value follows with no name attached." The tag is a varint, so it is one byte only while `(field_number << 3) | wire_type` stays under 128: field numbers **1–15 cost one tag byte, 16–2047 cost two**. That is why the protobuf guide tells you to spend numbers 1–15 on your hottest, most frequently-set fields.
 
 The tag is where the size win comes from. JSON spends the field name on every message; protobuf spends 3 bits on a type code and the rest on a number, then never mentions the name again.
 
 | Symbol | What it is |
 |--------|------------|
-| field number | The `= 1` / `= 2` in the `.proto`. The permanent identity of a field |
-| wire type | 3-bit code for how to parse the value: `0`=varint, `2`=length-delimited |
+| field number | The `= 1` / `= 2` in the `.proto`. The permanent identity of a field. Legal range 1–536,870,911, minus 19,000–19,999 which protobuf reserves for itself |
+| wire type | 3-bit code for how to parse the value: `0`=varint, `1`=64-bit, `2`=length-delimited, `5`=32-bit (`3`/`4` are the deprecated group markers) |
 | `<< 3` | Shift the field number left 3 bits to make room for the wire type |
 | `\|` | Bitwise OR — drops the wire type into the 3 low bits just vacated |
-| tag byte | The two packed together, the first byte of every field on the wire |
+| tag | The two packed together as a varint, the first thing on the wire for every field — one byte for field numbers 1–15, two for 16–2047 |
 
 **Walk one example.** Build both tag bytes from scratch, in binary:
 
@@ -185,7 +185,7 @@ The tag is where the size win comes from. JSON spends the field name on every me
   protobuf is 9/25 = 36% the size  ->  64% smaller
 ```
 
-Note where the win is concentrated: `age` costs 2 bytes instead of 8, a 4x reduction, because a small integer is one varint byte rather than two ASCII digits plus a quoted 5-character name. Strings barely improve — `"Alice"` still costs 5 bytes of UTF-8 either way. This is the rule of thumb worth carrying into an interview: **protobuf's advantage scales with how numeric and how deeply-nested your messages are**, and nearly vanishes for messages that are mostly long free-text strings.
+Note where the win is concentrated: `age` costs 2 bytes instead of 8, a 4x reduction, because a small integer is one varint byte rather than two ASCII digits plus the 5 bytes of `"age"` and its colon. Strings barely improve — `"Alice"` still costs 5 bytes of UTF-8 either way. This is the rule of thumb worth carrying into an interview: **protobuf's advantage scales with how numeric and how deeply-nested your messages are**, and nearly vanishes for messages that are mostly long free-text strings.
 
 ### Protobuf Schema Evolution: Safe vs. Breaking Changes
 
@@ -372,12 +372,16 @@ public class AuthInterceptor implements ServerInterceptor {
 // Client-side retry interceptor
 public class RetryInterceptor implements ClientInterceptor {
 
+    // ClientInterceptor declares exactly one method, and it takes the next
+    // Channel as its third argument — you must delegate to that, not to a
+    // field of your own.
     @Override
-    public <Req, Resp> ClientCall<Req, Resp> interceptNewCall(
+    public <Req, Resp> ClientCall<Req, Resp> interceptCall(
             MethodDescriptor<Req, Resp> method,
-            CallOptions callOptions) {
-        // Delegate to channel; retry policy configured in service config
-        return channel.newCall(method, callOptions);
+            CallOptions callOptions,
+            Channel next) {
+        // Delegate downstream; retry policy itself lives in the service config
+        return next.newCall(method, callOptions);
     }
 }
 ```
@@ -404,11 +408,11 @@ public class RetryInterceptor implements ClientInterceptor {
 
 ## 7. Real-World Examples
 
-**Google internal use**: gRPC was extracted from Google's internal Stubby RPC system. All internal Google services communicate via gRPC. The framework handles load balancing, health checking, retries, and deadline propagation automatically.
+**Google internal use**: gRPC is the open-source successor to Google's internal Stubby RPC system, and Google uses it across its cloud products and public APIs. The framework handles load balancing, health checking, retries, and deadline propagation automatically.
 
-**Netflix gRPC adoption**: Netflix migrated internal APIs from REST+JSON to gRPC, reporting 60% CPU reduction in some services (from binary parsing vs JSON parsing) and 15-30% latency reduction on p99.
+**Netflix gRPC adoption**: Netflix's Runtime Platform team adopted and extended gRPC for internal service-to-service calls, replacing hand-written REST clients with generated stubs. Netflix has publicly described qualitative wins — client creation dropping from weeks to minutes, and improved p99s on gRPC-oriented services — but has not published a specific CPU- or latency-reduction percentage, so treat any circulating figure as unsourced.
 
-**Kubernetes API server**: kubectl and controllers communicate with the API server via a mix of REST (for human-facing operations) and gRPC (for internal watch streams — the low-latency change notification mechanism).
+**Kubernetes API server**: kubectl, controllers and kubelets talk to the API server over its **HTTP REST API**, not gRPC — including `watch`, which is a long-lived `GET ...?watch=true` streamed with HTTP chunked transfer encoding (JSON or protobuf-encoded objects), with an optional WebSocket variant. gRPC is used elsewhere in the ecosystem: the API server to etcd, and the kubelet to the CRI, CSI and device-plugin sockets.
 
 ---
 
@@ -458,12 +462,12 @@ public class RetryInterceptor implements ClientInterceptor {
 | `protoc-gen-grpc-java` | Java gRPC code generator plugin |
 | `grpcurl` | Command-line gRPC client (like curl for gRPC) |
 | `evans` | Interactive gRPC client with REPL |
-| `grpc-health-probe` | Kubernetes health check for gRPC services |
+| `grpc-health-probe` | Exec-based gRPC health check. Largely superseded: Kubernetes has a native `grpc` probe type (beta 1.24, GA 1.27). Still useful pre-1.24, off-Kubernetes, or when you need custom metadata/TLS |
 | `buf` | Modern protobuf toolchain (linting, breaking change detection) |
 | `grpc-gateway` | Transcodes gRPC to REST/JSON (Go) |
 | Envoy Proxy | gRPC-Web transcoding, load balancing, retries |
-| `grpc-spring-boot-starter` | Spring Boot gRPC integration |
-| Bloomrpc / Kreya | GUI gRPC client |
+| `spring-grpc-spring-boot-starter` | Official Spring gRPC starter. The long-standing community alternative is `net.devh:grpc-spring-boot-starter` |
+| Kreya / Postman | GUI gRPC client (BloomRPC, the older option, was archived by its maintainers in January 2023) |
 
 ---
 
@@ -473,7 +477,7 @@ public class RetryInterceptor implements ClientInterceptor {
 gRPC is an RPC framework using Protocol Buffers for serialization and HTTP/2 for transport. It differs from REST in: using a binary format (compact, fast) vs JSON (human-readable), having strict schema enforcement via .proto files vs optional OpenAPI, built-in streaming support (4 modes) vs REST's single request-response, and generated type-safe stubs vs manual HTTP client code. gRPC is preferred for internal service-to-service communication; REST for public/browser-facing APIs.
 
 **Q: Explain Protocol Buffers wire format and field numbering.**
-Protobuf serializes each field as a tag-value pair. The tag encodes both the field number (1–536,870,911) and the wire type (0=varint, 1=64-bit, 2=length-delimited, 5=32-bit). Field names are not in the wire format — only numbers. This means field numbers must never be reused after a field is removed (doing so causes old clients to misinterpret new fields). Varint encoding uses variable-length encoding: values 0–127 fit in 1 byte.
+Protobuf serializes each field as a tag-value pair. The tag is `(field_number << 3) | wire_type`, encoding both the field number (1–536,870,911, minus the 19,000–19,999 range protobuf reserves for itself) and the wire type (0=varint, 1=64-bit, 2=length-delimited, 5=32-bit; 3 and 4 are the deprecated group markers). The tag is itself a varint, so field numbers 1–15 cost one tag byte and 16–2047 cost two — spend the low numbers on your hottest fields. Field names are not in the wire format — only numbers. This means field numbers must never be reused after a field is removed (doing so causes old clients to misinterpret new fields). Varint encoding uses variable-length encoding: values 0–127 fit in 1 byte.
 
 **Q: What are the four gRPC RPC modes?**
 Unary: one request, one response (like REST). Server-streaming: one request, stream of responses (useful for real-time data, large result sets). Client-streaming: stream of requests, one response (useful for bulk uploads, aggregation). Bidirectional streaming: both sides stream independently (useful for real-time chat, collaborative editing, game state sync). All modes use HTTP/2 streams, just with different DATA frame patterns.
@@ -488,13 +492,13 @@ An interceptor is middleware that runs before/after RPC handling. Server interce
 gRPC uses Status codes (similar to HTTP but gRPC-specific). Return a StatusRuntimeException on the server with the appropriate code (NOT_FOUND, INVALID_ARGUMENT, UNAUTHENTICATED, etc.). The gRPC framework sends it as trailing metadata grpc-status and grpc-message. For structured error details, use the google.rpc.Status type with google.rpc.ErrorInfo, google.rpc.BadRequest etc. from the googleapis/googleapis error.proto definitions. On the client, catch StatusRuntimeException and inspect the Status.
 
 **Q: What is the Health Checking Protocol in gRPC?**
-Google defined a standard health checking service (grpc.health.v1.Health) with a single Check RPC that returns SERVING, NOT_SERVING, or SERVICE_UNKNOWN. Kubernetes liveness/readiness probes use grpc-health-probe, which calls this service. Load balancers use it for backend health checks. Implement it by registering HealthStatusManager on the server and calling setStatus() when the service starts/stops.
+gRPC defines a standard health service, grpc.health.v1.Health, whose ServingStatus enum is UNKNOWN, SERVING, NOT_SERVING and SERVICE_UNKNOWN. It exposes more than one RPC: Check for a point-in-time answer, Watch for a stream of status changes, and (more recently) List for a snapshot of every registered service. SERVICE_UNKNOWN is only ever returned by Watch — Check answers an unregistered service name with a NOT_FOUND status instead. Kubernetes now calls this service directly via its native `grpc` probe type (beta in 1.24, GA in 1.27); the older `grpc-health-probe` exec binary is only needed on pre-1.24 clusters, outside Kubernetes, or for custom metadata/TLS. Load balancers use it for backend health checks. Implement it by registering HealthStatusManager on the server and calling setStatus() when the service starts/stops.
 
 **Q: How do you evolve a protobuf schema without breaking clients?**
-Safe changes: add new optional fields with new numbers, add new enum values, add new RPCs, rename a field (changes the name only, not the number — no wire impact). Breaking changes: remove a field (old clients send it; new server ignores — OK for requests; old clients may expect it in response), change a field's type, reuse a field number. Best practice: use `buf breaking --against` in CI to automatically detect breaking changes.
+Safe changes: add new optional fields with new numbers, add new enum values, add new RPCs, and rename a field. A rename changes the name only, not the number, so it has no wire impact — though it does break generated code and JSON/TextFormat parsing. Breaking changes: delete a field without reserving its number, reuse a field number, or change a field to an incompatible type. Type changes are not uniformly breaking — int32, uint32, int64, uint64 and bool are mutually wire-compatible, sint32 and sint64 are compatible with each other but with nothing else, fixed32 with sfixed32, fixed64 with sfixed64, and string with bytes when the bytes are valid UTF-8. Best practice: use `buf breaking --against` in CI to automatically detect breaking changes.
 
 **Q: What is the difference between proto2 and proto3?**
-Proto3 is the current version. Key differences: proto3 has no required fields (all are optional), default values are the zero value (cannot distinguish set vs unset unless using google.protobuf.FieldMask or wrapper types), proto3 supports JSON mapping by default. Proto2 had required fields (dangerous — adding a required field to a message breaks all old senders), had explicit optional with default values, and had extension ranges. Use proto3 for all new projects.
+Proto3 is the default syntax for new .proto files and proto2 is its predecessor. Key differences: proto3 dropped `required` entirely, dropped user-specified custom defaults (the default is always the zero value), and defines a canonical JSON mapping. Proto2 had `required` fields (dangerous — adding one breaks every old sender), explicit `optional` with custom defaults, and extension ranges. Field presence is the subtle one: proto3 originally had no way to distinguish an unset scalar from one explicitly set to zero, which is why `google.protobuf.Int32Value`-style wrapper types were the old workaround — but protobuf 3.15 (February 2021) made the `optional` label generally available in proto3, and that, not a wrapper type, is now the standard way to get explicit presence. (`google.protobuf.FieldMask` is unrelated: it is a client-supplied list of paths for partial reads and updates, not a presence mechanism.) Newer still, Protobuf Editions replaces the proto2/proto3 syntax split with per-feature settings, so expect `edition = "2023"` files alongside proto3 ones.
 
 **Q: What is gRPC-Web and when do you need it?**
 gRPC-Web is a variant of the gRPC protocol that browsers can use. Browsers cannot use HTTP/2 trailers (gRPC uses trailers for the grpc-status code), so gRPC-Web encodes trailing metadata in a special data frame. An Envoy sidecar or nginx gRPC-Web proxy translates between gRPC and gRPC-Web. gRPC-Web only supports unary and server-streaming; bidirectional streaming is not supported. Use gRPC-Web when browser clients need to call gRPC services directly.
@@ -503,13 +507,13 @@ gRPC-Web is a variant of the gRPC protocol that browsers can use. Browsers canno
 gRPC supports both client-side and proxy load balancing. Client-side: the gRPC channel resolves DNS, gets all backend IPs, and applies a load balancing policy (round-robin, pick-first). This is common with Kubernetes headless services. Proxy load balancing: a proxy (Envoy, Nginx, AWS NLB) receives all connections and distributes them. With HTTP/2, a single gRPC connection multiplexes many RPCs — L4 load balancers see one connection per client; L7 load balancers can distribute individual RPCs.
 
 **Q: What is the maximum message size in gRPC and how do you change it?**
-The default maximum inbound message size is 4 MB (4,194,304 bytes). The maximum outbound message size has no default limit. Change via: server-side: `ServerBuilder.maxInboundMessageSize(50 * 1024 * 1024)` (50 MB). Client-side: `ManagedChannelBuilder.maxInboundMessageSize(50 * 1024 * 1024)`. Better approach for large payloads: stream messages to avoid sending one large message; or store data in object storage and pass a reference URI in the message.
+The default maximum inbound message size is 4 MB (4,194,304 bytes). gRPC sets no default cap on outbound (send) size, so in practice the receiving peer's 4 MB inbound limit is what actually rejects your message. Change via: server-side: `ServerBuilder.maxInboundMessageSize(50 * 1024 * 1024)` (50 MB). Client-side: `ManagedChannelBuilder.maxInboundMessageSize(50 * 1024 * 1024)`. Better approach for large payloads: stream messages to avoid sending one large message; or store data in object storage and pass a reference URI in the message.
 
 **Q: Describe a scenario where gRPC bidirectional streaming provides value REST cannot easily match.**
 A real-time bidirectional order matching engine: traders send market orders and receive execution notifications in real-time. REST would require polling (latency), WebSocket (adds complexity and library overhead), or SSE (unidirectional only). gRPC bidirectional streaming provides full-duplex communication with protobuf efficiency and built-in flow control. Each side streams independently — the trader sends new orders, the server sends execution confirmations and market data updates — over one persistent connection with back-pressure from HTTP/2 flow control.
 
 **Q: What is the grpc reflection protocol?**
-gRPC reflection allows clients to query the server for service definitions at runtime, without having the .proto files. Tools like `grpcurl` and `evans` use reflection to discover available services and methods. Enable it on the server with ProtoReflectionService. Disable in production if you do not want to expose your API schema to clients (reflection is informational only — it does not grant access, but may expose schema information to attackers).
+gRPC reflection allows clients to query the server for service definitions at runtime, without having the .proto files. Tools like `grpcurl` and `evans` use reflection to discover available services and methods. In grpc-java, register `ProtoReflectionServiceV1.newInstance()`; the older `ProtoReflectionService` speaks the deprecated v1alpha protocol and is itself deprecated. Disable in production if you do not want to expose your API schema to clients (reflection is informational only — it does not grant access, but may expose schema information to attackers).
 
 **Q: How do you implement retries in gRPC?**
 gRPC supports a service config JSON with retry policy: `maxAttempts` (max total attempts), `initialBackoff`, `maxBackoff`, `backoffMultiplier`, and `retryableStatusCodes` (e.g., UNAVAILABLE, DEADLINE_EXCEEDED). This is specified in the service config loaded by the name resolver. For Java, configure via ManagedChannelBuilder with a default service config. Retries are transparent to the application code — the channel handles them. Only retry idempotent RPCs or explicitly idempotent operations.
@@ -532,9 +536,9 @@ gRPC supports a service config JSON with retry policy: `maxAttempts` (max total 
 
 ## 14. Case Study
 
-**Problem**: A financial data service was sending 10-second JSON batch updates (200 KB per update) to 500 subscriber services over REST, causing 100 MB/s of bandwidth usage and significant JSON parsing CPU overhead.
+**Problem** (illustrative worked example, not a published incident): A financial data service was sending JSON batch updates every 10 seconds (200 KB per update) to 500 subscriber services over REST — 0.2 MB x 500 / 10 s = **10 MB/s** of egress, plus significant JSON parsing CPU overhead.
 
-**Migration to gRPC bidirectional streaming**:
+**Migration to gRPC server streaming** (one subscribe request, an open-ended stream of updates back — the `.proto` below is server-streaming, not bidirectional):
 ```protobuf
 message MarketUpdate {
   int64 timestamp = 1;
@@ -562,6 +566,6 @@ service MarketDataService {
 - Parsing CPU: 40% reduction (protobuf vs JSON parsing)
 - Latency: each update delivered within 50ms vs 10s batch polling
 - Connection overhead: 500 persistent HTTP/2 streams vs 500 * 6 polling connections/minute
-- Total bandwidth: 100 MB/s → 17 MB/s
+- Total bandwidth: 10 MB/s → 1.7 MB/s (the same 83%, since the payload shrank and the fan-out did not change)
 
 **Lessons**: gRPC streaming is particularly valuable for high-frequency, structured data. Binary serialization pays off most when messages have many numeric fields. The migration required updating 500 subscriber services to use generated stubs — feasible because all were internal Java services with access to the proto repository.

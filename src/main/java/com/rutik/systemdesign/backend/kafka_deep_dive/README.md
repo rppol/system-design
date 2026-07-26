@@ -8,7 +8,9 @@ Apache Kafka is a distributed, durable, high-throughput event streaming platform
 
 Kafka's fundamental design choices differ radically from traditional message brokers: the broker is "dumb" (it does not route or transform messages), the consumer is "smart" (it tracks its own position in the log), messages are immutable and retained on disk for configurable periods, and consumers can replay the stream from any point. These choices make Kafka ideal for event streaming, event sourcing, CQRS projections, audit logs, and stream processing.
 
-As of Kafka 3.x, ZooKeeper has been replaced by KRaft (Kafka Raft Metadata) mode, eliminating the external dependency and simplifying operations. KRaft became production-ready in Kafka 3.3 and is the default in Kafka 3.7+.
+ZooKeeper has been replaced by KRaft (Kafka Raft Metadata) mode, eliminating the external dependency and simplifying operations. KRaft was marked production-ready in Kafka 3.3 (KIP-833), ZooKeeper mode was deprecated in Kafka 3.5, and ZooKeeper support was **removed entirely in Kafka 4.0** (released 2025-03-18). Kafka 4.x runs KRaft-only; there is no ZooKeeper option.
+
+**This module targets Kafka 4.x** (latest release at time of writing: 4.3.1, June 2026). Every default quoted below is the Kafka 4.x default — several changed in 3.0 and 4.0 and are commonly misremembered (`acks` is now `all`, `enable.idempotence` is now `true`, `linger.ms` is now `5`).
 
 ---
 
@@ -44,16 +46,16 @@ Key insight: Kafka's durability and replay capability transform it from a messag
 
 ### Deployment Modes
 
-**KRaft Mode (Kafka 3.3+ production, Kafka 3.7+ default)**
+**KRaft Mode (production-ready since 3.3; the ONLY mode from 4.0 onward)**
 - Internal Raft consensus replaces ZooKeeper.
 - Controller nodes (dedicated or combined with brokers) manage cluster metadata via a `__cluster_metadata` topic.
 - Eliminates ZooKeeper as an external dependency.
-- Faster controller failover (sub-second vs seconds with ZooKeeper).
-- Supports clusters up to millions of partitions (ZooKeeper was a bottleneck at ~200k partitions).
+- Much faster controller failover — Confluent reports the metadata-reload phase dropping from seconds/minutes to near-constant time.
+- Scales to millions of partitions; Confluent's guidance for ZooKeeper-backed clusters was to stay under ~200k partitions per cluster, and their KRaft lab test ran 2 million.
 
-**Classic Mode (ZooKeeper-based, pre-3.x)**
-- ZooKeeper manages cluster metadata, controller election, topic configs.
-- Still supported but deprecated. Migration to KRaft is provided via `kafka-storage.sh` migration tool.
+**Classic Mode (ZooKeeper-based) — REMOVED in Kafka 4.0**
+- ZooKeeper managed cluster metadata, controller election, and topic configs.
+- Kafka 4.0 deleted it. You cannot upgrade a ZooKeeper cluster straight to 4.x, and 4.x contains no ZK-to-KRaft migration path: migrate to KRaft on a 3.x bridge release (3.5+) first, then upgrade to 4.x.
 
 ### Topic Retention Strategies
 
@@ -74,21 +76,31 @@ Key insight: Kafka's durability and replay capability transform it from a messag
 
 **acks=1** — leader acknowledges. The partition leader writes to its local log and responds. Followers may not have replicated before the leader fails. Risk: message loss on leader failure before replication.
 
-**acks=all (or acks=-1)** — all in-sync replicas must acknowledge. Combined with `min.insync.replicas=2` (recommended), the producer waits until at least 2 replicas have written the record. Zero message loss under normal conditions.
+**acks=all (or acks=-1)** — the leader waits for the full current ISR to acknowledge. **This is the default since Kafka 3.0**, because `enable.idempotence` now defaults to `true` and idempotence requires `acks=all`. Note the interaction: setting `acks=0`/`acks=1` without explicitly setting `enable.idempotence` silently *disables* idempotence; setting `enable.idempotence=true` alongside `acks=1` throws a `ConfigException`.
+
+`min.insync.replicas` (broker/topic config, **default 1**) is the separate floor: it does not change how many replicas the producer waits for, it rejects the write with `NotEnoughReplicasException` when the ISR has fewer members than the floor. With RF=3 and `min.insync.replicas=2`, `acks=all` gives zero message loss as long as `unclean.leader.election.enable` stays at its default `false`.
 
 ### Consumer Group Rebalancing Strategies
 
-**Eager rebalancing (default before Kafka 2.4)**
+Kafka 4.x has two rebalance *protocols* (`group.protocol`, default `classic`), and the classic protocol has two *assignment styles*.
+
+**Eager rebalancing — still the effective default in the classic protocol**
 - All consumers stop consuming (revoke all partitions).
 - Coordinator reassigns all partitions.
 - All consumers resume.
-- Downside: full stop-the-world pause during rebalance. At high consumer counts, this can take 30+ seconds.
+- Downside: full stop-the-world pause during rebalance; in large groups this is seconds, not milliseconds.
+- Common misconception: cooperative rebalancing is *not* on by default. KIP-726 landed in Kafka 3.0 and made `partition.assignment.strategy` default to the ordered list `RangeAssignor, CooperativeStickyAssignor` — since the list is preference-ordered and `RangeAssignor` is first, an unconfigured consumer still rebalances eagerly. You must set `CooperativeStickyAssignor` explicitly.
 
-**Cooperative-sticky rebalancing (Kafka 2.4+, recommended)**
+**Cooperative-sticky rebalancing (Kafka 2.4+, opt-in)**
 - Only partitions that need to move are revoked.
 - Other consumers continue processing uninterrupted.
 - Implemented via `CooperativeStickyAssignor`.
-- Dramatically reduces rebalance impact in large consumer groups.
+- Reduces rebalance impact in large consumer groups.
+
+**New consumer group protocol, KIP-848 (`group.protocol=consumer`) — GA in Kafka 4.0**
+- Moves assignment from the client-side leader to the broker-side group coordinator; JoinGroup/SyncGroup rounds are replaced by a continuous heartbeat and server-driven reconciliation.
+- Rebalances are incremental by construction — there is no stop-the-world phase and no assignor to pick client-side.
+- Enabled server-side by default (`group.coordinator.rebalance.protocols` defaults to `classic,consumer,streams`), but **consumers must opt in**: `group.protocol` still defaults to `classic`. It is expected to become the default in a future major release, not yet.
 
 ---
 
@@ -333,23 +345,25 @@ props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
 props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
 props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
 
-// Delivery guarantee
-props.put(ProducerConfig.ACKS_CONFIG, "all");                    // ISR must confirm
-props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);       // eliminates duplicates per session
-props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5); // safe with idempotence
+// Delivery guarantee (all three are already the Kafka 4.x defaults —
+// stated explicitly here so the intent survives a config-management diff)
+props.put(ProducerConfig.ACKS_CONFIG, "all");                    // DEFAULT since 3.0; full ISR must confirm
+props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);       // DEFAULT since 3.0; dedupes retries per session
+props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5); // DEFAULT 5; idempotence requires <= 5
 
 // Throughput tuning
-props.put(ProducerConfig.LINGER_MS_CONFIG, 5);                   // wait 5ms to fill batch
-props.put(ProducerConfig.BATCH_SIZE_CONFIG, 65536);              // 64 KB batch size
-props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 33554432);        // 32 MB send buffer
-props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "snappy");     // snappy: good ratio, low CPU
+props.put(ProducerConfig.LINGER_MS_CONFIG, 5);                   // DEFAULT since 4.0 (was 0 in 3.x)
+props.put(ProducerConfig.BATCH_SIZE_CONFIG, 65536);              // 64 KB batch (default is 16384 = 16 KB)
+props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 33554432);        // 32 MB send buffer (this IS the default)
+props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "snappy");     // default is "none"; snappy = low CPU
 
 // Schema Registry
 props.put("schema.registry.url", "http://schema-registry:8081");
 props.put("specific.avro.reader", true);
 
-// Retries
-props.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);     // retry indefinitely
+// Retries — both of these are already the defaults (retries = 2147483647,
+// delivery.timeout.ms = 120000). delivery.timeout.ms, not retries, is the real bound.
+props.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);     // retry until the delivery timeout
 props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 120000);    // 2 min total timeout
 ```
 
@@ -387,21 +401,25 @@ props.put(ConsumerConfig.GROUP_ID_CONFIG, "order-fulfillment-service");
 props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class);
 
-// Cooperative-sticky rebalancing — reduces stop-the-world pauses
+// Cooperative-sticky rebalancing — must be set explicitly. The default is the
+// ordered list "RangeAssignor, CooperativeStickyAssignor", and Range (eager) wins.
 props.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
     CooperativeStickyAssignor.class.getName());
+// Kafka 4.x alternative: drop the assignor entirely and opt into KIP-848 instead,
+// which has no client-side assignor at all:
+// props.put(ConsumerConfig.GROUP_PROTOCOL_CONFIG, "consumer");  // default is "classic"
 
-// Polling
-props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);          // 500 records per poll
-props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000);   // 5 min max between polls
+// Polling (both values are the defaults; restated because they are coupled)
+props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);          // default 500
+props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000);   // default 300000 = 5 min
 
-// Exactly-Once: read only committed data
+// Exactly-Once: read only committed data (default is read_uncommitted)
 props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
 
-// Reset: where to start if no committed offset exists
+// Reset: where to start if no committed offset exists (default is "latest")
 props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
-// NEVER auto-commit in production for at-least-once guarantees
+// NEVER auto-commit in production for at-least-once guarantees (default is true)
 props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
 
 props.put("schema.registry.url", "http://schema-registry:8081");
@@ -505,9 +523,9 @@ KStream<String, EnrichedOrder> enriched = orders.join(
 // Topic configured for compaction (retain latest value per key)
 // AdminClient configuration:
 Map<String, String> configs = new HashMap<>();
-configs.put("cleanup.policy", "compact");
-configs.put("min.cleanable.dirty.ratio", "0.1");   // compact when 10% is dirty
-configs.put("segment.ms", "3600000");               // 1 hour segment roll
+configs.put("cleanup.policy", "compact");           // default is "delete"
+configs.put("min.cleanable.dirty.ratio", "0.1");    // compact at 10% dirty; default is 0.5
+configs.put("segment.ms", "3600000");               // 1 h segment roll; default is 604800000 (7 d)
 
 NewTopic compactedTopic = new NewTopic("product.prices", 12, (short) 3)
     .configs(configs);
@@ -537,43 +555,46 @@ kafka-consumer-groups.sh \
 
 ## 7. Real-World Examples
 
-**LinkedIn — Kafka's origin**: LinkedIn built Kafka to handle activity stream data (page views, likes, searches) from 400+ million users. A single cluster processes trillions of messages per day. The unified log architecture replaced point-to-point pipelines between dozens of data systems.
+**LinkedIn — Kafka's origin**: LinkedIn built Kafka to handle activity stream data (page views, likes, searches) and open-sourced it in 2011. LinkedIn's published figures are **7 trillion messages per day** spread across **100+ clusters, 4,000+ brokers, 100,000+ topics and 7 million partitions** — the scale is the fleet, not any single cluster. The unified log architecture replaced point-to-point pipelines between dozens of data systems. LinkedIn also runs a patched fork (releases carry an `-li` suffix) with fixes ahead of upstream.
 
-**Uber — Real-time surge pricing**: Uber's surge pricing engine consumes GPS events from millions of active drivers via Kafka at hundreds of thousands of events per second. Kafka Streams aggregates events in sliding time windows to compute supply/demand ratios per geohash cell in near real-time.
+**Uber — Real-time surge pricing**: GPS events from riders and drivers flow into Kafka, and stream processing jobs compute supply/demand aggregates per geospatial cell in near real-time. Two details usually get stated wrong: Uber's stream processing runs on **Apache Flink** (via their AthenaX SQL platform) — they evaluated Kafka Streams and chose Flink — and the spatial partitioning uses Uber's own **H3 hexagonal grid**, not geohash. Uber has not published a per-second event rate for the surge pipeline specifically; treat any such figure as unsourced.
 
-**Netflix — Change Data Capture to Kafka**: Netflix uses Debezium to capture MySQL binary log changes and publish them to Kafka topics. Downstream services subscribe to these CDC events to keep read caches, Elasticsearch indexes, and analytics pipelines in sync with the database of record.
+**Netflix — Change Data Capture to Kafka**: Netflix built its **own** CDC framework, **DBLog** ("DBLog: A Watermark Based Change-Data-Capture Framework", Netflix Tech Blog, 2019), after evaluating Maxwell, SpinalTap, Yelp's MySQL Streamer and Debezium. DBLog reads the MySQL binlog and publishes changes so downstream services can keep read caches, search indexes, and analytics pipelines in sync with the database of record. Netflix's watermark-based chunked-snapshot technique was later adopted *by* Debezium (incremental snapshots), which is the likely source of the common "Netflix uses Debezium" claim.
 
-**Robinhood — Exactly-Once Financial Events**: Robinhood uses Kafka with EOS (idempotent producers + transactions + `read_committed`) for trade event processing where duplicate debits or credits are catastrophic. The transactional producer guarantees that a trade event is written to exactly one offset in exactly one partition with no duplicates.
+**Robinhood — Exactly-Once Financial Events**: Robinhood has publicly described writing stock purchase events to Kafka and Postgres, with downstream services consuming them via Kafka Streams under exactly-once semantics, and a sub-one-second trade confirmation SLA across 5-10 Kafka hops. Note the precise guarantee: the idempotent producer dedupes *retries* within a session, and transactions make a multi-partition write plus its consumer offsets atomic — neither makes an external side effect exactly-once.
 
-**Confluent Schema Registry in Production**: At scale, a breaking schema change (removing a required field from an Avro schema) brought down a downstream consumer service at a major bank during trading hours. After recovery, the team enabled BACKWARD compatibility enforcement in Schema Registry. The CI pipeline now rejects non-compatible schema PRs before they reach production.
+**Confluent Schema Registry in Production** *(illustrative composite, not a published incident)*: a breaking schema change (removing a required field from an Avro schema) takes down a downstream consumer service during trading hours. The recovery pattern is to enable BACKWARD compatibility enforcement in Schema Registry and have CI reject non-compatible schema PRs before they reach production.
 
 ---
 
 ## 8. Tradeoffs
 
-| Configuration | Latency | Throughput | Durability | Use Case |
-|--------------|---------|------------|------------|----------|
-| acks=0 | Lowest | Highest | None | Metrics, logs (loss-tolerant) |
-| acks=1 | Low | High | Leader only | Semi-important events |
-| acks=all + min.insync=2 | Higher | Medium | High | Business events, financial |
+| Configuration | Latency | Throughput | Durability | Default in 4.x? | Use Case |
+|--------------|---------|------------|------------|-----------------|----------|
+| acks=0 | Lowest | Highest | None | No — also disables idempotence | Metrics, logs (loss-tolerant) |
+| acks=1 | Low | High | Leader only | No — also disables idempotence | Semi-important events |
+| acks=all + min.insync=2 | Higher | Medium | High | acks=all yes, min.insync.replicas=1 by default | Business events, financial |
 
-| Rebalancing Strategy | Stop-the-World | Complexity | Kafka Version |
-|---------------------|---------------|------------|---------------|
-| Eager (Range/RoundRobin) | Full pause | Low | < 2.4 |
-| Cooperative-Sticky | Partial — only moved partitions | Medium | 2.4+ |
+| Rebalancing Strategy | Stop-the-World | Complexity | Availability | Default? |
+|---------------------|---------------|------------|--------------|----------|
+| Eager (Range/RoundRobin) | Full pause | Low | since 0.9 | Yes — `RangeAssignor` is first in the default list |
+| Cooperative-Sticky | Partial — only moved partitions | Medium | 2.4+ | No — must set `CooperativeStickyAssignor` |
+| KIP-848 (`group.protocol=consumer`) | None — broker-driven, incremental | Low for the client | GA in 4.0 | No — `group.protocol` defaults to `classic` |
+
+Compression ratios below are directional only; the achieved ratio depends entirely on payload shape (repetitive JSON/Avro compresses far better than binary or already-compressed data). Benchmark on your own records rather than budgeting off these.
 
 | Compression | CPU Cost | Ratio | Latency | Best For |
 |------------|---------|-------|---------|----------|
-| none | None | 1x | Lowest | Dev/test |
-| snappy | Low | ~2x | Low | Throughput-optimized pipelines |
-| lz4 | Low | ~2x | Very low | Latency-sensitive pipelines |
-| gzip | High | ~4x | Higher | Storage-constrained, cold data |
-| zstd | Medium | ~4x | Low | Best balance: use in production |
+| none | None | 1x | Lowest | Dev/test (this is the default) |
+| snappy | Low | Modest | Low | Throughput-optimized pipelines |
+| lz4 | Low | Modest | Very low | Latency-sensitive pipelines |
+| gzip | High | Highest | Higher | Storage-constrained, cold data |
+| zstd | Medium | High | Low | Best balance: use in production |
 
-| Mode | ZooKeeper | Max Partitions | Failover Speed | Production Status |
-|------|-----------|----------------|----------------|-------------------|
-| Classic (ZK) | Required | ~200k | Seconds | Deprecated in 3.x |
-| KRaft | None | Millions | Sub-second | Default in 3.7+ |
+| Mode | ZooKeeper | Partitions per cluster | Failover Speed | Status |
+|------|-----------|------------------------|----------------|--------|
+| Classic (ZK) | Required | ~200k guideline | Slow — grows with metadata size | Deprecated in 3.5, **removed in 4.0** |
+| KRaft | None | Millions (2M in Confluent's lab test) | Near-constant time | The only mode from 4.0 |
 
 ---
 
@@ -592,7 +613,7 @@ kafka-consumer-groups.sh \
 - You need request/reply semantics with short timeouts (use gRPC or REST).
 - Your team is small and operational overhead of a Kafka cluster is not justified (use Amazon SQS or RabbitMQ).
 - Messages must be delivered to specific consumers based on content-based routing (RabbitMQ headers exchange or SNS filter policies are simpler).
-- You need sub-millisecond latency (Kafka's minimum latency is ~2–5ms under optimal conditions).
+- You need sub-millisecond latency. Kafka's floor is single-digit milliseconds end-to-end even when heavily tuned — Confluent's published tier-1-bank trading case study reports sustaining **sub-5 ms p99** at 1.6 M msg/sec with sub-5 KB messages, and that took dedicated tuning. Ordinary untuned deployments sit well above that.
 
 **Use log compaction when:**
 - The topic represents the latest state of a key (product prices, user preferences).
@@ -701,7 +722,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 ## 11. Technologies and Tools
 
 **Kafka Ecosystem**
-- Apache Kafka — core broker (KRaft mode in 3.7+).
+- Apache Kafka — core broker. 4.x is KRaft-only (no ZooKeeper); brokers/Connect/tools require Java 17+, clients and Streams require Java 11+.
 - Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
 - ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
 - Kafka Connect — scalable framework for source and sink connectors. 200+ connectors available (JDBC, Elasticsearch, S3, Debezium CDC).
@@ -717,7 +738,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 - Aiven for Kafka — managed Kafka across AWS, GCP, Azure.
 
 **Monitoring**
-- Confluent Control Center — commercial UI for consumer lag, broker health, Schema Registry.
+- Confluent Control Center — commercial UI for consumer lag, broker health, Schema Registry. Note the split: the original ("Legacy") Control Center was discontinued with Confluent Platform 8.0; the replacement ships separately as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and upgrading is a migration that discards historical metrics.
 - Kafdrop — open-source web UI for topic/message inspection.
 - Burrow (LinkedIn) — consumer lag monitoring with rule-based alerting.
 - KEDA (Kubernetes) — event-driven autoscaling based on Kafka consumer group lag.
@@ -725,7 +746,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 
 **Spring Integration**
 - Spring Kafka (`spring-kafka`) — `@KafkaListener`, `KafkaTemplate`, `KafkaTransactionManager`.
-- Spring Cloud Stream — binder abstraction for Kafka and RabbitMQ with `@StreamListener` (deprecated in favor of functional model with `Consumer<T>` beans).
+- Spring Cloud Stream — binder abstraction for Kafka and RabbitMQ. The annotation model (`@EnableBinding`, `@StreamListener`, `@Input`, `@Output`) was deprecated in 3.1 and **removed in 4.0** — use the functional model (`Supplier<T>` / `Function<T,R>` / `Consumer<T>` beans).
 
 ---
 
@@ -738,10 +759,10 @@ A partition is the fundamental unit of parallelism and ordering in Kafka. Each t
 The ISR is the set of replicas that are fully caught up with the partition leader within `replica.lag.time.max.ms` (default 30 seconds). With `acks=all`, the producer waits for all replicas in the ISR to confirm the write. If `min.insync.replicas=2` and the ISR has 3 replicas, all 3 must confirm. If one broker is slow and falls out of the ISR, the producer only waits for the remaining ISR members (as long as ISR size >= min.insync.replicas). If the ISR shrinks below `min.insync.replicas`, the producer receives a `NotEnoughReplicasException`.
 
 **Q: What is the difference between at-most-once, at-least-once, and exactly-once delivery semantics in Kafka?**
-At-most-once commits the offset before processing — if processing fails, the message is lost but never duplicated. At-least-once commits after processing — if the consumer crashes after processing but before committing, the message is reprocessed on restart, potentially causing duplicates. Exactly-once is achieved by combining three features: `enable.idempotence=true` on the producer (eliminates duplicates caused by producer retries), `transactional.id` + `producer.beginTransaction()` / `commitTransaction()` for atomic multi-partition writes, and `isolation.level=read_committed` on consumers so they only see committed data. Without all three, you cannot guarantee exactly-once.
+At-most-once commits the offset before processing — if processing fails, the message is lost but never duplicated. At-least-once commits after processing — if the consumer crashes after processing but before committing, the message is reprocessed on restart, potentially causing duplicates. Exactly-once is achieved by combining three features: `enable.idempotence=true` on the producer (eliminates duplicates caused by producer retries), `transactional.id` + `producer.beginTransaction()` / `commitTransaction()` for atomic multi-partition writes, and `isolation.level=read_committed` on consumers so they only see committed data. Without all three, you cannot guarantee exactly-once. Scope matters and is the most common interview trap: a Kafka transaction spans Kafka partitions and the `__consumer_offsets` entries only. It is **not** a distributed transaction — it cannot atomically include a write to Postgres, an HTTP call, or an email send, so every external side effect still needs its own idempotency key.
 
 **Q: What does enable.idempotence=true do in the producer?**
-The idempotent producer assigns a producer ID (PID) and a monotonically increasing sequence number to each message. The broker tracks the last sequence number per (PID, partition). If the producer retries a message (e.g., due to a network timeout), the broker detects the duplicate sequence number and discards the duplicate, returning success to the producer. This eliminates duplicates caused by producer retries within a single producer session. Note: the PID is reassigned on producer restart, so idempotence is per-session only. For cross-session deduplication, use transactional producers or consumer-side idempotency.
+The idempotent producer assigns a producer ID (PID) and a monotonically increasing sequence number to each message. The broker tracks the last sequence number per (PID, partition). If the producer retries a message (e.g., due to a network timeout), the broker detects the duplicate sequence number and discards the duplicate, returning success to the producer. This eliminates duplicates caused by producer retries within a single producer session. Two things people get wrong: it has been the **default since Kafka 3.0**, so you are already running it unless a conflicting `acks`/`retries` setting silently switched it off; and the PID is reassigned on producer restart, so idempotence is per-session only. It also constrains config — `acks` must be `all`, `retries` > 0, and `max.in.flight.requests.per.connection` <= 5; explicitly enabling idempotence alongside a conflicting value throws `ConfigException`. For cross-session deduplication, use transactional producers or consumer-side idempotency.
 
 **Q: What is log compaction and when would you use it instead of the default delete policy?**
 Log compaction retains the latest value for each record key indefinitely, deleting older records with the same key. A null value (tombstone) causes the key to be deleted entirely after the compaction runs. Use it for topics that represent current state rather than event history — for example, a `product.prices` topic where only the latest price matters, or a Kafka Streams changelog topic backing a state store. Use the delete policy when events are time-bounded and older events are irrelevant after a retention period.
@@ -753,10 +774,10 @@ A KStream represents an unbounded stream of events where each record is an indep
 A GlobalKTable is replicated to every Kafka Streams instance in the application, regardless of which partitions that instance is assigned. This means any instance can join any record against a GlobalKTable without co-partitioning requirements. Use it for small-to-medium reference data (country codes, product catalog with <100k entries) that every instance needs. Never use GlobalKTable for large tables — the full dataset is stored locally on every instance. For large tables with co-partitioned keys, use a regular KTable join.
 
 **Q: Explain the producer batching mechanism and how to tune it.**
-The producer accumulates records in an in-memory batch per partition (up to `batch.size` bytes, default 16384 = 16 KB). When the batch is full or `linger.ms` elapses (default 0), the batch is sent. With `linger.ms=0`, each record is sent as soon as possible (low latency, poor batching). With `linger.ms=5`, the producer waits 5ms for additional records to fill the batch (higher latency, better throughput and compression ratio). For throughput-optimized pipelines: set `batch.size=65536` (64 KB), `linger.ms=5–20`, and enable compression. For latency-sensitive pipelines: keep `linger.ms` at 0–1.
+The producer accumulates records in an in-memory batch per partition and sends when the batch fills or `linger.ms` elapses, whichever comes first. `batch.size` defaults to 16384 (16 KB). `linger.ms` **defaults to 5 in Kafka 4.x** — it was 0 through 3.x and was changed by KIP-1030, on the reasoning that the efficiency gain from larger batches usually produces similar or lower end-to-end latency despite the added wait. With `linger.ms=0` each record is sent as soon as possible (low latency, poor batching). For throughput-optimized pipelines: set `batch.size=65536` (64 KB), `linger.ms=5–20`, and enable compression. For genuinely latency-sensitive pipelines you can drop `linger.ms` toward 0-1, but measure rather than assume — under multi-producer load Confluent found a small linger (5-10 ms) actually improved p99.
 
 **Q: What is cooperative-sticky rebalancing and why is it better than eager rebalancing?**
-In eager rebalancing, all consumers in a group revoke all partitions simultaneously, then the coordinator reassigns all partitions. This causes a full stop-the-world pause — no consumer processes any message during the rebalance, which can take 10–30+ seconds in large groups. In cooperative-sticky rebalancing (`CooperativeStickyAssignor`), only the partitions that need to move are revoked, and only the affected consumers pause briefly. Unaffected consumers continue processing uninterrupted. The rebalance runs in multiple rounds. This dramatically reduces the impact of rebalancing caused by rolling deployments or scaling events.
+In eager rebalancing, all consumers in a group revoke all partitions simultaneously, then the coordinator reassigns all partitions. This causes a full stop-the-world pause — no consumer processes any message during the rebalance, and in large groups that is seconds. In cooperative-sticky rebalancing (`CooperativeStickyAssignor`), only the partitions that need to move are revoked, and only the affected consumers pause briefly. Unaffected consumers continue processing uninterrupted. The rebalance runs in multiple rounds. The trap: it is NOT the default. KIP-726 (Kafka 3.0) set `partition.assignment.strategy` to the preference-ordered list `RangeAssignor, CooperativeStickyAssignor`, and because `RangeAssignor` is first, an unconfigured 4.x consumer still rebalances eagerly. In Kafka 4.0+ the stronger option is the KIP-848 protocol (`group.protocol=consumer`), which makes assignment broker-driven and incremental with no client-side assignor at all — also opt-in.
 
 **Q: What is the Schema Registry and what compatibility modes does it support?**
 The Schema Registry is a centralized service that stores and enforces schemas for Kafka messages. Producers register a schema and receive a numeric schema ID; the ID and serialized bytes are published to Kafka. Consumers fetch the schema by ID and deserialize. Compatibility modes: BACKWARD — new schema can read data written with old schema (safe: add optional fields with defaults); FORWARD — old schema can read data written with new schema (safe: only add fields that old consumers will ignore); FULL — both backward and forward; BACKWARD_TRANSITIVE / FORWARD_TRANSITIVE / FULL_TRANSITIVE — check against all historical versions, not just the latest. Use FULL_TRANSITIVE for the strongest guarantee.
@@ -777,7 +798,7 @@ Producer metrics: `record-error-rate` (should be 0), `record-send-rate`, `reques
 Consumer group rebalancing is a runtime event triggered when a consumer joins or leaves a group, or when partition count changes. It redistributes partition assignments among the live consumers in the group without moving data. Partition reassignment (via `kafka-reassign-partitions.sh` or Admin API) is an administrative operation that moves partition replicas between brokers — it physically copies partition data to new brokers. Partition reassignment is used for broker decommissioning, rack-aware rebalancing, or restoring replication factor after broker failure.
 
 **Q: How does KRaft mode change Kafka's architecture compared to ZooKeeper-based Kafka?**
-In ZooKeeper-based Kafka, ZooKeeper manages controller election, stores topic metadata, broker registrations, and consumer group offsets (in older versions). The active controller is a single broker elected via ZooKeeper. In KRaft mode, a subset of brokers designated as controllers form a Raft quorum. The active controller is elected via Raft consensus. All cluster metadata is stored in an internal `__cluster_metadata` topic replicated via the Raft log. Eliminating ZooKeeper removes an external operational dependency, reduces the number of processes to manage, improves controller failover speed from seconds to sub-seconds, and removes the ~200k partition scalability limit that ZooKeeper imposed.
+KRaft replaces the external ZooKeeper ensemble with an internal Raft quorum of controller nodes that own all cluster metadata. The active controller is elected via Raft consensus, and metadata lives in an internal `__cluster_metadata` topic replicated by the Raft log. In the old ZooKeeper architecture, ZooKeeper managed controller election and stored topic metadata and broker registrations, and the active controller was a single broker elected via ZooKeeper. Eliminating ZooKeeper removes an external operational dependency, reduces the number of processes to manage, makes controller failover near-constant time instead of scaling with metadata size, and lifts the ~200k-partitions-per-cluster guideline ZooKeeper imposed (Confluent has lab-tested 2 million partitions on KRaft). Timeline for interviews: production-ready in 3.3 (KIP-833), ZooKeeper deprecated in 3.5 (also the bridge release for migration), ZooKeeper **removed in 4.0** — so there is no "ZooKeeper vs KRaft" choice on any current version, and a ZK cluster must be migrated on 3.5+ before it can upgrade to 4.x.
 
 **Q: What is the significance of the linger.ms and batch.size settings together?**
 These two settings jointly control when the producer sends a batch. `batch.size` sets the maximum size of a batch in bytes — the batch is sent immediately when full. `linger.ms` sets the maximum time the producer waits for the batch to fill before sending regardless of size. They work together: with `batch.size=64KB` and `linger.ms=5`, the producer sends when either 64KB is accumulated OR 5ms elapses, whichever comes first. At high throughput, batches fill quickly (batch.size dominates — near-zero extra latency). At low throughput, linger.ms governs (adds up to 5ms latency but groups more records together for compression efficiency). Setting both `linger.ms=0` and a large `batch.size` is counterproductive — batches will rarely fill.
@@ -789,9 +810,11 @@ Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor
 
 ## 13. Best Practices
 
-- **Always set acks=all and min.insync.replicas=2 for business events**: the default `acks=1` and `min.insync.replicas=1` provides no real durability guarantee under broker failure.
+- **Set min.insync.replicas=2 on every business-event topic**: `acks` already defaults to `all` in Kafka 4.x, but `min.insync.replicas` still defaults to **1**, and `acks=all` against a one-member ISR is exactly as weak as `acks=1`. The topic-level floor is the half of the pair nobody sets.
 
-- **Use cooperative-sticky rebalancing in all new consumer deployments**: add `CooperativeStickyAssignor` to `partition.assignment.strategy`. The performance improvement during rolling deployments is immediate and significant.
+- **Do not let a config change silently disable idempotence**: `enable.idempotence` defaults to `true`, but setting `acks=1` (or `acks=0`, or `retries=0`) without explicitly enabling idempotence turns it off with no error. Set both explicitly so any conflict fails loudly with `ConfigException`.
+
+- **Use cooperative-sticky rebalancing in all new consumer deployments**: it is not the default — the default assignor list is `RangeAssignor, CooperativeStickyAssignor` and Range (eager) wins, so you must set `CooperativeStickyAssignor` explicitly. On Kafka 4.0+, evaluate `group.protocol=consumer` (KIP-848) instead, which removes client-side assignment entirely.
 
 - **Set transaction.id to a stable, unique identifier per producer instance**: for Kubernetes deployments, use a combination of the pod name and a stable hash. This enables the broker to fence zombie producers on restart.
 
@@ -803,7 +826,7 @@ Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor
 
 - **Monitor UnderReplicatedPartitions as a P1 alert**: this metric indicates that a partition replica is not in sync. It is the earliest warning of broker degradation and data durability risk before an actual outage.
 
-- **Use compression in production**: enable `snappy` or `zstd` compression. At typical Avro payload sizes (500–2000 bytes), compression ratios of 2–4x reduce broker disk usage, network I/O, and end-to-end latency under load.
+- **Use compression in production**: `compression.type` defaults to `none`, so this is always an explicit choice. Enable `snappy` or `zstd`; on repetitive Avro/JSON payloads the reduction in broker disk usage and network I/O typically outweighs the CPU cost, but the achieved ratio is entirely payload-dependent — measure it on your own records rather than budgeting off a quoted multiple.
 
 - **Design for consumer idempotency even with EOS**: exactly-once semantics in Kafka apply to Kafka-to-Kafka flows. Any external side effects (database writes, HTTP calls, emails) must be idempotent because consumer restarts can re-execute processing logic.
 
@@ -814,6 +837,8 @@ Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor
 ## 14. Case Study
 
 ### Real-Time Order Processing Pipeline with Exactly-Once Semantics
+
+*(Illustrative worked scenario — the company, timeline and measured figures below are constructed to exercise the mechanics, not a published case study.)*
 
 **Scenario**: A fintech company processes stock trade orders. Each order triggers inventory reservation, risk assessment, and audit logging. Duplicate processing of a trade (double execution) or missed processing (silent loss) both cause regulatory and financial consequences. The team must achieve exactly-once processing end-to-end.
 
@@ -841,11 +866,12 @@ The risk service polls OrderPlaced, evaluates it, and produces the approval even
 
 **Producer Configuration**:
 ```java
-props.put(ProducerConfig.ACKS_CONFIG, "all");
-props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+props.put(ProducerConfig.ACKS_CONFIG, "all");                       // default in 4.x
+props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);          // default in 4.x
 props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "order-api-" + podOrdinal);
-props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
-// min.insync.replicas=2 set at topic level
+props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5); // default 5
+// min.insync.replicas=2 set at topic level -- the broker default is 1, so this
+// is the only line here that is NOT already the platform default.
 ```
 
 **Consumer + Produce Transaction**:
@@ -880,10 +906,12 @@ while (running) {
 
 **Schema Evolution**:
 - `TradeOrder` Avro schema registered with `FULL_TRANSITIVE` compatibility.
-- When the team needed to add a `regualtoryRegion` field (initially absent), they added it with a default value of `"UNKNOWN"`. All existing messages deserialized correctly with the default. All new messages carried the field explicitly.
+- When the team needed to add a `regulatoryRegion` field (initially absent), they added it with a default value of `"UNKNOWN"`. All existing messages deserialized correctly with the default. All new messages carried the field explicitly.
 - Schema Registry CI check: any PR touching `.avsc` files triggers a `GET /compatibility/subjects/{subject}/versions/latest` check against the registry staging environment. Non-compatible schemas fail the build.
 
-**Outcomes**:
-- Zero duplicate trade executions in 18 months of production operation.
-- Consumer lag monitored via KEDA: at peak trading hours (market open), consumer pods autoscale from 4 to 16 based on lag threshold of 5,000 records.
-- Rebalancing during rolling deployments with cooperative-sticky: measured partition unavailability reduced from 18 seconds (eager) to under 2 seconds per rebalance round.
+**Outcomes** *(illustrative figures for this constructed scenario — not measured public data)*:
+- No duplicate trade executions attributable to producer retries or consumer restarts, because every write is inside a transaction and the audit path is an idempotent upsert.
+- Consumer lag monitored via KEDA: at peak trading hours (market open), consumer pods autoscale from 4 to 16 based on a lag threshold of 5,000 records.
+- Rebalancing during rolling deployments: switching from the default eager `RangeAssignor` to `CooperativeStickyAssignor` shrinks partition unavailability from a whole-group pause to only the partitions actually moving. On Kafka 4.0+, `group.protocol=consumer` removes the client-side assignment round entirely.
+
+**Note on the guarantee's boundary**: the transaction covers the `orders.approved` write plus the consumer offsets. The audit-DB write is outside it, which is why it must be an idempotent upsert keyed on `(topic, partition, offset)` — no Kafka transaction can make a Postgres write atomic with a Kafka write.
