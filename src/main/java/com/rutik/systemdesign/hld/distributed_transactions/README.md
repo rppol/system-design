@@ -28,7 +28,7 @@ The central tension every design in this module navigates is the same one CAP de
 A local ACID transaction is atomic because one process holds the locks and writes one WAL. The instant two processes are involved, "commit" on one and "commit" on the other are two separate events that can be arbitrarily far apart in time — and the network between them can fail in the gap.
 
 **2. Every distributed transaction protocol is a tradeoff between blocking and consistency.**
-2PC achieves strong consistency by making participants block (hold locks) until the coordinator decides. Saga achieves non-blocking participants by accepting a window of visible inconsistency. There is no protocol that gives you both strong consistency *and* non-blocking participants *and* tolerance of arbitrary node failures — this is a direct corollary of the FLP impossibility result and the same forces behind CAP.
+2PC achieves strong consistency by making participants block (hold locks) until the coordinator decides. Saga achieves non-blocking participants by accepting a window of visible inconsistency. There is no protocol that gives you both strong consistency *and* non-blocking participants *and* tolerance of arbitrary failures. The precise result is the atomic-commitment one — Skeen and Stonebraker (1983) showed no atomic commit protocol can be non-blocking in the presence of network partitions — which sits alongside FLP (no deterministic consensus in an asynchronous system with even one crash failure) and the same forces behind CAP.
 
 **3. Compensation is not the inverse of an action — it is a separate action with its own failure modes.**
 "Refund the charge" is not "un-charge the card" — it's a new transaction that itself can fail, can have side effects (a non-refundable processing fee), and can itself need to be retried idempotently.
@@ -445,11 +445,11 @@ Claiming the key atomically before doing the work closes the race: only the requ
 
 ## 7. Real-World Examples
 
-- **Google Spanner**: cross-shard (cross-Paxos-group) transactions use **Two-Phase Commit** between participant leaders, with **TrueTime** providing globally-ordered commit timestamps. The TrueTime uncertainty wait (~7ms typical, bounded by GPS/atomic-clock-disciplined `TrueTime.now()` intervals) is the price paid for external consistency. This is 2PC done right — but only because all participants are in the same trust domain with sub-millisecond inter-DC latency.
+- **Google Spanner**: cross-shard (cross-Paxos-group) transactions use **Two-Phase Commit** between participant leaders, with **TrueTime** providing globally-ordered commit timestamps. The commit wait is bounded by TrueTime's uncertainty interval ε, which the OSDI 2012 paper describes as "a sawtooth function of time, varying from about 1 to 7 ms over each poll interval" on GPS/atomic-clock-disciplined masters — so ~7ms is the *peak* of that sawtooth, not the typical value, and single-digit milliseconds of commit wait is the price paid for external consistency. This is 2PC done right — but only because all participants are in the same trust domain with sub-millisecond inter-DC latency.
 - **AWS DynamoDB Transactions** (`TransactWriteItems`): a 2PC-like protocol limited to **100 unique items / 4 MB per transaction, single AWS region**. The limits exist precisely because 2PC's blocking cost grows with participant count and network distance — AWS bounds both.
-- **Stripe Idempotency Keys**: every `POST` to the Payments API accepts an `Idempotency-Key` header; Stripe stores the key and response for **24 hours**, returning the cached response (including the original HTTP status code) on a repeated key. This is §4.6 in production at massive scale.
+- **Stripe Idempotency Keys**: every `POST` to the Stripe API accepts an `Idempotency-Key` header; Stripe saves the status code and body of the first request under that key and retains it for **at least 24 hours**, after which keys become eligible for automatic removal, returning that saved response — including `500`s — on a repeated key. Stripe recommends a V4 UUID or another random string with sufficient entropy. This is §4.6 in production at massive scale.
 - **Uber Trip Lifecycle Saga**: "Request Trip -> Match Driver -> Start Trip -> Complete Trip -> Charge Rider -> Pay Driver" is a long-running (minutes to hours) saga. A failure at "Charge Rider" triggers compensations that can include "Cancel Trip" and "Notify Driver of Cancellation" — exactly the choreography pattern in §4.3.
-- **Booking.com / airline GDS systems**: TCC is the industry-standard pattern — every "hold this fare for 15 minutes" you've seen as a consumer is a Try with a TTL.
+- **Travel and airline booking flows**: the consumer-visible "we're holding this fare for 15 minutes" is a textbook Try with a TTL, and reservation-then-ticketing is the canonical shape TCC models. Treat this as a *pattern match* rather than a claim about any particular operator's internals — GDS and OTA implementations are not publicly documented at that level.
 
 **What this actually says.** DynamoDB's "100 items / 4 MB per transaction" is one limit stated twice: "you may lock at most 100 rows, and those rows must average no more than 40 KB each."
 
@@ -576,6 +576,8 @@ flowchart TD
 
 ## 10. Common Pitfalls
 
+> **How to read these**: the four war stories below are **composite, illustrative incidents**. The failure mechanisms, and the fixes, are real and recurring; the specific durations, customer counts, fees, and percentages are constructed so the arithmetic that follows each one is concrete. They are archetypes to reason from, not citable post-mortems of any named company — the same convention as the explicitly fictional PaySwift case study in §14.
+
 **War Story 1 — The 2PC Coordinator That Took Down Checkout for 45 Minutes**
 
 A payments platform used a JTA transaction manager (2PC) to atomically update an `orders` table and a `ledger` table across two Postgres instances on every checkout. The transaction manager's host had a disk failure mid-recovery after a routine restart. Both Postgres instances had participants sitting in the `PREPARED` state — row locks held, connections held — for **45 minutes** while the on-call team manually inspected the transaction manager's recovery log to determine the correct decision (commit, in this case, since both had voted yes). During those 45 minutes, the connection pool (size 50) on both databases was exhausted by blocked transactions, and **all checkout traffic returned 503s** — not just the original transaction's traffic.
@@ -663,11 +665,11 @@ Thirty-six thousand customers each told "Refunded" while being out $1.50 is what
 | Category | Tools | Notes |
 |----------|-------|-------|
 | 2PC / XA transaction managers | Atomikos, Bitronix, Narayana (JTA) | Coordinate commits across multiple `XAResource`-compliant drivers (e.g., two JDBC datasources) |
-| Saga orchestration engines | Temporal, Camunda, AWS Step Functions, Netflix Conductor | Durable workflow execution — survive process crashes, replay from event history |
+| Saga orchestration engines | Temporal, Camunda, AWS Step Functions, Conductor OSS | Durable workflow execution — survive process crashes, replay from event history. Note Conductor was built at Netflix but Netflix archived its repo in Dec 2023; the live project is Conductor OSS, maintained primarily by Orkes |
 | CDC / Outbox relays | Debezium, AWS DMS | Tail the database WAL/binlog; near-zero added write latency vs. polling |
 | Message brokers with transactional semantics | Kafka (transactional producer / EOS), RabbitMQ (publisher confirms) | Kafka EOS combines with the outbox pattern for end-to-end exactly-once *processing* |
 | Idempotency key stores | Redis (`SET key val NX EX ttl`), DynamoDB (with TTL attribute) | Sub-millisecond claim-and-check; TTL handles automatic key expiry |
-| Distributed SQL with built-in 2PC | Google Spanner, CockroachCB, YugabyteDB | 2PC + a global clock (TrueTime / hybrid logical clocks) used internally — application code doesn't implement 2PC itself |
+| Distributed SQL with built-in 2PC | Google Spanner, CockroachDB, YugabyteDB | 2PC + a global clock (TrueTime / hybrid logical clocks) used internally — application code doesn't implement 2PC itself |
 | Local transaction frameworks | Spring `@Transactional` (see [Spring Transactions](../../spring/spring_transactions/README.md)) | The "local transaction" half of every pattern in this module |
 
 ---
@@ -700,7 +702,7 @@ A: A Saga's compensations run *after* a later step has already failed — there'
 
 **Q7: A saga's compensation for "ChargeCard $50" is "RefundCard $50" — what's wrong with this, potentially?**
 
-A: If the original charge incurred a non-refundable processing fee (common with payment processors, ~$0.30-$1.50), refunding the full $50 either over-refunds (the business eats the fee) or, if you refund only $48.50, the customer sees an unexplained discrepancy. Compensations are not automatic inverses — they are separate operations that must be explicitly designed, including how partial costs (fees, restocking charges, non-refundable deposits) are handled and communicated. See §10, War Story 4.
+A: If the processor keeps its fee on refund, refunding the full $50 makes the business eat that fee, while refunding only the net leaves the customer with an unexplained discrepancy. This is the normal case, not an exotic one: Stripe, for example, does not return the original processing fee when a charge is refunded, and card-scheme fees are typically percentage-plus-fixed (Stripe's standard US online rate is 2.9% + $0.30), so the retained amount scales with the charge rather than being a flat $1.50. Compensations are not automatic inverses — they are separate operations that must be explicitly designed, including how partial costs (fees, restocking charges, non-refundable deposits) are handled and communicated. See §10, War Story 4.
 
 **Q8: How do you handle a saga step that fails permanently (not transiently) partway through?**
 
@@ -728,7 +730,7 @@ A: 3PC adds a pre-commit phase so participants can independently commit if the c
 
 **Q14: Why is there no protocol in this module's blocking-vs-consistency plane that's both strong and non-blocking?**
 
-A: That combination is provably impossible to achieve alongside tolerance of arbitrary node failures. Section 3's Core Principle 2 ties this directly to the FLP impossibility result and the same forces behind CAP. The Section 8 quadrant chart shows this empirically: 2PC sits at strong-but-blocking, Saga and Outbox sit at non-blocking-but-eventual, and nothing occupies the "strong and non-blocking" quadrant, because achieving it would require participants to know the global outcome before the coordinator finishes collecting votes — exactly what an arbitrary node or network failure can prevent. TCC and 3PC sit in between not because they've cheated the impossibility result, but because they narrow the blocking window (a bounded TTL instead of an indefinite lock) rather than eliminating it. Treat any vendor or design that claims "strong consistency with zero blocking, tolerant of any failure" as suspect — it has almost certainly narrowed the failure model rather than solved the general problem.
+A: That combination is provably impossible to achieve alongside tolerance of arbitrary failures. Section 3's Core Principle 2 ties this to the atomic-commitment impossibility result (Skeen and Stonebraker, 1983: no atomic commit protocol is non-blocking under network partitions), which sits alongside FLP and the same forces behind CAP. The Section 8 quadrant chart shows this empirically: 2PC sits at strong-but-blocking, Saga and Outbox sit at non-blocking-but-eventual, and nothing occupies the "strong and non-blocking" quadrant, because achieving it would require participants to know the global outcome before the coordinator finishes collecting votes — exactly what an arbitrary node or network failure can prevent. TCC and 3PC sit in between not because they've cheated the impossibility result, but because they narrow the blocking window (a bounded TTL instead of an indefinite lock) rather than eliminating it. Treat any vendor or design that claims "strong consistency with zero blocking, tolerant of any failure" as suspect — it has almost certainly narrowed the failure model rather than solved the general problem.
 
 **Q15: Why does DynamoDB cap `TransactWriteItems` at 100 items, 4MB, and a single AWS region?**
 

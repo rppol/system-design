@@ -421,7 +421,7 @@ xychart-beta
 We assume the 84 previous-window requests were uniformly distributed, so the 75% of the previous window that still overlaps the sliding view contributes 75% of them (63) to the estimate: 36 + 63 = 99, just under the limit of 100, so the request is allowed.
 
 #### Why It Works
-The approximation is statistically sound when traffic is roughly uniform. In practice, the error is very small (usually < 1%). Redis uses a similar approach in its sliding window rate limiter.
+The approximation is statistically sound when traffic is roughly uniform. In practice, the error is very small (usually < 1%). Redis documents this two-counter construction as one of the standard limiter recipes in its own rate-limiting tutorials, alongside the fixed-window and sorted-set sliding-log variants.
 
 #### Pseudocode
 
@@ -748,34 +748,35 @@ checks = [
 
 ## 7. Real-World Examples
 
-### Twitter / X API
-- Standard: 300 requests per 15-minute window per endpoint
+### X (Twitter) API
+- Limits are per endpoint; most use a 15-minute window, with documented exceptions annotated `/24hrs` or `/sec`
 - Headers: `x-rate-limit-limit`, `x-rate-limit-remaining`, `x-rate-limit-reset`
-- Different limits per endpoint (timeline vs. search vs. streaming)
-- App-level limits separate from user-level limits
+- Two separate budgets per endpoint: per-user (OAuth token) and per-app (bearer token)
+- Exceeding a limit returns `429` with error code 88; rate limits and billing are tracked separately
 
 ### GitHub API
 - Unauthenticated: 60 requests/hour per IP
-- Authenticated: 5,000 requests/hour per user
-- Search API: 10 requests/minute (more expensive)
+- Authenticated: 5,000 requests/hour per user (15,000 acting for a GitHub Enterprise Cloud org)
+- Search API: 30 requests/minute authenticated, 10 unauthenticated (code search: 10/minute)
 - GraphQL: 5,000 points/hour (complexity-weighted)
+- Secondary limits on top: max 100 concurrent requests, 900 REST points/minute
 
 ### Stripe
-- Test mode: 100 reads/sec, 100 writes/sec
-- Live mode: higher limits based on account history
-- Uses Token Bucket internally
-- Returns `429 Too Many Requests` with `Retry-After`
+- Live mode: 100 requests/sec per account; sandbox: 25 requests/sec
+- Individual endpoints default to 25 requests/sec, with documented exceptions (Files 20 reads + 20 writes/sec, Payouts 15 creates/sec, Search 20 reads/sec)
+- Uses a Redis-backed token bucket per user, plus a concurrency limiter and two load shedders (Stripe engineering, "Scaling your API with rate limiters")
+- Returns `429 Too Many Requests` with a `Stripe-Rate-Limited-Reason` header naming the limiter that fired (`global-rate`, `endpoint-rate`, `global-concurrency`, `endpoint-concurrency`, `resource-specific`)
 
 ### AWS API Gateway
-- Default: 10,000 requests/sec with burst of 5,000
-- Per-stage and per-client (API key) throttling
-- Usage Plans define rate + quota per API key
+- Default: 10,000 requests/sec per account per Region with burst of 5,000 (some newer Regions default to 2,500 / 1,250)
+- The rate quota is adjustable on request; the burst quota is not
+- Per-stage and per-client (API key) throttling; Usage Plans define rate + quota per API key
 - Uses Token Bucket algorithm
 
 ### OpenAI API
-- Rate limits by tokens per minute (TPM) and requests per minute (RPM)
-- Different limits per model (GPT-4 vs. GPT-3.5)
-- Organization-level limits
+- Rate limits by tokens per minute (TPM) and requests per minute (RPM), plus daily RPD/TPD caps — breaching any one returns 429
+- Limits are set per model, and models are retired and replaced often enough that you should read them from the account's limits page rather than hard-coding them
+- Scoped to the organization/project, with usage tiers that raise limits as cumulative spend grows
 
 ---
 
@@ -882,7 +883,7 @@ flowchart LR
     class failclosed lossN
 ```
 
-Stripe's own case study (§14) chooses fail-open — payment availability outweighs brief unmetered traffic — while an authentication endpoint should fail-closed instead, since unmetered access there is the more dangerous failure.
+The payments case study (§14) chooses fail-open — payment availability outweighs brief unmetered traffic — while an authentication endpoint should fail-closed instead, since unmetered access there is the more dangerous failure.
 
 **5. Shared quota across logically distinct clients**
 *Broken:* A platform issues one API key per top-level account, but that account has 1,000 sub-merchants making calls under it. One misbehaving sub-merchant exhausts the shared bucket, blocking all 999 others.
@@ -899,7 +900,7 @@ Stripe's own case study (§14) chooses fail-open — payment availability outwei
 | Tool / Library | Algorithm(s) | Layer | Notes |
 |-----------------|-------------|-------|-------|
 | **Redis** (`INCR`+`EXPIRE`, or Lua scripts) | Fixed window, token bucket, sliding window counter | Shared state store, any layer | The de facto standard for distributed rate limiting; single-threaded atomicity makes Lua scripts race-free |
-| **Envoy / Lyft `ratelimit`** | Generic, descriptor-based | Service mesh sidecar / gateway | gRPC rate-limit service called per-request; widely used at Lyft, Stripe, and inside Istio |
+| **Envoy / Lyft `ratelimit`** | Generic, descriptor-based | Service mesh sidecar / gateway | gRPC rate-limit service called per-request; open-sourced by Lyft and the reference global rate-limit backend for Envoy and Istio |
 | **Kong API Gateway** (rate-limiting plugin) | Fixed window, sliding window | API gateway | Per-consumer, per-route limits with Redis or cluster-wide policy stores |
 | **AWS API Gateway** (Usage Plans) | Token bucket | Managed gateway | Per-API-key throttle (steady-state rate) + burst (bucket capacity) configured declaratively |
 | **NGINX** (`limit_req` module) | Leaky bucket | Edge / reverse proxy | `limit_req zone=... burst=... nodelay;` — classic edge-layer traffic shaping |
@@ -964,11 +965,11 @@ A: Use a circuit breaker around the Redis call. Options: (1) fail open — allow
 
 **Q13: Why does clock skew across API servers silently inflate a distributed token bucket's effective limit?**
 
-A: When each server computes bucket refill from its own local clock, a lagging node calculates a refill "from the past" and grants tokens the bucket shouldn't have yet. Common Pitfall 3 and the Stripe case study both quantify it: roughly 500ms of drift across nodes inflated a 1000/min bucket to an effective ~1100/min — about 10% of free extra quota, invisible in any single node's logs because each node's math is locally correct. The fix is to make the rate-limit store the single source of time truth — the Stripe implementation passes `redis.call('TIME')` into the Lua script instead of the caller's wall clock, so every refill calculation uses the same clock regardless of which datacenter the request landed in. Never mix caller-side timestamps into shared rate-limit state; time must come from the same place the counters live.
+A: When each server computes bucket refill from its own local clock, a lagging node calculates a refill "from the past" and grants tokens the bucket shouldn't have yet. Common Pitfall 3 and the §14 case study both quantify it: roughly 500ms of drift across nodes inflated a 1000/min bucket to an effective ~1100/min — about 10% of free extra quota, invisible in any single node's logs because each node's math is locally correct. The fix is to make the rate-limit store the single source of time truth — the case study's Lua script takes `redis.call('TIME')` instead of the caller's wall clock, so every refill calculation uses the same clock regardless of which datacenter the request landed in. Never mix caller-side timestamps into shared rate-limit state; time must come from the same place the counters live.
 
-**Q14: Why did Stripe move its rate-limit check from the Java application layer to the NGINX edge?**
+**Q14: Why should a rate-limit check move from the application layer out to the NGINX edge?**
 
-A: An application-layer check means abusive traffic still consumes the very resources the limiter exists to protect — connections, threads, and CPU on the app servers, plus a Redis round trip per malicious request. The Stripe case study's first pitfall shows the consequence: a 100k req/sec DDoS drove app-server CPU to 100% even though every request was being correctly rejected, because rejection happened after the request had already traversed the expensive part of the stack. Moving the check into NGINX/OpenResty at the edge meant bad traffic received its 429 before touching an app server, cutting app CPU during attacks by 95%. Enforce volume limits as early in the request path as the needed context allows — the module's request-path diagram (§5) shows each layer can reject early, and cheap rejection is the entire point.
+A: An application-layer check means abusive traffic still consumes the very resources the limiter exists to protect — connections, threads, and CPU on the app servers, plus a Redis round trip per malicious request. The §14 case study's first pitfall shows the consequence: a 100k req/sec flood drove app-server CPU to 100% even though every request was being correctly rejected, because rejection happened after the request had already traversed the expensive part of the stack. Moving the check into NGINX/OpenResty at the edge meant bad traffic received its 429 before touching an app server, cutting app CPU during attacks by 95%. Enforce volume limits as early in the request path as the needed context allows — the module's request-path diagram (§5) shows each layer can reject early, and cheap rejection is the entire point.
 
 **Q15: Why should unauthenticated and authenticated clients sit on separate rate-limit tiers instead of sharing one limit?**
 
@@ -976,7 +977,7 @@ Unauthenticated requests are keyed only by IP, an identity cheap to rotate and o
 
 **Q16: A parent account has 1,000 sub-merchants sharing one rate-limit bucket — what goes wrong, and what's the right keying?**
 
-A: One misbehaving sub-merchant exhausts the shared bucket and blocks all 999 innocent siblings, because the limiter's unit of isolation doesn't match the actual unit of independent behavior. Common Pitfall 5 describes the general failure and the Stripe case study hit it concretely: Shopify generates an API key per merchant, and a single merchant's runaway integration consumed the parent account's shared quota, throttling every other merchant under that account. The fix is to key the rate limiter at the real unit of isolation — per sub-merchant or per integration — while keeping an optional higher-level aggregate limit for billing visibility only, never for throttling. When designing rate-limit keys, ask "whose bad behavior should be able to affect whom?" — the answer defines the key granularity, and it's usually finer than the billing relationship.
+A: One misbehaving sub-merchant exhausts the shared bucket and blocks all 999 innocent siblings, because the limiter's unit of isolation doesn't match the actual unit of independent behavior. Common Pitfall 5 describes the general failure and the §14 case study makes it concrete: a large platform customer issues an API key per merchant, and a single merchant's runaway integration consumes the parent account's shared quota, throttling every other merchant under that account. The fix is to key the rate limiter at the real unit of isolation — per sub-merchant or per integration — while keeping an optional higher-level aggregate limit for billing visibility only, never for throttling. When designing rate-limit keys, ask "whose bad behavior should be able to affect whom?" — the answer defines the key granularity, and it's usually finer than the billing relationship.
 
 ---
 
@@ -1040,15 +1041,25 @@ Provide SDK helpers that track and respect rate limits proactively, sending `X-R
 
 ---
 
-## 14. Case Study: Stripe API Rate Limiting with Redis Token Bucket
+## 14. Case Study: Rate Limiting a Payments API with a Redis Token Bucket
+
+> **How to read this case study.** It is a *worked design*, not a leaked architecture. Only
+> two things here come from Stripe's public record: that Stripe runs a Redis-backed **token
+> bucket** per user alongside a concurrent-request limiter and two load shedders (their
+> engineering post "Scaling your API with rate limiters"), and their published limits — 100
+> requests/sec in live mode, 25 in sandbox, 25/sec for most individual endpoints, `429` with
+> a `Stripe-Rate-Limited-Reason` header. Every specific number below — node counts, latency
+> percentiles, per-endpoint splits, datacenter layout, cost — is a plausible design exercise
+> chosen to make the arithmetic legible, not a Stripe measurement. Treat it as "how you would
+> build this for a payments API", and cite only the two published facts as Stripe's.
 
 ### Problem Statement
 
-Stripe processes payments and exposes a public REST API used by millions of integrations. Rate limiting must protect the platform from abuse and from accidental client bugs (runaway loops, retry storms) while not blocking legitimate bursty traffic. Scale:
+A payments platform exposes a public REST API used by millions of integrations. Rate limiting must protect the platform from abuse and from accidental client bugs (runaway loops, retry storms) while not blocking legitimate bursty traffic. Design targets:
 
 - Total API calls: 5M/day baseline, 50M/day during shopping holidays
 - API keys: ~500k active across all merchants
-- Requests/sec global: 60 baseline, 600 peak (Black Friday)
+- Requests/sec global: 60 baseline, 600 peak (a shopping-holiday spike)
 - Per-key limit: 1000 requests/minute (default), customizable per customer tier
 - Rate-limit check overhead budget: < 1 ms (so it never dominates a 30 ms API call)
 - Availability: 99.99% — rate limiter outage must not block API requests (fail-open with logging)
@@ -1130,7 +1141,7 @@ Sharded by API key hash across 6 nodes (RF=2) — e.g. `key:sk_live_abc:charges`
 2. **Redis Lua for atomicity** — A single Lua script reads bucket state, refills based on elapsed time, decrements, and writes back — atomically. Avoids MULTI/EXEC transactions and the race conditions of GET-then-SET.
    - *Alternative rejected*: WATCH + MULTI — works but adds round-trips and retry logic.
 
-3. **API-key-level limits, not IP** — Stripe customers (e.g., Shopify) front many merchants behind one IP/load balancer. IP-based limits would penalize big customers and miss attackers using rotating IPs.
+3. **API-key-level limits, not IP** — large platform customers front many merchants behind one IP/load balancer. IP-based limits would penalize big customers and miss attackers using rotating IPs.
 
 4. **Per-endpoint limits** — POST /charges (expensive) limited to 100/min; GET /charges (cheap, read-replica) at 1000/min; webhooks unlimited. Keys are `<api_key>:<endpoint_class>` so a noisy GET loop doesn't starve a critical POST.
 
@@ -1138,7 +1149,7 @@ Sharded by API key hash across 6 nodes (RF=2) — e.g. `key:sk_live_abc:charges`
 
 6. **Sharded Redis cluster on API key hash** — Spreads load across 6 nodes. A single rogue key cannot saturate one Redis instance (only consumes that shard's CPU, ~16% of total).
 
-7. **Fail-open on Redis outage** — If Redis is unreachable for > 100 ms, the limiter allows the request and logs the bypass. Rationale: payment availability matters more than enforcing limits during a Redis incident; Stripe can detect abuse post-hoc.
+7. **Fail-open on Redis outage** — If Redis is unreachable for > 100 ms, the limiter allows the request and logs the bypass. Rationale: payment availability matters more than enforcing limits during a Redis incident; abuse during the bypass window can be detected post-hoc from logs.
 
 ### Implementation
 
@@ -1259,21 +1270,21 @@ location /v1/ {
 | Sliding window log | Exact | O(N) per window | ZADD/ZREMRANGEBYSCORE | Compliance audit |
 | Fixed window counter | 2x burst at boundary | O(1) | INCR (atomic) | Coarse limits |
 
-### Metrics & Results
+### Metrics & Results (design targets, not measurements)
 
-- p50 rate-limit check: 0.4 ms; p99: 0.9 ms (SLA: < 1 ms)
+- p50 rate-limit check: 0.4 ms; p99: 0.9 ms (budget: < 1 ms)
 - Throughput: 8k checks/sec sustained per Redis shard; 48k cluster-wide
-- 99.93% of legitimate requests succeed without 429s (per Stripe public data)
-- During Black Friday 2024: peak 600 req/sec, zero rate-limiter incidents
+- Target 429 rate for legitimate (non-abusive) traffic: well under 0.1% — worth stating as an explicit SLO, since a limiter that throttles good clients is a product bug, not a security win. No public vendor figure is cited here because none of the major payment APIs publish one
+- At the 600 req/sec holiday peak the limiter is the cheap part of the request: 0.9 ms p99 against a ~30 ms API call is 3% of the budget
 - Memory per active key: ~80 bytes; 500k keys × 80 = 40 MB per shard
-- Cost: ~$1,200/month for 6× cache.r6g.large Redis nodes
+- Cost: 6 × `cache.r6g.large` at the current us-east-1 on-demand list price of ~$0.206/node-hour is ~$150/node-month, so ~$900/month before reserved-node discounts. Re-price before quoting it: ElastiCache list prices change, and AWS now recommends the Valkey engine for new clusters, which is priced ~20% below the Redis OSS engine for node-based deployments
 - Mean time to detect abuse (post-rate-limit alert): 8 min
 
 ### Common Pitfalls / Lessons Learned
 
 1. **Rate limiting at the app layer instead of the edge** — Broken: early implementation ran rate limit checks inside the Java API server. A 100k req/sec DDoS still hit the app servers (and the Redis check itself), driving CPU to 100%. Fix: moved the rate-limit check into NGINX/OpenResty at the edge; bad traffic gets 429 before reaching app servers. App CPU during attacks dropped 95%.
 
-2. **Shared bucket across all of a customer's API keys** — Broken: Shopify generates a key per merchant (~1M keys). A single misbehaving merchant's integration consumed the shared bucket, blocking all other merchants for the parent account. Fix: per-key limits by default, with optional account-level shared quota for billing/visibility but not throttling.
+2. **Shared bucket across all of a customer's API keys** — Broken: a large platform customer generates a key per merchant (~1M keys). A single misbehaving merchant's integration consumed the shared bucket, blocking all other merchants for the parent account. Fix: per-key limits by default, with optional account-level shared quota for billing/visibility but not throttling.
 
 3. **Clock skew between rate-limit nodes** — Broken: API servers in 3 datacenters each used their local clock when computing the bucket refill. Clock drift of 500 ms caused buckets to "refill in the past" on some nodes, granting extra tokens. Effective limit became ~1100/min instead of 1000. Fix: always pass `redis.call('TIME')` as the timestamp; Redis is the single source of time truth for all buckets.
 
@@ -1291,13 +1302,13 @@ The bucket holds up to `capacity` tokens (e.g., 1000). A client that's been idle
 Different endpoints have different costs and abuse potential. POST /charges hits payment processors (real money, fraud risk); GET /charges hits a read replica (cheap). One global limit forces tradeoffs: low enough to protect /charges throttles legitimate read traffic; high enough for reads enables charge abuse. Per-endpoint lets you tune each.
 
 **Q4: How do you handle a customer who legitimately needs more than the default limit?**
-Stripe exposes higher tiers (Enterprise) with custom `capacity` and `refill_rate` stored in a per-key policy table loaded into Redis at the start of each request. The policy is also cached in-process for ~30 seconds to avoid lookup overhead. Self-service quota requests are processed via a Slack-integrated approval workflow.
+Expose higher tiers (Enterprise) with custom `capacity` and `refill_rate` stored in a per-key policy table loaded into Redis at the start of each request. The policy is also cached in-process for ~30 seconds to avoid lookup overhead. Self-service quota requests are processed via a Slack-integrated approval workflow.
 
 **Q5: What's the difference between rate limiting and throttling?**
-Rate limiting hard-rejects requests above the limit (429 response). Throttling queues or slows requests but eventually serves them. Stripe uses hard rate limiting because queueing payment requests can cause client timeouts and duplicate charges (the client retries while the queued request is still pending). For lower-stakes APIs (e.g., metrics ingestion), throttling can be appropriate.
+Rate limiting hard-rejects requests above the limit (429 response). Throttling queues or slows requests but eventually serves them. A payments API should use hard rate limiting because queueing payment requests can cause client timeouts and duplicate charges (the client retries while the queued request is still pending). For lower-stakes APIs (e.g., metrics ingestion), throttling can be appropriate.
 
 **Q6: How would you detect abuse despite the rate limiter?**
 Look for patterns the limiter doesn't catch: 429-rate spikes per key (someone is hammering against the limit), distribution of requests across endpoints (an actor probing the API), geographic anomalies (key suddenly used from a new country), and request payload similarity (replay attacks). Feed these into a fraud detection pipeline that can revoke keys or apply stricter limits.
 
 **Q7: Why fail-open instead of fail-closed when Redis is down?**
-For Stripe specifically, payment availability outweighs the risk of brief unmetered traffic. A 30-second Redis outage at fail-closed = 30 seconds of failed payments globally = millions in lost merchant revenue. Fail-open = potential overuse by a small number of clients, detectable and recoverable post-hoc. For systems where abuse is more harmful than unavailability (e.g., authentication endpoints), fail-closed is correct.
+For a payments API specifically, availability outweighs the risk of brief unmetered traffic. A 30-second Redis outage at fail-closed = 30 seconds of failed payments globally = millions in lost merchant revenue. Fail-open = potential overuse by a small number of clients, detectable and recoverable post-hoc. For systems where abuse is more harmful than unavailability (e.g., authentication endpoints), fail-closed is correct.

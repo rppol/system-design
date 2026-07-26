@@ -48,7 +48,7 @@ Requirement #2 above — time-sortable IDs — is in direct tension with even wr
 ### Cluster-Wide Demand vs. Capacity
 
 - Suppose the actual cluster-wide demand is **500,000 IDs/sec** at peak (e.g., every write to every primary table across every service that uses this generator)
-- Spread evenly across 1,000 nodes: `500,000 / 1,000` = **500 IDs/sec/node** — a tiny fraction (about 0.01%) of even the conservative 1-2M/sec/node practical ceiling
+- Spread evenly across 1,000 nodes: `500,000 / 1,000` = **500 IDs/sec/node** — a tiny fraction (0.025-0.05%) of even the conservative 1-2M/sec/node practical ceiling, and ~0.012% of the 4.096M/sec theoretical one (§10)
 - **The conclusion that matters for an interview**: at realistic fleet sizes, ID generation throughput is *never* the bottleneck. The actual constraints are (a) the **worker-ID address space** (only so many distinct identities are available — §10), and (b) **operational correctness** under clock skew and coordination-service hiccups (§8, §9) — not raw IDs/sec
 
 ### Worker-ID Address Space
@@ -180,9 +180,9 @@ sequenceDiagram
     A->>Z: create ephemeral sequential znode<br/>under /snowflake/workers/
     Z-->>A: znode name: seq-0000000007
 
-    Note over A: parse trailing integer to 7<br/>if 7 exceeds MAX_WORKER_ID (1023):<br/>fall back to datacenter-split<br/>scheme or raise capacity alarm (§10)
+    Note over A: parse trailing integer to 7<br/>counter is cumulative, never recycled:<br/>fold it, workerId = 7 mod 1024<br/>then verify no LIVE znode holds that slot
 
-    Note over A: workerId = 7<br/>construct SnowflakeIdGenerator(7)
+    Note over A: workerId = 7<br/>construct SnowflakeIdGenerator(7)<br/>if live znodes exceed 1024: capacity alarm (§10)
 
     A->>Z: maintain session (heartbeats)
     Z-->>A: session active
@@ -342,7 +342,9 @@ public final class SnowflakeIdGenerator {
 
 ### 4.2 Worker-ID Allocation via ZooKeeper/etcd Ephemeral Sequential Nodes
 
-This is the piece that makes the "no central bottleneck" requirement (§1) compatible with "no two nodes share a worker ID." The mechanism leans on a property unique to **ephemeral sequential znodes** (ZooKeeper) or **lease-backed keys with a monotonic revision** (etcd): the coordination service itself guarantees the assigned sequence numbers are unique and monotonically increasing, *without the client needing to coordinate with any other client*.
+This is the piece that makes the "no central bottleneck" requirement (§1) compatible with "no two nodes share a worker ID." The mechanism leans on a property unique to **ephemeral sequential znodes** (ZooKeeper) or **lease-backed keys read against the cluster's monotonic revision** (etcd): the coordination service itself guarantees the assigned numbers are unique and monotonically increasing, *without the client needing to coordinate with any other client*.
+
+**The trap that catches most implementations**: ZooKeeper's sequential counter is a **cumulative claim ticket, not a free-slot allocator.** Per the [ZooKeeper Programmer's Guide](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html), the counter "is unique to the parent znode," is formatted `%010d`, and "will overflow when incremented beyond 2147483647" — it increments on *every* create under that parent and is **never reused after a child is deleted**. That is exactly the property that makes it collision-free, and exactly why the raw suffix cannot be used directly as a 10-bit worker ID: a 1,000-node fleet exhausts the 0-1023 range on its **first rolling restart**, not at its 1,025th concurrent node. The allocator below therefore folds the ticket into the 10-bit space (`rawSeq % 1024`) and then proves no *live* znode already occupies that slot — the cumulative counter supplies uniqueness of the *claim*, the live-children check supplies uniqueness of the *slot*. (etcd has no per-prefix sequential create at all; its revision is a single cluster-global counter bumped by every write, so the same fold-and-verify step is mandatory there too.)
 
 ```java
 package com.rutik.systemdesign.hld.idgen;
@@ -376,11 +378,11 @@ public final class WorkerIdAllocator implements Watcher {
     public synchronized long claimWorkerId() throws Exception {
         ensureParentExists();
 
-        // CreateMode.EPHEMERAL_SEQUENTIAL: ZK appends a 10-digit, globally
-        // monotonic, zero-padded sequence number to our path -- e.g.
-        // "/snowflake/workers/seq-0000000007". The node disappears
-        // automatically if our session dies (network partition, GC pause
-        // past the session timeout, process crash).
+        // CreateMode.EPHEMERAL_SEQUENTIAL: ZK appends a 10-digit, zero-padded
+        // sequence number -- drawn from a counter on the PARENT znode -- to
+        // our path, e.g. "/snowflake/workers/seq-0000000007". The node
+        // disappears automatically if our session dies (network partition, GC
+        // pause past the session timeout, process crash).
         myZnodePath = zk.create(
             NODE_PREFIX, new byte[0],
             ZooDefs.Ids.OPEN_ACL_UNSAFE,
@@ -388,23 +390,33 @@ public final class WorkerIdAllocator implements Watcher {
 
         long rawSeq = parseSequenceNumber(myZnodePath);
 
-        if (rawSeq > MAX_WORKER_ID) {
-            // Capacity exhaustion -- see §10. In production this triggers a
-            // page, not a silent wraparound: wrapping would let two live
+        // The counter is CUMULATIVE: it counts every create ever made under
+        // this parent, is never reused after a delete, and overflows past
+        // Integer.MAX_VALUE. So rawSeq is a unique claim ticket, NOT a bounded
+        // slot index -- using it directly would fail every node after the
+        // 1024th create, i.e. on the first rolling restart. Fold it into the
+        // 10-bit space instead.
+        this.workerId = rawSeq % (MAX_WORKER_ID + 1);
+
+        List<String> live = zk.getChildren(WORKERS_PATH, false);
+        if (live.size() > MAX_WORKER_ID + 1) {
+            // Genuine capacity exhaustion, measured by LIVE ephemeral znodes
+            // rather than by the cumulative counter -- see §10. This pages;
+            // it never silently wraps, because a wrap would let two live
             // nodes share a workerId.
             zk.delete(myZnodePath, -1);
             throw new IllegalStateException(
-                "Worker-ID space exhausted: claimed sequence " + rawSeq
-              + " exceeds MAX_WORKER_ID=" + MAX_WORKER_ID
+                "Worker-ID space exhausted: " + live.size() + " live workers"
+              + " exceeds capacity " + (MAX_WORKER_ID + 1)
               + ". Fleet has grown past 1024 nodes -- see §10 capacity plan.");
         }
 
-        this.workerId = rawSeq;
         this.fenced = false;
 
-        // Startup health check: verify we are the SOLE owner of this znode
-        // path -- guards against the race in War Story 2.
-        verifySoleOwnership();
+        // Startup health check: verify no OTHER live znode folds to the same
+        // slot -- guards against the race in War Story 2 and against the
+        // modulo colliding with a longer-lived node's workerId.
+        verifySoleOwnership(live);
 
         return workerId;
     }
@@ -431,14 +443,25 @@ public final class WorkerIdAllocator implements Watcher {
         return workerId;
     }
 
-    private void verifySoleOwnership() throws Exception {
-        List<String> children = zk.getChildren(WORKERS_PATH, false);
+    private void verifySoleOwnership(List<String> live) throws Exception {
         String myNodeName = myZnodePath.substring(WORKERS_PATH.length() + 1);
-        long matches = children.stream().filter(c -> c.equals(myNodeName)).count();
-        if (matches != 1) {
+        if (live.stream().noneMatch(c -> c.equals(myNodeName))) {
             throw new IllegalStateException(
-                "Sole-ownership check failed for " + myNodeName + ": found " + matches
-              + " matching znodes. Refusing to start.");
+                "Our own znode " + myNodeName + " is already gone (session lost"
+              + " during startup). Refusing to start.");
+        }
+        long clashes = live.stream()
+            .filter(c -> !c.equals(myNodeName))
+            .filter(c -> parseSequenceNumber(c) % (MAX_WORKER_ID + 1) == workerId)
+            .count();
+        if (clashes != 0) {
+            // Another LIVE znode already folds to this workerId. Refuse to
+            // start rather than mint duplicates; the supervisor retries and
+            // the next create draws a different ticket, hence a different slot.
+            zk.delete(myZnodePath, -1);
+            throw new IllegalStateException(
+                "workerId " + workerId + " already held by " + clashes
+              + " live znode(s). Refusing to start.");
         }
     }
 
@@ -457,7 +480,7 @@ public final class WorkerIdAllocator implements Watcher {
 }
 ```
 
-**What happens on session expiry/reconnect** (the mechanism behind War Story 2, §9): ZooKeeper ties ephemeral znodes to a **session**, not a TCP connection — a client can briefly lose its TCP connection and reconnect within the session timeout (typically 4-40 seconds, configurable) without losing its ephemeral znode, because the server-side session is still alive. Only when the **session itself** expires (no successful heartbeat for the full session timeout) does the server delete the ephemeral znode. The danger window is the gap between "our session expired and our znode was deleted" and "we notice and stop serving IDs" — if another node claims the now-vacant sequence number (or, worse, if *our* znode is deleted but we haven't yet noticed and keep using the old `workerId`), two live nodes can end up believing they own the same `workerId`. The `fenced` flag and `verifySoleOwnership()` check above are the two halves of the fix.
+**What happens on session expiry/reconnect** (the mechanism behind War Story 2, §9): ZooKeeper ties ephemeral znodes to a **session**, not a TCP connection — a client can briefly lose its TCP connection and reconnect within the session timeout without losing its ephemeral znode, because the server-side session is still alive. (ZooKeeper negotiates the timeout within server-set bounds: the current implementation "requires that the timeout be a minimum of 2 times the tickTime and a maximum of 20 times the tickTime" — so with the default 2s tick, 4-40 seconds.) Only when the **session itself** expires (no successful heartbeat for the full session timeout) does the server delete the ephemeral znode. The danger window is the gap between "our session expired and our znode was deleted" and "we notice and stop serving IDs" — if a newly-started node's claim ticket folds onto the now-vacant slot (or, worse, if *our* znode is deleted but we haven't yet noticed and keep using the old `workerId`), two live nodes can end up believing they own the same `workerId`. The `fenced` flag and `verifySoleOwnership()` check above are the two halves of the fix.
 
 ```mermaid
 stateDiagram-v2
@@ -496,7 +519,7 @@ Snowflake is one point in a design space; understanding the alternatives is what
 A 128-bit value, 122 bits of which are random. Generation is a pure local operation requiring no coordination and no clock — collision probability is astronomically low (the famous "you'd need to generate 1 billion UUIDs per second for 100 years to have a 50% chance of one collision"). The cost: **no ordering whatsoever**. As a database primary key, random UUIDs scatter inserts uniformly across the entire B-tree keyspace — every insert is a likely page miss, and B-tree pages fill and split far more often (roughly 1 split per ~80 inserts on an 8KB-page table vs. ~1 per 4000 for a sequential key, per the companion file's §10).
 
 **UUIDv7 / ULID (time-ordered random)**
-Both schemes prepend a millisecond (or finer) timestamp to the high-order bits and fill the remainder with randomness — UUIDv7 is the IETF-standardized variant (RFC 9562, finalized 2024); ULID is an earlier, widely-adopted convention with a similar structure (48-bit timestamp + 80 bits of randomness, base32-encoded as a 26-character string). Both recover most of Snowflake's B-tree-locality benefit (new IDs sort after old ones, at millisecond granularity) **without any coordination step** — there's no worker-ID allocation problem at all, because uniqueness comes from the random tail, not from a machine identity. The cost: at very high throughput, many IDs generated within the same millisecond differ only in their random bits, which is fine for uniqueness but means the decode step (§4.1's `IdInfo.parse`) can't recover *which node* generated a given ID — a property Snowflake's worker-ID field provides "for free" and that is genuinely useful for sharding (§5) and debugging.
+Both schemes prepend a millisecond (or finer) timestamp to the high-order bits and fill the remainder with randomness — UUIDv7 is the IETF-standardized variant, defined in **RFC 9562 (May 2024), which obsoletes the older RFC 4122**; anything still citing a `draft-peabody-dispatch-new-uuid-format` draft is out of date. ULID is an earlier, widely-adopted convention with a similar structure (48-bit timestamp + 80 bits of randomness, base32-encoded as a 26-character string). Both recover most of Snowflake's B-tree-locality benefit (new IDs sort after old ones, at millisecond granularity) **without any coordination step** — there's no worker-ID allocation problem at all, because uniqueness comes from the random tail, not from a machine identity. The cost: at very high throughput, many IDs generated within the same millisecond differ only in their random bits, which is fine for uniqueness but means the decode step (§4.1's `IdInfo.parse`) can't recover *which node* generated a given ID — a property Snowflake's worker-ID field provides "for free" and that is genuinely useful for sharding (§5) and debugging.
 
 **Database auto-increment with step/offset (multi-master MySQL)**
 In a multi-master MySQL setup (e.g., N masters in a ring or active-active pair), each master is configured with `auto_increment_increment = N` and a distinct `auto_increment_offset` (1, 2, ..., N). Master 1 generates IDs 1, N+1, 2N+1, ...; master 2 generates 2, N+2, 2N+2, .... This guarantees no collision between masters using nothing but a per-master configuration value — genuinely the simplest possible coordination-free scheme. The costs: (a) it caps the number of masters at a number fixed at configuration time (changing N for an existing cluster requires careful migration), (b) IDs are sequential but *not time-ordered across masters* — master 1's ID 1,000,001 and master 2's ID 1,000,002 could have been generated minutes apart, and (c) it's MySQL-specific, tying the ID scheme to the database technology rather than the application layer.
@@ -577,13 +600,16 @@ import java.time.format.DateTimeFormatter;
  * application, so it works even when the application (or its coordination
  * service connection) is down. Usage:
  *
- *   java IdDecoderTool 7234582091234918400
+ *   java IdDecoderTool 323661217608089856
  *
  * Output:
- *   raw id        : 7234582091234918400
+ *   raw id        : 323661217608089856
  *   timestamp     : 2026-06-12T03:14:07.612Z
- *   node id       : 412  (datacenter=12, worker=12)
+ *   node id       : 412  (datacenter=12, worker=28)
  *   sequence      : 256
+ *
+ * (Check the arithmetic: 412 = 12 x 32 + 28, so the high 5 bits of the
+ *  node field are the datacenter and the low 5 are the worker.)
  */
 public final class IdDecoderTool {
 
@@ -651,7 +677,7 @@ This is the same tension flagged in §1's preview, and it is **not resolved by p
 |---|---|---|
 | Operational burden at scale | Low — new instances self-register; no human/CI step to assign an ID | High — every new instance needs a manually (or CI-script) assigned, globally-unique ID baked into its config; a copy-paste error assigns a duplicate (a real, recurring incident class — see the companion file's Pitfall 2) |
 | New dependency introduced | Yes — the application now depends on a coordination service being reachable at startup (though not on the hot path, §3) | No additional runtime dependency |
-| Handles dynamic fleets (autoscaling) | Yes — naturally; each new instance claims the next available sequence number | Poorly — autoscaling requires either a pre-allocated pool of config templates or a separate ID-assignment automation step, which is itself a form of ad-hoc coordination |
+| Handles dynamic fleets (autoscaling) | Yes — naturally; each new instance draws a fresh claim ticket and folds it to a free slot (§4.2) | Poorly — autoscaling requires either a pre-allocated pool of config templates or a separate ID-assignment automation step, which is itself a form of ad-hoc coordination |
 | Failure mode if coordination service is down at startup | New instances cannot start (or must retry/backoff until it recovers) — existing instances are unaffected (§1 availability requirement) | New instances start fine (no dependency) but risk silent duplicate-ID assignment if the static config has *any* error |
 | Best fit | Fleets that already run ZooKeeper/etcd for other purposes (leader election, service discovery, Kafka controller — cross-ref [`../consensus_algorithms/README.md`](../consensus_algorithms/README.md)) — the marginal cost of also using it for worker-ID allocation is small | Small, slowly-changing, manually-managed fleets where the operational discipline to keep a config registry correct is feasible |
 
@@ -674,8 +700,8 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
 
 - **Twitter Snowflake (2010)**: the namesake and origin. Twitter open-sourced Snowflake (originally a Scala service) in 2010 to replace MySQL auto-increment as tweet IDs, which had become a bottleneck and a single point of failure as Twitter scaled past what a single MySQL master could handle for primary-key generation. The original design used ZooKeeper for worker-ID coordination via ephemeral sequential nodes — precisely the §4.2 mechanism. The 41-bit-timestamp + 10-bit-node + 12-bit-sequence layout from Twitter's original implementation has since become the de facto industry-standard split, replicated (with epoch changes) across nearly every implementation discussed below. Cross-ref [`./design_twitter.md`](./design_twitter.md) for how tweet IDs are used as the primary shard key for the timeline-fan-out architecture, and the hotspotting discussion in that file's §5/§9.
 - **Instagram's sharded-ID scheme (2012)**: rather than running a separate ID-generation service, Instagram generates IDs **inside PostgreSQL itself** via a `plpgsql` function executed at insert time. The 64-bit ID is composed of a 41-bit millisecond timestamp (custom epoch: 2011-01-01, Instagram's launch year), a **13-bit shard ID** (instead of Snowflake's separate datacenter+worker split — Instagram's sharding scheme uses logical shards mapped many-to-one onto physical PostgreSQL databases), and a 10-bit per-shard, per-millisecond sequence drawn from a PostgreSQL sequence object. The widely-read Instagram engineering blog post ("Sharding & IDs at Instagram") documents this design and is frequently cited as a "Snowflake without a separate service" reference architecture — the shard ID embedded in the ID is later used directly to route reads to the correct physical database, collapsing ID generation and shard routing into one mechanism.
-- **Discord Snowflake variant (2015)**: Discord's IDs use the identical 64-bit layout as Twitter's original (41-bit timestamp + 10-bit worker/process + 12-bit sequence) but with a **custom epoch of 2015-01-01** (the date of Discord's first internal message), pushing the overflow date to roughly 2084. Discord's published engineering documentation explicitly notes that the worker-ID field encodes which **internal process** generated a given message/snowflake, which is used operationally to trace a specific ID back to the worker that issued it — directly analogous to this design's §4.1 decode utility.
-- **Baidu UidGenerator / Sony Sonyflake (CachedUidGenerator family)**: Baidu's open-source `UidGenerator` (Java) re-derives the Snowflake bit layout but adds a **ring-buffer pre-generation** layer — a background thread continuously fills a lock-free ring buffer with pre-packed IDs, so the hot path is a single `AtomicLong` array-index increment rather than a timestamp read plus bit-packing under a lock. Published benchmarks claim throughput around **6 million IDs/sec on a 4-core machine**, an order of magnitude above the `synchronized` baseline (the companion file's §10 capacity numbers). Sony's `Sonyflake` (Go) takes the opposite tradeoff for a different deployment target (large IoT fleets): a 39-bit timestamp at **10ms resolution** (not 1ms), an 8-bit sequence (255 IDs per 10ms), and a **16-bit machine ID** supporting up to 65,535 nodes — trading per-node throughput for a vastly larger addressable fleet, which matters when "fleet size" means tens of thousands of edge devices rather than thousands of servers.
+- **Discord Snowflake variant (2015)**: Discord's IDs use essentially Twitter's 64-bit layout but with a **custom epoch of 1420070400000** — which Discord's API reference states plainly as "the first second of 2015," giving no rationale for the date. The published field table is `Timestamp` bits 63-22, `Internal worker ID` bits 21-17, `Internal process ID` bits 16-12, `Increment` bits 11-0 — so Discord splits Twitter's 10-bit node field into an explicit 5-bit worker plus 5-bit process, and, because Discord snowflakes are transported as strings and read as **unsigned** 64-bit values, its timestamp field is 42 bits rather than Twitter's 41 (bit 63 is not spent on a sign), pushing overflow out to roughly **2154** instead of the ~2084 a signed 41-bit field from a 2015 epoch would give. That the worker/process fields identify which internal process minted a given snowflake is documented in the field table itself — directly analogous to this design's §4.1 decode utility.
+- **Baidu UidGenerator / Sony Sonyflake (CachedUidGenerator family)**: Baidu's open-source `UidGenerator` (Java) re-derives the Snowflake bit layout but adds a **ring-buffer pre-generation** layer — a background thread continuously fills a lock-free ring buffer with pre-packed IDs, so the hot path is a single `AtomicLong` array-index increment rather than a timestamp read plus bit-packing under a lock. Its README claims "over 6 million QPS per single instance" on a 4-core CPU, an order of magnitude above the `synchronized` baseline (the companion file's §10 capacity numbers). Sony's `Sonyflake` (Go) takes the opposite tradeoff for a different deployment target (large distributed fleets): its README documents **39 bits of time in units of 10 msec**, an **8-bit sequence** (`2^8` = 256 IDs per 10 msec per instance), and a **16-bit machine ID** (`2^16` = 65,536 machines), with a stated lifetime of **174 years** from the start time — trading per-node throughput for a vastly larger addressable fleet and a much longer epoch, which matters when "fleet size" means tens of thousands of nodes rather than thousands.
 - **Flickr ticket servers (pre-2010)**: covered in depth in §4.4 — the historically significant predecessor to Snowflake-style approaches, demonstrating that the "encode identity + counter into the ID" idea (Snowflake) and the "centralize a fast atomic counter behind a thin service" idea (ticket servers, Model (b) in §3) were both production-proven solutions to the same underlying problem, arrived at independently by different teams around the same time.
 - **MongoDB ObjectId**: covered in §4.4 — included here as the most widely-deployed example of a hybrid scheme that achieves Snowflake-like time-ordering and node-identity encoding **without any allocation step**, by using a randomly-generated per-process identifier instead of a coordinated worker ID. Every MongoDB collection's default `_id` field uses this scheme, making it likely the single most-generated ID format described in this document by raw volume.
 
@@ -691,7 +717,7 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
 | NTP / clock sync | `chronyd` (preferred on modern Linux — supports fine-grained slew control), `ntpd` | §4.3 — `chronyd`'s `makestep` directive controls the slew-vs-step boundary |
 | Dedicated ID-generation service (Model (b)) | Meituan Leaf (segment-based + Snowflake-based modes); Baidu UidGenerator as a Spring Boot service | §4.6 — Leaf's "segment" mode is the production-grade version of the `REPLACE INTO` / `UPDATE ... RETURNING` pattern |
 | Database-segment allocation backing store | MySQL / PostgreSQL with a single `id_allocations` table | §4.6 — must support atomic `UPDATE ... RETURNING` or `SELECT ... FOR UPDATE` |
-| Alternative ID formats | UUIDv4/v7 (language-standard-library `java.util.UUID`, RFC 9562); ULID (`ulid-java` and similar) | §4.4-§4.5 |
+| Alternative ID formats | UUIDv4 via `java.util.UUID.randomUUID()`; UUIDv7 via `UUID.ofEpochMillis(long)` — **added in JDK 26**, so pre-26 runtimes still need a library (JUG, `uuid-creator`); ULID (`ulid-java` and similar) | §4.4-§4.5; both versions per RFC 9562 |
 | Decode / debug tooling | Custom `IdInfo.parse()` (companion file §4.4); internal admin dashboards that accept a raw ID and display decoded fields | §3 step 5 |
 
 ### Build vs. Buy Considerations
@@ -701,7 +727,7 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
 | Core Snowflake algorithm | Custom 50-100 line class (§4.1, companion file) | Baidu UidGenerator, `bwmarrin/snowflake`, Meituan Leaf | Build — the algorithm is small, and bespoke clock-skew/alerting hooks (§4.1, §8) are easier to integrate into a custom class than to retrofit onto a third-party library |
 | Worker-ID coordination | Custom `WorkerIdAllocator` (§4.2) using an existing ZK/etcd client | N/A — ZK/etcd themselves are the "buy" | Buy ZK/etcd (almost every fleet already runs one for other purposes — leader election, service discovery), build the thin allocator wrapper |
 | Dedicated ID service (Model (b)) | Custom microservice wrapping §4.1 + §4.2 | Meituan Leaf (open-source, production-proven at scale) | Either — Leaf is a reasonable starting point if database-segment mode is desired without building it from scratch; a custom thin wrapper is reasonable if only Snowflake-as-a-service is needed |
-| Alternative ID format (if Snowflake isn't chosen) | N/A | `java.util.UUID` (UUIDv4/v7, standard library, zero dependencies) | Buy — UUID generation is in every language's standard library; there is essentially never a reason to hand-roll UUID generation |
+| Alternative ID format (if Snowflake isn't chosen) | N/A | `java.util.UUID` (v4 always; v7 via `ofEpochMillis` on JDK 26+, else JUG / `uuid-creator`) | Buy — UUID generation is in every language's standard library; there is essentially never a reason to hand-roll UUID generation |
 
 ---
 
@@ -715,7 +741,7 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
 | **NTP drift / frequency error per node** | How fast this node's clock is gaining or losing time relative to the reference | Warn if drift exceeds ~100 ppm sustained — indicates a hardware clock issue, predicts future large corrections |
 | **Clock-backward-jump count** (`clockBackwardEvents`, §4.1) | How often `nextId()` observes `now < lastTimestamp` | Page on **any** occurrence of a jump exceeding `MAX_BACKWARD_DRIFT_MS` (i.e., any `ClockMovedBackwardException`) — this is a correctness-threatening event, not a performance one |
 | **Sequence-exhaustion rate** (`sequenceExhaustionEvents`, §4.1) | How often a single node issues all 4096 IDs within one millisecond | Investigate if sustained > a few per second on any one node — approaching the per-node throughput ceiling (§2); consider Model (b) batching or sharding traffic across more worker IDs |
-| **Worker-ID pool utilization** | `(highest claimed sequence number) / MAX_WORKER_ID` (1023, §10) | Warn at 80% (819/1023); page at 95% (972/1023) — drives the capacity-planning conversation in §10 well before exhaustion |
+| **Worker-ID pool utilization** | `(count of LIVE ephemeral znodes under /snowflake/workers) / 1024` — never the raw sequence counter, which is cumulative and always climbing (§4.2) | Warn at 80% (819/1024); page at 95% (972/1024) — drives the capacity-planning conversation in §10 well before exhaustion |
 | **ZooKeeper/etcd session-expiry count** (per node) | How often a node's coordination session expires and must be re-established | Page if any node re-registers more than once per hour — indicates a network-partition or GC-pause pattern worth investigating (War Story 2) |
 | **Ephemeral znode count vs. live-instance count** | Sanity check: number of `/snowflake/workers/*` children should equal the number of currently-running instances | Page on mismatch in either direction — fewer znodes than instances means some instance is running unregistered (post-fencing, pre-re-registration); more znodes than instances means stale znodes weren't cleaned up |
 | **ID-service P50/P99 latency** (Model (b) only) | End-to-end `/next-id` response time including the network round trip | Page if P99 > 5ms intra-DC — at this layer, latency is dominated by network and queueing, not by `nextId()` itself |
@@ -727,8 +753,8 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
  +----------------------------------------------------------------+
  |  Fleet: id-generator (1,000 nodes)            Last updated: now  |
  +----------------------------------------------------------------+
- |  Worker-ID pool utilization     [###########.......]  812/1023   |
- |                                   (79.4% -- below 80% warn line) |
+ |  Worker-ID pool utilization     [###########.......]  812/1024   |
+ |                                   (79.3% -- below 80% warn line) |
  |                                                                    |
  |  NTP offset, p99 across fleet    3.2 ms        (warn > 10ms)     |
  |  NTP drift, p99 across fleet     18 ppm        (warn > 100ppm)   |
@@ -767,6 +793,8 @@ A dashboard like this is the first thing an on-call engineer should check when *
 
 ## 9. Common Pitfalls & War Stories
 
+> **How to read these**: the three war stories below are **composite, illustrative incidents**. The mechanisms and the fixes are real and recurring, but the specific durations, node IDs, drift magnitudes, and rates are constructed to make each mechanism concrete — they are archetypes to reason from, not citable post-mortems of any named company.
+
 ### War Story 1: A Hypervisor Migration Causes NTP to Step the Clock Backward — Broken, Then Fixed
 
 **Broken**: An early production deployment of the Snowflake-style generator (§4.1) had `MAX_BACKWARD_DRIFT_MS` set far too high — effectively "never throw," with any backward drift simply absorbed by `spinUntil`. The reasoning at the time was "the clock barely ever goes backward, and when it does it's by a millisecond or two — spinning is fine." NTP was running with default `ntpd` settings, which permit step corrections for offsets beyond a threshold but otherwise allow the system clock to drift freely between corrections.
@@ -780,14 +808,14 @@ A dashboard like this is the first thing an on-call engineer should check when *
 
 ### War Story 2: A ZooKeeper Session Expiry Causes Two Nodes to Claim the Same Worker ID — Broken, Then Fixed
 
-**Broken**: The initial `WorkerIdAllocator` implementation (§4.2) created its ephemeral sequential znode at startup, parsed the assigned `workerId`, and constructed its `SnowflakeIdGenerator` — and then **never checked its ZooKeeper connection state again**. There was no `process(WatchedEvent)` handling for session expiry, no `fenced` flag, and no `verifySoleOwnership()` check.
+**Broken**: The initial `WorkerIdAllocator` implementation (§4.2) created its ephemeral sequential znode at startup, folded the assigned ticket into the 10-bit space (`rawSeq % 1024` — necessary, since ZooKeeper's cumulative counter climbs past 1023 within the first rolling restart), and constructed its `SnowflakeIdGenerator` — and then **never checked its ZooKeeper connection state again**. There was no `process(WatchedEvent)` handling for session expiry, no `fenced` flag, and no `verifySoleOwnership()` check that the folded slot was actually free.
 
-**Impact**: During a brief network partition between one application-server rack and the ZooKeeper ensemble — lasting about 45 seconds, longer than the configured 30-second session timeout — that rack's instance's ZooKeeper session **expired server-side**, and ZooKeeper deleted its ephemeral znode (`seq-0000000412`). The instance itself, however, had no idea: it had no watch registered for session-state changes, so it continued running, continued serving traffic, and continued calling `generator.nextId()` with `workerId = 412` exactly as before — completely unaware that, from ZooKeeper's perspective, "node 412" no longer existed. Meanwhile, the partition healed, and a routine autoscaling event spun up a brand-new instance around the same time. That new instance ran the startup handshake (§4.2), and because `seq-0000000412`'s znode had just been deleted, ZooKeeper's **next assigned sequence number was 413** — *not* 412, because ZooKeeper's sequence counter for ephemeral sequential nodes under a given path is monotonically increasing and never reused, even after deletions. So far, no collision. The actual collision happened differently: a **second** new instance, started moments later as part of the same autoscaling event, raced the first new instance — both attempted `verifySoleOwnership()`-equivalent logic informally (by eyeballing the children list in a debug log, which the original implementation didn't even do), and due to a **caching bug in the ZK client's children-list cache** (a stale read that hadn't yet observed znode 412's deletion), one of the two new instances computed its workerId by an off-by-one fallback path that — under the specific buggy logic in place at the time — resolved to **412**, the same ID still actively in use by the original (un-fenced) instance whose session had expired but which was still running. Now **two live instances** — the original, zombie-session instance, and the newly-started one — were both calling `nextId()` with `workerId = 412`. Whenever their clocks were within the same millisecond and their sequence counters happened to align (which, at moderate load, occurs regularly), they produced **identical 64-bit IDs**. The database began rejecting roughly 1-in-several-thousand inserts with duplicate-key violations, intermittently, from two different application-server instances — a pattern that took considerable on-call time to correlate, because neither instance's own logs showed anything obviously wrong (each believed it owned `workerId = 412` and had no way to know the other did too).
+**Impact**: During a brief network partition between one application-server rack and the ZooKeeper ensemble — lasting about 45 seconds, longer than the configured 30-second session timeout — that rack's instance's ZooKeeper session **expired server-side**, and ZooKeeper deleted its ephemeral znode (`seq-0000000412`). The instance itself, however, had no idea: it had no watch registered for session-state changes, so it continued running, continued serving traffic, and continued calling `generator.nextId()` with `workerId = 412` exactly as before — completely unaware that, from ZooKeeper's perspective, "node 412" no longer existed. Meanwhile, the partition healed, and a routine autoscaling event spun up a brand-new instance. That new instance ran the startup handshake (§4.2) and drew ticket `seq-0000001436` — the counter never rewinds to fill the hole left by a deleted znode, it only climbs — which the allocator folded to `1436 % 1024` = **412**: the slot ZooKeeper considered vacant but that the zombie instance was in fact still using. With no `verifySoleOwnership()` check to catch it, the new instance started happily. Now **two live instances** — the original, zombie-session instance, and the newly-started one — were both calling `nextId()` with `workerId = 412`. Whenever their clocks were within the same millisecond and their sequence counters happened to align (which, at moderate load, occurs regularly), they produced **identical 64-bit IDs**. The database began rejecting roughly 1-in-several-thousand inserts with duplicate-key violations, intermittently, from two different application-server instances — a pattern that took considerable on-call time to correlate, because neither instance's own logs showed anything obviously wrong (each believed it owned `workerId = 412` and had no way to know the other did too).
 
 **Fixed**: Three changes:
 1. **Self-fencing on session expiry**: `WorkerIdAllocator.process()` now watches for `KeeperState.Expired` and immediately sets `fenced = true` (§4.2). `currentWorkerId()` throws if `fenced`, and the application's `/next-id` (or in-process) call path checks this flag — a fenced instance **stops generating IDs entirely** rather than continuing to operate on a `workerId` ZooKeeper no longer considers reserved. The instance then re-runs `claimWorkerId()` from scratch, receiving a fresh sequence number.
 2. **Shorter session timeouts**: the ZooKeeper session timeout was reduced from 30 seconds to **10 seconds** (still comfortably above typical GC-pause durations on these JVMs, which were profiled at under 200ms p99) — shrinking the window during which a partitioned-but-still-running instance could be operating on a workerId that ZooKeeper has already reclaimed.
-3. **Startup health check verifying sole ownership**: `verifySoleOwnership()` (§4.2) is now a mandatory, **blocking** step before an instance marks itself ready to serve traffic — it lists `/snowflake/workers/*`, confirms exactly one child matches the instance's own znode name, and refuses to start otherwise. This converts the kind of "two instances both think they own 412" scenario from a silent data-corruption issue into a **startup failure** that's caught immediately, with the offending instance never accepting traffic in the first place.
+3. **Startup health check verifying sole ownership**: `verifySoleOwnership()` (§4.2) is now a mandatory, **blocking** step before an instance marks itself ready to serve traffic — it lists `/snowflake/workers/*`, confirms its own znode is present and that no *other* live child folds to the same 10-bit slot, and refuses to start otherwise. This converts the kind of "two instances both think they own 412" scenario from a silent data-corruption issue into a **startup failure** that's caught immediately, with the offending instance never accepting traffic in the first place.
 
 ### War Story 3: A Database-Segment ID Service Stalls Every `step` Requests Under Load — Broken, Then Fixed
 
@@ -907,7 +935,7 @@ A: Because the same property that makes them excellent as a B-tree primary key �
 A: Both are just subdivisions of a single 10-bit "node identity" space (§4.1) — the split is a convention, not a hard requirement. The conventional 5+5 split assumes a topology of up to 32 datacenters, each running up to 32 worker processes. The *purpose* of having two fields rather than one flat 10-bit field is purely organizational: it lets worker-ID allocation be **scoped per-datacenter** (each datacenter's ZooKeeper/etcd ensemble allocates worker IDs 0-31 independently, with the datacenter ID — assigned once, statically, per datacenter — providing global uniqueness across datacenters without any cross-datacenter coordination). If a fleet has very few datacenters but many workers per datacenter, re-splitting to, say, 2+8 bits (§10, option 1) is a legitimate and sometimes necessary adjustment.
 
 **Q: Walk me through exactly how ZooKeeper's ephemeral sequential znodes guarantee no two nodes get the same worker ID.**
-A: `CreateMode.EPHEMERAL_SEQUENTIAL` does two things atomically, server-side: it appends a monotonically-increasing, zero-padded integer to the requested path (the "sequential" part — ZooKeeper's leader assigns this number from a per-parent-znode counter that is itself replicated via ZAB consensus, so two concurrent create requests are guaranteed different numbers, cross-ref [`../consensus_algorithms/README.md`](../consensus_algorithms/README.md)), and it ties the znode's lifetime to the creating client's **session** (the "ephemeral" part — the znode is automatically deleted if the session expires). The client parses the assigned integer suffix as its `workerId`. Because the sequence counter is never reused — even for deleted znodes, the next create still gets a higher number — two clients can never be assigned the same number, regardless of timing or concurrent requests.
+A: They guarantee two clients never get the same *number*, which is not the same thing as a worker ID — you still have to fold that number into the 10-bit space and verify the slot is free. `CreateMode.EPHEMERAL_SEQUENTIAL` does two things atomically, server-side: it appends a zero-padded `%010d` integer to the requested path (the "sequential" part — the leader assigns it from a counter that ZooKeeper's docs say "is unique to the parent znode," replicated via ZAB consensus, so two concurrent creates are guaranteed different numbers, cross-ref [`../consensus_algorithms/README.md`](../consensus_algorithms/README.md)), and it ties the znode's lifetime to the creating client's **session** (the "ephemeral" part — the znode is automatically deleted if the session expires). The catch that trips up most candidates: that counter is **cumulative and never reused**, even after a delete, and it overflows past 2147483647 — so it counts every create ever made under the parent, not the number of live nodes. Parsing the suffix directly as a `workerId` therefore fails on the 1,025th create, which for a 1,000-node fleet is its first rolling restart. The correct allocator takes `rawSeq % 1024` and then checks that no *live* child znode folds to the same slot (§4.2): the counter supplies uniqueness of the claim, the live-children check supplies uniqueness of the slot.
 
 **Q: What happens to the sequence counter when it rolls over from 4095 back to 0 within the same millisecond?**
 A: The generator detects `sequence == 0` after the `(sequence + 1) & SEQUENCE_MASK` rollover (§4.1) and treats this identically to the clock-skew "wait" path: it spins (`spinUntil(lastTimestamp + 1)`) until the wall clock advances to the next millisecond, at which point `sequence` resets to 0 for that new millisecond and the ID is minted with the new timestamp. This is a **wait, never an error** — exhausting 4096 IDs within a millisecond is an expected high-load condition, not a fault. The maximum added latency is bounded at ~1ms.
@@ -919,7 +947,7 @@ A: Not for uniqueness — a clock that's "fast" relative to true time still move
 A: A persistently slow clock is more concerning than a persistently fast one, because it increases the probability that a *future* correction (when NTP eventually steps the clock forward to fix the slowness) is large — and forward steps are harmless (§4.3's table) — but it also means this node's `lastTimestamp` values trail the wall clock, so if NTP ever needs to apply a **backward** correction later (e.g., overcorrecting after a previous forward step, or a subsequent hypervisor event), the node has less "banked" headroom before `MAX_BACKWARD_DRIFT_MS` is breached. The operational response is the same either way: monitor NTP offset/drift per node (§8) and treat sustained non-zero drift, in either direction, as a leading indicator worth investigating before it manifests as a step correction.
 
 **Q: The fleet needs to scale from 1,000 to 1,500 nodes — walk through what breaks and how you'd fix it.**
-A: Nothing breaks gradually — it's a hard wall at 1024 worker-ID identities (§10). At 1,000 nodes you have 24 spare identities (2.3% headroom); at 1,500 nodes, the 1,025th node's `claimWorkerId()` call (§4.2) would receive a sequence number exceeding `MAX_WORKER_ID`, and the implementation should **fail that node's startup outright** (as shown in §4.2's `claimWorkerId()`) rather than silently wrapping around to a reused ID. The fix is one of §10's three options: re-split the datacenter/worker bit allocation if the fleet's actual datacenter count is small (option 1), borrow a bit from the sequence field to go from 1024 to 2048 identities at the cost of halving per-node throughput — which §2 established has enormous headroom to spare (option 2), or move to a Sonyflake-style 16-bit node-ID layout for headroom into the tens of thousands (option 3, most disruptive). The §8 "worker-ID pool utilization" metric crossing 80% should trigger this planning *before* the 1500th node's deploy fails.
+A: Nothing breaks gradually — it's a hard wall at 1024 worker-ID identities (§10). At 1,000 nodes you have 24 spare identities (2.3% headroom); at 1,500 nodes, the 1,025th *concurrently live* node finds every slot in `[0, 1023]` already held, so `claimWorkerId()` (§4.2) sees a live-znode count above capacity — or its folded slot already occupied — and must **fail that node's startup outright** rather than silently sharing a `workerId` with a running node. The fix is one of §10's three options: re-split the datacenter/worker bit allocation if the fleet's actual datacenter count is small (option 1), borrow a bit from the sequence field to go from 1024 to 2048 identities at the cost of halving per-node throughput — which §2 established has enormous headroom to spare (option 2), or move to a Sonyflake-style 16-bit node-ID layout for headroom into the tens of thousands (option 3, most disruptive). The §8 "worker-ID pool utilization" metric crossing 80% should trigger this planning *before* the 1500th node's deploy fails.
 
 **Q: How is this design different for the embedded-library model versus the dedicated-service model, operationally?**
 A: In the embedded-library model (§3 Model (a)), worker-ID churn scales with the *application-server* fleet size — every deploy, autoscale event, or crash-restart of any of the ~1,000 application instances triggers a `claimWorkerId()` call (§4.2), and the 1024-identity ceiling (§10) is sized against that fleet. In the dedicated-service model (§3 Model (b)), only the small ID-service fleet (perhaps 8-16 instances) needs worker IDs at all — application servers are just HTTP/gRPC clients with no identity of their own — so the 1024-identity ceiling is essentially never a concern, at the cost of adding a network hop (and a new shared dependency) to every ID-generation call. The database-segment variant of Model (b) (§4.6) sidesteps the worker-ID concept entirely, trading it for a different scaling axis (database write throughput for range-allocation `UPDATE`s, amortized by the `step` size).
