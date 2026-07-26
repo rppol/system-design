@@ -49,7 +49,7 @@ Senior interviews probe this because **"how much memory does this deployment nee
 | **SnapKV** | `seq_len` term | One-time observation window, prune, then fixed cache | No (static) | 50-80% | <1% |
 | **StreamingLLM / attention sinks** | `seq_len` term | Keep first few "sink" tokens + sliding window, evict everything else | No (fixed policy) | 80-95% | 2-5% |
 | **Scissorhands** | `seq_len` term | Persistence-of-importance: tokens important once tend to stay important | Yes (cheaper than H2O) | 80% | <1% |
-| **Cross-layer KV sharing (YOCO, CLA)** | `layers` term | Groups of layers share one KV cache instead of each computing its own | N/A (architecture) | 2× (CLA-2), up to ~half (YOCO) | Minimal, requires training |
+| **Cross-layer KV sharing (YOCO, CLA)** | `layers` term | Groups of layers share one KV cache instead of each computing its own | N/A (architecture) | 2× (CLA-2); ~`L`× (YOCO — one global cache for the whole model) | Minimal, requires training |
 | **PagedAttention** (cross-link [vLLM Deep Dive](../vllm_deep_dive/README.md)) | fragmentation, not total size | Block-based virtual memory for KV cache | N/A (memory mgmt) | Recovers ~60-80% of memory lost to fragmentation | None (lossless) |
 
 ---
@@ -159,14 +159,17 @@ CLA (Cross-Layer Attention) — groups of layers share one KV cache:
 
 YOCO (You Only Cache Once) — decoder-decoder split:
   ┌─────────── Self-Decoder (first half of layers) ───────────┐
-  │  Computes K, V ONCE, cached here                          │
+  │  EFFICIENT self-attention (sliding-window / gated          │
+  │  retention) -> O(1) CONSTANT cache, does not grow with     │
+  │  sequence length. Produces the one global K, V             │
   └────────────────────────┬───────────────────────────────────┘
                             │  single shared KV cache
   ┌─────────── Cross-Decoder (second half of layers) ─────────┐
   │  ALL layers attend to the SAME cached K, V via cross-attn │
   └─────────────────────────────────────────────────────────────┘
-  -> "layers" term in the formula drops to effectively 1 for the
-     cross-decoder half -> roughly 2x overall KV cache reduction
+  -> the sequence-growing "layers" term drops to effectively 1 for
+     the WHOLE model -> the paper reports "roughly L times less"
+     cache memory than a Transformer decoder (~80x for a 65B model)
 ```
 
 ---
@@ -277,7 +280,7 @@ def max_concurrent_requests(
 
 
 # 2x H100 80GB, Llama-3-70B BF16 (140GB weights), GQA 320KB/token
-print(max_concurrent_requests(80, 2, 140, 327_680, 8_192))    # ~6 requests @ 8K
+print(max_concurrent_requests(80, 2, 140, 327_680, 8_192))    # 4 requests  @ 8K
 print(max_concurrent_requests(80, 2, 140, 327_680, 32_768))   # ~1 request  @ 32K
 print(max_concurrent_requests(80, 2, 140, 327_680, 131_072))  # 0 requests  @ 128K -- INFEASIBLE without eviction/quant
 ```
@@ -432,6 +435,10 @@ class H2OCache:
     (e.g., the subject of a sentence, a key entity introduced early).
     """
 
+    # NOTE: the defaults below are a small illustrative budget so the example
+    # stays readable. The H2O paper's headline setting is a budget of ~20% of
+    # the sequence (roughly 10% recent + 10% heavy hitters), which is what the
+    # cost/benefit numbers under this class refer to.
     def __init__(self, recent_window: int = 256, heavy_hitter_budget: int = 128):
         self.recent_window = recent_window
         self.heavy_hitter_budget = heavy_hitter_budget
@@ -459,7 +466,7 @@ class H2OCache:
         return to_evict
 ```
 
-**Cost/benefit**: H2O's per-step score update is O(cached_tokens) — typically 5-10% additional decode latency. On Llama-3-70B at 128K context: full cache ~41GB -> H2O cache (recent 256 + heavy hitters 128 = 384 "active" tokens worth of K/V, but note the *positions* of heavy hitters are scattered through the original 128K range and must still be individually addressable) ~8-10GB, **<1% quality loss on LongBench/RULER**.
+**Cost/benefit**: H2O's per-step score update is O(cached_tokens) — typically 5-10% additional decode latency. On Llama-3-70B at 128K context with the paper's ~20% budget (about 13K recent + 13K heavy-hitter tokens): full cache ~41GB -> H2O cache ~8-10GB. Note the *positions* of the heavy hitters are scattered through the original 128K range and must still be individually addressable, so the saving is in bytes held, not in address space. Reported quality impact is **<1% on long-context benchmarks**.
 
 ### 6.6 SnapKV — static, observation-then-prune
 
@@ -569,7 +576,8 @@ Every other technique in this file makes `seq_len` smaller. StreamingLLM makes i
   full 128K context              131,072      320KB x 131,072 = 40 GiB      1x
   StreamingLLM (4 + 1020)          1,024      320KB x   1,024 = 0.31 GiB  128x
   sinks + 2044 window              2,048      320KB x   2,048 = 0.63 GiB   64x
-  H2O (256 recent + 128 heavy)       384      320KB x     384 = 0.12 GiB  341x
+  H2O at the toy 256+128 budget      384      320KB x     384 = 0.12 GiB  341x
+  H2O at the paper's ~20% budget  26,214      320KB x  26,214 = 8.0 GiB     5x
 
   kept fraction for StreamingLLM at 128K:  1,024 / 131,072 = 0.78%
   kept fraction at 4M tokens streamed:     1,024 / 4,000,000 = 0.026%
@@ -620,11 +628,12 @@ standard_config = {"num_layers": 80, "kv_cache_layers": 80}  # 1:1
 cla2_config = {"num_layers": 80, "kv_cache_layers": 40}  # 2:1 -> 2x reduction
 
 # YOCO (You Only Cache Once): the model is split into a "self-decoder"
-# (first half of layers, computes K/V once) and a "cross-decoder"
-# (second half, ALL layers attend to that SAME single cache via
-# cross-attention rather than each computing their own K/V).
-# Effective "layers" term for the cross-decoder half drops to ~1.
-yoco_config = {"num_layers": 80, "kv_cache_layers": 41}  # 40 self-decoder + 1 shared -> ~2x reduction
+# (first half of layers, using EFFICIENT self-attention whose cache is
+# O(1) in sequence length) and a "cross-decoder" (second half, ALL
+# layers attend to ONE global K/V cache via cross-attention rather than
+# each computing their own K/V). The sequence-growing "layers" term
+# therefore drops to ~1 for the entire model, not just half of it.
+yoco_config = {"num_layers": 80, "kv_cache_layers": 1}  # one global cache -> ~L x reduction
 ```
 
 **The idea behind it.** "The formula's `layers` term never had to equal the model's depth — it only counts how many *distinct* KV caches exist. Let neighbouring layers read the same one and the model stays 80 layers deep while the cache thinks it is 40."
@@ -636,9 +645,9 @@ This is the same trick GQA plays on heads, applied one axis over. That is also w
 | `num_layers` | The model's real depth. Unchanged — every layer still computes attention |
 | `kv_cache_layers` | How many distinct KV caches get allocated. **This** is the term in the memory formula |
 | CLA-`k` | Groups of `k` adjacent layers share one cache. `kv_cache_layers = num_layers / k` |
-| self-decoder | YOCO's first half: computes and caches K/V normally |
-| cross-decoder | YOCO's second half: every layer cross-attends to that one shared cache, contributing ~1 |
-| reduction | `num_layers / kv_cache_layers`. Exactly 2 for CLA-2 |
+| self-decoder | YOCO's first half: efficient self-attention with an O(1) constant cache; emits the one global K/V |
+| cross-decoder | YOCO's second half: every layer cross-attends to that one shared cache |
+| reduction | `num_layers / kv_cache_layers`. Exactly 2 for CLA-2; ~`L` for YOCO |
 
 **Walk one example.** Llama-3-70B geometry (8 KV heads, head_dim 128, BF16), varying only the cache-layer count:
 
@@ -646,10 +655,12 @@ This is the same trick GQA plays on heads, applied one axis over. That is also w
   config       kv_cache_layers   per-token bytes              KB/token   @128K
   standard             80        2 x 80 x 8 x 128 x 2 = 327,680   320    40.0 GiB
   CLA-2                40        2 x 40 x 8 x 128 x 2 = 163,840   160    20.0 GiB
-  YOCO (40 + 1)        41        2 x 41 x 8 x 128 x 2 = 167,936   164    20.5 GiB
+  YOCO (one global)     1        2 x  1 x 8 x 128 x 2 =   4,096     4     0.5 GiB
 
   CLA-2 reduction : 80 / 40 = 2.00x
-  YOCO reduction  : 80 / 41 = 1.95x   (the shared cross-decoder cache is the "+1")
+  YOCO reduction  : 80 /  1 = 80x     (only the single global cache grows with
+                                       sequence length; the self-decoder's own
+                                       cache is O(1) and does not)
 
   stacked with FP8 (bytes_per_element 2 -> 1):
       CLA-2 + FP8 = 2 x 40 x 8 x 128 x 1 = 81,920 bytes = 80 KB/token = 10 GiB @128K
@@ -706,9 +717,9 @@ def fixed_sliding_window_with_sinks(
 - **vLLM** — supports FP8 KV cache quantization (`--kv-cache-dtype fp8`), PagedAttention block management, and prefix caching; H2O/SnapKV-style eviction available via research integrations rather than core defaults.
 - **DeepSeek-V2/V3** — Multi-head Latent Attention (MLA) reduces KV cache by ~93% vs. standard MHA, reported as a primary enabler of DeepSeek's aggressive context-length and cost economics.
 - **StreamingLLM (MIT, 2023)** — demonstrated stable perplexity over 4M+ token streams in constant memory using the sink + sliding window approach (Section 6.7).
-- **H2O (Heavy-Hitter Oracle, 2023)** — reported up to 5× higher throughput at similar memory budgets and <1% accuracy loss on long-context benchmarks, via dynamic heavy-hitter retention.
+- **H2O (Heavy-Hitter Oracle, 2023)** — with a 20% KV budget on OPT-6.7B/OPT-30B, the paper reports throughput gains of up to 29× over DeepSpeed Zero-Inference and HuggingFace Accelerate and up to 3× over FlexGen, and up to 1.9× lower latency at the same batch size, via dynamic heavy-hitter retention.
 - **SnapKV (2024)** — reported 3.6× decode speedup and >8× memory reduction in long-context settings (e.g., 380K context on a single A100) while preserving near-baseline accuracy on LongBench.
-- **YOCO (Microsoft, 2024)** — decoder-decoder architecture targeting ~2× KV cache reduction with comparable quality, evaluated up to 1M context length.
+- **YOCO (Microsoft, 2024)** — decoder-decoder architecture that "roughly saves L times GPU memory for caches compared to Transformer decoders" (about 80× for a 65B model); at 1M context its total inference memory is 12.4GB, ~9.4× less than a Transformer, with comparable quality.
 
 ---
 
@@ -720,7 +731,7 @@ def fixed_sliding_window_with_sinks(
 | Dynamic eviction (H2O, Scissorhands) | Adapts to shifting attention over long generations | More per-step overhead (5-10%) | Generation length and whether topic drift is expected |
 | Static eviction (SnapKV) | Near-zero ongoing overhead | Cache layout frozen after observation window | Is the relevant context established early, or does it emerge later? |
 | StreamingLLM (fixed sink+window) | Unbounded length, constant memory, simplest | Permanently loses mid-context — 2-5% quality loss, can be much worse for recall-heavy tasks | Is the task "keep talking" (streaming chat) or "remember everything" (long-doc QA)? |
-| Cross-layer sharing (YOCO/CLA) | Architectural ~2x on the `layers` term, composes with GQA | Requires training from scratch; not retrofittable | Greenfield model design vs. serving an existing checkpoint |
+| Cross-layer sharing (YOCO/CLA) | Architectural reduction on the `layers` term (2x for CLA-2, ~Lx for YOCO), composes with GQA | Requires training from scratch; not retrofittable | Greenfield model design vs. serving an existing checkpoint |
 | Eviction vs. quantization vs. both | Either alone often insufficient at 128K+ (Section 6.4) | Combining gives multiplicative reduction | How extreme is the context length / concurrency target? |
 
 ---
@@ -799,7 +810,7 @@ They're additive, operating on independent terms of the memory formula: GQA redu
 PagedAttention is a *lossless* memory-management technique: it eliminates fragmentation waste (typically 60-80% of pre-allocated-but-unused KV memory under naive contiguous allocation) by managing the cache in fixed-size blocks, like OS virtual memory — it doesn't change *what* is cached, only how efficiently it's packed. Eviction (H2O/SnapKV/StreamingLLM) is *lossy*: it actually discards cached tokens to reduce the total amount of content kept. A production deployment typically needs both — PagedAttention to use the memory you've allocated efficiently, and eviction/quantization to reduce how much you need to allocate in the first place. "We enabled PagedAttention but KV usage is still at 100%" is a sign of confusing the two (Common Pitfall #6).
 
 **Q9: Explain cross-layer KV sharing (CLA/YOCO). Why is it less commonly deployed than GQA despite both reducing KV cache?**
-Both reduce a multiplicative term in the memory formula — GQA reduces `num_kv_heads` by having multiple query heads share fewer KV heads; cross-layer sharing (CLA, YOCO) reduces the `num_layers` term by having groups of layers share one KV cache (CLA: pairs/groups of adjacent layers; YOCO: a "self-decoder" computes K/V once for a "cross-decoder" of equal size to attend to). The difference is adoption stage: GQA has been standard since Llama-2-70B and is supported by essentially every serving engine. Cross-layer sharing is architecturally invasive — it changes what each layer computes during the forward pass — and must be baked in at pretraining time; it cannot be retrofitted onto an existing checkpoint's serving config the way a KV-quantization flag can. It represents where the field is heading on the `layers` term, but requires training new model families to adopt.
+Both reduce a multiplicative term in the memory formula — GQA reduces `num_kv_heads` by having multiple query heads share fewer KV heads; cross-layer sharing (CLA, YOCO) reduces the `num_layers` term by having groups of layers share one KV cache (CLA: pairs/groups of adjacent layers, a clean 2× for CLA-2; YOCO: a "self-decoder" with an O(1) constant cache produces one global K/V that the entire "cross-decoder" attends to, so the paper reports roughly `L`× less cache memory — about 80× for a 65B model). The difference is adoption stage: GQA has been standard since Llama-2-70B and is supported by essentially every serving engine. Cross-layer sharing is architecturally invasive — it changes what each layer computes during the forward pass — and must be baked in at pretraining time; it cannot be retrofitted onto an existing checkpoint's serving config the way a KV-quantization flag can. It represents where the field is heading on the `layers` term, but requires training new model families to adopt.
 
 **Q10: A team reports their RAG system's quality degrades on long documents after they enabled "KV cache compression." How would you debug this?**
 First question: which compression — static (SnapKV) or dynamic (H2O/Scissorhands)? If static, the likely cause is Common Pitfall #4 — SnapKV's observation window establishes "important" tokens early, but RAG conversations often ask *follow-up* questions whose relevant context wasn't flagged as important during the initial observation window, so it was pruned before the follow-up needed it. Second: check whether the degradation correlates with *where* in the document the answer is — if quality is fine for answers near the document's start/end but bad for answers from the middle, that's consistent with StreamingLLM-style sink+window eviction (mid-context is unconditionally dropped), not H2O/SnapKV (which retain scattered "important" positions throughout). The fix depends on the diagnosis: switch static→dynamic eviction for multi-turn RAG, or switch sink+window→heavy-hitter-based eviction if mid-document recall matters.

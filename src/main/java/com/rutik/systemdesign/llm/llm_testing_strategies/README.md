@@ -275,8 +275,9 @@ import pytest
 import json
 import os
 from pathlib import Path
-from langsmith import Client
 from myapp.chain import build_qa_chain
+from myapp.prompts import JUDGE_PROMPT   # the template shown above; without this import
+                                         # evaluate_response() raises NameError at call time
 
 # Load golden dataset
 GOLDEN_DATASET = [
@@ -418,7 +419,7 @@ number of golden examples you need:
 
 ```
   n = (z_(alpha/2) + z_beta)^2 x sigma_d^2 / delta^2
-    = (1.96 + 0.84)^2 x sigma_d^2 / delta^2
+    = (1.96 + 0.84)^2 x sigma_d^2 / delta^2        alpha = 0.05 two-sided, power = 80%
     = 7.84 x sigma_d^2 / delta^2
 
   sigma_d = run-to-run stdev of the per-example score (use 0.15, the flakiness threshold)
@@ -715,9 +716,9 @@ jobs:
 
 **Vendor release evaluation**: Frontier labs publish a system card or model card with each release covering capability benchmarks (MMLU, HumanEval, MT-Bench — see [Evaluation & Benchmarks](../evaluation_and_benchmarks/README.md)) alongside safety evaluations. The pattern worth copying is the two-sided safety metric: refusal rate on known-harmful prompts *and* over-refusal rate on legitimate requests, since optimizing either alone is trivial and useless. The details of any lab's internal judge configuration are not published, so do not assume a particular judge model is used.
 
-**OpenAI Evals Framework** (`openai/evals`): Open-source framework for running standardized evaluations. Supports: "model-graded" evals (LLM as judge), "code-graded" evals (programmatic scoring), and "human-graded" baselines. Each eval is a JSONL dataset + a grading function. Teams can contribute custom evals to the public registry. The framework logs all results to a local or remote database for comparison across model versions.
+**OpenAI Evals Framework** (`openai/evals`): Open-source framework for running standardized evaluations. It documents two template families: *basic* evals (programmatic scoring — `Match`, `Includes`, `FuzzyMatch`, `JsonMatch`) and *model-graded* evals (LLM as judge, specified entirely in YAML); anything outside those requires custom eval logic. Each eval is a JSONL dataset plus an eval template or grading class. Contributions to the public registry are accepted, but the repository states it is "currently not accepting evals with custom code" — only model-graded YAML evals. Results are written to local JSONL log files, with optional logging to a Snowflake database for comparison across model versions. Note that OpenAI now also exposes a hosted Evals product in its dashboard, separate from this repository.
 
-**Honeyhive and Braintrust**: Commercial evaluation platforms that integrate with LangChain and LangSmith. Honeyhive specializes in structured evaluation pipelines with multi-dimensional rubrics and annotation queues. Braintrust provides dataset versioning, A/B experiment tracking, and prompt playground with built-in evaluation. Both support LLM-as-judge with configurable rubrics and provide dashboards for quality trends.
+**HoneyHive and Braintrust**: Commercial evaluation platforms that integrate with LangChain through callback handlers (`HoneyHiveLangChainTracer`, `BraintrustCallbackHandler`). HoneyHive specializes in structured evaluation pipelines with multi-dimensional rubrics and annotation queues. Braintrust provides dataset versioning, A/B experiment tracking, and prompt playground with built-in evaluation. Both support LLM-as-judge with configurable rubrics and provide dashboards for quality trends.
 
 **Promptfoo**: Open-source CLI tool for testing prompts against multiple providers simultaneously. Define test cases in YAML, run against GPT + Claude + Gemini + Llama, compare outputs side-by-side. Useful for model selection: "which model produces better outputs for my specific prompt and dataset?" Supports regex, LLM-as-judge, and custom JavaScript evaluation functions.
 
@@ -727,11 +728,16 @@ jobs:
 
 | Evaluation Method | Cost | Speed | Accuracy vs Human | Scalability |
 |------------------|------|-------|------------------|-------------|
-| Human evaluation | High ($5-50/example) | Slow (days) | Ground truth | Limited |
-| LLM-as-judge | Medium ($0.01-0.10/example) | Fast (seconds) | ~80% agreement (MT-Bench) | Unlimited |
+| Human evaluation | High (annotator-minutes per example) | Slow (days) | Ground truth | Limited |
+| LLM-as-judge | Medium (~$0.003-0.015/example) | Fast (seconds) | over 80% agreement (MT-Bench) | Unlimited |
 | Automated metrics (BLEU, ROUGE) | Very low | Instant | Low (for open-ended) | Unlimited |
 | Heuristic checks (format, length) | ~$0 | Instant | Medium (for constrained) | Unlimited |
 | pytest with mocked LLM | ~$0 | Instant | Low (verifies structure) | Unlimited |
+
+The LLM-as-judge cost band is derived from published list pricing on a ~2,000-input/200-output-token
+judgement: $0.003 with Claude Haiku 4.5 ($1/$5 per MTok) up to $0.015 with Claude Opus 5 ($5/$25 per
+MTok). See Section 11 for the full derivation. Human-evaluation cost depends entirely on your
+annotator rate and is not a published figure.
 
 | Approach | Advantages | Disadvantages |
 |---------|-----------|--------------|
@@ -791,14 +797,14 @@ A team generated evaluation examples with one model and used that same model as 
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `RAGAS` | RAG evaluation | Faithfulness, response relevancy, context precision/recall; built for RAG pipelines |
-| `DeepEval` | General evaluation | 50+ metrics, pytest integration, LLM-as-judge, toxicity, hallucination |
+| `Ragas` | RAG evaluation | Faithfulness, response relevancy, context precision/recall; built for RAG pipelines |
+| `DeepEval` | General evaluation | 50+ metrics (56 metric classes in 4.1.3), pytest integration, LLM-as-judge, toxicity, hallucination |
 | `Braintrust` | Eval platform | Dataset versioning, A/B experiments, LLM-as-judge, prompt playground |
 | `Promptfoo` | CLI eval tool | Multi-model comparison, YAML test cases, regex + LLM graders |
 | `LangSmith` | Tracing + eval | Datasets, evaluators, regression tracking, production sampling |
-| `OpenAI Evals` | Eval framework | Open-source; model-graded, code-graded, human-graded; JSONL format |
-| `Honeyhive` | Eval platform | Multi-dimensional rubrics, annotation queues, drift detection |
-| `pytest` | Test runner | Parametrize with golden dataset; fixtures for chain setup; `--timeout` |
+| `OpenAI Evals` | Eval framework | Open-source; basic (programmatic) + model-graded eval templates; JSONL format |
+| `HoneyHive` | Eval platform | Multi-dimensional rubrics, annotation queues, drift detection |
+| `pytest` | Test runner | Parametrize with golden dataset; fixtures for chain setup; `--timeout` needs the `pytest-timeout` plugin |
 | `vcrpy` | HTTP recording | Record/replay API calls for deterministic integration tests |
 | `pytest-asyncio` | Async testing | Required for async LangChain/LangGraph chains in pytest |
 
@@ -813,10 +819,11 @@ These cover the *grading* only. Running the system under test — retrieval, gen
 loop — is billed on top and usually dominates, which is why the case study in Section 14 budgets
 ~$2/PR all-in against $0.80 of judge calls. Re-derive both after any repricing.
 
-**RAGAS metrics explained** (Ragas renamed `answer_relevancy` to Response Relevancy /
-`ResponseRelevancy`; the old name survives as an alias):
+**Ragas metrics explained** (the metric class was renamed `AnswerRelevancy` -> `ResponseRelevancy`;
+in Ragas 0.4.x `AnswerRelevancy` still exists as a subclass alias and the importable module-level
+instance is still the snake_case `answer_relevancy` — there is no `response_relevancy` symbol):
 - `faithfulness`: does the answer use only information from the retrieved context?
-- `response_relevancy`: does the answer address the original question?
+- `answer_relevancy` (class `ResponseRelevancy`): does the answer address the original question?
 - `context_precision`: are the retrieved chunks relevant to the question?
 - `context_recall`: does the retrieved context contain all information needed to answer?
 
@@ -953,6 +960,9 @@ Action: Tone prompt tuning before deployment + monitor no-answer rate.
 
 ### CI/CD Integration Results
 
+The figures below are illustrative outcomes for this worked scenario, not measurements from a
+named deployment; only the cost lines are derived from published list pricing.
+
 - Regressions caught before production: 7 in 6 months (3 prompt changes, 2 model upgrades, 2 knowledge base updates)
 - Average time to detect regression: 8 minutes (PR evaluation step)
 - Average time to detect regression without CI eval: ~3 days (user complaints)
@@ -962,6 +972,8 @@ Action: Tone prompt tuning before deployment + monitor no-answer rate.
 
 ### Production Monitoring
 
+Also illustrative for this scenario rather than an observed deployment record.
+
 - LangSmith evaluator on 5% of production traces daily (~500 traces/day)
 - Alert if rolling 7-day average drops >5% from baseline
 - One alert triggered in 6 months: knowledge base article was deleted; retrieval recall dropped 12% for one intent category; caught within 24 hours vs ~3 days without monitoring
@@ -970,7 +982,9 @@ Action: Tone prompt tuning before deployment + monitor no-answer rate.
 
 **Additional war story — Golden dataset staleness causing false "passing" CI/CD gates in code generation product:**
 
-A code generation product maintained a golden dataset of 300 programming problems with expected outputs. CI passed if the model scored >80% on this set. After 6 months, engineers noticed that the golden dataset problems had been "contaminated" — the fine-tuning pipeline had been trained on solutions to 40 of the 300 problems (sourced from GitHub, which overlapped with the golden set). The model was memorizing, not generalizing, and the CI gate reported 89% accuracy while real-world acceptance rate had fallen from 34% to 27%. Detection came from a user survey, not from CI.
+This narrative is an illustrative composite of a known failure pattern, not a report of a specific
+verifiable public incident; the percentages are worked example numbers, not measurements. A code
+generation product maintained a golden dataset of 300 programming problems with expected outputs. CI passed if the model scored >80% on this set. After 6 months, engineers noticed that the golden dataset problems had been "contaminated" — the fine-tuning pipeline had been trained on solutions to 40 of the 300 problems (sourced from GitHub, which overlapped with the golden set). The model was memorizing, not generalizing, and the CI gate reported 89% accuracy while real-world acceptance rate had fallen from 34% to 27%. Detection came from a user survey, not from CI.
 
 ```python
 # BROKEN: golden dataset with no contamination check against training data
@@ -1008,7 +1022,7 @@ def check_contamination(
     return contaminated
 
 # Additional: use a held-out test set that is NEVER used in training pipeline
-def create_eval_split(problems: list[dict], held_out_fraction: float = 0.15) -> tuple:
+def create_eval_split(problems: list[dict], held_out_fraction: float = 0.20) -> tuple:
     import random
     random.shuffle(problems)
     split = int(len(problems) * held_out_fraction)
@@ -1021,14 +1035,14 @@ def create_eval_split(problems: list[dict], held_out_fraction: float = 0.15) -> 
 
 **How do you detect flaky LLM evaluations where the same input produces different scores on repeated runs?** Measure score variance over 5-10 repeated evaluations of the same prompt-response pair with the same judge LLM. For binary (pass/fail) judgments, flakiness rate = fraction of pairs where the judgment differs across runs. Target flakiness rate < 5% for reliable CI gates. Mitigation: request greedy decoding on judge calls where the model still exposes it (Claude Opus 4.7 and later reject `temperature` outright — omit it and steer with the prompt instead); include explicit scoring rubrics with worked examples in the judge prompt, which is the single largest lever on inter-run variance; use ensemble judging (3 independent LLM calls, majority vote) for high-stakes evals. Track flakiness rate as a first-class metric alongside accuracy.
 
-**How do you integrate LLM evaluation into CI/CD without making every PR deployment take 30 minutes?** Use a tiered evaluation strategy: (1) fast tier (<2 minutes): run 50-100 representative golden examples on every PR; block merge if score drops >3%; (2) medium tier (<10 minutes): run full 1,000-example golden set on every merge to main; alert but don't block; (3) slow tier (<60 minutes): run full production eval including LLM-as-judge on 5% sample before every production deployment. Cache embedding computations for retrieval-dependent evals to cut tier-1 time by 40%. Use parallel evaluation workers (10 concurrent eval requests to judge LLM) to reduce wall clock time.
+**How do you integrate LLM evaluation into CI/CD without making every PR deployment take 30 minutes?** Use a tiered evaluation strategy: (1) fast tier (<2 minutes): run 50-100 representative golden examples on every PR; keep the gate at the >5% drop this module uses, since the power table above shows ~71 examples is the minimum that can resolve a 5-point drop and a tighter gate at this sample size would fire on noise; (2) medium tier (<10 minutes): run full 1,000-example golden set on every merge to main; alert but don't block; (3) slow tier (<60 minutes): run full production eval including LLM-as-judge on 5% sample before every production deployment. Cache embedding computations for retrieval-dependent evals so repeated tier-1 runs skip re-embedding the golden inputs. Use parallel evaluation workers (10 concurrent eval requests to judge LLM) to reduce wall clock time.
 
 **Quick-reference table:**
 
 | Strategy | Speed | Coverage | Best for |
 |---|---|---|---|
 | Golden dataset (exact match/BLEU) | Fast (<2 min for 100 examples) | Narrow — only tests known good outputs | Regression prevention in CI; structured output validation |
-| LLM-as-judge (production sampling) | Slow (hours for 1,000 examples) | Broad — tests real-world distribution | Production drift detection; open-ended generation quality |
+| LLM-as-judge (production sampling) | Slow (accrues over days of live traffic) | Broad — tests real-world distribution | Production drift detection; open-ended generation quality |
 | Unit tests for tool calls and parsers | Fastest (<30 seconds) | Exact — tests deterministic components | JSON parsing, function call schema validation, retrieval integration |
 | A/B testing with user metrics | Very slow (days to weeks) | Ground truth — measures business impact | Final validation of model changes; acceptance criteria for major updates |
 
@@ -1060,6 +1074,6 @@ def refresh_golden_dataset(prod_logs: list[ConversationLog],
     return current_dataset + filtered   # append, never replace
 ```
 
-**How do you implement LLM-as-judge for automated evaluation at scale?** Use a model at least as capable as the one under test to evaluate its outputs against criteria: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison, or score both orders and average; (3) calibrate against human labels on a fixed calibration set before trusting any score, using the MT-Bench result (a strong judge reaching over 80% human agreement, the same as human-human agreement) as the realistic ceiling rather than a 95%+ target; (4) run the judge on a different model family from the one being evaluated — never self-evaluate. Cost: roughly $0.003 per judgement with a cheap current model such as Claude Haiku 4.5 at $1/$5 per MTok on a ~2,000-token rubric.
+**How do you implement LLM-as-judge for automated evaluation at scale?** Match judge capability to rubric difficulty — a cheap small model is adequate for narrow, mechanical criteria, while open-ended quality judgements need a model at least as capable as the one under test: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison, or score both orders and average; (3) calibrate against human labels on a fixed calibration set before trusting any score, using the MT-Bench result (a strong judge reaching over 80% human agreement, the same as human-human agreement) as the realistic ceiling rather than a 95%+ target; (4) run the judge on a different model family from the one being evaluated — never self-evaluate. Cost: roughly $0.003 per judgement with a cheap current model such as Claude Haiku 4.5 at $1/$5 per MTok on a ~2,000-token rubric.
 
 **What is flakiness in LLM tests and how do you detect and fix it?** A flaky test passes sometimes and fails sometimes on the same model and prompt — caused by stochastic sampling. Detection: run each test case 5× and flag tests where pass rate is 2/5 to 4/5 (not deterministically passing or failing). Note that no current frontier model is fully deterministic even at temperature 0, and the newest ones do not expose the parameter at all (Claude Opus 4.7 and later return HTTP 400 for any non-default `temperature`, `top_p` or `top_k`), so "just set temperature=0" is no longer a general fix. Fix: (1) where the knob still exists, request greedy decoding for factual tasks; (2) for creative tasks that require non-zero temperature, switch from exact-match assertions to LLM-as-judge assertions that are robust to paraphrasing; (3) use `n=3` completions and require 2/3 to pass (majority vote) before marking the test as failed — reduces false failures from lucky/unlucky samples.

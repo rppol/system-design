@@ -138,13 +138,13 @@ The reason this matters is that the denominator is the *only* thing protecting y
 ```
 Model                          Dim    Context  MTEB Avg  Use Case
 ---------------------------------------------------------
-text-embedding-3-small         1536   8191     62.3      OpenAI managed; good default
-text-embedding-3-large         3072   8191     64.6      Best OpenAI quality; high cost
-text-embedding-ada-002         1536   8191     61.0      Legacy; superseded by v3
+text-embedding-3-small         1536   8192     62.3      OpenAI managed; good default
+text-embedding-3-large         3072   8192     64.6      Best OpenAI quality; high cost
+text-embedding-ada-002         1536   8192     61.0      Legacy; superseded by v3
 BAAI/bge-base-en-v1.5          768    512      63.6      Best open source (compact)
 BAAI/bge-large-en-v1.5         1024   512      64.2      Best open source (quality)
 BAAI/bge-m3                    1024   8192     -         Multilingual; long context
-nomic-embed-text-v1.5          768    8192     62.4      Open source; long context
+nomic-embed-text-v1.5          768    8192     62.3      Open source; long context
 E5-large-v2                    1024   512      62.3      Good general purpose
 Cohere embed-english-v3.0      1024   512      64.5      Managed; strong multilingual
 ```
@@ -466,7 +466,7 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 ### OpenAI Embeddings API (the managed option, as used for file-retrieval features)
 - text-embedding-3-small superseded text-embedding-ada-002 as the default managed model
   (OpenAI does not publish which model backs ChatGPT's own file retrieval)
-- 1536-dim embeddings, 8191-token context window
+- 1536-dim embeddings, 8192-token max input
 - Managed endpoint: no infrastructure; pay-per-use
 
 ### Weaviate's Vectorize Module
@@ -488,16 +488,19 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 | bge-base-en-v1.5 | 53.3 | 768 | 512 tok | Self | Free |
 | bge-large-en-v1.5 | 54.3 | 1024 | 512 tok | Self | Free |
 | bge-m3 | 54.7 | 1024 | 8192 tok | Self | Free |
-| text-embedding-3-small | 51.1 | 1536 | 8191 tok | API | $0.02/M tok |
-| text-embedding-3-large | 55.4 | 3072 | 8191 tok | API | $0.13/M tok |
+| text-embedding-3-small | 51.1 | 1536 | 8192 tok | API | $0.02/M tok |
+| text-embedding-3-large | 55.4 | 3072 | 8192 tok | API | $0.13/M tok |
 | Cohere embed-english-v3.0 | 55.9 (BEIR) | 1024 | 512 tok | API | $0.10/M tok |
 | nomic-embed-v1.5 | 53.0 | 768 | 8192 tok | Self | Free |
 
 Note the ordering: on MTEB Retrieval nDCG@10, `text-embedding-3-small` (51.08) sits *below*
 both self-hosted BGE models — its appeal is the managed endpoint and 8k context, not raw
 retrieval quality. Cohere also ships `embed-v4.0` (1536-dim, multimodal, $0.12/M text tokens)
-alongside the v3 line. The bge-m3 figure is the one row here not confirmed against a primary
-source this pass; treat it as indicative.
+alongside the v3 line. Two caveats on this table: the bge-m3 figure is not confirmed against a
+primary source, and Cohere's own materials have quoted both 55.0 and 55.9 for
+`embed-english-v3.0` on BEIR — treat both rows as indicative. The BGE and OpenAI rows come
+from the model cards and the original MTEB (English) leaderboard; MTEB has since been
+restructured, so re-check the live leaderboard before quoting a ranking.
 
 ---
 
@@ -587,7 +590,7 @@ A: Domain fine-tuning continues training a pre-trained embedding model on domain
 A: Dimension mismatch occurs when the embedding model changes during the system's lifecycle. Common scenarios: (1) upgrading from text-embedding-ada-002 (1536d) to text-embedding-3-small (1536d — same dimension, but different semantic space, still incompatible); (2) switching from BGE-base (768d) to BGE-large (1024d) — different dimension, immediate error; (3) deploying a different model at query time than was used at index time. Prevention: (1) store model_name and model_version as vector index metadata; (2) assert model_name matches at query time; (3) version the vector index — when changing models, create a new index version and migrate atomically. Never assume same-dimension means same semantic space.
 
 **Q: How do you handle long documents that exceed an embedding model's context window?**
-A: Four strategies. First, chunking: split the document into chunks that fit within the model's context window (most common approach; see [chunking_strategies.md](chunking_strategies.md)). Second, use a long-context embedding model: bge-m3 (8192 tokens), nomic-embed-text-v1.5 (8192 tokens), text-embedding-3-large (8191 tokens). Third, hierarchical summarization: embed a summary of each long document as a coarse-grained index; use the summary embedding for first-stage retrieval, then retrieve sub-sections from matched documents. Fourth, sliding window: embed overlapping windows of the document independently; at query time, retrieve the window with highest similarity. For most production systems: chunking + overlap is the right default; switch to long-context models when chunk boundary information loss is a significant problem.
+A: Four strategies. First, chunking: split the document into chunks that fit within the model's context window (most common approach; see [chunking_strategies.md](chunking_strategies.md)). Second, use a long-context embedding model: bge-m3 (8192 tokens), nomic-embed-text-v1.5 (8192 tokens), text-embedding-3-large (8192 tokens). Third, hierarchical summarization: embed a summary of each long document as a coarse-grained index; use the summary embedding for first-stage retrieval, then retrieve sub-sections from matched documents. Fourth, sliding window: embed overlapping windows of the document independently; at query time, retrieve the window with highest similarity. For most production systems: chunking + overlap is the right default; switch to long-context models when chunk boundary information loss is a significant problem.
 
 **Q: How should you evaluate whether domain fine-tuning improved embedding quality?**
 A: Measure recall@10 on a labeled retrieval test set: 100-200 (query, expected_document_ids) pairs created by domain experts. Run both the base model and fine-tuned model on this test set. Record recall@10: fraction of queries where the expected document appears in top-10 retrieved results. Also measure: (1) MRR@10 (Mean Reciprocal Rank) — measures average rank of the first relevant document; (2) NDCG@10 — weighted rank measure. A fine-tuned model should show >5% recall@10 improvement to justify the fine-tuning effort and maintenance overhead. If improvement is less, the base model is already well-calibrated for the domain, or the training data isn't high quality.
@@ -683,8 +686,10 @@ User Query (any language)
     |   country_availability includes user.country
     |   product_status = "active"
     |
-    +-- Reranker (Cohere managed rerank; the v3.x line was deprecated
-    |   2026-07-01 and now routes to cohere-rerank-4-fast)
+    +-- Reranker (Cohere managed rerank; current IDs are rerank-v4.0-fast /
+    |   rerank-v4.0-pro. On Pinecone's hosted catalog, cohere-rerank-3.5 was
+    |   deprecated 2026-07-01 and is auto-served by cohere-rerank-4-fast from
+    |   2026-08-01, which returns a different score scale — re-tune thresholds)
     |   Top-200 → Top-20 for display
     |
     +-- Results Ranked by (rerank_score × 0.7 + popularity_score × 0.3)
@@ -753,7 +758,7 @@ model.save_pretrained("multilingual-e5-ecommerce-v1")
 | Japanese query recall@10 | 28% | 52% | 61% |
 | English recall@10 | 79% | 77% | 81% |
 | Embedding throughput | 2M/hr (API) | 8M/hr (self-hosted GPU) | 8M/hr (self-hosted GPU) |
-| Indexing cost (8M SKUs) | $128 one-time | GPU infra only | GPU infra only |
+| Indexing cost (8M SKUs) | ~$41 one-time | GPU infra only | GPU infra only |
 | Cross-market conversion rate gap | 31% | 14% | 9% |
 
 **Tradeoffs and Alternatives**

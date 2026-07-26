@@ -308,7 +308,7 @@ npx @modelcontextprotocol/inspector python my_server.py
 
 ## 7. Real-World Examples
 
-**Reference servers** (`github.com/modelcontextprotocol/servers`, managed by Anthropic with the community). Only seven are still maintained: **everything, fetch, filesystem, git, memory, sequential-thinking, time**. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers were archived during 2025 and their npm packages carry a deprecation notice — use the vendor's own server instead (for example `github/github-mcp-server`, `@playwright/mcp`).
+**Reference servers** (`github.com/modelcontextprotocol/servers`, described by the repo as "the small number of reference servers maintained by the MCP steering group" — MCP governance moved to the Linux Foundation's Agentic AI Foundation in December 2025, so these are no longer Anthropic-owned). Only seven are still maintained: **everything, fetch, filesystem, git, memory, sequential-thinking, time**. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers were archived during 2025 and their npm packages carry a deprecation notice — use the vendor's own server instead (for example `github/github-mcp-server`, `@playwright/mcp`).
 
 **Community servers**: Linear, Notion, Jira, Confluence, AWS, GCP, Stripe, Square, Snowflake, BigQuery, MongoDB, Redis, Elasticsearch, Cloudflare, Vercel, Sentry, PagerDuty, Datadog, hundreds more.
 
@@ -385,7 +385,7 @@ async def get_user(user_id: str) -> str:
         return f"User {user_id} not found in database"  # LLM understands error
 ```
 
-**War story**: A team built an internal Snowflake MCP server. Worked great until LLMs started "creatively" interpreting cryptic error messages. After expanding error messages to include context ("Query failed: ORA-00942: table 'salse' doesn't exist — did you mean 'sales'?"), agent success rate jumped from 60% to 88%.
+**War story** (illustrative composite, not a published incident): A team built an internal Snowflake MCP server. Worked great until LLMs started "creatively" interpreting cryptic error messages. After expanding error messages to include context ("Query failed: SQL compilation error: Object 'SALSE' does not exist or not authorized — did you mean 'SALES'?"), agent success rate jumped from 60% to 88%.
 
 **What the formula is telling you.** "Going from 60% to 88% is not a 28% improvement — it is a
 70% cut in how often the agent fails, and failure count is what your users actually experience."
@@ -418,7 +418,8 @@ that is the quantity a retry loop multiplies and a user counts.
     after  : 480 x 0.12 =  58 failed attempts/day     -> 134 fewer failures/day
 ```
 
-**Why the error message is the lever, and what breaks without it.** `ORA-00942` is a fully
+**Why the error message is the lever, and what breaks without it.** A bare "Object does not
+exist or not authorized" is a fully
 correct error that carries no repair signal — the agent knows it failed and cannot tell whether
 to fix a typo, request a permission, or abandon the query, so it retries semi-randomly and burns
 tokens. Adding `did you mean 'sales'?` converts the failure from a dead end into an instruction:

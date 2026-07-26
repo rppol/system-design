@@ -193,7 +193,7 @@ MQA — Multi-Query Attention (H=8 Q, G=1 KV) — all Q heads share a single K,V
             K0                      KV cache = 1 × d_head  →  0.125× MHA (8:1)
 ```
 
-GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA. The GQA paper (Ainslie et al. 2023) measured this on T5-XXL, where GQA-8 scored 47.1 average ROUGE vs MHA's 47.2 at close to MQA speed; no equivalent published ablation exists at 70B.
+GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA. The GQA paper (Ainslie et al. 2023) measured this on T5-XXL, where GQA-8 scored 47.1 on their benchmark average (ROUGE-1 on five summarization sets, BLEU on WMT, F1 on TriviaQA) vs MHA's 47.2 at close to MQA speed; no equivalent published ablation exists at 70B.
 
 ### Pre-LN vs Post-LN Data Flow
 
@@ -347,11 +347,11 @@ Candidates often assume Q, K, and V come from three different places. They do no
 
    Q = x . W_Q = [ 1*1 + 0*0 + 2*0 + 1*1 ,  1*0 + 0*1 + 2*1 + 1*0 ] = [2.0, 2.0]
    K = x . W_K = [ 1*0 + 0*1 + 2*1 + 1*0 ,  1*1 + 0*0 + 2*0 + 1*1 ] = [2.0, 2.0]
-   V = x . W_V = [ 1*.5+ 0*0 + 2*.5+ 1*0 ,  1*0 + 0*.5+ 2*.5+ 1*1 ] = [2.0, 2.0]
+   V = x . W_V = [ 1*.5+ 0*0 + 2*.5+ 1*0 ,  1*0 + 0*.5+ 2*.5+ 1*1 ] = [1.5, 2.0]
 
-   Same x in, three different 2-dim vectors out -- and the numbers only match here
-   because these toy matrices are deliberately symmetric. In a trained model the
-   three projections diverge sharply.
+   Same x in, three different 2-dim vectors out -- and Q and K only match each other
+   here because those two toy matrices are deliberately symmetric. V, built from a
+   different matrix, already differs. In a trained model all three diverge sharply.
 ```
 
 **Why three matrices and not one.** Collapse `W_Q` and `W_K` into a single matrix and every token's query becomes identical to its key, forcing the score matrix to be symmetric — "it" would have to attend to "cat" exactly as much as "cat" attends to "it". Language is not symmetric: a pronoun needs its antecedent far more than the antecedent needs the pronoun. Separating `W_V` matters for a different reason: what makes a token a good *match* ("this is a noun, singular, animate") is rarely the information you want to *copy* ("the specific concept: cat"). One matrix would force the model to use the same vector for both jobs.
@@ -444,7 +444,7 @@ next token ID
 ```python
 logits = hidden @ E.T    # shape: [vocab_size]
 ```
-This works because E already encodes good token representations. The LM head is asking "how similar is my hidden state to each token's embedding?" — the token with the highest similarity is the most likely next token. Weight tying saves ~500M parameters at LLaMA-3's vocabulary size. Note the size split: tying is standard for sub-4B models (Gemma, Qwen small variants, Llama 3.2 1B/3B all set `tie_word_embeddings: true`) but the larger models — including the LLaMA 3 8B config used throughout this section — keep the two matrices **untied** (`tie_word_embeddings: false`), because past a few billion parameters the vocabulary matrices are a small fraction of the model and the extra capacity is worth more than the saving.
+This works because E already encodes good token representations. The LM head is asking "how similar is my hidden state to each token's embedding?" — the token with the highest similarity is the most likely next token. Weight tying saves ~500M parameters at LLaMA-3's vocabulary size. Note the size split: tying is standard for sub-4B models (Qwen small variants and Llama 3.2 1B/3B both set `tie_word_embeddings: true`) but the larger models — including the LLaMA 3 8B config used throughout this section — keep the two matrices **untied** (`tie_word_embeddings: false`), because past a few billion parameters the vocabulary matrices are a small fraction of the model and the extra capacity is worth more than the saving.
 
 **Stated plainly.** "Dot your final hidden state against every token's embedding vector and read off the similarities. The embedding table already knows what each token 'looks like' as a vector, so you can reuse it backwards as the output classifier instead of learning a second copy."
 
@@ -1455,7 +1455,7 @@ def route_by_prompt_length(prompt_tokens: int) -> str:
 Prefill processes all prompt tokens in parallel — it is compute-bound (high arithmetic intensity). Decode generates one token at a time, requiring a full forward pass through all model weights to produce each token — it is memory-bandwidth-bound (low arithmetic intensity: load 70 GB of weights to produce 1 token). This is why batching dramatically improves decode throughput: processing 16 decode requests together loads the weights once, amortizing the 20ms memory load across 16 tokens. Compute bottlenecks benefit from faster GPUs; memory bandwidth bottlenecks benefit from larger batches.
 
 **Q: How does Grouped Query Attention (GQA) reduce KV cache memory without significantly hurting quality?**
-GQA uses fewer KV heads than query heads — LLaMA-3-70B has 64 query heads but only 8 KV heads. Each KV head is shared by 8 query heads. The KV cache stores only 8 sets of keys and values, reducing KV cache size by 8× compared to Multi-Head Attention. During attention computation, each KV head is replicated across the 8 query heads that use it — this expansion is cheap (a tensor repeat_interleave) and happens on the fly rather than in the cache. The published evidence is Ainslie et al. 2023, who uptrained T5 checkpoints with 5% of original pre-training compute and found GQA-8-XXL scored 47.1 average ROUGE against MHA-XXL's 47.2 while running at 0.28s vs 1.51s per inference — near-MHA quality at near-MQA speed. That ablation is at T5-XXL (11B) scale; the 8:1 ratio at 70B is an engineering extrapolation, not a measured result in that paper.
+GQA uses fewer KV heads than query heads — LLaMA-3-70B has 64 query heads but only 8 KV heads. Each KV head is shared by 8 query heads. The KV cache stores only 8 sets of keys and values, reducing KV cache size by 8× compared to Multi-Head Attention. During attention computation, each KV head is replicated across the 8 query heads that use it — this expansion is cheap (a tensor repeat_interleave) and happens on the fly rather than in the cache. The published evidence is Ainslie et al. 2023, who uptrained T5 checkpoints with 5% of original pre-training compute and found GQA-8-XXL scored 47.1 on their seven-benchmark average (ROUGE-1/BLEU/F1, not ROUGE alone) against MHA-XXL's 47.2 while running at 0.28s vs 1.51s per inference — near-MHA quality at near-MQA speed. That ablation is at T5-XXL (11B) scale; the 8:1 ratio at 70B is an engineering extrapolation, not a measured result in that paper.
 
 **Q: What is chunked prefill and how does it improve decode latency fairness?**
 Without chunked prefill, a long 8192-token prompt monopolizes the GPU for ~600ms while all other decode requests wait. Chunked prefill breaks the prompt into chunks of 2048 tokens; the scheduler interleaves one prefill chunk with decode steps from waiting requests. Decode requests get a turn every ~150ms (one chunk) instead of waiting ~600ms, reducing p99 decode latency by 4×. The tradeoff is slightly higher TTFT for the long prompt (it now takes 4 scheduling rounds instead of 1), but TTFT fairness is generally more important than minimizing a single long prompt's prefill time.
@@ -1467,7 +1467,7 @@ Standard attention materializes the full N×N attention weight matrix — for N=
 Prefix caching reuses KV cache blocks from previous requests that share a common prefix (typically a system prompt). If the system prompt is 512 tokens and all requests share it, those 512 tokens' KV blocks are computed once and reused by all subsequent requests — saving 512 tokens of prefill computation per request. At 500 RPS with a shared system prompt, this saves 256,000 tokens of prefill per second, reducing TTFT by ~100ms and cutting GPU compute by 30-40%. Cache hit rate is bounded by prefix sharing ratio — if 90% of requests share the same system prompt, hit rate approaches 90% for that prefix.
 
 **Q: What determines whether to use TP=2, TP=4, or TP=8 for serving a 70B model?**
-The primary drivers are: (1) Model fit — 70B in FP8 is 70 GB; one H100 (80 GB) can barely hold it with no KV cache. TP=2 allows 35 GB per GPU + 45 GB for KV, which is viable. (2) Communication overhead — AllReduce per layer adds latency proportional to TP degree over the available bandwidth. With NVLink (600 GB/s), TP=4 adds ~2ms per layer vs 0.5ms for TP=2. For low-latency SLAs (p99 < 50ms/token), TP=2 with FP8 often wins. (3) Throughput — higher TP allows more KV cache headroom, supporting more concurrent sequences. For throughput-optimized serving (high RPS), TP=4 or TP=8 on NVLink systems is preferred.
+The primary drivers are: (1) Model fit — 70B in FP8 is 70 GB; one H100 (80 GB) can barely hold it with no KV cache. TP=2 allows 35 GB per GPU + 45 GB for KV, which is viable. (2) Communication overhead — AllReduce per layer adds latency proportional to TP degree over the available bandwidth. On H100 NVLink 4 (900 GB/s aggregate) the two AllReduces per layer are cheap, but their cost rises with TP degree, so higher TP trades per-token latency for KV-cache headroom — measure it on your own topology rather than assuming a fixed per-layer figure. For low-latency SLAs (p99 < 50ms/token), TP=2 with FP8 often wins. (3) Throughput — higher TP allows more KV cache headroom, supporting more concurrent sequences. For throughput-optimized serving (high RPS), TP=4 or TP=8 on NVLink systems is preferred.
 
 ---
 

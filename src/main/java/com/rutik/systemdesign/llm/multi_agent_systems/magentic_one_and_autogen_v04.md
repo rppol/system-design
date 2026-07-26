@@ -4,9 +4,11 @@
 
 ## 1. Concept Overview
 
-Magentic-One (Microsoft Research, November 2024) is a generalist multi-agent system built on a hierarchical orchestrator-plus-specialists architecture. A single Orchestrator agent maintains two explicit ledgers — a task ledger and a progress ledger — and coordinates four specialized sub-agents: WebSurfer (browser automation via Playwright), FileSurfer (file system navigation), Coder (write and execute Python/shell code), and ComputerTerminal (run shell commands directly). The system achieved 38.85% on GAIA Level 3 (hard multi-step tasks requiring 5+ reasoning steps), 52.0% on Level 2, and 75.0% on Level 1, establishing state-of-the-art results on open-ended web and computer tasks at the time of publication. All agents are GPT-4o-based.
+Magentic-One (Microsoft Research, arXiv 2411.04468, November 2024) is a generalist multi-agent system built on a hierarchical orchestrator-plus-specialists architecture. A single Orchestrator agent maintains two explicit ledgers — a task ledger and a progress ledger — and coordinates four specialized sub-agents: WebSurfer (browser automation via a Chromium browser), FileSurfer (file system navigation and file preview), Coder (write code and analyze collected information), and ComputerTerminal (execute the Coder's programs in a console shell). The paper's headline GAIA result is **38.00% overall on the GAIA test set** for its best configuration and **32.33%** for the GPT-4o-only configuration; on the GAIA validation set the best configuration scored **54.84% (Level 1), 32.7% (Level 2), 22.92% (Level 3)** — versus 46.24% / 28.3% / 18.75% with GPT-4o alone. The team runs on `gpt-4o-2024-05-13`; the best configuration swaps in o1-preview for the Orchestrator's outer planning loop and the Coder. The paper's own framing is "statistically competitive with the previous state of the art" on GAIA, AssistantBench and WebArena, not a clean sweep.
 
-AutoGen v0.4 (released 2024) is a ground-up redesign of the AutoGen framework. The v0.2 architecture used synchronous GroupChat with polling; v0.4 replaces this with an async-first actor model where agents receive typed messages via an event bus. The new core introduces `RoutedAgent`, `@message_handler` decorators, `RoundRobinGroupChat`, and `SelectorGroupChat` — replacing the brittle GroupChat speaker-selection loop with composable, type-safe orchestration primitives.
+AutoGen v0.4 (announced January 2025) is a ground-up redesign of the AutoGen framework. The v0.2 architecture used synchronous GroupChat; v0.4 replaces this with an async-first actor model where agents receive typed messages via an event bus. The new core introduces `RoutedAgent`, `@message_handler` decorators, `RoundRobinGroupChat`, and `SelectorGroupChat` — replacing the brittle GroupChat speaker-selection loop with composable, type-safe orchestration primitives.
+
+**Version this file targets (checked July 2026).** The code below targets the **v0.4-and-later Python packages** — `autogen-agentchat` / `autogen-core` / `autogen-ext`, whose current release line is **0.7.x**. The v0.4 APIs shown here (`AssistantAgent`, `RoundRobinGroupChat`, `SelectorGroupChat`, `RoutedAgent`, `@message_handler`, `SingleThreadedAgentRuntime`) are still the current APIs in 0.7.x; nothing in this file targets the v0.2 `autogen` package, whose API is incompatible and which Microsoft no longer develops. Note the strategic context: in October 2025 Microsoft announced the **Microsoft Agent Framework**, which converges AutoGen and Semantic Kernel into one framework and shipped a production-ready 1.0 in April 2026. Microsoft positions it as the direct successor; AutoGen continues to receive bug fixes and security patches, and Microsoft publishes an AutoGen → Agent Framework migration guide. Treat AutoGen v0.4+ as a stable but no-longer-advancing base, and the Agent Framework as the destination for new Microsoft-stack work.
 
 ---
 
@@ -28,9 +30,9 @@ Key insight: separating "what do we know about the task" (task ledger) from "wha
 
 **Typed message contracts (AutoGen v0.4).** Every inter-agent message is a Pydantic model with a declared type. The event bus routes by type, not by agent name string, eliminating the "wrong agent activated" bugs common in v0.2 string-matched GroupChat.
 
-**Async-first concurrency.** AutoGen v0.4 agents are asyncio coroutines. Multiple agents can process messages concurrently without blocking the event loop. This reduces end-to-end latency on I/O-bound tasks (browser wait, code execution) by 40-60% in benchmarks compared to synchronous v0.2.
+**Async-first concurrency.** AutoGen v0.4 agents are asyncio coroutines. Multiple agents can process messages concurrently without blocking the event loop. On I/O-bound tasks (browser wait, code execution) this removes the head-of-line blocking that synchronous v0.2 `initiate_chat` imposed; Microsoft publishes no benchmark quantifying the speedup, so treat the gain as workload-dependent rather than a fixed percentage.
 
-**Explicit ledger-based replanning.** If `progress_ledger.is_done` is False after N steps with no new information, the Orchestrator increments a stall counter and triggers re-planning by rewriting the `task_ledger.plan`. This prevents infinite loops — a hard limit of 30 steps (configurable) terminates the run.
+**Explicit ledger-based replanning.** If `progress_ledger.is_done` is False after N steps with no new information, the Orchestrator increments a stall counter and triggers re-planning by rewriting the `task_ledger.plan`. This prevents infinite loops. In the shipped implementation (`autogen_agentchat.teams.MagenticOneGroupChat`) the two relevant guards are `max_stalls` (default **3** stalls before re-planning) and `max_turns` (default **20** turns before the run stops). The worked example later in this file uses its own `MAX_STEPS = 30`; that is an illustrative value, not the framework default.
 
 **Minimal agent interfaces.** Each specialist exposes a single `handle(instruction: str) -> AgentResult` interface. Specialists do not call each other; all coordination flows through the Orchestrator.
 
@@ -71,7 +73,7 @@ Key insight: separating "what do we know about the task" (task ledger) from "wha
 
 **RoutedAgent (event-driven):** agents declare message handlers via `@message_handler`. The runtime routes typed messages to matching handlers. Enables fan-out (one message triggers multiple agents) and conditional routing without a central selector.
 
-**Swarm (AutoGen extension):** agents hand off control explicitly by returning a `HandoffMessage` pointing to the next agent name. Similar to Magentic-One but without a separate Orchestrator — each agent decides its own successor.
+**Swarm (`autogen_agentchat.teams.Swarm`):** a first-class team type alongside RoundRobin and Selector — agents hand off control explicitly by emitting a `HandoffMessage` naming the next agent. Similar to Magentic-One but without a separate Orchestrator — each agent decides its own successor.
 
 ### 4.4 AutoGen v0.2 vs v0.4 Architecture
 
@@ -85,8 +87,8 @@ Key insight: separating "what do we know about the task" (task ledger) from "wha
 | Concurrency | One agent active at a time | Multiple handlers can run concurrently |
 | State management | Implicit in message history | Explicit via typed message state fields |
 | Testing | Hard — global mutable GroupChat | Easy — inject mock runtime, assert typed messages |
-| Nested agents | Manual recursion, fragile | First-class nested teams |
-| Token tracking | Manual | Built-in `ModelUsage` per message |
+| Nested agents | Manual recursion, fragile | A team can be a participant of another team (`SocietyOfMindAgent`, `Team` in `participants`) |
+| Token tracking | Manual | `models_usage: RequestUsage` on every message |
 
 ---
 
@@ -682,20 +684,25 @@ if __name__ == "__main__":
 
 ## 7. Real-World Examples
 
-**GAIA Benchmark (Magentic-One, Nov 2024)**
-- Level 1 (simple, 1-2 steps): 75.0% accuracy — comparable to GPT-4o zero-shot
-- Level 2 (moderate, 3-4 steps): 52.0% accuracy — requires combining web search + file reading
-- Level 3 (hard, 5+ steps with multi-modal reasoning): 38.85% — state-of-the-art at release
-- Typical task: "Find the population of Oslo in 2023, multiply by the GDP per capita of Norway in 2022, and save the result to a CSV." This requires WebSurfer (find data), Coder (arithmetic + CSV), ComputerTerminal (save file).
+**GAIA Benchmark (Magentic-One, arXiv 2411.04468, Nov 2024)** — validation set, per level:
 
-**Microsoft Copilot Studio (AutoGen v0.4 backend)**
-Copilot Studio uses AutoGen v0.4's `RoutedAgent` pattern for multi-step customer service flows. Each department (billing, technical support, account management) is a registered agent. The routing LLM selects the next department based on user intent. Internal benchmarks show 35% reduction in wrong-department escalations compared to single-agent GPT-4o.
+| Level | Magentic-One (GPT-4o) | Magentic-One (GPT-4o + o1-preview) |
+|---|---|---|
+| Level 1 (1-2 steps) | 46.24% | 54.84% |
+| Level 2 (3-4 steps) | 28.3% | 32.7% |
+| Level 3 (5+ steps, multi-modal) | 18.75% | 22.92% |
+| **Test set, overall** | **32.33%** | **38.00%** |
 
-**Software Engineering Automation**
-AutoGen v0.4 `RoundRobinGroupChat` with [Planner, Coder, TestWriter, Reviewer] produces end-to-end feature implementations. In internal Microsoft evals on 50 GitHub issues, the 4-agent team closed 62% of issues with passing tests vs 41% for a single AssistantAgent.
+On the paper's other two benchmarks: AssistantBench test set 11.0% exact match / 25.3% accuracy (GPT-4o) and 13.3% / 27.7% (GPT-4o + o1); WebArena 32.8% overall against a 78.2% human reference. A typical GAIA-style task — "find the population of Oslo in 2023, multiply by Norway's 2022 GDP per capita, and save the result to a CSV" — needs WebSurfer (find data), Coder (arithmetic + CSV), and ComputerTerminal (run it and write the file).
 
-**Document Processing Pipeline**
-A FileSurfer + Coder team processes quarterly reports: FileSurfer lists PDFs, Coder calls `pdfplumber` to extract tables, ComputerTerminal runs a validation script. Processing 200 reports takes ~45 minutes vs 8 hours manual. Error rate: 3.2% (mostly malformed PDFs).
+**AutoGen v0.4 as a departmental router (illustrative pattern)**
+A common production shape for `RoutedAgent`: each department (billing, technical support, account management) is a registered agent, and a routing LLM or a `SelectorGroupChat` picks the next department from user intent. This pattern is widely deployed, but no vendor publishes a controlled A/B against a single-agent baseline — do not carry an assumed escalation-reduction figure into a design review without measuring it on your own traffic.
+
+**Software Engineering Automation (illustrative)**
+AutoGen v0.4 `RoundRobinGroupChat` with [Planner, Coder, TestWriter, Reviewer] produces end-to-end feature implementations. Teams routinely report higher issue-resolution rates than a single `AssistantAgent`, but the size of the gap is entirely dependent on the issue distribution and the test suite; there is no published Microsoft benchmark for this specific four-agent configuration.
+
+**Document Processing Pipeline (illustrative)**
+A FileSurfer + Coder team processes quarterly reports: FileSurfer lists PDFs, Coder calls `pdfplumber` to extract tables, ComputerTerminal runs a validation script. Throughput and error rate on this shape of pipeline are dominated by PDF quality (born-digital vs scanned), so measure on your own corpus rather than importing a headline number.
 
 ---
 
@@ -710,13 +717,13 @@ A FileSurfer + Coder team processes quarterly reports: FileSurfer lists PDFs, Co
 | Type safety | None — all messages are plain strings | Pydantic message models |
 | Human-in-loop | `human_input_mode` ("ALWAYS", "NEVER", "TERMINATE") | Explicit `UserProxyAgent` with `async` input |
 | Orchestration | `GroupChatManager` + `GroupChat` | `RoundRobinGroupChat`, `SelectorGroupChat`, `RoutedAgent` |
-| Nested teams | Not supported natively | First-class `nested_teams` |
+| Nested teams | Not supported natively | A team can be a participant of another team (`SocietyOfMindAgent`) |
 | Concurrency | Sequential — one agent at a time | Concurrent handlers, fan-out supported |
 | State sharing | Implicit — buried in message history strings | Explicit typed message fields |
 | Test isolation | Difficult — requires mocking global GroupChat | Simple — inject mock `AgentRuntime` |
-| Token tracking | None built-in | `ModelUsage` per message, aggregated by team |
+| Token tracking | None built-in | `models_usage: RequestUsage` per message, aggregable across `TaskResult.messages` |
 | Migration effort | Existing v0.2 code does not run on v0.4 | Breaking API change; migration guide provided |
-| Maturity | Stable, many community examples | Newer, API surface still evolving |
+| Maturity (July 2026) | Dead — incompatible API, no longer developed by Microsoft | Stable at 0.7.x, but in maintenance; Microsoft Agent Framework 1.0 is the successor |
 
 ### 8.2 Magentic-One vs Flat Multi-Agent
 
@@ -760,7 +767,7 @@ A FileSurfer + Coder team processes quarterly reports: FileSurfer lists PDFs, Co
 - Production browser or computer-use tasks — use Magentic-One's WebSurfer or Computer Use API (Anthropic) instead.
 - Minimal-dependency environments — AutoGen v0.4 pulls in a non-trivial dependency tree.
 - When you need deterministic, auditable flows with graph-level control — prefer LangGraph.
-- If your team is already on v0.2 and migration cost outweighs benefits — v0.2 is still maintained.
+- If you are starting a new project on the Microsoft stack today — the **Microsoft Agent Framework** (GA 1.0, April 2026) is the supported successor that merges AutoGen and Semantic Kernel; AutoGen itself is now bug-fix-and-security-patch only. Staying on v0.2 is not an option either: it is a dead API, incompatible with v0.4+, and no longer developed by Microsoft.
 
 ---
 
@@ -849,7 +856,8 @@ asyncio.run(run())
 ```python
 # BROKEN: agent returns 50 KB of HTML; orchestrator prompt exceeds 128K context
 progress_ledger.last_observation = await agent.handle(instruction)
-# next LLM call includes full 50 KB in prompt => context overflow or $30 API call
+# next LLM call carries the full 50 KB (~12,500 tokens) in the prompt, every remaining step:
+# ~$0.03 per step at GPT-4o input pricing, ~$0.94 across a 30-step run, and it crowds the window
 ```
 
 **Fixed — truncate + summarize observations:**
@@ -946,16 +954,17 @@ class MyAgent(RoutedAgent):
 
 | Tool / Library | Role | Notes |
 |---|---|---|
-| `autogen-agentchat` | AutoGen v0.4 agent and team primitives | `pip install autogen-agentchat` |
+| `autogen-agentchat` | AutoGen agent and team primitives (`AssistantAgent`, the four team types) | `pip install autogen-agentchat`; current line 0.7.x |
 | `autogen-core` | Runtime, `RoutedAgent`, typed messages | `pip install autogen-core` |
-| `autogen-ext[openai]` | OpenAI model client for v0.4 | Separate install required |
-| `magentic-one` | Microsoft Research reference implementation | GitHub: microsoft/magentic-one |
-| `playwright` | Browser automation for WebSurfer | `playwright install chromium` |
-| `openai` (Python SDK) | GPT-4o API calls | `pip install openai>=1.0` |
-| `pydantic` v2 | Message schema validation in v0.4 | Required by autogen-core |
+| `autogen-ext[openai]` | OpenAI model client | Separate install required |
+| `autogen-ext[magentic-one]` | Magentic-One reference implementation | `autogen_ext.teams.magentic_one.MagenticOne`; lives in the microsoft/autogen repo — there is **no** standalone `microsoft/magentic-one` repo |
+| `playwright` | Browser automation underneath `MultimodalWebSurfer` | `playwright install chromium` |
+| `openai` (Python SDK) | Model API calls | `pip install openai>=1.0` |
+| `pydantic` v2 | Message schema validation | Required by autogen-core |
 | Docker | Sandboxed code execution for ComputerTerminal/Coder | Prevents host system damage |
-| GAIA Benchmark | Evaluation suite for generalist agents | huggingface.co/datasets/gaia-benchmark |
-| AgentEval | AutoGen's built-in evaluation framework | Measures task completion rate |
+| GAIA Benchmark | Evaluation suite for generalist agents | huggingface.co/datasets/gaia-benchmark/GAIA (gated) |
+| AgentEval | Multi-dimensional task-utility assessment, published as an AutoGen 0.2 blog framework | Not a built-in of the v0.4+ packages; community re-implementations exist |
+| Microsoft Agent Framework | Successor framework merging AutoGen + Semantic Kernel | GA 1.0 April 2026; Microsoft publishes an AutoGen migration guide |
 | Langfuse / Arize Phoenix | Tracing and observability for agent runs | Integrates via OpenTelemetry |
 
 ---
@@ -972,7 +981,7 @@ The task ledger stores durable information: the original request, a list of veri
 The Orchestrator counts consecutive steps in which no new facts were added to the task ledger. When this count exceeds a threshold (default 3 steps), it issues a replanning LLM call that rewrites `task_ledger.plan` given the facts accumulated so far. This avoids the infinite-loop failure mode where an agent keeps returning unhelpful output and the Orchestrator keeps re-sending the same instruction.
 
 **Q: What GAIA benchmark scores did Magentic-One achieve and what do they mean?**
-Magentic-One achieved 75.0% on Level 1 (1-2 step tasks), 52.0% on Level 2 (3-4 steps), and 38.85% on Level 3 (5+ steps requiring multi-modal reasoning). Level 3 was state-of-the-art at the time of the November 2024 paper. The scores demonstrate that hierarchical orchestration with specialized tool agents substantially outperforms single-LLM approaches on complex, real-world tasks.
+Magentic-One's best configuration scored 38.00% overall on the GAIA test set, and 32.33% with GPT-4o alone. Per level on the validation set, that best configuration reached 54.84% (Level 1), 32.7% (Level 2) and 22.92% (Level 3); GPT-4o alone reached 46.24% / 28.3% / 18.75%. The steep drop from Level 1 to Level 3 is the point: hierarchical orchestration with specialized tool agents was statistically competitive with the previous state of the art without task-specific tuning, but under a quarter of the hardest multi-step tasks were solved.
 
 **Q: What is the fundamental architectural difference between AutoGen v0.2 and v0.4?**
 AutoGen v0.2 uses synchronous, blocking `initiate_chat` calls and routes messages via a GroupChat string-matching speaker selection loop. AutoGen v0.4 replaces this with an async-first actor model: each agent is a `RoutedAgent` that declares typed `@message_handler` methods, and a `SingleThreadedAgentRuntime` (or distributed runtime) routes typed Pydantic message objects to the correct handler. v0.4 eliminates the global mutable GroupChat state and enables concurrent execution of independent agents.
@@ -987,25 +996,25 @@ A `RoutedAgent` is a base class whose subclasses declare message handlers with t
 Termination conditions are composable objects passed to the team constructor. `MaxMessageTermination(n)` stops after n total messages. `TextMentionTermination("DONE")` stops when any agent's message contains the string "DONE". `StopMessageTermination()` stops when an agent returns a `StopMessage`. Conditions combine with `|` (OR) and `&` (AND) operators, e.g., `MaxMessageTermination(10) | TextMentionTermination("DONE")`.
 
 **Q: Why is the observation truncated before being passed back to the Orchestrator?**
-LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors (or $20+ API calls for large contexts), and dilute the prompt with irrelevant content. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
+LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors, and dilute the prompt with irrelevant content. The cost effect is per-step rather than dramatic per-call — a filled 128K GPT-4o prompt is about $0.32 of input, but it is re-paid on every remaining step of the run. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
 
 **Q: What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
-ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user (see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)). Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. In production, the Microsoft Magentic-One reference implementation defaults to a Docker sandbox.
+ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user (see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)). Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. The `autogen_ext.teams.magentic_one.MagenticOne` reference implementation uses Docker for code execution **if Docker is available and otherwise silently falls back to a local executor** — so pass an explicit `code_executor` in production rather than relying on the default, and note that Microsoft's own docstring warns Magentic-One is susceptible to prompt injection from webpages.
 
 **Q: How does AutoGen v0.4 improve testability compared to v0.2?**
 In v0.2, testing required mocking the global GroupChat state and monkey-patching `initiate_chat`. In v0.4, the runtime is injected as a dependency. Tests can create an in-memory `SingleThreadedAgentRuntime`, register mock agents that return predefined typed messages, and assert the exact typed messages exchanged — without any real LLM calls. This makes unit tests for agent logic fast (<100 ms) and deterministic.
 
 **Q: What is the Swarm pattern in AutoGen and how does it relate to Magentic-One?**
-Swarm is an AutoGen v0.4 extension where each agent, instead of waiting for an Orchestrator to assign the next step, explicitly hands off control by returning a `HandoffMessage` naming the next agent. This eliminates the Orchestrator as a single point of failure and reduces latency by one LLM call per step. Unlike Magentic-One, Swarm has no global task ledger — each agent is responsible for deciding its own successor, which makes complex replanning harder but reduces coordination overhead.
+Swarm is a first-class AutoGen team type (`autogen_agentchat.teams.Swarm`) in which each agent picks its own successor by emitting a `HandoffMessage`. No Orchestrator assigns the next step. This eliminates the Orchestrator as a single point of failure and reduces latency by one LLM call per step. Unlike Magentic-One, Swarm has no global task ledger — each agent is responsible for deciding its own successor, which makes complex replanning harder but reduces coordination overhead.
 
 **Q: What token cost does the Orchestrator add per step in Magentic-One?**
-Each Orchestrator decision requires one GPT-4o call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At GPT-4o pricing (~$2.50/M input, $10/M output as of mid-2024), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
+Each Orchestrator decision requires one GPT-4o call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At GPT-4o API pricing ($2.50/M input, $10/M output — the tier introduced with the August 2024 snapshot, still current), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
 
 **Q: How does SelectorGroupChat handle the case where no agent is clearly the right next speaker?**
-The Selector LLM receives a prompt listing all participant names and their descriptions, plus the conversation history, and must return exactly one agent name. If the LLM returns an invalid name, AutoGen v0.4 raises a `ValueError` and the run fails — there is no fallback. Best practice: add a `selector_prompt` that explicitly lists valid agent names and instructs the LLM to return only one of them verbatim. Include a default agent name in the prompt as a fallback instruction.
+It retries with corrective feedback up to `max_selector_attempts` (default 3), then falls back rather than failing. Concretely: if the model mentions no valid participant name, or mentions more than one, the team appends a corrective user message ("No valid name was mentioned. Please select from: ...") and asks again. After the attempts are exhausted it logs a warning and returns the previous speaker — or, if there is no previous speaker, the first participant. It does not raise. Best practice is still to write a `selector_prompt` that lists the valid names and demands exactly one verbatim, because every retry is a wasted LLM call and the silent fallback to the previous speaker can look like a stall.
 
 **Q: What is the stall threshold in Magentic-One and how should it be tuned?**
-The default stall threshold is 3 consecutive steps with no new facts added to the task ledger. For tasks with long-running agents (browser page loads, large file reads), the threshold should be increased to 5-7 to avoid premature replanning. For short-latency tasks (code execution), 2-3 is appropriate. Setting the threshold too low causes unnecessary replanning (wasted tokens); too high causes the system to spin on a dead-end strategy for many steps before recovering.
+The shipped default is `max_stalls=3` on `MagenticOneGroupChat` — three consecutive stalled steps trigger a re-plan. For tasks with long-running agents (browser page loads, large file reads), the threshold should be increased to 5-7 to avoid premature replanning. For short-latency tasks (code execution), 2-3 is appropriate. Setting the threshold too low causes unnecessary replanning (wasted tokens); too high causes the system to spin on a dead-end strategy for many steps before recovering.
 
 **Q: Can Magentic-One agents run in parallel, and if not, what is the architectural reason?**
 No. The Orchestrator activates exactly one agent per step and waits for its observation before deciding the next step. This is intentional: the Orchestrator's decision depends on the latest observation (it reads `progress_ledger.last_observation`), so parallel agent execution would produce race conditions on the progress ledger. Parallelism can be introduced by having the Orchestrator issue a "batch instruction" to a fan-out coordinator, but this is not part of the base Magentic-One architecture.
@@ -1014,7 +1023,7 @@ No. The Orchestrator activates exactly one agent per step and waits for its obse
 
 ## 13. Best Practices
 
-**Enforce a hard MAX_STEPS limit.** Always set a maximum iteration count (30 is the Magentic-One default). Without it, a hallucinating Orchestrator can spin indefinitely and accumulate thousands of dollars in API costs.
+**Enforce a hard MAX_STEPS limit.** Always set a maximum iteration count. `MagenticOneGroupChat` defaults to `max_turns=20`; the 30 used in the worked example above is illustrative, so pick your own from measured workflow length. Without a cap, a hallucinating Orchestrator can spin indefinitely and accumulate thousands of dollars in API costs.
 
 **Truncate and summarize observations.** Cap observations at 2,000-3,000 characters. For large outputs (HTML pages, code stdout), run a separate summarization LLM call with a small, cheap model (GPT-4o-mini, ~$0.00015/K tokens) before passing the result to the Orchestrator.
 
@@ -1024,7 +1033,7 @@ No. The Orchestrator activates exactly one agent per step and waits for its obse
 
 **Prefer RoundRobin for known pipelines, Selector for open-ended tasks.** RoundRobin saves one LLM call (~$0.003, ~1-2 s) per turn and is fully deterministic. Reserve SelectorGroupChat for tasks where the number and order of agent activations is genuinely unknown.
 
-**Add `ModelUsage` tracking.** AutoGen v0.4 tracks token usage per message. Aggregate these in a `TeamResult` and log them to your [observability platform](../agentic_frameworks/framework_observability.md) (Langfuse, Arize Phoenix) to detect runaway token consumption before it appears on your bill.
+**Track token usage per message.** Every AutoGen message carries a `models_usage` field holding a `RequestUsage` (`prompt_tokens`, `completion_tokens`). Aggregate those across `TaskResult.messages` and log them to your [observability platform](../agentic_frameworks/framework_observability.md) (Langfuse, Arize Phoenix) to detect runaway token consumption before it appears on your bill.
 
 **Design agents with idempotent actions.** If the Orchestrator retries an instruction (after a stall), the agent may re-execute the same action. WebSurfer re-navigating to a URL is harmless; Coder appending to a file twice doubles the output. Use checksums or existence checks in Coder scripts: `if not Path("/tmp/output.csv").exists(): write_csv(...)`.
 
@@ -1126,7 +1135,7 @@ barely matters.
 | `input_tokens` | Everything in the prompt: ledger, instructions, last observation |
 | `output_tokens` | What the model generates. Priced 4x higher |
 | `Calls` | How many times that component ran. Multiplies both token columns |
-| `$2.50/1M`, `$10.00/1M` | GPT-4o list pricing as of mid-2024 |
+| `$2.50/1M`, `$10.00/1M` | GPT-4o API list pricing (August 2024 snapshot tier, still current July 2026) |
 
 **Walk one example.** Every row, rebuilt from scratch:
 

@@ -50,7 +50,7 @@ npx -y @smithery/cli install @modelcontextprotocol/server-filesystem --client cl
 
 ### 4.3 Reference Servers (github.com/modelcontextprotocol/servers)
 
-Reference implementations "managed by Anthropic, but built together with the community". Highest quality bar; often the canonical implementation of common patterns. The set narrowed sharply during 2025 — only **everything, fetch, filesystem, git, memory, sequential-thinking and time** remain active. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers moved to an archive repo and their npm packages are marked deprecated. Several have first-party successors maintained by the vendor instead (`github/github-mcp-server`, `@playwright/mcp`).
+Reference implementations described by the repo as "the small number of reference servers maintained by the MCP steering group" — Anthropic donated MCP to the Linux Foundation's Agentic AI Foundation in December 2025, so these are no longer Anthropic-owned. The repo also warns they are educational examples, not production-ready solutions. Highest quality bar; often the canonical implementation of common patterns. The set narrowed sharply during 2025 — only **everything, fetch, filesystem, git, memory, sequential-thinking and time** remain active. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers moved to an archive repo and their npm packages are marked deprecated. Several have first-party successors maintained by the vendor instead (`github/github-mcp-server`, `@playwright/mcp`).
 
 ### 4.4 Community Server Lists and Aggregators
 
@@ -175,23 +175,17 @@ npx -y @smithery/cli uninstall @modelcontextprotocol/server-filesystem --client 
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents", "/Users/me/Projects"]
     },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
-      }
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "/Users/me/Projects/app"]
     },
-    "postgres": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
     },
-    "brave-search": {
+    "memory": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
-      "env": {
-        "BRAVE_API_KEY": "..."
-      }
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
     },
     "remote-server": {
       "url": "https://my-mcp.example.com/mcp",
@@ -202,6 +196,8 @@ npx -y @smithery/cli uninstall @modelcontextprotocol/server-filesystem --client 
 ```
 
 Path: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
+
+Every package above is one of the seven still-maintained reference servers. Do **not** copy the once-common `@modelcontextprotocol/server-github`, `server-postgres`, `server-slack`, `server-brave-search`, `server-puppeteer` or `server-gitlab` names from older tutorials — those were archived during 2025 and their npm entries carry a deprecation notice. Use the vendor's own server instead (`github/github-mcp-server`, `@playwright/mcp`). There was never an npm `@modelcontextprotocol/server-sqlite`; the SQLite reference server was a Python package and is likewise archived.
 
 ### Publishing Your Own Server to Smithery
 
@@ -223,12 +219,21 @@ npm publish --access public
 ### Programmatic Install (Custom Client)
 
 ```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-async def install_and_use(server_package: str, env: dict = None) -> ClientSession:
-    """Install via npx, connect, return session."""
+# A function containing `yield` is an async GENERATOR, not an async context
+# manager — `async with install_and_use(...)` fails with AttributeError unless
+# it is wrapped with @asynccontextmanager.
+@asynccontextmanager
+async def install_and_use(
+    server_package: str, env: dict | None = None
+) -> AsyncIterator[ClientSession]:
+    """Install via npx, connect, yield a live session."""
     params = StdioServerParameters(
         command="npx",
         args=["-y", server_package],
@@ -250,15 +255,18 @@ async with install_and_use("@modelcontextprotocol/server-filesystem") as session
 
 ## 7. Real-World Examples
 
-**Most-installed servers (2025 approximate)**:
-- `filesystem` — 100K+ installs; access local files
-- `github` — 80K+; PRs, issues, code search
-- `brave-search` — 50K+; web search alternative
-- `puppeteer` / `playwright` — 40K+; browser automation
-- `slack` — 35K+; team communication
-- `postgres` / `sqlite` — 30K+ each
-- `sequential-thinking` — 25K+; reasoning aid
-- `memory` — 25K+; persistent agent memory
+**Most-downloaded `@modelcontextprotocol/*` servers on npm** (weekly downloads, npm registry API, late July 2026 — downloads are the only publicly published usage metric; nobody publishes an "install" count):
+- `server-filesystem` — ~472K/week; access local files
+- `server-sequential-thinking` — ~143K/week; reasoning aid
+- `server-postgres` — ~129K/week (**deprecated/archived**; traffic is legacy configs)
+- `server-github` — ~128K/week (**deprecated/archived**; superseded by `github/github-mcp-server`)
+- `server-memory` — ~99K/week; persistent agent memory
+- `server-slack` — ~90K/week (**deprecated/archived**)
+- `server-everything` — ~66K/week; feature/test reference server
+- `server-puppeteer` — ~35K/week (**deprecated/archived**; superseded by `@playwright/mcp`)
+- `server-brave-search` — ~30K/week (**deprecated/archived**)
+
+Note the shape of that list: four of the top nine are archived packages that are still being pulled tens of thousands of times a week by unpinned or copy-pasted configs. Download volume is a lagging indicator of tutorials, not of maintenance status.
 
 **Enterprise patterns**:
 - Internal registries (private Smithery deployment, internal npm)
@@ -351,10 +359,10 @@ npx @modelcontextprotocol/inspector @random/social-server
 ## 12. Interview Questions with Answers
 
 **Q: What is Smithery and what role does it play in the MCP ecosystem?**
-Smithery (smithery.ai) is the leading MCP server registry — analogous to npm for Node, PyPI for Python. Hosts 3000+ servers, supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Most MCP users discover servers via Smithery.
+Smithery (smithery.ai) is the leading third-party MCP server registry — analogous to npm for Node, PyPI for Python. It indexed roughly 7,300 servers as of May 2026, and supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Since September 2025 it sits downstream of the official MCP Registry, which is the canonical metadata source aggregators are expected to pull from.
 
-**Q: Where do I find Anthropic's official MCP servers?**
-GitHub at `modelcontextprotocol/servers`. Includes: filesystem, github, gitlab, sqlite, postgres, brave-search, sequential-thinking, slack, puppeteer, memory, and others. These are reference implementations — the canonical "how to build this kind of server."
+**Q: Where do I find the official MCP reference servers?**
+GitHub at `modelcontextprotocol/servers`, maintained by the MCP steering group rather than by Anthropic since the December 2025 donation to the Agentic AI Foundation. Only seven remain active: everything, fetch, filesystem, git, memory, sequential-thinking and time. The github, gitlab, sqlite, postgres, brave-search, slack, puppeteer, google-drive, redis and sentry servers were archived during 2025 into `modelcontextprotocol/servers-archived` and their npm packages are marked deprecated. These are reference implementations — educational examples of "how to build this kind of server," explicitly not production-ready solutions.
 
 **Q: How do I install an MCP server for Claude Desktop?**
 Either: (1) use Smithery CLI: `npx -y @smithery/cli install @author/server --client claude`. (2) Manually edit `claude_desktop_config.json` — add server entry with command/args/env. Restart Claude Desktop to load.
@@ -369,7 +377,7 @@ Stdio: server is an npm/pip package that the Smithery CLI installs and configure
 (1) Build server as a package (typically npm with `@modelcontextprotocol/sdk`). (2) Publish to npm with public access. (3) Submit to Smithery via their submission UI — provide package name, install command, config schema, capability description. Smithery reviews and indexes.
 
 **Q: What's signed servers and when will it be standard?**
-Proposed MCP spec extension: servers cryptographically signed by publisher (Sigstore-based). Clients verify signature on install. Defeats supply-chain attacks (tampered packages). Active discussion in MCP working group; likely standard in 2025-2026 spec revision.
+Cryptographic signing of MCP server artifacts is still not part of the protocol as of the 2025-11-25 revision or the 2026-07-28 release candidate. The idea is that a publisher signs the package (Sigstore-style) and clients verify the signature on install, defeating tampered-package supply-chain attacks. What actually shipped instead is weaker: the official MCP Registry authenticates *namespaces* — reverse-DNS names like `io.github.acme/server` proven via a GitHub account, DNS record or HTTP challenge — and delegates artifact scanning to npm/PyPI/Docker Hub. Treat that as provenance for the name, not integrity for the code. Signing is not on the current roadmap's priority areas, so do not assume a date; version pinning remains the load-bearing control.
 
 **Q: How do enterprises manage MCP server adoption?**
 Internal registry (private Smithery deployment or internal artifact server). Allowlist of approved servers. Security review process per server (review tool descriptions, audit code, check publisher). Centralized auth via OAuth gateway. Audit logging of all MCP calls.
@@ -378,7 +386,7 @@ Internal registry (private Smithery deployment or internal artifact server). All
 Persistent memory store for agents — exposes tools to read/write knowledge across sessions. Common use: agent stores user preferences, facts learned, ongoing project context. Available in official servers list and several community variants (with different backends — JSON file, SQLite, vector DB).
 
 **Q: How do you discover which MCP server to use for a given integration?**
-(1) Search Smithery by keyword. (2) Check Anthropic's official servers list. (3) Browse "awesome-mcp-servers" GitHub. (4) Check the SaaS tool's docs — many list MCP servers. If nothing exists, you'll likely need to build one.
+(1) Search the official MCP Registry (`registry.modelcontextprotocol.io`) or an aggregator like Smithery or PulseMCP by keyword. (2) Check the seven reference servers in `modelcontextprotocol/servers`. (3) Browse "awesome-mcp-servers" GitHub. (4) Check the SaaS tool's docs — many list MCP servers. If nothing exists, you'll likely need to build one.
 
 **Q: Can MCP servers self-update?**
 No automatic self-update mechanism per spec. Updates happen via the package manager (`npm update`, `pip install --upgrade`). Some clients (Smithery) help facilitate. Manual config edits do not auto-update.
@@ -387,13 +395,13 @@ No automatic self-update mechanism per spec. Updates happen via the package mana
 (1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session.
 
 **Q: How are MCP server bugs typically reported and fixed?**
-GitHub issues against the server's repo (Smithery links to repos). Maintainers fix and publish new versions. Users update via package manager. For official servers: Anthropic's team triages. Critical bugs (security) get fast fixes; long tail may sit for weeks.
+GitHub issues against the server's repo (Smithery links to repos). Maintainers fix and publish new versions. Users update via package manager. For the reference servers: the MCP steering group triages. Critical bugs (security) get fast fixes; long tail may sit for weeks.
 
 **Q: What's the role of the MCP Inspector in the ecosystem?**
 MCP Inspector (`npx @modelcontextprotocol/inspector <server-cmd>`) is the standard tool to: test servers locally, inspect tool/resource lists, manually call tools, view JSON-RPC traffic. Essential for both server developers (verify their server) and integrators (preview a server before integrating).
 
 **Q: Are there enterprise MCP server marketplaces?**
-Emerging. Smithery has a paid tier for enterprises. Companies are starting to publish official MCP servers for their products (e.g., commercial Linear MCP server, paid Atlassian MCP). Expect rapid commercialization through 2025-2026.
+Yes, and first-party vendor servers are now the norm rather than the exception. Smithery has a paid tier for enterprises, and the official registry's API is explicitly designed so organizations can stand up private sub-registries on top of it. Most major SaaS vendors now ship their own MCP server (GitHub, Atlassian, Linear, Stripe, Cloudflare, Sentry and others) instead of leaving it to community wrappers — which is exactly why the community reference servers for those products were archived. The 2026 roadmap's Enterprise Readiness track (audit trails, SSO-integrated auth, gateway patterns, configuration portability) is where the remaining enterprise gaps are being worked, mostly as extensions rather than core spec changes.
 
 ---
 

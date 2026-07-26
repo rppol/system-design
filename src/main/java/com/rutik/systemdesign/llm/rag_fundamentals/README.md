@@ -345,15 +345,17 @@ Cross-encoders read query and candidate together → much better relevance judgm
 Models:
   - BGE-reranker-v2-m3 (0.6B, multilingual; current BAAI open-source default,
     successor to bge-reranker-large / bge-reranker-base)
-  - Cohere Rerank API (managed; rerank-3.5 deprecated 2026-07-01, superseded
-    by cohere-rerank-4-fast)
+  - Cohere Rerank API (managed; current IDs rerank-v4.0-fast / rerank-v4.0-pro.
+    On Pinecone's hosted catalog cohere-rerank-3.5 was deprecated 2026-07-01 and
+    is auto-served by cohere-rerank-4-fast from 2026-08-01, on a different score
+    scale — re-tune any hard-coded threshold)
   - ColBERT (token-level matching, faster than full cross-encoder)
 ```
 
-Cost: reranking latency scales with model size and candidate count, so measure it —
-a small cross-encoder (ms-marco-MiniLM-L-12-v2) scores ~30 pairs in roughly 10ms on GPU,
-while a 0.6B multilingual reranker over the same batch is an order of magnitude slower.
-Worth it for precision-critical tasks.
+Cost: reranking latency scales with model size and candidate count, so measure it on your
+own hardware — the ms-marco-MiniLM-L-12-v2 model card quotes ~960 docs/sec on a V100
+(~30ms for 30 pairs), and a 0.6B multilingual reranker over the same batch is an order of
+magnitude slower. Worth it for precision-critical tasks.
 
 ### 4.5 Context Injection
 
@@ -744,7 +746,7 @@ Query transformation rewrites the user's query before retrieval so it better mat
 A bi-encoder embeds query and document independently into vectors compared via cosine similarity — document embeddings are precomputable, so it scales to millions of documents through ANN search, but it cannot model token-level interaction between query and document. A cross-encoder feeds the concatenated (query, document) pair through one transformer and outputs a relevance score — far more accurate, but it requires a full forward pass per pair and cannot be pre-indexed. The standard pipeline exploits both: bi-encoder retrieves top-50-100 candidates in tens of milliseconds, then a cross-encoder reranks them to the final top 5 (ColBERT's token-level late interaction sits between the two in both cost and quality). Never use a cross-encoder for first-stage retrieval over a large corpus, and never rely on bi-encoder scores alone for precision-critical top-5 selection.
 
 **Q: What is the latency budget for reranking in a production RAG pipeline?**
-Reranking adds tens to hundreds of milliseconds depending on the model size, candidate count and hardware. A cross-encoder reranker processes each (query, document) pair independently through a transformer, so cost is linear in candidates: a small model (ms-marco-MiniLM-L-12-v2, ~33M params) scores 30 pairs in roughly 10ms on GPU, while a 0.6B multilingual model like bge-reranker-v2-m3 is an order of magnitude slower on the same batch, and the managed Cohere Rerank API adds a network round trip on top. Budget allocation for a 2-second total pipeline SLO: embedding query (~10ms) + vector search (20-50ms) + reranking (10-150ms depending on model) + LLM generation (1-1.5s) + overhead (100ms). To reduce reranking latency: (1) limit candidates to top-20 from initial retrieval (diminishing returns beyond 20); (2) use a smaller reranker model; (3) batch reranking calls; (4) use GPU acceleration. Skip reranking entirely for latency-critical applications (<500ms total) or when initial retrieval recall@5 already exceeds 90%.
+Reranking adds tens to hundreds of milliseconds depending on the model size, candidate count and hardware. A cross-encoder reranker processes each (query, document) pair independently through a transformer, so cost is linear in candidates: a small model (ms-marco-MiniLM-L-12-v2, 33.4M params) is quoted at ~960 docs/sec on a V100 by its model card — about 30ms for 30 pairs, faster on newer GPUs — while a 0.6B multilingual model like bge-reranker-v2-m3 is an order of magnitude slower on the same batch, and the managed Cohere Rerank API adds a network round trip on top. Budget allocation for a 2-second total pipeline SLO: embedding query (~10ms) + vector search (20-50ms) + reranking (10-150ms depending on model) + LLM generation (1-1.5s) + overhead (100ms). To reduce reranking latency: (1) limit candidates to top-20 from initial retrieval (diminishing returns beyond 20); (2) use a smaller reranker model; (3) batch reranking calls; (4) use GPU acceleration. Skip reranking entirely for latency-critical applications (<500ms total) or when initial retrieval recall@5 already exceeds 90%.
 
 **Q: How do you choose between vector databases for a production RAG system?**
 Vector database selection depends on scale, infrastructure, and operational requirements. For fewer than 1M vectors: Chroma (embedded, Python-native, zero ops) or pgvector (if you already use PostgreSQL). For 1M-100M vectors: Qdrant (best query performance, Rust-based), Weaviate (good hybrid search, GraphQL API), or Pinecone (fully managed, zero ops). For more than 100M vectors: Milvus (distributed; NVIDIA and Roblox are the adopters Milvus names on its own adopters page) or Pinecone (managed, scales automatically). Key decision factors: (1) managed vs self-hosted — Pinecone for zero-ops, Qdrant/Milvus for control; (2) hybrid search support — Weaviate and Qdrant have native BM25+dense; pgvector requires separate BM25 setup; (3) filtering — all support metadata filtering but performance varies (Qdrant and Milvus handle high-cardinality filters best); (4) cost — pgvector is free, Pinecone charges per vector per month, self-hosted cost = compute only.
@@ -772,7 +774,7 @@ Each RAG component has a comprehensive standalone reference with 10+ senior-AI-e
 | Chunking Strategies | [chunking_strategies.md](chunking_strategies.md) | Fixed-size, semantic, hierarchical; overlap; chunk-size selection |
 | Retrieval Methods | [retrieval_methods.md](retrieval_methods.md) | Dense (bi-encoder + HNSW), sparse (BM25), hybrid (RRF), metadata filtering |
 | Reranking | [reranking.md](reranking.md) | Cross-encoder architecture, ColBERT, BGE-reranker, Cohere Rerank |
-| Embedding Models | [embedding_models.md](embedding_models.md) | Sentence-Transformers, BGE, OpenAI Ada, MTEB, domain fine-tuning |
+| Embedding Models | [embedding_models.md](embedding_models.md) | Sentence-Transformers, BGE, OpenAI text-embedding-3, MTEB, domain fine-tuning |
 
 ---
 
@@ -829,7 +831,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 class HybridRetriever:
-    def __init__(self, corpus: list[str], embed_model: str = "multilingual-e5-large") -> None:
+    def __init__(self, corpus: list[str], embed_model: str = "intfloat/multilingual-e5-large") -> None:
         self.model = SentenceTransformer(embed_model)
         # Sparse index
         tokenized = [doc.split() for doc in corpus]
@@ -974,7 +976,10 @@ response = llm.complete(prompt)
   │  - Financial Reports: table-aware, preserve table structure  │
   │                                                              │
   │  Embedding: text-embedding-3-large (OpenAI)                  │
-  │  3072-dim → PCA → 1536-dim (half storage cost, 97% quality) │
+  │  3072-dim → 1536-dim via the `dimensions` API parameter      │
+  │  (MRL truncation, not PCA; halves storage. OpenAI's only     │
+  │  published anchor is that 3-large at 256 dims still beats    │
+  │  ada-002 at 1536 — measure your own retention at 1536)       │
   │  Batch API: $0.065/1M tok (50% of the $0.13 standard rate)  │
   │  10M docs × 500 avg tokens = 5B tokens = $325 one-time cost  │
   │                                                              │

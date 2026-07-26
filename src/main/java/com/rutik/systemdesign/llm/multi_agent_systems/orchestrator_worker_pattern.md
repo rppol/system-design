@@ -8,7 +8,7 @@ The orchestrator-worker pattern is a multi-agent architecture in which a central
 
 This pattern maps directly to how large software engineering teams operate: a tech lead (orchestrator) defines tickets and assigns them to engineers (workers) who specialize in backend, frontend, QA, or documentation. The tech lead integrates the pull requests into a coherent release.
 
-The key engineering insight is that a single LLM context window is a fixed resource. Breaking a 50,000-token research task into ten 5,000-token sub-tasks — each run by a focused worker with clean context — produces better output than cramming everything into one call. Anthropic's internal multi-agent research systems demonstrated this concretely: a task that took a single agent more than one hour was completed in under 15 minutes by an orchestrator with parallel workers, with higher factual accuracy. See [Subagents & Delegation](../agents_and_tool_use/subagents_and_delegation.md) for the single-agent-spawning-subagents variant of the same idea.
+The key engineering insight is that a single LLM context window is a fixed resource. Breaking a 50,000-token research task into ten 5,000-token sub-tasks — each run by a focused worker with clean context — produces better output than cramming everything into one call. Anthropic's published account of its multi-agent research system reports the quality side of this concretely: a system with a Claude Opus 4 lead agent and Claude Sonnet 4 subagents **outperformed single-agent Claude Opus 4 by 90.2%** on their internal research eval, and parallel tool calling **cut research time by up to 90% for complex queries**. It also reports the bill honestly, and in the opposite direction from what most write-ups assume: **multi-agent systems use about 15x more tokens than chat interactions** (single agents about 4x), and token usage alone explains 80% of the performance variance on their BrowseComp eval. Orchestrator-worker buys latency and quality; it does not, by itself, buy cheapness. See [Subagents & Delegation](../agents_and_tool_use/subagents_and_delegation.md) for the single-agent-spawning-subagents variant of the same idea.
 
 ---
 
@@ -75,7 +75,7 @@ flowchart TD
     Orch["Orchestrator\n(LLM or Code)\nTask list: research→draft→review"] --> W1
     W1["Research Worker\nGPT-4o-mini\nweb_search, fetch_url\nOutput: research_findings JSON"] --> Orch2
     Orch2["Orchestrator\nmark 1 done, start 2"] --> W2
-    W2["Draft Writer Worker\nClaude 3.5 Sonnet\nInput: research_findings\nOutput: draft_document Markdown"] --> Orch3
+    W2["Draft Writer Worker\nClaude Sonnet 5\nInput: research_findings\nOutput: draft_document Markdown"] --> Orch3
     Orch3["Orchestrator\nmark 2 done, start 3"] --> W3
     W3["Review Worker\nGPT-4o\nInput: draft_document\nOutput: review_result JSON"] --> Approved{"approved?"}
     Approved -- YES --> Result([Return draft])
@@ -227,7 +227,9 @@ async def run_worker(task: Task, context: dict[str, Any]) -> Any:
         f"Context from prior tasks:\n{json.dumps(context, indent=2)}"
     )
     response = await client.messages.create(
-        model="claude-3-5-haiku-20241022",  # cheap worker model
+        # Cheap worker tier. NOTE: claude-3-5-haiku-20241022 was RETIRED on
+        # 2026-02-19 -- requests to it now fail. claude-haiku-4-5 is the successor.
+        model="claude-haiku-4-5",
         max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user_msg}],
@@ -250,7 +252,7 @@ async def orchestrate(goal: str, max_retries: int = 2) -> str:
         "Return JSON: list of {task_id, description, depends_on (list of task_ids)}."
     )
     plan_response = await client.messages.create(
-        model="claude-opus-4-5",   # expensive orchestrator model
+        model="claude-opus-5",   # expensive orchestrator model
         max_tokens=1024,
         messages=[{"role": "user", "content": plan_prompt}],
     )
@@ -298,7 +300,7 @@ async def orchestrate(goal: str, max_retries: int = 2) -> str:
         "Synthesize a final comprehensive answer."
     )
     final_response = await client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-5",
         max_tokens=4096,
         messages=[{"role": "user", "content": integration_prompt}],
     )
@@ -319,10 +321,10 @@ from anthropic import AsyncAnthropic
 client = AsyncAnthropic()
 
 PIPELINE: list[dict] = [
-    {"stage": "extract_entities",  "model": "claude-3-5-haiku-20241022", "max_tokens": 512},
-    {"stage": "classify_intent",   "model": "claude-3-5-haiku-20241022", "max_tokens": 256},
-    {"stage": "generate_response", "model": "claude-sonnet-4-5",         "max_tokens": 2048},
-    {"stage": "review_response",   "model": "claude-haiku-4-5",          "max_tokens": 512},
+    {"stage": "extract_entities",  "model": "claude-haiku-4-5",  "max_tokens": 512},
+    {"stage": "classify_intent",   "model": "claude-haiku-4-5",  "max_tokens": 256},
+    {"stage": "generate_response", "model": "claude-sonnet-5",   "max_tokens": 2048},
+    {"stage": "review_response",   "model": "claude-haiku-4-5",  "max_tokens": 512},
 ]
 
 SYSTEM_PROMPTS = {
@@ -351,36 +353,58 @@ async def run_deterministic_pipeline(user_input: str) -> str:
         if stage_config["stage"] == "review_response" and not stage_result.get("approved"):
             # Re-run generate_response with feedback
             accumulated["review_feedback"] = stage_result["feedback"]
-            regen = await run_stage("generate_response", "claude-sonnet-4-5", 2048, accumulated)
+            regen = await run_stage("generate_response", "claude-sonnet-5", 2048, accumulated)
             accumulated["generate_response"] = regen
     return accumulated["generate_response"]["response_text"]
 ```
 
-### Anthropic Research System Pattern (Concrete Numbers)
+### What Anthropic Actually Published
 
-Anthropic's internal research benchmarks comparing single-agent vs orchestrator-worker:
+Anthropic's engineering write-up on its multi-agent research system is the closest thing to a
+primary source here. The figures it reports, verbatim in substance:
+
+| Reported figure | Value |
+|---|---|
+| Multi-agent (Opus 4 lead + Sonnet 4 subagents) vs single-agent Opus 4, internal research eval | **+90.2%** |
+| Token usage: agents vs chat | ~**4x** |
+| Token usage: multi-agent vs chat | ~**15x** |
+| Share of BrowseComp performance variance explained by token usage alone | **80%** |
+| Research-time reduction from parallel tool calling, complex queries | up to **90%** |
+| Task-completion-time reduction from improved tool descriptions | **40%** |
+
+Anthropic publishes no wall-clock A/B, no absolute accuracy percentages, and no cost comparison.
+The direction of the cost finding matters and is frequently reported backwards: because
+multi-agent runs burn roughly 15x chat-level tokens, Anthropic's guidance is that the pattern
+only pays where task value justifies that spend.
+
+### Worked Cost Model (ILLUSTRATIVE — not measured data)
+
+The numbers below are a self-consistent worked example built from current list prices, so you can
+see how the arithmetic behaves. They are **not** a published benchmark and must not be cited as one.
 
 ```
-Task: "Survey and summarize all relevant papers on speculative decoding
-       published in 2023-2024, with a structured comparison table."
+Task: "Survey and summarize papers on speculative decoding published in a
+       given window, with a structured comparison table."
 
-Single agent (Claude Opus):
-  Wall-clock time:  62 minutes (sequential tool calls)
-  Context used:     187K tokens (near limit)
-  Accuracy score:   71%  (papers missed, some hallucinated)
-  Cost estimate:    $0.94 (187K input + 24K output at Opus pricing)
+Single agent (Claude Opus 5, $5 / $25 per MTok):
+  Wall-clock time:   62 minutes (sequential tool calls)
+  Context used:      187K input + 24K output (near the useful working limit)
+  Cost:              187 x $5/1000  = $0.935
+                      24 x $25/1000 = $0.600   ->  $1.54
 
-Orchestrator-Worker (1 Opus orchestrator + 8 Haiku workers, parallel):
-  Wall-clock time:  14 minutes
-  Peak tokens/agent: 12K (focused context per worker)
-  Accuracy score:   89%  (workers each search a specific sub-topic)
-  Cost estimate:    $0.41 (Haiku workers are 20x cheaper than Opus)
+Orchestrator-Worker (1 Opus 5 orchestrator + 8 Haiku 4.5 workers, $1 / $5 per MTok):
+  Wall-clock time:   14 minutes
+  Peak tokens/agent: 12K input (focused context per worker)
+  Workers:           8 x (12K x $1/1M + 3K x $5/1M) = 8 x $0.027 = $0.216
+  Plan call:         2K in / 1K out on Opus 5              = $0.035
+  Integrate call:    8K in / 4K out on Opus 5              = $0.140
+                                                    total ->  $0.39
 
-Key findings:
   - 4.4x faster wall-clock
-  - 18 percentage point accuracy improvement
-  - 56% cost reduction (despite more total LLM calls)
-  - 90%+ of single-agent long tasks fail past 30 minutes
+  - 75% lower cost in THIS configuration, because the 8 workers together read
+    96K tokens rather than 187K AND read them on a 5x cheaper tier
+  - fan out wider than the work you replaced and the sign flips: Anthropic's
+    real systems land at ~15x chat token usage, not a saving
 ```
 
 **In plain terms.** "Splitting the work across workers buys back wall-clock time in proportion
@@ -398,52 +422,59 @@ worker count and then miss their latency target by the orchestration term they f
 
 | Symbol | What it is |
 |--------|------------|
-| `sequential_time` | What one agent takes doing every sub-task back to back. Here 62 min |
+| `sequential_time` | What one agent takes doing every sub-task back to back. Here 62 min (illustrative) |
 | `num_workers` | How many workers actually run in parallel. Here 8 |
 | `orchestration_overhead` | Planning call + integration call + dispatch/collect. Not divisible |
 | `wall_clock` | Time the user waits. Here 14 min |
 | `speedup` | Wall-clock ratio, not a token ratio — the two move in opposite directions |
 | `cost_change` | Fraction of spend removed. Positive means the parallel version is cheaper |
 
-**Walk one example.** The numbers above, decomposed:
+**Walk one example.** The illustrative numbers above, decomposed:
 
 ```
   parallel work   : 62 / 8               =  7.75 min
-  measured total  :                         14.00 min
+  assumed total   :                         14.00 min
   orchestration   : 14.00 - 7.75         =  6.25 min   <- the fixed tax
                                              (2 Opus calls: plan, then integrate)
 
   speedup         : 62 / 14              =  4.4x       (NOT 8x -- the tax eats 3.6x)
-  accuracy        : 89% - 71%            =  +18 points
-  cost reduction  : (0.94 - 0.41) / 0.94 =  56%
+  cost reduction  : (1.54 - 0.39) / 1.54 =  75%
 ```
 
 The counter-intuitive line is the cost one: the orchestrator-worker run makes *more* LLM calls
-(1 + 8 = 9 vs 1) and is still 56% cheaper. Model tier is doing all the work — Haiku is roughly
-20x cheaper per token than Opus, so moving 8 units of search onto Haiku more than pays for the
-extra orchestration calls. Flip the tiers (Opus workers under a Haiku orchestrator) and the same
-architecture becomes several times *more* expensive than the single agent. The pattern does not
-save money; the tier assignment does.
+(1 + 8 = 9 vs 1) and is still cheaper here. Two things produce that, and only one of them is the
+architecture. First, tier: Claude Haiku 4.5 is 5x cheaper per token than Claude Opus 5 ($1/$5
+against $5/$25). Second, and larger, total input shrank — 8 workers x 12K = 96K tokens read
+against the single agent's 187K, because each worker reads only its own slice. Flip the tiers
+(Opus workers under a Haiku orchestrator) and the same architecture becomes several times *more*
+expensive than the single agent.
+
+**The saving is conditional, and in production it usually does not appear.** This example holds
+total work roughly constant and redistributes it. Real research fan-out does the opposite: each
+worker issues its own searches and reads its own sources, so aggregate tokens go *up*, which is
+exactly what Anthropic measured (~15x chat-level usage). Budget orchestrator-worker as a latency
+and quality purchase, and verify the cost direction on your own workload rather than assuming it.
 
 Note also what shrank on the context axis: `187K` tokens in one context became `12K` peak per
 agent. That is a 15.6x reduction in the largest prompt any single model has to reason over, and
-it is the mechanism behind the +18 points — not extra intelligence, just no "lost in the middle."
+it is the proposed mechanism behind the quality gap Anthropic measured — not extra intelligence,
+just no "lost in the middle."
 
 ---
 
 ## 7. Real-World Examples
 
-### Anthropic Internal Research Systems
+### Anthropic — "Building Effective Agents" and the Research System
 
-Anthropic's "Building Effective Agents" post (December 2024) describes production multi-agent systems where Claude orchestrators coordinate multiple Claude subagents on week-long research workflows. The orchestrator maintains a task ledger, spawns workers with narrow search instructions, and periodically checkpoints results to avoid losing progress. The ratio of orchestrator to worker model capability follows a consistent pattern: orchestrator uses the best available model; workers use cost-effective models appropriate to their narrow function.
+Two distinct Anthropic sources, often conflated. **"Building Effective Agents"** (19 December 2024) names orchestrator-workers as one of five workflow patterns and defines it as "a central LLM dynamically breaks down tasks, delegates them to worker LLMs, and synthesizes their results," recommending it for "complex tasks where you can't predict the subtasks needed." It contains no task ledger, no checkpointing, and no week-long-workflow claim. The separate engineering write-up on Anthropic's **multi-agent research system** supplies the measured figures reproduced in §6: Claude Opus 4 lead with Claude Sonnet 4 subagents, +90.2% over single-agent Opus 4 on their internal research eval, and ~15x chat-level token usage. The orchestrator/worker tier split (best model on the orchestrator, cheaper models on narrow workers) is Anthropic's stated practice.
 
-### GitHub Copilot Workspace
+### GitHub Copilot Workspace (retired)
 
-Copilot Workspace (2024) uses an orchestrator-worker pattern for issue resolution: a planning agent reads the GitHub issue and generates a list of file modifications; individual worker agents each handle one file; a final integration agent resolves merge conflicts and writes the PR description. Each file-level worker operates with a focused context (just the relevant file + the plan) rather than the entire codebase.
+Copilot Workspace, launched as a technical preview in April 2024, applied an issue-to-plan-to-code decomposition: a planning step read a GitHub issue and produced a spec and a plan, then code changes were generated per file rather than over the whole repository. **GitHub discontinued it on 30 May 2025**; the architecture was folded into the Copilot coding agent, generally available to paid subscribers from September 2025. Cite it as a retired preview whose decomposition idea survived, not as a live product.
 
-### Stripe Fraud Detection Pipeline
+### Deterministic Fan-Out in Fraud Scoring
 
-Stripe's production ML systems use a code orchestrator (not LLM) dispatching specialized scoring agents in parallel: a velocity worker, a geolocation worker, a merchant risk worker, and a device fingerprint worker. All four run simultaneously; results arrive in under 80ms; a deterministic aggregator (not an LLM) computes the final fraud score. No LLM orchestration — all dispatch logic is deterministic code.
+The lowest-risk production form of this pattern uses a **code** orchestrator, not an LLM: a request fans out to independent scoring services — velocity, geolocation, merchant risk, device fingerprint — which run concurrently under a millisecond-scale budget, and a deterministic aggregator combines their scores. Payment processors run fan-out scoring of broadly this shape, but none publishes its worker roster or per-stage latency, so treat the specific decomposition here as a representative design rather than a documented one. The transferable point is the one that *is* checkable in your own system: when the sub-tasks are fixed and the latency budget is tight, every dispatch decision should be code, and the LLM (if any) should be inside a worker, not in the orchestrator.
 
 ---
 
@@ -588,8 +619,8 @@ async def run_worker_rate_limited(task: Task, context: dict) -> Any:
 | Tool | Role in Orchestrator-Worker | Notes |
 |------|----------------------------|-------|
 | LangGraph | Graph-based orchestration with typed state | Best production choice; supports checkpoints, human-in-the-loop |
-| Anthropic Claude Opus | Orchestrator LLM | Highest reasoning capability; use sparingly |
-| Anthropic Claude Haiku | Worker LLM | 20x cheaper than Opus; sufficient for narrow tasks |
+| Anthropic Claude Opus | Orchestrator LLM | Highest reasoning capability; use sparingly. Opus 5: $5 / $25 per MTok |
+| Anthropic Claude Haiku | Worker LLM | Haiku 4.5: $1 / $5 per MTok — exactly 5x cheaper than Opus 5 on both input and output; sufficient for narrow tasks |
 | LangSmith / Langfuse | Tracing inter-agent calls | Essential for debugging; log every dispatch and result |
 | Redis | Task ledger persistence | Allows orchestrator restart without losing progress |
 | asyncio (Python) | Parallel worker dispatch | Core Python; use `asyncio.gather` for fan-out |
@@ -612,8 +643,8 @@ A: Use `asyncio.gather` to dispatch all ready workers simultaneously. Mark tasks
 **Q: What is a task ledger and why is it important?**
 A: A task ledger is the orchestrator's persistent record of all tasks, their dependencies, statuses, and results. It is important for three reasons: (1) it enables dependency-aware scheduling — tasks are only dispatched when their dependencies are completed; (2) it enables failure recovery — the orchestrator can retry failed tasks or skip them and continue with the rest; (3) it enables checkpointing — if the orchestrator process crashes, a persisted ledger allows resumption from the last completed task rather than starting over. In practice, store the ledger in Redis or a database so it survives process restarts.
 
-**Q: How did Anthropic's internal research demonstrate the advantage of orchestrator-worker over single-agent?**
-A: Anthropic's multi-agent research systems showed that a task requiring a single Claude Opus agent more than one hour (with 187K tokens of context and 71% accuracy) was completed in under 15 minutes with 89% accuracy using an orchestrator-worker pattern. The orchestrator used Opus; eight parallel Haiku workers each handled a narrow search sub-task with only 12K tokens of context each. The result was 4.4x faster, 18 percentage points more accurate, and 56% cheaper due to cheaper worker models. The key lesson: single agents degrade in quality as context grows; focused workers maintain quality by keeping context small.
+**Q: How did Anthropic's published research demonstrate the advantage of orchestrator-worker over single-agent?**
+A: Anthropic reported that a Claude Opus 4 lead agent with Claude Sonnet 4 subagents outperformed single-agent Claude Opus 4 by 90.2% on their internal research eval. Parallel tool calling separately cut research time by up to 90% on complex queries. The stated mechanism is context and token budget rather than raw intelligence: on their BrowseComp eval, token usage alone explained 80% of the performance variance, and fan-out is how you spend more tokens without any one context growing. The number interviewers most often get backwards is the cost: Anthropic measured multi-agent systems using roughly 15x the tokens of a chat interaction (single agents ~4x), so the pattern buys latency and quality and generally costs more, not less.
 
 **Q: How do you handle a worker that returns invalid or malformed output?**
 A: Validate every worker result against the expected schema before storing it in the task ledger. If the result is malformed, retry the worker up to max_retries times (typically 2). After all retries fail, store a fallback result (empty summary, zero confidence, error message) and mark the task as failed. The orchestrator must handle failed tasks during integration — either skip the section, use a placeholder, or escalate to a human reviewer. Never let a single malformed worker result crash the entire orchestration loop.
@@ -634,7 +665,7 @@ A: Persist the task ledger to durable storage (Redis, PostgreSQL) after every st
 A: Signs of overly coarse decomposition: (1) a worker's task description is so broad that the worker itself needs to decompose it further, effectively creating an unplanned nested orchestration; (2) workers frequently time out because a single sub-task is too large; (3) worker context windows overflow because the sub-task requires too much background material; (4) error recovery is coarse-grained — one failure requires redoing a large chunk of work. Fix by splitting coarse tasks into 2-3 finer tasks and adding explicit output schemas for each. A well-decomposed task should be completable by a worker in under 30 seconds with under 10K tokens of context.
 
 **Q: How do you choose which model to use for orchestrator vs workers?**
-A: The orchestrator requires high reasoning capability because it must understand the overall goal, generate a coherent task plan, evaluate whether worker outputs are sufficient, and handle unexpected situations. Use the highest-capability available model (Claude Opus, GPT-4o). Workers perform narrow, well-defined tasks with explicit instructions and output schemas; they do not need broad reasoning. Use the cheapest model that can reliably complete the specific worker task — often claude-haiku or gpt-4o-mini. This model-tier separation is a key cost optimization: Haiku is roughly 20x cheaper per token than Opus.
+A: The orchestrator requires high reasoning capability because it must understand the overall goal, generate a coherent task plan, evaluate whether worker outputs are sufficient, and handle unexpected situations. Use the highest-capability model you have (Claude Opus 5, or a frontier model from another vendor). Workers perform narrow, well-defined tasks with explicit instructions and output schemas; they do not need broad reasoning. Use the cheapest model that can reliably complete the specific worker task — often claude-haiku-4-5 or gpt-4o-mini. Size the saving from real list prices rather than a remembered ratio: Haiku 4.5 at $1/$5 against Opus 5 at $5/$25 is 5x, not the 15-60x gaps that held in earlier model generations.
 
 **Q: What is the "cascading hallucination" problem specific to orchestrator-worker systems?**
 A: Cascading hallucination occurs when Worker A produces a factual error, Worker B accepts that error as ground truth and builds on it, and Worker C builds on Worker B's compounded error. The final output is wrong with high apparent confidence because multiple agents "agreed." To prevent it: (1) add a fact-checking worker at key pipeline junctions (between research and synthesis); (2) instruct workers to flag uncertainty rather than confabulate; (3) require workers to cite their sources (web URLs, file names) so the orchestrator can verify; (4) treat high-confidence outputs with low source citation as a red flag.
@@ -669,7 +700,7 @@ A: At minimum: (1) structured log entry for every task dispatch (task_id, worker
 
 ### Problem Statement
 
-A law firm needed to analyze 200-400 patent documents per case to identify prior art, claim overlaps, and potential infringement risks. A single-agent approach using GPT-4o hit the 128K context limit after ~15 patents, required sequential processing (3-4 hours per case), and produced inconsistent analysis formats that required manual harmonization.
+A law firm needed to analyze 50-400 patent documents per case to identify prior art, claim overlaps, and potential infringement risks. A single-agent approach using GPT-4o hit the 128K context limit after ~15 patents, required sequential processing (3-4 hours per case), and produced inconsistent analysis formats that required manual harmonization. **All figures in this case study are illustrative and are worked for a 50-patent case** — the worker term scales linearly with patent count, the orchestration term does not.
 
 ### Architecture
 
@@ -680,12 +711,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Orch["Orchestrator (Claude Opus)<br/>- Reads case brief<br/>- Generates patent analysis plan<br/>- Maintains task ledger<br/>- Integrates final analysis"] --> B1 & B2 & B3
-    B1["Batch 1: Patents 1-50<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON per patent"] --> Conflict
-    B2["Batch 2: Patents 51-100<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON, same format"] --> Conflict
-    B3["Batch 3: Patents 101-150<br/>Patent Analyst Worker (Claude Haiku)<br/>Output: claim_analysis JSON, same format"] --> Conflict
-    Conflict["Conflict Detection Worker (Claude Sonnet)<br/>Input: all claim_analysis JSONs<br/>Output: overlap_matrix JSON"] --> Summary
-    Summary["Legal Summary Writer (Opus)<br/>Input: overlap_matrix<br/>Output: attorney-ready report"]
+    Orch["Orchestrator (Claude Opus 5)<br/>- Reads case brief<br/>- Generates patent analysis plan<br/>- Maintains task ledger<br/>- Integrates final analysis"] --> B1 & B2 & B3
+    B1["Worker 1: patent #1<br/>Patent Analyst (Claude Haiku 4.5)<br/>Output: claim_analysis JSON"] --> Conflict
+    B2["Worker 2: patent #2<br/>Patent Analyst (Claude Haiku 4.5)<br/>Output: claim_analysis JSON, same format"] --> Conflict
+    B3["Worker N: patent #N<br/>one worker per patent, 50 in flight<br/>Output: claim_analysis JSON, same format"] --> Conflict
+    Conflict["Conflict Detection Worker (Claude Sonnet 5)<br/>Input: all claim_analysis JSONs<br/>Output: overlap_matrix JSON"] --> Summary
+    Summary["Legal Summary Writer (Opus 5)<br/>Input: overlap_matrix<br/>Output: attorney-ready report"]
 
     class Orch req
     class B1,B2,B3 base
@@ -694,13 +725,13 @@ flowchart TD
 
 ### Key Design Decisions
 
-- Orchestrator uses Claude Opus (best reasoning for legal context) but runs only twice (planning + integration) — total ~4,000 orchestrator tokens per case.
-- Patent analyst workers use Claude Haiku; each receives exactly one patent (2,000-8,000 tokens) plus a standard claim analysis schema. 50 workers run in parallel.
+- Orchestrator uses Claude Opus 5 (best reasoning for legal context) but runs only twice (planning + integration). Those two calls consume roughly 15K input and 22K output tokens combined — output-dominated, because the second one writes the attorney-ready report, and Opus 5 output at $25/MTok is what makes three calls carry 37.5% of the bill.
+- Patent analyst workers use Claude Haiku 4.5; each receives exactly one patent (2,000-8,000 tokens) plus a standard claim analysis schema. Up to 50 workers run concurrently under a semaphore; a 300-patent case runs six such waves.
 - Workers return a fixed JSON schema: `{patent_id, filing_date, claims: [{claim_id, text, keywords}], novelty_flags}`. Any deviation triggers immediate retry.
-- Conflict detection worker is Claude Sonnet (middle tier) — needs more reasoning than Haiku for cross-patent comparison, but less than Opus.
+- Conflict detection worker is Claude Sonnet 5 (middle tier) — needs more reasoning than Haiku for cross-patent comparison, but less than Opus.
 - Task ledger persisted in Redis with 48-hour TTL — cases can be paused and resumed.
 
-### Results
+### Results (illustrative, for a 50-patent case)
 
 - Wall-clock time per case: 18 minutes (vs. 3-4 hours single-agent)
 - Patent coverage: 100% (all patents analyzed; single-agent capped at ~15)
@@ -726,7 +757,8 @@ That ratio is the whole design argument: because the expensive tier is called a 
 regardless of case size, doubling the patent count to 100 does not double the bill — it adds
 `50 x $0.03 = $1.50`, taking the case from $2.40 to $3.90 — 100% more work for 62.5% more money.
 The orchestration cost amortises. That is why the pattern gets *more* attractive as fan-out
-widens, and why the ~4,000-token orchestrator budget noted above is worth defending: it is the
-one term that does not shrink when you move work to a cheaper model.
+widens, and why the orchestrator's token budget is worth defending: it is the one term that does
+not shrink when you move work to a cheaper model, and it is dominated by *output* — the report
+the summary writer generates — so trimming its prompt buys almost nothing.
 - Attorney acceptance rate on first draft: 84% (minor revisions needed on 16%)
 - System ran 340 cases in first six months with 99.2% successful completion rate (0.8% required human intervention for corrupted patent PDFs)

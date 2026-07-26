@@ -912,7 +912,7 @@ not a sampler issue.
 
 - **OpenAI API** — `temperature` (0-2), `top_p`, `presence_penalty` and `frequency_penalty` (-2.0 to 2.0), `logit_bias` (token-id → -100..100 offset map), `seed` (best-effort reproducibility, with the batching caveat from Section 6.8).
 - **Anthropic API** — `temperature` (0-1, default 1.0), `top_p`, `top_k` — deliberately a smaller surface than OpenAI's. **These are removed from the newest generation**: setting `temperature`, `top_p` or `top_k` to any non-default value on Claude Opus 4.7 or later (including Opus 5, Fable 5, Mythos 5) returns a 400 error, and Anthropic's migration guide says to omit them entirely and steer behaviour by prompting instead. Sampler tuning is simply not a lever on those models.
-- **llama.cpp** — the most feature-complete open sampler chain: `top_k` (default 40), `top_p` (0.95), `min_p` (0.05), `typical_p` (1.0 = off), `top_n_sigma`, `mirostat` (v1/v2 with `mirostat_tau`/`mirostat_eta`), DRY (`dry_multiplier`, `dry_base` 1.75, `dry_allowed_length` 2), and XTC (`xtc_probability`, `xtc_threshold` 0.1) — plus an explicit, documented sampler *order* configuration (`--samplers`). Tail-free sampling (`tfs_z`) was **removed** in October 2024 (PR #10071) as redundant against min-p. Note the shipped default order is `dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature` — temperature runs **last**, i.e. after truncation, which is exactly Order B in Section 6.3.
+- **llama.cpp** — the most feature-complete open sampler chain: `top_k` (default 40), `top_p` (0.95), `min_p` (0.05), `typical_p` (1.0 = off), `top_n_sigma`, `mirostat` (v1/v2 with `mirostat_tau`/`mirostat_eta`), DRY (`dry_multiplier`, `dry_base` 1.75, `dry_allowed_length` 2), and XTC (`xtc_probability`, `xtc_threshold` 0.1) — plus an explicit, documented sampler *order* configuration (`--samplers`). Tail-free sampling (`tfs_z`) was **removed** in October 2024 (PR #10071) as redundant against min-p. Note the shipped default order is `penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature` — temperature runs **last**, i.e. after truncation, which is exactly Order B in Section 6.3.
 - **vLLM `SamplingParams`** — `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, plus `structured_outputs` / `StructuredOutputsParams` for constrained decoding (composed per Section 6.9). The older `guided_json`/`guided_regex`/`guided_choice`/`guided_grammar`/`guided_decoding_backend` parameters were removed in vLLM v0.12.0.
 - **HuggingFace `transformers` `GenerationConfig`** — the reference implementation; includes `penalty_alpha`/`top_k` for contrastive search, `typical_p`, `no_repeat_ngram_size`, and beam search (`num_beams`, `length_penalty`, `early_stopping`).
 
@@ -970,7 +970,7 @@ not a sampler issue.
 
 | Tool | Notes |
 |------|-------|
-| llama.cpp | Most complete open sampler chain — min-p, typical, TFS, Mirostat v1/v2, DRY, XTC, with configurable order |
+| llama.cpp | Most complete open sampler chain — min-p, typical, top-n-sigma, Mirostat v1/v2, DRY, XTC, with configurable order (TFS was removed in 2024) |
 | vLLM `SamplingParams` | Production-grade: temperature, top_p, top_k, min_p, repetition/presence/frequency penalties, seed |
 | HuggingFace `transformers` `GenerationConfig` | Reference implementation; contrastive search (`penalty_alpha`), typical_p, beam search |
 | OpenAI API | temperature, top_p, presence/frequency penalty, logit_bias, best-effort seed |

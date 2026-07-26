@@ -18,8 +18,8 @@ beyond setting up the search.
 
 This module covers the major families: **GCG** (Greedy Coordinate Gradient, 2023 — white-box,
 gradient-guided discrete optimization that produces *transferable* adversarial suffixes), **AutoDAN**
-(2023 — a genetic algorithm that evolves fluent, human-readable jailbreak prompts under a
-perplexity constraint), **AutoDAN-Turbo** (2024 — fully automated *strategy discovery*, no
+(2023 — a hierarchical genetic algorithm that evolves fluent, human-readable jailbreak prompts by
+mutating handcrafted seeds with an LLM), **AutoDAN-Turbo** (2024 — fully automated *strategy discovery*, no
 human-designed seed strategies), **TAP** (Tree of Attacks with Pruning, 2023 — black-box, uses an
 attacker LLM and a judge LLM to grow and prune a tree of candidate prompts), **BEAST** (2024 —
 beam-search adversarial suffixes that run in under a minute on a single GPU), **GPTFuzzer** (2023 —
@@ -186,14 +186,20 @@ targets**.
 
 ### 3.4 Genetic / Evolutionary Search (AutoDAN)
 
-AutoDAN maintains a **population** of candidate jailbreak prompts, each scored by a **fitness
-function** combining (a) jailbreak success against the target model and (b) **fluency**
-(low perplexity under a reference LM — a prompt that reads as natural English/role-play framing,
-not random tokens). Each generation: select high-fitness candidates, apply **mutation** (word-level
-substitution, paraphrasing via an auxiliary LLM) and **crossover** (combine fragments of two
-parent prompts), and re-score. Because fluency is *part of the fitness function from the start*,
-AutoDAN's outputs are human-readable role-play-style prompts — this is precisely what defeats a
-**naive perplexity-only filter** (§6.3).
+AutoDAN maintains a **population** of candidate jailbreak prompts. Its **fitness function is the
+target's log-likelihood of the affirmative response alone** — `S = -L`, the same objective as
+GCG's — with **no explicit perplexity or fluency term**. Each generation: select high-fitness
+candidates, apply **mutation** (word-level substitution, paraphrasing via an auxiliary LLM) and
+**crossover** (combine fragments of two parent prompts), and re-score.
+
+Fluency is therefore **structural, not scored**. It comes from three design choices: the
+population is *seeded with handcrafted, semantically meaningful DAN-style prompts*; mutation is
+*LLM-proposed rewriting* that preserves logical flow; and the genetic algorithm is
+*hierarchical*, operating at the sentence and word level rather than on raw tokens. No operator
+in the loop can leave the manifold of natural language, so nothing gibberish ever enters the
+population to be scored. The measured gap is large — the paper reports AutoDAN prompts at
+perplexity **~46** against GCG suffixes at **~1532**. That is precisely what defeats a **naive
+perplexity-only filter** (§6.3).
 
 ### 3.5 Attacker-LLM Tree Search (TAP)
 
@@ -209,9 +215,10 @@ target-model internals, only input/output queries — making it directly applica
 to spend about `1/p` attempts before the first success — and after `N` attempts you have found one
 with probability `1 - (1-p)^N`."
 
-Every query-budget claim in this module ("~45 queries/prompt vs PAIR's ~75", §14) is a statement
-about this geometric model. It is also why "the attack failed" and "the attack ran out of budget"
-are different findings that red-team reports routinely confuse.
+Every query-budget claim in this module (§14's illustrative "~45 queries/prompt vs PAIR's ~75";
+the published TAP figures are 22.5-28.8 vs PAIR's 39.6-47.1, §7) is a statement about this
+geometric model. It is also why "the attack failed" and "the attack ran out of budget" are
+different findings that red-team reports routinely confuse.
 
 | Symbol | What it is |
 |---|---|
@@ -265,9 +272,9 @@ family** — there is no single defense that covers both ends.
 
 | Algorithm | Year | Access | Search Method | Output Style |
 |---|---|---|---|---|
-| **GCG** (Greedy Coordinate Gradient) | 2023, Zou/Wang/Carlini/Nasr/Fredrikson | White-box (gradients) | Greedy coordinate descent guided by token-embedding gradients (§3.2) | Gibberish suffix; universal + transferable |
-| **AutoDAN** | 2023 | Black-box (queries only) | Genetic algorithm with fluency-constrained fitness (§3.4) | Fluent role-play-style prompts |
-| **AutoDAN-Turbo** | 2024 | Black-box | Fully automated *strategy discovery* — no human-seeded jailbreak strategies; builds a growing strategy library via lifelong exploration | Diverse, self-discovered strategies; highest reported ASR (attack success rate) among black-box methods at publication |
+| **GCG** (Greedy Coordinate Gradient) | 2023, Zou/Wang/Carlini/Nasr/Kolter/Fredrikson | White-box (gradients) | Greedy coordinate descent guided by token-embedding gradients (§3.2) | Gibberish suffix; universal + transferable |
+| **AutoDAN** (Liu et al.) | 2023 | White-box — its fitness needs the target's log-likelihood of the target response, so query-only access is not enough | Hierarchical genetic algorithm; fitness is the log-likelihood loss alone, fluency comes from the seeds and LLM mutation (§3.4) | Fluent role-play-style prompts |
+| **AutoDAN-Turbo** | 2024 | Black-box | Fully automated *strategy discovery* — no human-seeded jailbreak strategies; builds a growing strategy library via lifelong exploration | Diverse, self-discovered strategies; reported 88.5% ASR (attack success rate) on GPT-4-1106-turbo, 93.4% when human-designed strategies are plugged in |
 | **TAP** (Tree of Attacks with Pruning) | 2023 | Black-box | Attacker LLM + judge LLM, pruned tree search (§3.5) | Natural-language jailbreak prompts; far fewer queries than PAIR |
 | **BEAST** | 2024 | Gray-box (token probabilities) | Beam search over adversarial suffix tokens | Semi-readable suffixes; runs in under a minute on one GPU |
 | **GPTFuzzer** | 2023 | Black-box | Fuzzing: seed templates + mutation operators (synonym swap, role-play rewrites), success-driven seed selection | Mutated natural-language templates |
@@ -311,8 +318,8 @@ GCG typically runs N=500 steps; the suffix is whitebox-optimized against one mod
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
-    Pop(["Population: P role-play-style seed prompts"]) --> Score
-    Score["Score each prompt\nfitness = w1 × jailbreak_success(target, prompt)\n       + w2 × (1 / perplexity(prompt))"] --> Select
+    Pop(["Population: P handcrafted DAN-style seed prompts"]) --> Score
+    Score["Score each prompt\nfitness = -loss = log P(affirmative target given prompt)\nno fluency term - fluency is structural"] --> Select
     Select["Select top-fitness prompts"] --> Mutate & Cross
     Mutate["MUTATION\nword-level swap\nLLM-paraphrase"] --> NewPop
     Cross["CROSSOVER\ncombine fragments of two parents"] --> NewPop
@@ -439,7 +446,7 @@ def gcg_step(
     logits = model(inputs_embeds=embeds.unsqueeze(0)).logits
     target_slice = slice(len(prompt_ids) + len(suffix_ids), len(full_ids))
     loss = torch.nn.functional.cross_entropy(
-        logits[0, target_slice[0] - 1 : target_slice[-1]], target_ids
+        logits[0, target_slice.start - 1 : target_slice.stop - 1], target_ids
     )
     loss.backward()
 
@@ -477,9 +484,9 @@ def _evaluate_loss(model, prompt_ids, suffix_ids, target_ids) -> float:
 
 **Concrete numbers**: the original GCG paper used `suffix_len=20`, `top_k=256`, `batch_size=512`,
 and `num_steps=500` against an ensemble of open-weight models (Vicuna-7B/13B), achieving high
-attack-success rates on the open models and **nonzero transfer** (tens of percent ASR) to GPT-3.5
-and, with lower rates, GPT-4 and Claude — at the time of publication, before model providers
-deployed countermeasures informed by this research.
+attack-success rates on the open models and substantial **transfer** to closed APIs — 86.6% on
+GPT-3.5, 46.9% on GPT-4, 47.9% on Claude-1 but only 2.1% on Claude-2 (§7) — at the time of
+publication, before model providers deployed countermeasures informed by this research.
 
 **In plain terms.** "Each of the 500 steps costs one backward pass plus 512 forward passes, so the
 published configuration is roughly a quarter of a million model evaluations to produce one suffix."
@@ -515,11 +522,16 @@ than 5,120 forward passes and injects enough stochasticity to avoid getting stuc
 different seed genuinely produces a different suffix, which is exactly the fact that defeats
 adversarial training on a fixed suffix corpus (Pitfall 10.2).
 
-### 6.2 AutoDAN: Fluency-Constrained Genetic Mutation
+### 6.2 AutoDAN: Genetic Mutation, and Why an Explicit Fluency Term Would Not Help
+
+> The fitness function below is a **didactic variant**, not AutoDAN's published objective.
+> AutoDAN scores candidates on the log-likelihood loss alone (§3.4). The weighted version is
+> shown here because working its arithmetic is what demonstrates *why* the paper does not need
+> such a term — see "Why AutoDAN's outputs are fluent anyway" at the end of this section.
 
 ```python
-import math
-from dataclasses import dataclass, field
+import torch
+from dataclasses import dataclass
 
 @dataclass
 class AutoDANCandidate:
@@ -581,7 +593,7 @@ scores higher. What it is *not* is linear.
 | Symbol | What it is |
 |---|---|
 | `jailbreak_score` | Target-model probe result, `0` to `1`. Higher = closer to a successful jailbreak |
-| `perplexity` | Reference-LM surprise at the prompt's wording. ~15-25 fluent (§6.3), 1000s for gibberish |
+| `perplexity` | Reference-LM surprise at the prompt's wording. Measured: AutoDAN ~46, GCG ~1532 (§3.4); the example below rounds these to 20 and 1500 |
 | `1/(1 + perplexity)` | The fluency term. Perfect fluency (`ppl = 0`) gives 1; huge perplexity gives ~0 |
 | `w_jb = 0.7` | Weight on jailbreak success — the dominant term |
 | `w_fluency = 0.3` | Weight on the fluency term — the tiebreaker, not the driver |
@@ -604,12 +616,12 @@ jailbreak-score advantage of only `0.0141 / 0.7 = 0.020` completely erases. A ca
 points of jailbreak score better can be arbitrarily less fluent and still win.
 
 **Why AutoDAN's outputs are fluent anyway.** Not because this term forces it — the arithmetic above
-shows it barely can — but because the *mutation operator* is an LLM paraphrase (`paraphraser_lm`),
-which can only produce fluent text in the first place. The population never contains gibberish for
-the fluency term to have to reject. The term is a guardrail against drift, while the real fluency
-constraint is structural: unlike GCG's token-level swaps, no operator in this loop can leave the
-manifold of natural language. Swap the paraphraser for random token edits and this fitness function
-would not save you.
+shows it barely can — but because the *mutation operator* is an LLM paraphrase (`paraphraser_lm`)
+applied to handcrafted DAN-style seeds, which can only produce fluent text in the first place. The
+population never contains gibberish for a fluency term to have to reject. This is exactly why the
+published AutoDAN carries no such term at all (§3.4): the real fluency constraint is structural —
+unlike GCG's token-level swaps, no operator in this loop can leave the manifold of natural
+language. Swap the paraphraser for random token edits and no fitness weighting would save you.
 
 ### 6.3 BROKEN -> FIX: Perplexity Filter Bypassed by Fluent Jailbreaks
 
@@ -620,9 +632,8 @@ would not save you.
 # normal creative-writing requests, §3.6) -- they sail through.
 def is_safe_broken(prompt: str, reference_lm, threshold: float = 50.0) -> bool:
     return _compute_perplexity(reference_lm, prompt) < threshold
-    # AutoDAN's "You are a method actor preparing for a film role about
-    # a chemistry teacher who explains, in great technical detail..."
-    # has perplexity ~15-25 -- well under threshold. PASSES. Jailbreak succeeds.
+    # AutoDAN-style role-play framing measured ~46 perplexity in the paper
+    # (vs ~1532 for GCG suffixes, §3.4) -- under this threshold. PASSES.
 ```
 
 ```python
@@ -665,24 +676,30 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
 ## 7. Real-World Examples
 
 - **GCG (2023)** — demonstrated that suffixes optimized against an ensemble of Vicuna-7B/13B
-  transferred to **GPT-3.5, GPT-4, Bard (Gemini predecessor), and Claude** with measurable
-  (though reduced) attack success rates at publication — the result that made automated,
-  transferable jailbreaks a mainstream safety concern rather than a curiosity.
-- **AutoDAN-Turbo (2024)** — reported the **highest black-box attack success rate** among
-  evaluated methods at publication by *discovering its own strategy library* through lifelong
-  exploration rather than relying on human-seeded strategies (e.g., "DAN", role-play) —
-  demonstrating that the space of effective jailbreak strategies extends well beyond known
-  human-discovered patterns.
-- **TAP (2023)** — achieved comparable or higher attack success rates than the earlier **PAIR**
-  algorithm (referenced in [Safety & Alignment §11](README.md)) while requiring **substantially
-  fewer queries** to the target model, due to the tree-pruning step (§3.5) avoiding wasted
-  exploration of off-topic branches.
+  transferred to **GPT-3.5, GPT-4, Bard (Gemini predecessor), and Claude**. The paper's Table 2
+  reports ensemble-of-prompts transfer ASR of **86.6% on GPT-3.5, 46.9% on GPT-4, 66.0% on
+  PaLM-2, 47.9% on Claude-1 and 2.1% on Claude-2** — note the Claude-1/Claude-2 gap, which shows
+  transfer is strongly model-specific rather than universal. This was the result that made
+  automated, transferable jailbreaks a mainstream safety concern rather than a curiosity.
+- **AutoDAN-Turbo (2024)** — reported **88.5% ASR on GPT-4-1106-turbo** (93.4% when existing
+  human-designed strategies are plugged into its framework) by *discovering its own strategy
+  library* through lifelong exploration rather than relying on human-seeded strategies (e.g.,
+  "DAN", role-play) — demonstrating that the space of effective jailbreak strategies extends
+  well beyond known human-discovered patterns.
+- **TAP (2023)** — outperformed the earlier **PAIR** algorithm (referenced in
+  [Safety & Alignment §11](README.md)) on both axes at once: on GPT-4, **90% jailbreak rate at
+  28.8 average queries vs PAIR's 60% at 39.6**; on GPT-4-Turbo, **84% at 22.5 queries vs PAIR's
+  44% at 47.1** — the paper summarizes this as jailbreaking 40% more prompts while sending 52%
+  fewer queries. The gain comes from the tree-pruning step (§3.5) avoiding wasted exploration of
+  off-topic branches.
 - **SmoothLLM (2023)** — showed that randomized character-level perturbation + majority voting
-  reduces GCG attack success rates from near-100% to single digits on tested models, at the cost
-  of a small utility/latency hit from running multiple forward passes per query — directly
-  motivating §6.3's layered defense.
-- **RepE / Circuit Breakers (2024, research from groups including Anthropic interpretability
-  teams)** — demonstrated defenses operating on **internal activations** rather than input text,
+  reduces GCG attack success rate **below one percentage point** across the seven models tested,
+  down from an undefended 98% on Vicuna and 51% on Llama-2 (the undefended baseline is itself
+  strongly model-dependent, not uniformly near-100%), at the cost of a small utility/latency hit
+  from running multiple forward passes per query — directly motivating §6.3's layered defense.
+- **RepE / Circuit Breakers (Zou et al. 2024, from Gray Swan AI, Carnegie Mellon and the Center
+  for AI Safety — not a frontier-lab release)** — demonstrated defenses operating on
+  **internal activations** rather than input text,
   remaining effective against jailbreak strategies the defense was never trained against,
   because the defense targets the *internal representation of "about to produce harmful
   content"* rather than surface-level input patterns — see
@@ -695,9 +712,9 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
 
 ### 8.1 White-Box vs. Black-Box Attacks
 
-| | White-box (GCG) | Black-box (TAP, AutoDAN, PAP, GPTFuzzer) |
+| | White-box (GCG, AutoDAN) | Black-box (TAP, PAP, GPTFuzzer, AutoDAN-Turbo) |
 |---|---|---|
-| Access required | Model weights/gradients | Query access only (input/output) |
+| Access required | Model weights/gradients (GCG) or output log-likelihoods (AutoDAN's fitness) | Query access only (input/output) |
 | Directly applicable to closed APIs? | No — must rely on transfer (§3.3) | Yes — designed for this |
 | Optimization signal | Exact gradients (precise but expensive per step) | LLM judge scores / fitness functions (noisier, cheaper per query in some cases) |
 | Typical use in red-teaming | Optimize against open-weight proxy, test transfer | Direct evaluation of the target itself |
@@ -874,7 +891,7 @@ The leading explanation connects to the linear representation hypothesis (see [M
 Perplexity filters detect *statistically unusual token sequences* — they catch GCG/BEAST-style gibberish suffixes (perplexity in the thousands) but do nothing against AutoDAN, AutoDAN-Turbo, or PAP, whose entire design optimizes for (or inherently produces) *fluent, low-perplexity* prompts (§3.6) — a well-crafted role-play framing has perplexity comparable to a legitimate creative-writing request and sails through unchanged (§6.3 BROKEN example). The claim conflates "defended against one attack family" with "defended against jailbreaks" generally — defense-in-depth (§5.4, §8.3) covering both gibberish and fluent attack styles, plus representation-level defenses for novel strategies, is required for a meaningful protection claim.
 
 **Q5: How does AutoDAN's genetic algorithm avoid producing gibberish, unlike GCG?**
-AutoDAN's fitness function explicitly weights *fluency* (inverse perplexity under a reference LM) alongside jailbreak success (§3.4) — candidates that drift toward gibberish are selected against from generation one, not as an afterthought. Its mutation operator is also LLM-based paraphrasing (preserving intent while varying surface form) rather than GCG's token-level swaps, which naturally stays within the manifold of fluent text. The tradeoff (§8.2): AutoDAN typically requires more queries/generations to converge than GCG's gradient-guided search, but produces outputs that are both effective AND human-interpretable — useful for understanding *which framings* (role-play, fictional context, gradual escalation) are exploitable.
+Not through its fitness function — AutoDAN scores candidates on the target's log-likelihood loss alone, the same objective GCG uses (§3.4). Fluency is structural instead: the population is seeded with handcrafted, semantically meaningful DAN-style prompts, the mutation operator is LLM-based paraphrasing (preserving intent while varying surface form) rather than GCG's token-level swaps, and the genetic algorithm is hierarchical, recombining at the sentence and word level. No operator can produce gibberish, so none ever enters the population — the paper measures ~46 perplexity for AutoDAN prompts against ~1532 for GCG suffixes. The tradeoff (§8.2): AutoDAN typically requires more queries/generations to converge than GCG's gradient-guided search, but produces outputs that are both effective AND human-interpretable — useful for understanding *which framings* (role-play, fictional context, gradual escalation) are exploitable.
 
 **Q6: What does TAP's "pruning" actually prune, and why does it matter for query efficiency?**
 At each tree node, TAP's judge LLM scores the candidate prompt on two axes: jailbreak progress (is the response moving toward compliance?) and on-topic-ness (does the prompt still relate to the original harmful request, or has the attacker LLM's refinement drifted into an unrelated topic?). Branches scored as off-topic or unlikely to improve are pruned — not expanded further. Without pruning (PAIR's approach — purely iterative, no tree), the search either commits to a single refinement path (missing better alternatives) or would need to expand all branches (expensive). TAP's pruned-tree search reported comparable-or-better attack success rates than PAIR with substantially fewer target-model queries — query count matters directly for cost when evaluating against paid APIs.
@@ -904,7 +921,7 @@ Because the field is adversarial and ongoing — AutoDAN-Turbo (2024) demonstrat
 The target prefix (e.g., "Sure, here is how to...") exploits the autoregressive model's tendency to continue in a manner consistent with its own prior tokens — once "Sure, here is" is in the context, continuing with a refusal becomes a much larger distributional jump than continuing with compliance. This is the same "commitment" dynamic seen in reasoning models' chain-of-thought (early tokens constrain later ones). The defensive implication: some mitigations specifically detect and interrupt generation *if an affirmative-compliance prefix begins forming for a harmful request*, even before the harmful content itself appears — an early-intervention point that's cheaper to monitor than the full generated content.
 
 **Q15: If you only had budget to run ONE automated jailbreak algorithm for a pre-launch evaluation, which would you choose, and what would you explicitly NOT be testing for?**
-There's no single algorithm covering both axes of §8.2 (gibberish vs. fluent) and both access models (§8.1), so any single choice has a known blind spot you must document. A reasonable default for a closed-model team is TAP or AutoDAN (black-box, fluent, directly applicable, reasonably query-efficient) — but explicitly note you are NOT testing: white-box/gradient-based transferability signal (GCG), pure social-engineering with zero optimization (PAP, which sometimes succeeds where optimized methods fail because it doesn't trigger optimization-detection heuristics), and self-discovered novel strategies (AutoDAN-Turbo). In an interview, the value is in *naming the gap explicitly* — "we tested X, which means we have no signal on Y" — rather than implying single-algorithm coverage is comprehensive.
+There's no single algorithm covering both axes of §8.2 (gibberish vs. fluent) and both access models (§8.1), so any single choice has a known blind spot you must document. A reasonable default for a closed-model team is TAP (black-box, fluent, directly applicable, reasonably query-efficient — note AutoDAN is not an option here, since its fitness function needs the target's log-likelihoods, §8.1) — but explicitly note you are NOT testing: white-box/gradient-based transferability signal (GCG), pure social-engineering with zero optimization (PAP, which sometimes succeeds where optimized methods fail because it doesn't trigger optimization-detection heuristics), and self-discovered novel strategies (AutoDAN-Turbo). In an interview, the value is in *naming the gap explicitly* — "we tested X, which means we have no signal on Y" — rather than implying single-algorithm coverage is comprehensive.
 
 **Q16: How does this module's threat model change when the target isn't a chatbot but an agent with tool access?**
 Everything in §3-§8 still applies to getting the *underlying model* to produce a harmful response, but for an agent, "harmful response" can mean "the model decides to call a destructive tool" rather than "the model generates harmful text" — the action surface is much larger and often higher-stakes (file deletion, financial transactions, sending messages). Attack-success-rate benchmarks designed for text generation (AdvBench-style) don't directly measure this; agentic evaluation needs action-level harm classification, and defenses need to extend beyond the text-generation pipeline to tool-call authorization (least-privilege scoping, human-in-the-loop for high-risk actions) — see [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) and [Agent Reliability](../agents_and_tool_use/agent_reliability.md) for the agentic extension.
@@ -928,8 +945,11 @@ Everything in §3-§8 still applies to getting the *underlying model* to produce
 
 ## 14. Case Study
 
-**Scenario**: Before a model release, a safety team runs a structured automated-jailbreak
-evaluation across 520 harmful-behavior prompts (AdvBench-style) spanning 8 harm categories.
+**Scenario** (illustrative composite — the ASR and query figures below are scenario numbers used
+to exercise the statistics, not results published by any of these algorithms' papers; for the
+papers' own reported numbers see §7): before a model release, a safety team runs a structured
+automated-jailbreak evaluation across 520 harmful-behavior prompts (the size of AdvBench's
+released harmful-behaviors set) spanning 8 harm categories.
 
 **Pipeline**: (1) GCG against an open-weight proxy of similar architecture, checking transfer to
 the release candidate — baseline transfer ASR 9%. (2) TAP directly against the release candidate

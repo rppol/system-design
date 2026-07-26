@@ -14,7 +14,7 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 **Mental model**: Hugging Face `model.generate()` works but leaves GPU resources massively underutilized. Inference engines implement continuous batching (no wasted GPU slots), PagedAttention (no KV cache fragmentation), fused CUDA kernels (fewer memory operations), and quantization (smaller weights = faster loads). vLLM is like a highly tuned racing engine — the same 70B model goes from 50 tokens/sec to 600+ tokens/sec with the same hardware.
 
-**Why it matters**: Inference is where 90%+ of LLM compute costs occur after a model is trained. A 10× throughput improvement means 10× cost reduction or serving 10× more users with the same hardware. Choosing the right inference engine is one of the most impactful engineering decisions in production LLM systems.
+**Why it matters**: Inference dominates spend once a model is trained — AWS's published figure is that up to 90% of the infrastructure cost of developing and running ML applications goes to inference. A 10× throughput improvement means 10× cost reduction or serving 10× more users with the same hardware. Choosing the right inference engine is one of the most impactful engineering decisions in production LLM systems.
 
 **Key insight**: The bottleneck during LLM decoding is memory bandwidth (loading weights from GPU HBM), not compute. Batching amortizes this load; quantization reduces data volume. Both are fundamental to efficient inference.
 
@@ -75,7 +75,7 @@ response = client.chat.completions.create(
 
 ### 4.2 TensorRT-LLM (NVIDIA)
 
-NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwell). Highest raw performance, and since the 1.x line it is a PyTorch-architected framework rather than an ahead-of-time engine compiler.
+NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwell). Highest raw performance, and since the 1.x line it is a PyTorch-architected framework rather than an ahead-of-time engine compiler — as of the 1.2 release the TensorRT backend is removed outright and PyTorch is the sole execution backend (`LLM(backend="tensorrt")` now raises `ValueError`, and the per-model `convert_checkpoint.py` scripts are gone).
 
 **Key features:**
 - Quantization: INT4, INT8, FP8 with auto-calibration
@@ -315,8 +315,8 @@ GPTQ (vLLM, ExLlamaV2):
   INT4, INT8 variants
   Slightly lower quality than AWQ at same bit-width
 
-FP8 (TensorRT-LLM on H100):
-  Requires H100 hardware
+FP8 (TensorRT-LLM on Hopper/Ada/Blackwell):
+  Needs FP8 tensor cores — H100/H200, L4/L40S, B200. NOT on A100 (Ampere)
   Best quality at 8-bit; hardware-supported
   Near-BF16 quality at 2× memory savings
 ```
@@ -328,26 +328,29 @@ Example: Serving LLaMA 3 70B, max 4096 context, 50 concurrent users on 2× H100 
 
 Model weights (BF16):  70B × 2 bytes = 140GB (70GB per GPU with TP=2)
 Activations:           ~2GB per GPU (small)
-KV cache per user:     70B model: 2 × 80 layers × 8 KV heads × 128 dim × 2048 tokens × 2 bytes = 660MB
-                       (at 4096 tokens this doubles to ~1.31GB)
-50 users KV cache:     50 × 660MB = 33GB → 16.5GB per GPU
+KV cache per user:     70B model: 2 × 80 layers × 8 KV heads × 128 dim × 2048 tokens × 2 bytes
+                       = 671,088,640 bytes ≈ 670MB
+                       (at 4096 tokens this doubles to ~1.34GB)
+50 users KV cache:     50 × 670MB = 33.5GB → 16.8GB per GPU
 
 Total per GPU:
   Weights:    70GB
-  KV cache:   16.5GB
+  KV cache:   16.8GB
   Overhead:   3GB
   ─────────────
-  Total:      89.5GB ← exceeds 80GB!
+  Total:      89.8GB ← exceeds 80GB!
 
 Headroom left for KV after weights + overhead: 80 - 70 - 3 = 7GB per GPU (14GB across TP=2).
 Every fix below has to land inside that 7GB, which is a brutal constraint:
 
 Fix options:
-  1. Reduce max users to 21: KV = 21 × 660MB / 2 = 6.9GB per GPU → fits (barely)
-  2. Halve context to 1024: KV = 330MB/user → 42 users in the same 6.9GB
+  1. Reduce max users to 20: KV = 20 × 670MB / 2 = 6.7GB per GPU → fits (barely)
+  2. Halve context to 1024: KV = 335MB/user → 40 users in the same 6.7GB
   3. Quantize weights to INT4: 35GB total = 17.5GB per GPU, leaving 59.5GB per GPU
-     for KV → ~180 users at 2048 context. Quantization buys far more than trimming users
-  4. Widen to TP=4: 35GB of weights per GPU, ~42GB per GPU left for KV → ~127 users.
+     for KV → ~177 users at 2048 context (59.5GB ÷ 335MB). Quantization buys far
+     more than trimming users
+  4. Widen to TP=4: 35GB of weights per GPU, ~42GB per GPU left for KV. TP shards the
+     KV cache too, so each user costs 670MB / 4 = 167MB per GPU → ~250 users.
      (TP must divide num_kv_heads=8, so TP ∈ {1,2,4,8} — TP=3 is not a legal shape here)
 ```
 
@@ -376,22 +379,24 @@ always "solve for the number of concurrent users", never "solve for the model".
                    / TP=2                   =  70 GB per GPU
 
   KV per token     = 2 x num_layers x num_kv_heads x head_dim x bytes
-                   = 2 x 80 x 8 x 128 x 2   = 327,680 B  = 320 KB per token
+                   = 2 x 80 x 8 x 128 x 2   = 327,680 B  ~= 0.33 MB per token
 
-  KV per user      = 320 KB x context
-                     context 2048           = 655 MB      <- the "660MB" above
-                     context 4096           = 1.31 GB
+  KV per user      = 327,680 B x context
+                     context 2048           = 671 MB      <- the "670MB" above
+                     context 4096           = 1.34 GB
 
-  50 users @ 2048  = 50 x 655 MB = 32.8 GB  -> 16.4 GB per GPU with TP=2
+  50 users @ 2048  = 50 x 671 MB = 33.5 GB  -> 16.8 GB per GPU with TP=2
 
-  per-GPU total    = 70 GB weights + 16.4 GB KV + 3 GB overhead = 89.4 GB
+  per-GPU total    = 70 GB weights + 16.8 GB KV + 3 GB overhead = 89.8 GB
                      H100 capacity          = 80 GB
-                     overdraw               =  9.4 GB       <- does not fit
+                     overdraw               =  9.8 GB       <- does not fit
 ```
 
-Note the reconciliation: the `660MB` figure in the block above is the **2,048-token** number, not
-the 4,096-token one. At the stated 4,096 context the same 50 users need 65.5 GB of KV cache, and the
-deficit is not 9.4 GB but 42 GB — the plan fails twice as hard as the first pass suggests.
+Note the reconciliation: the `670MB` figure in the block above is the **2,048-token** number, not
+the 4,096-token one. At the stated 4,096 context the same 50 users need 67 GB of KV cache — 33.5 GB
+per GPU — so the per-GPU total becomes 106.5 GB and the overdraw is not 9.8 GB but 26.5 GB. Only the
+KV term doubles while the 7 GB of headroom stays fixed, so the deficit grows ~2.7x, not 2x: the plan
+fails considerably harder than the first pass suggests.
 
 **Why the leading `× 2` exists.** Drop it and every estimate is exactly half the truth, which is the
 single most common way teams OOM in week one: they size for K, forget V, ship, and discover the
@@ -611,7 +616,8 @@ and upgrade. Benchmark first, then divide by your actual fleet size before switc
 
 ### Together AI
 - Serverless inference across 200+ open-source models via an OpenAI-compatible API
-- Runs its own inference stack (originally vLLM-derived) with custom kernels
+- Runs its own inference stack (the Together Inference Engine) with custom kernels — its
+  published stack cites FlashAttention and continuous batching enabled by default
 - Continuously batches across a multi-tenant fleet
 
 ### Anyscale / Ray Serve
@@ -623,8 +629,12 @@ and upgrade. Benchmark first, then divide by your actual fleet size before switc
 ### Mistral AI
 - Mistral's own deployment docs put **vLLM first** for self-hosting Mistral models, with
   TensorRT-LLM and TGI as documented alternatives
-- Mistral worked with NVIDIA to land Mixtral's sparse-MoE support in TensorRT-LLM
-- Mistral Large 3 is documented as running on a single 8×A100 or 8×H100 node under vLLM
+- TensorRT-LLM ships tuned Mixtral 8x7B sparse-MoE support (hybrid expert + tensor
+  parallelism) on Ampere and Hopper; NVIDIA and Mistral co-engineered Mistral NeMo 12B and
+  the Blackwell/NVFP4 path for Mistral Large 3
+- Mistral Large 3 (675B total / 41B active MoE) is documented as fitting one 8-GPU node —
+  FP8 on 8×H200 or 8×B200, NVFP4 on 8×H100 or 8×A100 — served with vLLM at
+  `--tensor-parallel-size 8`. The unquantized BF16 weights do not fit an 8×80GB node
 
 ### Local AI Community
 - llama.cpp runs on everything from Raspberry Pi to Apple Silicon MacBooks
@@ -721,10 +731,10 @@ vLLM is the best general-purpose open-source inference engine, while TensorRT-LL
 A: TTFT (time to first token) is queueing plus prefill — one compute-bound pass over the whole prompt; TPOT (time per output token, also called inter-token latency) is decode — a memory-bandwidth-bound pass per generated token. The two respond to different levers: prefix caching (on by default in current vLLM; disable with `--no-enable-prefix-caching`, and SGLang's RadixAttention) and chunked prefill mainly cut TTFT — a cached 2,000-token system prompt removes hundreds of milliseconds of prompt computation; weight quantization (AWQ/INT4) and speculative decoding mainly cut TPOT, because decode time scales with bytes streamed from HBM per token, not FLOPs. When someone reports "the engine is slow," split the complaint into TTFT vs TPOT first — the fixes barely overlap, and optimizing the wrong phase wastes a sprint.
 
 **Q: How does llama.cpp handle quantization and what quality tradeoffs exist at different quantization levels?**
-llama.cpp supports multiple quantization formats: Q8_0 (8-bit, ~1% quality loss), Q5_K_M (5-bit mixed, ~2-3% loss), Q4_K_M (4-bit mixed, ~3-5% loss), Q3_K_M (3-bit, ~5-10% loss), Q2_K (2-bit, ~15-20% loss). The "K" variants use k-quant, which allocates more bits to important layers (attention) and fewer to less important ones (feed-forward). For a 7B model: FP16 = 14GB, Q8_0 = 7GB, Q4_K_M = 4GB, Q2_K = 2.5GB. Quality tradeoffs: Q4_K_M is the sweet spot for most consumer hardware — a 70B model in Q4_K_M (40GB) fits on an M2 Max with 64GB RAM and produces near-FP16 quality for conversational tasks. Below Q4, quality degrades noticeably on reasoning-heavy tasks (math, coding). llama.cpp runs on CPU (AVX2/AVX512), Apple Metal, and CUDA, making it the go-to for consumer hardware and edge deployment. For production servers, vLLM or TensorRT-LLM are preferred because they handle batching and concurrency better.
+llama.cpp supports multiple quantization formats — Q8_0, Q5_K_M, Q4_K_M, Q3_K_M and Q2_K — trading file size against a measurable but usually small quality loss. Quote measured numbers, not folklore: a 2026 unified evaluation on Llama-3.1-8B-Instruct found average-benchmark deltas versus FP16 of -0.09% (Q8_0), -0.15% (Q5_K_M), -0.43% (Q4_K_M) and -2.02% (Q3_K_M), an order of magnitude smaller than the "3-10% loss" numbers often repeated; Q2_K was outside that study and degrades further. The "K" variants use k-quant super-blocks of 256 weights with per-sub-block scales, and the `_M` mix keeps a higher-precision type (Q6_K) for the quality-sensitive `attention.wv` and `feed_forward.w2` tensors — note it is *both* attention and FFN tensors that get upgraded, not attention at the expense of the FFN. For a 7B model: FP16 = 14GB, Q8_0 = 7GB, Q4_K_M = 4GB, Q2_K = 2.5GB. Quality tradeoffs: Q4_K_M is the sweet spot for most consumer hardware — a 70B model in Q4_K_M (40GB) fits on an M2 Max with 64GB RAM and produces near-FP16 quality for conversational tasks. Below Q4, quality degrades noticeably on reasoning-heavy tasks (math, coding). llama.cpp runs on CPU (AVX2/AVX512), Apple Metal, and CUDA, making it the go-to for consumer hardware and edge deployment. For production servers, vLLM or TensorRT-LLM are preferred because they handle batching and concurrency better.
 
 **Q: What is SGLang's radix attention and how does it improve structured output generation?**
-SGLang's radix attention uses a radix tree (prefix tree) to cache and reuse KV cache entries across requests that share common prefixes, similar to vLLM's prefix caching but optimized for structured generation patterns. For structured outputs (JSON, function calls), SGLang's frontend language allows defining generation patterns that automatically share KV cache across branches. Example: generating a JSON object with 5 fields — all fields share the system prompt + schema prefix, and SGLang caches this shared prefix once. Additionally, SGLang's constrained decoding uses a finite state machine (FSM) compiled from the JSON schema, which is faster than Outlines' token-by-token constraint checking. SGLang achieves 2-5x speedup over vLLM for workloads with heavy structured output generation. Choose SGLang when your application generates many structured outputs with shared prompt prefixes (API backends, data extraction pipelines).
+SGLang's radix attention uses a radix tree (prefix tree) to cache and reuse KV cache entries across requests that share common prefixes, similar to vLLM's prefix caching but optimized for structured generation patterns. For structured outputs (JSON, function calls), SGLang's frontend language allows defining generation patterns that automatically share KV cache across branches. Example: generating a JSON object with 5 fields — all fields share the system prompt + schema prefix, and SGLang caches this shared prefix once. Additionally, SGLang's constrained decoding uses a *compressed* FSM: Outlines also compiles the schema into an FSM, but decodes one token per forward pass, whereas SGLang collapses runs of singular-transition edges so a deterministic multi-token span is emitted in a single step (jump-forward decoding). LMSYS's published benchmark reports up to 2x lower latency and up to 2.5x higher throughput than Outlines+vLLM on JSON decoding — measure your own schemas rather than quoting a fixed multiple. Choose SGLang when your application generates many structured outputs with shared prompt prefixes (API backends, data extraction pipelines).
 
 **Q: How do you choose between cloud inference (vLLM/TRT-LLM) and edge inference (llama.cpp/Ollama)?**
 Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user serving with high concurrency, while edge engines (llama.cpp, Ollama, MLC-LLM) are optimized for single-user, low-resource environments. Decision matrix: (1) Concurrency >1 user — cloud engines (edge engines serialize requests); (2) Hardware — NVIDIA GPUs — vLLM/TRT-LLM; Apple Silicon — llama.cpp/MLX; CPU only — llama.cpp; (3) Model size — >13B parameters — cloud GPUs (edge devices struggle); 1B-7B — edge viable; (4) Latency requirements — <100ms TTFT — cloud with GPU; <1s acceptable — edge; (5) Privacy — data cannot leave device — edge only. Ollama wraps llama.cpp with a user-friendly API and model management, making it ideal for developer machines and prototyping. For mobile deployment: use MLC-LLM (Android/iOS) or ONNX Runtime with quantized models. Production pattern: use cloud inference for real-time features, edge inference for offline-capable features.
@@ -733,7 +743,7 @@ Cloud inference engines (vLLM, TensorRT-LLM, TGI) are designed for multi-user se
 A: Tensor parallelism (TP) splits every weight matrix across GPUs and all-reduces activations inside every layer, so it needs NVLink-class bandwidth (900 GB/s per GPU on H100 SXM) and must stay within one node — `--tensor-parallel-size` up to 8. Pipeline parallelism (PP) splits the model by layers into stages that pass one activation tensor per boundary, tolerating inter-node links (InfiniBand at ~50 GB/s per NIC) — `--pipeline-parallel-size` across nodes. The classic production mistake is TP spanning nodes after a topology change: every layer's all-reduce crosses the slow fabric and throughput drops 5-10×, while "GPU utilization" still looks high. Rule: TP inside the NVLink domain until the model fits, then PP or independent replicas beyond it.
 
 **Q: What is the role of CUDA graphs in LLM inference and when should you disable them?**
-CUDA graphs capture a sequence of GPU operations into a replayable graph, eliminating CPU launch overhead for repeated operations. In LLM inference, the decode phase (generating one token at a time) is identical for each step — same kernel launches, same memory patterns — making it ideal for CUDA graphs. vLLM captures CUDA graphs for common batch sizes, reducing per-token CPU overhead from ~1ms to <0.1ms. This matters because decode is memory-bound, and CPU overhead can become the bottleneck at high throughput. When to disable (--enforce-eager in vLLM): (1) debugging — CUDA graphs make error messages unhelpful; (2) variable-shape operations — dynamic batch sizes or sequence lengths cause graph cache misses; (3) memory pressure — CUDA graphs pre-allocate memory for each captured batch size; (4) unsupported operations — some custom attention kernels do not work with graph capture. In production, always enable CUDA graphs unless actively debugging. The v1 architecture in vLLM improves CUDA graph flexibility with more efficient capture strategies.
+CUDA graphs capture a sequence of GPU operations into a replayable graph, eliminating CPU launch overhead for repeated operations. In LLM inference, the decode phase (generating one token at a time) is identical for each step — same kernel launches, same memory patterns — making it ideal for CUDA graphs. vLLM captures CUDA graphs for common batch sizes; a decode step dispatches hundreds of kernels at roughly 5-10 microseconds of CPU launch cost each, and replaying one graph collapses that dispatch chain into a single launch. Measure the win on your own model rather than quoting a fixed figure. This matters because decode is memory-bound, and CPU overhead can become the bottleneck at high throughput. When to disable (--enforce-eager in vLLM): (1) debugging — CUDA graphs make error messages unhelpful; (2) variable-shape operations — dynamic batch sizes or sequence lengths cause graph cache misses; (3) memory pressure — CUDA graphs pre-allocate memory for each captured batch size; (4) unsupported operations — some custom attention kernels do not work with graph capture. In production, always enable CUDA graphs unless actively debugging. The v1 architecture in vLLM improves CUDA graph flexibility with more efficient capture strategies.
 
 **Q: What is chunked prefill and what problem does it solve?**
 A: Chunked prefill splits a long prompt's prefill into fixed-size chunks (typically 512-2,048 tokens) that are scheduled alongside ongoing decode iterations instead of monopolizing the GPU for one long pass. Without it, a 32K-token prompt arriving at a busy server stalls every in-flight decode for the entire prefill — other users see a multi-second inter-token latency spike, the classic "someone pasted a document and chat froze for everyone" incident. With chunking, decode steps interleave between prompt chunks: the long request's TTFT grows slightly while everyone else's TPOT stays flat. It is enabled by default in recent vLLM versions; tune `max_num_batched_tokens` to trade the new request's TTFT against fleet-wide inter-token latency stability.
@@ -742,7 +752,7 @@ A: Chunked prefill splits a long prompt's prefill into fixed-size chunks (typica
 A: Both reuse the KV cache of shared prompt prefixes, but at different granularity. vLLM's automatic prefix caching hashes fixed-size KV blocks (16 tokens by default) and reuses exact block-aligned matches; SGLang's RadixAttention maintains a token-level radix tree that matches arbitrary-length shared prefixes across requests and across branches of structured generation. For a single common system prompt, both deliver similar wins. For tree-shaped workloads — few-shot prompt variants, multi-branch JSON filling, multi-turn chats where each turn extends a shared prefix — the radix tree matches more aggressively, which is where SGLang's 2-5× advantage comes from. If your traffic is flat single-turn requests with unique prompts, expect near-parity; benchmark your actual prefix-share rate before switching engines.
 
 **Q: How do inference engines handle model loading and what are the optimization strategies?**
-Model loading (downloading weights and transferring to GPU memory) takes 1-10 minutes for large models, creating cold-start latency. Optimization strategies: (1) tensor parallelism loading — load shards in parallel across GPUs rather than sequentially (2-4x faster); (2) memory-mapped loading — mmap the model file and let the OS handle page-level loading (avoids full copy into CPU RAM first); (3) safetensors format — random-access tensor loading without deserializing the entire file (faster than PyTorch .bin format); (4) model caching — keep models in CPU RAM or on fast NVMe for quick reload; (5) pre-warming — load models during deployment before accepting traffic. vLLM loads a 7B model in ~30 seconds on NVMe SSD, 70B in ~3 minutes. For serverless inference (Lambda, Modal), cold start is the primary latency concern — keep instances warm or use shared model caches. Kubernetes strategy: use initContainers to download models from S3/GCS to a local PVC, then the inference container mmaps from local storage.
+Model loading (downloading weights and transferring to GPU memory) takes 1-10 minutes for large models, creating cold-start latency. Optimization strategies: (1) tensor parallelism loading — load shards in parallel across GPUs rather than sequentially (2-4x faster); (2) memory-mapped loading — mmap the model file and let the OS handle page-level loading (avoids full copy into CPU RAM first); (3) safetensors format — random-access tensor loading without deserializing the entire file (faster than PyTorch .bin format); (4) model caching — keep models in CPU RAM or on fast NVMe for quick reload; (5) pre-warming — load models during deployment before accepting traffic. Order of magnitude only, and worth measuring on your own storage path: a 7B model loads in tens of seconds from local NVMe and a 70B in a few minutes. For serverless inference (Lambda, Modal), cold start is the primary latency concern — keep instances warm or use shared model caches. Kubernetes strategy: use initContainers to download models from S3/GCS to a local PVC, then the inference container mmaps from local storage.
 
 ---
 
@@ -752,7 +762,7 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 2. **Set max_model_len explicitly** — don't let the engine default to model's maximum; set it to your actual max input + output.
 3. **Enable tensor parallelism across your GPUs** — multi-GPU almost always worth it for batch throughput.
 4. **Monitor queue depth** — if requests are queuing, add replicas; if GPU utilization is low, reduce replicas.
-5. **Use quantization in production** — INT4/AWQ reduces cost 4× with <5% quality loss; almost always worth it.
+5. **Use quantization in production** — INT4/AWQ cuts weight bytes ~4×, and because decode is bandwidth-bound that translates fairly directly into cost per token; measured quality loss at 4-bit is small (well under 1% on benchmark averages for Q4_K_M on Llama-3.1-8B), so it is almost always worth it.
 6. **Run load tests before launch** — find your throughput ceiling before users hit it.
 
 ---
@@ -896,7 +906,7 @@ async def generate(prompt: str, request_id: str) -> str:
 
 **Additional interview Q&As:**
 
-**What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache reserves one contiguous block per sequence, sized to the maximum sequence length, at request arrival. For a 13B Llama-class model (40 layers, 40 heads, head_dim 128, MHA) that is 2 × 40 × 40 × 128 × 2 bytes = 800KB per token, so 2,048 tokens is ~1.6GB per sequence and 200 concurrent sequences would need ~320GB — four A100s' worth of memory for one model's cache. PagedAttention instead divides KV memory into fixed-size blocks (16 tokens by default) allocated on demand and shared across sampling branches via copy-on-write. The SOSP 2023 paper measured that prior systems put only 20.4-38.2% of their reserved KV memory to actual token state — 60-80% wasted to fragmentation and over-reservation — while vLLM's paged allocator drives that waste to near zero, which is where the 2-4x gain in concurrent sequences comes from.
+**What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache reserves one contiguous block per sequence, sized to the maximum sequence length, at request arrival. For a 13B Llama-class model (40 layers, 40 heads, head_dim 128, MHA) that is 2 × 40 × 40 × 128 × 2 bytes = 800KB per token, so 2,048 tokens is ~1.6GB per sequence and 200 concurrent sequences would need ~320GB — four A100s' worth of memory for one model's cache. PagedAttention instead divides KV memory into fixed-size blocks (16 tokens by default) allocated on demand and shared across sampling branches via copy-on-write. The SOSP 2023 paper measured that prior systems put only 20.4-38.2% of their reserved KV memory to actual token state — 60-80% wasted to fragmentation and over-reservation — while vLLM's paged allocator drives that waste to near zero, which is where the paper's 2-4x throughput gain at the same latency comes from.
 
 **When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation; you want a battle-tested production container maintained by HuggingFace. vLLM is preferred when: you want the deepest PagedAttention/scheduler tuning surface; you need speculative decoding; you need fine-grained control over scheduling. Do not memorize a percentage gap between the two — vLLM's own 2023 launch benchmark claimed up to 3.5x over TGI and both projects have leapfrogged each other many times since, so any number you quote is a version-specific artifact. Benchmark both on your own traffic shape.
 
@@ -937,7 +947,7 @@ def route_request(prompt: str) -> str:
 
 **How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. That measurement is the whole answer — do not carry a remembered percentage gap between vLLM and TGI into the decision, because it is a version-specific artifact that flips with releases. TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
 
-**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'`; the older per-flag form (`--speculative-model`, `--num-speculative-tokens`) has been removed, so a config written against it will fail to start. The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
+**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'`; the old per-flag form (`--speculative-model`, `--num-speculative-tokens`) has been removed, so a config written against it will fail to start. Current vLLM does expose shorthand flags `--spec-method` / `--spec-model` / `--spec-tokens`, which are mutually exclusive with the corresponding keys inside `--speculative-config`. The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
 
 ---
 

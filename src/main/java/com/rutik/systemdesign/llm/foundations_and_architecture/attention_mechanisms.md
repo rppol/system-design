@@ -33,7 +33,7 @@ Key insight: Flash Attention doesn't change what is computed — the mathematica
 
 **Scaled dot-product attention:** `Attn(Q,K,V) = softmax(QK^T / sqrt(d_k)) V`. The scaling by `sqrt(d_k)` is mathematically necessary to prevent softmax saturation at high dimensions.
 
-**Variance argument for sqrt(d_k):** Assume Q and K have entries sampled from N(0,1). The dot product Q_i · K_j = Σ_{k=1}^{d_k} q_{ik} k_{jk} is a sum of d_k i.i.d. products. By the Central Limit Theorem, the variance of each product is 1, so the sum has variance d_k. Therefore the standard deviation is sqrt(d_k). Without scaling, large d_k (e.g., d_k=128) produces QK^T values with std ~11, pushing softmax into regions where the gradient is near-zero (the distribution becomes nearly one-hot). Dividing by sqrt(d_k) restores unit variance.
+**Variance argument for sqrt(d_k):** Assume Q and K have entries sampled from N(0,1). The dot product Q_i · K_j = Σ_{k=1}^{d_k} q_{ik} k_{jk} is a sum of d_k i.i.d. products. Each product of two independent N(0,1) draws has mean 0 and variance 1, and variances of independent terms add, so the sum has variance d_k. Therefore the standard deviation is sqrt(d_k). Without scaling, large d_k (e.g., d_k=128) produces QK^T values with std ~11, pushing softmax into regions where the gradient is near-zero (the distribution becomes nearly one-hot). Dividing by sqrt(d_k) restores unit variance.
 
 **Read it like this.** `Attn(Q,K,V) = softmax(QK^T / sqrt(d_k)) V` says: "for every token, score how well its question matches every token's label, shrink those scores so they stay in a sane range, turn each row of scores into percentages that add to 100%, then mix the tokens' contents in exactly those percentages."
 
@@ -467,6 +467,11 @@ class GroupedQueryAttention(nn.Module):
 
         # Compute attention using PyTorch's Flash Attention (SDPA)
         # This uses FA-2 kernel when available
+        # NOTE: is_causal=True builds a square lower-triangular mask over
+        # (q_len, k_len). That is correct for prefill/training, where q_len ==
+        # k_len. During incremental decode with a populated cache q_len is 1
+        # while k_len is the full history, and the square assumption breaks —
+        # production code passes an explicit mask (or no mask) on that path.
         attn_out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=None,
@@ -712,9 +717,9 @@ class SinkKVCache:
 | Variant | KV Cache (relative) | Quality (PPL) | Implementation Complexity | Best For |
 |---------|--------------------|--------------|--------------------------|---------  |
 | MHA | 1x | Baseline | Simple | Research, small models |
-| MQA | 1/H x | Largest quality drop of the three (Ainslie et al. measured MQA-XXL at 46.6 avg ROUGE vs MHA's 47.2 on T5) | Simple | Latency-critical, quality flexible |
+| MQA | 1/H x | Largest quality drop of the three (Ainslie et al. measured MQA-XXL at 46.6 benchmark average vs MHA's 47.2 on T5) | Simple | Latency-critical, quality flexible |
 | GQA (4:1) | 0.25x | Small | Simple | Production sweet spot |
-| GQA (8:1) | 0.125x | Small (GQA-8-XXL: 47.1 vs MHA 47.2 avg ROUGE) | Simple | Large model serving (70B+) |
+| GQA (8:1) | 0.125x | Small (GQA-8-XXL: 47.1 vs MHA 47.2 benchmark average) | Simple | Large model serving (70B+) |
 | MLA | ~2.25/H x (1/57 at H=128) | Near-MHA | Complex (down+up projections) | Extreme context, model density |
 
 | Flash Attention vs Naive | |
@@ -723,12 +728,12 @@ class SinkKVCache:
 | Speed | 2-4x faster than PyTorch naive |
 | Backward | Recomputes attention in backward (saves activation memory) |
 | Causal mask | Generated on-the-fly (no N×N mask storage) |
-| Limitation | Fixed d_head constraint (< 256 per head) in FA-2; custom attention bias requires workaround |
+| Limitation | Head dimension capped at 256 in FA-2; custom attention bias requires workaround |
 
 | Linear Attention vs Softmax | |
 |------------------------------|--|
 | Complexity | O(N×d) vs O(N²) |
-| Quality gap | 5-15% worse on language modeling benchmarks |
+| Quality gap | Consistently worse on language modeling; the size is model- and corpus-specific, so measure it rather than quoting a fixed percentage |
 | Why worse | Cannot represent sharp peaked distributions (key for copying/retrieval) |
 | Best use case | Ultra-long sequences (>100K) where softmax quality is acceptable tradeoff |
 
@@ -756,7 +761,7 @@ class SinkKVCache:
 
 ### Use Flash Attention when:
 
-- Always — there is no reason not to use it. `F.scaled_dot_product_attention(is_causal=True)` uses FA-2 automatically in PyTorch 2.0+ when CUDA is available.
+- Always — there is no reason not to use it. `F.scaled_dot_product_attention(is_causal=True)` dispatches to a Flash Attention kernel automatically when CUDA is available; SDPA shipped in PyTorch 2.0 with the FA-1 kernel, and FlashAttention-2 was integrated in PyTorch 2.2.
 
 ### Use sliding window attention when:
 
@@ -884,7 +889,7 @@ def kv_cache_gb(seq_len, num_layers, num_kv_heads, d_head, bytes=2):
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `torch.nn.functional.scaled_dot_product_attention` | FA-2 via PyTorch 2.0+ | Automatic FA-2 when CUDA available and d_head <= 256 |
+| `torch.nn.functional.scaled_dot_product_attention` | FA-2 via PyTorch 2.2+ (SDPA itself landed in 2.0 with the FA-1 kernel) | Automatic FA-2 when CUDA available and d_head <= 256 |
 | `flash_attn` (Tri Dao) | Flash Attention 1/2/3 CUDA kernels | `pip install flash-attn --no-build-isolation` |
 | `xformers` (Meta) | Memory-efficient attention ops | Flash attention + custom ops |
 | `vLLM` | KV cache management for serving | PagedAttention for dynamic KV cache allocation |
@@ -903,13 +908,13 @@ Let Q and K have entries i.i.d. from N(0,1). The attention score for token i att
 Flash Attention solves the O(N²) memory problem in attention by processing K and V in blocks that fit in SRAM, using an online softmax to accumulate the result without materializing the full N×N score matrix. Online softmax works as follows: normal softmax `exp(x_i) / Σ_j exp(x_j)` requires all x_j before computing any output. Online softmax maintains a running maximum `m` and running denominator `l`. For each new block of scores: (1) compute new block max `m_block`; (2) update global max `m_new = max(m_prev, m_block)`; (3) rescale previous accumulated output by `exp(m_prev - m_new)` (compensating for max increase); (4) add new block contribution. The mathematical identity `softmax([x1,...,xN]) = softmax_online([x1,...,xN])` holds exactly. Memory: O(N × d) (linear) instead of O(N²). HBM accesses: reduced by M/d where M is SRAM size — typically 5-10x fewer reads/writes, which is where the 2-4x speedup comes from.
 
 **Q: How does GQA reduce KV cache size? What is the quality tradeoff?**
-GQA assigns G key-value heads (G < H) shared across H/G query heads each. During forward pass, the G key-value matrices are expanded via `repeat_interleave` to match H query heads. At inference (generation), only the G KV heads are stored in the KV cache: cache size reduces from `H × d_head` to `G × d_head` per token per layer — a factor of H/G reduction. For LLaMA 3 70B with H=64, G=8: 8x KV cache reduction. Quality tradeoff: less distinct KV representation per query head means some cross-position information is lost. Empirically the loss is small: Ainslie et al. (2023) measured GQA-8 on T5-XXL at 47.1 average ROUGE against MHA's 47.2, with MQA at 46.6. Tasks requiring fine-grained position tracking (copying, coreference) degrade more than tasks requiring semantic understanding. The production sweet spot is G=H/4 to G=H/8 — 4-8x KV savings for close-to-MHA quality; note that no published ablation covers 70B scale, so this is an extrapolation from the T5 result plus the fact that every major open 70B model shipped with it.
+GQA assigns G key-value heads (G < H) shared across H/G query heads each. During forward pass, the G key-value matrices are expanded via `repeat_interleave` to match H query heads. At inference (generation), only the G KV heads are stored in the KV cache: cache size reduces from `H × d_head` to `G × d_head` per token per layer — a factor of H/G reduction. For LLaMA 3 70B with H=64, G=8: 8x KV cache reduction. Quality tradeoff: less distinct KV representation per query head means some cross-position information is lost. Empirically the loss is small: Ainslie et al. (2023) measured GQA-8 on T5-XXL at 47.1 on their seven-benchmark average (ROUGE-1 on five summarization sets, BLEU on WMT, F1 on TriviaQA) against MHA's 47.2, with MQA at 46.6. Tasks requiring fine-grained position tracking (copying, coreference) degrade more than tasks requiring semantic understanding. The production sweet spot is G=H/4 to G=H/8 — 4-8x KV savings for close-to-MHA quality; note that no published ablation covers 70B scale, so this is an extrapolation from the T5 result plus the fact that every major open 70B model shipped with it.
 
 **Q: What is the attention sink phenomenon and how does it affect KV cache eviction?**
 StreamingLLM (Xiao et al., 2023) showed that LLMs assign disproportionately high attention weights to the first 4-8 tokens in the sequence regardless of their semantic content. These "attention sinks" act as aggregate value storage — because a massive fraction of softmax attention goes to them, they must encode the model's otherwise-unattended state. Removing sink tokens from the KV cache causes catastrophic quality degradation even when all semantically relevant tokens are retained. This has three practical implications: (1) KV eviction strategies must never evict sink tokens (always keep first 4-8); (2) sliding window attention must include initial tokens as global tokens; (3) context truncation should remove from the middle, not the beginning. StreamingLLM implements a constant-memory cache by keeping sink tokens (4) + a sliding window of recent tokens, enabling infinite-length generation at fixed memory cost.
 
 **Q: Compare MQA, GQA, and MLA. When would you use each?**
-MQA (Multi-Query): H query heads, 1 KV head. Maximum KV cache reduction (H× smaller), with the largest quality cost of the three — Ainslie et al. put MQA-XXL at 46.6 avg ROUGE against MHA's 47.2 on T5. Used in older models (PaLM, Falcon 7B/40B) and latency-critical deployments. GQA (Grouped Query): H query heads, G KV heads where G is a divisor of H. Configurable quality-memory tradeoff. Standard for modern production models (LLaMA 2+, Mistral, Gemma, Qwen). G=H/8 is the most common. MLA (DeepSeek-V2): Compresses the KV representation to a latent vector of dimension d_c (e.g., 512) regardless of num_heads or d_head. Cache stores a d_c-dimensional latent (plus a 64-dim RoPE key) per token; at attention time, decompresses to full K and V. Achieves ~57x KV reduction vs MHA at DeepSeek-V2's 128 heads, enabling serving a 236B MoE model economically. Complexity: more architectural changes; cannot simply be added to an existing model.
+MQA (Multi-Query): H query heads, 1 KV head. Maximum KV cache reduction (H× smaller), with the largest quality cost of the three — Ainslie et al. put MQA-XXL at 46.6 on their seven-benchmark average against MHA's 47.2 on T5. Used in older models (PaLM, Falcon 7B/40B) and latency-critical deployments. GQA (Grouped Query): H query heads, G KV heads where G is a divisor of H. Configurable quality-memory tradeoff. Standard for modern production models (LLaMA 2+, Mistral, Gemma, Qwen). G=H/8 is the most common. MLA (DeepSeek-V2): Compresses the KV representation to a latent vector of dimension d_c (e.g., 512) regardless of num_heads or d_head. Cache stores a d_c-dimensional latent (plus a 64-dim RoPE key) per token; at attention time, decompresses to full K and V. Achieves ~57x KV reduction vs MHA at DeepSeek-V2's 128 heads, enabling serving a 236B MoE model economically. Complexity: more architectural changes; cannot simply be added to an existing model.
 
 **Q: What does Flash Attention do differently in the backward pass?**
 The standard backward pass for attention requires storing the attention matrix `P = softmax(QK^T/sqrt(d_k))` for computing gradients — O(N²) storage. Flash Attention's backward pass uses activation recomputation: it stores only the output O and the softmax statistics (m, l) — O(N) storage. During backward, it recomputes P from Q, K, and the stored m/l statistics. This recomputation takes additional FLOPs (~1/3 of forward pass cost) but eliminates the O(N²) memory requirement. FA-2's backward pass additionally optimizes warp-level parallelism for the gradient computation, reaching up to 63% of theoretical A100 FLOP utilization in backward (vs 50-73% in forward; the original FlashAttention managed only 25-35% backward). In practice, the memory saving from not storing N²-sized activation matrices enables much larger batch sizes and longer sequences during training.
@@ -936,7 +941,7 @@ The softmax bottleneck (Yang et al., 2018) is a property of the output layer: th
 Some researchers (e.g., the RWKV, Mamba papers) argue that attention's O(N²) complexity is fundamentally limiting and that recurrent or selective state space alternatives achieve similar quality at O(N) complexity. The criticism is valid at extreme context lengths (>1M tokens) where even FA-3 is memory-limited. GQA provides a middle ground: it doesn't reduce attention's theoretical complexity but dramatically reduces the memory cost of the KV cache (the practical bottleneck in serving, not training). The criticism more applies to the serving side: for a model serving 1000 concurrent users at 128K context, even with GQA, KV cache is 42GB × 1000 = 42TB — impossible. Solutions being explored: (1) shared prefix caching reduces this for common prompts; (2) KV cache quantization reduces 2-4x; (3) speculative decoding reduces the number of full KV accesses per generated token; (4) hybrid architectures (Jamba, Zamba) replace some attention layers with SSM layers to reduce total KV cache by 50%.
 
 **Q: How does PyTorch's scaled_dot_product_attention dispatch to Flash Attention?**
-`torch.nn.functional.scaled_dot_product_attention` (introduced in PyTorch 2.0) is a composite operation that automatically selects the best implementation based on input characteristics: (1) Flash Attention 2 kernel: when inputs are on CUDA, dtype is FP16 or BF16, d_head <= 256, and no custom attention mask (or is_causal=True); (2) Memory-efficient attention (xformers-style): when FA-2 conditions are not fully met but CUDA is available; (3) Math (naive): CPU or custom conditions. The dispatch is automatic — no code change needed. Check which backend is used: `torch.backends.cuda.flash_sdp_enabled()`, `torch.backends.cuda.mem_efficient_sdp_enabled()`. To force a specific backend, use the current API: `from torch.nn.attention import sdpa_kernel, SDPBackend` then `with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]): ...`. The older `torch.backends.cuda.sdp_kernel(enable_flash=True, ...)` context manager is deprecated (it emits a FutureWarning) and slated for removal. Practical implication: always use SDPA in production code; it will automatically use FA-2 when available and is forward-compatible with FA-3 when PyTorch adds support.
+`torch.nn.functional.scaled_dot_product_attention` (introduced in PyTorch 2.0; its Flash backend was upgraded from FA-1 to FlashAttention-2 in PyTorch 2.2) is a composite operation that automatically selects the best implementation based on input characteristics: (1) Flash Attention 2 kernel: when inputs are on CUDA, dtype is FP16 or BF16, d_head <= 256, and no custom attention mask (or is_causal=True); (2) Memory-efficient attention (xformers-style): when FA-2 conditions are not fully met but CUDA is available; (3) Math (naive): CPU or custom conditions. The dispatch is automatic — no code change needed. Check which backend is used: `torch.backends.cuda.flash_sdp_enabled()`, `torch.backends.cuda.mem_efficient_sdp_enabled()`. To force a specific backend, use the current API: `from torch.nn.attention import sdpa_kernel, SDPBackend` then `with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]): ...`. The older `torch.backends.cuda.sdp_kernel(enable_flash=True, ...)` context manager is deprecated (it emits a FutureWarning) and slated for removal. Practical implication: always use SDPA in production code; it will automatically use FA-2 when available and is forward-compatible with FA-3 when PyTorch adds support.
 
 **Q: Walk through the memory math for serving 100 concurrent users at 32K context on LLaMA 3 8B.**
 LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV cache per token = 2 (K+V) × 32 layers × 8 KV heads × 128 dims × 2 bytes = 131,072 bytes ≈ 128KB per token. Per user at 32K tokens: 32,768 × 128KB = 4GB. For 100 users: 400GB — impossible on standard GPU clusters. Practical solutions: (1) Reduce context to 8K (common): 1GB per user, 100GB total — feasible on 2x H100 (160GB). (2) Use KV quantization INT8: halves to 50GB for 100 users at 8K. (3) PagedAttention (vLLM): allows sharing KV pages across users with common prefixes (system prompt); reduces unique KV storage by 20-40%. (4) Reduce max batch: serve 25 concurrent users at 32K, accept lower throughput. Model weights: 8B × 2 bytes = 16GB — small compared to KV cache at this scale.
@@ -945,7 +950,7 @@ LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV ca
 
 ## 13. Best Practices
 
-1. Always use `F.scaled_dot_product_attention(is_causal=True)` in PyTorch 2.0+ instead of manually implementing attention — automatic FA-2 dispatch, no code changes needed when FA-3 becomes available.
+1. Always use `F.scaled_dot_product_attention(is_causal=True)` instead of manually implementing attention — automatic Flash Attention dispatch (FA-2 from PyTorch 2.2 onward), no code changes needed when FA-3 becomes available.
 2. Set `is_causal=True` not `attn_mask=causal_mask` — `is_causal=True` generates the mask on-the-fly without materializing an N×N tensor; passing a manual causal mask forces materialization and disables FA-2.
 3. Choose GQA G=H/8 as a starting point for production models — empirically balances quality and KV cache reduction. Monitor PPL degradation on your specific task before going lower.
 4. Never remove attention sinks (first 4-8 tokens) from KV cache eviction policies — they disproportionately harm output quality.
@@ -971,9 +976,9 @@ LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV ca
 ```
 Model weights (LLaMA 3 70B, BF16): 70B × 2 bytes = 140GB
 KV cache (MHA, 128K, per user):
-  2 × 80 layers × 64 heads × 128 dims × 128K tokens × 2 bytes = 337GB
+  2 × 80 layers × 64 heads × 128 dims × 131,072 tokens × 2 bytes = 344GB (320 GiB)
 
-1 user: 140GB (weights) + 337GB (KV) = 477GB  → barely fits 8x H100
+1 user: 140GB (weights) + 344GB (KV) = 484GB  → barely fits 8x H100
 50 users: impossible
 ```
 

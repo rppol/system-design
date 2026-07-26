@@ -94,10 +94,14 @@ embedded text reads like an instruction relevant to B's task, B may act on it.
 A more severe variant: the injected payload doesn't just try to manipulate the *immediately
 receiving* agent — it specifically instructs that agent to **include the injection itself
 (verbatim or paraphrased) in its own output**, so that whichever agent receives *that* agent's
-output is also exposed, and so on. Research on this pattern (2024) demonstrated that such
+output is also exposed, and so on. Lee and Tiwari, "Prompt Infection: LLM-to-LLM Prompt
+Injection within Multi-Agent Systems" (arXiv 2410.07283, October 2024) demonstrated that such
 injections can propagate across a multi-agent network with **no additional attacker action after
 the initial injection point** — the infected agents do the propagation work themselves, exactly
-like a self-replicating worm uses a compromised host's own resources to infect the next host. The
+like a self-replicating worm uses a compromised host's own resources to infect the next host.
+Their paper reports that multi-agent systems remain highly susceptible even when agents do not
+share all communications publicly, and proposes **LLM Tagging** — marking which text came from
+which agent — as a partial mitigation that reduces but does not eliminate spread. The
 severity scales with **network connectivity**: a multi-agent system where many agents communicate
 with many others (common in agent marketplaces, A2A registries) has a much larger potential
 propagation surface than a strict pipeline.
@@ -155,7 +159,9 @@ JWT-authenticated A2A tasks) establish *who sent a message* but — critically �
 *that the message's content is safe to act on*. A cryptographically valid signature from a
 legitimate peer agent on a message that *contains* a propagated injection (§3.3) is still a valid
 signature — authentication and content-safety are independent properties. **Capability-based
-security** (CaMeL, Google DeepMind 2025) addresses content-safety directly: rather than the LLM's
+security** (CaMeL — "CApabilities for MachinE Learning" — Debenedetti et al., "Defeating Prompt
+Injections by Design," arXiv 2503.18813, March 2025; Google, Google DeepMind and ETH Zurich)
+addresses content-safety directly: rather than the LLM's
 output directly triggering actions, the LLM's output is treated as **data**; a separate,
 non-LLM **control flow** determines what actions are taken, and any action requires an
 **unforgeable capability token** scoping exactly what that action is permitted to do. The LLM
@@ -558,15 +564,18 @@ def route_to_human_review(message: ResearchFindings) -> None: ...
 
 ## 7. Real-World Examples
 
-- **Prompt Infection research (2024)** — academic work demonstrated self-replicating prompt
-  injection across multi-agent LLM systems, showing that a single injection point could propagate
-  to every agent in a connected network with no further attacker action, validating §3.3's worm
-  analogy as a measured phenomenon, not just a theoretical concern.
-- **CaMeL (Google DeepMind, 2025)** — a capability-based architecture (§3.7, §5.4) demonstrating
-  that treating LLM output strictly as data, with a non-LLM control flow enforcing capability
-  tokens, substantially reduces prompt-injection attack success rates in agentic settings compared
-  to single-LLM-with-instructions architectures — at the cost of architectural complexity (§8).
-- **Dual-LLM pattern (Simon Willison, widely cited architectural pattern)** — proposed the
+- **Prompt Infection (Lee & Tiwari, arXiv 2410.07283, Oct 2024)** — demonstrated self-replicating
+  prompt injection across multi-agent LLM systems, showing that a single injection point could
+  propagate to every agent in a connected network with no further attacker action, validating
+  §3.3's worm analogy as a measured phenomenon, not just a theoretical concern. Their proposed
+  defense, LLM Tagging, reduces spread when combined with existing safeguards but does not stop it.
+- **CaMeL (Debenedetti et al., arXiv 2503.18813, 2025 — Google, Google DeepMind, ETH Zurich)** —
+  a capability-based architecture (§3.7, §5.4) in which LLM output is treated strictly as data and
+  a non-LLM interpreter tracks data provenance and enforces capability tokens before every tool
+  call. On AgentDojo it **solves 77% of tasks with provable security, against 84% for an
+  undefended system** — the 7-point gap is the concrete price of the guarantee, alongside the
+  architectural complexity (§8). Reference code: `google-research/camel-prompt-injection`.
+- **Dual-LLM pattern (Simon Willison, April 2023)** — proposed the
   "quarantined LLM / privileged LLM" split (§5.4) as a practical mitigation predating CaMeL's
   formal capability framework, now a common reference architecture for agents that must process
   untrusted content and also take privileged actions.
@@ -705,8 +714,8 @@ attacker's control) gets the *appearance* of robustness from majority voting wit
 
 | Tool / Concept | Role |
 |---|---|
-| **CaMeL (Google DeepMind)** | Capability-based architecture (§3.7, §5.4) — non-LLM control flow + unforgeable capability tokens |
-| **Dual-LLM pattern (Simon Willison)** | Quarantined/privileged LLM split (§5.4) — practical precursor to CaMeL |
+| **CaMeL** (Google / Google DeepMind / ETH Zurich, arXiv 2503.18813) | Capability-based architecture (§3.7, §5.4) — non-LLM control flow + unforgeable capability tokens; 77% of AgentDojo tasks solved with provable security vs 84% undefended |
+| **Dual-LLM pattern (Simon Willison, April 2023)** | Quarantined/privileged LLM split (§5.4) — practical precursor to CaMeL |
 | **Pydantic / schema validation** | Enforces structured, field-separated inter-agent messages (§6.2) — data fields vs. absent "instruction" fields |
 | **A2A JWT signing** ([Agent-to-Agent Protocols §6.2](agent_to_agent_protocols.md)) | Message authentication (§3.7) — necessary but not sufficient (§8) |
 | **OpenTelemetry for LLM Apps** ([cross_cutting](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md)) | Cross-agent tracing (§10.4) — reconstructing propagation paths after an incident |

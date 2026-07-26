@@ -14,7 +14,7 @@
 
 ## 1. Concept Overview
 
-Model Context Protocol (MCP) is an open protocol published by Anthropic in November 2024 that standardizes how LLM applications connect to external data sources and tools. Before MCP, every integration between an LLM-powered application and an external system (a database, a file system, a SaaS API) required bespoke code on both sides. MCP replaces that N-times-M integration matrix with a single, versioned, capability-negotiated protocol. Spec revisions are date-stamped strings; the released revisions to date are `2024-11-05`, `2025-03-26`, `2025-06-18` and `2025-11-25`, with `2026-07-28` in release candidate at the time of writing (July 2026). Unless stated otherwise this module describes `2025-11-25`, the current released revision.
+Model Context Protocol (MCP) is an open protocol published by Anthropic in November 2024 that standardizes how LLM applications connect to external data sources and tools. Before MCP, every integration between an LLM-powered application and an external system (a database, a file system, a SaaS API) required bespoke code on both sides. MCP replaces that N-times-M integration matrix with a single, versioned, capability-negotiated protocol. Spec revisions are date-stamped strings; the released revisions to date are `2024-11-05`, `2025-03-26`, `2025-06-18` and `2025-11-25`, with `2026-07-28` in release candidate at the time of writing (July 2026). Unless stated otherwise this module describes `2025-11-25`, the current released revision. MCP is no longer a single-vendor protocol: Anthropic donated it on 9 December 2025 to the **Agentic AI Foundation**, a directed fund under the Linux Foundation, and the specification is now developed by Working Groups under that governance.
 
 MCP defines three primitives that **servers** offer to clients:
 
@@ -216,17 +216,17 @@ The envelope is fixed cost per message, not per byte of useful work. That ratio 
    "arguments":{"path":"/home/user/project/main.py"}}}
 
     JSON-RPC envelope   jsonrpc + id + method + params keys        55 bytes
-    MCP payload         tool name + argument value                 70 bytes
+    MCP payload         name/arguments object incl. the path       71 bytes
                                                                  ---------
-    total on the wire                                            125 bytes
+    total on the wire                                            126 bytes
 
-    envelope share = 55 / 125 = 44%
+    envelope share = 55 / 126 = 44%
 
-  Pretty-printed as displayed above (newlines + 2-space indent): ~340 bytes, 2.7x
+  Pretty-printed as displayed above (newlines + 2-space indent): 171 bytes, 1.4x
   larger. The indentation in this document is for human readers; minify in transit.
 
   One tool call = 2 messages. A 20-call session:
-    20 x (125 request + 125 response) = 5,000 bytes of JSON -- genuinely negligible.
+    20 x (126 request + 126 response) = 5,040 bytes of JSON -- genuinely negligible.
 
   Now the case that is not negligible. resources/read on a 500 KB PDF:
     base64 inflation    500 KB x 4/3                    = 667 KB on the wire

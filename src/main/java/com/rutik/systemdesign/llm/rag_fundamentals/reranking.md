@@ -669,13 +669,13 @@ def handle_support_query(query: str) -> dict:
 | End-to-end P95 latency | 1.6s | 1.95s |
 | Daily retrieval cost | ~$40 (embedding API) | ~$240 (embedding + Cohere Rerank) |
 
-The $200/day increase in retrieval cost (Cohere Rerank) was justified: the 23-point CSAT improvement reduced human agent escalations by 11% net (despite routing 11% more via threshold), saving ~$1,800/day in agent handling time at the company's support cost model.
+The $200/day increase in retrieval cost (Cohere Rerank) was justified on quality grounds: self-service CSAT rose a full point (3.1 to 4.1 out of 5.0) and the audited hallucination rate fell 23 points (31% to 8%). Note the cost side is not a saving — the confidence threshold deliberately routes 11 points MORE traffic to human agents (22% to 33%), so this trade buys answer quality and pays for it in both API spend and agent time.
 
 **Tradeoffs and Alternatives**
 
 - Self-hosted BGE-reranker-large alternative: would cost ~$15/day GPU vs. $200/day Cohere but required handling the 512-token truncation problem (34% of chunks) — truncation caused the reranker to miss relevant content in the second half of long support articles. Switching to 400-token chunks (with re-indexing) would resolve the truncation issue and make BGE-reranker-large viable at a 13× cost reduction.
 - The relevance threshold (0.30) was calibrated on the labeled eval set: at 0.30, the precision of returned answers was 89%; raising to 0.40 improved precision to 94% but routed 28% of queries to human agents (unacceptable deflection rate). The threshold is a product decision as much as a technical one.
-- Flash reranking (FlashRank): a lightweight reranker that runs in 15ms CPU-only, suitable for eliminating the GPU dependency. FlashRank achieves approximately 80% of BGE-reranker-large quality — acceptable for Tier 2 support (general product questions) but not Tier 1 (billing, security, account access) where the quality gap matters.
+- Flash reranking (FlashRank): a lightweight CPU-only reranker that eliminates the GPU dependency at a real but corpus-specific quality cost. Neither its latency nor its quality gap versus BGE-reranker-large is published as a comparable head-to-head benchmark, so measure both on your own eval set — in this deployment the gap was tolerable for Tier 2 support (general product questions) but not Tier 1 (billing, security, account access).
 
 **Interview Discussion Points**
 

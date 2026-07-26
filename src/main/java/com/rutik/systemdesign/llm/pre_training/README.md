@@ -25,7 +25,7 @@ The scale of pre-training is staggering: GPT-4 was trained on trillions of token
 ## 3. Core Principles
 
 - **Self-supervised learning**: Training signal from predicting next tokens; no human labels needed at scale.
-- **Data quality > quantity**: A well-curated 1T token dataset beats a poorly filtered 10T token dataset (the LIMA insight). Quality filtering impact: a 10x smaller high-quality dataset can match or exceed a 10x larger unfiltered dataset on downstream benchmarks.
+- **Data quality > quantity**: A well-curated 1T token dataset beats a poorly filtered 10T token dataset. Quality filtering impact: a 10x smaller high-quality dataset can match or exceed a 10x larger unfiltered dataset on downstream benchmarks (the Phi "textbooks are all you need" line of work — note that LIMA is a *fine-tuning* result about 1,000 curated SFT examples and says nothing about pre-training data scale).
 - **Data mixture optimization**: Not all data domains are equal — code data at 10-15% of the mix improves reasoning even on non-code tasks. The optimal mixture depends on target capabilities, and algorithms like DoReMi can find better domain weights automatically.
 - **Training dynamics matter**: Loss curves, gradient norms, and learning rate schedules determine stability and final quality.
 - **Irreversibility**: Pre-training mistakes are expensive to fix — a contaminated training set or wrong architectural choice is hard to undo at scale.
@@ -268,7 +268,7 @@ flowchart TD
     class TRAIN train
 ```
 
-~3–5 % of raw Common Crawl survives quality filtering; high-quality sources (Wikipedia, curated books) are oversampled to compensate for their small volume.
+Roughly 10 % of raw Common Crawl survives the one published end-to-end pipeline (RefinedWeb, whose Figure 2 reports that Macrodata Refinement "removes nearly 90 % of the documents originally in CommonCrawl"); more aggressive pipelines keep only a few percent. High-quality sources (Wikipedia, curated books) are oversampled to compensate for their small volume.
 
 ### Learning Rate Schedule
 ```mermaid
@@ -338,22 +338,25 @@ the loss plateaus noisily forever — the model keeps stepping over the minimum 
 
 **Web data (Common Crawl) quality pipeline:**
 ```
-Raw CC crawl: ~2.0-2.5B pages / ~350-400 TiB uncompressed HTML per monthly snapshot
-               (RedPajama-V2 extracted 100T+ text tokens from 84 snapshots, ~1.2T/snapshot)
+Raw CC crawl: ~2.0-2.3B pages / ~345 TiB uncompressed HTML per monthly snapshot
+               (CC-MAIN-2026-12: 1.97B pages, 344.64 TiB)
+               (RedPajama-V2 spans 84 snapshots -> 30T deduplicated tokens, ~360B/snapshot)
   |
   v  URL filtering (known-quality domains upweighted)
   |
   v  Language identification (fastText or CLD3)
   |
   v  Deduplication:
-     MinHash with k=9 n-grams, Jaccard threshold 0.8
+     MinHash over n-gram shingles (5-grams are typical), Jaccard threshold 0.8
      Remove documents with >80% overlap with any other
   |
   v  Quality classifier (trained on curated positive examples):
      Reddit upvotes as proxy for quality (WebText/OpenWebText)
      Wikipedia/books as high-quality reference
   |
-  v  ~3-5% of raw CC survives (but that's still trillions of tokens)
+  v  ~10% of raw CC survives RefinedWeb's published pipeline; more aggressive
+     pipelines keep 1-5% (GPT-3 kept 570GB out of 45TB of compressed plaintext)
+     — either way, still trillions of tokens
 ```
 
 ### Data Mixture Optimization
@@ -384,7 +387,7 @@ The Pile (EleutherAI):
 1. Train a small reference model (280M params) on the baseline domain weights
 2. Train a second 280M proxy model with group-DRO, which upweights domains where the proxy's excess loss over the reference is largest
 3. Apply the learned domain weights to train the full-scale model (8B in the paper — 30x the proxy)
-4. Result on The Pile: **+6.5 percentage points** average few-shot downstream accuracy, and the baseline accuracy is reached with **2.6x fewer training steps** — without increasing total data volume
+4. Result on The Pile: **+6.5 percentage points** average one-shot downstream accuracy, and the baseline accuracy is reached with **2.6x fewer training steps** — without increasing total data volume
 
 **Key findings on domain weighting:**
 - Raising the code fraction is widely reported to improve non-code reasoning as well, and frontier mixes have moved that way (Llama 3: 17% code + 25% math/reasoning). The size of the transfer is model- and eval-specific; treat any single "+X% on GSM8K" number as an internal measurement, not a published constant.
@@ -807,9 +810,9 @@ section above).
 | GPT-NeoX | Open-source LLM training | EleutherAI framework |
 | Nanotron | LLM training framework | HuggingFace; modern replacement |
 | torchtitan | PyTorch-native training platform | `pytorch/torchtitan`; released on PyPI (0.2.x), actively developed |
-| Common Crawl | Web data source | ~2-2.5B pages, ~350-400 TiB uncompressed per monthly snapshot |
+| Common Crawl | Web data source | ~2.0-2.3B pages, ~345 TiB uncompressed per monthly snapshot |
 | The Pile | Curated training dataset | EleutherAI; 825GB diverse text |
-| DCLM | DataComp for LM | New curated CC dataset, strong quality |
+| DCLM | DataComp for LM | Curated CC dataset (DCLM-Baseline), strong quality |
 | RedPajama-v2 | Open training dataset | Together AI; 30T tokens |
 
 ---
@@ -844,7 +847,7 @@ Data deduplication removes near-duplicate documents from the training corpus, im
 Chinchilla (Hoffmann et al., 2022) found the compute-optimal ratio is roughly 20 tokens per parameter — a 70B model should train on 1.4T tokens. LLaMA 1 deliberately over-trained smaller models on much more data (6.7B and 13B on 1.0T tokens, 32.5B and 65.2B on 1.4T — far beyond Chinchilla-optimal for the small models). The LLaMA approach is better for inference efficiency: a smaller over-trained model achieves the same quality as a larger Chinchilla-optimal model but is cheaper to serve. Chinchilla optimizes for training compute; LLaMA optimizes for inference compute. Since inference cost dominates in production (training is one-time, inference is continuous), the industry has shifted toward the LLaMA strategy. Llama 3 8B was trained on ~15T tokens — about 1,875 tokens per parameter, roughly 94x the Chinchilla ratio of 20.
 
 **Q: What is curriculum learning in pre-training and does it help?**
-Curriculum learning orders training data from easy to hard, hypothesizing that models learn better with structured progression. In LLM pre-training, this might mean training on simple Wikipedia first, then academic papers, then code. Evidence is mixed: optimizing the domain *mixture* clearly helps — DoReMi reports +6.5 percentage points average few-shot downstream accuracy on The Pile and reaches baseline accuracy 2.6x faster — but that is a better fixed mixture, not an easy-to-hard ordering. Most frontier models (GPT-4, Llama 3) use random sampling with fixed domain proportions, suggesting that at sufficient scale, ordering effects diminish. What does work: starting with high-quality data and maintaining quality throughout training, rather than starting with low-quality data. The most impactful "curriculum" choice is increasing the fraction of code and math data in later training stages, which several models (CodeLLaMA, DeepSeek) use successfully.
+Curriculum learning orders training data from easy to hard, hypothesizing that models learn better with structured progression. In LLM pre-training, this might mean training on simple Wikipedia first, then academic papers, then code. Evidence is mixed: optimizing the domain *mixture* clearly helps — DoReMi reports +6.5 percentage points average one-shot downstream accuracy on The Pile and reaches baseline accuracy 2.6x faster — but that is a better fixed mixture, not an easy-to-hard ordering. Most frontier models (GPT-4, Llama 3) use random sampling with fixed domain proportions, suggesting that at sufficient scale, ordering effects diminish. What does work: starting with high-quality data and maintaining quality throughout training, rather than starting with low-quality data. The most impactful "curriculum" choice is increasing the fraction of code and math data in later training stages, which several models (CodeLLaMA, DeepSeek) use successfully.
 
 **Q: How do you diagnose and recover from training instability (loss spikes) during pre-training?**
 Training instability manifests as sudden loss spikes — the training loss jumps by 0.5-2.0 and may or may not recover. Causes: (1) learning rate too high for current training stage; (2) data quality issues — a batch with corrupted or adversarial data; (3) numerical overflow in FP16/BF16 (especially with large gradient norms); (4) attention logits growing too large. Diagnosis: log gradient norms per layer (spikes in specific layers indicate the source), check the specific training examples in the spike batch, monitor attention entropy. Recovery strategies: (1) skip the problematic batch and resume; (2) roll back to a checkpoint 100-1000 steps before the spike; (3) reduce learning rate temporarily; (4) add gradient clipping (max_grad_norm=1.0). Prevention: use BF16 instead of FP16 (larger dynamic range), pre-attention LayerNorm (as in LLaMA), and z-loss regularization on attention logits. PaLM's training paper documented 20+ loss spikes during training, each requiring checkpoint rollback.
@@ -869,7 +872,7 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
 ## 13. Best Practices
 
 1. **Deduplicate aggressively** — both exact duplicates (substring match) and near-duplicates (MinHash). Repeated data hurts generalization.
-2. **Use high-quality data for the final 10% of training** — LIMA-style: the last few billion tokens of high-quality data disproportionately shapes the model's "final personality."
+2. **Use high-quality data for the final 10% of training** — the "annealing" phase used by Llama 3 and others: the last few billion tokens, drawn from the highest-quality sources, disproportionately shape the model's final behaviour. (Do not cite LIMA here — that result is about 1,000 curated SFT examples, not pre-training data.)
 3. **Checkpoint frequently** — every 30-60 minutes at scale; rolling restarts after hardware failures are inevitable.
 4. **Monitor per-domain losses** — track validation loss separately on code, math, web text to detect if any domain is being under/over-fit.
 5. **Run eval benchmarks every N billion tokens** — validate that capabilities emerge and don't regress as training progresses.
@@ -880,13 +883,14 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
 
 ## 14. Case Study
 
-**Scenario:** A biotech company continues pre-training Mistral-7B-v0.3 (existing open-source model) on 500B domain-specific tokens: scientific literature (PubMed, biorXiv), patent filings, clinical trial data, and internal lab reports. Goal: improve domain perplexity from 24.3 (baseline Mistral-7B on biomedical text) to < 16.0, maintain general language benchmark scores within 5% of baseline, training cost < $80,000.
+**Scenario:** A biotech company continues pre-training Mistral-7B-v0.3 (existing open-source model) on 500B domain-specific tokens: scientific literature (PubMed, biorXiv), patent filings, clinical trial data, and internal lab reports. Goal: improve domain perplexity from 24.3 (baseline Mistral-7B on biomedical text) to < 16.0, maintain general language benchmark scores within 5% of baseline, training cost < $90,000.
 
 **Architecture:**
 
 ```
   Mistral-7B-v0.3 (Starting Checkpoint)
-  Params: 7.24B, Context: 32k (Sliding Window Attention)
+  Params: 7.25B, Vocab: 32,768, Context: 32k
+  (v0.2 removed sliding-window attention; v0.3 config has sliding_window: null)
          |
          v Data Preparation
   ┌─────────────────────────────────────────────────────────────┐
@@ -895,10 +899,10 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
   │  Full-text open-access papers (PMC): 120B tokens            │
   │  US/EU patent biotech filings: 80B tokens                   │
   │  Clinical trial data (ClinicalTrials.gov): 40B tokens       │
-  │  BioRxiv preprints (2013-2024): 30B tokens                  │
+  │  BioRxiv preprints (2013-2024): 40B tokens                  │
   │  Internal lab reports (anonymized): 15B tokens              │
   │  General text (5% to prevent catastrophic forgetting):      │
-  │    C4/RedPajama mixture: 35B tokens                         │
+  │    C4/RedPajama mixture: 25B tokens                         │
   │                                                             │
   │  Data Quality Pipeline:                                     │
   │  1. Dedup: MinHash LSH, threshold=0.80 → removed 12%       │
@@ -914,7 +918,7 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
   │  Parallelism: DP=32 (7B fits on 1 GPU in BF16)              │
   │  Batch: 2M tokens (smaller than base pre-training ~4M)      │
   │    rationale: domain data is less noisy → smaller batch ok  │
-  │  LR: 1e-5 (10× lower than base pre-training's 3e-4)        │
+  │  LR: 1e-5 (30× lower than base pre-training's 3e-4)        │
   │    rationale: continued pre-training — don't overshoot      │
   │  LR schedule: cosine decay, 2000-step warmup                │
   │  Epochs: ~1.0 (500B tokens / 500B dataset = 1 pass)        │
@@ -1002,8 +1006,14 @@ class ContinuedPretrainingConfig:
         return min_lr + cosine * (self.learning_rate - min_lr)
 
     def to_deepspeed_config(self) -> dict:
+        # DeepSpeed asserts train_batch_size == micro_batch_per_gpu * grad_accum * world_size.
+        # Deriving it from global_batch_tokens // sequence_length (488) instead of from the
+        # realized product (2 * 7 * 32 = 448) trips that assertion at engine init — the
+        # integer floor in grad_accum_steps is exactly the 8% the two numbers disagree by.
         return {
-            "train_batch_size": self.global_batch_tokens // self.sequence_length,
+            "train_batch_size": (
+                self.micro_batch_sequences * self.grad_accum_steps * self.num_gpus
+            ),
             "train_micro_batch_size_per_gpu": self.micro_batch_sequences,
             "gradient_accumulation_steps": self.grad_accum_steps,
             "gradient_clipping": self.gradient_clip,
@@ -1159,8 +1169,8 @@ def broken_lr_for_continued_pretraining() -> float:
 
 
 # FIX: Use 10-30× lower LR for continued pre-training.
-# 1e-5 provides meaningful domain learning (BioASQ +18%) while limiting
-# general capability loss (MMLU -2.8% — within 5% acceptable threshold).
+# 1e-5 provides meaningful domain learning (BioASQ +18.2 pp) while limiting
+# general capability loss (MMLU -1.7 pp — within the 5% acceptable threshold).
 def fixed_lr_continued() -> float:
     return 1e-5   # 30× lower than base pre-training
 
@@ -1176,7 +1186,7 @@ def broken_pure_domain_data(domain_dataset: list, n_tokens: int) -> list:
 # FIX: Mix 5% general text to act as forgetting prevention.
 # This is the "replay buffer" approach from continual learning:
 # by periodically seeing general text, the model retains those representations.
-# 5% general text: MMLU loss reduced from -18% to -2.8%.
+# 5% general text: MMLU loss reduced from -21.1 pp (62.3 -> 41.2) to -1.7 pp.
 def fixed_mixed_data(domain_dataset: list, general_dataset: list) -> list:
     # Interleave: 95% domain, 5% general (every 20th sample is general)
     mixed = []
@@ -1249,32 +1259,39 @@ def fixed_load_optimizer_checkpoint(
 # (if batch draws from beginning), then internal reports — heavily overrepresents PubMed style.
 
 # FIX: Proportional sampling from each source throughout training.
-# Use DataLoader with per-source sampling weights.
-import torch
+# WeightedRandomSampler needs ONE weight PER DATASET SAMPLE — it indexes into the
+# weights list, so a list of per-source weights (or that list repeated) samples
+# meaningless indices. Divide the target share by the source's sample count so each
+# source is drawn at its target rate regardless of its raw size.
+from collections import Counter
 from torch.utils.data import WeightedRandomSampler
 
-def build_weighted_sampler(source_sizes: dict[str, int]) -> WeightedRandomSampler:
-    total = sum(source_sizes.values())
-    weights = [size / total for size in source_sizes.values()]
-    # Each source contributes proportionally — no source dominates epoch structure
-    n_samples = total // 512   # approximate number of batches
-    return WeightedRandomSampler(weights=weights * n_samples, num_samples=n_samples)
+def build_weighted_sampler(
+    sample_sources: list[str],          # source name for each sample, in dataset order
+    target_mix: dict[str, float],       # desired sampling fraction per source, sums to 1
+) -> WeightedRandomSampler:
+    counts = Counter(sample_sources)
+    weights = [target_mix[s] / counts[s] for s in sample_sources]
+    # replacement=True: a large source is not exhausted before a small one is reached
+    return WeightedRandomSampler(
+        weights=weights, num_samples=len(weights), replacement=True
+    )
 ```
 
 **Metrics:**
 
 | Metric | Baseline Mistral-7B | After Continued Pre-training |
 |--------|--------------------|-----------------------------|
-| BioASQ accuracy | 48.2% | 66.4% (+18.2%) |
-| PubMedQA accuracy | 61.3% | 74.8% (+13.5%) |
-| MedMCQA accuracy | 54.7% | 68.1% (+13.4%) |
+| BioASQ accuracy | 48.2% | 66.4% (+18.2 pp) |
+| PubMedQA accuracy | 61.3% | 74.8% (+13.5 pp) |
+| MedMCQA accuracy | 54.7% | 68.1% (+13.4 pp) |
 | Domain perplexity (biomedical) | 24.3 | 15.7 (-35%) |
-| MMLU (general) | 62.3% | 60.6% (-1.7%) |
-| HellaSwag | 81.2% | 79.8% (-1.4%) |
-| GSM8K (math) | 46.8% | 45.2% (-1.6%) |
-| Training cost | — | $29,400 |
+| MMLU (general) | 62.3% | 60.6% (-1.7 pp) |
+| HellaSwag | 81.2% | 79.8% (-1.4 pp) |
+| GSM8K (math) | 46.8% | 45.2% (-1.6 pp) |
+| Training cost | — | $88,000 (44,000 GPU-hours at $2/GPU-hour) |
 | Tokens trained | — | 500B |
-| Training time | — | 19 days (32×A100) |
+| Training time | — | 57 days (32×A100; 48.7 days of compute at 85% availability) |
 
 **Interview Q&As:**
 
@@ -1302,10 +1319,10 @@ Different benchmarks probe different capabilities: MMLU tests knowledge recall, 
 
 A software tooling company wants to pre-train a 7B parameter code-specialized LLM to power an internal Copilot for 4,000 engineers writing Python, Java, Go, and SQL. The model must:
 - Outperform GPT-3.5-turbo on HumanEval (baseline: 48.1% pass@1)
-- Pre-training budget: $240,000 (512 A100 80GB GPUs × 14 days × $2.50/GPU-hour)
+- Pre-training budget: $120,000 (512 A100 80GB GPUs × $2.50/GPU-hour — roughly 3.5 days of wall clock, since `6ND` at 45% MFU needs only 33,000 GPU-hours)
 - Training tokens: 400B tokens from curated code corpus
 - Context length: 8,192 tokens (supports full file context)
-- Inference target: < 150ms p99 for 256-token completions on A10G
+- Inference target: < 40 ms p99 per output token on a single A10G (7B in BF16 = 14 GB of weights re-read per decoded token against the A10G's 600 GB/s, a hard floor near 23 ms/token — a 64-token completion therefore lands around 2 s, not 150 ms)
 
 **Data Curation Pipeline**
 
@@ -1374,13 +1391,13 @@ Pre-Training Cluster
 
 1. **Fill-in-the-Middle (FIM) at 50% of training steps**: Transforms `[prefix][suffix]` samples into `<PRE>prefix<SUF>suffix<MID>middle` format. This teaches the model to complete code in the middle of a file — critical for IDE Copilot use cases where the cursor is rarely at the end. Rejected alternative: post-training FIM fine-tuning only — FIM capability degrades 18% in pass@1 when not trained from scratch.
 
-2. **Grouped Query Attention (GQA, 8 KV heads)**: 32 attention heads share 8 KV head groups. Reduces KV cache memory by 4× during inference (from 512 GB to 128 GB for 100 concurrent 8k-context requests). Quality: < 0.3% perplexity regression vs full MHA.
+2. **Grouped Query Attention (GQA, 8 KV heads)**: 32 attention heads share 8 KV head groups. Reduces KV cache memory by 4× during inference. Do the arithmetic: with MHA, K+V per token per layer = 2 × 4,096 dims × 2 bytes (BF16) = 16 KiB, × 32 layers = 512 KiB/token, so a full 8,192-token context costs 4 GiB per request — 400 GiB for 100 concurrent requests. GQA with 8 KV heads cuts the KV width 4× to 128 KiB/token, i.e. ~100 GiB for the same 100 requests. Quality: < 0.3% perplexity regression vs full MHA.
 
-3. **ZeRO Stage 1 + TP=2 over ZeRO Stage 3**: ZeRO Stage 3 (full model sharding) gives better memory efficiency but adds 15% communication overhead for 7B parameters — less justified than for 70B. ZeRO Stage 1 (optimizer state sharding only) reduces per-GPU memory from 112 GB to 68 GB, well within A100 80GB limit, with zero communication overhead.
+3. **ZeRO Stage 1 + TP=2 over ZeRO Stage 3**: ZeRO Stage 3 (full parameter sharding) gives better memory efficiency but incurs a 50% increase in communication volume over plain data parallelism (ZeRO paper, Rajbhandari et al. 2020) — less justified at 7B than at 70B. Mixed-precision Adam costs 16 bytes/param (2 BF16 weights + 2 BF16 grads + 12 bytes of FP32 master/momentum/variance), so an unsharded 7B replica needs ~112 GB — over the A100's 80 GB. ZeRO Stage 1 shards only the 12-byte optimizer state across data-parallel ranks, leaving ~4 bytes/param resident: ~28 GB per GPU, comfortably inside 80 GB, and stages 1 and 2 carry the same communication volume as plain DP.
 
-4. **Context packing to 8,192 tokens**: Multiple code files packed into one context window with `<|file_sep|>` delimiter tokens. Without packing, 40% of training steps process < 512-token files, wasting 84% of the context window. Packing increases effective token throughput from 1.8M to 3.1M tokens/step.
+4. **Context packing to 8,192 tokens**: Multiple code files packed into one context window with `<|file_sep|>` delimiter tokens. Without packing, most training steps are dominated by files far shorter than the window — a 512-token file leaves 94% of an 8,192-token slot as padding, and real tokens per step fall to roughly 1.8M of the 4.2M-token batch. Packing recovers essentially the full 4.2M.
 
-5. **BPE vocabulary with code-specific tokens**: Standard LLaMA vocabulary treats Python indentation as individual space tokens (4-space indent = 4 tokens). Adding 2,048 code-specific tokens (common identifiers, operators) reduces tokenization length for code by 23%, which directly translates to 23% more effective code content per training context.
+5. **BPE vocabulary with code-specific tokens**: Standard LLaMA vocabulary treats Python indentation as individual space tokens (4-space indent = 4 tokens). Training the 32,000-entry BPE vocabulary on the code corpus itself — with roughly 2,048 entries spent on code-specific tokens (common identifiers, operators, indentation runs) — reduces tokenized length for code by 23%, which directly translates to 23% more effective code content per training context.
 
 6. **Warmup 2,000 steps + cosine decay**: Learning rate 3e-4 peak, cosine decay to 3e-5 over 400B tokens. Linear warmup prevents early gradient explosion. Cosine decay is preferable to linear because it maintains higher LR during mid-training (better exploration) and slowly anneals at the end (better convergence).
 
@@ -1471,7 +1488,8 @@ loss.backward()
 optimizer.step()   # catastrophic divergence if loss spikes — NaN in weights
 scheduler.step()
 # At step 8,243: loss spikes from 2.1 to 18.7, then NaN
-# Recovery: roll back to checkpoint from step 7,000 and restart — 3 hours lost
+# Recovery: roll back to checkpoint from step 7,000 and restart — 1,243 steps at
+# ~3 s/step (95,000 steps over 84 hours) plus restart overhead, ~1.5 hours lost
 ```
 
 **FIX: Gradient clipping + loss spike detection with auto-rollback**
@@ -1535,22 +1553,22 @@ def build_document_mask(doc_lengths: list[int], seq_len: int) -> torch.Tensor:
 | 100B | 41.2% | 38.6% | 2.2 |
 | 200B | 49.8% | 46.1% | 2.1 |
 | 400B (final) | 61.4% | 57.9% | 2.0 |
-| GPT-3.5-turbo (baseline) | 48.1% | 52.4% | — |
+| GPT-3.5 (baseline, Code Llama paper Table 2) | 48.1% | 52.2% | — |
 
 **Metrics and Results**
 
 | Resource | Amount | Notes |
 |---|---|---|
-| Training duration | 14 days | 512 A100 80GB |
-| Total compute | 1.72M GPU-hours | 512 × 336 hours |
-| Effective tokens/sec | 285,000 | with packing + FIM |
-| Total cost | $228,000 | under $240K budget |
+| Training duration | 3.5 days (84 h) | 512 A100 80GB; 65 h of it is compute at 45% MFU |
+| Total compute | 43,000 GPU-hours | 512 × 84 hours |
+| Effective tokens/sec | 1.32M | 400B / 302,400 s — 35% end-to-end MFU |
+| Total cost | $107,500 | 43,008 GPU-hours × $2.50, under the $120K budget |
 | Final HumanEval pass@1 | 61.4% | +13.3 pp over GPT-3.5 |
-| Inference (256-token completion) | 94ms p50, 138ms p99 | A10G, GQA KV cache |
+| Inference (per output token) | 31 ms p50, 38 ms p99 | A10G, BF16, GQA KV cache (23 ms bandwidth floor) |
 
 **Common Pitfalls**
 
-1. **Not deduplicating training data leads to memorization, not generalization.** If the model sees the same file 100 times, it memorizes verbatim rather than learning patterns. MinHash LSH deduplication is mandatory — remove files with Jaccard similarity > 0.85. Effect: 500B raw tokens → 400B after dedup; HumanEval +4.1 pp for deduped vs non-deduped at same token count.
+1. **Not deduplicating training data leads to memorization, not generalization.** If the model sees the same file 100 times, it memorizes verbatim rather than learning patterns. MinHash LSH deduplication is mandatory — remove files with Jaccard similarity > 0.85. Effect: ~548B raw tokens → 400B after the full filter-plus-dedup pipeline; HumanEval +4.1 pp for deduped vs non-deduped at the same token count.
 
 2. **Using left-padding instead of right-padding (or packing) for short sequences.** Left-padding shifts the absolute position of code tokens — RoPE positional encodings become misaligned. Always pack or right-pad. Never left-pad for decoder-only models using RoPE.
 
@@ -1561,10 +1579,10 @@ def build_document_mask(doc_lengths: list[int], seq_len: int) -> torch.Tensor:
 **Interview Discussion Points**
 
 **Q: How do you calculate the compute budget required to pre-train a 7B model on 400B tokens?**
-Chinchilla scaling law: optimal compute C ≈ 6 × N × D, where N = model parameters and D = training tokens. For N=7B, D=400B: C ≈ 6 × 7×10^9 × 4×10^11 = 1.68×10^22 FLOPs. To convert to GPU-hours: A100 80GB at BF16 peak = 312 TFLOPS = 3.12×10^14 FLOPS/second. GPU-hours needed = 1.68×10^22 / (3.12×10^14 × 3600) ≈ 15,000 GPU-hours, but accounting for ~45% MFU (Model FLOPS Utilization): 15,000 / 0.45 = 33,000 GPU-hours. At 512 GPUs: 33,000 / 512 = 65 hours ≈ 2.7 days wall time. Actual training was 14 days — the remainder accounts for data loading overhead, checkpoint saves, evaluation runs, and hardware failures.
+The 6ND compute identity (Kaplan et al. 2020, not Chinchilla) gives C ≈ 6 × N × D, where N = model parameters and D = training tokens. Chinchilla supplies the separate question of how to split a budget between N and D. For N=7B, D=400B: C ≈ 6 × 7×10^9 × 4×10^11 = 1.68×10^22 FLOPs. To convert to GPU-hours: A100 80GB at BF16 peak = 312 TFLOPS = 3.12×10^14 FLOPS/second. GPU-hours needed = 1.68×10^22 / (3.12×10^14 × 3600) ≈ 15,000 GPU-hours, but accounting for ~45% MFU (Model FLOPS Utilization): 15,000 / 0.45 = 33,000 GPU-hours. At 512 GPUs: 33,000 / 512 = 65 hours ≈ 2.7 days wall time. Actual training was 3.5 days (84 hours) — the extra 19 hours is data loading overhead, checkpoint saves, evaluation runs, and hardware failures, i.e. 77% end-to-end availability. Be suspicious of any plan whose wall clock is many times the 6ND estimate: a 14-day run for this budget would imply about 7% MFU, not 45%.
 
 **Q: Why is 400B tokens chosen rather than 1T tokens for a 7B model?**
-Chinchilla shows the optimal token count for a 7B model is approximately 140B tokens (20× model parameters). 400B is already 3× Chinchilla-optimal — returns are diminishing. Going to 1T tokens would cost $600K and yield HumanEval improvement of perhaps 3–4 pp, not worth the extra $360K. The exception: if this model will be used as a foundation for many fine-tuning variants, over-training the base gives fine-tuning a better starting point.
+Chinchilla shows the optimal token count for a 7B model is approximately 140B tokens (20× model parameters). 400B is already ~2.9× Chinchilla-optimal — returns are diminishing. Going to 1T tokens is 2.5× the compute, so about $270K against this run's $107.5K, and would yield a HumanEval improvement of perhaps 3–4 pp — not worth the extra $160K. The exception: if this model will be used as a foundation for many fine-tuning variants, over-training the base gives fine-tuning a better starting point.
 
 **Q: How do you prevent data leakage from the evaluation benchmark (HumanEval) into the training corpus?**
 HumanEval problems are on GitHub. Exact deduplication via SHA-256 hash removes exact copies. Near-deduplication via MinHash catches paraphrased versions. Additionally: (1) Download a specific HumanEval commit and date-filter training data to exclude any GitHub repos created or modified after the HumanEval publication date (July 2021); (2) Monitor for suspiciously high pass@1 on very early training checkpoints — if pass@1 > 30% at 10B tokens, contamination is likely; (3) Create a held-out internal benchmark of original problems not on GitHub.

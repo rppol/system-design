@@ -79,7 +79,7 @@ distinct names, not that the model can choose among them.
 - **Prefix tools by server**: avoid name collisions in multi-server setups.
 - **Handle reconnection**: servers may restart; clients must detect and reconnect.
 - **Sampling roundtrip**: if server supports sampling, client must handle `sampling/createMessage` requests by calling the LLM and returning the result.
-- **Timeout per call**: SDKs default to roughly 60s and make it configurable; the spec mandates no value, only that senders set timeouts and issue `notifications/cancelled` when they lapse.
+- **Timeout per call**: defaults differ by SDK — the TypeScript SDK applies `DEFAULT_REQUEST_TIMEOUT_MSEC = 60000`, while the Python SDK's `ClientSession(read_timeout_seconds=...)` defaults to `None`, i.e. **no timeout at all** unless you pass one. The spec mandates no value, only that senders set timeouts and issue `notifications/cancelled` when they lapse.
 
 ---
 
@@ -323,7 +323,7 @@ async def use_remote_server():
 
 **Cursor**: similar pattern for IDE-integrated MCP.
 
-**Custom agent frameworks**: LangChain MCP adapter, smolagents `ToolCollection.from_mcp`, Mastra `MastraMCPClient` — all wrap ClientSession differently.
+**Custom agent frameworks**: LangChain MCP adapter, smolagents `ToolCollection.from_mcp`, Mastra `MCPClient` (the older `MastraMCPClient` was deprecated and removed from `@mastra/mcp`) — all wrap ClientSession differently.
 
 **Internal AI platforms**: large enterprises building centralized MCP gateways that aggregate dozens of internal servers.
 
@@ -412,7 +412,7 @@ except (asyncio.TimeoutError, ConnectionError):
 ## 12. Interview Questions with Answers
 
 **Q: Why does an MCP client need to call `initialize` first?**
-The initialize handshake negotiates the protocol version and both sides' capabilities, and the spec forbids sending anything except `ping` before it completes. Both sides learn what the other supports — does the client offer sampling, roots, elicitation? does the server offer tools, resources, prompts, and do its lists emit `listChanged`? Calling a method whose capability was never declared is a protocol violation, not just bad manners. On HTTP the handshake also fixes the value you must send in the `MCP-Protocol-Version` header on every later request.
+The initialize handshake negotiates the protocol version and both sides' capabilities, and the spec says neither side SHOULD send anything but `ping` (plus `logging` from the server) before it completes. Both sides learn what the other supports — does the client offer sampling, roots, elicitation? does the server offer tools, resources, prompts, and do its lists emit `listChanged`? Calling a method whose capability was never declared is a protocol violation, not just bad manners. On HTTP the handshake also fixes the value you must send in the `MCP-Protocol-Version` header on every later request.
 
 **Q: How do you avoid tool name collisions across multiple MCP servers?**
 Prefix each tool name with the server's logical name: `github_create_issue` from GitHub server, `gitlab_create_issue` from GitLab server. Routes calls by parsing the prefix. Standard pattern in Claude Desktop, Cursor.
@@ -427,7 +427,7 @@ Sampling lets a server request the client to make an LLM call on its behalf. The
 Per spec, tool calls should return within a reasonable timeout. For long ops, two patterns: (1) server returns a task_id quickly + provides a polling tool to check status; (2) server supports progress notifications during the call.
 
 **Q: What's the right timeout for tool calls?**
-Around 60 seconds by default in most SDKs, configurable per call — the spec sets no number, it only requires that you set one. For known long operations, increase, or use the experimental Tasks utility added in 2025-11-25. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
+The TypeScript SDK defaults to 60s, but the Python SDK ships no default at all, so set one explicitly. The spec sets no number, it only requires that you set one. For known long operations, increase, or use the experimental Tasks utility added in 2025-11-25. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
 
 **Q: How do you handle a server that crashes?**
 Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Re-initialize. Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
@@ -442,7 +442,7 @@ Reads `claude_desktop_config.json` (path varies by OS — `~/Library/Application
 For stdio: the server takes credentials from the environment (e.g. env vars passed at launch) — the authorization spec explicitly does not apply to stdio. For HTTP: OAuth 2.1 with mandatory PKCE (`S256`) for user-authorized servers, with the authorization server discovered from RFC 9728 protected-resource metadata, and an RFC 8707 `resource` parameter so the token is bound to that one MCP server. Custom: server-specific auth via headers on the HTTP transport.
 
 **Q: How do you debug MCP client issues?**
-(1) Use MCP Inspector to verify the server works in isolation. (2) Enable verbose logging on the client (`MCP_LOG_LEVEL=debug`). (3) Inspect JSON-RPC traffic with a proxy or stdio interceptor. (4) Try Claude Desktop as a reference client — if it works there but not in your client, the bug is yours.
+(1) Use MCP Inspector to verify the server works in isolation. (2) Turn on debug logging in your own client — there is no MCP-wide log-level environment variable; the SDKs log through the host language's standard logging facility (Python `logging`, and stderr is explicitly allowed for stdio server logs). (3) Inspect JSON-RPC traffic with a proxy or stdio interceptor. (4) Try Claude Desktop as a reference client — if it works there but not in your client, the bug is yours.
 
 **Q: Should the client validate tool args before calling?**
 Optionally — the server should validate too. Client-side validation (against the tool's `inputSchema`) catches errors earlier, gives better LLM feedback. Frameworks like Pydantic-AI do this automatically.

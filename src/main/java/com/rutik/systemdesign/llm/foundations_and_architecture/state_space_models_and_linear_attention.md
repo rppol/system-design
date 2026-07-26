@@ -51,9 +51,9 @@ heads, head_dim 128, FP16) at a 100K-token context, the KV cache alone is
 `2 x 32 x 100,000 x 32 x 128 x 2 bytes ≈ 52.4 GB` — larger than the model weights themselves, and
 it *keeps growing* with every generated token. A comparably-sized Mamba model's recurrent state
 is `2,560 x 16 x 2 bytes ≈ 81.9 KB` per layer; across 64 layers, **≈ 5.2 MB total, independent of
-sequence length**. That seven-order-of-magnitude difference is the entire economic argument for
-this module — it is why Cartesia chose an SSM for streaming TTS (§7) and why hybrid models like
-Jamba can offer 256K context on a single 80GB GPU.
+sequence length**. That four-order-of-magnitude difference (52.4 GB vs 5.2 MB, ~10,000x) is the
+entire economic argument for this module — it is why Cartesia chose an SSM for streaming TTS (§7)
+and why a hybrid model like Jamba can hold 140K tokens of context on a single 80GB GPU.
 
 **Key insight**: a fixed-size state is only useful if the model can be *selective* about what goes
 into it. S4's state-transition matrices were fixed (input-independent), so the state compressed
@@ -251,11 +251,11 @@ attention on recall-heavy tasks.
 | **Mamba-2 (SSD)** | 2024, same authors | Structured State Space Duality — selective SSM reformulated as masked linear attention (§3.5) | 2-8x faster *training* via matmul kernels; supports larger state dimensions |
 | **RWKV (v4-v7)** | 2023-2025, community (BlinkDL) | RNN-style linear attention with time-decay ("W") + receptance gating ("R") — the "WKV" recurrence | Trainable in parallel like a Transformer via custom kernels, runs as a pure RNN at inference (O(1) state); v6/v7 add per-channel dynamic decay |
 | **RetNet** | 2023, Microsoft | "Retention": linear attention with a *fixed* exponential decay matrix | Three mathematically equivalent forms — parallel (training), recurrent (inference), chunkwise (long sequences, §6.3) |
-| **Jamba** | 2024, AI21 | **Hybrid**: interleaved Transformer-attention + Mamba layers + MoE FFNs | 52B total / 12B active params; 256K context fits on a single 80GB GPU with int8 KV cache |
+| **Jamba** | 2024, AI21 | **Hybrid**: interleaved Transformer-attention + Mamba layers + MoE FFNs | 52B total / 12B active params; 256K-token context window, of which AI21 states up to 140K fits on a single 80GB GPU |
 | **Zamba / Zamba2** | 2024, Zyphra | **Hybrid**: Mamba backbone + a single shared attention block reused across layers | 7B-class, parameter-efficient hybrid via attention-block sharing |
 | **Hyena** | 2023 | Implicit long convolutions (filters parameterized by a small FFN) evaluated via FFT | Sub-quadratic but **not** a recurrence — a distinct family from SSM/linear-attention |
 | **GLA (Gated Linear Attention)** | 2023, Yang et al. | Linear attention + data-dependent, per-head/per-channel gating (§3.6) | Closes much of the recall gap to softmax attention versus ungated linear attention |
-| **Lightning Attention** | 2024, MiniMax | Linear attention with **intra-block** (quadratic, small blocks) + **inter-block** (linear, running KV state) tiling | Powers MiniMax-01 (456B total / 45.9B active MoE), claims up to 4M-token context |
+| **Lightning Attention** | 2024, MiniMax | Linear attention with **intra-block** (quadratic, small blocks) + **inter-block** (linear, running KV state) tiling | Powers MiniMax-01 (456B total / 45.9B active MoE; itself a hybrid — one softmax-attention layer after every 7 lightning-attention layers), trained at 1M and claiming up to 4M-token context at inference |
 
 ### 4.1 Four Families, One Underlying Idea
 
@@ -611,9 +611,11 @@ def parallel_scan(A_seq: torch.Tensor, b_seq: torch.Tensor) -> torch.Tensor:
 - **Mamba / Mamba-2 (CMU, Princeton)** — the reference research line; Mamba-2.8B matches
   Pythia-2.8B perplexity while achieving **~5x higher inference throughput** at long sequence
   lengths (no KV cache to read/write).
-- **Jamba 1.5 (AI21, 2024)** — production hybrid model, **52B total / 12B active** parameters
-  (MoE), **256K-token context window** that fits on a single 80GB GPU with int8 KV cache — a
-  context length that would be impractical for a same-size pure-attention model.
+- **Jamba 1.5 Mini (AI21, 2024)** — production hybrid model, **52B total / 12B active** parameters
+  (MoE), **256K-token context window**, of which AI21 states **up to 140K tokens fits on a single
+  80GB GPU** — a context length that would be impractical for a same-size pure-attention model.
+  (The 256K full window is served on a multi-GPU node; AI21's ExpertsInt8 quantization is what
+  makes the Large variant fit its full 256K on a single 8-GPU node.)
 - **RWKV (community, BlinkDL)** — actively used for **edge/CPU deployment** via `rwkv.cpp`, since
   its O(1) recurrent inference state needs no GPU-resident KV cache.
 - **MiniMax-01 (2025)** — **456B total / 45.9B active** MoE using **Lightning Attention**, with
@@ -623,8 +625,9 @@ def parallel_scan(A_seq: torch.Tensor, b_seq: torch.Tensor) -> torch.Tensor:
   [Voice Cloning / TTS Platform case study §6](../case_studies/design_voice_cloning_tts_platform.md))
   built on a **Mamba-based architecture specifically because of §2's memory argument**: TTS is a
   long, continuous streaming-generation task, and Mamba's O(1) per-step state gives **fixed,
-  predictable per-token latency at any output length** (claimed <50ms TTFB), vs. a Transformer's
-  KV cache making each subsequent token marginally more expensive.
+  predictable per-token latency at any output length** (Cartesia advertises sub-90ms
+  time-to-first-audio for Sonic), vs. a Transformer's KV cache making each subsequent token
+  marginally more expensive.
 - **Zamba2 (Zyphra)** — a 7B-class hybrid that shares a *single* attention block across multiple
   layers, demonstrating that hybrid designs can be parameter-efficient, not just
   memory-efficient.
@@ -701,7 +704,7 @@ about 13,000x less than softmax attention's `1.407e+14` at that length.
 |---|---|---|---|
 | Long-context memory cost | Lowest (constant) | Low (mostly constant + a few attention layers) | Highest (full KV cache) |
 | Recall/retrieval quality | Weakest | Near-Transformer (the few attention layers recover most of it, §5.4) | Strongest |
-| Maximum practical context length | Highest (RWKV/MiniMax claim millions of tokens) | High (Jamba: 256K on 1 GPU) | Limited by KV cache memory |
+| Maximum practical context length | Highest (RWKV/MiniMax claim millions of tokens) | High (Jamba: 256K window, 140K on 1 GPU) | Limited by KV cache memory |
 | Maturity for general-purpose LLM deployment | Lowest | Medium and rising | Highest |
 
 ### 8.4 Linear-Attention Variant Comparison
@@ -840,7 +843,7 @@ A naive `for t in range(seq_len)` loop (§6.1, §10.1) issues one tiny GPU kerne
 Pure SSMs and linear-attention models tend to underperform same-size Transformers on tasks requiring exact retrieval of specific far-back tokens (needle-in-haystack, copying, certain associative-recall benchmarks) — even though their *perplexity* can match. The reason is structural: attention's KV cache makes every past token exactly retrievable; an SSM's fixed-size state must lossily compress the entire history, and content that gets "overwritten" by the selection/gating mechanism (§3.3, §3.6) is genuinely gone. This isn't fixed by more training — it's why hybrid architectures (§8.3) exist.
 
 **Q6: Why do hybrid architectures like Jamba interleave attention and SSM layers, and in what ratio?**
-The motivation is directly Q5: a small number of full-attention layers can recover most of the recall quality that pure SSM layers lack, while the majority-SSM layers provide most of the memory/throughput savings. Jamba uses roughly 1-in-8 layers as full attention (the rest Mamba + MoE FFN, §5.4) — empirically, this ratio recovers near-Transformer recall while keeping the KV cache at roughly 1/8th the size (and thus 1/8th the memory cost) of an all-attention model at the same context length, enabling Jamba's 256K context on a single 80GB GPU.
+The motivation is directly Q5: a small number of full-attention layers can recover most of the recall quality that pure SSM layers lack, while the majority-SSM layers provide most of the memory/throughput savings. Jamba uses roughly 1-in-8 layers as full attention (the rest Mamba + MoE FFN, §5.4) — empirically, this ratio recovers near-Transformer recall while keeping the KV cache at roughly 1/8th the size (and thus 1/8th the memory cost) of an all-attention model at the same context length, which is what lets AI21 fit up to 140K of Jamba's 256K context window on a single 80GB GPU.
 
 **Q7: Explain the Mamba-2 "SSD" duality between linear attention and SSMs.**
 Standard attention is `softmax(QK^T)V`; removing softmax makes the computation associative, so `(QK^T)V = Q(K^T V)` — you can maintain a running state `S_t = S_{t-1} + k_t v_t^T` and compute `y_t = q_t^T S_t`, which is structurally identical to an SSM recurrence `h_t = A h_{t-1} + B x_t` with `A=I` (§3.5). Mamba-2's SSD result generalizes this: the *selective* SSM recurrence (with input-dependent `A_t`) is a structured (semiseparable) form of *masked* linear attention — meaning it can be computed with the same matmul-heavy kernels GPUs are built for, which is the source of Mamba-2's 2-8x training speedup over Mamba-1's scan kernel. Important caveat: this is duality with *linear* attention, not full softmax attention (Pitfall 10.5).
@@ -861,7 +864,7 @@ Pure SSM/linear-attention for workloads dominated by long streaming generation w
 Lightning Attention (used in MiniMax-01) splits computation into small **intra-block** chunks computed via quadratic (but small, hence cheap) attention entirely within fast on-chip memory, plus an **inter-block** linear-attention running state carried in slower memory between chunks (§4, §6.3 is the same general pattern as RetNet's chunkwise form). This mirrors Flash Attention's core insight — minimize expensive reads/writes to slow GPU memory by keeping working sets in fast on-chip memory — but applied to linear rather than softmax attention, and is a major contributor to MiniMax-01's claimed 4M-token context support.
 
 **Q13: How does Cartesia leverage Mamba for TTS, and why is constant per-step memory the key advantage?**
-TTS is a long, continuous, streaming-generation task — synthesizing audio for a multi-sentence response means generating thousands of audio tokens sequentially. With a Transformer backbone, each subsequent token's KV cache read grows, so per-token latency *increases* over the course of generation — bad for a streaming user experience where consistent low latency matters more than peak throughput. Mamba's O(1) state means **every token costs the same**, regardless of how much audio has already been generated — Cartesia's Sonic claims sub-50ms time-to-first-byte with this property, and it's why several voice-agent companies (Bland AI, Retell AI, Vapi) build on it (see the [Voice Cloning case study](../case_studies/design_voice_cloning_tts_platform.md)).
+TTS is a long, continuous, streaming-generation task — synthesizing audio for a multi-sentence response means generating thousands of audio tokens sequentially. With a Transformer backbone, each subsequent token's KV cache read grows, so per-token latency *increases* over the course of generation — bad for a streaming user experience where consistent low latency matters more than peak throughput. Mamba's O(1) state means **every token costs the same**, regardless of how much audio has already been generated — Cartesia advertises sub-90ms time-to-first-audio for Sonic on the back of this property, and it's why several voice-agent companies (Bland AI, Retell AI, Vapi) build on it (see the [Voice Cloning case study](../case_studies/design_voice_cloning_tts_platform.md)).
 
 **Q14: What is the discretization step in SSMs, and why is it needed?**
 SSMs originate from continuous-time control theory (`dh/dt = Ah + Bx`), but language models operate on discrete tokens — discretization (§3.1) converts the continuous-time system into a discrete-time recurrence `h_t = A_bar h_{t-1} + B_bar x_t` via a timestep `delta` (zero-order hold: `A_bar = exp(delta*A)`). `delta` isn't just a numerical-methods detail — in Mamba it's *learned and input-dependent* (§3.3), effectively letting the model control its own "clock speed" per token: a large `delta` means "this token represents a big jump in the underlying continuous process, update aggressively," small `delta` means "barely anything changed, keep the state mostly as-is."

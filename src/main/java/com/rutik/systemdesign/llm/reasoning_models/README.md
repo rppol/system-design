@@ -159,10 +159,10 @@ Same PRM, same two chains, and the aggregator flips the winner. Chain A does bet
 ```
   4 steps at p = 0.90 each  ->  0.90^4 = 0.6561    <- chain-level correctness
   4 steps at p = 0.95 each  ->  0.95^4 = 0.8145
-  3 steps at 0.95, 1 at 0.50 ->  0.95^3 x 0.50 = 0.4286   <- one weak step dominates
+  3 steps at 0.95, 1 at 0.50 ->  0.95^3 x 0.50 = 0.4287   <- one weak step dominates
 ```
 
-The 0.4286 row is the point: the product collapses toward the weakest factor, which is the behaviour you want from a verifier. Drop `min`/`product` in favour of `mean` and you get the classic PRM failure mode — best-of-N reranking that confidently selects chains containing one silent invalid step, precisely the chains an ORM would have caught.
+The 0.4287 row is the point: the product collapses toward the weakest factor, which is the behaviour you want from a verifier. Drop `min`/`product` in favour of `mean` and you get the classic PRM failure mode — best-of-N reranking that confidently selects chains containing one silent invalid step, precisely the chains an ORM would have caught.
 
 ### 4.4 Self-Consistency
 
@@ -713,9 +713,9 @@ prompt**, not a vendor-published ratio; latency bands are order-of-magnitude.
 |------|---------|-------|
 | **OpenAI GPT-5.6 series** (`sol` / `terra` / `luna`) | Top-tier reasoning | Current OpenAI reasoning line; `reasoning.effort` defaults to `medium`. Supersedes o1/o3, which are all deprecated (o1 and o3-mini shut down 2026-10-23, o3 on 2026-12-11; o1-mini already retired 2025-10-27) |
 | **DeepSeek-R1** | Open-weights reasoning | Matched o1 on published benchmarks; free to self-host |
-| **Qwen3** | Open reasoning | Hybrid thinking / non-thinking in one model; supersedes QwQ-32B (Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters) |
-| **Gemini 3 / 3.5** | Google reasoning | `thinking_level` (`minimal`…`high`) replaced the integer `thinking_budget`; `thinking_budget` still accepted for back-compat |
-| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Visible thinking blocks; `thinking.budget_tokens` via API. Adaptive thinking on Fable 5 / Opus 5 / Sonnet 5; extended thinking on Haiku 4.5 |
+| **Qwen3** | Open reasoning | Supersedes QwQ-32B (Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters). The original one-model hybrid thinking / non-thinking design was abandoned in the 2507 refresh — Instruct and Thinking now ship as separately trained checkpoints |
+| **Gemini 3.x** (3.1 / 3.5 / 3.6) | Google reasoning | `thinking_level` (`minimal`…`high`) replaced the integer `thinking_budget`; `thinking_budget` is still accepted for back-compat, but the two cannot be sent in the same request |
+| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Summarized thinking blocks returned; thinking tokens billed as output. Adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) on Fable 5 / Opus 5 / Sonnet 5; extended thinking (`thinking.budget_tokens`) on Haiku 4.5. `type: "enabled"` is deprecated on the 4.6 models and returns 400 on Claude 4.7 and later |
 | **Math-Shepherd** | PRM for math | Step-level reward signals |
 | **Lean 4** | Formal verification | Used by AlphaProof |
 | **OpenR** | MCTS for LLMs | Open-source MCTS implementation |
@@ -758,7 +758,7 @@ A: DeepSeek-R1 used a format reward: the model earned a small bonus if it struct
 A: MCTS treats each reasoning step as a node in a tree. UCB (Upper Confidence Bound) balances exploration of new branches vs. exploitation of promising ones. Each rollout runs a complete reasoning chain from a node and scores it with a reward model (PRM or outcome checker). Node values are backpropagated: if a partial path leads to correct answers in 7 of 10 rollouts, that path gets a high value. Practical limitations: (1) each rollout is a full LLM forward pass — MCTS with 100 rollouts costs 100× base inference; (2) requires a reliable reward or verification signal — without a PRM or test-case checker, node values are noisy; (3) high implementation complexity. Used in AlphaProof, which pairs a language model with AlphaZero-style RL and proof search in Lean and contributed 3 of the 4 problems DeepMind solved at IMO 2024, but not in general-purpose commercial APIs because the compute cost is prohibitive at scale. AlphaCode 2 is frequently miscited as an MCTS system; it is massive sampling plus filtering, clustering and a learned scorer, with no tree search.
 
 **Q: You're building a coding assistant that needs to solve hard algorithmic problems. How do you choose between reasoning models, self-consistency, and standard LLM + CoT?**
-A: Use a tiered approach based on difficulty and latency budget. For well-known algorithm patterns (sorting, BFS, standard DP): standard LLM with CoT is sufficient, fast (<2s), and cheap. For medium problems (graph algorithms, moderately complex DP): self-consistency with N=5 chains provides a meaningful accuracy boost at 5× cost — the problem space is navigable by the base model but benefits from aggregation. For hard competitive programming (novel algorithms, correctness proofs): reasoning model (o1 or DeepSeek-R1) is necessary — these problems have a combinatorial reasoning space that requires extended exploration. Always add programmatic verification: run test cases against the generated code and use the result as a second filter. The verification step is cheap and eliminates 10-20% of errors that even reasoning models make on hard problems.
+A: Use a tiered approach based on difficulty and latency budget. For well-known algorithm patterns (sorting, BFS, standard DP): standard LLM with CoT is sufficient, fast (<2s), and cheap. For medium problems (graph algorithms, moderately complex DP): self-consistency with N=5 chains provides a meaningful accuracy boost at 5× cost — the problem space is navigable by the base model but benefits from aggregation. For hard competitive programming (novel algorithms, correctness proofs): a current reasoning tier (OpenAI's GPT-5.6 line at high effort, or DeepSeek-R1 self-hosted — do not build new work on o1, which shuts down 2026-10-23) is necessary — these problems have a combinatorial reasoning space that requires extended exploration. Always add programmatic verification: run test cases against the generated code and use the result as a second filter. The verification step is cheap and eliminates 10-20% of errors that even reasoning models make on hard problems.
 
 **Q: What is the "aha moment" phenomenon in DeepSeek-R1 training?**
 A: During pure RL training with no supervised reasoning data, DeepSeek-R1 spontaneously developed self-correction behavior: mid-reasoning phrases like "wait, that doesn't seem right, let me reconsider" followed by backtracking to a different and correct approach. This was not explicitly trained — no reward was given for self-correction specifically; only the correctness of the final answer was rewarded. This reveals that reasoning behaviors (exploration, verification, backtracking) are instrumentally useful for maximizing correctness rewards and emerge naturally from RL incentives. It suggests that human-like reasoning patterns may be achievable by incentivizing correct outcomes rather than by imitating human reasoning processes step by step.
@@ -817,8 +817,10 @@ flowchart TD
 ```
 Test-Time Compute Scaling — reasoning-budget effect (ILLUSTRATIVE figures for
 this scenario, not vendor-published benchmarks). Note the knob differs by vendor:
-Anthropic takes an integer thinking.budget_tokens; OpenAI takes reasoning.effort
-plus a max_completion_tokens ceiling. There is no portable "budget_tokens".
+Anthropic's current models take an effort level (output_config.effort) with adaptive
+thinking, and an integer thinking.budget_tokens only on the older extended-thinking
+models; OpenAI takes reasoning.effort plus a max_completion_tokens ceiling. There is
+no portable "budget_tokens".
 
   effort=low    / ~500 reasoning tokens:   gpt-5.6-terra — 12s, 65% solve rate
   effort=medium / ~2,000 reasoning tokens: gpt-5.6-terra — 28s, 78% solve rate
@@ -912,7 +914,13 @@ Think step by step: (1) parse the stack trace to find the failing frame,
 
 
 async def _diagnose_sonnet(prompt: str, incident_id: str) -> DiagnosisResult:
-    """Claude Sonnet 4.6 with extended thinking for P3."""
+    """Claude Sonnet 4.6 with extended thinking for P3.
+
+    thinking.type="enabled" with budget_tokens is deprecated on the 4.6 models
+    (requests still succeed) and returns HTTP 400 on Claude 4.7 and later. On a
+    current model use thinking={"type": "adaptive"} with
+    output_config={"effort": "high"} instead.
+    """
     client = anthropic.AsyncAnthropic()
     t0 = time.monotonic()
     response = await client.messages.create(
@@ -1165,7 +1173,7 @@ def fixed_build_context(logs: list[str]) -> str:
 
 ```python
 # BROKEN: Auto-apply generated fix patch without validation.
-# Reasoning models hallucinate plausible-looking but incorrect patches ~8% of the time.
+# Reasoning models hallucinate plausible-looking but incorrect patches at a non-trivial rate.
 async def broken_apply_fix(patch: str) -> None:
     import subprocess
     subprocess.run(["git", "apply", "-"], input=patch.encode(), check=True)
@@ -1232,10 +1240,10 @@ PRM reranking (generate N candidates with a cheaper model, score each, take the 
 Chain-of-thought prompting adds "think step by step" to the user prompt; the reasoning is visible in the output and uses standard output tokens (billed at output rate). Reasoning models (the OpenAI GPT-5.6 line, the retired o-series, Claude with extended thinking) perform internal reasoning in a separate "thinking" phase before generating the final response; this thinking may be partially or fully hidden and uses a separate token budget, but it is NOT cheaper — reasoning tokens are not returned to you and are billed at the full output rate, which is why a hidden 50k-token chain can cost more than the answer you actually see. Reasoning model chains tend to be more self-consistent and self-correcting than CoT-prompted standard models because the model is specifically trained to reason before answering.
 
 **Q: Why is a validation sandbox essential after a reasoning model generates a code fix?**
-Reasoning models hallucinate syntactically plausible but semantically incorrect patches approximately 5-10% of the time — the reasoning process increases confidence but does not eliminate hallucination. A patch that looks correct may fail to compile, break unrelated tests, or introduce a subtle new bug. Running the fix in an isolated container with the test suite catches these cases before a PR is opened. The sandbox also provides ground-truth feedback for a retry loop: if the first fix fails validation, the agent can pass the test failure output back to the model for self-correction.
+Reasoning models still emit syntactically plausible but semantically incorrect patches at a non-trivial rate — the reasoning process increases confidence but does not eliminate hallucination. A patch that looks correct may fail to compile, break unrelated tests, or introduce a subtle new bug. Running the fix in an isolated container with the test suite catches these cases before a PR is opened. The sandbox also provides ground-truth feedback for a retry loop: if the first fix fails validation, the agent can pass the test failure output back to the model for self-correction.
 
 **Q: How do you choose budget_tokens for a reasoning model in production?**
-Budget_tokens controls how many tokens the model can spend "thinking" before generating the final answer. The knob is vendor-specific: Anthropic takes an integer `thinking.budget_tokens`, OpenAI takes a `reasoning.effort` level plus a `max_completion_tokens` ceiling, and Gemini 3 takes a `thinking_level` enum that replaced its old integer `thinking_budget`. More tokens = better accuracy but higher cost and latency. Calibrate by running your eval set with exponentially increasing budgets (500, 1000, 2000, 4000, 8000) and plotting solve rate vs cost. The curve typically shows diminishing returns after a threshold — often 2000-4000 tokens for code debugging. Set the production budget at the knee of that curve. Apply higher budgets only for the highest-severity incidents where cost is less important than correctness.
+Budget_tokens controls how many tokens the model can spend "thinking" before generating the final answer. The knob is vendor-specific: Anthropic's adaptive-thinking models take an `output_config.effort` level (the integer `thinking.budget_tokens` survives only on the older extended-thinking models), OpenAI takes a `reasoning.effort` level plus a `max_completion_tokens` ceiling, and Gemini 3.x takes a `thinking_level` enum that replaced its old integer `thinking_budget`. More tokens = better accuracy but higher cost and latency. Calibrate by running your eval set with exponentially increasing budgets (500, 1000, 2000, 4000, 8000) and plotting solve rate vs cost. The curve typically shows diminishing returns after a threshold — often 2000-4000 tokens for code debugging. Set the production budget at the knee of that curve. Apply higher budgets only for the highest-severity incidents where cost is less important than correctness.
 
 **Q: What makes code debugging particularly well-suited for reasoning models versus standard LLMs?**
 Code debugging requires multi-step logical deduction: (1) parse the stack trace to identify the fault, (2) trace backwards through the call chain, (3) correlate with external state (logs, recent changes), (4) form a causal hypothesis, (5) design a minimal fix, (6) verify the fix is consistent with all constraints. Standard LLMs tend to pattern-match to the most common bug for the given error type without thoroughly checking all evidence. Reasoning models systematically work through each step and self-correct when they detect contradictions — exactly the process an expert SRE uses, just codified as internal reasoning chains.

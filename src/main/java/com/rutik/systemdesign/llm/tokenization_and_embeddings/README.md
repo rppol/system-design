@@ -127,10 +127,10 @@ Used by: LLaMA (SentencePiece BPE), T5, ALBERT, mT5, PaLM, Gemma
 
 OpenAI's fast BPE implementation in Rust/Python. Used for GPT-3.5, GPT-4, embedding models.
 
-Key vocabularies:
-- `cl100k_base` (100K vocab): GPT-3.5, GPT-4, text-embedding-3
-- `o200k_base` (200K vocab): GPT-4o (better multilingual coverage)
-- `p50k_base` (50K vocab): GPT-3, Codex
+Key vocabularies (sizes and model mappings from the `tiktoken` registry):
+- `cl100k_base` (100,277 tokens): GPT-3.5-turbo, GPT-4, text-embedding-3-small/large, ada-002
+- `o200k_base` (200,019 tokens): GPT-4o and every later OpenAI model — GPT-4.1, GPT-5, o1/o3/o4-mini (better multilingual coverage)
+- `p50k_base` (50,281 tokens): Codex and text-davinci-002/003; the original GPT-3 base models (davinci, curie) use `r50k_base` (50,257)
 
 ---
 
@@ -258,17 +258,19 @@ decoded = enc.decode(tokens)
 
 ### Fertility and Efficiency
 
-**Token density comparison** (approximate tokens per word):
+**Token density comparison** (illustrative tokens per word — the exact ratio depends on the
+tokenizer; measured under `cl100k_base`, English runs ~1.1 and Arabic/Hindi ~4.0-4.9 tokens per
+whitespace word, and `o200k_base` cuts the non-Latin figures roughly in half):
 ```
 English: ~1.3 tokens/word  (most efficient)
 French:  ~1.4 tokens/word
-Chinese: ~1.5-2 tokens/word (depends on vocab design)
+Chinese: ~1.5-2 tokens/character (no whitespace words to count)
 Arabic:  ~2-3 tokens/word
 Code:    ~2-4 tokens per identifier (varies with vocabulary)
 
 Implication: An LLM with 4K context window can process:
   ~3000 English words
-  ~2000 Arabic words
+  ~1600 Arabic words
   ~1500 Python lines of code
 ```
 
@@ -305,7 +307,7 @@ This is the cost gotcha that surprises teams at launch: the *same sentence*, tra
     Arabic    4096 / 2.5  =  1,638 words fit      <- half the document
 ```
 
-**Why this is a design defect, not a language property.** Arabic is not intrinsically more verbose — it is under-represented in the merge-training corpus, so its frequent character pairs never won a merge slot and never became single tokens. Buying more merges fixes it: the `p50k_base` to `cl100k_base` move (§7) cut non-English token counts roughly 4x for exactly this reason, and `o200k_base` bought another round. If you serve a non-English market on an English-trained tokenizer, the fertility gap is a line item you can shrink by changing tokenizers, not something to budget around forever.
+**Why this is a design defect, not a language property.** Arabic is not intrinsically more verbose — it is under-represented in the merge-training corpus, so its frequent character pairs never won a merge slot and never became single tokens. Buying more merges fixes it: the `p50k_base` to `cl100k_base` move (§7) cut non-English token counts by roughly 1.2-2x for exactly this reason, and `o200k_base` bought a much larger round — a further ~1.5-3.5x on Indic and Arabic scripts (measured with `tiktoken` on matched sentences). If you serve a non-English market on an English-trained tokenizer, the fertility gap is a line item you can shrink by changing tokenizers, not something to budget around forever.
 
 ### Special Tokens
 
@@ -329,7 +331,7 @@ Every model uses special tokens to delimit structure:
 | Medium (32K-50K) | Good English coverage, standard | May struggle with multilingual |
 | Large (100K-200K) | Better multilingual, better coding | Larger embedding matrix, rare token quality |
 
-Modern trend: 100K+ vocabulary for broader language coverage (GPT-4o uses 200K, Llama 3 uses 128K).
+Modern trend: 100K+ vocabulary for broader language coverage (OpenAI's `o200k_base`, used by GPT-4o and every later OpenAI model, is 200K; Llama 3 uses 128K).
 
 **What this actually says.** "A bigger vocabulary buys shorter sequences. You pay for it once in the embedding table, and again on every single token you generate, because the output softmax has to score all `V` candidates."
 
@@ -368,9 +370,9 @@ Stating both halves is the point. The embedding cost is a one-time storage hit t
 ## 7. Real-World Examples
 
 ### OpenAI tiktoken Evolution
-- GPT-2: 50K vocab (`gpt2` encoding), poor multilingual
-- GPT-3/3.5: `p50k_base` 50K, then `cl100k_base` 100K — dramatically better multilingual, 4x fewer tokens for common non-English languages
-- GPT-4o: `o200k_base` 200K — further multilingual improvement, better code coverage
+- GPT-2: 50,257 vocab (`gpt2`/`r50k_base` encoding), poor multilingual
+- GPT-3 / Codex: `r50k_base` then `p50k_base` (50,281); GPT-3.5-turbo and GPT-4 moved to `cl100k_base` (100,277) — better multilingual, roughly 1.2-2x fewer tokens on non-Latin scripts than `p50k_base`
+- GPT-4o and later (GPT-4.1, GPT-5, o-series): `o200k_base` (200,019) — the large multilingual jump, ~1.5-3.5x fewer tokens than `cl100k_base` on Indic and Arabic scripts, plus better code coverage
 
 ### LLaMA Tokenizer
 - LLaMA 1/2: SentencePiece BPE, 32K vocabulary
@@ -431,7 +433,7 @@ Solutions: Use tokenizers with consistent number splitting
 
 ## 10. Common Pitfalls
 
-1. **Token counting != character counting**: "ChatGPT" is 1 token but has 7 characters. Always count tokens with the model's actual tokenizer.
+1. **Token counting != character counting**: under `cl100k_base`, "tokenization" is 12 characters but only 2 tokens (`["token", "ization"]`), while the shorter "ChatGPT" is 7 characters and 3 tokens (`["Chat", "G", "PT"]`). Always count tokens with the model's actual tokenizer.
 2. **Leading space matters**: `"hello"` and `" hello"` are different tokens in BPE. This matters for prompt construction.
 3. **Special token handling**: Forgetting to add BOS/EOS tokens can degrade model performance.
 4. **Vocabulary truncation on fine-tuning**: Adding new tokens to a frozen embedding matrix — the new tokens have random embeddings and need extra training.
@@ -457,7 +459,8 @@ from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
 tokens = tokenizer.encode("Hello, LLM world!", return_tensors="pt")
-print(tokenizer.vocab_size)  # 128,256
+print(tokenizer.vocab_size)  # 128000 -- BASE vocab only, added tokens excluded
+print(len(tokenizer))        # 128256 -- includes the 256 reserved special tokens
 ```
 
 ---
@@ -492,13 +495,13 @@ A: If your code lets raw user text be tokenized with `add_special_tokens` semant
 BPE starts with individual characters and iteratively merges the most frequent adjacent pair into a new token until reaching the target vocabulary size. Each merge creates a new token — for example, if "t" and "h" appear adjacent most often, they merge into "th", then "th" and "e" might merge into "the". The final vocabulary is determined by the merge order and the target vocabulary size (e.g., 32K, 50K, 128K). GPT-2 used 50,257 tokens; LLaMA uses 32,000; GPT-4 uses ~100K. The training corpus determines which merges are learned — training on English-heavy data creates English-efficient tokenization but wastes tokens on other languages.
 
 **Q: What are the tradeoffs of vocabulary size (32K vs 64K vs 128K tokens)?**
-Larger vocabularies reduce sequence length (fewer tokens per text) but increase embedding table size and softmax computation. A 32K vocabulary (LLaMA) tokenizes "unfortunately" as one token, while a smaller vocab might split it into 3. However, a 128K vocabulary (GPT-4) adds ~256MB to the embedding layer (128K x 2048 dim x FP16) and makes the softmax output layer 4x more expensive to compute. The optimal size depends on: languages supported (multilingual needs 64K+), domain (code benefits from larger vocab for common patterns), and model size (small models can't leverage huge vocabularies effectively). Mistral's Tekken tokenizer uses 128K for superior multilingual support.
+Larger vocabularies reduce sequence length (fewer tokens per text) but increase embedding table size and softmax computation. A 32K vocabulary (LLaMA 2) tokenizes "unfortunately" as one token, while a smaller vocab might split it into 3. However, a 128K vocabulary (Llama 3; GPT-4's `cl100k_base` is ~100K) adds ~512 MB to the embedding layer (128K x 2048 dim x 2 bytes for FP16) and makes the softmax output layer 4x more expensive to compute. The optimal size depends on: languages supported (multilingual needs 64K+), domain (code benefits from larger vocab for common patterns), and model size (small models can't leverage huge vocabularies effectively). Mistral's Tekken tokenizer uses 131,072 entries for superior multilingual support.
 
 **Q: Why do LLMs show multilingual bias in tokenization and how can it be addressed?**
-Multilingual tokenization bias occurs because BPE merge rules are learned from the training corpus, which is typically English-heavy. English text requires ~1.3 tokens per word, while languages like Chinese, Japanese, or Hindi may require 3-5x more tokens per word because their character sequences appear less frequently in the training data. This means non-English users pay more per API call and get shorter effective context windows. Solutions: (1) train tokenizer on balanced multilingual corpus; (2) use larger vocabulary (128K+) to include more non-English tokens; (3) SentencePiece with language-balanced sampling. GPT-4 significantly improved multilingual tokenization compared to GPT-3.5.
+Multilingual tokenization bias occurs because BPE merge rules are learned from the training corpus, which is typically English-heavy. English text requires ~1.3 tokens per word, while languages like Hindi, Arabic, or Thai may require 3-5x more tokens per word because their character sequences appear less frequently in the training data. This means non-English users pay more per API call and get shorter effective context windows. Solutions: (1) train tokenizer on balanced multilingual corpus; (2) use larger vocabulary (128K+) to include more non-English tokens; (3) SentencePiece with language-balanced sampling. GPT-4o's `o200k_base` significantly improved multilingual tokenization over the `cl100k_base` that GPT-3.5-turbo and GPT-4 share — those two tokenize identically, so there was no GPT-3.5-to-GPT-4 improvement at all.
 
 **Q: What is the difference between tiktoken and SentencePiece, and when would you choose each?**
-tiktoken (OpenAI) is a fast BPE tokenizer optimized for speed (Rust backend), while SentencePiece (Google) is a more flexible framework supporting both BPE and Unigram models. tiktoken is 3-6x faster than SentencePiece for encoding. Choose tiktoken when: building on OpenAI models, need maximum tokenization speed, English-primary workloads. Choose SentencePiece when: training a new model from scratch, need Unigram model support, multilingual focus, or need language-agnostic tokenization (SentencePiece treats text as raw Unicode, no pre-tokenization needed). LLaMA uses SentencePiece; GPT-4 uses tiktoken. For production tokenization of user input, speed often matters most.
+tiktoken (OpenAI) is a fast BPE tokenizer optimized for speed (Rust backend), while SentencePiece (Google) is a more flexible framework supporting both BPE and Unigram models. tiktoken's own README benchmarks it at 3-6x faster than HuggingFace's `GPT2TokenizerFast` on 1 GB of text; there is no equivalent published head-to-head against SentencePiece, so treat "faster than SentencePiece" as unmeasured. Choose tiktoken when: building on OpenAI models, need maximum tokenization speed, English-primary workloads. Choose SentencePiece when: training a new model from scratch, need Unigram model support, multilingual focus, or need language-agnostic tokenization (SentencePiece treats text as raw Unicode, no pre-tokenization needed). LLaMA uses SentencePiece; GPT-4 uses tiktoken. For production tokenization of user input, speed often matters most.
 
 **Q: How does the tokenizer affect model performance on code and mathematical expressions?**
 Tokenizers can dramatically affect code and math performance because poor tokenization splits meaningful patterns into semantically meaningless pieces. A tokenizer trained primarily on English text might split "def fibonacci(n):" into 6+ tokens, while a code-aware tokenizer keeps "fibonacci" as one token. For mathematics, "3.14159" might be split into ["3", ".", "14", "159"] with a generic tokenizer, destroying the numerical representation. Solutions: (1) include code and math in tokenizer training data; (2) dedicated tokens for common programming constructs (indentation, brackets); (3) digit tokenization strategies — some models tokenize each digit separately for better arithmetic. CodeLLaMA and StarCoder use code-aware tokenizers that significantly improve code completion quality.
@@ -510,7 +513,7 @@ A: All three produce subword vocabularies but choose merges differently. BPE is 
 A: Byte-level BPE runs BPE over the 256 raw UTF-8 bytes rather than over Unicode characters, so the base alphabet is a fixed 256 symbols and every possible string is representable with zero out-of-vocabulary risk — no `[UNK]` token is ever needed. This is why GPT-2/GPT-4 tokenizers can encode any emoji, script, or binary-ish text losslessly. The cost is that a character requiring multiple UTF-8 bytes (most CJK characters are 3 bytes) can fragment into several byte tokens when it is not itself a learned merge, inflating sequence length for those languages. Byte-level BPE is the standard for general-purpose LLMs precisely because robustness to arbitrary input outweighs the fertility penalty on non-Latin scripts.
 
 **Q: What is weight tying between the embedding and output layers, and why is it common?**
-A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embedding lookup (`[V × D]`) and the output projection that produces logits over the vocabulary (`[D × V]`), so the same learned vector represents a token both when it is read in and when it is scored for generation. It roughly halves the parameters spent on the vocabulary interface — for a 128K vocab at D=4096 that is ~0.5B parameters saved — and it usually improves quality because input and output representations of a word are forced to be consistent. Most decoder LLMs (GPT-2, LLaMA family) tie weights; the main reason not to is when input and output should live in genuinely different spaces (e.g., some encoder-decoder setups) or when a factorized/large-vocab output head is used for efficiency.
+A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embedding lookup (`[V × D]`) and the output projection that produces logits over the vocabulary (`[D × V]`), so the same learned vector represents a token both when it is read in and when it is scored for generation. It roughly halves the parameters spent on the vocabulary interface — for a 128K vocab at D=4096 that is ~0.5B parameters saved — and it usually improves quality because input and output representations of a word are forced to be consistent. Many decoder LLMs tie weights (GPT-2, Gemma, and small models like Llama 3.2 1B/3B, where the table would otherwise dominate the parameter budget), but it is not universal: Llama 1/2/3 at 7B and above ship `tie_word_embeddings: false` and train a separate output head. The main reason not to tie is when input and output should live in genuinely different spaces (e.g., some encoder-decoder setups) or when a factorized/large-vocab output head is used for efficiency.
 
 ---
 
@@ -547,7 +550,7 @@ A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embeddi
   ┌───────────────────────────────────────────────────────────┐
   │  Embedding Model: multilingual-e5-large-instruct          │
   │  (560M params, 1024-dim, supports 100 languages)          │
-  │  Instruction prefix: "Represent this product for search:" │
+  │  Instruction prefix on QUERIES only (docs take none)      │
   │  Batch size: 64 (GPU) / 8 (CPU fallback)                  │
   │  Quantization: INT8 (2× speedup, < 0.5% quality loss)    │
   └──────────────────────────┬────────────────────────────────┘
@@ -611,7 +614,10 @@ class EmbeddingConfig:
     device: str = "cuda"
     # Instruction prefixes for different usage types
     query_prefix: str = "Instruct: Represent this e-commerce search query for retrieval\nQuery: "
-    document_prefix: str = "Instruct: Represent this product description for retrieval\nQuery: "
+    # multilingual-e5-*-instruct takes an instruction on the QUERY side only --
+    # its model card states "no need to add instruction for retrieval documents",
+    # and adding one degrades retrieval quality.
+    document_prefix: str = ""
 
 
 class MultilingualEmbedder:
@@ -792,15 +798,16 @@ from transformers import AutoTokenizer
 import unicodedata
 
 
-# BROKEN: Use English-only GPT-2 tokenizer (50k BPE, English trained) for Spanish queries.
-# Spanish word "niño" (child) tokenizes to: ['n', 'i', 'ñ', 'o'] — 4 tokens.
-# English vocab has no "ñ" entry; fertility for Spanish: 3.8 tok/word (too high).
-# Embedding model trained with multilingual tokenizer — tokenizer mismatch → garbage embeddings.
+# BROKEN: Use English-trained GPT-2 tokenizer (50,257 byte-level BPE) for Spanish queries.
+# Byte-level BPE never fails outright, it just fragments: "zapatillas de running"
+# becomes ['z','ap','at','illas',' de',' running'] -- 6 tokens for 3 words (2.0 tok/word)
+# versus 5 with LLaMA's SentencePiece -- and rarer Spanish morphology fragments further.
+# The real defect is the MISMATCH: the embedding model was trained with a different
+# tokenizer, so these ids index the wrong embedding rows entirely.
 def broken_tokenize_spanish(text: str) -> list[int]:
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")  # English-only
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")  # English-trained
     return tokenizer.encode(text)
-# "zapatillas de running" → 8 tokens (vs 4 with multilingual SentencePiece)
-# Embedding model: mismatch → lower recall on Spanish queries
+# Embedding model: mismatch → garbage embeddings, lower recall on Spanish queries
 
 
 # FIX: Use the exact same tokenizer the embedding model was trained with.
@@ -965,7 +972,7 @@ BPE vocabulary size determines how many subword merge rules exist. A 32k vocabul
 Token fertility is the ratio of tokens to words for a given language and tokenizer — "niño" tokenized as 1 piece has fertility 1.0; tokenized as 4 pieces has fertility 4.0. High fertility (> 4.0) indicates the tokenizer poorly covers that language: subwords are too small, increasing cost proportionally, and potentially fragmenting morphemes that the embedding model was trained to handle as units. In production, monitor fertility per language per product category — new product launches in a new geography may introduce vocabulary the tokenizer has never seen, spiking OOV rates and fertility, degrading search quality before you notice the recall drop.
 
 **Q: How does instruction-tuned embedding (E5-Instruct) differ from standard bi-encoder embedding?**
-Standard bi-encoders (sentence-transformers SBERT) encode text symmetrically — same model, same prefix for queries and documents. Instruction-tuned embedders (E5-Instruct, text-embedding-3) use a task description prefix to orient the embedding space: "Represent this query for retrieval:" places the embedding in a retrieval-optimized space. The document side uses a different (or no) prefix. Asymmetric retrieval — where the query and document embedding spaces are allowed to differ — consistently outperforms symmetric by 5-15% recall@10 on MTEB benchmarks. The instruction tells the model "optimize for retrieval" vs "optimize for clustering" vs "optimize for classification."
+Standard bi-encoders (sentence-transformers SBERT) encode text symmetrically — same model, same prefix for queries and documents. Instruction-tuned embedders (E5-Instruct, and open instruction-following embedders generally; OpenAI's text-embedding-3 API has no instruction parameter) use a task description prefix to orient the embedding space: "Represent this query for retrieval:" places the embedding in a retrieval-optimized space. The document side uses no prefix at all for the E5-instruct family. Asymmetric retrieval — where the query and document embedding spaces are allowed to differ — is what these models were trained for; the multilingual-e5-instruct model card states plainly that omitting the query instruction causes "performance degradation," though it does not publish a headline recall delta. The instruction tells the model "optimize for retrieval" vs "optimize for clustering" vs "optimize for classification."
 
 **Q: What causes cross-lingual recall failures even with multilingual embedding models?**
 Four common causes: (1) Language imbalance in training data — the embedding model saw 95% English text, so English embeddings cluster densely while low-resource languages cluster sparsely; Spanish "zapatos" and English "shoes" are near in embedding space but "zapatos" in Swahili may not be. (2) Tokenizer OOV — if query words tokenize to [UNK], the embedding loses signal. (3) Domain shift — model trained on Wikipedia/Common Crawl, but product descriptions use specialized vocabulary ("breathable mesh upper") not well represented. (4) Character normalization — accented characters not normalized consistently cause the same word to produce different embeddings.
@@ -974,4 +981,4 @@ Four common causes: (1) Language imbalance in training data — the embedding mo
 The decision is recall vs latency/cost. Larger models (560M) typically achieve 5-15% higher NDCG@10 on multilingual benchmarks. Smaller distilled models (120M) run 3-4× faster and cost 3-4× less to serve. For a 50M product index with 200M monthly queries, embedding queries at 200M × 120M model = $180/month vs 560M model = $720/month. If the recall difference translates to measurable revenue (A/B test needed), use the larger model. In practice, the reranking stage recovers much of the top-K recall gap — a smaller bi-encoder + cross-encoder reranker often beats a larger bi-encoder alone at similar cost.
 
 **Q: Why use HNSW instead of exact nearest neighbor search for 50M product embeddings?**
-Exact nearest neighbor search (exhaustive dot product over 50M vectors) requires 50M × 1024 × 4 bytes × 200M queries / month = 40 petaFLOPs per second of sustained compute — economically infeasible. HNSW (Hierarchical Navigable Small Worlds) achieves approximate nearest neighbor search in O(log N) per query by building a navigable graph of shortcut edges at multiple granularity levels. At ef=128, HNSW achieves 97%+ recall@10 with p99 latency under 25ms for 50M vectors — 1000× faster than exact search. The 3% recall gap is recovered by reranking the top-100 approximate results with an exact cross-encoder.
+Exact nearest neighbor search means every query scans all 50M vectors: 50M × 1024 dims × 2 FLOPs ≈ 1.0e11 FLOPs and 200 GB of memory traffic per query. At 200M queries/month (~77 queries/s average) that is ~8 TFLOP/s of sustained compute and, far worse, ~15 TB/s of sustained memory bandwidth — the scan is bandwidth-bound, and no economically sane fleet supplies that. HNSW (Hierarchical Navigable Small Worlds) achieves approximate nearest neighbor search in O(log N) per query by building a navigable graph of shortcut edges at multiple granularity levels. At ef=128, HNSW achieves 97%+ recall@10 with p99 latency under 25ms for 50M vectors — 1000× faster than exact search. The 3% recall gap is recovered by reranking the top-100 approximate results with an exact cross-encoder.

@@ -333,19 +333,26 @@ For K draft tokens with a constant per-token acceptance probability α (geometri
 E[accepted] = (1 - α^(K+1)) / (1 - α)        (includes the K+1'th "bonus" token
                                                 if all K are accepted)
 
-K=4 draft tokens:
-  α = 0.90 -> E[accepted] = 3.52  -> ~3.5x speedup per target pass
-  α = 0.75 -> E[accepted] = 2.63  -> ~2.6x speedup
-  α = 0.60 -> E[accepted] = 2.07  -> ~2.1x speedup
-  α = 0.50 -> E[accepted] = 1.69  -> ~1.7x speedup
+K=4 draft tokens (ILLUSTRATIVE end-to-end figures, discounted below the
+closed form because real acceptance decays with draft depth -- the raw
+formula gives 4.10 / 3.05 / 2.31 / 1.94 for these same alphas):
+  α = 0.90 -> E[accepted] ~ 3.5  -> ~3.5x speedup per target pass
+  α = 0.75 -> E[accepted] ~ 2.6  -> ~2.6x speedup
+  α = 0.60 -> E[accepted] ~ 2.1  -> ~2.1x speedup
+  α = 0.50 -> E[accepted] ~ 1.7  -> ~1.7x speedup
 
-Overhead: draft model adds roughly draft_cost/target_cost per
-draft token (e.g. ~1.4% for a 1B draft vs a 70B target).
+Overhead: a 1B draft against a 70B target is only ~1.4% of the target's
+FLOPs per token, but the MEASURED wall-clock cost per draft token runs
+far higher (~0.2 target passes) because kernel launches, sampling and
+scheduling do not shrink with the model. Use the measured ratio.
 Total speedup ≈ E[accepted] / (1 + K * draft_cost_fraction)
 
 Break-even (speedup = 1): solve for α such that
   E[accepted] = 1 + K * draft_cost_fraction
-  For K=4, draft_cost_fraction ≈ 0.014 (1B/70B):  α ≈ 0.45
+  For K=4 at the measured draft_cost_fraction ≈ 0.2:  α ≈ 0.45
+  (at the FLOPs-ratio 0.014 the bar is only 1.056 tokens/pass and
+   break-even would sit near α ≈ 0.05 -- which is exactly why a
+   FLOPs estimate makes speculation look free when it is not)
 ```
 
 **What the formula is telling you.** "Count on the first draft token surviving with probability α, the second only if the first also survived (α²), the third α³, and so on — then add them all up, because the run stops dead at the first rejection."
@@ -425,7 +432,7 @@ The right-hand column is the one that matches production: net speedup **peaks at
 
 **Why the measured cost ratio is so much larger than the parameter ratio.** A 1B draft is ~1.4% of a 70B model's FLOPs, but decode is memory-bandwidth-bound and latency-floored: kernel launches, sampling, and Python-side scheduling do not shrink with the model. Invert the file's own break-even to see the implied number — solving `E[accepted] = 1 + 4c` at the stated break-even of α≈0.45 gives `E(0.45, 4) = 1.7846`, so `c = (1.7846 - 1) / 4 = 0.196`. The real draft tax is ~20% of a target pass per token, roughly 14× the FLOPs ratio. Budget with measured wall-clock, never with parameter counts.
 
-**A note on the K=4 table above.** Plugging the stated α values straight into `(1 - α^(K+1)) / (1 - α)` gives `4.10 / 3.05 / 2.31 / 1.94` for α = 0.90 / 0.75 / 0.60 / 0.50, so the listed `3.52 / 2.63 / 2.07 / 1.69` are the more conservative end-to-end figures rather than the raw geometric idealization. The gap is the point: the geometric model assumes a *constant* per-token α, but real acceptance decays with depth — the 4th draft token is conditioned on three prior guesses and is empirically harder to accept than the 1st. Treat the closed form as an upper bound on a real system, not a forecast.
+**A note on the K=4 table above.** Plugging the stated α values straight into `(1 - α^(K+1)) / (1 - α)` gives `4.10 / 3.05 / 2.31 / 1.94` for α = 0.90 / 0.75 / 0.60 / 0.50, so the listed `~3.5 / ~2.6 / ~2.1 / ~1.7` are illustrative, more conservative end-to-end figures rather than the raw geometric idealization. The gap is the point: the geometric model assumes a *constant* per-token α, but real acceptance decays with depth — the 4th draft token is conditioned on three prior guesses and is empirically harder to accept than the 1st. Treat the closed form as an upper bound on a real system, not a forecast.
 
 When α < 0.45 for K=4, the draft model's sequential overhead exceeds the savings from accepted tokens — speculative decoding becomes a net *slowdown*. This is the number production monitors alarm on (Section 6.9).
 
@@ -475,16 +482,17 @@ Lookahead decoding reframes greedy autoregressive decoding as finding the fixed 
 
 In practice, a sliding "lookahead window" runs these Jacobi iterations continuously, and every n-gram observed during the iterations (even ones that haven't converged yet) is cached in an **n-gram pool**. A verification step then checks whether cached n-grams match the model's actual greedy continuation from the current position; matches let decoding jump forward multiple tokens per real forward pass.
 
-The key tradeoff vs. draft-model speculative decoding: lookahead decoding spends **extra FLOPs** (the GPU has spare compute during memory-bound decode anyway) rather than relying on a separate model's predictive accuracy. Reported speedups (~1.5–2.3×) are smaller than EAGLE/Medusa's, but it requires **zero extra training and zero extra weights** — pure inference-time technique, applicable to any model immediately.
+The key tradeoff vs. draft-model speculative decoding: lookahead decoding spends **extra FLOPs** (the GPU has spare compute during memory-bound decode anyway) rather than relying on a separate model's predictive accuracy. Reported speedups (up to 1.8× on MT-bench, and up to 4× with strong scaling across multiple GPUs on code completion) are generally smaller than EAGLE/Medusa's, but it requires **zero extra training and zero extra weights** — pure inference-time technique, applicable to any model immediately.
 
 ### 6.6 Prompt-lookup (ngram) decoding
 
 For tasks where the output substantially **echoes the input** — retrieval-augmented generation quoting source documents, summarization, code editing (most of the file is unchanged), grammar/spelling correction — the cheapest possible "draft model" is a hash table over the prompt itself. After generating a token, search the prompt (and generated-so-far text) for the most recent n-gram of generated tokens; if found, propose the tokens that *followed* that n-gram in the source as the draft continuation.
 
 ```
-vLLM:  --speculative-model "[ngram]" \
-       --ngram-prompt-lookup-max 8 \
-       --ngram-prompt-lookup-min 3
+vLLM:  --speculative-config '{"method": "ngram",
+                              "num_speculative_tokens": 5,
+                              "prompt_lookup_max": 8,
+                              "prompt_lookup_min": 3}'
 ```
 
 There is **no extra model and no extra forward pass for drafting at all** — it's a string search. Acceptance is bimodal: 0.6–0.9+ when the output genuinely copies from context (code edits, RAG citations), and near 0 for tasks with no input/output overlap (creative writing), where it should simply be disabled. Because the cost is ~zero, many production systems enable it as a "free roll" alongside a model-based draft and let the verification step naturally prefer whichever proposal the target agrees with more.
@@ -614,14 +622,15 @@ def broken_always_on() -> dict:
 
 # FIX: only enable SD when expected output length exceeds the
 # break-even point (~50 tokens for typical K=4-5 configurations).
-# vLLM's speculative_disable_by_batch_size handles the batch-size
-# dimension of this automatically.
+# vLLM's num_speculative_tokens_per_batch_size schedule handles the
+# batch-size dimension of this automatically (it replaced V0's
+# speculative_disable_by_batch_size flag).
 def fixed_conditional_on_output_length(expected_output_tokens: int) -> dict:
     return {"use_speculative_decoding": expected_output_tokens >= 50,
-            "speculative_disable_by_batch_size": 32}
+            "num_speculative_tokens_per_batch_size": [(0, 31, 5), (32, 8192, 0)]}
 ```
 
-**High concurrency disables speculation too**: at 512 concurrent sequences, the draft model itself runs a *batched* forward pass of `512 × K` tokens every step — at K=5 that's 2,560 draft tokens per step, enough to make the draft pass itself memory-bandwidth-significant (~7.5ms overhead at typical bandwidths). Past a batch-size threshold (commonly 32–64), this overhead exceeds the benefit from accepted tokens, and vLLM's `speculative_disable_by_batch_size` falls back to standard decoding.
+**High concurrency disables speculation too**: at 512 concurrent sequences, the draft model itself runs a *batched* forward pass of `512 × K` tokens every step — at K=5 that's 2,560 draft tokens per step, enough to make the draft pass itself memory-bandwidth-significant (an illustrative ~7.5ms of overhead at typical bandwidths). Past a batch-size threshold (commonly 32–64), this overhead exceeds the benefit from accepted tokens, and vLLM's `num_speculative_tokens_per_batch_size` schedule tapers K to 0 and falls back to standard decoding.
 
 ---
 
@@ -636,7 +645,7 @@ This is the one regime where the entire premise of Section 2 inverts. Speculatio
 | `batch_size × K` | Total draft tokens the draft model must generate every single step |
 | draft step cost | Wall-clock of that batched draft pass. ~7.5 ms at typical HBM bandwidths |
 | target step cost | Wall-clock of one target decode step. 20 ms/token from the Section 14 baseline |
-| `speculative_disable_by_batch_size` | The vLLM threshold (commonly 32–64) that trips the fallback |
+| `num_speculative_tokens_per_batch_size` | The vLLM batch-size schedule (commonly tapering to 0 around 32–64) that trips the fallback |
 
 **Walk one example.** The 512-concurrency step, priced against the case study's 20 ms baseline:
 
@@ -661,11 +670,11 @@ Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have 
 
 ## 7. Real-World Examples
 
-- **vLLM** — supports multiple speculative methods via `speculative_model`: independent draft models (any HF causal LM with a matching tokenizer), `"[ngram]"` for prompt-lookup decoding, and dedicated integrations for EAGLE and Medusa checkpoints. Exposes `num_speculative_tokens`, `speculative_disable_by_batch_size`, and `use_v2_block_manager` for KV cache sharing between draft and target.
+- **vLLM** — configured through a single `--speculative-config` object whose `method` selects the mechanism: `draft_model` (any HF causal LM with a matching tokenizer), `ngram` for prompt-lookup decoding, plus `eagle`/`eagle3`, `medusa`, `mlp_speculator` and per-model MTP heads. Key fields: `num_speculative_tokens`, `draft_sample_method` (`greedy` default, or `probabilistic`), `rejection_sample_method`, `draft_tensor_parallel_size`, and `num_speculative_tokens_per_batch_size` for batch-size-aware tapering. The older V0 flags (`speculative_model`, `speculative_disable_by_batch_size`, `use_v2_block_manager`) no longer exist.
 - **SGLang** — EAGLE and EAGLE-2 integration with radix-tree-aware KV cache sharing between draft and target passes; reports among the highest published EAGLE throughput numbers due to tight integration with its scheduler.
 - **TensorRT-LLM** — draft-model speculative decoding plus Medusa support with custom fused kernels for tree attention, tuned for H100/B200.
 - **HuggingFace `transformers`** — "assisted generation" (`model.generate(assistant_model=...)`), the reference implementation of vanilla draft-model speculative decoding; widely used for prototyping and CPU/consumer-GPU inference (llama.cpp also implements draft-model speculation for the same use case).
-- **Medusa** (Together AI / Princeton, 2024) — open-source heads + training recipe; demonstrated on Vicuna and Llama 2 with 2-3x throughput gains.
+- **Medusa** (Together AI / Princeton, 2024) — open-source heads + training recipe; the paper reports over 2.2x speedup for Medusa-1 and 2.3-3.6x for Medusa-2.
 - **EAGLE** (Peking University / Microsoft, 2024-25) — open-source EAGLE/EAGLE-2/EAGLE-3 weights for popular Llama and Qwen checkpoints; widely adopted as the default "bolt-on" speculative method for new deployments because it requires no target fine-tuning.
 - **DeepSeek-V3 / DeepSeek-R1** — ship with trained MTP modules used both during pretraining (densified supervision) and inference (speculative draft), reported α≈0.85-0.9 for the first speculative token at scale.
 
@@ -737,7 +746,7 @@ A draft mechanism proposes K candidate tokens; the target model verifies all K i
 Decode is memory-bandwidth-bound: each step's cost is dominated by streaming the full weight matrices from HBM (e.g., 140GB for a 70B model in BF16), and that cost is roughly independent of how many token positions are processed in the same pass, up to the point where the batch becomes compute-bound (the roofline crossover, ~batch 156 on an A100 — see the parent [README §6](README.md)). A verification pass over K=5 positions reads the weights once and computes attention/FFN for 5 positions in parallel — essentially "free" extra positions riding along on a weight-load you were going to pay for anyway.
 
 **Q3: What is the break-even acceptance rate and why does it matter operationally?**
-For K=4 draft tokens and a ~1.4% draft-overhead fraction (1B draft vs 70B target), the break-even acceptance rate α is about 0.45 — below that, the draft model's sequential overhead exceeds the throughput gained from accepted tokens, making speculative decoding a net *slowdown*. Operationally this means you cannot just "turn SD on" — you need live acceptance-rate monitoring (a rolling window per task type) with automatic K-reduction or full disablement when α drifts below this threshold, because α is workload-dependent and will vary across your traffic mix.
+For K=4 draft tokens at a measured draft cost of ~0.2 target passes per drafted token, break-even acceptance is about α = 0.45. Below that, the draft's sequential overhead exceeds the throughput gained from accepted tokens, making speculative decoding a net *slowdown*. Budget with that measured wall-clock ratio, not the 1B/70B FLOPs ratio of ~1.4%, which would put break-even near α = 0.05 and make speculation look unconditionally free. Operationally this means you cannot just "turn SD on" — you need live acceptance-rate monitoring (a rolling window per task type) with automatic K-reduction or full disablement when α drifts below this threshold, because α is workload-dependent and will vary across your traffic mix.
 
 **Q4: Explain EAGLE's "feature-level autoregression" and why it gets higher acceptance than a standalone small LM.**
 EAGLE adds one small transformer layer that predicts the target model's *next hidden-state vector* (from its penultimate layer) given the current hidden state and the embedding of the actual sampled token, then reuses the target's own (frozen) LM head to turn that predicted feature into a token. Hidden-state trajectories are smoother and more predictable step-to-step than raw token sequences — a tiny module predicting features outperforms a much larger independent LM predicting tokens, because it's effectively "continuing the target's own thought" rather than guessing what the target would say from scratch. This is why EAGLE-class methods report the highest acceptance rates (0.75-0.9+) among lightweight draft mechanisms.
@@ -749,7 +758,7 @@ Medusa attaches K small extra prediction heads to the target model's final hidde
 Linear verification checks one chain of K guesses; if the first guess is wrong, all K-1 subsequent guesses (which were conditioned on that wrong guess) are wasted. Tree verification instead proposes multiple *branches* at each depth (e.g., the top-2 candidates at each position), and verifies the entire tree in one forward pass using a tree-structured attention mask so each node only attends to its ancestors. The accepted output is the longest valid path from the root across ANY branch — so a wrong guess at depth 1 doesn't waste the alternative branch's deeper guesses. For the same number of "extra tokens scored" in the verification pass, a well-shaped tree yields a higher expected accepted-length than a single chain, which is why Medusa, EAGLE-2/3, and Sequoia all use trees.
 
 **Q7: What is lookahead (Jacobi) decoding and how does it differ fundamentally from draft-model speculative decoding?**
-Lookahead decoding reframes greedy decoding as solving y_i = f(prompt, y_1..y_{i-1}) for all positions simultaneously via Jacobi iteration — guess values for future positions, run one parallel forward pass to refine all guesses given the previous iteration's earlier guesses, repeat until convergence (guaranteed by the Banach fixed-point theorem to match true greedy decoding). N-grams observed during these iterations are cached and verified against the model's real output to jump forward multiple tokens. The fundamental difference: it requires NO separate model and NO extra weights — it trades *spare FLOPs* (which the GPU has during memory-bound decode anyway) for speedup, whereas draft-model SD trades a *separate model's predictive accuracy*. This makes it immediately applicable to any model with zero training, though typical speedups (1.5-2.3x) are smaller than EAGLE/Medusa's.
+Lookahead decoding reframes greedy decoding as solving y_i = f(prompt, y_1..y_{i-1}) for all positions simultaneously via Jacobi iteration — guess values for future positions, run one parallel forward pass to refine all guesses given the previous iteration's earlier guesses, repeat until convergence (guaranteed by the Banach fixed-point theorem to match true greedy decoding). N-grams observed during these iterations are cached and verified against the model's real output to jump forward multiple tokens. The fundamental difference: it requires NO separate model and NO extra weights — it trades *spare FLOPs* (which the GPU has during memory-bound decode anyway) for speedup, whereas draft-model SD trades a *separate model's predictive accuracy*. This makes it immediately applicable to any model with zero training, though the paper's reported speedups (up to 1.8x on MT-bench, up to 4x with strong scaling on multiple GPUs) are generally smaller than EAGLE/Medusa's.
 
 **Q8: When would you choose prompt-lookup (ngram) decoding over a model-based draft?**
 When the task has high input/output token overlap — RAG answers quoting source documents, code editing where most of the file is unchanged, summarization, or grammar correction. Prompt-lookup searches the prompt/context for the most recent generated n-gram and proposes whatever followed it in the source as the draft — a hash lookup with essentially zero cost, no extra model, no extra forward pass. Acceptance is bimodal: 0.6-0.9+ when overlap is real, near 0 for creative generation with no overlap (where it should be disabled). Many production systems run it alongside a model-based draft as a "free roll" since the marginal cost is negligible.
@@ -767,13 +776,13 @@ The rejection-sampling rule compares p_target(x) and p_draft(x) for the *same to
 K should be adaptive, not static, because acceptance rate α — and therefore the optimal K — varies by task type, temperature, and traffic mix. A common production pattern: maintain a rolling window of (accepted/proposed) ratios; if α > 0.8, increase K toward a max (more speedup available); if α < 0.4, decrease K toward a minimum (reduce wasted draft compute); if α < 0.25, disable speculation entirely. Static K tuned on a single benchmark will be miscalibrated the moment your traffic mix shifts (e.g., a surge of creative-writing requests on a system tuned for code).
 
 **Q13: A team reports speculative decoding made their P99 latency WORSE, not better. What's your debugging approach?**
-First check the acceptance rate by request type — if it's below the break-even threshold (~0.45 for K=4), the draft overhead is structurally exceeding the gains; the fix is task-aware routing or auto-disable. Second, check for logit processors (repetition penalty, logit_bias) on the affected requests — these break the rejection-sampling guarantees and commonly cause both quality and latency regressions. Third, check concurrent batch size — at high concurrency the draft model's own batched forward pass (K × batch_size tokens) becomes bandwidth-significant; verify `speculative_disable_by_batch_size` is configured. Finally, check output length distribution — if P99-latency requests are short-output (<50 tokens), the draft overhead never amortizes for them specifically even if average-case numbers look fine.
+First check the acceptance rate by request type — if it's below the break-even threshold (~0.45 for K=4), the draft overhead is structurally exceeding the gains; the fix is task-aware routing or auto-disable. Second, check for logit processors (repetition penalty, logit_bias) on the affected requests — these break the rejection-sampling guarantees and commonly cause both quality and latency regressions. Third, check concurrent batch size — at high concurrency the draft model's own batched forward pass (K × batch_size tokens) becomes bandwidth-significant; verify a `num_speculative_tokens_per_batch_size` schedule is configured. Finally, check output length distribution — if P99-latency requests are short-output (<50 tokens), the draft overhead never amortizes for them specifically even if average-case numbers look fine.
 
 **Q14: Compare the engineering cost and acceptance rate of self-speculative decoding (LayerSkip) vs. an independent draft model.**
 Self-speculative decoding (LayerSkip) runs an early-exit subset of the target's own layers as the draft, sharing weights and KV cache with the full verification pass — zero extra deployment footprint, automatic tokenizer match, typical α≈0.6-0.8. The cost is that the target model must have been *trained* with layer dropout and early-exit losses; you cannot retrofit this onto an arbitrary checkpoint and expect a usable early-exit distribution. An independent draft model (e.g., Llama 3 8B for a 70B target) requires no special training of the target — any same-family small model works off the shelf — but doubles the deployment surface (separate weights, separate KV cache, separate scaling decisions) and constrains you to same-tokenizer pairs. In practice: choose self-speculative if you control pretraining/fine-tuning of the target; choose an independent draft if you're deploying a third-party checkpoint as-is.
 
 **Q15: What's the relationship between speculative decoding and continuous batching?**
-They're mostly compatible but create one tension: speculative decoding's benefit (acceptance rate) is highest on homogeneous, predictable workloads, while continuous batching deliberately mixes heterogeneous requests (different lengths, different task types) to maximize GPU utilization. When a batch mixes high-acceptance (code) and low-acceptance (creative) requests, the *effective* speedup for the batch is dragged toward the lower end — and at large batch sizes, the draft model's own batched cost grows linearly, eventually exceeding the marginal benefit. `speculative_disable_by_batch_size` is the practical reconciliation: speculate at low-to-moderate concurrency where it helps most, fall back to standard continuous batching at high concurrency where it doesn't.
+They're mostly compatible but create one tension: speculative decoding's benefit (acceptance rate) is highest on homogeneous, predictable workloads, while continuous batching deliberately mixes heterogeneous requests (different lengths, different task types) to maximize GPU utilization. When a batch mixes high-acceptance (code) and low-acceptance (creative) requests, the *effective* speedup for the batch is dragged toward the lower end — and at large batch sizes, the draft model's own batched cost grows linearly, eventually exceeding the marginal benefit. vLLM's `num_speculative_tokens_per_batch_size` schedule is the practical reconciliation: speculate at low-to-moderate concurrency where it helps most, fall back to standard continuous batching at high concurrency where it doesn't.
 
 **Q16: How would you A/B test whether to enable EAGLE for a production model?**
 Measure three things on production-representative traffic (not a benchmark): (1) rolling acceptance rate α segmented by task type/route, to confirm it clears the break-even threshold for your K; (2) end-to-end P50/P99 TPOT with EAGLE on vs. off, since EAGLE's extra layer and tree verification add some per-step overhead that must be recovered by accepted tokens; (3) GPU memory headroom, since the EAGLE layer's weights and any tree-attention buffers add to the model's footprint — check this doesn't push KV cache budget into preemption territory (see [kv_cache_optimization.md](kv_cache_optimization.md)). Roll out behind the adaptive-K/auto-disable monitor from Section 6.9 so a traffic-mix shift that drops α below break-even degrades gracefully rather than silently regressing latency.
@@ -791,7 +800,7 @@ Only TPOT (decode). TTFT is dominated by the prefill pass over the input prompt,
 4. **Gate on expected output length** (~≥50 tokens) — short outputs never amortize draft overhead.
 5. **Prefer EAGLE/Medusa/self-speculative over an independent draft model when you control the target's training** — no separate deployment, automatic tokenizer match, typically higher acceptance.
 6. **Use prompt-lookup (ngram) as a free additional proposal source** for RAG/code-edit/summarization workloads — near-zero marginal cost.
-7. **Set `speculative_disable_by_batch_size`** to fall back to standard continuous batching at high concurrency, where the draft's own batched cost dominates.
+7. **Set a `num_speculative_tokens_per_batch_size` schedule** that tapers K to 0 at high concurrency, so the engine falls back to standard continuous batching where the draft's own batched cost dominates.
 8. **Re-train Medusa/EAGLE heads after major target fine-tunes** — they're calibrated to specific activation distributions.
 9. **Factor the draft model's KV cache into capacity planning** for independent-draft-model setups — see [kv_cache_optimization.md](kv_cache_optimization.md).
 10. **Tune tree shape (Medusa/EAGLE-2/3) against production traffic distributions**, not published benchmarks.
@@ -803,8 +812,8 @@ Only TPOT (decode). TTFT is dominated by the prefill pass over the input prompt,
 **Scenario**: An AI infrastructure company serves Llama-3-70B as a shared inference API. Current state: single-model vLLM deployment, 180 RPS, p99 TTFT 1,800ms, p99 decode 95ms/token, on 8×H100 80GB (TP=4). Target after adopting speculative decoding: 520+ RPS, p99 TTFT < 700ms, p99 decode < 40ms/token — without any change to output quality.
 
 **Design**:
-1. **Draft choice**: Llama-3.2-1B-Instruct (FP8, TP=1) — same tokenizer family as the 70B target, ~1.4% of target compute per token. Deployed on 1 of the 8 H100s alongside a TP=4 shard of the target (memory layout: target 140GB FP8 weights across 4×H100 + ~140GB KV cache; draft 2GB weights + ~78GB KV cache on the 5th GPU).
-2. **Configuration**: `num_speculative_tokens=5`, multinomial rejection sampling (exact distribution preservation — `speculative_disable_by_batch_size=32` to fall back at high concurrency), chunked prefill enabled so long prompts don't stall concurrent decode steps.
+1. **Draft choice**: Llama-3.2-1B-Instruct (FP8, TP=1) — same tokenizer family as the 70B target, ~1.4% of target compute per token. Deployed on 1 of the 8 H100s alongside a TP=4 shard of the target (memory layout: target ~70GB of FP8 weights sharded across 4×H100, leaving ~250GB of those cards for KV cache; ~1.3GB of FP8 draft weights plus its own KV cache on the 5th GPU).
+2. **Configuration**: `num_speculative_tokens=5`, multinomial rejection sampling (exact distribution preservation) with a `num_speculative_tokens_per_batch_size` schedule tapering K to 0 above batch 32, chunked prefill enabled so long prompts don't stall concurrent decode steps.
 3. **Acceptance monitoring**: rolling 1,000-request window per route; code-generation routes settled at α≈0.71, general chat at α≈0.52 — both above the K=4-5 break-even of ~0.45.
 4. **Adaptive K**: the monitor from Section 6.9 raised K to 5-6 for code routes (α>0.8 sometimes) and held K at 3-4 for chat routes, recovering an additional ~5-8% throughput over static K=5 across the whole fleet.
 
@@ -864,5 +873,5 @@ The chat route's 98%-of-ceiling number is the actionable one: adaptive K correct
 - [Sampling & Decoding Strategies](sampling_and_decoding_strategies.md) — temperature/top-p/min-p, the dimension that must match between draft and target
 - [KV Cache Optimization](kv_cache_optimization.md) — capacity planning when an independent draft model adds its own KV cache
 - [Constrained Decoding & Structured Outputs](constrained_decoding_and_structured_outputs.md) — how grammar masks and speculative decoding interact (Q13 there)
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — engine configuration: `num_speculative_tokens`, `speculative_disable_by_batch_size`, KV cache sharing
+- [vLLM Deep Dive](../vllm_deep_dive/README.md) — engine configuration: `--speculative-config`, `num_speculative_tokens`, `num_speculative_tokens_per_batch_size`, KV cache sharing
 - [Design: AI Coding Assistant](../case_studies/design_copilot.md) — worked production speculative decoder for a code-completion service

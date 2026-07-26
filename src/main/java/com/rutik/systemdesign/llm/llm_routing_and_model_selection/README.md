@@ -23,7 +23,7 @@ Routing approaches fall into four main families:
 
 **Mental model**: Think of model capability as a ladder. Every rung costs more than the one below it. The router's job is to find the lowest rung that still gets the patient safely discharged.
 
-**Why it matters**: Frontier models cost more per token than small models, though by less than the folklore suggests as of July 2026 — Claude Opus 5 ($5/$25 per MTok) is 5x Claude Haiku 4.5 ($1/$5), and GPT-5.6-sol ($5/$30) is 5x GPT-5.6-luna ($1/$6). Reach down a generation to a nano tier (GPT-5.4-nano at $0.20/$1.25, Gemini 2.5 Flash-Lite at $0.10/$0.40) and the ratio widens to 20–30x. At 10M queries/day, routing the bottom 70% of queries to cheap models still saves millions of dollars per year with no user-visible quality drop.
+**Why it matters**: Frontier models cost more per token than small models, though by less than the folklore suggests as of July 2026 — Claude Opus 5 ($5/$25 per MTok) is 5x Claude Haiku 4.5 ($1/$5), and GPT-5.6-sol ($5/$30) is 5x GPT-5.6-luna ($1/$6). Reach down a generation to a nano tier and the ratio widens sharply: GPT-5.4-nano at $0.20/$1.25 sits 25x below Opus 5 on input and 20x on output, and Gemini 2.5 Flash-Lite at $0.10/$0.40 sits 50x below on input and 60x on output. At 10M queries/day, routing the bottom 70% of queries to cheap models still saves millions of dollars per year with no user-visible quality drop.
 
 **Key insight**: Query difficulty is long-tailed, so a large share of traffic does not need the frontier model — RouteLLM's 3.66x cost saving at 95% of GPT-4 quality on MT Bench is only achievable if most of that benchmark's queries were answerable by the weak model. But the share is workload-specific: the same routers save only 1.41x on MMLU. Measure the share on your own traffic rather than importing a "70–80%" figure. The challenge is classifying queries accurately before spending tokens on the expensive model.
 
@@ -68,7 +68,7 @@ Architecture:
 - Input: query text (optionally concatenated with system prompt)
 - Model: DistilBERT fine-tuned for multi-class classification, or a logistic regression over TF-IDF features
 - Output: probability distribution over model tiers (e.g., [haiku: 0.72, sonnet: 0.21, opus: 0.07])
-- Latency: 5–20ms for DistilBERT on CPU; sub-1ms for logistic regression
+- Latency: 5–20ms for DistilBERT on CPU with a quantized ONNX-style runtime (an unoptimized fp32 PyTorch deployment is several times slower — Section 6.5 budgets ~50ms for that case); sub-1ms for logistic regression
 
 Training data collection: A/B test queries across models, collect human or LLM-as-judge quality scores, label each query with the cheapest model that met the quality threshold.
 
@@ -345,7 +345,7 @@ features = {
 
 Accuracy figures below are illustrative planning numbers for a three-tier routing task, not published benchmark results — measure them on your own labeled set.
 
-| Classifier | Latency (CPU) | Accuracy (illustrative) | Notes |
+| Classifier | Latency (CPU, quantized runtime) | Accuracy (illustrative) | Notes |
 |---|---|---|---|
 | Logistic regression on TF-IDF | <1ms | ~75% | Good baseline |
 | DistilBERT fine-tuned | 5–15ms | ~85% | Best accuracy/latency tradeoff |
@@ -575,7 +575,7 @@ OpenRouter is a model marketplace that exposes a unified `/chat/completions` end
 
 ### LiteLLM
 
-Open-source library providing a unified interface over 100+ LLM providers. Supports load balancing, fallback chains, cost tracking, and retry logic. Used to build custom routing layers. Not a router by itself, but the infrastructure layer that custom routers are built on. See [LiteLLM Routing](../agentic_frameworks/litellm_routing.md) for a deep dive on its router strategies and fallback configuration.
+Open-source library providing a unified OpenAI-format interface over 100+ LLMs. Supports load balancing, fallback chains, cost tracking, and retry logic. Used to build custom routing layers. Not a router by itself, but the infrastructure layer that custom routers are built on. See [LiteLLM Routing](../agentic_frameworks/litellm_routing.md) for a deep dive on its router strategies and fallback configuration.
 
 ### Anthropic Model Tiers
 
@@ -813,7 +813,7 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 | OpenRouter | API marketplace | 400+ models, 70+ providers, fallback lists | Per-token (pass-through) | Provider redundancy |
 | LiteLLM | Open-source gateway | Unified API for 100+ LLMs, fallbacks, cost tracking | Free (self-hosted) | Custom routing infrastructure |
 | RouteLLM | Open-source | Preference-trained strong/weak routers + benchmarks | Free (self-hosted) | Research-grade binary routing |
-| Portkey | Managed SaaS | Gateway, routing, observability | Per-request fee | Observability + routing combo |
+| Portkey | Managed SaaS | Gateway, routing, observability | Subscription tiers priced by logs/month (free tier 10k logs) | Observability + routing combo |
 | Custom DistilBERT | DIY | Full control, lowest latency | Engineering time | High-volume, latency-sensitive |
 | Amazon Bedrock Intelligent Prompt Routing | Managed | Predicts per-request response quality and routes between two models *within one family* (Anthropic or Meta defaults) | Per-token | AWS-native deployments |
 | Martian, Unify AI | — | Historical: both marketed cross-provider routers; see Section 7 for their current status | — | Reference designs only |
@@ -830,7 +830,7 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 ## 12. Interview Questions with Answers
 
 **Q: What is LLM routing and why does it matter in production?**
-LLM routing is a system that dynamically selects the optimal model for each query based on its complexity, task type, and quality requirements. It matters because the frontier tier costs several times more per token than the cheap tier — 5x within Anthropic's July 2026 ladder (Opus 5 $5/$25 vs Haiku 4.5 $1/$5), and 20–30x if you reach down to a previous-generation nano model — while much production traffic is simple enough for the cheap tier. Savings are workload-dependent and should be quoted with the workload attached: RouteLLM measured a 3.66x cost saving on MT Bench at 95% of GPT-4 quality but only 1.41x on MMLU, and the Section 6.3 worked example lands at 43% on a mixed workload.
+LLM routing is a system that dynamically selects the optimal model for each query based on its complexity, task type, and quality requirements. It matters because the frontier tier costs several times more per token than the cheap tier — 5x within Anthropic's July 2026 ladder (Opus 5 $5/$25 vs Haiku 4.5 $1/$5), and 20–25x if you reach down to a previous-generation nano model (GPT-5.4-nano at $0.20/$1.25) — while much production traffic is simple enough for the cheap tier. Savings are workload-dependent and should be quoted with the workload attached: RouteLLM measured a 3.66x cost saving on MT Bench at 95% of GPT-4 quality but only 1.41x on MMLU, and the Section 6.3 worked example lands at 43% on a mixed workload.
 
 **Q: What is the difference between cascade routing and classifier-based routing?**
 Cascade routing sends the query to the cheapest model first and escalates only if a confidence check fails; the routing decision happens after seeing the cheap model's output. Classifier-based routing makes the routing decision before any model call, using a lightweight classifier trained on query features to predict the best target model. Cascade routing has higher accuracy for ambiguous queries but accumulates latency at the tail (P99); classifier routing has lower and more predictable latency but requires labeled training data and may misroute edge cases.
@@ -1017,10 +1017,13 @@ The Tier 1 line counts **calls, not queries**: code assistance is a cascade, so 
 queries pay a Haiku call first — including the 0.50M that then escalate to Tier 2 and the 0.10M
 that reach Tier 3. Counting only the 0.40M that passed the confidence check would understate the
 bill by 0.60M x $0.00200 = $1,200/day, which is the `P_esc x C_cheap` error from Section 6.3.
+The Tier 2 and Tier 3 lines, by contrast, count terminal destinations only: the intermediate legs
+of the queries that pass *through* Tier 2 on their way to Tier 3 (0.10M code + 0.12M support) are
+omitted, understating the projection by a further 0.22M x $0.00600 = $1,320/day.
 
 **Quality Monitoring Implementation**
 
-Sample 2% of responses per routing tier per task type (approximately 200K evaluations/day). Use a cheap judge from a *different* model family than the tier being judged — grading Haiku's output with Haiku is the self-enhancement bias Zheng et al. document in the MT-Bench paper, and it will systematically over-score the tier you are most tempted to over-use. Score on a 1–5 scale. Alert pipeline:
+Sample 2% of responses per routing tier per task type (approximately 200K evaluations/day). Use a cheap judge from a *different* model family than the tier being judged — grading Haiku's output with Haiku risks the self-enhancement bias Zheng et al. describe in the MT-Bench paper (GPT-4 favoured its own answers by a 10% higher win rate and Claude-v1 by 25%, though the authors caution their data cannot establish the effect conclusively), and it can over-score the tier you are most tempted to over-use. Score on a 1–5 scale. Alert pipeline:
 
 ```
 IF avg_quality_score[tier=1, task=code_assistance] < 3.5 for 15-minute window:

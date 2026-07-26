@@ -31,7 +31,7 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 - **Stdio framing**: newline-delimited JSON-RPC over stdin/stdout; messages must not contain embedded newlines, and stdout carries nothing but MCP messages.
 - **HTTP framing**: one POST per message; response may be JSON or an SSE stream.
 - **Bidirectional**: server can send requests too (e.g., `sampling/createMessage`, `elicitation/create`).
-- **Ordered delivery**: messages over a single connection are processed in order.
+- **Ordered delivery, unordered completion**: a single stdio or HTTP stream delivers messages in the order written, but the spec requires no in-order *processing* — a receiver may work on requests concurrently and reply out of order, which is exactly why every request carries an `id`.
 - **Lifecycle hygiene**: initialize → operate → close the transport. There is no `shutdown` message; `ping` is the keepalive.
 
 ---
@@ -543,7 +543,7 @@ For stateful sessions over Streamable HTTP. The server may return `MCP-Session-I
 Either party sends a `ping` request and the other MUST reply promptly with an empty `result: {}` — there is no `pong` method, the reply is just an ordinary empty JSON-RPC response. A missed reply lets the sender treat the connection as stale and reconnect. The spec sets no default interval: it says the frequency should be configurable and that excessive pinging should be avoided, so any "every 30s" figure is an implementation choice, not a protocol rule. Most SDKs handle this automatically; it only matters when you implement the transport yourself.
 
 **Q: What does the initialize handshake negotiate?**
-Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request.
+Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request. The 2026-07-28 release candidate removes this handshake entirely, carrying client info and version in per-request `_meta` and headers instead.
 
 **Q: What's the typical latency for each transport?**
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.
@@ -552,7 +552,7 @@ Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: 
 It is not used at all: MCP removed JSON-RPC batching in the 2025-06-18 revision, so a batch array is now an invalid MCP message. Plain JSON-RPC 2.0 lets a client send an array of requests and get an array of responses, and MCP briefly allowed it, but the current spec requires the Streamable HTTP body to be exactly one request, notification, or response. The removal cost a one-off saving at startup, where `tools/list`, `resources/list` and `prompts/list` could have shared a round-trip; it bought a much simpler wire contract, since batching complicates id correlation, the SSE-upgrade decision, and the `202 Accepted` rule for notifications. Recover most of the lost latency by issuing those independent calls concurrently on the already-open connection rather than serially. This is a common interview trap: candidates cite batching as a live MCP optimization years after it was taken out.
 
 **Q: What happens if the same id is used twice in JSON-RPC?**
-Spec says don't do it (id should be unique per session). In practice: response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
+MCP forbids it: a request id MUST NOT have been used before by the same requestor in that session. MCP also tightens base JSON-RPC by disallowing a `null` id and requiring a string or integer. In practice a reused id means the response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
 
 **Q: Can the server send requests to the client?**
 Yes — bidirectional. The main use case is `sampling/createMessage` (server asks client to call its LLM). Notifications can also flow both ways. JSON-RPC supports this naturally; clients must be prepared to receive and handle.

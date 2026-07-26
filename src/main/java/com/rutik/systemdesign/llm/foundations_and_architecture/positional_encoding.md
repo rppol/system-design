@@ -975,7 +975,7 @@ def attention_with_yarn_factor(q, k, v, d_head: int, s: float):
 | `yarn` (ggerganov fork) | YaRN implementation for llama.cpp | CLI flag: `--rope-scaling yarn --rope-scale 4` |
 | `axolotl` | Fine-tuning framework with YaRN support | Configurable via YAML |
 | LM-Eval Harness | Evaluate long-context models | Needle-in-haystack and RULER benchmarks |
-| RULER benchmark | Long-context evaluation | 12 tasks from 4K to 128K tokens |
+| RULER benchmark | Long-context evaluation | 13 tasks in 4 categories, evaluated at 4K and above |
 
 ---
 

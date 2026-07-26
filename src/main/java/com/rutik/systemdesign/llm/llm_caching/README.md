@@ -31,10 +31,11 @@ match: have you seen this exact byte sequence before? Semantic match: have you s
 equivalent question? Prompt prefix: have you already computed the KV tensors for the stable part
 of this context? Only if all caches miss do you pay the full inference cost.
 
-**Why it matters:** For FAQ-heavy workloads (customer support, documentation Q&A), 40-70% of
-questions are semantically equivalent to previously answered questions. For multi-user agents
-sharing a common system prompt, 60-90% of input tokens are identical prefix tokens that can be
-cache-hit at 90%+ discount. Caching is the highest-ROI optimization in most LLM production systems.
+**Why it matters:** For FAQ-heavy workloads (customer support, documentation Q&A), a large share of
+questions — plan on 40-70% as a sizing heuristic, then measure your own logs, since nobody publishes
+these — are semantically equivalent to previously answered questions. For multi-user agents sharing
+a common system prompt, the identical prefix routinely dominates the input token count and is
+cache-read at 0.1x the base input price. Caching is usually the highest-ROI optimization available.
 
 **Key insight:** The right cache for your workload depends on query distribution. Power-law query
 distributions (a few questions asked many times) favor exact and semantic caching. Token-repeat
@@ -138,7 +139,10 @@ constant handed to you.
 | `S` | How much of the list price you avoided. What you should report, not the discount |
 
 **Walk one example.** The 70% prompt cache hit rate from the cost anchor in Section 1, priced on a
-0.1x cache-read tier and on a legacy 0.5x tier:
+0.1x cache-read tier and on a legacy 0.5x tier. (The Sonnet 5 figures below use its $3/$15 per MTok
+list price; introductory pricing of $2/$10 runs through 2026-08-31 and scales every dollar figure by
+2/3 while leaving every percentage unchanged, because reads and writes are fixed multiples of the
+base input price.)
 
 ```
   Claude Sonnet 5:   p_full = $3.00/1M, p_cached = $0.30/1M (0.1x), h = 0.70
@@ -341,8 +345,9 @@ The "from the very beginning" clause is the entire reason Pitfall 4 exists. A pr
 | `cached` | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |
 
 **Walk one example.** The exact layout drawn above — 14,200 total tokens, 7,000 marked cacheable —
-on Claude Sonnet 5, whose minimum cacheable prefix is `M` = 1,024, under three scenarios (run the
-same sum with `M` = 4,096 if you are on Opus 4.5 or Haiku 4.5 and scenario 2 gets worse, not better):
+on Claude Sonnet 5, whose minimum cacheable prefix is `M` = 1,024, under three scenarios (on Opus
+4.5 or Haiku 4.5 the floor is `M` = 4,096: scenario 1 still caches, but every prefix shorter than
+4,096 tokens joins scenario 2 and caches nothing at all):
 
 ```
   Scenario 1: prefix byte-identical (the happy path)
@@ -598,8 +603,13 @@ def call_with_prompt_cache(
             }
         ],
         tools=[
-            {**tool, "cache_control": {"type": "ephemeral"}}   # cache tool defs
-            for tool in tool_defs
+            # Mark ONLY the last tool: a breakpoint caches every block before
+            # it, and the API allows at most 4 cache_control breakpoints per
+            # request -- marking every tool 400s as soon as there are five.
+            {**tool, "cache_control": {"type": "ephemeral"}}
+            if i == len(tool_defs) - 1
+            else tool
+            for i, tool in enumerate(tool_defs)
         ],
         messages=[{"role": "user", "content": user_message}],
     )
@@ -628,9 +638,10 @@ incremental hit rate comes from, because users paraphrase.
 
 **Coding assistants** (Cursor, Claude Code and similar) lean on *provider prompt caching* rather
 than response caching: the repository index and system prompt sit in a cached prefix block that is
-byte-identical across a session, while the user turn changes every request. Cursor's own docs
-confirm the mechanism — Anthropic prompt caching is applied server-side for Claude requests with no
-user-facing toggle — but do not publish a hit rate, so do not quote one.
+byte-identical across a session, while the user turn changes every request. Cursor's pricing docs
+publish separate cache-write and cache-read token rates for the Claude models it offers (a
+Sonnet-class model bills $3.75/1M written against $0.30/1M read), which is direct evidence that
+provider prompt caching is in play on those requests; no hit rate is published, so do not quote one.
 
 ---
 
@@ -651,7 +662,8 @@ user-facing toggle — but do not publish a hit rate, so do not quote one.
 **Use caching when:**
 - *Exact cache:* template-driven or FAQ workloads with repeating identical queries.
 - *Semantic cache:* conversational Q&A where users paraphrase the same question.
-- *Prompt cache:* any system with a stable system prompt >1,024 tokens shared across many users.
+- *Prompt cache:* any system with a stable system prompt above your model's minimum cacheable
+  prefix (512-4,096 tokens depending on the model — see Section 4.3) shared across many users.
 - *Embedding cache:* RAG pipelines with large document corpora that do not change frequently.
 
 **Do NOT cache when:**
@@ -781,9 +793,9 @@ counters come back 0 and you are billed full price with no error.
 **Q: How does vLLM automatic prefix caching (APC) work?**
 vLLM's APC maintains a GPU-resident LRU cache of KV tensors keyed by the SHA-256 of the token
 sequence of each block (typically 16-32 tokens per block). When a new request shares a prefix with
-a cached entry, vLLM skips the prefill computation for the cached blocks, reducing time-to-first-
-token by up to 60-80% for long shared prefixes. APC provides no benefit when every request has a
-unique prefix.
+a cached entry, vLLM skips the prefill computation for the cached blocks, cutting time-to-first-
+token roughly in proportion to the share of the prefill it skips — so the win grows with the length
+of the shared prefix. APC provides no benefit when every request has a unique prefix.
 
 **Q: How do you prevent cache poisoning in a semantic cache?**
 (1) Validate and sanitize all responses before caching — run through the same guardrail pipeline
@@ -891,9 +903,10 @@ a clean end-of-stream event.
 
 **Problem Statement**
 
-A B2B SaaS company runs an AI customer support chatbot handling 500,000 requests/day. Monthly
-inference cost is $45,000 (GPT-4o). Analysis: 65% of queries are from a shared pool of ~2,000 FAQ
-topics; system prompt is 4,000 tokens; average context is 6,000 tokens. No caching is in place.
+A B2B SaaS company runs an AI customer support chatbot handling 500,000 requests/day on a
+Sonnet-class model ($3/$15 per 1M list). Analysis: 65% of queries are from a shared pool of ~2,000
+FAQ topics; system prompt is 4,000 tokens; average context is 6,000 tokens. That is 90B input
+tokens/month, about $270,000/month in input-token spend alone. No caching is in place.
 
 **Architecture Overview**
 
@@ -910,7 +923,7 @@ L2: Semantic cache (Qdrant + text-embedding-3-small)
   Threshold: 0.92
   Metadata filter: product_line, language
   TTL: 6 hours
-  Expected hit rate on L1 misses: ~40%  (= 33% of total)
+  Expected hit rate on L1 misses: ~33%  (= 27% of total)
 
 L3: Anthropic prompt cache
   Cached prefix: 4,000-token system prompt
@@ -919,21 +932,28 @@ L3: Anthropic prompt cache
   Discount: 90% on cached portion
 
 
-Cost model (per 1,000 requests, Claude 3.5 Sonnet $3/$15 per 1M):
+Cost model (per 1,000 requests, Claude Sonnet 5 $3/$15 per 1M list):
   Without cache:   6,000 input tokens * $3/1M * 1,000 = $18.00
 
-  After L1 (18% hit, 0 cost):
+  After L1 (18% hit, 0 model cost):
     820 requests pass through  -> cost $14.76
 
-  After L2 (33% of 820 = 270 hits, ~$0.05 embedding cost):
+  After L2 (33% of 820 = 270 hits; 820 queries embedded at ~500 tok,
+            820 * 500 * $0.02/1M = ~$0.01):
     550 requests pass through  -> cost $9.90
 
-  After L3 (80% of 550 = 440 cache reads at 90% discount):
-    440 * 4,000 * $0.30/1M = $0.53   (vs $5.28 without L3)
-    110 full-prefix requests: 110 * 6,000 * $3/1M = $1.98
+  After L3 (80% of 550 = 440 prefix-cache reads, 110 writes):
+    440 reads   on the 4,000-tok prefix: 440 * 4,000 * $0.30/1M = $0.53
+                                          (the same tokens at full price: $5.28)
+    110 writes  on the 4,000-tok prefix: 110 * 4,000 * $3.75/1M = $1.65
+    dynamic remainder, all 550 requests:  550 * 2,000 * $3.00/1M = $3.30
 
-  Total with cache: ~$2.51  vs  $18.00 without
-  Savings: 86%
+  Total with cache: 0.53 + 1.65 + 3.30 + 0.01 = $5.49  vs  $18.00 without
+  Savings: 69%
+
+  The remainder line is the one teams forget: L3 only covers the 4,000-token
+  prefix, so the other 2,000 tokens of every request still bill at full price
+  and become the largest single item in the post-cache bill.
 ```
 
 **Key Design Decisions**
@@ -952,8 +972,9 @@ complexity.
 
 **Interview Discussion Points**
 
-- Monthly cost: $45,000 → $6,750 (savings: $38,250). Cache infra cost: $400/month. ROI: day 1.
-- Three false-positive incidents in the first month prompted lowering the threshold from 0.90 to
+- Monthly input spend: $270,000 → $82,350 (15,000 x $5.49; savings $187,650). Cache infra cost:
+  $400/month. ROI: day 1.
+- Three false-positive incidents in the first month prompted raising the threshold from 0.90 to
   0.92 for product-pricing queries, dropping hit rate by 3pp but eliminating false positives.
 - The cache hit rate drops predictably every Monday morning when users ask about weekend policy
   changes before the TTL refreshes — this is acceptable; the team adds a webhook from the policy

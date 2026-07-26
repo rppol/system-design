@@ -4,9 +4,9 @@
 
 > **One-line analogy**: vLLM is to LLM serving what a database's buffer pool manager is to query execution — it reimagines memory management from scratch to eliminate waste and maximize throughput.
 
-**Mental model**: A naive LLM server allocates a fixed KV cache block per request at arrival time, holds it until completion, and serves one batch at a time. GPU memory fragments, utilization drops to 30-40%, and throughput plateaus. vLLM's PagedAttention borrows virtual memory concepts from OS design: KV cache is divided into fixed-size pages; pages are allocated on demand and can be non-contiguous; requests share pages when their prefixes match. The result reported in the SOSP 2023 paper (arXiv 2309.06180) is 2-4× higher throughput at the same latency versus the then state-of-the-art systems FasterTransformer and Orca; the widely quoted "24×" is from vLLM's own June 2023 launch blog, measured against Hugging Face Transformers (LLaMA-7B on an A10G, LLaMA-13B on an A100 40GB), not against a serving system.
+**Mental model**: A naive LLM server allocates a fixed KV cache block per request at arrival time, holds it until completion, and serves one batch at a time. GPU memory fragments — the PagedAttention paper profiled the systems of the day and found "only 20.4% - 38.2% of the KV cache memory is used to store the actual token states" — and throughput plateaus. vLLM's PagedAttention borrows virtual memory concepts from OS design: KV cache is divided into fixed-size pages; pages are allocated on demand and can be non-contiguous; requests share pages when their prefixes match. The result reported in the SOSP 2023 paper (arXiv 2309.06180) is 2-4× higher throughput at the same latency versus the then state-of-the-art systems FasterTransformer and Orca; the widely quoted "24×" is from vLLM's own June 2023 launch blog, measured against Hugging Face Transformers (LLaMA-7B on an A10G, LLaMA-13B on an A100 40GB), not against a serving system.
 
-**Why it matters**: vLLM is the dominant open-source inference engine. Understanding it means understanding the engineering that makes production LLM serving economically viable — and being able to tune, debug, and architect around it.
+**Why it matters**: vLLM is among the most widely deployed open-source inference engines. Understanding it means understanding the engineering that makes production LLM serving economically viable — and being able to tune, debug, and architect around it.
 
 **Key insight**: Almost every vLLM optimization (PagedAttention, continuous batching, prefix caching, chunked prefill, speculative decoding) attacks the same root problem: GPU memory bandwidth is the bottleneck during autoregressive decoding, not compute. Every feature is about keeping data on-chip longer, transferring less, or batching more requests to amortize the transfer cost.
 
@@ -39,6 +39,12 @@
 ---
 
 ## 1. Architecture Overview
+
+> **Version this document targets: vLLM v0.26.0** (released 2026-07-25). vLLM's CLI flags and
+> Python API move fast — the V0 engine was deleted in v0.11.0 and several flags quoted in older
+> tutorials (`--speculative-model`, `--preemption-mode`, `--use-v2-block-manager`, `guided_json`)
+> no longer exist. Every flag, default and signature below was checked against the v0.26.0 source.
+> Re-check against your installed release before copying anything into production.
 
 vLLM separates concerns into three layers:
 
@@ -305,8 +311,10 @@ long-tail — output lengths in chat traffic routinely span 20×):
   throughput ratio             = 64,000 / 5,100       = 12.5x
 ```
 
-That 12.5× lands inside the 8.5-24× range vLLM's launch blog reports against Hugging Face
-Transformers' `model.generate()`,
+That 12.5× lands inside the range vLLM's June 2023 launch blog reports against Hugging Face
+Transformers' `model.generate()` — 14-24× when sampling one completion per prompt, 8.5-15× when
+sampling three parallel completions (LLaMA-7B on an A10G and LLaMA-13B on an A100 40GB, request
+lengths sampled from ShareGPT) —
 and note where it came from: not a faster kernel, not a better GEMM — purely from not holding 31
 idle slots hostage. The ratio is exactly `L_max / mean(L)`, so it collapses toward 1× when every
 request produces the same output length, which is why fixed-length classification workloads see
@@ -809,18 +817,28 @@ Step 3: Accept [the][cat][sat], reject [on][mat]
 Net: 3 tokens in ~1 target forward pass instead of 3 separate passes.
 ```
 
-**Speedup condition**: draft acceptance rate must be high enough that the overhead of running the draft model is worth it. Typically achieves 1.5-3× speedup on repetitive text.
+**Speedup condition**: draft acceptance rate must be high enough that the overhead of running the draft model is worth it. Reported speedups cluster in the low single digits on repetitive text and can be *below* 1× when acceptance is poor — always measure on your own traffic rather than assuming a multiplier.
 
 ### vLLM Speculative Decoding Options
+
+All speculative decoding is configured through **one** flag, `--speculative-config` (short form
+`-sc`), which takes a JSON object validated against `SpeculativeConfig`
+(`vllm/config/speculative.py`). The old individual flags — `--speculative-model`,
+`--num-speculative-tokens`, `--ngram-prompt-lookup-min/max`,
+`--speculative-draft-tensor-parallel-size` — **were removed**; three shorthands remain
+(`--spec-method`, `--spec-model`, `--spec-tokens`) and are mutually exclusive with the
+corresponding JSON keys. Valid `method` values in v0.26.0 include `ngram`, `ngram_gpu`, `suffix`,
+`medusa`, `mlp_speculator`, `draft_model`, `eagle`, `eagle3`, and the per-model MTP variants.
 
 #### Option 1: Draft Model
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3-70B-Instruct \
-    --speculative-model meta-llama/Meta-Llama-3-8B-Instruct \
-    --num-speculative-tokens 5 \
-    --speculative-draft-tensor-parallel-size 1
+    --speculative-config '{"method": "draft_model",
+                           "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+                           "num_speculative_tokens": 5,
+                           "draft_tensor_parallel_size": 1}'
 ```
 
 The draft model must share the same tokenizer and vocabulary as the target model.
@@ -828,10 +846,10 @@ The draft model must share the same tokenizer and vocabulary as the target model
 #### Option 2: N-gram Speculator (no draft model needed)
 
 ```bash
---speculative-model "[ngram]" \
---num-speculative-tokens 5 \
---ngram-prompt-lookup-min 4 \  # min n-gram length to match
---ngram-prompt-lookup-max 8    # max n-gram length to try
+--speculative-config '{"method": "ngram",
+                       "num_speculative_tokens": 5,
+                       "prompt_lookup_min": 4,
+                       "prompt_lookup_max": 8}'
 ```
 
 Predicts next tokens by finding matching n-grams in the prompt. Works well for:
@@ -839,23 +857,29 @@ Predicts next tokens by finding matching n-grams in the prompt. Works well for:
 - Document continuation with repeated phrases
 - RAG (model echoes retrieved text)
 
-#### Option 3: MedusaHeads / EAGLE
+#### Option 3: Medusa heads / EAGLE
 
 ```bash
---speculative-model /path/to/eagle-llama3-instruct-8b \
---speculative-draft-tensor-parallel-size 1
+--speculative-config '{"method": "eagle",
+                       "model": "/path/to/eagle-llama3-instruct-8b",
+                       "num_speculative_tokens": 5}'
 ```
 
 EAGLE adds a lightweight draft head trained on top of the target model's hidden states — higher acceptance rate than a separate small model.
 
 ### Performance Impact
 
-| Method | Speedup | Memory overhead | Best for |
+The speedup column below is an **illustrative ordering, not a benchmark** — no single published
+number covers "EAGLE on vLLM" across models and workloads, and acceptance rate (hence speedup) is
+dominated by how predictable your output text is. Treat the ranking as directional and measure the
+multiplier yourself.
+
+| Method | Indicative speedup | Memory overhead | Best for |
 |---|---|---|---|
-| Draft model (small) | 1.5–2.5× | Model weights for draft | General text |
-| N-gram | 1.2–2× | None | Repetitive/structured text |
-| EAGLE | 2–3× | Small head weights | Code, structured output |
-| Medusa | 1.5–2.5× | Multiple head weights | Chat, instruction following |
+| Draft model (small) | low single digits | Model weights for draft | General text |
+| N-gram | smallest, but free | None | Repetitive/structured text |
+| EAGLE | usually the highest | Small head weights | Code, structured output |
+| Medusa | between n-gram and EAGLE | Multiple head weights | Chat, instruction following |
 
 ---
 
@@ -865,16 +889,23 @@ vLLM supports multiple quantization formats, affecting memory, throughput, and q
 
 ### Supported Formats
 
-| Format | Bits | Hardware | Method | Quality loss |
+`--quantization` accepts the values in `QuantizationMethods`
+(`vllm/model_executor/layers/quantization/__init__.py`). In v0.26.0 that list includes `awq`,
+`gptq`, `gptq_marlin`, `awq_marlin`, `fp8`, `modelopt`, `modelopt_fp4`, `mxfp4`,
+`compressed-tensors`, `bitsandbytes`, `quark`, `torchao` and several online-quantization
+shorthands. **`squeezellm`, `aqlm` and QuIP# are gone** — they were removed from vLLM, so any
+tutorial passing them will fail argument validation. GGUF is no longer in-tree either; it is
+served through an out-of-tree plugin.
+
+| Format | Bits | `--quantization` value | Method | Quality loss |
 |---|---|---|---|---|
-| FP16 / BF16 | 16 | A100, H100 | None (baseline) | None |
-| FP8 | 8 | H100, H200 | Per-tensor or per-channel | Minimal (<0.5%) |
-| INT8 (SmoothQuant) | 8 | A100, H100 | Smooth activation outliers | Very small |
-| GPTQ | 4 | All | Post-training, weight-only | Small–moderate |
-| AWQ | 4 | All | Activation-aware weight quantization | Small |
-| GGUF (via llama.cpp) | 2–8 | CPU + GPU | Mixed-precision | Varies by bits |
-| QuIP# | 2 | H100 | Incoherence processing | Moderate |
-| AQLM | 2 | H100 | Additive quantization | Moderate |
+| FP16 / BF16 | 16 | (none — baseline) | None | None |
+| FP8 | 8 | `fp8` | Per-tensor or per-channel | Small |
+| INT8 (SmoothQuant-style W8A8) | 8 | `compressed-tensors` | Smooth activation outliers | Small |
+| GPTQ | 4 | `gptq` / `gptq_marlin` | Post-training, weight-only | Small–moderate |
+| AWQ | 4 | `awq` / `awq_marlin` | Activation-aware weight quantization | Small |
+| NVFP4 / MXFP4 | 4 | `modelopt_fp4` / `mxfp4` | Blackwell-class block-scaled FP4 | Small–moderate |
+| bitsandbytes | 4/8 | `bitsandbytes` | On-the-fly NF4/INT8 | Moderate |
 
 ### Using Quantization
 
@@ -907,23 +938,41 @@ python -m vllm.entrypoints.openai.api_server \
 Separate from weight quantization — quantizes the KV cache itself to save memory:
 
 ```bash
---kv-cache-dtype fp8_e5m2   # FP8 KV cache (H100 only)
---kv-cache-dtype int8        # INT8 KV cache
+--kv-cache-dtype fp8         # FP8 KV cache; resolves to e4m3 on CUDA/ROCm
+--kv-cache-dtype fp8_e5m2    # explicit E5M2 variant (CUDA 11.8+)
+--kv-cache-dtype fp8_e4m3    # explicit E4M3 variant (CUDA 11.8+ and ROCm)
 ```
 
-**Impact**: FP8 KV cache cuts KV memory in half vs FP16. For LLaMA 3 70B at 128K context: reduces KV memory from ~640GB to ~320GB, enabling longer contexts on the same hardware.
+There is no plain `int8` KV cache dtype in v0.26.0. The accepted values are `auto`, `float16`,
+`bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2`, `fp8_inc`, `fp8_ds_mla`, `nvfp4`, the `turboquant_*`
+family and the per-token-head variants `int4_per_token_head`, `int8_per_token_head`,
+`fp8_per_token_head` (`CacheDType` in `vllm/config/cache.py`).
+
+**Impact**: FP8 KV cache halves KV memory versus FP16. Recompute it for LLaMA 3 70B (80 layers,
+8 KV heads, head_dim 128) at a full 128K context — that is 320 KiB/token, so one sequence holds
+`131,072 × 327,680 B ≈ 43 GB` in FP16 and **≈ 21 GB in FP8**. Two full-context sequences in FP16
+already overflow an 80 GB card; in FP8 three fit. (A "640 GB → 320 GB" figure circulates for this
+same configuration; it is off by roughly 15× and does not correspond to any head count this model
+actually has.)
 
 ### Memory vs Quality Tradeoff
 
 ```mermaid
 xychart-beta
-    title "Weight memory footprint by quantization format (quality retained in label)"
-    x-axis ["FP16 (100% qual)", "FP8 (99.5%)", "INT8 (99%)", "AWQ INT4 (97-98%)", "GPTQ INT4 (96-98%)", "INT2 (90-95%)"]
+    title "Weight memory footprint by quantization bit-width (relative to FP16)"
+    x-axis ["FP16", "FP8", "INT8", "AWQ INT4", "GPTQ INT4", "2-bit"]
     y-axis "Memory (% of FP16)" 0 --> 100
     bar [100, 50, 50, 25, 25, 12.5]
 ```
 
-Each halving of bit-width halves weight memory, while quality (retained % in each label) stays within ~0.5-4% of the FP16 baseline all the way down to 4-bit — then drops sharply at 2-bit (90-95%). This is why FP8 is the recommended default on H100 and INT2 remains "use with caution."
+The memory axis is exact arithmetic: each halving of bit-width halves weight memory. The **quality**
+axis is deliberately absent, because quality retention is not a property of the bit-width — it
+depends on the model, the calibration set and the benchmark, and published deltas for the same
+format disagree by several points. The practical ordering that does hold: FP8 is close enough to
+BF16 that it is the default choice on Hopper-and-newer hardware, 4-bit weight-only (AWQ/GPTQ) is
+usable with measurable but modest degradation, and 2-bit remains "benchmark it before you trust
+it." Validate any quantized checkpoint on your own eval set — do not port a retention percentage
+from a blog post.
 
 ---
 
@@ -946,7 +995,12 @@ python -m vllm.entrypoints.openai.api_server \
 
 **When to use**: When the model doesn't fit on one GPU. Communication overhead requires NVLink or fast interconnect (PCIe TP is slow).
 
-**Scaling**: TP=2 → ~1.8× throughput (communication overhead). TP=4 → ~3.2×. TP=8 → ~5-6×.
+**Scaling**: sub-linear, and how sub-linear depends entirely on your interconnect, batch size and
+model shape — there is no portable "TP=4 gives 3.2×" constant. The reason it is sub-linear is
+concrete: TP inserts **two all-reduces per transformer layer** (after attention output projection
+and after the MLP down projection), each moving `batched_tokens × hidden_size × dtype_bytes`, and
+that cost does not shrink as you add GPUs. Measure with `vllm bench throughput` at your own batch
+size rather than assuming a multiplier.
 
 ### Pipeline Parallelism (PP)
 
@@ -963,18 +1017,24 @@ python -m vllm.entrypoints.openai.api_server \
 
 **When to use**: Multi-node serving. PP avoids high-bandwidth AllReduce across slow inter-node network; only activations (smaller) cross nodes.
 
-**PP tradeoff**: Pipeline bubbles reduce utilization. PP=2 with micro-batches achieves ~85-90% efficiency.
+**PP tradeoff**: Pipeline bubbles reduce utilization — a stage is idle whenever no micro-batch is
+available for it, so efficiency falls as the number of stages rises relative to the number of
+in-flight micro-batches. Continuous batching keeps the pipeline reasonably full at production
+concurrency, but treat the efficiency as something to measure, not a fixed percentage.
 
 ### Expert Parallelism (EP) for MoE
 
-For Mixture-of-Experts models (Mixtral, DeepSeek-V3), different experts run on different GPUs:
+For Mixture-of-Experts models (Mixtral, DeepSeek-V3), different experts run on different GPUs — but
+this is **not** automatic. `ParallelConfig.enable_expert_parallel` defaults to `False`, and its
+docstring is explicit: "Use expert parallelism instead of tensor parallelism for MoE layers."
+Without the flag, vLLM shards each expert's weights across the TP group like any other matrix.
 
 ```bash
-# Mixtral 8x7B: 8 experts distributed across 4 GPUs
+# Mixtral 8x7B: experts distributed across 4 GPUs (EP), attention still TP=4
 python -m vllm.entrypoints.openai.api_server \
     --model mistralai/Mixtral-8x7B-Instruct-v0.1 \
-    --tensor-parallel-size 4
-# vLLM automatically applies EP for MoE layers
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel
 ```
 
 ### Multi-Node with Ray
@@ -1003,7 +1063,7 @@ python -m vllm.entrypoints.openai.api_server \
 | 70B FP8 | 1× H100 80GB | TP=1 |
 | 405B | 8× H100 80GB | TP=8 |
 | 405B | 2 nodes × 8× H100 | TP=8, PP=2 |
-| Mixtral 8x22B | 4× A100 80GB | TP=4 (EP auto) |
+| Mixtral 8x22B | 4× A100 80GB | TP=4 + `--enable-expert-parallel` |
 
 ---
 
@@ -1058,7 +1118,10 @@ response = client.chat.completions.create(
 
 ### LoRA Memory Management
 
-- LoRA weights are small (rank 16 → ~8MB per adapter for 8B model)
+- LoRA weights are small, but size the number rather than guessing it. Per target matrix a rank-`r`
+  adapter adds `r × (fan_in + fan_out)` parameters. For LLaMA 3 8B (32 layers, hidden 4096, KV
+  projections 1024, MLP 14336) at rank 16 in FP16 that is **~27 MB** if the adapter targets only
+  q/k/v/o, and **~84 MB** if it also targets gate/up/down. Rank 64 is 4× those figures
 - vLLM pages adapters between GPU and CPU as requests arrive
 - `--max-loras` limits simultaneous GPU-resident adapters
 - `--max-cpu-loras` limits CPU-cached adapters (LRU eviction after that)
@@ -1067,7 +1130,16 @@ response = client.chat.completions.create(
 
 ## 12. Structured Output
 
-vLLM can constrain generation to follow a JSON schema, regex, grammar, or choice list. Uses the **outlines** library internally for guided decoding.
+vLLM can constrain generation to follow a JSON schema, regex, grammar, or choice list.
+
+**The API changed.** The old `guided_json` / `guided_regex` / `guided_choice` / `guided_grammar`
+top-level fields were replaced by a single `structured_outputs` object
+(`StructuredOutputsParams` in `vllm/sampling_params.py`) whose fields are `json`, `regex`,
+`choice`, `grammar`, `json_object` and `structural_tag`. The backend is chosen by
+`StructuredOutputsConfig.backend`, which defaults to **`"auto"`** — vLLM picks per request among
+`xgrammar`, `guidance`, `outlines` and `lm-format-enforcer`, and the docstring warns the choice
+"is subject to change in each release." Do not assume outlines is doing the work; pin
+`--structured-outputs-config '{"backend": "xgrammar"}'` if you need determinism.
 
 ### JSON Schema
 
@@ -1090,9 +1162,12 @@ schema = {
 response = client.chat.completions.create(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     messages=[{"role": "user", "content": "Extract user info: John Doe, 30, john@example.com"}],
-    extra_body={"guided_json": json.dumps(schema)}
+    extra_body={"structured_outputs": {"json": json.dumps(schema)}}
 )
 ```
+
+(`response_format={"type": "json_schema", ...}`, the OpenAI-native spelling, works too and is
+normalized onto the same `StructuredOutputsParams` internally.)
 
 ### Regex
 
@@ -1100,7 +1175,7 @@ response = client.chat.completions.create(
 response = client.chat.completions.create(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     messages=[{"role": "user", "content": "Generate a US phone number"}],
-    extra_body={"guided_regex": r"\(\d{3}\) \d{3}-\d{4}"}
+    extra_body={"structured_outputs": {"regex": r"\(\d{3}\) \d{3}-\d{4}"}}
 )
 ```
 
@@ -1110,7 +1185,7 @@ response = client.chat.completions.create(
 response = client.chat.completions.create(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     messages=[{"role": "user", "content": "Is this review positive or negative?"}],
-    extra_body={"guided_choice": ["positive", "negative", "neutral"]}
+    extra_body={"structured_outputs": {"choice": ["positive", "negative", "neutral"]}}
 )
 ```
 
@@ -1129,20 +1204,20 @@ number ::= [0-9]+
 response = client.chat.completions.create(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     messages=[{"role": "user", "content": "Generate a JSON object"}],
-    extra_body={"guided_grammar": grammar}
+    extra_body={"structured_outputs": {"grammar": grammar}}
 )
 ```
 
 ### How Guided Decoding Works
 
-At each decoding step, outlines computes a **token mask** — a bitmask over the vocabulary where `1` means the token is valid given the current schema/grammar state. vLLM applies this mask to logits before sampling, forcing the model to only sample valid tokens:
+At each decoding step, the structured-outputs backend computes a **token mask** — a bitmask over the vocabulary where `1` means the token is valid given the current schema/grammar state. vLLM applies this mask to logits before sampling, forcing the model to only sample valid tokens:
 
 ```
 logits[invalid_token_ids] = -inf   # force probability to 0
 sampled_token = sample(softmax(logits))
 ```
 
-**Performance note**: Building the FSM (finite state machine) for complex schemas adds overhead on the first request. vLLM caches compiled FSMs — subsequent requests with the same schema pay no compilation cost.
+**Performance note**: Compiling a complex schema into its automaton adds overhead on the first request that uses it. vLLM caches the compiled grammar, so subsequent requests with the same schema pay no compilation cost — which is why a schema assembled per request (with an interpolated id or timestamp inside it) is much more expensive than a stable one.
 
 ---
 
@@ -1152,20 +1227,28 @@ vLLM supports vision-language models (VLMs) via a unified multimodal input inter
 
 ### Supported Models
 
-- LLaMA 3.2 Vision (11B, 90B)
-- Qwen2-VL (7B, 72B)
-- InternVL2
+A sample from `_MULTIMODAL_MODELS` in `vllm/model_executor/models/registry.py` (the registry is
+the authoritative list and grows every release):
+
+- Qwen2-VL / Qwen2.5-VL / Qwen3-VL (incl. the MoE variant)
+- Llama 4 (`Llama4ForConditionalGeneration`, the `mllama4` implementation)
+- InternVL / InternVL-Chat
 - Phi-3-Vision
-- LLaVA-1.5 / LLaVA-NeXT
+- LLaVA-1.5 / LLaVA-NeXT / LLaVA-OneVision
 - Pixtral (Mistral's vision model)
-- Molmo
-- Gemma3 (multimodal)
+- Molmo / Molmo2
+- Gemma 3 (multimodal)
+
+**Watch for removals, not just additions.** `MllamaForConditionalGeneration` — Llama 3.2 Vision
+11B/90B — is listed in `_PREVIOUSLY_SUPPORTED_MODELS` with a last-supported version of `0.10.2`.
+It no longer loads on current vLLM, and neither do the other encoder-decoder multimodal models
+dropped with the V0 deprecation. Check the registry before promising a model in a design doc.
 
 ### Serving Vision Models
 
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Llama-3.2-11B-Vision-Instruct \
+    --model Qwen/Qwen2.5-VL-7B-Instruct \
     --max-model-len 8192
 ```
 
@@ -1176,7 +1259,7 @@ import base64
 
 # URL input
 response = client.chat.completions.create(
-    model="meta-llama/Llama-3.2-11B-Vision-Instruct",
+    model="Qwen/Qwen2.5-VL-7B-Instruct",
     messages=[{
         "role": "user",
         "content": [
@@ -1191,7 +1274,7 @@ with open("image.jpg", "rb") as f:
     image_data = base64.b64encode(f.read()).decode()
 
 response = client.chat.completions.create(
-    model="meta-llama/Llama-3.2-11B-Vision-Instruct",
+    model="Qwen/Qwen2.5-VL-7B-Instruct",
     messages=[{
         "role": "user",
         "content": [
@@ -1227,10 +1310,12 @@ vLLM uses the model's built-in image processor (from the Hugging Face config). I
 4. Concatenated with text token embeddings
 
 ```bash
-# Limit image resolution to control KV cache size
+# Cap multimodal input to control KV cache and encoder cost.
+# --image-input-type / --image-token-id no longer exist; the modern knobs are:
 --max-num-seqs 16 \
---image-input-type pixel_values \
---image-token-id 128256 \  # model-specific image token ID
+--limit-mm-per-prompt '{"image": 2}' \       # max images accepted per request
+--mm-processor-kwargs '{"max_pixels": 1003520}' \  # passed to the HF image processor
+--mm-processor-cache-gb 4                    # cache for preprocessed multimodal inputs
 ```
 
 ---
@@ -1246,11 +1331,14 @@ vLLM exposes a fully OpenAI-compatible REST API — any client using the OpenAI 
 | `GET /v1/models` | List available models and LoRA adapters |
 | `POST /v1/completions` | Text completion (legacy) |
 | `POST /v1/chat/completions` | Chat completion (primary) |
+| `POST /v1/chat/completions/batch` | Batched chat completions |
+| `POST /v1/responses` | OpenAI Responses API (plus `GET`/cancel by id) |
 | `POST /v1/embeddings` | Text embeddings (embedding models only) |
 | `GET /health` | Health check |
 | `GET /metrics` | Prometheus metrics |
-| `GET /v1/tokenize` | Tokenize text (vLLM extension) |
-| `POST /v1/pooling` | Pooling for embedding models |
+| `POST /tokenize` | Tokenize text (vLLM extension — **not** under `/v1`) |
+| `POST /detokenize` | Detokenize token ids (vLLM extension) |
+| `POST /pooling` | Pooling for embedding models (**not** under `/v1`) |
 
 ### Chat Completions
 
@@ -1291,14 +1379,14 @@ for chunk in stream:
 ### vLLM-Specific Extensions
 
 ```python
-# Beam search
+# Beam search. NOTE: `best_of` and `early_stopping` were removed from vLLM's
+# request schema. Beam width now comes from `n`; `length_penalty` still applies.
 response = client.chat.completions.create(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     messages=[{"role": "user", "content": "Translate to French: Hello"}],
+    n=4,                                   # -> BeamSearchParams(beam_width=4)
     extra_body={
         "use_beam_search": True,
-        "best_of": 4,
-        "early_stopping": True,
         "length_penalty": 1.0,
     }
 )
@@ -1398,30 +1486,39 @@ vLLM exposes rich Prometheus metrics at `/metrics`.
 
 ### Key Metrics
 
+Names below are the **exposed** Prometheus names from `vllm/v1/metrics/loggers.py`; counters carry
+the `_total` suffix that `prometheus_client` appends, gauges and histograms do not.
+
 ```
 # Throughput
 vllm:prompt_tokens_total          # total prompt tokens processed
+vllm:prompt_tokens_cached_total   # prompt tokens served from the prefix cache
 vllm:generation_tokens_total      # total tokens generated
 vllm:request_success_total        # completed requests
 
 # Latency
-vllm:time_to_first_token_seconds  # TTFT histogram (p50, p95, p99)
-vllm:time_per_output_token_seconds # TPOT histogram (inter-token latency)
-vllm:request_latency_seconds       # end-to-end request latency
+vllm:time_to_first_token_seconds       # TTFT histogram (p50, p95, p99)
+vllm:inter_token_latency_seconds       # per-step inter-token latency histogram
+vllm:request_time_per_output_token_seconds  # per-request TPOT histogram
+vllm:e2e_request_latency_seconds       # end-to-end request latency
+vllm:request_queue_time_seconds        # time spent waiting before first schedule
 
 # Queue / Scheduling
 vllm:num_requests_waiting          # requests in WAITING queue
 vllm:num_requests_running          # requests in RUNNING state
-vllm:num_requests_swapped          # requests swapped to CPU
+vllm:num_preemptions_total         # scheduler preemption count
 
 # KV Cache
-vllm:gpu_cache_usage_perc          # % of KV cache blocks used
-vllm:cpu_cache_usage_perc          # % of CPU swap cache used
-vllm:gpu_prefix_cache_hit_rate     # APC cache hit rate (0-1)
-
-# GPU
-vllm:num_preemptions_total         # scheduler preemption count
+vllm:kv_cache_usage_perc           # KV cache utilization, 1.0 == 100%
+vllm:prefix_cache_queries_total    # prefix-cache lookups, in tokens
+vllm:prefix_cache_hits_total       # prefix-cache hits, in tokens
 ```
+
+**Three metrics from V0-era dashboards no longer exist** and will silently render as empty panels:
+`vllm:num_requests_swapped` and `vllm:cpu_cache_usage_perc` (there is no swap path in V1 — see §4),
+and `vllm:gpu_cache_usage_perc`, renamed to `vllm:kv_cache_usage_perc`. There is likewise no
+`vllm:gpu_prefix_cache_hit_rate` gauge; compute the hit rate yourself as
+`rate(vllm:prefix_cache_hits_total[5m]) / rate(vllm:prefix_cache_queries_total[5m])`.
 
 ### Grafana Dashboard
 
@@ -1437,13 +1534,17 @@ scrape_configs:
 
 ### Key SLO Targets (Production Guidance)
 
-| Metric | Target |
+These are **starting points for an alert threshold, not industry statistics** — the right TTFT for
+a voice agent and for a batch summarizer differ by an order of magnitude. Set yours from your own
+product requirement, then use the table's shape (which signal to watch) rather than its numbers.
+
+| Metric | Suggested starting threshold |
 |---|---|
 | P50 TTFT | < 500ms |
 | P99 TTFT | < 2s |
-| P50 TPOT | < 50ms |
-| GPU cache usage | 70–90% (higher = better utilization) |
-| Requests waiting | < 10 (queue depth spike signals capacity issue) |
+| P50 TPOT | < 50ms (roughly reading speed) |
+| `vllm:kv_cache_usage_perc` | 0.70–0.90 (higher = better utilization, less headroom) |
+| `vllm:num_requests_waiting` | < 10 (queue depth spike signals capacity issue) |
 | Prefix cache hit rate | > 50% (for shared-system-prompt workloads) |
 
 ---
@@ -1606,6 +1707,9 @@ server {
 
 ### Essential Flags
 
+Values shown are illustrative; the **defaults** are called out where they matter (all read from
+`vllm/config/*.py` at v0.26.0).
+
 ```bash
 python -m vllm.entrypoints.openai.api_server \
 
@@ -1613,35 +1717,39 @@ python -m vllm.entrypoints.openai.api_server \
   --model meta-llama/Meta-Llama-3-8B-Instruct  # HF model ID or local path
   --tokenizer /path/to/tokenizer    # if different from model
   --revision main                   # git revision / branch
-  --dtype bfloat16                  # bfloat16 | float16 | float32 | auto
+  --dtype bfloat16                  # default: auto
 
 # Memory & Context
-  --gpu-memory-utilization 0.9      # fraction of GPU memory for model + KV cache
+  --gpu-memory-utilization 0.9      # fraction of GPU memory for model + KV cache; DEFAULT 0.92
   --max-model-len 8192              # max context length (prompt + output)
-  --max-num-seqs 256                # max concurrent sequences
-  --max-num-batched-tokens 32768    # max tokens per scheduler step
+  --max-num-seqs 256                # max concurrent sequences; DEFAULT 128
+  --max-num-batched-tokens 32768    # max tokens per scheduler step; DEFAULT 2048
 
 # Parallelism
   --tensor-parallel-size 2         # GPUs for tensor parallelism
-  --pipeline-parallel-size 1       # nodes for pipeline parallelism
-  --distributed-executor-backend ray  # ray | mp (default: mp for single-node)
+  --pipeline-parallel-size 1       # stages for pipeline parallelism
+  --enable-expert-parallel         # EP instead of TP for MoE layers; DEFAULT off
+  --distributed-executor-backend ray  # ray | mp | uni | external_launcher
+                                      # DEFAULT: uni if world_size == 1, else mp
 
 # Performance Features
-  --enable-prefix-caching          # Automatic Prefix Caching (APC)
-  --enable-chunked-prefill         # interleave prefill and decode
-  --block-size 16                  # KV cache block size in tokens
+  --enable-prefix-caching          # Automatic Prefix Caching; DEFAULT ON (--no-... to disable)
+  --enable-chunked-prefill         # interleave prefill and decode; DEFAULT ON
+  --block-size 16                  # KV cache block size in tokens; DEFAULT 16
+  --prefix-caching-hash-algo sha256  # DEFAULT sha256; also sha256_cbor, xxhash, xxhash_cbor
 
 # Quantization
-  --quantization fp8               # fp8 | gptq | awq | squeezellm | none
-  --kv-cache-dtype fp8_e5m2        # FP8 KV cache (H100 only)
+  --quantization fp8               # awq | gptq | fp8 | compressed-tensors | mxfp4 | ...
+                                   # (squeezellm, aqlm and QuIP# were REMOVED)
+  --kv-cache-dtype fp8             # FP8 KV cache; there is no plain "int8" value
 
-# Speculative Decoding
-  --speculative-model [ngram]      # draft model path or [ngram]
-  --num-speculative-tokens 5       # draft tokens per step
+# Speculative Decoding  (one JSON flag; the old per-knob flags were removed)
+  --speculative-config '{"method": "ngram", "num_speculative_tokens": 5}'
 
 # LoRA
   --enable-lora
   --max-loras 4
+  --max-cpu-loras 16
   --lora-modules name=/path/to/adapter
 
 # Serving
@@ -1651,18 +1759,19 @@ python -m vllm.entrypoints.openai.api_server \
   --max-log-len 100                # truncate logged prompts
 
 # Optimization
-  --compilation-config 3           # torch.compile optimization level (0-3)
-  --enforce-eager                  # disable CUDA graph (debug only)
-  --disable-log-requests           # reduce logging overhead in production
+  --compilation-config '{"mode": 3}'  # torch.compile mode 0-3; DEFAULT 3 (VLLM_COMPILE)
+  --enforce-eager                     # disable CUDA graph (debug only)
+  --enable-log-requests               # per-request logging is OFF by default now;
+                                      # --disable-log-requests no longer exists
 ```
 
 ### Flag Tuning Guide
 
 | Goal | Key flags |
 |---|---|
-| Max throughput | `--max-num-seqs 512`, `--gpu-memory-utilization 0.95`, `--enable-prefix-caching` |
-| Min TTFT | `--enable-chunked-prefill`, `--max-num-batched-tokens 512` |
-| Long context | `--max-model-len 131072`, `--enable-prefix-caching`, `--kv-cache-dtype fp8_e5m2` |
+| Max throughput | `--max-num-seqs 512`, `--gpu-memory-utilization 0.95`, prefix caching (on by default) |
+| Min TTFT | `--max-num-batched-tokens 512` (chunked prefill is on by default) |
+| Long context | `--max-model-len 131072`, `--kv-cache-dtype fp8` |
 | Multi-tenant LoRA | `--enable-lora`, `--max-loras 8`, `--max-cpu-loras 32` |
 | Cost efficiency | `--quantization awq`, `--tensor-parallel-size 1` |
 | Debug mode | `--enforce-eager`, `--max-num-seqs 4` |
@@ -1671,73 +1780,112 @@ python -m vllm.entrypoints.openai.api_server \
 
 ## 18. vLLM v0 vs v1 Architecture
 
-vLLM v1 (released late 2024, default from v0.8+) is a ground-up rewrite of the execution engine.
+vLLM V1 is a ground-up rewrite of the execution engine. Timeline: **alpha in v0.7.0 on 2025-01-27**,
+default engine from **v0.8.0**, and V0 was **deleted from the codebase in v0.11.0** — so on any
+current release this is history, not a choice you make.
 
 ### Key Differences
 
 | Aspect | v0 | v1 |
 |---|---|---|
-| Scheduler | Python, single-threaded | C++, zero-copy |
-| KV cache | Block-based (PagedAttention) | Block-based + prefix caching by default |
-| Prefill/decode | Separate forward passes | Unified with chunked prefill |
-| CUDA graphs | Per-batch-size | Flexible capture |
-| Multimodal | Limited | First-class, multi-image |
-| Structured output | outlines integration | Faster FSM caching |
-| CPU overhead | Higher (Python GIL) | Lower (async tokenizer, C++ paths) |
-| TP communication | NCCL | NCCL + optimized collectives |
+| Engine process model | Single process | `EngineCore` in its own process; tokenize/detokenize/stream overlap with it |
+| Scheduler | Prefill and decode as distinct phases | One queue, prompt and output tokens treated uniformly |
+| Preemption | Recompute **or** GPU↔CPU swap | Recompute only; no swap path, no `SWAPPED` state |
+| KV cache | Block-based (PagedAttention), prefix caching opt-in | Block-based, prefix caching **on by default** |
+| Prefill/decode | Separate forward passes | Unified with chunked prefill (on by default) |
+| CUDA graphs | Per-batch-size capture | Piecewise capture integrated with `torch.compile` |
+| Multimodal | Limited | First-class, multi-image, cached preprocessing |
+| Structured output | Request-level backend choice | Engine-level backend, `auto` by default with fallbacks |
+| `best_of` | Supported | **Removed** |
+| Per-request logits processors | Supported | **Removed** — global processors registered at startup |
+
+Note the scheduler in V1 is still **Python** (`vllm/v1/core/sched/scheduler.py`); the CPU-overhead
+win came from moving work off the critical path and out of the API-server process, not from
+rewriting the scheduler in C++.
 
 ### Enabling v1
 
 ```bash
-# v1 is default from vLLM 0.8+
-# For earlier versions:
+# V1 is the only engine from v0.11.0 onward; there is nothing to enable.
+# On releases between v0.7.0 and v0.8.0, V1 was opt-in:
 VLLM_USE_V1=1 python -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
 ### v1 Performance Improvements (vs v0)
 
-- 1.5–2× higher throughput on same hardware
-- 40% lower CPU overhead per token
-- Better chunked prefill integration
-- Async tokenization off critical path
-- Prefix caching enabled by default
+The one number vLLM published for the V1 alpha is **"up to 1.7× higher throughput compared to V0
+(without multi-step scheduling)"**, attributed to CPU-overhead reductions across the whole stack;
+the announcement gives no per-token CPU-overhead percentage, so treat any specific figure you see
+quoted as unsourced. What is structurally true:
+
+- `EngineCore` runs in its own process, overlapping tokenization/detokenization/streaming with the
+  model loop
+- Prefix caching costs "less than 1% decrease in throughput even when the cache hit rate is 0%",
+  which is why it could be turned on by default
+- Chunked prefill enabled by default whenever possible
+- Larger gains on vision-language models than on text-only ones
 
 ---
 
 ## 19. Performance Numbers
 
-### Throughput (tokens/second, single A100 80GB)
+**Read this section as arithmetic, not as a benchmark.** Absolute tokens/sec depends on the
+release, the attention backend, the batch composition and the driver, and any table of engine-vs-engine
+numbers goes stale within a release or two. What does not go stale is the roofline, so the figures
+below are *derived* from hardware limits rather than quoted from a run. Benchmark your own workload
+with `vllm bench serve` before committing capacity.
 
-| Model | Method | Throughput |
+### Where the ceilings come from (LLaMA 3 8B, A100 80GB SXM)
+
+```
+  A100 80GB: 312 TFLOPS dense BF16, 2,039 GB/s HBM
+
+  PREFILL is compute-bound: ~2P FLOPs per token
+    ceiling  = 312e12 / (2 x 8e9)              = 19,500 prompt tok/s at 100% MFU
+    realistic at ~50% MFU                       ~10,000 prompt tok/s
+
+  DECODE is bandwidth-bound: the whole weight set is read once per step
+    steps/s  = 2,039e9 / 16e9 (FP16 weights)   = ~127 forward passes/s
+    output tok/s = 127 x batch_size            -> batch is the only lever
+    FP8 weights halve the read, roughly doubling the step rate
+```
+
+Two consequences worth internalizing. First, **decode throughput is linear in batch size** until
+the KV pool runs out, which is the entire reason PagedAttention and continuous batching exist.
+Second, a single-stream (batch=1) decode number is a bandwidth measurement, not an engine
+comparison — every engine on the same card lands close to the same value.
+
+### TTFT vs Context Length (LLaMA 3 8B, A100 80GB — modelled, not measured)
+
+Computed from the ~10,000 prompt tok/s prefill figure above. Any table that shows an 8B model
+prefilling faster than ~19,500 tok/s on an A100 is reporting something impossible.
+
+| Context length | Prefill-bound TTFT (no APC) | TTFT (full APC hit) |
 |---|---|---|
-| LLaMA 3 8B | HF Transformers (baseline) | ~80 tok/s |
-| LLaMA 3 8B | vLLM FP16, batch=1 | ~250 tok/s |
-| LLaMA 3 8B | vLLM FP16, continuous batch | ~1,200 tok/s |
-| LLaMA 3 8B | vLLM FP8 + APC | ~1,800 tok/s |
-| LLaMA 3 8B | vLLM FP8 + speculative (ngram) | ~2,400 tok/s |
-| LLaMA 3 70B | vLLM FP16, TP=2 | ~350 tok/s |
-| LLaMA 3 70B | vLLM FP8, TP=1 (H100) | ~800 tok/s |
+| 1K tokens | ~100 ms | one scheduler step, tens of ms |
+| 8K tokens | ~800 ms | one scheduler step |
+| 32K tokens | ~3.3 s (plus quadratic attention cost) | one scheduler step |
+| 128K tokens | ~13 s (plus quadratic attention cost) | one scheduler step |
 
-### TTFT vs Context Length (LLaMA 3 8B, A100)
+The APC column is nearly flat in context length precisely because a full prefix hit removes the
+prefill term entirely; what remains is queueing plus one forward pass. That flatness — not any
+particular millisecond value — is the point.
 
-| Context length | TTFT (no APC) | TTFT (APC hit) |
-|---|---|---|
-| 1K tokens | ~50ms | ~5ms |
-| 8K tokens | ~350ms | ~10ms |
-| 32K tokens | ~1.4s | ~15ms |
-| 128K tokens | ~5.5s | ~20ms |
+### Engine Comparison (qualitative)
 
-### Engine Comparison (LLaMA 3 8B, A100 80GB, throughput-mode)
+Absolute throughput numbers for vLLM vs TensorRT-LLM vs SGLang change with every release and with
+the exact model/precision/batch, and the published head-to-heads contradict each other. The stable
+distinctions are architectural:
 
-| Engine | Throughput | TTFT | Notes |
-|---|---|---|---|
-| HF Transformers | 80 tok/s | 50ms | Baseline |
-| vLLM | 1,200 tok/s | 50ms | Best all-round |
-| TensorRT-LLM | 1,500 tok/s | 40ms | NVIDIA-only, more setup |
-| SGLang | 1,100 tok/s | 45ms | Better for structured outputs |
-| llama.cpp | 50 tok/s | 60ms | CPU+consumer GPU |
-| Ollama | 40 tok/s | 70ms | Ease of use |
+| Engine | Distinguishing property |
+|---|---|
+| HF Transformers `generate()` | Static batching, no paged KV — the baseline vLLM's launch blog beat by 14-24× |
+| vLLM | PagedAttention + continuous batching; broadest hardware and feature coverage |
+| TensorRT-LLM | NVIDIA-only, ahead-of-time engine build, most aggressive kernel fusion |
+| SGLang | RadixAttention (token-level prefix reuse) and a front-end language for structured programs |
+| llama.cpp | GGUF, CPU and consumer GPUs, single-user focus |
+| Ollama | Packaging and UX layer over llama.cpp |
 
 ---
 
@@ -1757,7 +1905,7 @@ Chunked prefill breaks long prompt processing into small chunks interleaved with
 
 **Q4: How does automatic prefix caching work and when does it help?**
 
-APC maintains a radix tree (hash trie) keyed by token block hashes. When a new request arrives, vLLM checks if its prefix blocks are already in the tree. If so, it reuses the cached KV pages — skipping recomputation. It helps significantly when many requests share the same system prompt, few-shot examples, or RAG context. It doesn't help for fully unique prompts.
+APC maintains a hash table from block hash to physical block ID, giving O(1) prefix lookup. Each block's hash chains in the previous block's hash plus its own token IDs, so a hit means "this exact token sequence from position zero has been seen before." When a new request arrives, vLLM hashes its blocks in order and reuses the cached KV pages for every leading block that matches, skipping their recomputation. It helps significantly when many requests share the same system prompt, few-shot examples, or RAG context, and not at all for fully unique prompts. Note it is not a radix tree — token-level radix matching is SGLang's RadixAttention, a different design.
 
 **Q5: Explain tensor parallelism vs pipeline parallelism in vLLM.**
 
@@ -1769,7 +1917,7 @@ The draft model generates K candidate tokens cheaply. The target model verifies 
 
 **Q7: What is the tradeoff between gpu_memory_utilization and throughput?**
 
-Higher `gpu_memory_utilization` allocates more GPU RAM for KV cache blocks after model weights are loaded. More blocks = more concurrent sequences = higher throughput (up to a point). Too high risks OOM from memory spikes or CUDA context overhead. Too low leaves throughput on the table. Rule of thumb: 0.85-0.90 for stable production; 0.95 for maximum throughput with monitoring in place.
+Higher `gpu_memory_utilization` allocates more GPU RAM for KV cache blocks after model weights are loaded. The default is 0.92. More blocks means more concurrent sequences and higher throughput, up to a point. The trap is that the flag caps the *whole card*, not the KV pool: raising it from 0.90 to 0.95 does not add 5% of KV capacity, it adds 5% of total VRAM to a pool that may only be 60% of the card, and it takes that headroom from CUDA graphs and NCCL buffers that still need it. Too high risks allocation failure under a traffic spike rather than at steady state; too low leaves throughput on the table. Practical approach: keep it at or slightly below the default, then raise it only while `vllm:num_preemptions_total` stays at zero.
 
 **Q8: When would you use LoRA serving vs separate model deployments?**
 
@@ -1777,31 +1925,31 @@ LoRA serving is better when: (1) you have many fine-tuned variants of the same b
 
 **Q9: How do you diagnose and respond to KV cache saturation in a production vLLM deployment?**
 
-KV cache saturation is visible through three primary metrics: `gpu_cache_usage_perc` climbing above 90% consistently, `num_requests_swapped` increasing (indicating the scheduler is spilling KV blocks to CPU RAM), and `num_preemptions_total` rising (requests being fully preempted and re-queued). When these metrics spike together, the immediate lever is reducing `--max-num-seqs` to cap the number of concurrently in-flight requests, which limits total KV cache demand at the cost of lower throughput. A more targeted fix is enabling FP8 KV cache quantization (`--kv-cache-dtype fp8`), which halves KV memory per token at a small accuracy cost — practical for most chat workloads but worth evaluating on your benchmark suite first. Raising `--gpu-memory-utilization` from 0.85 to 0.90 or 0.92 gives the allocator more headroom, but must be done carefully to avoid OOM from CUDA context fragmentation during traffic spikes. If saturation persists under expected load, it indicates the serving instance is undersized for the request mix and the right fix is horizontal scaling or moving to a GPU with more VRAM.
+KV cache saturation is visible through three metrics: `vllm:kv_cache_usage_perc` sitting above 0.9, `vllm:num_preemptions_total` rising, and `vllm:num_requests_waiting` growing. (There is no `num_requests_swapped` any more — V1 removed GPU-to-CPU KV swapping entirely, so preemption always means discard-and-recompute.) When these spike together, the immediate lever is reducing `--max-num-seqs` to cap concurrently in-flight requests, which limits total KV cache demand at the cost of lower throughput. A more targeted fix is enabling FP8 KV cache quantization (`--kv-cache-dtype fp8`), which halves KV memory per token at a small accuracy cost — practical for most chat workloads but worth evaluating on your benchmark suite first. Raising `--gpu-memory-utilization` above the 0.92 default gives the allocator more blocks, but takes the headroom from CUDA graph and NCCL buffers, so it tends to move the failure from steady state into traffic spikes. If saturation persists under expected load, the instance is undersized for the request mix and the right fix is horizontal scaling or a GPU with more VRAM.
 
 **Q10: How do you configure multi-LoRA serving in vLLM, and when does LoRA memory overhead become significant?**
 
-Multi-LoRA serving is enabled with `--enable-lora`, `--max-loras` (maximum number of adapters resident in GPU memory simultaneously), and `--max-cpu-loras` (adapters cached on CPU for paging). vLLM treats LoRA weight tensors as pages — hot adapters live in GPU VRAM, cold adapters are evicted to CPU and reloaded on demand when a request for that adapter arrives, similar to how KV blocks are swapped. The paging cost is a PCIe transfer of the adapter weights, which for rank-16 adapters on LLaMA-3 8B is roughly 50–100 MB — a few hundred milliseconds on PCIe 4.0, so cache-miss latency is noticeable. Memory overhead becomes significant when rank exceeds 64: a rank-64 LoRA on a 7B model adds roughly 500 MB of GPU RAM per resident adapter, which meaningfully cuts into KV cache budget. With many concurrent adapters (more than 8–10) and high rank, the combined adapter footprint can rival the KV cache allocation, forcing you to reduce `--max-num-seqs` or drop to lower rank (16 or 32) to maintain throughput.
+Multi-LoRA serving is enabled with `--enable-lora`, `--max-loras` (adapters resident in GPU memory simultaneously), and `--max-cpu-loras` (adapters cached on CPU for paging). Hot adapters live in GPU VRAM; cold adapters are evicted to CPU and copied back on demand when a request for that adapter arrives. Size the adapter before reasoning about the cost: a rank-`r` LoRA adds `r × (fan_in + fan_out)` parameters per target matrix, so rank 16 in FP16 on LLaMA-3 8B is about 27 MB targeting q/k/v/o and about 84 MB if it also targets the MLP projections. That is a **single-digit-millisecond** PCIe 4.0 transfer at ~25 GB/s, not a hundreds-of-milliseconds one — the expensive miss is the cold path that has to read the adapter from disk or object storage, not the CPU-to-GPU hop. Memory overhead matters at high rank: rank 64 is 4× those figures, roughly 320 MB per resident adapter for a 7-8B model targeting all linear layers, which meaningfully cuts into the KV cache budget. With more than 8-10 concurrent high-rank adapters the combined footprint can rival the KV pool, forcing you to reduce `--max-num-seqs` or drop to rank 16-32.
 
 **Q11: When does automatic prefix caching provide zero benefit, and what overhead does it impose?**
 
-APC provides zero cache-hit benefit when every request has a fully unique prompt — chatbots with no shared system prompt, document summarization where each document is different, or any workload where the first token block differs across requests. In these cases every block hash misses the radix tree on every lookup, and vLLM still pays the overhead of hashing each block of tokens (one hash per block_size tokens, typically 16 or 32 tokens) and walking the radix tree on every prefill. The radix tree itself consumes CPU memory and adds scheduler CPU time proportional to tree depth. For workloads with long unique prompts and high request rates, this overhead is measurable — typically a few milliseconds of scheduler latency per request. In these scenarios, disabling APC (`--no-enable-prefix-caching`) reduces scheduler complexity and CPU overhead with no throughput penalty. APC is worth keeping only when a meaningful fraction of requests share a prefix of at least one full block (16–32 tokens).
+APC provides zero cache-hit benefit when every request has a fully unique prompt — chatbots with no shared system prompt, document summarization where each document differs, or any workload where the first token block differs across requests. In those cases every block hash misses the lookup table, and vLLM still pays for hashing each block (one SHA-256 by default, per `block_size` tokens) plus the table probe on every prefill. The measured cost of that overhead is small: vLLM's own V1 announcement reports "less than 1% decrease in throughput even when the cache hit rate is 0%", which is exactly why prefix caching could be switched on by default in V1. So the honest answer is that leaving APC enabled is nearly free and disabling it (`--no-enable-prefix-caching`) buys you almost nothing — reach for `--prefix-caching-hash-algo xxhash` before reaching for the off switch if hashing genuinely shows up in a profile. The real reason to disable it is correctness or debugging, not throughput.
 
-**Q12: What CPU overhead improvements did vLLM v1 introduce over v0, and when is v0 still needed?**
+**Q12: What CPU overhead improvements did vLLM v1 introduce over v0, and is v0 still available?**
 
-vLLM v1 restructured the engine to move the tokenizer into an async worker thread, eliminating blocking tokenization from the critical scheduling path. The scheduler itself gained C++ fast paths for common block allocation decisions, reducing Python interpreter overhead. CUDA graph capture was made more flexible — v1 can capture graphs for a wider range of batch sizes and padding configurations, reducing the frequency of falling back to eager mode. Combined, these changes reduce CPU overhead per generated token by approximately 40% under high concurrency, which translates directly to higher sustainable throughput on CPU-bound workloads. The v0 engine is still required for a handful of model architectures and quantization combinations not yet ported to the v1 execution stack — check the vLLM compatibility matrix for specifics. v0 is also the fallback when custom model code or custom attention backends are used that have not been adapted to v1's executor interface.
+V0 is gone — it was deleted from the codebase in v0.11.0, so there is no fallback engine to choose. V1 became the default in v0.8.0 after shipping as an alpha in v0.7.0 (January 2025). The CPU-overhead work that motivated it: the scheduling and model-execution loop was isolated into an `EngineCore` running in its own process, so tokenization, detokenization and response streaming overlap with the model loop instead of contending with it on one interpreter. The scheduler also stopped distinguishing prefill from decode, treating prompt and output tokens uniformly, which removed a whole class of special-case bookkeeping. CUDA graph capture was reworked to integrate with `torch.compile`. Note the scheduler itself is still Python — the win came from moving work off the critical path, not from a C++ rewrite, and the only figure vLLM published is "up to 1.7x higher throughput compared to V0." If a model architecture does not work today, the answer is that it was either never ported or was actively removed (see `_PREVIOUSLY_SUPPORTED_MODELS` in the registry), not that you should fall back to V0.
 
-**Q13: How does vLLM's preemption and swap mechanism work, and what is its impact on tail latency?**
+**Q13: How does vLLM's preemption mechanism work, and what is its impact on tail latency?**
 
-When the block allocator cannot satisfy a new block allocation for an active sequence (KV cache is full), the scheduler must free blocks. It identifies the lowest-priority in-flight requests — typically those with the most tokens already generated, or those at the back of the scheduling queue — and preempts them. Preemption means writing their KV blocks from GPU VRAM to CPU RAM (swap-out) via asynchronous DMA transfers, then freeing those GPU blocks to serve the higher-priority request. When GPU blocks become available again (other requests finish), the swapped requests are swap-in — KV blocks are transferred back to GPU and the request resumes decoding. Each swap round trip costs the full PCIe bandwidth for the swapped KV data: a sequence with 2K tokens in a LLaMA-3 70B model (80 layers, 128 head dim, GQA 8 KV heads) holds roughly 2K * 80 * 2 * 128 * 8 * 2 bytes ~ 650 MB of KV data, taking hundreds of milliseconds to swap. This directly inflates P99 TTFT (time-to-first-token) and P99 inter-token latency for the preempted requests. The `num_preemptions_total` metric is the key signal; sustained preemption rates above a few per minute indicate the deployment needs more KV cache capacity or reduced concurrency.
+When the block allocator cannot give an active sequence another block, the scheduler frees blocks by preempting a running request — and in V1 preemption always means **discard and recompute**, never swap. `Scheduler._preempt_request` frees the request's blocks, resets `num_computed_tokens` to 0, sets its status to `PREEMPTED`, and *prepends* it to the waiting queue so it is retried first. Which request gets chosen depends on policy: under FCFS it is `self.running.pop()`, the most recently admitted request (the one that has generated the fewest tokens), not the oldest; under `--scheduling-policy priority` it is the request with the numerically highest priority value, ties broken by latest arrival. The cost on resume is a full re-prefill of everything the request had generated so far, which is why prefix caching matters here — most of that prefix is usually still in the block pool and the "recompute" collapses into a cache hit. The `vllm:num_preemptions_total` counter is the signal to alert on: sustained rates above a few per minute mean the pool is oversubscribed, and the fix is a lower `--max-num-seqs` or more capacity, not per-preemption tuning. Anyone describing GPU-to-CPU swap-out and swap-in is describing V0, removed in v0.11.0.
 
 **Q14: How would you configure tensor parallelism for a LLaMA 70B model on 4 x A100 80GB GPUs?**
 
-With TP=4, each GPU holds one-quarter of every weight matrix. LLaMA 70B in FP16 is approximately 140 GB total (70 billion parameters * 2 bytes), so each GPU holds ~35 GB of model weights, leaving roughly 45 GB per GPU for KV cache — comfortable for serving long sequences or large batches. AllReduce communication between the 4 GPUs runs over NVLink (600 GB/s bidirectional on A100 SXM), keeping the synchronization overhead small relative to compute. An alternative is TP=2 with FP8 quantization: FP8 halves the weight footprint to ~70 GB total, so 2 GPUs each hold ~35 GB, leaving ~45 GB per GPU for KV cache — numerically similar per-GPU headroom with only 2 GPUs, freeing the other 2 for a second replica (doubling throughput). Choose TP=4 with FP16 when output quality must be preserved and you have the NVLink bandwidth; choose TP=2 + FP8 when throughput scales matter more and your task tolerates slight quantization degradation. For a single 70B model with strict latency SLAs, TP=4 is generally preferred.
+With TP=4, each GPU holds one-quarter of every weight matrix. LLaMA 70B in FP16 is approximately 140 GB total (70 billion parameters * 2 bytes), so each GPU holds ~35 GB of weights; against the 0.92 default utilization cap that is ~73.6 GB of budget per card, leaving roughly 35 GB for KV cache once activations, CUDA graphs and NCCL buffers take their few GB. AllReduce between the 4 GPUs runs over NVLink (600 GB/s on A100 SXM), keeping synchronization small relative to compute. An alternative is TP=2 with FP8 weights: that halves the footprint to ~70 GB total, so 2 GPUs each hold ~35 GB with similar per-GPU headroom, freeing the other 2 GPUs for a second replica. One caveat specific to A100: full FP8 W8A8 compute requires compute capability 8.9 or higher (Ada/Hopper), so on Ampere vLLM runs FP8 as weight-only W8A16 through Marlin — you get the VRAM saving and the extra KV capacity, but no FP8 tensor-core speedup. Choose TP=4 in FP16 when you want no quantization risk; choose TP=2 + FP8 when you want two replicas out of the same four cards.
 
 **Q15: How does PagedAttention compare to TensorRT-LLM's in-flight batching, and when would you choose one over the other?**
 
-Both PagedAttention (vLLM) and TensorRT-LLM's in-flight batching solve the same core problem: keeping the GPU busy by mixing prefill and decode steps from different requests in the same forward pass, rather than waiting for a static batch to complete. The key architectural difference is in memory management: PagedAttention uses non-contiguous paged blocks that can be allocated and freed independently, eliminating KV cache fragmentation at the cost of indirection through a block table; TensorRT-LLM uses a preallocated contiguous KV cache pool with guaranteed-contiguous allocation per sequence, which avoids the block table indirection and allows tighter kernel fusion but is more susceptible to fragmentation under variable sequence lengths. In practice, TensorRT-LLM can be 10–30% faster than vLLM on raw NVIDIA hardware throughput benchmarks for specific model/precision combinations due to more aggressive CUDA kernel fusion and NVIDIA-specific optimizations. vLLM is hardware-agnostic (AMD ROCm, AWS Inferentia, Google TPU support), more flexible for custom model architectures, and has a larger community ecosystem. Choose TensorRT-LLM when you are exclusively on NVIDIA hardware, throughput is the primary metric, and you are serving a supported standard architecture (LLaMA, Mistral, Falcon); choose vLLM when you need portability, rapid iteration on custom models, or multi-LoRA / speculative decoding features not yet available in TRT-LLM.
+Both PagedAttention (vLLM) and TensorRT-LLM's in-flight batching solve the same core problem: keeping the GPU busy by mixing prefill and decode steps from different requests in the same forward pass, rather than waiting for a static batch to complete. The common misconception is that only vLLM pages its KV cache — TensorRT-LLM offers both a contiguous KV cache (a monolithic tensor sized for `max_batch_size × max_seqlen`) and a paged one managed in blocks by a cache manager, and the paged form is the default, with its own block reuse for shared prefixes. So the memory-management designs have converged; the real difference is the build model. TensorRT-LLM compiles an engine ahead of time for a fixed model, precision and shape envelope, which is what enables its more aggressive kernel fusion and also what makes iteration slower; vLLM assembles the model at load time and pays a little indirection for the flexibility. Published head-to-head throughput numbers move with every release on both sides and depend heavily on the exact model, precision and batch composition, so treat any specific percentage as a claim to re-measure rather than a constant; the durable statement is that TensorRT-LLM's ahead-of-time engine build lets it fuse more aggressively on NVIDIA silicon, at the cost of a build step per model/precision/shape. vLLM is hardware-agnostic (AMD ROCm, AWS Inferentia, Google TPU support), more flexible for custom model architectures, and has a larger community ecosystem. Choose TensorRT-LLM when you are exclusively on NVIDIA hardware, throughput is the primary metric, and you are serving a supported standard architecture (LLaMA, Mistral, Falcon); choose vLLM when you need portability, rapid iteration on custom models, or multi-LoRA / speculative decoding features not yet available in TRT-LLM.
 
 **Q16: How does PD (prefill/decode) disaggregation differ from chunked prefill, and when would you choose one over the other?**
 
@@ -1810,6 +1958,11 @@ Chunked prefill (§7) keeps prefill and decode on the SAME GPU pool and interlea
 ---
 
 ## 21. Case Study
+
+> **This case study is an illustrative composite, not a public incident report.** The company,
+> the traffic figures and the before/after metrics are constructed to exercise the mechanics in
+> §1-19; they are not measurements from a named deployment. The configuration flags and the block
+> arithmetic are real and checked against vLLM v0.26.0 — the business numbers are not citable.
 
 **Scenario:** A generative AI startup serves a Llama-3-70B instruction model as their core product API. Current load: 500 RPS, average prompt 512 tokens, average output 256 tokens, p99 TTFT SLA < 800ms, p99 decode latency < 50ms/token. GPU budget: 8 x A100 80GB SXM. The naive deployment (HuggingFace `generate()` with static batching) saturates at 40 RPS with p99 TTFT > 3s.
 
@@ -1846,17 +1999,29 @@ flowchart TD
     class pod2 req
 ```
 
-Metrics scraped from each pod: `vllm:num_requests_running`, `vllm:gpu_cache_usage_pct`, `vllm:num_preemptions_total`.
+Metrics scraped from each pod: `vllm:num_requests_running`, `vllm:kv_cache_usage_perc`, `vllm:num_preemptions_total`.
 
 ```
-PagedAttention block layout (per GPU, 70B FP8):
+PagedAttention block layout (per GPU, 70B weights FP8, KV cache FP8)
+  requires BOTH --quantization fp8 (weights) AND --kv-cache-dtype fp8 (cache);
+  the two flags are independent -- quantizing weights alone leaves KV at FP16.
+
+  CAVEAT on A100 (compute capability 8.0): full FP8 W8A8 compute needs cc >= 8.9
+  (Ada/Hopper). On Ampere, vLLM runs FP8 as W8A16 weight-only through Marlin --
+  so the 2x VRAM saving below is real, but there is NO FP8 tensor-core speedup.
+
   GPU VRAM: 80 GB
-  Model weights (FP8, TP=2): ~35 GB
-  KV cache pool: ~40 GB
+  Model weights (FP8, TP=2): 70e9 x 1 byte / 2       = 35 GB
+  KV cache pool (after overhead):                    ~40 GB
   Block size: 16 tokens
-  KV per block (70B, 80 layers, GQA-8): 16 * 80 * 2 * 128 * 8 * 1 byte = 3.3 MB
-  Blocks available: 40 GB / 3.3 MB ≈ 12,000 blocks per GPU
-  Max concurrent tokens in flight: 12,000 * 16 = 192,000 tokens per pod
+
+  KV per token (80 layers, 2 for K+V, 8 KV heads, head_dim 128, 1 byte)
+                 = 80 x 2 x 8 x 128 x 1              =   163,840 B = 160 KiB
+  KV per block   = 160 KiB x 16 tokens               = 2,621,440 B = 2.5 MiB
+  Blocks         = 40e9 / 2,621,440                  = ~15,260 blocks per GPU
+  Token capacity = 15,260 x 16                       = ~244,000 tokens per GPU
+
+  (In FP16 the same pool holds half that: 320 KiB/token, ~122,000 tokens.)
 ```
 
 **Key implementation — 3 Python code blocks:**
@@ -1874,19 +2039,21 @@ import time
 
 
 def build_engine() -> AsyncLLMEngine:
+    # NOTE: `preemption_mode` and `use_v2_block_manager` no longer exist on
+    # AsyncEngineArgs -- passing them raises TypeError. V1 preemption is
+    # always recompute, and there is only one block manager.
     args = AsyncEngineArgs(
         model="meta-llama/Meta-Llama-3-70B-Instruct",
         tensor_parallel_size=2,
-        quantization="fp8",                 # halves weight VRAM vs BF16
+        quantization="fp8",                  # weights only
+        kv_cache_dtype="fp8",                # separate flag; halves KV memory
         max_model_len=8192,
-        max_num_batched_tokens=32768,        # prefill budget per scheduler step
-        max_num_seqs=512,                    # max concurrent sequences
-        gpu_memory_utilization=0.92,         # leave 8% headroom for fragmentation
-        enable_prefix_caching=True,          # deduplicate system-prompt KV
-        enable_chunked_prefill=True,         # interleave prefill+decode
-        preemption_mode="recompute",         # avoid PCIe swap latency spikes
+        max_num_batched_tokens=32768,        # per-step token budget (default 2048)
+        max_num_seqs=512,                    # max concurrent sequences (default 128)
+        gpu_memory_utilization=0.92,         # this IS the default
+        enable_prefix_caching=True,          # on by default in V1; explicit here
+        enable_chunked_prefill=True,         # on by default in V1; explicit here
         block_size=16,
-        use_v2_block_manager=True,
     )
     return AsyncLLMEngine.from_engine_args(args)
 
@@ -1916,8 +2083,8 @@ Block 2 — Prefix cache warming for system prompt (production concern):
 
 ```python
 from __future__ import annotations
-import hashlib
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass
 from typing import Any
 import aiohttp
 
@@ -1934,8 +2101,14 @@ class PrefixCacheWarm:
     Warm vLLM's prefix cache at startup by sending synthetic requests
     containing the system prompt. With prefix caching enabled, vLLM
     reuses computed KV blocks for identical token prefixes.
-    The system prompt at 128 tokens saves ~1.5 ms TTFT per request
-    at 500 RPS = 750 ms of aggregate latency saved every second.
+
+    Sizing the win: prefix caching removes `cached_tokens / prefill_throughput`
+    from TTFT. This 128-token system prompt is only 8 blocks, so the saving is
+    small in absolute terms -- the technique pays off in proportion to how long
+    the shared prefix is, which is why it is transformative for multi-thousand
+    token system prompts and RAG contexts and near-worthless here. Warming is
+    still worth doing because it also avoids a cold-start miss on the first
+    real request of a new pod.
     """
     base_url: str
     model: str
@@ -2047,9 +2220,9 @@ args_broken = AsyncEngineArgs(
     gpu_memory_utilization=0.98,   # too aggressive
 )
 
-# FIX: set 0.90-0.92 so ~8% VRAM stays free as allocation buffer.
-# Monitor vllm:num_preemptions_total; if > 5/minute, reduce
-# max_num_seqs or increase GPU count.
+# FIX: keep the 0.92 default so ~8% VRAM stays free as allocation buffer
+# for CUDA graphs and NCCL. Monitor vllm:num_preemptions_total; if it climbs,
+# reduce max_num_seqs or increase GPU count.
 args_fixed = AsyncEngineArgs(
     model="...",
     gpu_memory_utilization=0.92,
@@ -2082,20 +2255,28 @@ def fixed_prompt(user_msg: str, date_str: str) -> str:
 
 ```python
 # BROKEN: TP=4 across GPUs on different PCIe switches (no NVLink bridge).
-# AllReduce bandwidth = 32 GB/s PCIe; at 70B scale, each layer's
-# AllReduce adds ~2ms; 80 layers = 160ms overhead per token → unusable.
+# Size the all-reduce volume rather than guessing at it. TP inserts TWO
+# all-reduces per layer (after attention o_proj, after MLP down_proj), each
+# moving batched_tokens x hidden_size x dtype_bytes:
+#   70B: hidden 8192, 80 layers, BF16 activations, 256 tokens in the step
+#   per all-reduce = 256 x 8192 x 2 B            =   4.2 MB
+#   per step       = 4.2 MB x 2 x 80 layers      = 671 MB
+#   ring all-reduce on 4 ranks moves ~1.5x that  = ~1.0 GB off-chip per step
+#   over PCIe Gen4 at ~25 GB/s effective         = ~40 ms per DECODE STEP
+# A 70B decode step is ~25 ms of compute, so the interconnect more than
+# doubles per-token latency. The same 1.0 GB over NVLink at 600 GB/s is <2 ms.
 broken_args = AsyncEngineArgs(model="...", tensor_parallel_size=4)
 # (If GPUs 0,1 are on PCIe switch A and 2,3 on switch B, cross-switch = PCIe)
 
 # FIX: use TP=2 within a single NVLink domain (GPUs sharing NVSwitch).
-# NVLink: 600 GB/s vs PCIe 32 GB/s — 18x faster AllReduce.
+# A100 NVLink: 600 GB/s vs PCIe Gen4 x16 ~32 GB/s peak — ~19x more bandwidth.
 # Use CUDA_VISIBLE_DEVICES to pin each vLLM pod to NVLink-connected pair.
 # Pod 0: CUDA_VISIBLE_DEVICES=0,1  (NVLink pair)
 # Pod 1: CUDA_VISIBLE_DEVICES=2,3  (NVLink pair)
 fixed_args = AsyncEngineArgs(model="...", tensor_parallel_size=2)
 ```
 
-**Metrics:**
+**Metrics (illustrative — see the note at the top of this section):**
 
 | Metric | Before (static batching) | After (vLLM + PagedAttention) |
 |--------|--------------------------|-------------------------------|
@@ -2108,22 +2289,27 @@ fixed_args = AsyncEngineArgs(model="...", tensor_parallel_size=2)
 | GPU count | 8 x A100 | 8 x A100 (3 pods TP=2 + 2 spare) |
 | Cost per 1M tokens | $4.20 | $0.32 |
 
+Sanity-check the top row against §19 before quoting it anywhere: 520 RPS × 256 output tokens is
+~133K output tok/s, which at ~127 decode steps/s per pod implies batch sizes in the high hundreds
+per pod — right at the edge of what a 40 GB FP8 KV pool holds for 768-token sequences. The table
+is the *shape* of a paged-vs-static win, not a measurement you can cite.
+
 **Interview Q&As:**
 
 **Q: Why does PagedAttention improve GPU memory utilization compared to static KV cache allocation?**
-Static allocation reserves the maximum sequence length upfront for every request, wasting 60-80% of reserved memory when actual sequences are shorter. PagedAttention allocates fixed-size blocks (16 tokens each) on demand, so memory is consumed only as tokens are generated. Fragmentation drops from ~40% wasted to under 5% because the block table indirection allows non-contiguous blocks to appear logically contiguous to the attention kernel.
+Static allocation reserves the maximum sequence length upfront for every request, so most of the reservation is never used. The PagedAttention paper measured this directly: in the systems it compared against, "only 20.4% - 38.2% of the KV cache memory is used to store the actual token states" — that is 62-80% wasted to internal and external fragmentation. PagedAttention allocates fixed-size blocks (16 tokens each) on demand, so memory is consumed only as tokens are generated, and the block table indirection lets non-contiguous physical blocks appear logically contiguous to the attention kernel. The remaining waste is bounded by `block_size - 1` tokens per sequence — at most 15 tokens, typically 2-3% — and external fragmentation goes to zero, because every allocation is the same size.
 
 **Q: What is the trade-off between chunk size in chunked prefill and TTFT vs decode latency?**
-Larger chunks process more prefill tokens per step, reducing TTFT for long prompts but stalling ongoing decode steps for that entire step duration. Smaller chunks (4096 tokens) keep decode latency low but increase TTFT for 8K+ token prompts. A chunk of 8192-16384 tokens is a common production sweet spot for mixed workloads; tune based on your prompt-length distribution using vllm:time_per_output_token histogram.
+Larger chunks process more prefill tokens per step, reducing TTFT for long prompts but stalling ongoing decode steps for that entire step duration. Smaller chunks keep decode latency low but increase TTFT for long prompts, since the prefill now spans more scheduler steps. The knob is `--max-num-batched-tokens`, whose default is 2048 — note it is a budget for prefill *and* decode tokens in the same step, so raising it trades TPOT for TTFT and lowering it does the reverse. There is no universal sweet spot: derive it from your prompt-length distribution and your TTFT-vs-TPOT SLO, then verify with the `vllm:inter_token_latency_seconds` and `vllm:time_to_first_token_seconds` histograms.
 
 **Q: When should you prefer speculative decoding over increasing tensor parallelism to reduce decode latency?**
-Speculative decoding reduces per-token latency without adding GPUs by using a small draft model (1-3B) to propose k tokens that the target model verifies in a single forward pass. It is most effective when output tokens are highly predictable (code, structured data, repetitive prose) and acceptance rate exceeds 70%. Tensor parallelism reduces latency by splitting compute across GPUs but adds AllReduce communication cost; prefer TP scaling when the model does not fit on fewer GPUs or when acceptance rates are low.
+Speculative decoding reduces per-token latency without adding GPUs by using a cheap drafter to propose k tokens that the target model verifies in a single forward pass. It is most effective when output tokens are highly predictable — code, structured data, repetitive prose — because the win scales with acceptance rate and turns negative when acceptance is low enough that the drafting cost is not repaid. Tensor parallelism reduces latency by splitting compute across GPUs but adds two all-reduces per layer; prefer TP scaling when the model does not fit on fewer GPUs, when you have NVLink to absorb the collectives, or when your output distribution is unpredictable enough that acceptance stays low. The two are composable — vLLM supports speculative decoding on top of a TP deployment.
 
 **Q: How does vLLM's scheduler handle a request whose KV blocks get preempted?**
-The scheduler writes preempted sequence KV blocks from GPU VRAM to CPU RAM via asynchronous DMA (swap-out), frees those GPU blocks for higher-priority requests, and marks the preempted request as suspended. When GPU blocks become available again, the blocks are swapped back in (swap-in) and decoding resumes. The swap round-trip cost for a 2K-token sequence in LLaMA-3-70B is approximately 650 MB of KV data, taking hundreds of milliseconds over PCIe — making preemption a significant tail-latency event. Setting `preemption_mode="recompute"` avoids the swap entirely by discarding KV and recomputing prefill on resume, which is faster for short sequences.
+The scheduler frees the request's KV blocks outright, resets its computed-token count to zero, marks it `PREEMPTED`, and prepends it to the waiting queue so it is retried first. There is no swap: `preemption_mode` and the GPU-to-CPU KV swap path were V0 features, and V0 was deleted in v0.11.0. On resume the request re-prefills everything it had produced, which sounds ruinous — a 2K-token LLaMA-3-70B sequence holds about 650 MB of KV — but the recomputation usually lands on prefix-cache hits, so the practical cost is far below a full cold prefill. That trade is precisely why vLLM dropped swapping: swapping spends PCIe bandwidth twice and rents pinned host memory for the whole wait, while recompute spends GPU FLOPs that are partly idle during bandwidth-bound decode and holds nothing while the request waits. Alert on `vllm:num_preemptions_total`; a sustained rate means the pool is oversubscribed and `--max-num-seqs` is too high.
 
 **Q: What metrics indicate a vLLM deployment is undersized and needs more GPUs?**
-Watch four signals: (1) `vllm:gpu_cache_usage_pct` sustained above 90% indicates KV cache pressure; (2) `vllm:num_preemptions_total` rate above 5/minute signals frequent eviction; (3) `vllm:num_requests_waiting` queue depth growing over time means scheduler is falling behind; (4) p99 TTFT exceeding 2x p50 TTFT indicates head-of-line blocking from long prefills. Any two of these together justify adding replicas or increasing TP degree.
+Watch four signals: (1) `vllm:kv_cache_usage_perc` sustained above 0.9 indicates KV cache pressure; (2) a rising `vllm:num_preemptions_total` rate signals frequent eviction and recompute; (3) `vllm:num_requests_waiting` growing over time means the scheduler is falling behind arrivals; (4) p99 TTFT pulling far away from p50 TTFT indicates head-of-line blocking from long prefills. Note the first metric was called `vllm:gpu_cache_usage_perc` in V0 and no longer exists under that name, so a dashboard copied from an old runbook will show an empty panel rather than a healthy one. Any two of these together justify adding replicas or increasing TP degree; a preemption rate that only appears under burst usually means `--max-num-seqs` was sized to average sequence length rather than to `max_model_len`.
 
 **Q: How does prefix caching interact with LoRA adapters in a multi-tenant vLLM deployment?**
-Prefix cache keys include the LoRA adapter ID in addition to token content, so two requests using different LoRA adapters with identical prompts get separate cache entries — no cross-adapter contamination. The downside is reduced cache hit rate in multi-tenant setups: if 10 adapters share traffic equally, each adapter's effective cache is 1/10th the total. vLLM's `--max-cpu-loras` flag controls how many adapters are kept resident; evicted adapters require a disk load before serving, adding 200-500ms latency. For high-concurrency multi-LoRA deployments, pre-warm each adapter's prefix cache at startup.
+Prefix cache keys fold in the LoRA adapter ID alongside the token content, so two requests using different adapters with identical prompts get separate cache entries — no cross-adapter contamination. (The block hash also folds in multimodal input hashes and an optional per-request cache salt, for the same isolation reason.) The downside is a diluted hit rate in multi-tenant setups: if 10 adapters share traffic equally, each adapter's slice of the block pool is roughly a tenth of it. `--max-loras` bounds GPU-resident adapters and `--max-cpu-loras` bounds the CPU-side cache behind it; an adapter evicted past both has to be re-read from disk or object storage before it can serve, and that cold read — not the CPU-to-GPU copy, which is single-digit milliseconds for a typical rank-16 adapter — is what shows up in tail latency. For high-concurrency multi-LoRA deployments, pre-warm each adapter's prefix cache at startup and size `--max-cpu-loras` above your active adapter count.

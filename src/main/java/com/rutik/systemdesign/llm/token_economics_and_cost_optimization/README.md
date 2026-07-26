@@ -70,7 +70,7 @@ decision in this module is a manipulation of one of those two multiplications.
                                                                           ---------
   cost per request                                                        $0.007000
 
-  Note the asymmetry: output is 1/3 of the token count but 57% of the bill
+  Note the asymmetry: output is 1/3 of the INPUT token count but 57% of the bill
     $0.004000 / $0.007000 = 0.571
 
   The identical request on GPT-4o-mini ($0.15 in / $0.60 out):
@@ -147,9 +147,10 @@ you can rely on is 24 hours and un-processed requests expire at that point. Offl
 classification jobs, document processing, overnight report generation — should always use batch.
 
 **Self-hosting break-even depends on volume.** The crossover point where self-hosting becomes
-cheaper than the API is typically 5-20M tokens/day depending on model size, GPU type, and
-amortization period. Below this threshold, API is cheaper when you account for engineering
-maintenance cost.
+cheaper than the API is a function of model size, GPU type, API tier, and amortization period —
+compute it, do not quote a rule of thumb. The worked 70B example in Section 4 ($28,700/month TCO
+against a $7.80/1M blended API rate) lands at 123M tokens/day. Below the crossover, API is cheaper
+once you account for engineering maintenance cost.
 
 **Cost monitoring must be per-feature, not aggregate.** An aggregate dashboard that shows
 $50K/month tells you nothing actionable. A per-feature, per-user, per-query breakdown reveals that
@@ -478,7 +479,7 @@ Step 3 -- verify by pricing both sides at three volumes:
      200M          6,000M         6,000 x $7.80 = $46,800     $28,700      self
 
     At 200M/day the annual gap is ($46,800 - $28,700) x 12 = $217,200/year,
-    which is the ~$218,000 figure quoted in Section 7.
+    which is the ~$217,000 figure quoted in Section 7.
 ```
 
 The shape to remember: the self-hosted line is flat and the API line is a ray through the origin.
@@ -488,8 +489,9 @@ FTE — just moves one of the two lines and slides the crossing point.
 **Why the blended rate has to be there.** Skipping Step 1 and dividing by the input price alone
 gives `$28,700 / $3.00 = 9,567M tokens/month = 319M tokens/day` — a break-even line 2.6x too high,
 which would tell a team at 150M tokens/day to stay on the API while they overpay by roughly
-$10,000/month. The blend is the term that makes the answer depend on *your* output verbosity rather
-than the provider's cheapest headline number.
+$6,400/month (150M/day = 4,500M/month; 4,500 x $7.80 = $35,100 API vs $28,700 self-hosted). The
+blend is the term that makes the answer depend on *your* output verbosity rather than the
+provider's cheapest headline number.
 
 ---
 
@@ -855,12 +857,12 @@ multiple similar deployments, total savings exceeded $50K/month.
 API (50% discount) reduced this to $2,100/night, saving $63,000/month with no change in output
 quality and acceptable 6-hour latency.
 
-**Self-hosting LLaMA 3 70B, ~$218K/year savings at 200M tokens/day.** A content moderation platform
+**Self-hosting LLaMA 3 70B, ~$217K/year savings at 200M tokens/day.** A content moderation platform
 switched from a commercial API ($7.80/1M blended) to self-hosted LLaMA 3 70B on 4x reserved A100
 instances ($28,700/month). The break-even is 123M tokens/day: at 50M tokens/day the API costs
 50M * 30 * $7.80/1M = $11,700/month against $28,700 self-hosted, so the API wins by a wide margin.
 Only above 123M does the flat bill pay off. They were at 200M tokens/day, where the API would be
-$46,800/month vs $28,700 self-hosted — an annual saving of ($46,800 - $28,700) * 12 = ~$218,000,
+$46,800/month vs $28,700 self-hosted — an annual saving of ($46,800 - $28,700) * 12 = ~$217,000,
 with 3 months engineering time to set up and ongoing 0.5 FTE maintenance already factored into the
 $28,700.
 
@@ -880,7 +882,7 @@ $28,700.
 | Semantic response caching | 60-95% | 1 week | Low-Medium | Positive |
 | Embedding caching | ~100% on repeat queries | 2-3 days | None | Positive |
 | Fine-tuning smaller model | 70-95% | 2-6 weeks | Low (if done well) | Positive |
-| Self-hosting | 50-85% at volume | 2-3 months | None | Varies |
+| Self-hosting | ~39% at full utilization in this module's worked example ($4.78 vs $7.80/1M) | 2-3 months | None | Varies |
 
 ### API vs Self-Hosting
 
@@ -892,7 +894,7 @@ $28,700.
 | Model updates | Automatic | Manual re-deployment |
 | Data privacy | Provider dependent | Full control |
 | Engineering overhead | Minimal | Significant |
-| Break-even volume | N/A | 5-200M tokens/day depending on model |
+| Break-even volume | N/A | 123M tokens/day in the worked 70B example; recompute per model, GPU and API tier |
 
 ---
 
@@ -929,7 +931,8 @@ $28,700.
 - Quality regression on simple-but-nuanced queries would be unacceptable
 
 ### Consider self-hosting when:
-- Sustained volume exceeds 20M tokens/day for a mid-size model
+- Sustained volume reaches the hybrid band or above in the Section 4 decision table (10-50M
+  tokens/day for a mid-size model) AND you have computed your own break-even, not quoted one
 - Data privacy requirements prohibit sending data to third-party APIs
 - You have or can hire dedicated ML infrastructure engineers
 
@@ -949,7 +952,7 @@ feature_name to every logging call and build a per-feature dashboard. This pitfa
 across organizations that adopt LLMs quickly without instrumentation discipline.
 
 **Ignoring output token costs.** Engineers optimizing token usage focus on prompt length because
-input tokens are visible and controllable. Output tokens are 3-5x more expensive and often
+input tokens are visible and controllable. Output tokens are 4-6x more expensive and often
 unconstrained. A prompt that says "explain in detail" can generate 2,000 tokens where 200 suffice.
 Set explicit max_tokens limits and instruct models to be concise. Monitor output token distributions
 — a histogram showing a spike at max_tokens indicates the model is being cut off and the limit is
@@ -988,7 +991,7 @@ not after the bill arrives.
 
 | Tool | Category | Purpose | Notes |
 |---|---|---|---|
-| tiktoken | Token counting | OpenAI tokenizer | Exact count before sending; supports all OpenAI models |
+| tiktoken | Token counting | OpenAI tokenizer | Exact count before sending. `encoding_for_model` only maps model IDs it already knows — the newest families (gpt-5.6, gpt-5.4) raise `KeyError` as of tiktoken 0.13.0, so call `get_encoding("o200k_base")` explicitly for them |
 | LiteLLM | Proxy / abstraction | Unified API across 100+ providers; built-in cost tracking | Key tool for multi-provider routing |
 | Helicone | Observability | Request logging, cost attribution, prompt management | SaaS; self-hostable |
 | Portkey | Observability + routing | Cost tracking, fallback routing, semantic caching | Strong multi-provider support |
@@ -1067,17 +1070,17 @@ for batch completion, and downloading the results file.
 
 **Q: How does tokenizer efficiency change costs across languages?**
 Non-English text tokenizes into substantially more tokens per unit of meaning on English-heavy
-tokenizers — typically 1.5-3x more tokens for the same content in Hindi, Thai, or Arabic than in
-English, and historically far worse for low-resource scripts. Since billing is per token, the same
-product feature costs 2-3x more per user in some markets, and effective context windows shrink
+tokenizers. Typically 1.5-3x more tokens are needed for the same content in Hindi, Thai, or Arabic
+than in English, and historically far worse for low-resource scripts. Since billing is per token,
+the same product feature costs 2-3x more per user in some markets, and context windows shrink
 proportionally. Newer tokenizers with larger multilingual vocabularies (100K+ entries) narrow but
 do not eliminate the gap. If you operate multilingually, measure tokens-per-character per language
 on your actual traffic and build per-language cost models rather than one global average.
 
 **Q: When does prompt caching lose money, given the cache-write premium?**
 Anthropic bills cache writes at a 25% premium over standard input ($3.75 vs $3.00 per 1M tokens
-for Sonnet-class models), so a prefix that is written but never re-read within the TTL costs 25%
-more than not caching at all. Break-even arithmetic for N uses of the same prefix: uncached cost
+for Sonnet-class models). A prefix that is written but never re-read within the TTL therefore costs
+25% more than not caching at all. Break-even arithmetic for N uses of the same prefix: uncached cost
 scales as 3.00 × N, cached cost as 3.75 + 0.30 × (N − 1); the lines cross at N ≈ 1.3, so a single
 reuse within the ~5-minute TTL already profits. Caching loses money only for genuinely unique
 prefixes (per-request dynamic content mistakenly marked cacheable) or very sparse traffic where
@@ -1085,10 +1088,11 @@ entries always expire before reuse. Watch the ratio of cache_creation to cache_r
 ratio near or above 1 means you are paying premiums without collecting discounts.
 
 **Q: How would you implement per-feature cost monitoring in a production LLM application?**
-Every LLM API call should log: feature_name (the product feature making the call), user_id,
-model, input_tokens, cached_tokens, output_tokens, latency_ms, and cost_usd (calculated from token
-counts and the current pricing table). These logs go to a structured log store (e.g., BigQuery,
-Datadog, ClickHouse). A dashboard groups by feature_name and shows daily/weekly cost trends,
+Every LLM API call should log feature_name, user_id, model, input_tokens, cached_tokens,
+output_tokens, latency_ms, and cost_usd. feature_name is the product feature making the call, and
+cost_usd is calculated from token counts and the current pricing table. These logs go to a
+structured log store (e.g., BigQuery, Datadog, ClickHouse). A dashboard groups by feature_name
+and shows daily/weekly cost trends,
 cost per query, and cost per user. Set anomaly alerts for features whose cost deviates more than
 2x from their 7-day average. The key discipline is adding feature_name to every logging call —
 this is trivial per call but transformative for visibility.
@@ -1154,7 +1158,7 @@ cost. The decision depends on query volume (fine-tuning pays off faster at highe
 task stability (stable, narrow tasks are better fine-tuning candidates).
 
 **Q: What rate limiting strategies would you implement for a multi-tenant LLM platform?**
-A multi-tenant platform needs layered rate limiting across three dimensions: per-user RPM and TPM limits (prevent individual abuse), per-organization monthly token budgets (cost control), and global capacity limits (prevent infrastructure overload). Implementation uses token bucket algorithm with Redis + Lua scripts for atomic counting — the bucket fills at quota/period rate and drains by estimated token count per request. Sliding window rate limiting is preferred over fixed windows to prevent the boundary-burst problem where clients hit 2x the limit by straddling two fixed windows. Return HTTP 429 with Retry-After header and include X-RateLimit-Remaining in every response so clients can self-throttle. For overflow handling, queue lower-priority requests (free tier) rather than rejecting immediately, while high-priority requests (paid, SLA-bound) bypass the queue. Budget enforcement: warn at 80% of monthly allocation, soft-cap at 100% with a 10% grace period, hard-cap at 110%. The key production lesson is to enforce limits at the API gateway layer (not the application layer) to catch all traffic uniformly.
+A multi-tenant platform needs layered rate limiting across three dimensions: per-user limits, per-organization budgets, and global capacity limits. Per-user RPM and TPM limits prevent individual abuse, per-organization monthly token budgets control cost, and global capacity limits prevent infrastructure overload. Implementation uses token bucket algorithm with Redis + Lua scripts for atomic counting — the bucket fills at quota/period rate and drains by estimated token count per request. Sliding window rate limiting is preferred over fixed windows to prevent the boundary-burst problem where clients hit 2x the limit by straddling two fixed windows. Return HTTP 429 with Retry-After header and include X-RateLimit-Remaining in every response so clients can self-throttle. For overflow handling, queue lower-priority requests (free tier) rather than rejecting immediately, while high-priority requests (paid, SLA-bound) bypass the queue. Budget enforcement: warn at 80% of monthly allocation, soft-cap at 100% with a 10% grace period, hard-cap at 110%. The key production lesson is to enforce limits at the API gateway layer (not the application layer) to catch all traffic uniformly.
 
 **Q: When does self-hosting LLMs become cost-effective versus using commercial APIs?**
 The break-even depends on daily token volume and whether all costs are honestly accounted for. For a 70B model on 4x A100 80GB reserved instances, the illustrative all-in monthly TCO used throughout this module is $28,700 (GPU lease $20,000 + storage $200 + 0.5 FTE personnel $8,000 + monitoring/tooling $500). Against a commercial API at ~$7.80/1M blended token cost, this breaks even at $28,700 / $7.80 = 3,679M tokens/month, about 123M tokens/day. Below 10M tokens/day, the API is almost always cheaper because self-hosting overhead (personnel, infrastructure, maintenance) exceeds any per-token savings. Between 10M and 50M tokens/day, a hybrid approach works: route high-volume, latency-tolerant tasks (batch processing, embeddings) to self-hosted infrastructure while keeping real-time, user-facing queries on the API. Above 50M tokens/day, self-hosting primary workloads becomes clearly cost-effective. The most commonly underestimated costs are personnel (0.5-1.0 FTE ML engineer for maintenance), GPU failure rates (2-5% annually, requiring spare capacity), and inference framework tuning (vLLM/TensorRT-LLM configuration is not set-and-forget). Revisit the analysis every 6 months: providers reprice and retire model tiers several times a year, and a break-even computed against a rate that has since moved is worse than no analysis at all.
@@ -1275,7 +1279,7 @@ Step 2 -- apply each feature's lever to its own slice:
                                 then caching + compression -> $ 4,000
     customer support   $16,000  mini fine-tune + 40% cache -> $ 5,000
     writing assistant  $ 9,000  caching + max_tokens=1200  -> $ 8,000
-    query enhancement  $ 4,000  x 0.25 (75% fewer inputs)  -> $ 2,000
+    query enhancement  $ 4,000  75% fewer input tokens     -> $ 2,000
                                                               --------
     blended total                                             $19,000
 

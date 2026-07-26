@@ -280,9 +280,12 @@ Algorithm:
   4. Quantize scaled weights
   5. Rescale at inference
 
-Result: Better than GPTQ at very low bit-widths (2-3 bit); comparable at 4-bit
-No Hessian computation needed; faster calibration
-Used by: LLaMA 70B serving at Together AI, AWS Bedrock
+Result: Better than GPTQ at 3-bit (paper: Llama-2-7B INT3 perplexity 6.24 vs 6.43);
+        comparable at 4-bit
+No Hessian computation needed; faster calibration (the paper reaches better
+  perplexity with a 10x smaller calibration set than GPTQ: 16 vs 192 sequences)
+Serving frameworks that adopted it (named in the AWQ paper): vLLM, HuggingFace TGI,
+  LMDeploy, FastChat
 ```
 
 The scaling trick in step 3 is one identity, applied per input channel:
@@ -330,7 +333,7 @@ The insight is that quantization error is *absolute* (half a step, always) while
   depends entirely on what text you profiled).
 ```
 
-**Why AWQ needs no Hessian.** GPTQ asks "how do I repair the error after making it?" and needs `H^-1` to answer. AWQ asks "how do I avoid making it on the important channels in the first place?" and only needs the *magnitude* of each channel's activations — the diagonal information, obtainable by a single profiling pass. That is the whole reason AWQ calibrates in minutes where GPTQ takes hours, and why it degrades more gracefully at 2-3 bits: there is no error-propagation chain to destabilise when the grid gets very coarse.
+**Why AWQ needs no Hessian.** GPTQ asks "how do I repair the error after making it?" and needs `H^-1` to answer. AWQ asks "how do I avoid making it on the important channels in the first place?" and only needs the *magnitude* of each channel's activations — the diagonal information, obtainable by a single profiling pass. That is the whole reason AWQ calibrates in minutes where GPTQ takes hours, and why it degrades more gracefully at 3 bits: there is no error-propagation chain to destabilise when the grid gets very coarse.
 
 ### 4.2 Quantization-Aware Training (QAT)
 
@@ -447,9 +450,12 @@ Unlike weight memory, which is fixed the moment you load the model, **KV cache m
 That last line is the crossover the Section 13 Q&A refers to: `context_length > weight_bytes / (2 × layers × kv_heads × head_dim × bytes_per_element)`, which here is `35e9 / 327,680 ≈ 107K tokens`. Below it, quantize weights first. Above it, quantizing the KV cache is worth more than anything you can do to the weights — and note that GQA has *already* divided this by 8 (64 query heads down to 8 KV heads); without it the same request would need 343 GB.
 
 **KIVI (2-bit KV cache):**
-- Channels of K/V have different value ranges → per-channel quantization
-- 2-bit KV with group quantization: ~8× smaller KV cache vs BF16
-- Best for long context (128K+) where KV cache otherwise dominates memory
+- Asymmetric by tensor: the **key** cache has channel-wise outliers so it is quantized
+  **per-channel**; the **value** cache has no such pattern so it is quantized **per-token**
+- Reported: 2.6× lower peak memory (model weights included), up to 4× larger batch,
+  2.35-3.47× throughput — not the naive 8× the 16→2 bit ratio suggests, because a small
+  full-precision residual window and the group scales are kept
+- Best where KV cache otherwise dominates memory: long context and high batch
 
 **When KV cache quantization matters most:**
 - Long context (>16K tokens): KV cache > model weights in memory
@@ -471,9 +477,10 @@ llama.cpp's quantization format optimized for CPU/metal inference:
 | Q8_0 | 8.5 | Near BF16 | Slowest | 7.2GB |
 
 Bits/weight are the llama.cpp block-format figures (Q4_0 stores 32 4-bit values plus one
-FP16 scale = 4.5 bpw; Q8_0 stores 32 bytes plus a scale = 8.5 bpw). The `_M` mixes keep
-some tensors at a higher bit width, so the realized file size can sit slightly above the
-base format's bpw. Sizes are for a 7B Llama-class model.
+FP16 scale = 4.5 bpw; Q8_0 stores 32 bytes plus a scale = 8.5 bpw). Every K-quant mixes
+tensor types — the `_M` variants most of all — keeping some tensors at a higher bit width,
+so realized file size sits above the base format's bpw (a Q2_K 7B file lands near 3.4 bpw,
+not 2.56). Sizes are the measured GGUF file sizes for a 7B Llama-class model.
 
 `Q4_K_M` is the community standard recommendation: best quality/size/speed balance.
 
@@ -631,7 +638,7 @@ Key: by tracking (m, l) incrementally, softmax is computed without
 | `m` | Largest score seen so far in this row. Subtracted before `exp` so nothing overflows |
 | `l` | Running softmax denominator: the sum of all `exp` terms seen so far |
 | `exp(m - m_new)` | The rescaling correction. Always ≤ 1 — it shrinks stale accumulations |
-| `B_r`, `B_c` | Tile sizes chosen so `Q,K,V` tiles fit one SM's SRAM (192KB on A100, 228KB on H100) |
+| `B_r`, `B_c` | Tile sizes chosen so `Q,K,V` tiles fit one SM's shared memory (A100: 164KB usable of 192KB combined L1/SRAM; H100: 228KB) |
 | `O_accum` | Partial output, rescaled at every block, divided by `l` exactly once at the end |
 
 **Walk one example — one query row, two blocks of scores.**
@@ -717,12 +724,13 @@ This is the concrete version of Core Principle 2 ("memory bandwidth is the bottl
 ```mermaid
 timeline
     title Flash Attention evolution
-    2022 : FlashAttention-1 — original fused kernel, 2-4x faster, 5-20x memory reduction
+    2022 : FlashAttention-1 — original fused kernel, 3x GPT-2 training speedup, 10-20x attention memory savings at 2K-4K seq len
     2023 : FlashAttention-2 — 2x faster than FA-1 via better work partitioning and parallelization
-    2024 : FlashAttention-3 — H100-specific, FP8 support, asynchronous computation, ~75% of theoretical FLOPs utilization
+    2024 : FlashAttention-3 — Hopper-specific, FP8 support, asynchronous computation, 740 TFLOPs FP16 on H100 (~75% utilization)
+    2026 : FlashAttention-4 — CuTeDSL rewrite for Hopper and Blackwell, 1,613 TFLOPs BF16 on B200 (~71% utilization)
 ```
 
-Each generation kept the same exact-attention math and improved hardware mapping — FA-2 doubled FA-1's speed through better parallelization, and FA-3 exploits H100 Tensor Core asynchrony and FP8 to reach ~75% of theoretical FLOPs.
+Each generation kept the same exact-attention math and improved hardware mapping — FA-2 doubled FA-1's speed through better parallelization, FA-3 exploits H100 Tensor Core asynchrony and FP8 to reach ~75% of theoretical FLOPs, and FA-4 (`pip install flash-attn-4`) re-targets Blackwell's asymmetric compute/memory scaling.
 
 ---
 
@@ -925,7 +933,9 @@ Structured pruning: remove entire heads, layers, or neurons
   Layer dropping: for models >40 layers, remove ~25% of layers
   Result: smaller, faster model with some quality loss
 
-LLM.int8() / SparseGPT: combined quantization + pruning
+SparseGPT: one-shot pruning to >=50% sparsity (OPT-175B / BLOOM-176B in under 4.5 hours,
+  no retraining) and it composes with weight quantization in the same pass
+LLM.int8() is NOT pruning — it is outlier-aware INT8 matmul; combine the two, don't conflate
 ```
 
 ### GQA as Inference Optimization
@@ -957,8 +967,10 @@ Sliding window (window_size=4096):
   128K × 4096 attention matrix = 512M elements × 2 bytes = 1GB per head
   → 32× memory reduction for long-context inference
 
-Mistral 7B: sliding window = 4096 tokens per layer
-Combined with Flash Attention → efficient 32K effective context
+Mistral 7B: sliding window = 4096 tokens per layer, 32 layers, 8K trained context
+  → stacking layers gives a theoretical attention span of ~131K tokens
+  → the paper reports 2x speed over vanilla attention at 16K seq len, and an 8x
+    cache-memory reduction at 32K seq len via the rolling buffer cache
 ```
 
 Deeper layers often use larger windows (or full attention) to capture global context; shallow layers use small local windows for efficiency.
@@ -1148,7 +1160,8 @@ In the optimization stack, speculative decoding is deployed after quantization (
 
 ```
 E[speedup] ≈ (1 - α^(K+1)) / (1 - α)   with K draft tokens
-α = 0.80, K = 4 → ~3.2 tokens per target pass → 3.2× throughput improvement
+α = 0.80, K = 4 → 3.36 tokens per target pass by the formula; ~3.2 measured once the
+                  draft model's own forward passes are charged
 ```
 
 **What the formula is telling you.** "You keep the draft model's guesses only up to the first one the target model disagrees with — so the expected haul is a geometric series that stalls the moment the streak breaks."
@@ -1233,8 +1246,9 @@ When to use model merging:
   You cannot afford to re-train on a joint dataset
   You need to ship quickly (merging takes minutes vs training takes weeks)
 
-Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Hermes,
-  WizardLM merged variants), many top-ranked LMSYS arena models are merges
+Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingFace
+  community merges are built with. Note that popular open checkpoints are often plain
+  fine-tunes rather than merges — check the model card before citing one as an example
 ```
 
 ---
@@ -1288,7 +1302,8 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 - You're running fine-tuning (quantized weights can't be efficiently trained)
 
 ### Use Flash Attention When:
-- Always — there's essentially no downside; use Flash Attention 2 everywhere
+- Always — there's essentially no downside. FA-2 is the portable baseline (Ampere+);
+  use FA-3 on Hopper and FA-4 (`flash-attn-4`) on Hopper/Blackwell where available
 
 ### Use MoE When:
 - Training a new model (architectural choice at pre-training time)
@@ -1312,7 +1327,7 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 |------|---------|-------|
 | **GPTQModel** | GPTQ quantization | `pip install gptqmodel`; the maintained successor to AutoGPTQ, whose last release (auto-gptq 0.7.1) is from 2024 |
 | **llm-compressor** | AWQ / GPTQ / FP8 / sparsity | `pip install llmcompressor`; vLLM-project library that absorbed AutoAWQ. **AutoAWQ (`pip install autoawq`, last release 0.2.9) is officially deprecated and unmaintained** — its last tested stack was torch 2.6.0 / transformers 4.51.3 |
-| **bitsandbytes** | INT4/INT8 load-time quantization | Used by QLoRA; easy API |
+| **bitsandbytes** | 4-bit (NF4/FP4) and 8-bit (LLM.int8()) load-time quantization | Used by QLoRA; easy API. Note its 4-bit types are NF4/FP4 — there is no plain "int4" quant type |
 | **llama.cpp** | GGUF quantization | Best for CPU/metal |
 | **Flash Attention** | Efficient attention | pip install flash-attn |
 | **NVIDIA TransformerEngine** | FP8 quantization | H100 hardware |
@@ -1326,7 +1341,7 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 ## 13. Interview Questions with Answers
 
 **Q: What is the difference between GPTQ and AWQ?**
-A: GPTQ uses second-order information (Hessian H = 2XX^T) to compensate for quantization error as it quantizes column by column — each column's error is redistributed to remaining unquantized columns, dramatically reducing layer-level reconstruction error. AWQ profiles activation magnitudes across a calibration dataset to identify important weight channels, then scales those channels up before quantization so they get more quantization precision. AWQ is faster to apply (no Hessian inversion) and tends to give better quality at very low bit-widths (2-3 bit); GPTQ is competitive at 4-bit. Both require ~128-512 calibration samples. In practice, AWQ is preferred for latency-sensitive deployment; GPTQ for maximum quality at INT4.
+A: GPTQ uses second-order information (Hessian H = 2XX^T) to compensate for quantization error as it quantizes column by column — each column's error is redistributed to remaining unquantized columns, dramatically reducing layer-level reconstruction error. AWQ profiles activation magnitudes across a calibration dataset to identify important weight channels, then scales those channels up before quantization so they get more quantization precision. AWQ is faster to apply (no Hessian inversion) and gives better quality at 3-bit (its paper reports Llama-2-7B INT3 perplexity 6.24 vs GPTQ's 6.43); GPTQ is competitive at 4-bit. Both require ~128-512 calibration samples. In practice, AWQ is preferred for latency-sensitive deployment; GPTQ for maximum quality at INT4.
 
 **Q: How do you choose between INT8 and INT4 quantization for a production deployment?**
 A: Evaluate on domain-specific benchmarks first — not just MMLU. INT8 gives 2× memory reduction with less than 0.5% quality loss and is safe for quality-sensitive domains (legal, medical, code generation). INT4 gives 4× memory reduction with roughly 1-2% general benchmark loss, but potentially 5-10% domain-specific loss depending on calibration data quality. Prefer INT8 when quality is the constraint. Prefer INT4 (via GPTQ or AWQ, not naive round-to-nearest) when GPU cost is the primary constraint and domain benchmarks confirm acceptable quality. Never use naive INT4 rounding in production — always use calibrated PTQ.
@@ -1350,7 +1365,7 @@ A: GQA uses fewer K/V heads than Q heads. For example, LLaMA 3 70B uses 64 Q hea
 A: GPUs execute dense matrix multiplications — sparse weight patterns produce no fewer operations unless sparsity is hardware-aligned. NVIDIA A100/H100 Sparse Tensor Cores natively accelerate exactly the 2:4 pattern: 2 non-zero values per every 4 consecutive elements. The model stores only the 2 non-zero values plus a 2-bit index mask per group of 4, giving 2× compression. At compute time, the hardware decompresses and executes in a single pass, achieving up to 2× speedup over dense matmul. Unstructured pruning (random zeros scattered through the weight matrix) cannot leverage this hardware path — the sparse values still require the same number of multiply-accumulate operations as a dense matrix, producing no actual speedup despite the reduced non-zero count.
 
 **Q: What is KV cache quantization and when does it matter more than weight quantization?**
-A: KV cache quantization reduces the precision of the stored K and V tensors during inference (e.g., FP16→INT8). It matters most when: (1) context length is long (>16K tokens) — at 128K context, KV cache memory for a single request on LLaMA 3 70B exceeds 40GB, dwarfing the per-request weight cost; (2) serving many concurrent users — each user's KV cache accumulates; (3) you have already quantized model weights and GPU memory is still the bottleneck. INT8 KV cache halves cache memory. INT4 KV requires per-channel quantization (KIVI-style) to avoid quality degradation. The crossover point where KV cache dominates over weight memory is approximately: context_length > (weight_bytes / (2 × layers × kv_heads × head_dim × bytes_per_element)).
+A: KV cache quantization reduces the precision of the stored K and V tensors during inference (e.g., FP16→INT8). It matters most when: (1) context length is long (>16K tokens) — at 128K context, KV cache memory for a single request on LLaMA 3 70B exceeds 40GB, dwarfing the per-request weight cost; (2) serving many concurrent users — each user's KV cache accumulates; (3) you have already quantized model weights and GPU memory is still the bottleneck. INT8 KV cache halves cache memory. Sub-4-bit KV needs KIVI-style asymmetric grouping — keys per-channel (they carry channel outliers), values per-token — to avoid quality degradation. The crossover point where KV cache dominates over weight memory is approximately: context_length > (weight_bytes / (2 × layers × kv_heads × head_dim × bytes_per_element)).
 
 **Q: Describe the tradeoffs of knowledge distillation vs quantization for model compression.**
 A: Quantization is fast (30 minutes to 3 hours for a 70B model), requires no retraining, and gives 2-4× memory reduction with roughly 1-2% quality loss — best for deploying an existing model under memory constraints. Knowledge distillation creates a structurally different (smaller) model — it requires full training infrastructure and generates training data from the teacher model, but can achieve 10-100× compression while preserving more task-specific quality than quantization can achieve at the same size. Use quantization when you have a fixed model that must fit on fewer GPUs. Use distillation when designing a new model intended for permanent production deployment at scale, where the engineering investment in training pays off over millions of inference calls.
@@ -1401,14 +1416,14 @@ A: Knowledge distillation trains a small student model using a large teacher mod
   │  - Weights: INT4 per-group (128 elements per scale factor)  │
   │  - Activations: FP16 (NOT quantized — quality preservation) │
   │  - KV cache: FP8 (separate optimization)                    │
-  │  - Output: Llama-3-70B-AWQ (Q4_K_M equivalent)             │
+  │  - Output: Llama-3-70B-AWQ (INT4, group size 128)          │
   │                                                              │
   │  Step 3: Deployment                                          │
-  │  Model VRAM: 70B × 0.5 bytes = 35 GB (FP4 equiv)           │
-  │  → Fits on 2×A100 per replica with 45 GB for KV cache       │
+  │  Model VRAM: 70B × 0.5 bytes = 35 GB (~38 GB w/ scales)    │
+  │  → Fits on 2×A100/replica, ~122 GB free for KV (61 GB/GPU)  │
   │  → 4×A100 total (2 replicas) vs 8×A100 before              │
   │  MBPP score: 61.1% (-1.3% — within 2% SLA)                 │
-  │  Throughput: 185 RPS (2.3× vs FP16 on same hardware)        │
+  │  Throughput: 185 RPS (2.3× the FP16 baseline, half the GPUs)│
   └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -1557,8 +1572,8 @@ def build_awq_engine(model_dir: str, tensor_parallel: int = 2) -> AsyncLLMEngine
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
         kv_cache_dtype="fp8",             # FP8 KV cache saves additional 50% KV memory
-        use_v2_block_manager=True,
-    )
+    )                                     # (no use_v2_block_manager — removed from vLLM;
+                                          #  V1 block management is the only path now)
     return AsyncLLMEngine.from_engine_args(args)
 
 
@@ -1646,7 +1661,7 @@ def fixed_quant_config() -> dict:
 # BROKEN: Quantize embedding and LM head layers.
 # These layers are NOT compute-bottlenecks but DO have high sensitivity to quantization.
 # The embedding layer maps token IDs → vectors; INT4 embedding causes
-# vocabulary confusion for tokens with similar embeddings → 3.2% quality drop alone.
+# vocabulary confusion for tokens with similar embeddings → 2-3% quality drop alone.
 def broken_quantize_all_layers(model: torch.nn.Module) -> torch.nn.Module:
     # Quantize every Linear layer including embed_tokens and lm_head
     return _apply_int4_to_all(model)
@@ -1670,27 +1685,30 @@ def _apply_int4_to_all(model: torch.nn.Module) -> torch.nn.Module:
     return model  # placeholder
 
 
-# BROKEN: Deploy AWQ model on GPU without checking CUDA Compute Capability.
-# AWQ GEMM kernel requires CUDA 8.0+ (Ampere A100 or better).
-# Deployed on T4 (CUDA 7.5) → GEMM kernel falls back to slow FP16 simulation.
-# "Quantized" model runs SLOWER than FP16 — 0.6× throughput.
+# BROKEN: Deploy AWQ model on a GPU without checking its compute capability.
+# AWQ needs compute capability 7.5+ (Turing and later; vLLM's AWQ config returns
+# get_min_capability() == 75, and AutoAWQ documents "Compute Capability 7.5").
+# Deployed on V100 (7.0) → AWQ is simply unsupported; the load fails or falls back.
 def broken_deploy_awq_anywhere() -> None:
     # No capability check — deploys on any GPU
     pass
 
 
-# FIX: Verify GPU CUDA Compute Capability before deploying AWQ.
-# Minimum: 8.0 (A100, A10G, RTX 3090/4090).
-# For older GPUs (T4, V100): use GPTQ with marlin kernel (supports CUDA 7.0+)
-# or FP8 quantization on H100 (native FP8 tensor cores).
+# FIX: Verify compute capability before deploying AWQ.
+# Minimum for AWQ: 7.5 (T4, RTX 2080, A10G, A100, H100 ...).
+# For sm70 and older (V100): GPTQ still loads (vLLM min capability 6.0), but NOT with
+# the Marlin kernel — Marlin requires compute capability >= 8.0 (Ampere/Ada).
+# The Marlin fast path is therefore an Ampere+ optimization, not an old-GPU fallback.
 def fixed_check_gpu_capability() -> str:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available")
-    cap = torch.cuda.get_device_capability()
-    major, minor = cap
-    if major < 8:
-        return f"GPU CUDA {major}.{minor} < 8.0: use GPTQ-marlin or FP8 instead of AWQ"
-    return f"GPU CUDA {major}.{minor} >= 8.0: AWQ supported"
+    major, minor = torch.cuda.get_device_capability()
+    cc = major + minor / 10
+    if cc < 7.5:
+        return f"compute capability {major}.{minor} < 7.5: use GPTQ (non-Marlin) instead of AWQ"
+    if cc < 8.0:
+        return f"compute capability {major}.{minor}: AWQ supported, Marlin kernels are not"
+    return f"compute capability {major}.{minor} >= 8.0: AWQ and Marlin kernels supported"
 ```
 
 **Pitfall 1 — Quantizing a model that's already LoRA fine-tuned:**
@@ -1703,8 +1721,8 @@ def fixed_check_gpu_capability() -> str:
 
 # FIX: Quantize the base model with AWQ first, THEN apply LoRA adapters.
 # LoRA adapters remain in FP16 (they're small: rank 16 × dimensions = ~50M params).
-# Adapter weights stay in FP16 alongside INT4 base → no quality loss from double quantization.
-# QLoRA uses this approach: INT4 base + FP16 LoRA.
+# Adapter weights stay in FP16 alongside the INT4 base → no quality loss from double quantization.
+# QLoRA uses this shape: a frozen 4-bit base (NF4, not INT4) with BF16 LoRA adapters on top.
 ```
 
 **Pitfall 2 — Over-quantizing to INT3 for cost savings:**
@@ -1712,13 +1730,13 @@ def fixed_check_gpu_capability() -> str:
 ```python
 # BROKEN: Apply INT3 quantization for additional 25% cost reduction.
 # 70B INT3 = 26 GB (fits on 1 A100 80GB) — seems attractive.
-# MBPP score: 55.9% (-6.5% vs FP16) — exceeds 2% SLA by 3.25%.
+# MBPP score: 55.9% (-6.5% vs FP16) — 4.5 points past the 2% SLA, i.e. 3.25x the budget.
 # Code with subtle bugs generated at a rate customers notice → increased support.
 config_int3 = {"w_bit": 3}   # too aggressive for code LLMs
 
 # FIX: INT4 with FP8 KV cache is the correct production point.
 # INT4 weights (0.5 byte) + FP8 KV cache = approximately 45-50 GB for 70B.
-# MBPP: -1.3% — within SLA. KV cache savings: additional 30% memory freed.
+# MBPP: -1.3% — within SLA. FP8 KV halves cache bytes vs FP16: 2x the concurrent sequences.
 config_optimal = {"w_bit": 4, "kv_cache_dtype": "fp8"}
 ```
 
@@ -1731,10 +1749,10 @@ config_optimal = {"w_bit": 4, "kv_cache_dtype": "fp8"}
 | Throughput | 80 RPS | 165 RPS | 185 RPS |
 | p99 TTFT | 1,800ms | 780ms | 720ms |
 | p99 decode | 95ms/tok | 41ms/tok | 38ms/tok |
-| Model VRAM | 140 GB | 35 GB | 35 GB |
-| KV cache headroom | 80 GB/replica | 90 GB/replica | 130 GB/replica |
-| Monthly GPU cost | $12,400 | $6,200 | $6,200 |
-| Savings | — | $6,200/month | $6,200/month |
+| Model VRAM | 140 GB | 35 GB (38 GB w/ scales) | 38 GB |
+| KV cache headroom | 45 GB/GPU (180/replica) | 61 GB/GPU (122/replica) | 61 GB/GPU, 2× sequences at FP8 |
+| Monthly GPU cost | $11,680 (8 GPU) | $5,840 (4 GPU) | $5,840 (4 GPU) |
+| Savings | — | $5,840/month | $5,840/month |
 | Quantization time | — | 4h (1×A100) | 4h + 1h KV |
 
 **Interview Q&As:**
@@ -1746,7 +1764,7 @@ GPTQ (Frantar et al. 2022) quantizes weights by minimizing the L2 reconstruction
 AWQ searches for per-channel scaling factors that minimize quantization error specifically on the calibration data distribution. Weight-activation interactions depend on which tokens are being processed — code uses different token patterns, different hot paths through the model, and different activation magnitude distributions than general text. If you calibrate on C4 (general web text) for a code LLM, AWQ optimizes scales for the wrong activation distribution, leaving code-specific activations suboptimally scaled. This adds approximately 3-4% MBPP quality loss versus domain-matched calibration — significant enough to exceed quality SLAs.
 
 **Q: What are the memory savings from INT4 quantization and how do they translate to deployment efficiency?**
-FP16 uses 2 bytes per parameter; INT4 uses 0.5 bytes — a 4× compression ratio. For Llama-3-70B: FP16 = 140 GB, INT4 = 35 GB. The immediate effect is model fit: FP16 requires 4×A100 (35 GB each, 140 GB total); INT4 fits on 2×A100 (17.5 GB each, plus group scale factors bringing it to ~38 GB). With 2×A100 per replica, the remaining ~80 GB per replica is available for KV cache — nearly double the concurrent sequences vs the FP16 deployment (which had only 40 GB KV headroom per GPU). So INT4 both reduces hardware cost and increases concurrent serving capacity.
+FP16 uses 2 bytes per parameter; INT4 uses 0.5 bytes — a 4× compression ratio. For Llama-3-70B: FP16 = 140 GB, INT4 = 35 GB. The immediate effect is model fit: FP16 requires 4×A100 (35 GB each, 140 GB total); INT4 fits on 2×A100 (17.5 GB each, plus group scale factors bringing it to ~38 GB). With 2×A100 per replica, ~122 GB of the 160 GB remains for KV cache — 61 GB per GPU against 45 GB per GPU in the FP16 deployment, so each GPU carries ~1.35× the concurrent sequences while the replica uses half as many GPUs. So INT4 both reduces hardware cost and increases concurrent serving capacity per GPU.
 
 **Q: Which layers should NOT be quantized in an INT4 deployment?**
 Three categories: (1) Embedding layer (embed_tokens) — directly maps token IDs to dense vectors; INT4 causes vocabulary confusion between tokens with similar embeddings, losing 2-3% quality alone. (2) LM head (output projection) — the final layer that produces the vocabulary logits; quantization here spreads probability mass incorrectly, particularly affecting rare token predictions. (3) Layer norms — these have very small weight tensors that are not compute bottlenecks; quantizing them adds 0% speed benefit and some quality risk. AWQ excludes these by default. The quantization benefit comes from the large Linear layers in attention (Q/K/V/O projections) and FFN, which constitute > 99% of parameter count.

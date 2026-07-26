@@ -140,8 +140,16 @@ It helps to separate two questions these five architectures answer differently:
   independent of the first — you could imagine (though no major released model does) a
   byte-level-BPE-vocabulary model with entropy-based patching layered on top.
 
-BLT is the current frontier because it answers both questions in the more general way: no learned
-vocabulary, and patch boundaries chosen by measured difficulty rather than a fixed rule.
+BLT answers both questions in the more general way: no learned vocabulary, and patch boundaries
+chosen by measured difficulty rather than a fixed rule. It remains the largest FLOP-controlled
+byte-level study (8B parameters), but it is no longer the last word on the boundary question —
+**H-Net** (Hwang, Wang & Gu, "Dynamic Chunking for End-to-End Hierarchical Sequence Modeling",
+arXiv 2507.07955, July 2025) removes BLT's *separately trained* entropy model by learning the
+chunk boundaries jointly with the rest of the network by gradient descent, reports outperforming a
+BPE Transformer at equivalent compute at the byte level, and reports that stacking two chunking
+stages matches Transformers twice its size — with its largest gains exactly where tokenizers are
+weakest (Chinese, code, DNA). Those runs are ~1B-scale, so BLT's 8B result and H-Net's end-to-end
+boundary learning are complementary data points, not a settled ranking.
 
 ---
 
@@ -210,7 +218,7 @@ patches    [the_][cat_][sat_][on_][the_][mat.]
 `_` marks a literal space byte. The entropy row is illustrative (0-9 scale standing in for the
 model's real bits-of-entropy output), but the shape is the real mechanism: low, flat entropy runs
 through the middle of a familiar word, a sharp spike at the first byte of a new, less-predictable
-word — and BLT's global constraint (Section 3.4 of the paper) cuts a patch exactly there.
+word — and BLT's global constraint (Section 2.3 of the paper) cuts a patch exactly there.
 
 ### 5.4 Fixed-Size (MEGABYTE) vs. Entropy-Based (BLT) Patching, Same Bytes
 
@@ -382,9 +390,9 @@ def patched_total_cost(num_bytes: int, patch_size: float, d_local: int = 512, d_
 bpe_cost = attention_flops(2048)
 patched_cost = patched_total_cost(num_bytes=8192, patch_size=4.5)   # BLT's measured avg patch
 print(f"Patched byte total FLOPs:  {patched_cost:,.0f}  ({patched_cost / bpe_cost:.2f}x vs BPE baseline)")
-# Patched byte total FLOPs:  27,143,569,408  (0.79x vs BPE baseline)
+# Patched byte total FLOPs:  27,173,396,480  (0.79x vs BPE baseline)
 #
-# The expensive quadratic term is now paid on ~1,820 patches, not 8,192
+# The expensive quadratic term is now paid on ~1,821 patches, not 8,192
 # bytes -- global attention compute comes back down to BELOW BPE-token
 # territory (~21% cheaper), while the model still reads and writes raw,
 # tokenizer-free bytes.
@@ -473,11 +481,14 @@ def dynamic_patch_boundaries(
     monotonic_threshold: float = 0.5,
 ) -> list[int]:
     """BLT's two patch-boundary rules, OR'd together (the paper's Section
-    3.4): a GLOBAL constraint (H(x_t) > global_threshold) and an
+    2.3): a GLOBAL constraint (H(x_t) > global_threshold) and an
     APPROXIMATE MONOTONIC constraint (H(x_t) - H(x_{t-1}) > monotonic_threshold),
     so a patch also ends when entropy jumps sharply even without crossing
     the absolute threshold yet. Returns the byte indices where a new patch
-    starts."""
+    starts. NOTE: the threshold VALUES here are illustrative defaults --
+    the paper does not publish fixed thresholds; it fits the global
+    threshold so the training mix lands on a target average patch size
+    (and reports adjusting it from 0.6 to 0.1 at inference time)."""
     boundaries = [0]
     for t in range(1, len(entropy)):
         crosses_global = entropy[t].item() > global_threshold
@@ -497,7 +508,9 @@ def group_bytes_into_patches(byte_ids: torch.Tensor, boundaries: list[int]) -> l
     return [byte_ids[s:e] for s, e in zip(boundaries, ends)]
 ```
 
-The two boundary rules, written out:
+The two boundary rules, written out (the `1.5` / `0.5` values are this file's illustrative
+defaults — the paper's rules are `H(x_t) > theta_g` and `H(x_t) - H(x_{t-1}) > theta_r`, with
+`theta_g` fitted to hit a target average patch size rather than fixed at a published number):
 
 ```
   global constraint      :  H(x_t)  >  1.5 bits
@@ -511,9 +524,9 @@ it is hard in absolute terms, or it just got sharply harder than the byte right 
 | Symbol | What it is |
 |--------|------------|
 | `H(x_t)` | Entropy, in bits, of the entropy model's predicted next-byte distribution at position `t` |
-| `global_threshold` | The absolute difficulty bar, `1.5` bits. Cross it and a patch always ends |
+| `global_threshold` | The absolute difficulty bar (`theta_g`). Cross it and a patch always ends. `1.5` here is illustrative; the paper fits it to a target patch size |
 | `H(x_t) - H(x_{t-1})` | The *change* in difficulty from one byte to the next |
-| `monotonic_threshold` | Jump size that triggers a cut, `0.5` bits, even while still under the bar |
+| `monotonic_threshold` | Jump size that triggers a cut (`theta_r`), `0.5` illustrative, even while still under the bar |
 | `or` | The two rules are OR'd, not AND'd — either one alone is sufficient |
 
 **Walk one example.** Eleven bytes, their entropies in bits, both rules evaluated at every step:
@@ -616,7 +629,7 @@ actual layers instead of a lookup table.
 **Concrete numbers, tied together**: at 8,192 raw bytes (the ~2048-BPE-token document from
 Section 6.2), naive per-byte attention costs 549,755,813,888 relative FLOPs versus the BPE
 baseline's 34,359,738,368 — 16.0x more. Patching at BLT's measured ~4.5-bytes/patch average brings
-the global-attention term back down to about 27.1 billion (Section 6.3) — roughly 21% *cheaper*
+the global-attention term back down to about 27.2 billion (Section 6.3) — roughly 21% *cheaper*
 than the BPE baseline, because the average patch (4.5 bytes) is slightly larger than BPE's own
 ~4-byte-per-token fertility. Patching does not just fix the byte penalty; at BLT's measured patch
 size it turns bytes into the cheaper option.
@@ -657,7 +670,9 @@ size it turns bytes into the cheaper option.
   baseline's 58.1, HumanEval 35.4 vs. 31.1 — while using **up to 50% fewer FLOPs at inference**.
   Robustness gap is the more striking result: Noisy HellaSwag 64.3 vs. 56.9, the character-
   manipulation CUTE benchmark 54.1 vs. 27.5 (roughly double), spelling-task accuracy 99.9%, and a
-  +2-point overall FLORES-101 translation-into-English advantage on low-resource language pairs.
+  +2-point overall advantage translating *into* English on FLORES-101 (12.1 -> 14.0 SentencePiece
+  BLEU, averaged over six widely-used plus twenty-one lower-resource languages; only +0.5 out of
+  English).
 
 ---
 
@@ -1002,8 +1017,8 @@ A BPE model asked to reverse a word or count a letter inside it has to recover t
 indirectly, from statistical co-occurrence patterns baked into a token embedding it never sees
 decomposed into characters; a byte-level model already operates at exactly the granularity the task
 is asking about, so the task stops being an indirect inference problem. The same mechanism explains
-BLT's reported spelling-task accuracy of 99.9% and its +2-point translation advantage into English
-on low-resource FLORES-101 language pairs (Section 7) — anywhere a task cares about the literal
+BLT's reported spelling-task accuracy of 99.9% and its +2-point average advantage translating into
+English on FLORES-101, across both widely-used and lower-resource languages (Section 7) — anywhere a task cares about the literal
 character sequence, removing the tokenizer removes a layer of obfuscation between the model and
 the answer.
 

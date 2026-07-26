@@ -400,7 +400,7 @@ Acceptance rate α (probability draft token matches target) drives the speedup.
 Geometric upper bound at K=4, E[tokens] = (1 - α^5)/(1 - α):
   α=0.90 → 4.10 tokens/pass | α=0.75 → 3.05 | α=0.60 → 2.31 | α=0.50 → 1.94
 Real systems land below this because acceptance decays with draft depth — the deep-dive
-quotes ~3.5 / 2.6 / 2.1 / 1.7 as the measured end-to-end equivalents.
+quotes ~3.5 / 2.6 / 2.1 / 1.7 as illustrative end-to-end equivalents.
 Break-even ≈ α=0.45 for K=4 at a *measured* wall-clock draft cost of ~0.2 target passes
 per draft token (below this, draft overhead exceeds gains)
 
@@ -561,7 +561,7 @@ Effective: 90% cost reduction on shared prefix for high-traffic applications
 
 ### 4.9 Prefix Caching (SGLang RadixAttention)
 
-SGLang (Stanford) takes prefix caching further with **RadixAttention** — automatic, fine-grained prefix reuse without explicit API breakpoints:
+SGLang (Zheng et al., LMSYS) takes prefix caching further with **RadixAttention** — automatic, fine-grained prefix reuse without explicit API breakpoints:
 
 ```
 Radix tree structure (indexed by token sequences):

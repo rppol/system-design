@@ -161,7 +161,9 @@ import base64
 import hashlib
 import secrets
 import webbrowser
-from urllib.parse import urlencode
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 
@@ -228,23 +230,42 @@ async def exchange_code_for_token(
 
 
 # Usage in MCP client
-async def connect_to_remote_mcp(mcp_url: str, client_id: str) -> ClientSession:
+@asynccontextmanager
+async def connect_to_remote_mcp(mcp_url: str, client_id: str) -> AsyncIterator[ClientSession]:
     # Two-hop discovery. The MCP server is only a RESOURCE server: its
     # RFC 9728 metadata does NOT contain authorization_endpoint/token_endpoint,
     # it contains `authorization_servers` (and optionally `scopes_supported`).
     # You must then fetch the AUTHORIZATION server's own metadata (RFC 8414 or
     # OpenID Connect Discovery) to get the real endpoints.
+    parts = urlsplit(mcp_url)
     async with httpx.AsyncClient() as http:
         # 1a. Protected Resource Metadata, discovered from the WWW-Authenticate
         #     header on a 401, or by probing the well-known URI.
-        prm = (await http.get(
-            f"{mcp_url.rstrip('/')}/.well-known/oauth-protected-resource"
-        )).json()
+        #     RFC 9728 INSERTS the well-known segment between host and path — it
+        #     is NOT appended to the MCP endpoint. For https://host/mcp the URL is
+        #     https://host/.well-known/oauth-protected-resource/mcp, with the
+        #     bare root form as the documented fallback.
+        origin = f"{parts.scheme}://{parts.netloc}"
+        prm_urls = [
+            f"{origin}/.well-known/oauth-protected-resource{parts.path.rstrip('/')}",
+            f"{origin}/.well-known/oauth-protected-resource",
+        ]
+        for url in prm_urls:
+            resp = await http.get(url)
+            if resp.status_code == 200:
+                prm = resp.json()
+                break
+        else:
+            raise RuntimeError("No RFC 9728 protected-resource metadata found")
         as_issuer = prm["authorization_servers"][0]
 
-        # 1b. Authorization Server Metadata.
+        # 1b. Authorization Server Metadata. Same path-insertion rule applies when
+        #     the issuer URL carries a path (e.g. a per-tenant issuer); MCP requires
+        #     clients to try RFC 8414 and OpenID Connect Discovery URLs in order.
+        iss = urlsplit(as_issuer)
         asm = (await http.get(
-            f"{as_issuer.rstrip('/')}/.well-known/oauth-authorization-server"
+            f"{iss.scheme}://{iss.netloc}/.well-known/oauth-authorization-server"
+            f"{iss.path.rstrip('/')}"
         )).json()
 
     # MCP requires the client to refuse the flow if PKCE support is not advertised.
@@ -363,7 +384,7 @@ async def safe_register_tools(session: ClientSession) -> list[dict]:
 
 **Reported incidents (publicly known)**:
 - **Tool poisoning** was named and demonstrated by Invariant Labs in April 2025, along with the "rug pull" variant in which a server serves a benign tool description at install time and swaps in a malicious one later.
-- **postmark-mcp (September 2025)** — the first confirmed malicious MCP server found in the wild. An npm package impersonating Postmark behaved correctly for fifteen releases, then added a one-line change in v1.0.16 that BCC'd every email the server sent to an attacker-controlled address. It was pulled roughly ten days after that release; reported download counts are in the low thousands. This is the canonical proof that "benign for N versions, then malicious" defeats install-time review and that version pinning is the load-bearing control.
+- **postmark-mcp (September 2025)** — the first confirmed malicious MCP server found in the wild. An npm package impersonating Postmark behaved correctly for fifteen releases, then added a one-line change in v1.0.16 (published 17 September 2025) that BCC'd every email the server sent to an attacker-controlled address. It was pulled about nine days after that release; researchers reported roughly 1,600 downloads before removal. This is the canonical proof that "benign for N versions, then malicious" defeats install-time review and that version pinning is the load-bearing control.
 - Broader academic and vendor work followed through 2025-2026 (large-scale ecosystem scans, tool-poisoning benchmarks), so the attack surface is now documented rather than hypothetical.
 
 **Best-practice deployments**:
