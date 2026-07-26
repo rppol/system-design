@@ -22,7 +22,7 @@ One-line analogy: A highway on-ramp traffic light (metering signal) lets one car
 
 Mental model: The token bucket is a bucket with a hole in it. Tokens (permits) accumulate in the bucket at a fixed rate. Each request consumes one token. When the bucket is full, new tokens are discarded (the burst has a hard cap at bucket capacity). When the bucket is empty, requests are rejected. The bucket allows bursts up to its capacity but enforces a long-run average rate equal to the token refill rate.
 
-Why it matters: In 2020, a misconfigured API client at a financial institution accidentally created an infinite retry loop that sent 2 million requests per minute to a third-party data provider. Without rate limiting, the provider's entire API was unusable for all customers for 4 hours. With a per-client rate limit of 10,000 requests per minute and automatic throttling, the blast radius would have been contained to that one client.
+Why it matters: consider the shape of a failure that any unlimited API invites — a single customer's misconfigured client falls into an infinite retry loop and sends 2 million requests per minute at a third-party data provider. With no per-client limit, that one bug makes the provider's API unusable for every other customer for hours. With a per-client limit of 10,000 requests per minute and automatic throttling, the blast radius is exactly one client. The numbers here are illustrative; the asymmetry they show — one client's bug versus every client's outage — is the entire argument for rate limiting.
 
 Key insight: Rate limiting that is only applied at the edge (API gateway) without client-side adaptive throttling is incomplete. Clients that receive 429 errors and immediately retry add more load rather than less. A complete rate limiting system includes server-side enforcement and client-side backoff.
 
@@ -255,7 +255,6 @@ HTTP/1.1 200 OK
 X-RateLimit-Limit: 1000
 X-RateLimit-Remaining: 847
 X-RateLimit-Reset: 1698765432       (Unix timestamp when window resets)
-X-RateLimit-Policy: 1000;w=60       (RFC draft: limit=1000, window=60s)
 
 HTTP/1.1 429 Too Many Requests
 X-RateLimit-Limit: 1000
@@ -263,6 +262,21 @@ X-RateLimit-Remaining: 0
 X-RateLimit-Reset: 1698765432
 Retry-After: 23                     (seconds until requests are accepted again)
 ```
+
+The `X-RateLimit-*` triple above is a de facto convention, not a standard — it came from
+early versions of the IETF work and is what GitHub, X and most public APIs actually ship.
+The standards-track effort is `draft-ietf-httpapi-ratelimit-headers`, still an
+Internet-Draft (draft-11, May 2026) and **not yet an RFC**. It defines two unprefixed
+Structured Fields (no `X-`), and the current syntax is not the old `1000;w=60` form:
+
+```
+RateLimit-Policy: "burst";q=100;w=60, "daily";q=1000;w=86400
+RateLimit: "burst";r=50;t=30
+```
+
+`q` is the quota allocated, `w` the window in seconds, `r` the remaining quota and `t` the
+seconds until it resets. Emit the `X-RateLimit-*` set for compatibility today; add the
+standard fields alongside them rather than replacing them, since the draft can still change.
 
 ### Adaptive Throttling (Client-Side)
 
@@ -422,6 +436,8 @@ end
 -- ARGV[1]: current window start timestamp (seconds)
 -- ARGV[2]: window size in seconds
 -- ARGV[3]: limit
+-- ARGV[4]: current unix timestamp in seconds -- pass redis.call('TIME')[1],
+--          never the caller's clock (see Pitfall 4 on clock skew)
 
 local curr_key    = KEYS[1]
 local prev_key    = KEYS[2]
@@ -539,7 +555,10 @@ public class RateLimitingFilter extends OncePerRequestFilter {
 ```nginx
 # Define rate limit zones
 # Zone "api_limit": keyed by $http_x_api_key, 10MB state space, 100 req/s limit
-# 10MB can hold approximately 160,000 entries (each entry ~64 bytes)
+# nginx state is 128 bytes per key on 64-bit platforms (64 bytes on 32-bit), so
+# 10MB holds ~80,000 concurrent keys on 64-bit -- NOT the ~160,000 you get if you
+# assume the 32-bit figure. Size the zone from the 64-bit number or nginx will
+# start evicting the oldest states (and silently under-limit) once it fills.
 http {
     limit_req_zone $http_x_api_key zone=api_limit:10m rate=100r/s;
     limit_req_zone $binary_remote_addr zone=ip_limit:10m rate=10r/s;
@@ -569,8 +588,11 @@ http {
             proxy_pass http://backend;
         }
 
-        # Add rate limit headers to responses
-        add_header X-RateLimit-Limit $limit_req_status always;
+        # $limit_req_status (nginx 1.17.6+) is PASSED / DELAYED / REJECTED --
+        # it is a diagnostic, NOT the configured limit. Expose it as its own
+        # header (or log it); nginx has no built-in variable for the numeric
+        # limit or the remaining count, so emit those from the app or OpenResty.
+        add_header X-RateLimit-Decision $limit_req_status always;
     }
 }
 ```
@@ -635,19 +657,19 @@ public class AdaptiveThrottler {
 
 ### GitHub API: Multi-Tier Rate Limiting
 
-GitHub's REST API uses multiple simultaneous rate limits. Unauthenticated requests: 60 requests per hour per IP. Authenticated requests: 5,000 requests per hour per user. GitHub Apps: 5,000 per hour per installation, scalable up to 15,000 per hour based on the number of repositories. Search API: 10 requests per minute (separate pool). GraphQL API: based on query complexity points (not request count). GitHub also uses secondary rate limiting that fires on too many concurrent requests or too many requests in a short window, even if the hourly limit has not been reached. All limits are returned via `X-RateLimit-*` headers on every response.
+GitHub's REST API uses multiple simultaneous rate limits. Unauthenticated requests: 60 requests per hour per IP. Authenticated requests: 5,000 requests per hour per user (15,000 for users acting on behalf of a GitHub Enterprise Cloud organization). GitHub App installations: 5,000 per hour baseline, scaling by 50 requests/hour for each repository beyond 20 and each user beyond 20, capped at 12,500 per hour. Search API: 30 requests per minute authenticated, 10 unauthenticated (separate pool; code search is 10/minute even authenticated). GraphQL API: based on query complexity points (not request count). GitHub also uses secondary rate limits that fire on too many concurrent requests (max 100), more than 900 points per minute against REST endpoints, or more than 90 seconds of CPU time per 60 seconds of real time, even if the hourly limit has not been reached. Primary limits are returned via `x-ratelimit-*` headers on every response.
 
-### Stripe API: Idempotency-Aware Rate Limiting
+### Stripe API: Layered Global, Per-Endpoint and Concurrency Limits
 
-Stripe limits to 100 read requests per second and 100 write requests per second per API key. Critically, Stripe's rate limiting treats idempotent retries (same `Idempotency-Key`) differently from new requests. A retry with the same idempotency key does not count against the rate limit if the original response is still cached on Stripe's end (24-hour cache). This allows clients to safely retry failed payment requests without worrying about hitting rate limits during error recovery.
+Stripe's published account-wide limit is 100 requests per second in live mode and 25 requests per second in sandbox. On top of that, individual endpoints default to 25 requests per second, with documented exceptions (Files: 20 reads and 20 writes/sec; Payouts: 15 creates/sec and 30 concurrent requests per business; Search: 20 reads/sec). A throttled request returns `429 Too Many Requests` with a `Stripe-Rate-Limited-Reason` header naming which limiter fired — `global-rate`, `endpoint-rate`, `global-concurrency`, `endpoint-concurrency` or `resource-specific` — which is what makes the 429 actionable instead of merely discouraging. Stripe's engineering post "Scaling your API with rate limiters" describes the mechanism: a Redis-backed token bucket per user, plus a concurrent-request limiter and two load shedders that reserve fleet capacity for critical traffic. Separately, Stripe caches idempotency-key results for at least 24 hours and replays the original response on retry, so a retry storm during error recovery re-reads a cached result rather than re-executing the charge; note that Stripe does not publish any rate-limit *exemption* for idempotent retries, so budget for them as ordinary requests.
 
-### Twitter/X API: Tiered Limits with Context
+### X (Twitter) API: Per-Endpoint Limits Split by Auth Type
 
-Twitter's API uses a combination of rate limiting by endpoint (some endpoints have per-15-minute windows, others have per-day limits), by authentication type (app-only bearer token gets higher limits than user tokens), and by access tier (Free, Basic, Pro, Enterprise). The v2 API returns `x-rate-limit-limit`, `x-rate-limit-remaining`, and `x-rate-limit-reset` on every response. Hitting the search endpoint limit returns a `429` with a `x-rate-limit-reset` timestamp, and clients that hammer the endpoint with retries before the reset time are temporarily blocked at the infrastructure level.
+The X API rate limits per endpoint, and the same endpoint carries two separate budgets depending on how you authenticate: a per-user limit (OAuth user token) and a per-app limit (app-only bearer token). Most endpoints use a 15-minute window, but the window is a per-endpoint property, not a global one — the docs annotate the exceptions explicitly (`/24hrs` for media upload at 50,000, `/sec` for some streaming endpoints). Every response carries `x-rate-limit-limit`, `x-rate-limit-remaining` and `x-rate-limit-reset`; exceeding a limit returns HTTP `429` with error code 88, "Rate limit exceeded". Note that X separates rate limiting from billing — since the February 2026 move to pay-per-usage as the default model, staying inside a rate limit does not mean staying inside a budget, and the two must be monitored independently.
 
-### Redis at Slack
+### Slack Web API: Method Tiers Scoped Per Workspace
 
-Slack uses Redis-based rate limiting for their message delivery pipeline. Each user's message send rate is tracked in Redis with a sliding window counter. When a user (or more commonly, a Slack bot) sends messages too rapidly, their message queue is throttled. The rate limiter is implemented with Lua scripts for atomicity and uses Redis Cluster with consistent hashing to distribute load. A key implementation detail: Slack tracks rate limits per Slack workspace (team), not per user account, so that one active workspace cannot starve another on the same infrastructure.
+Slack's published limits are the clearest example of choosing the *unit of isolation* deliberately. Every Web API method is assigned a tier — Tier 1 (1+ per minute), Tier 2 (20+), Tier 3 (50+), Tier 4 (100+), plus per-method "Special" tiers — and the budget is enforced **per method, per workspace, per app**, not per user account, so one busy workspace cannot starve another workspace using the same app. `chat.postMessage` is a special tier at roughly one message per second per channel, with short bursts tolerated. Exceeding a limit returns HTTP `429 Too Many Requests` with a `Retry-After` header, and the same tier applies on every Slack plan — paying more does not buy a higher API rate. The design lesson generalizes: key the limiter on the tenant boundary you actually want to protect, give expensive methods their own tier rather than one global budget, and implement the counter with a Redis Lua script so the check-and-increment is atomic across app instances.
 
 ---
 
@@ -806,8 +828,8 @@ A team used a leaky bucket to smooth requests to a third-party payment processor
 | Bucket4j                     | Java in-memory and Redis-backed token bucket                 | Good for application-level limiting                 |
 | Resilience4j `RateLimiter`   | Per-service rate limiting in application code                | Integrates with circuit breaker / retry              |
 | Spring Cloud Gateway         | Built-in `RequestRateLimiter` filter using Redis             | Plug-and-play for Spring microservices              |
-| AWS API Gateway               | Managed rate limiting (10,000 req/s per account, configurable) | Per-stage and per-method limits                  |
-| Cloudflare Rate Limiting      | Edge-level rate limiting with geo-awareness                  | DDoS protection + API limiting in one              |
+| AWS API Gateway               | Managed rate limiting (10,000 req/s per account per Region, burst 5,000) | Rate is adjustable on request; the burst quota is not. Some newer Regions default to 2,500 rps / 1,250 burst |
+| Cloudflare Rate Limiting      | Edge-level rate limiting with geo-awareness                  | DDoS protection + API limiting in one; counters are kept per data center, not globally |
 | Kong                         | API gateway with rate limiting plugin                        | Supports Redis backend for distributed limiting     |
 | Envoy                        | Rate limiting via external RLS (Rate Limit Service)          | Integrates with Lyft's `ratelimit` service          |
 
@@ -823,11 +845,15 @@ public class RateLimiterConfig {
     }
 
     // Per-user token bucket: 100 tokens, refilled at 100/minute
+    // Bucket4j 8.x: Bandwidth.classic(...) / Bandwidth.simple(...) / Refill.greedy(...)
+    // are all deprecated -- use the staged Bandwidth.builder() API instead.
     public Bucket getBucketForUser(String userId) {
         return userBuckets().computeIfAbsent(userId, k ->
             Bucket.builder()
-                .addLimit(Bandwidth.classic(100,
-                    Refill.greedy(100, Duration.ofMinutes(1))))
+                .addLimit(Bandwidth.builder()
+                    .capacity(100)
+                    .refillGreedy(100, Duration.ofMinutes(1))
+                    .build())
                 .build()
         );
     }
@@ -882,7 +908,7 @@ Standard request count rate limiting does not work well for long-lived connectio
 Rate limiting enforces a hard cap: once the limit is exceeded, requests are rejected with a 429. Throttling slows requests down: it artificially delays processing (e.g., sleeping before processing) to stay within capacity. Rate limiting is more common for API quotas because it is simple and deterministic for clients. Throttling is used in queue-based systems and leaky bucket implementations where requests are deferred rather than dropped. In practice, the terms are often used interchangeably in API contexts.
 
 **Q: How would you implement rate limiting across multiple data centers without requiring cross-DC synchronization on every request?**
-Use a two-level approach: a local Redis cluster per data center enforces a fraction of the total limit (`total_limit / num_datacenters`). Each data center enforces its local fraction without cross-DC calls. Periodically synchronize counts across data centers (every 5–10 seconds) to rebalance. This means clients can exceed the global limit by up to `(N-1) / N * limit` in the worst case during a synchronization interval, but eliminates cross-DC latency on every request. This is the approach used by Cloudflare and Fastly for their edge rate limiting.
+Use a two-level approach: a local Redis cluster per data center enforces a fraction of the total limit (`total_limit / num_datacenters`). Each data center enforces its local fraction without cross-DC calls. Periodically synchronize counts across data centers (every 5–10 seconds) to rebalance. This means clients can exceed the global limit by up to `(N-1) / N * limit` in the worst case during a synchronization interval, but eliminates cross-DC latency on every request. Cloudflare has published the edge version of this tradeoff: it keeps an isolated counting system inside each PoP rather than reporting every counter to one central service, because a central counter cannot meet edge latency and availability requirements — and it accepts the consequence that traffic spread across many data centers can stay under the per-data-center threshold while exceeding the aggregate.
 
 **Q: What happens to your rate limiter when Redis is unavailable?**
 You must decide: fail open (allow all requests when Redis is down) or fail closed (reject all requests when Redis is down). Fail open is typically correct for API rate limiting: a brief Redis outage should not take down the entire API. However, fail open during an extended outage may allow abuse. A good compromise: fail open for authenticated users (who have agreed to terms of service) and fail closed for unauthenticated endpoints (to prevent DDoS amplification during outages). Always alert immediately when Redis is unreachable so the outage is detected quickly.
@@ -999,4 +1025,4 @@ rate-limiting:
 - Rate limiter adds 1.2ms average latency (0.8ms Redis round-trip + 0.4ms Lua execution)
 - Zero race conditions: atomic Lua scripts eliminate all boundary violations
 - During a credential leak incident, the compromised API key's burst of 50,000 requests in 10 seconds was blocked after 100 requests (free tier limit). Without rate limiting, the leak would have scraped 50,000 records.
-- Cloudflare layer blocked 98% of a 2-million-req/s DDoS, Nginx `limit_req` blocked the remaining 2%, zero requests reached origin servers.
+- Layered edge-then-origin limiting meant the CDN's IP rules absorbed the overwhelming majority of a volumetric HTTP flood and Nginx `limit_req` caught the residue, so no attack traffic reached the application servers. For scale context, the published records for HTTP request floods are Cloudflare's 17.2M rps (2021), 26M rps (2022), 71M rps (Feb 2023) and just over 201M rps (Aug 2023, HTTP/2 Rapid Reset), while volumetric records are measured in Tbps — Cloudflare reported 7.3 Tbps in Q2 2025 and 31.4 Tbps by Q4 2025. Size the edge tier against those numbers, not against origin capacity.

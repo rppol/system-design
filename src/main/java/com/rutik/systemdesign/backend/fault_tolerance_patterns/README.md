@@ -20,7 +20,7 @@ One-line analogy: A circuit breaker in your house cuts the circuit when a fault 
 
 Mental model: Imagine a water treatment plant. If one pipe bursts, isolation valves (bulkheads) prevent the entire system from flooding. Pressure relief valves (circuit breakers) open when pressure exceeds safe limits. Engineers (retry logic) go back and try the repair after a cool-down period, but they don't all rush back at the exact same second (jitter).
 
-Why it matters: The 2021 Facebook outage took down WhatsApp, Instagram, and Facebook itself because a BGP configuration change caused a cascading failure that the internal systems had no circuit breaking for. The retry storms from millions of clients hammering reconnecting servers made recovery orders of magnitude slower.
+Why it matters: The 4 October 2021 Facebook outage took WhatsApp, Instagram and Facebook itself offline for roughly six hours. Per Facebook's own postmortem, a command issued during routine backbone maintenance took the whole backbone down; the DNS servers then withdrew their BGP route advertisements as designed, which made every Meta property unresolvable worldwide. Recovery was slowed by the resulting surge of retrying clients and by the fact that the internal tools needed to fix it were themselves behind the failed network.
 
 Key insight: Fault tolerance is about failing fast and failing gracefully, not about preventing failures entirely. A system that detects failure quickly and returns a stale cache entry is worth more than one that hangs for 30 seconds before returning a 500 error.
 
@@ -87,7 +87,7 @@ After the wait duration expires, the circuit allows `permittedNumberOfCallsInHal
 
 **Semaphore bulkhead:** Limits the number of concurrent calls to a dependency. When the semaphore count is exhausted, new calls are rejected immediately (or wait for a configurable duration). Very lightweight — no threads involved. Suitable for non-blocking code.
 
-**Thread pool bulkhead:** Executes each call to a dependency in a dedicated, isolated thread pool. When the pool is saturated, new calls are rejected. Adds a thread-switch overhead (~100 microseconds) but provides complete isolation — a hung downstream call cannot even hold a thread from the shared server thread pool.
+**Thread pool bulkhead:** Executes each call to a dependency in a dedicated, isolated thread pool. When the pool is saturated, new calls are rejected. Adds a hand-off to another thread — a Linux thread context switch measures roughly 1–5 microseconds directly (lmbench `lat_ctx`), with cache-locality loss pushing the effective cost higher — but provides complete isolation, since a hung downstream call cannot even hold a thread from the shared server thread pool.
 
 ### Fallback Strategies
 
@@ -193,6 +193,21 @@ flowchart LR
 ## 6. How It Works — Detailed Mechanics
 
 ### Resilience4j Circuit Breaker Configuration
+
+Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
+down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
+itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
+`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
+
+Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
+down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
+itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
+`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
+
+Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
+down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
+itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
+`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
 
 ```java
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -307,15 +322,20 @@ RetryConfig broken = RetryConfig.custom()
     .build();
 ```
 
-FIX — full jitter fully desynchronizes retries:
+FIX — jitter desynchronizes retries. Note carefully which *kind* of jitter each option gives you:
 
 ```java
-// FIX: exponential backoff with full jitter
-// delay = random(0, min(cap, base * 2^attempt))
-// attempt 0: random(0, 100ms)
-// attempt 1: random(0, 200ms)
-// attempt 2: random(0, 400ms)
-// capped at 10s
+// Resilience4j's built-in randomized backoff.
+// ofExponentialRandomBackoff(initialInterval, multiplier, maxInterval) is real,
+// but it does NOT implement AWS "full jitter". It applies a randomization
+// factor (DEFAULT_RANDOMIZATION_FACTOR = 0.5) around the exponential value:
+//   delay = uniform(interval * (1 - f), interval * (1 + f))
+// so with f = 0.5 the delay lands in [0.5x, 1.5x] of the ceiling, never near 0.
+//   attempt 0: uniform( 50ms, 150ms)
+//   attempt 1: uniform(100ms, 300ms)
+//   attempt 2: uniform(200ms, 600ms)
+// That is bounded jitter — good enough for most services, and it keeps a
+// minimum wait, but it spreads clients less than full jitter does.
 
 RetryConfig retryConfig = RetryConfig.custom()
     .maxAttempts(3)
@@ -327,16 +347,18 @@ RetryConfig retryConfig = RetryConfig.custom()
     .retryOnResult(response -> response.getStatusCode() == 429)  // also retry on rate limit
     .build();
 
-// Manual implementation for clarity:
-long jitteredDelay(int attempt, long baseMs, long capMs) {
-    long exponential = (long) (baseMs * Math.pow(2, attempt));
-    long capped = Math.min(capMs, exponential);
-    return ThreadLocalRandom.current().nextLong(0, capped);
-}
+// For true AWS full jitter — delay = random(0, min(cap, base * 2^attempt)),
+// as defined in Marc Brooker's 2015 AWS Architecture Blog post
+// "Exponential Backoff And Jitter" — supply your own IntervalFunction:
+IntervalFunction fullJitter = attempt -> {
+    long exponential = (long) (100L * Math.pow(2, attempt - 1)); // attempt is 1-based
+    long capped = Math.min(10_000L, exponential);
+    return ThreadLocalRandom.current().nextLong(0, capped + 1);
+};
 ```
 
-**What this actually says.** "Pick the ceiling that doubles every attempt, then throw a dart
-anywhere between zero and that ceiling."
+**What this actually says** (of the full-jitter formula above). "Pick the ceiling that doubles
+every attempt, then throw a dart anywhere between zero and that ceiling."
 
 The exponent grows the *window*; the random pick spreads clients *inside* the window. Both
 halves are load-bearing. Exponential alone still fires every client at the same instant —
@@ -351,7 +373,7 @@ it just moves that instant further out.
 | `min(cap, base * 2^attempt)` | The ceiling actually in force for this attempt |
 | `random(0, ceiling)` | Full jitter. Uniform pick, so the expected delay is half the ceiling |
 
-**Walk one example.** The three attempts this config allows, and where clients land:
+**Walk one example.** The three attempts full jitter allows here, and where clients land:
 
 ```
                  base x 2^attempt    ceiling after cap    delay drawn from   mean delay
@@ -597,19 +619,21 @@ to get its chance.
 
 ### Netflix and the Origin of Hystrix
 
-Netflix built Hystrix in 2011 after discovering that a single failing downstream service could bring down their entire API server. One of their services had an infinite default timeout on HTTP connections. A single slow database node caused all 400 threads in the thread pool to hang waiting for a response that never came. The API server appeared healthy (it was accepting connections) but was not processing any requests. The fix was Hystrix, which introduced circuit breaking and thread pool bulkheads to the JVM ecosystem. Hystrix was eventually deprecated in 2018 in favor of Resilience4j.
+Netflix built Hystrix in 2011 after discovering that a single failing downstream service could bring down their entire API server: a slow dependency with no effective timeout consumed every thread in the shared pool, so the API server kept accepting connections while processing nothing. Hystrix introduced circuit breaking and thread pool bulkheads to the JVM ecosystem, and its wiki's latency-and-fault-tolerance framing shaped the whole generation of libraries that followed.
+
+Status as of 2026: Hystrix is **in maintenance mode, not deleted and not formally deprecated**. Netflix stopped active development in November 2018; the last release is 1.5.18, and the GitHub README states Hystrix "is no longer in active development, and is currently in maintenance mode", recommends the community consider **Resilience4j**, and notes Netflix moved internally toward adaptive concurrency limits that react to real-time performance rather than pre-configured thresholds. Treat it as unmaintained for new work; existing deployments still run.
 
 ### Amazon's Retry Storms During EC2 Recovery
 
-During the 2011 US-East EC2 outage, Amazon's EBS service experienced a feedback loop where retry storms from customers amplified the load on a recovering system, turning what would have been a 30-minute outage into a multi-day event. The synchronized retry behavior from tens of thousands of instances retrying at fixed intervals overwhelmed the storage nodes as they attempted to restart. AWS subsequently published best practices requiring exponential backoff with full jitter for all AWS SDK retries.
+During the April 2011 US-East EC2/EBS outage, the amplifying feedback loop came from **inside** EBS, not from customer retries — a distinction the AWS postmortem is explicit about. A misrouted network change isolated a set of EBS nodes; when connectivity returned they all simultaneously searched for spare capacity to re-replicate, exhausting the cluster in what AWS named a **"re-mirroring storm"**. About 13% of volumes in the affected AZ became stuck, and the slow `CreateVolume` API calls that followed caused thread starvation in the EBS control plane, spreading impact beyond the one AZ; 97.8% of volumes were re-replicated within roughly 24 hours. The retry lesson still holds, and AWS formalized it four years later in Marc Brooker's 2015 AWS Architecture Blog post "Exponential Backoff And Jitter", which is the canonical source for the full-jitter formula.
 
 ### DoorDash Bulkhead Failure Pattern
 
-DoorDash's order fulfillment service suffered an outage in 2022 where their restaurant availability lookup service (which enriches order data) started returning slow responses. Because there was no bulkhead between the availability service client and the order placement client, the shared thread pool was exhausted. New order placement requests — which did not even need availability data — were rejected. Post-incident, they introduced semaphore bulkheads with strict limits (15 concurrent calls) per downstream integration.
+DoorDash's publicly documented May 12, 2022 outage is the canonical modern example of a misconfigured breaker making things worse rather than better. Routine database maintenance briefly raised read/write latency; that latency propagated upstream as timeouts, the elevated error rate tripped a **misconfigured circuit breaker**, and the result was a roughly three-and-a-half-hour system-wide outage in which Dashers could not accept deliveries and consumers could not order. The lesson DoorDash drew was not "add more breakers" but that per-team, hand-rolled reliability controls do not compose: they moved Layer 7 circuit breaking and load shedding out of application code and into a **service mesh**, so the policy is uniform and centrally observable.
 
 ### Google's Client-Side Throttling
 
-Google's internal SRE book describes a scenario where a cascading failure in their ad serving system was caused by retry amplification. A 10% failure rate, with clients retrying 3 times each, resulted in a 30% increase in total requests — which pushed the failure rate higher, causing more retries in a feedback loop. The fix was client-side adaptive throttling, where clients track their own accept rate and self-throttle before sending requests that are statistically likely to be rejected.
+Google's SRE book treats retry amplification as a first-class cascading-failure mode (see "Handling Overload" and "Addressing Cascading Failures") rather than as one named incident. The arithmetic is what matters: a 10% failure rate with clients retrying 3 times each adds 30% to total request volume, which pushes the failure rate higher and produces more retries in a feedback loop. Google's documented answer is **client-side adaptive throttling**: each client task tracks `requests` and `accepts` over the last two minutes and begins rejecting requests locally once `requests > K * accepts`, with `K = 2` as Google's stated preference — self-throttling before sending requests that are statistically likely to be rejected.
 
 ---
 
@@ -642,7 +666,7 @@ Google's internal SRE book describes a scenario where a cascading failure in the
 | Isolation           | Partial (borrows caller thread) | Full (own thread pool)         |
 | Async compatibility | Ideal for reactive/async     | Required for blocking calls      |
 | Hung call impact    | Ties up a caller thread      | Ties up only pool thread         |
-| Latency overhead    | Negligible                   | ~100 microseconds context switch |
+| Latency overhead    | Negligible                   | ~1-5 microseconds context switch, plus cache-locality loss |
 
 ### Hystrix vs. Resilience4j
 
@@ -745,7 +769,7 @@ flowchart LR
 
 ### Pitfall 6: Not Testing the HALF_OPEN State
 
-Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident, a bug in a custom `CircuitBreakerStatePredicator` caused the circuit to immediately transition back to OPEN when the first probe call in HALF_OPEN returned a slow (but successful) response. Because `slowCallRateThreshold` was 0% in HALF_OPEN (the team had not configured it separately), a single 3-second probe call tripped the circuit again. The service never recovered automatically and required a deployment to fix. The fix: write integration tests that simulate HALF_OPEN probe behavior, including slow-but-successful responses.
+Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident, a custom `recordResult`/`recordException` predicate caused the circuit to immediately transition back to OPEN when the first probe call in HALF_OPEN returned a slow (but successful) response. Because `slowCallRateThreshold` was 0% in HALF_OPEN (the team had not configured it separately), a single 3-second probe call tripped the circuit again. The service never recovered automatically and required a deployment to fix. The fix: write integration tests that simulate HALF_OPEN probe behavior, including slow-but-successful responses.
 
 ---
 
@@ -755,11 +779,11 @@ Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident
 |-----------------------|---------------------------------------------------------------|---------------------------------------------|
 | Resilience4j          | Circuit breaker, retry, bulkhead, time limiter, rate limiter  | Lightweight, modular, Micrometer integration |
 | Spring Cloud CircuitBreaker | Abstraction layer over Resilience4j (or Sentinel)       | Use when you want to swap implementations   |
-| Hystrix               | Circuit breaker (Netflix OSS)                                 | Deprecated 2018, do not use for new projects |
+| Hystrix               | Circuit breaker (Netflix OSS)                                 | Maintenance mode since Nov 2018, last release 1.5.18; do not use for new projects |
 | Sentinel (Alibaba)    | Circuit breaking + flow control + hotspot detection           | Popular in Chinese tech stack                |
 | Failsafe              | Retry, circuit breaker, timeout, hedge                        | Lightweight alternative to Resilience4j     |
 | Polly (.NET)          | .NET equivalent of Resilience4j                               | Reference architecture for .NET services    |
-| AWS SDK               | Built-in retry with exponential jitter on all AWS API calls   | Configurable via ClientConfiguration        |
+| AWS SDK               | Built-in retry with jittered backoff on all AWS API calls     | Java v2: `ClientOverrideConfiguration.retryStrategy`. `ClientConfiguration` is the **v1** API — v1 reached end-of-support 31 Dec 2025 |
 | Istio / Envoy         | Circuit breaking and retry at the service mesh layer          | No code changes required; config-driven     |
 | Chaos Monkey          | Injects faults to test resilience (Netflix)                   | Use to validate circuit breaker behavior    |
 | Chaos Toolkit         | Open-source chaos engineering                                 | Run fault injection in CI/CD pipelines      |

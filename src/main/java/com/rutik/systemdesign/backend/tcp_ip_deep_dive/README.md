@@ -14,9 +14,9 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 
 **Mental model**: TCP is a sliding window protocol. The sender maintains a window of bytes that can be "in flight" (sent but not acknowledged). The receiver's window (rwnd) limits how fast the sender can push data. The congestion window (cwnd) limits how fast the network can absorb data. The actual send rate is min(rwnd, cwnd).
 
-**Why it matters**: TIME_WAIT sockets accumulate on busy servers and can exhaust ephemeral ports. Nagle's algorithm batches small writes, adding 40ms+ latency to request-response protocols unless disabled. Congestion control algorithms determine throughput over long-distance or lossy links. Getting these wrong causes production latency spikes and connection failures.
+**Why it matters**: TIME_WAIT sockets accumulate on busy servers and can exhaust ephemeral ports. Nagle's algorithm batches small writes, and when the peer also uses delayed ACK this pairing adds ~40ms of latency to request-response protocols unless Nagle is disabled. Congestion control algorithms determine throughput over long-distance or lossy links. Getting these wrong causes production latency spikes and connection failures.
 
-**Key insight**: TCP was designed in 1981 for reliability on unreliable networks. Its defaults (port range, socket backlog, TIME_WAIT duration) were set for servers handling hundreds of connections. Modern servers handle hundreds of thousands — you must tune the kernel.
+**Key insight**: TCP was specified in 1981 (RFC 793, rewritten as RFC 9293 in 2022) for reliability on unreliable networks. Its defaults (port range, socket backlog, TIME_WAIT duration) were set for servers handling hundreds of connections. Modern servers handle hundreds of thousands — you must tune the kernel.
 
 ---
 
@@ -42,7 +42,7 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 | Sequence Number | 32 bit | Position of first byte in this segment |
 | Acknowledgment Number | 32 bit | Next byte receiver expects |
 | Data Offset | 4 bit | Header length in 32-bit words |
-| Flags | 9 bit | SYN, ACK, FIN, RST, PSH, URG, ECE, CWR |
+| Control Bits (Flags) | 8 bit | CWR, ECE, URG, ACK, PSH, RST, SYN, FIN (RFC 9293; 4 further bits are Reserved) |
 | Window Size | 16 bit | Receiver's available buffer (rwnd) |
 | Checksum | 16 bit | Error detection |
 | Urgent Pointer | 16 bit | Out-of-band data offset |
@@ -54,7 +54,7 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 | TCP Reno | Packet loss | Additive increase / multiplicative decrease | Default on many older systems |
 | TCP CUBIC | Packet loss | Cubic function for cwnd growth | Linux default since kernel 2.6.19 |
 | TCP BBR | Bandwidth + RTT | Model-based, probes BDP | Google, high-latency/high-BDP links |
-| QUIC | Packet loss + ECN | Per-stream control | HTTP/3 |
+| QUIC | Packet loss + ECN | Per-connection CC (NewReno-style by default, RFC 9002); per-stream flow control | HTTP/3 |
 
 ### 4.3 TCP State Machine
 
@@ -90,7 +90,7 @@ stateDiagram-v2
     class TIME_WAIT lossN
 ```
 
-The active opener (client) walks CLOSED → SYN_SENT → ESTABLISHED while the passive opener (server) walks CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED; on close, the active closer's path (FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT) forces the 2×MSL wait (60–240s on Linux) that drives the TIME_WAIT accumulation problem in Section 6.2, while the passive closer takes the shorter CLOSE_WAIT → LAST_ACK path straight to CLOSED.
+The active opener (client) walks CLOSED → SYN_SENT → ESTABLISHED while the passive opener (server) walks CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED; on close, the active closer's path (FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT) forces the 2×MSL wait (a hardcoded 60s on Linux; up to 240s on stacks that use the RFC's 2-minute MSL) that drives the TIME_WAIT accumulation problem in Section 6.2, while the passive closer takes the shorter CLOSE_WAIT → LAST_ACK path straight to CLOSED.
 
 ---
 
@@ -133,12 +133,12 @@ sequenceDiagram
     S->>C: FIN (seq=n)
     Note over S: enters LAST_ACK
     C-->>S: ACK (ack=n+1)
-    Note over C: enters TIME_WAIT<br/>(2×MSL = 60-240s)
+    Note over C: enters TIME_WAIT<br/>(2×MSL: 60s on Linux)
     Note over S: enters CLOSED
     Note over C: after 2×MSL wait,<br/>enters CLOSED
 ```
 
-The active closer (here, the client) pays the 2×MSL TIME_WAIT cost (60–240s on Linux) while the passive closer (server) reaches CLOSED immediately after its final ACK — the asymmetry behind TIME_WAIT accumulation on servers that initiate their own outbound closes (Section 6.2).
+The active closer (here, the client) pays the 2×MSL TIME_WAIT cost (a fixed 60s on Linux) while the passive closer (server) reaches CLOSED immediately after its final ACK — the asymmetry behind TIME_WAIT accumulation on servers that initiate their own outbound closes (Section 6.2).
 
 ### Sliding Window Flow Control
 
@@ -270,9 +270,9 @@ Selective Acknowledgment (SACK) option allows the receiver to inform the sender 
 
 ### 6.2 TIME_WAIT and Its Server-Side Implications
 
-After active close, the closer enters TIME_WAIT for 2*MSL (Maximum Segment Lifetime). On Linux, MSL is typically 30–60 seconds, so TIME_WAIT lasts 60–120 seconds. The purpose: ensure the final ACK reaches the other side, and absorb stale duplicate packets from previous connection incarnations.
+After active close, the closer enters TIME_WAIT for 2*MSL (Maximum Segment Lifetime). RFC 793 suggests an MSL of 2 minutes, which would make TIME_WAIT 240 seconds; Linux does not derive it from MSL at all — it hardcodes `TCP_TIMEWAIT_LEN` in `include/net/tcp.h` at **60 seconds** and exposes no sysctl to change it (only a kernel rebuild does). Windows and the BSDs sit nearer the 120-second mark. The purpose: ensure the final ACK reaches the other side, and absorb stale duplicate packets from previous connection incarnations.
 
-**Problem**: A high-throughput HTTP server making many outbound connections (reverse proxy, service mesh, database client) accumulates TIME_WAIT sockets. Ephemeral ports are typically 28,000–65,000 (32,768–60,999 on Linux by default). At 60,000 TIME_WAIT sockets, new connections fail with "Cannot assign requested address" (EADDRNOTAVAIL).
+**Problem**: A high-throughput HTTP server making many outbound connections (reverse proxy, service mesh, database client) accumulates TIME_WAIT sockets. The Linux ephemeral port range defaults to 32,768–60,999 (IANA's own suggested range is 49,152–65,535). At 60,000 TIME_WAIT sockets, new connections fail with "Cannot assign requested address" (EADDRNOTAVAIL).
 
 **Read it like this.** "A port is not free the moment you close it — it is rented for 2×MSL afterwards, so your sustainable connection rate is the port pool divided by how long each rental lasts."
 
@@ -280,8 +280,8 @@ This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the 
 
 | Symbol | What it is |
 |--------|------------|
-| MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. 30–60 s on Linux |
-| 2×MSL | TIME_WAIT duration, 60–120 s. One MSL for the final ACK to arrive, one for any reply it triggers |
+| MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. RFC 793 suggests 2 min |
+| TIME_WAIT | 2×MSL in the RFC. Linux ignores the derivation and hardcodes 60 s (`TCP_TIMEWAIT_LEN`); other stacks use ~120 s |
 | Port pool | Ephemeral range width, `60999 − 32768 + 1` = 28,232 ports by default |
 | Sustainable rate | `port pool ÷ 2×MSL` — new connections per second before ports run out |
 | Ports in use | `connection rate × 2×MSL` — the steady-state TIME_WAIT count |
@@ -291,8 +291,8 @@ This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the 
 ```
   How fast can I go?      rate = ports / TIME_WAIT
 
-    28,232 / 60 s   =   470 conn/s        (MSL = 30 s)
-    28,232 / 120 s  =   235 conn/s        (MSL = 60 s)
+    28,232 / 60 s   =   470 conn/s        (Linux, TCP_TIMEWAIT_LEN = 60 s)
+    28,232 / 120 s  =   235 conn/s        (a stack using a 60 s MSL)
 
   How many ports will I burn?    ports = rate x TIME_WAIT
 
@@ -323,7 +323,8 @@ cat /proc/sys/net/ipv4/ip_local_port_range
 # 1. Widen port range
 echo "1024 65000" > /proc/sys/net/ipv4/ip_local_port_range
 
-# 2. Enable tcp_tw_reuse (safe for client-side)
+# 2. Enable tcp_tw_reuse for all outbound connections (safe for client-side)
+#    Current kernels default this to 2 = loopback traffic only; 1 = everywhere
 echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse
 
 # 3. Keep-Alive reduces connections created (prefer over TIME_WAIT tuning)
@@ -332,11 +333,11 @@ echo 10 > /proc/sys/net/ipv4/tcp_keepalive_intvl
 echo 6  > /proc/sys/net/ipv4/tcp_keepalive_probes
 ```
 
-`tcp_tw_reuse`: allows reuse of TIME_WAIT sockets for new outbound connections when it is safe (requires timestamps to distinguish old vs new segments). Safe for client-side connections (databases, upstream HTTP). Do NOT use `tcp_tw_recycle` (removed in kernel 4.12) — it breaks connections through NAT.
+`tcp_tw_reuse`: allows reuse of TIME_WAIT sockets for new outbound connections when it is safe (requires TCP timestamps to distinguish old vs new segments). Safe for client-side connections (databases, upstream HTTP). Note the kernel default is now **2** — reuse enabled for loopback traffic only — so you must explicitly set it to 1 to get the effect on real network traffic. Do NOT use `tcp_tw_recycle` (removed in kernel 4.12) — it breaks connections through NAT.
 
 ### 6.3 Nagle's Algorithm
 
-Nagle's algorithm (RFC 896) batches small TCP writes: it holds outgoing data until either a full MSS can be sent or all outstanding unacknowledged data is ACKed. This reduces packet count on congested networks but adds up to 40ms (one delayed ACK timeout) of latency for request-response protocols.
+Nagle's algorithm (RFC 896, 1984) batches small TCP writes: it holds outgoing data until either a full MSS can be sent or all outstanding unacknowledged data is ACKed. On its own that only reduces packet count on congested networks. The latency damage comes from the **interaction** with the receiver's delayed ACK (RFC 813, 1982): Nagle waits for an ACK that delayed ACK is deliberately withholding. The stall therefore lasts one delayed-ACK timeout, which on Linux is up to 40ms — a Linux implementation constant, not a value in either RFC.
 
 ```mermaid
 flowchart LR
@@ -370,14 +371,15 @@ ServerSocket serverSocket = new ServerSocket(8080);
 Socket socket = serverSocket.accept();
 socket.setTcpNoDelay(true);  // TCP_NODELAY
 
-// For HttpClient (Java 11+)
-HttpClient client = HttpClient.newBuilder()
-    // No direct API — use system property:
-    // -Djdk.httpclient.allowRestrictedHeaders=connection
-    .build();
+// For java.net.http.HttpClient (Java 11+): there is no socket-option API on
+// the builder, but you do not need one — the JDK sets TCP_NODELAY itself on
+// every connection it opens (jdk.internal.net.http.PlainHttpConnection calls
+// chan.setOption(StandardSocketOptions.TCP_NODELAY, true)).
+// If you need explicit control, use a Netty-based client (see Section 14).
+HttpClient client = HttpClient.newBuilder().build();
 ```
 
-Redis clients, gRPC, and JDBC drivers all set TCP_NODELAY by default. MySQL Connector/J had a bug in older versions where TCP_NODELAY was off, causing intermittent 40ms latency on every small query.
+Redis clients, gRPC, and mainstream JDBC drivers enable TCP_NODELAY by default — MySQL Connector/J exposes it as the `tcpNoDelay` connection property, documented default `true` since 5.0.7. The 40ms symptom therefore comes from the clients that do *not* set it: hand-rolled socket code, and HTTP clients whose channel options were never configured (the Netty case in Section 14).
 
 ### 6.4 Half-Open Connections
 
@@ -422,8 +424,8 @@ Nginx and newer Java runtimes use `SO_REUSEPORT` for their acceptor threads.
 ### 6.6 SYN Backlog and Accept Queue
 
 The TCP handshake creates two queues:
-- **SYN backlog** (incomplete queue): half-open connections (SYN received, SYN+ACK sent, waiting for ACK). Default: `net.ipv4.tcp_max_syn_backlog` = 128–256.
-- **Accept queue** (complete queue): completed 3-way handshakes waiting for `accept()` call. Default: `net.core.somaxconn` = 128.
+- **SYN backlog** (incomplete queue): half-open connections (SYN received, SYN+ACK sent, waiting for ACK). `net.ipv4.tcp_max_syn_backlog` has no fixed default — the kernel scales it with RAM, with a floor of 128 on low-memory machines (commonly 512–4096 on servers).
+- **Accept queue** (complete queue): completed 3-way handshakes waiting for `accept()` call. `net.core.somaxconn` defaults to **4096** since Linux 5.4 (it was 128 before that — a value still quoted by most older tuning guides).
 
 ```mermaid
 flowchart LR
@@ -469,7 +471,7 @@ echo 65535 > /proc/sys/net/ipv4/tcp_max_syn_backlog
 
 **HikariCP and TCP Keep-Alive**: HikariCP uses `connectionTestQuery` or JDBC4 `isValid()` to validate connections. But at the TCP level, a silent firewall can drop the underlying socket without either end knowing. HikariCP's `connectionTimeout`, `idleTimeout`, and `maxLifetime` settings exist partly for this reason. Configuring `socketTimeout` in the JDBC URL ensures the driver closes stale connections.
 
-**BBR congestion control at Google**: Google deployed BBR on their backbone and reported 2–25% throughput improvement on their CDN. BBR does not react to packet loss alone — it models bandwidth and RTT to find the optimal operating point. On high-bandwidth, high-latency links (inter-continental), BBR dramatically outperforms CUBIC.
+**BBR congestion control at Google**: Google switched its B4 internal WAN from CUBIC to BBR (all B4 TCP traffic since 2016) and reported BBR throughput **2–25 times** greater than CUBIC's on those paths — a multiple, not a percentage. The far more modest public-internet figure comes from YouTube: about **4% higher network throughput on average globally**, over 14% in some countries, with median RTT down ~33%. BBR does not react to packet loss alone — it models bandwidth and RTT to find the optimal operating point. On high-bandwidth, high-latency links (inter-continental), BBR dramatically outperforms CUBIC.
 
 ---
 
@@ -478,7 +480,7 @@ echo 65535 > /proc/sys/net/ipv4/tcp_max_syn_backlog
 | Parameter | Default | Tuned | Tradeoff |
 |-----------|---------|-------|---------|
 | Ephemeral port range | 32768–60999 | 1024–65000 | More ports, but low ports may conflict with services |
-| tcp_tw_reuse | 0 | 1 | Reduces TIME_WAIT pressure; safe only with TCP timestamps |
+| tcp_tw_reuse | 2 (loopback only) | 1 (all outbound) | Reduces TIME_WAIT pressure; safe only with TCP timestamps |
 | TCP_NODELAY | Off | On | Lower latency, more packets, higher CPU |
 | SO_RCVBUF/SO_SNDBUF | Auto | 4 MB–16 MB | Higher throughput on high-BDP links; more memory per socket |
 | tcp_keepalive_time | 7200s | 60s | Detects stale connections faster; more probe traffic |
@@ -503,7 +505,7 @@ quadrantChart
     Reno: [0.2, 0.2]
 ```
 
-BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it dominate the high-BDP, lossy quadrant where Google reported 2–25% throughput gains after deploying it (Section 7), while CUBIC remains the safer default for low-loss, high-BDP datacenter networks.
+BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it dominate the high-BDP, lossy quadrant where Google measured 2–25x the throughput of CUBIC on its B4 WAN (Section 7), while CUBIC remains the safer default for low-loss, high-BDP datacenter networks.
 
 ---
 
@@ -543,7 +545,7 @@ BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it
 | `iperf3 -c server` | TCP throughput measurement |
 | Wireshark TCP stream stats | RTT, retransmit, window size graphs |
 | `ip tcp_metrics` | Per-host TCP performance metrics cache |
-| `ethtool -K eth0 gso off` | Disable TCP segmentation offload (for testing) |
+| `ethtool -K eth0 tso off gso off` | Disable TCP segmentation offload (NIC hardware) and generic segmentation offload (software) so captures show real on-wire segments |
 
 ---
 
@@ -553,13 +555,13 @@ BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it
 Client sends SYN with its initial sequence number. Server responds with SYN+ACK, acknowledging the client's sequence and sending its own sequence. Client sends ACK, acknowledging the server's sequence. Three steps are required because both sides need to agree on initial sequence numbers independently. A 2-way handshake would not establish the server's sequence number acknowledgment before data flows.
 
 **Q: What is TIME_WAIT and why does it exist?**
-TIME_WAIT is the state the active closer enters after sending the final ACK, lasting 2*MSL (60–240 seconds on Linux). It serves two purposes: ensuring the final ACK reaches the other side (if lost, the passive closer retransmits FIN and the active closer re-sends ACK), and ensuring all duplicate packets from the previous connection expire before the port pair is reused (preventing data corruption in a new connection).
+TIME_WAIT is the state the active closer enters after sending the final ACK, nominally lasting 2*MSL but fixed at 60 seconds on Linux. Linux hardcodes this as `TCP_TIMEWAIT_LEN` and offers no sysctl for it, while stacks that follow RFC 793's suggested 2-minute MSL sit closer to 120–240 seconds. It serves two purposes: ensuring the final ACK reaches the other side (if lost, the passive closer retransmits FIN and the active closer re-sends ACK), and ensuring all duplicate packets from the previous connection expire before the port pair is reused (preventing data corruption in a new connection).
 
 **Q: How does TIME_WAIT cause problems on busy servers and how do you fix it?**
 High-throughput servers making many short-lived outbound connections accumulate TIME_WAIT sockets that hold ports until expiry. If the ephemeral port range is exhausted, new connections fail with EADDRNOTAVAIL. Fix: (1) use persistent connections/connection pooling to reduce connection churn; (2) widen ephemeral port range to 1024–65000; (3) enable tcp_tw_reuse=1 for outbound connections; (4) never use tcp_tw_recycle (broken with NAT).
 
 **Q: What is Nagle's algorithm and when should you disable it?**
-Nagle's algorithm holds small TCP writes in a buffer until a full MSS is available or all outstanding data is ACKed, reducing small-packet overhead. Disable it (TCP_NODELAY=true) for request-response protocols like Redis, JDBC, or gRPC, where a single small request must be sent immediately. Without TCP_NODELAY, Nagle's interacts with delayed ACK to add 40ms of artificial latency to every request.
+Nagle's algorithm holds small TCP writes in a buffer until a full MSS is available or all outstanding data is ACKed, reducing small-packet overhead. It is specified in RFC 896 (1984), not in the base TCP spec. Disable it (TCP_NODELAY=true) for request-response protocols like Redis, JDBC, or gRPC, where a single small request must be sent immediately. The 40ms penalty is not caused by Nagle alone — it needs a peer running delayed ACK (RFC 813) so that the ACK Nagle is waiting for is itself deliberately delayed, and 40ms specifically is Linux's delayed-ACK maximum.
 
 **Q: Explain TCP slow start and congestion avoidance.**
 Slow start begins each new connection with cwnd=1 MSS and doubles it per RTT until reaching the slow start threshold (ssthresh). This avoids overwhelming the network immediately. Once ssthresh is reached, congestion avoidance takes over and increases cwnd by 1 MSS per RTT (linear). On packet loss (triple duplicate ACK), ssthresh is halved and cwnd is reduced; on timeout, cwnd is reset to 1 MSS (full slow start restart).
@@ -580,7 +582,7 @@ TCP Keep-Alive sends probe packets on idle connections to detect if the other en
 CUBIC (Linux default) reacts to packet loss as a congestion signal — it reduces cwnd on each loss event. BBR (Bottleneck Bandwidth and RTT) probes for available bandwidth and RTT to model the network's operating point, then maintains cwnd at the bandwidth-delay product. BBR handles high-latency, high-bandwidth links better because it does not interpret every packet loss as congestion. On lossy wireless links, BBR can be too aggressive and crowd out loss-based algorithms.
 
 **Q: What is the difference between SO_REUSEADDR and SO_REUSEPORT?**
-SO_REUSEADDR allows binding a socket to a port that is in TIME_WAIT state (common for servers restarting quickly — without it, bind fails for 60–240 seconds). SO_REUSEPORT allows multiple sockets (in different processes or threads) to bind to the same IP:port; the kernel load-balances incoming connections across them. Nginx and modern Java servers use SO_REUSEPORT for worker-per-core architectures.
+SO_REUSEADDR allows binding a socket to a port still held in TIME_WAIT, which is what lets a server restart immediately instead of waiting the state out (60 seconds on Linux). SO_REUSEPORT allows multiple sockets (in different processes or threads) to bind to the same IP:port; the kernel load-balances incoming connections across them. Nginx and modern Java servers use SO_REUSEPORT for worker-per-core architectures.
 
 **Q: What are half-open connections and how do they cause memory leaks?**
 A half-open connection occurs when one end has closed (process crash, network partition) but the other end's socket is still ESTABLISHED. The OS holds the socket and its buffers indefinitely because no signal (FIN or RST) was received. This leaks file descriptors and memory. Detection: `ss -tan | grep ESTABLISHED` growing without bound. Fix: TCP Keep-Alive with aggressive timers, application heartbeats, and connection idle timeouts.
@@ -589,7 +591,7 @@ A half-open connection occurs when one end has closed (process crash, network pa
 If the server process exits without calling close() on sockets, the OS sends RST to all connected clients. If the server calls close() gracefully (sends FIN), clients receive the FIN and can read remaining buffered data. For zero-downtime restarts: (1) stop accepting new connections but finish processing in-flight requests; (2) use SO_REUSEPORT for the new process to accept new connections immediately; (3) drain the old process with a timeout.
 
 **Q: What is ECN (Explicit Congestion Notification)?**
-ECN is a mechanism where routers mark packets (setting ECE/CWR bits in the IP header) to signal congestion before dropping packets. TCP supports ECN (IANA-registered TCP option). Benefits: faster congestion response without packet loss, lower latency. Requirement: both endpoints and all routers in the path must support ECN. In practice, some routers drop ECN-marked packets, requiring fallback. Linux enables ECN via `net.ipv4.tcp_ecn=1`.
+ECN lets a congested router set the CE (Congestion Experienced) codepoint in the IP header's 2-bit ECN field instead of dropping the packet. Note the split defined by RFC 3168: the router marks CE in the **IP** header, and the signal is then carried back through two **TCP header flag bits** — the receiver sets ECE to echo the mark, and the sender sets CWR to confirm it shrank its congestion window. ECE and CWR are control bits in the fixed TCP header, not a TCP option. Benefits: faster congestion response without packet loss, lower latency. Requirement: both endpoints and the path must support ECN; some middleboxes still drop ECN-marked packets, requiring fallback. Linux tunes this via `net.ipv4.tcp_ecn`, which now defaults to 2 (accept ECN on inbound connections, do not request it on outbound); set it to 1 to also request ECN when initiating.
 
 **Q: How does TCP handle out-of-order delivery?**
 TCP buffers out-of-order segments at the receiver. The receiver sends ACKs for the last contiguous byte received. If segment 1000–1999 arrives, then 3000–3999 arrives before 2000–2999, the receiver ACKs only 2000 (edge of contiguous delivery) but buffers 3000–3999. With SACK, the receiver can also report 3000–3999 as received, allowing the sender to retransmit only 2000–2999.
@@ -604,7 +606,7 @@ The second argument to listen() sets the maximum length of the accept queue (com
 Load balancers have idle connection timeouts. When a backend connection has been idle for the configured timeout (commonly 60–300 seconds), the load balancer closes it, often by sending RST. If the backend application has no connection validation and reuses the connection, the next request will fail with a broken pipe error. This is why connection pools should have maxLifetime shorter than the LB idle timeout, and why keepalive probes should be shorter than the LB timeout.
 
 **Q: Explain the relationship between TCP window size and throughput.**
-Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link gives 640 KB/s maximum throughput, regardless of bandwidth. The TCP window scale option (RFC 1323) extends the window to 1 GB. For high-BDP (bandwidth-delay product) links, increasing socket buffers is critical. `net.core.rmem_max` and `net.core.wmem_max` control maximum buffer sizes.
+Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link gives 640 KB/s maximum throughput, regardless of bandwidth. The TCP window scale option (originally RFC 1323, superseded by RFC 7323 in 2014) extends the window to about 1 GB via a shift factor capped at 14. For high-BDP (bandwidth-delay product) links, increasing socket buffers is critical. `net.core.rmem_max` and `net.core.wmem_max` control maximum buffer sizes.
 
 ---
 
@@ -629,7 +631,7 @@ Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link give
 **Investigation**:
 1. `tcpdump` on the gateway host during a slow request showed: gateway sent a small HTTP header (146 bytes), then 40.003ms later sent the body (892 bytes). The total time matched the 40ms spike exactly.
 2. `ss -tn` showed the backend connections had TCP_NODELAY not set.
-3. The gateway was using Spring WebClient with default settings. Spring's Netty-based HTTP client does not enable TCP_NODELAY by default in some configurations.
+3. The gateway was using Spring WebClient over Reactor Netty. Netty enables `TCP_NODELAY` by default on every platform except Android, so this was not a framework default — a shared connector `@Bean` in the gateway's config had explicitly set `ChannelOption.TCP_NODELAY, false` (copied years earlier from a bulk-transfer service where the batching was wanted), silently overriding it.
 
 **Root Cause**: The gateway was sending the HTTP request headers and body as two separate write() calls (by the HTTP codec). Nagle's algorithm held the second write until the first was ACKed. The backend was using delayed ACK (40ms window). Together: gateway writes headers → Nagle buffers body → backend delays ACK 40ms → ACK arrives → Nagle releases body. Every request with a body suffered this 40ms penalty.
 
@@ -646,4 +648,4 @@ WebClient webClient = WebClient.builder()
 
 After fix: p95 dropped to 4ms. The bimodal distribution vanished.
 
-**Lesson**: Always verify TCP_NODELAY on all HTTP client connections in production. The 40ms delayed ACK + Nagle interaction is one of the most common and most misdiagnosed sources of latency spikes.
+**Lesson**: Do not assume a library default survives your own configuration — verify TCP_NODELAY on the live socket (`ss -tni`, or a packet capture) rather than in the docs. The 40ms delayed-ACK + Nagle interaction is one of the most common and most misdiagnosed sources of latency spikes, and note it takes both sides to produce it: Nagle on the sender, delayed ACK on the receiver.

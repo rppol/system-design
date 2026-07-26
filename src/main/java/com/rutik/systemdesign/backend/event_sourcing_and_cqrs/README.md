@@ -110,7 +110,15 @@ Projections consume the event stream asynchronously and fan out into denormalize
 
 ## 6. How It Works — Detailed Mechanics
 
-### Aggregate with Event Sourcing (Axon Framework)
+### Aggregate with Event Sourcing (Axon Framework 4.x)
+
+Version note (July 2026): the annotation-based aggregate model shown here is the **Axon
+Framework 4.x** API, which is what nearly all production Axon systems still run. Axon
+Framework **5.0** shipped in late 2025 (5.0.5 is current) and reworks the programming model
+around a Dynamic Consistency Boundary, async-native processing and "stateful handlers" that
+take state objects as parameters instead of living inside an aggregate class; AxonIQ has said
+migration tooling for 4.x arrives in 5.1.0. Check the 5.x reference before porting this code
+verbatim.
 
 ```java
 @Aggregate
@@ -285,18 +293,40 @@ The unique index on `(aggregate_id, event_version)` from the schema above is wha
 
 ### Snapshot Pattern
 
+The idiomatic Axon 4 way is declarative — annotate the aggregate and let the framework count:
+
+```java
+@Aggregate(snapshotTriggerDefinition = "orderSnapshotTrigger")
+public class OrderAggregate { /* ... */ }
+
+@Bean("orderSnapshotTrigger")
+public SnapshotTriggerDefinition orderSnapshotTrigger(Snapshotter snapshotter) {
+    // snapshot every 50 events on this aggregate type
+    return new EventCountSnapshotTriggerDefinition(snapshotter, 50);
+}
+```
+
+If you need the trigger under your own control, `Snapshotter.scheduleSnapshot(Class, String)`
+is the API to call — note it must be injected, it is not ambiently available:
+
 ```java
 @Component
 public class OrderAggregateSnapshotTrigger {
 
     private static final int SNAPSHOT_THRESHOLD = 50; // snapshot every 50 events
 
+    private final Snapshotter snapshotter; // injected by Axon/Spring
+
+    public OrderAggregateSnapshotTrigger(Snapshotter snapshotter) {
+        this.snapshotter = snapshotter;
+    }
+
     @EventHandler
     public void on(OrderCreatedEvent event, @SequenceNumber long sequenceNumber) {
         if (sequenceNumber % SNAPSHOT_THRESHOLD == 0 && sequenceNumber > 0) {
             // Axon's snapshotter will store current aggregate state
             // Next load will: read snapshot + only events AFTER snapshot version
-            snapshotTrigger.scheduleSnapshot(OrderAggregate.class, event.getOrderId());
+            snapshotter.scheduleSnapshot(OrderAggregate.class, event.getOrderId());
         }
     }
 }
@@ -375,20 +405,25 @@ CREATE TABLE aggregate_snapshots (
 // BROKEN: modifying old events in the store
 // NEVER do this — events are immutable
 
-// FIX: event upcaster transforms old format to new format at read time
+// FIX: event upcaster transforms old format to new format at read time.
+// SingleEventUpcaster is an ABSTRACT CLASS (so: extends, not implements) and both
+// hooks are protected. The first argument to upcastPayload is the OUTPUT
+// SerializedType — i.e. the new type+revision — not metadata.
 @Component
-public class OrderCreatedEventUpcaster implements SingleEventUpcaster {
+public class OrderCreatedEventUpcaster extends SingleEventUpcaster {
+
+    private static final SimpleSerializedType TARGET =
+        new SimpleSerializedType("OrderCreatedEvent", "1");
 
     @Override
-    public boolean canUpcast(IntermediateEventRepresentation representation) {
-        return representation.getType().getName().equals("OrderCreatedEvent")
-            && representation.getType().getRevision().equals("1");
+    protected boolean canUpcast(IntermediateEventRepresentation representation) {
+        return representation.getType().equals(TARGET);
     }
 
     @Override
-    public IntermediateEventRepresentation doUpcast(IntermediateEventRepresentation representation) {
+    protected IntermediateEventRepresentation doUpcast(IntermediateEventRepresentation representation) {
         return representation.upcastPayload(
-            new MetaData(Map.of("revision", "2")),
+            new SimpleSerializedType(TARGET.getName(), "2"),  // output type + new revision
             JsonNode.class,
             payload -> {
                 ObjectNode node = (ObjectNode) payload;
@@ -401,6 +436,15 @@ public class OrderCreatedEventUpcaster implements SingleEventUpcaster {
     }
 }
 ```
+
+For the common case of renaming an event type or moving it to a new package, do not hand-roll
+this at all — Axon 4 ships `EventTypeUpcaster`, a predefined `SingleEventUpcaster` that maps
+one type/revision pair to another.
+
+**Version caveat (July 2026):** upcasters are an Axon **4.x** feature. The Axon Framework 5.0
+reference guide states plainly that event upcasters are *not available in 5.0* and are
+scheduled to return in **5.2.0**; on 5.0 the documented approach is payload conversion at
+handling time. If you are on Axon 5 today, do not expect the classes above to resolve.
 
 ### Temporal Queries (Point-in-Time State)
 
@@ -422,9 +466,9 @@ public OrderState getOrderStateAt(String orderId, Instant pointInTime) {
 ## 7. Real-World Examples
 
 - **Axon Framework**: Java framework purpose-built for CQRS + event sourcing; used by enterprises for banking, insurance, e-commerce; AxonServer provides event store + message bus
-- **EventStoreDB**: purpose-built event store by the creators of the event sourcing pattern; stream-per-aggregate model, catch-up subscriptions, competing consumer groups for projections
-- **Microsoft**: uses event sourcing for Azure Resource Manager — every resource operation (create, update, delete) is an event; enables audit trail and resource history
-- **Jet.com**: used CQRS + event sourcing for the pricing engine — commands update price models, events project to read-optimized price tables queried by millions of product lookups per minute
+- **KurrentDB** (called **EventStoreDB** until the March 2025 rebrand of Event Store Ltd to Kurrent; first release under the new name was 25.0): purpose-built event store from the team behind the modern event sourcing pattern; stream-per-aggregate model, catch-up subscriptions, competing consumer groups for projections. Older EventStoreDB releases keep the original branding, and the config prefixes moved from `EVENTSTORE_` to `KURRENTDB_`
+- **Azure Event Hubs / Kafka-backed pipelines**: the append-only, offset-addressed log is the same primitive an event store provides, which is why Kafka compacted topics are so often pressed into service as a poor-man's event store (it works for integration events; it lacks the per-aggregate optimistic-concurrency guarantee shown in the schema above)
+- **Jet.com** (historical): built its pricing and order pipeline on F# with CQRS + event sourcing before the Walmart acquisition — commands update price models, events project to read-optimized tables. Cited widely in event-sourcing talks; note the business itself was wound down in 2020, so treat it as an architecture reference, not a live system
 
 ---
 
@@ -470,7 +514,7 @@ Do NOT use event sourcing for: simple CRUD applications without complex business
 |------|---------|
 | Axon Framework | Java CQRS + event sourcing framework with Spring integration |
 | AxonServer | Event store + message bus for Axon Framework |
-| EventStoreDB | Purpose-built event store with native subscriptions |
+| KurrentDB (formerly EventStoreDB) | Purpose-built event store with native subscriptions; renamed in 2025 |
 | Spring Data JDBC | Lightweight persistence for event store tables |
 | Jackson | Event serialization/deserialization |
 | Avro + Schema Registry | Typed event schemas with evolution support |
@@ -491,7 +535,7 @@ CQRS separates the write model (command side) from the read model (query side). 
 An aggregate is a cluster of domain objects treated as a single unit for data consistency. It is the boundary of transactional consistency — all changes within an aggregate are atomic. In event sourcing, each aggregate has its own ordered event stream. The aggregate root is the only entry point for modifying the aggregate — all commands go through it. The aggregate validates business invariants before emitting events. Examples: `Order` aggregate (contains OrderItems, ShippingAddress, PaymentDetails), `BankAccount` aggregate (contains transactions, balance).
 
 **Q: What are snapshots in event sourcing and when should you use them?**
-A snapshot is a point-in-time serialization of an aggregate's state, stored alongside the event log. When loading an aggregate, instead of replaying all events from the beginning, you load the most recent snapshot and only replay events that occurred after the snapshot's version. Use snapshots when: aggregate has more than 50-100 events (replay time > 50ms), or for aggregates with high event velocity. The snapshot threshold is typically 50-100 events. Snapshots trade storage space (snapshot table) for faster aggregate loading. They do not change the event log — events remain the source of truth.
+A snapshot is a point-in-time serialization of an aggregate's state, stored alongside the event log. When loading an aggregate, instead of replaying all events from the beginning, you load the most recent snapshot and only replay events that occurred after the snapshot's version. Use snapshots when an aggregate's stream keeps growing without bound, or when it has high event velocity. Be careful with the threshold justification: replaying 50-100 already-deserialized events in memory costs microseconds, so the real cost being avoided is the I/O and deserialization of fetching a long stream — which is why the pain shows up at thousands of events (the 5000-event cart in Section 10 took 800ms to load), not at 50. The snapshot threshold is typically 50-100 events. Snapshots trade storage space (snapshot table) for faster aggregate loading. They do not change the event log — events remain the source of truth.
 
 **Q: How do you handle schema evolution in event sourcing?**
 Events are immutable once written, so you cannot change their schema retroactively. Use event upcasters: a transformer that converts old event format to new format at read time. When loading events, the upcaster chain runs before the event reaches the aggregate or projection. An upcaster matches events by type and revision, transforms the payload (adds a new field with default value, renames a field, splits one event into two), and outputs the new format. Rules: adding optional fields is backward-compatible; removing or renaming fields requires an upcaster; changing semantics requires a new event type and a migration strategy.
@@ -512,7 +556,7 @@ When a command handler loads an aggregate, it knows the current version (the ver
 In a microservices architecture, each service naturally has its own write model (its aggregate) and can publish events that other services project into their own read models. Order service owns `OrderAggregate` and publishes `OrderCreated`, `OrderShipped` events. ShippingService subscribes to `OrderShipped` and maintains its own shipment read model. ReportingService subscribes to all order events and builds denormalized reporting tables. Each service owns its read model, denormalized for its specific queries. This avoids cross-service JOINs and lets each service's read model be independently scaled and optimized.
 
 **Q: What is the Axon Framework and what problems does it solve?**
-Axon Framework is a Java framework for implementing CQRS and event sourcing. It provides: `@Aggregate` annotation for aggregates with automatic event sourcing, `@CommandHandler` for command handling, `@EventSourcingHandler` for state reconstruction, `@EventHandler` for projections, `CommandGateway` for dispatching commands, `QueryGateway` for querying projections, and AxonServer as the event store and message routing infrastructure. It solves the boilerplate of: event serialization, aggregate loading (snapshot + replay), optimistic concurrency, event publishing, and projection catch-up. It integrates natively with Spring Boot.
+Axon Framework is a Java framework for implementing CQRS and event sourcing, currently at 5.x with 4.x still the version most production systems run. It provides (in the widely deployed 4.x model): `@Aggregate` annotation for aggregates with automatic event sourcing, `@CommandHandler` for command handling, `@EventSourcingHandler` for state reconstruction, `@EventHandler` for projections, `CommandGateway` for dispatching commands, `QueryGateway` for querying projections, and AxonServer as the event store and message routing infrastructure. It solves the boilerplate of: event serialization, aggregate loading (snapshot + replay), optimistic concurrency, event publishing, and projection catch-up. It integrates natively with Spring Boot.
 
 **Q: What is the difference between a command and an event in event sourcing?**
 A command is a request to do something and can be rejected, while an event is a statement of fact that has already happened and can never be rejected or undone. `CreateOrderCommand` might fail validation and be refused by the aggregate, but `OrderCreatedEvent` — once emitted and persisted — is an immutable record that the order was in fact created. Commands are named in the imperative (`ShipOrder`), events are named in the past tense (`OrderShipped`), and this naming convention is a direct expression of the difference. Design your domain model so that only aggregates emit events after validating a command, never the reverse.

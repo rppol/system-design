@@ -42,7 +42,7 @@ Key insight: systems fail in ways their designers never anticipated. Chaos engin
 | Application | Exception injection | Aspect-based fault injection |
 | Application | Slow response | Add Thread.sleep() via bytecode agent |
 | Application | Dependency unavailable | Block downstream port |
-| Infrastructure | Kill VM instance | AWS FIS TerminateInstances |
+| Infrastructure | Kill VM instance | AWS FIS `aws:ec2:terminate-instances` |
 | Infrastructure | AZ failure | Revoke security group for one AZ |
 
 **Experiment types by scope**:
@@ -62,7 +62,7 @@ quadrantChart
     Continuous chaos - daily: [0.15, 0.9]
     Exploratory: [0.3, 0.2]
     Game Day: [0.55, 0.45]
-    Chaos Kong / AZ failure: [0.8, 0.6]
+    Chaos Kong - region failure: [0.8, 0.6]
     DR testing - DiRT: [0.92, 0.1]
 ```
 
@@ -209,8 +209,8 @@ tc qdisc del dev eth0 root
 ```json
 {
   "version": "1.0.0",
-  "title": "Inventory service latency does not affect checkout",
-  "description": "Add 200ms latency to inventory service, verify checkout maintains SLO",
+  "title": "Losing an inventory instance does not affect checkout",
+  "description": "Stop one inventory-service EC2 instance in us-east-1a, verify checkout maintains SLO",
   "steady-state-hypothesis": {
     "title": "Checkout API is healthy",
     "probes": [
@@ -228,7 +228,7 @@ tc qdisc del dev eth0 root
   },
   "method": [
     {
-      "name": "inject-inventory-latency",
+      "name": "stop-inventory-instance",
       "type": "action",
       "provider": {
         "type": "python",
@@ -272,7 +272,12 @@ chaos:
       service: true        # inject into @Service beans
       rest-controller: true
     assaults:
-      level: 5             # 1=low frequency, 10=every request
+      # level = "attack 1 in every N requests", range 1-10000.
+      # level: 1 attacks EVERY request; level: 5 attacks roughly every 5th.
+      # Higher numbers mean LESS frequent attacks, not more.
+      # By default the selection is probabilistic; set deterministic: true
+      # (default false) to attack exactly every Nth request.
+      level: 5
       latency-active: true
       latency-range-start: 1000  # 1000ms - 3000ms random latency
       latency-range-end: 3000
@@ -292,7 +297,9 @@ chaos:
 // }
 ```
 
-### AWS Fault Injection Simulator (FIS)
+### AWS Fault Injection Service (FIS)
+
+(Originally launched as "AWS Fault Injection Simulator"; AWS renamed it to Fault Injection Service in late 2023. The `fis` API, CLI and action IDs were unchanged by the rename.)
 
 ```json
 {
@@ -403,10 +410,10 @@ The first run is affordable — you could execute it roughly 86 times in a month
 
 ## 7. Real-World Examples
 
-- **Netflix**: Chaos Monkey (2011) randomly terminates EC2 instances during business hours. Engineers designed Netflix to handle instance loss because it happened routinely. Extended to Chaos Kong (AZ-level failure) and Chaos Gorilla (region-level failure). Result: Netflix survived a major AWS US-East-1 outage while competitors went down.
-- **Amazon**: GameDay exercises since 2004; a quarterly exercise where teams simulate failure scenarios; discovered that some fallback paths had never been exercised and had silent bugs
-- **LinkedIn**: Found that a key caching layer had a thundering herd problem only visible when the cache restarted — chaos experiment discovered this before a production incident
-- **Google**: DiRT (Disaster Recovery Testing) — annual multi-day exercise testing recovery from catastrophic failures; discovered documentation gaps and untested runbooks
+- **Netflix**: Chaos Monkey (announced in the July 2011 "Netflix Simian Army" post) randomly terminates EC2 instances during business hours. Engineers designed Netflix to handle instance loss because it happened routinely. The escalation ladder is instance → zone → region: **Chaos Gorilla** simulates the loss of an entire availability zone, and **Chaos Kong** the loss of an entire AWS region (the names are frequently swapped in secondary sources — the bigger ape is the bigger blast radius). Result: during the April 2011 US-East EBS outage Netflix kept streaming while Reddit, Quora and Foursquare went down; Netflix's own "Lessons Netflix Learned from the AWS Outage" post credits fail-fast timeouts, per-feature fallbacks and feature removal.
+- **Amazon**: GameDay exercises, created by Jesse Robbins ("Master of Disaster") in the early-to-mid 2000s and described in the 2012 ACM Queue article "Resilience Engineering: Learning to Embrace Failure"; teams deliberately inject major failures into critical systems on a recurring schedule and repeatedly find fallback paths that had never been exercised and carried silent bugs
+- **LinkedIn**: the SRE-led "Waterbear" resilience program and its **LinkedOut** framework (2018) inject errors, delays and timeouts at *request* granularity — a single request is selected via the LiX experiment framework or a cookie, so an engineer can fault their own traffic in production with a blast radius of exactly one user
+- **Google**: DiRT (Disaster Recovery Testing) — a company-wide, multi-day exercise run annually to test recovery from catastrophic failures; documented by Kripa Krishnan in "Weathering the Unexpected" (ACM Queue, 2012), which reports that the recurring findings are documentation gaps and untested runbooks rather than the technical faults themselves
 
 ---
 
@@ -475,7 +482,7 @@ Note that the second row breaches 99.9% from a single incident, because 45 minut
 |------|------|-------|
 | Chaos Toolkit | Open-source experiment runner | Python, JSON/YAML experiments, plugin architecture |
 | Chaos Monkey for Spring Boot | Library | Inject latency/exceptions into Spring beans |
-| AWS Fault Injection Simulator (FIS) | Managed service | EC2, ECS, RDS, EKS faults with CloudWatch stop conditions |
+| AWS Fault Injection Service (FIS) | Managed service | EC2, ECS, RDS, EKS faults with CloudWatch stop conditions; renamed from "Fault Injection Simulator" in 2023 |
 | Gremlin | Commercial SaaS | Comprehensive fault library, team collaboration features |
 | LitmusChaos | Kubernetes-native | CRD-based experiments, Argo Workflow integration |
 | ChaosBlade | Open-source | Network, CPU, memory, process, container faults |

@@ -79,7 +79,7 @@ flowchart LR
 
 **OpenTelemetry Pipeline**
 
-The OTel Collector ingests OTLP from the app SDK, batches and enriches it, then fans out to three specialized backends — Prometheus for metrics, Jaeger/Tempo for traces, and Loki for logs — each feeding its own UI.
+The OTel Collector ingests OTLP from the app SDK, batches and enriches it, then fans out to three specialized backends — Prometheus for metrics, Jaeger/Tempo for traces, and Loki for logs — each feeding its own UI. Note the exporter names: the Collector's dedicated `jaeger` exporter was removed in 2023 (Jaeger accepts OTLP natively) and the `loki` exporter was deprecated in 2024 (Loki 3 accepts OTLP natively), so traces go out over `otlp` and logs over `otlphttp`.
 
 ```mermaid
 flowchart LR
@@ -93,8 +93,8 @@ flowchart LR
 
     App(["App SDK"]) -->|"OTLP gRPC/HTTP"| Collector("OTel Collector<br/>batch + resource_detection")
     Collector -->|"exporter: prometheus"| Prom@{ icon: "logos:prometheus", form: "square", label: "Prometheus", pos: "b", h: 44 }
-    Collector -->|"exporter: jaeger"| Trace@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger / Tempo", pos: "b", h: 44 }
-    Collector -->|"exporter: loki"| Log("Loki")
+    Collector -->|"exporter: otlp"| Trace@{ icon: "simple-icons:jaeger", form: "square", label: "Jaeger / Tempo", pos: "b", h: 44 }
+    Collector -->|"exporter: otlphttp"| Log("Loki")
     Prom --> Grafana@{ icon: "logos:grafana", form: "square", label: "Grafana", pos: "b", h: 44 }
     Trace --> TraceUI(["Trace UI"])
     Log --> LogUI(["Log Aggregation"])
@@ -131,7 +131,8 @@ public class OrderService {
             .tag("service", "order")
             .publishPercentiles(0.5, 0.95, 0.99)  // client-side percentiles (memory overhead)
             .publishPercentileHistogram()           // server-side histogram for Prometheus
-            .sla(Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofMillis(500))
+            // .sla(...) is deprecated in Micrometer — use serviceLevelObjectives(...)
+            .serviceLevelObjectives(Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofMillis(500))
             .register(registry);
 
         // DistributionSummary: for non-time distributions (order value)
@@ -224,7 +225,7 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
 ### Structured Logging Configuration
 
 ```yaml
-# logback-spring.xml — JSON output for log aggregators
+# application.yaml — pattern carries traceId/correlationId into every line
 logging:
   pattern:
     console: "%d{ISO8601} [%thread] %-5level %logger{36} traceId=%X{traceId} correlationId=%X{correlationId} - %msg%n"
@@ -424,7 +425,7 @@ management:
 - **Netflix**: RED method dashboards (Rate, Errors, Duration) per microservice; Hollow for in-memory data cache with metrics per dataset
 - **Google**: Four Golden Signals (latency, traffic, errors, saturation); internal Monarch TSDB for metrics
 - **Uber**: M3 (open-source TSDB for aggregated metrics), Jaeger (open-source distributed tracer originated at Uber), structured logging with correlation IDs across 4000+ microservices
-- **Cloudflare**: tail-based sampling for traces — only retain traces with errors or high latency, reducing storage 99%
+- **Cloudflare**: Workers observability combines a configurable head sampling rate (`head_sampling_rate`) for normal traffic with Tail Workers that capture 100% of invocation and error events — the general pattern of sampling the boring traces hard while keeping every error trace
 
 ---
 
@@ -462,7 +463,14 @@ management:
 
 **MDC leaking between requests**: Developer forgot `MDC.clear()` in the finally block of a filter. ThreadLocal MDC context from one request leaked to the next request processed by the same thread. Logs for request B showed the correlation ID of request A. The fix is always `MDC.clear()` in a `finally` block.
 
-**Tracing overhead without sampling**: Adding OpenTelemetry without configuring a sampler defaults to recording every span. A service receiving 50K RPS × 20 spans per request = 1 million spans per second. The OTLP exporter became a bottleneck and caused 100ms latency increases. Always configure `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with a rate like `0.01` (1%) in production.
+**Tracing overhead without sampling**: Adding OpenTelemetry without configuring a sampler falls back to the SDK default `OTEL_TRACES_SAMPLER=parentbased_always_on`, which records every span. A service receiving 50K RPS × 20 spans per request = 1 million spans per second. The OTLP exporter became a bottleneck and caused 100ms latency increases. The sampler name and its ratio are **two separate environment variables** — the ratio does not go in `OTEL_TRACES_SAMPLER`:
+
+```bash
+OTEL_TRACES_SAMPLER=parentbased_traceidratio   # sampler name only
+OTEL_TRACES_SAMPLER_ARG=0.01                   # the ratio, 0.0-1.0 (1% here)
+```
+
+`OTEL_TRACES_SAMPLER_ARG` is ignored unless `OTEL_TRACES_SAMPLER` is also set, and an unset ratio defaults to `1.0` (sample everything) — so setting only the sampler name changes nothing.
 
 **Alert fatigue from CPU-based alerts**: Team had 50 CPU > 80% alerts per week. None of them indicated user impact. Engineers stopped looking at alerts. Critical incidents were missed in the noise. Solution: delete CPU alerts, replace with p99 latency and error rate alerts. Alerts dropped to 2 per week, all indicating real user impact.
 
@@ -477,7 +485,7 @@ management:
 | Prometheus | Pull-based metrics TSDB, PromQL query language |
 | Grafana | Dashboard and alerting UI |
 | OpenTelemetry (OTel) | Vendor-neutral instrumentation SDK + collector |
-| Jaeger / Zipkin | Distributed trace storage and UI |
+| Jaeger / Zipkin | Distributed trace storage and UI (Jaeger v2 is built on the OTel Collector and ingests OTLP natively) |
 | Grafana Tempo | Cost-effective trace storage (no indexes) |
 | Grafana Loki | Log aggregation (indexed labels only, log content not indexed) |
 | ELK Stack | Elasticsearch + Logstash + Kibana for log search |
@@ -495,7 +503,7 @@ Metrics are aggregated numeric measurements (counters, gauges, histograms) with 
 Each unique combination of label values creates a separate time series. A metric with labels `{status="200", method="GET", userId="12345"}` creates one series per user. With 1 million users, that's 1 million time series. Prometheus stores each series in memory; high cardinality exhausts heap, increases scrape latency, and can crash the TSDB. Solution: only use low-cardinality, finite-set values as metric labels. High-cardinality values belong in trace span attributes or structured log fields.
 
 **Q: What is the difference between head-based and tail-based sampling in distributed tracing?**
-Head-based sampling makes the decision at the trace root (the first span): sample this trace or not. It has low overhead since downstream services inherit the decision. However, it samples blindly — a 1% rate may miss the one slow request in 1000. Tail-based sampling buffers the entire trace and makes the decision after all spans arrive: always keep error traces and traces over p99 latency threshold, sample normal traces at 1%. It has higher memory cost but ensures important traces are always retained. Jaeger Collector supports tail-based sampling via the adaptive sampler.
+Head-based sampling makes the decision at the trace root (the first span): sample this trace or not. It has low overhead since downstream services inherit the decision. However, it samples blindly — a 1% rate may miss the one slow request in 1000. Tail-based sampling buffers the entire trace and makes the decision after all spans arrive: always keep error traces and traces over p99 latency threshold, sample normal traces at 1%. It has higher memory cost but ensures important traces are always retained. Do not confuse the two in Jaeger: Jaeger's own remote/adaptive sampler is head-based (it recalculates per-service probabilities and pushes them to the SDK), while tail-based sampling comes from the OpenTelemetry Collector's `tail_sampling` processor, which Jaeger v2 embeds because v2 is built on the OTel Collector.
 
 **Q: How do you propagate trace context across service boundaries?**
 The trace context (trace ID, span ID, sampling flag) is injected into outgoing requests as HTTP headers. B3 propagation uses `X-B3-TraceId`, `X-B3-SpanId`, `X-B3-ParentSpanId`, `X-B3-Sampled`. W3C TraceContext (standardized) uses a single `traceparent: 00-{traceId}-{parentSpanId}-{flags}` header. OpenTelemetry Java auto-instrumentation handles propagation automatically for RestTemplate, WebClient, HttpClient, and Kafka. For custom transports, use `W3CTraceContextPropagator.inject(context, carrier, setter)` manually.
@@ -519,7 +527,7 @@ TRACE: every method entry/exit, variable values — development only, never prod
 When a service publishes to Kafka, it injects the trace context into Kafka message headers using OpenTelemetry's `TextMapSetter`. When the consumer reads the message, it extracts the context using `TextMapGetter` and creates a new root span with a `FOLLOWS_FROM` link to the producer span (not a parent-child relationship, since the consumer may run minutes later). This links the producer and consumer traces in the UI for async correlation. Micrometer Tracing handles this automatically with Spring Kafka when using the OTel bridge.
 
 **Q: What is the difference between Grafana Loki and Elasticsearch for logs?**
-Elasticsearch indexes every field of every log entry — enabling fast full-text search on any field. This makes it powerful but expensive: indexing overhead, high disk usage (inverted index), and significant memory. Loki only indexes configured labels (service, environment, log level) and stores log content as compressed chunks. Querying log content requires scanning compressed chunks (slower for regex across large volumes). Loki is 10x cheaper to operate than Elasticsearch for log aggregation where most queries filter by label first. Choose Elasticsearch for compliance log search (complex queries), Loki for operational troubleshooting (label-filtered queries).
+Elasticsearch indexes every field of every log entry — enabling fast full-text search on any field. This makes it powerful but expensive: indexing overhead, high disk usage (inverted index), and significant memory. Loki only indexes configured labels (service, environment, log level) and stores log content as compressed chunks. Querying log content requires scanning compressed chunks (slower for regex across large volumes). Loki is typically substantially cheaper to operate for log aggregation where most queries filter by label first — the saving comes from not building an inverted index, so benchmark it on your own retention and query mix rather than trusting a headline multiplier. Choose Elasticsearch for compliance log search (complex queries), Loki for operational troubleshooting (label-filtered queries).
 
 **Q: How do you avoid creating dashboards that look healthy during incidents?**
 Avoid using averages — a p50 latency of 50ms looks fine even if p99 is 5 seconds (5% of users experience 5s latency). Always show p95 and p99. Avoid success-rate dashboards that aggregate across services — a healthy service can mask a broken one. Show error rates per service and endpoint. Include the error budget burn rate — if the error budget is burning 3x faster than expected, alert before the SLO is breached. Use multi-window burn rate alerts (short window for fast detection, long window for sustained burn) per the Google SRE workbook.
@@ -534,7 +542,7 @@ Key JVM metrics via Micrometer: `jvm.memory.used` / `jvm.memory.max` per pool (h
 MDC is backed by a ThreadLocal, so an uncleared value leaks into whichever request the same pooled thread handles next, not just the one that set it. Application servers reuse a fixed-size thread pool across requests rather than spawning a new thread per request, so a filter that populates MDC but skips the cleanup leaves stale correlation IDs sitting on that thread for the next unrelated request to inherit. In production this shows up as request B's logs carrying request A's correlation ID or trace ID, making log-based incident investigation actively misleading rather than just incomplete. Always populate MDC inside a try block and clear it in a matching finally block — `MDC.clear()` must run regardless of whether the request succeeded, failed, or threw.
 
 **Q: What happens if you enable OpenTelemetry auto-instrumentation without configuring a sampler?**
-Without an explicit sampler, OpenTelemetry records every single span by default, and at high request volume the exporter itself can become the bottleneck. A service handling 50,000 requests per second with 20 spans per request produces roughly 1 million spans per second, and one team saw their OTLP exporter saturate under that load, adding 100ms of latency across the entire service. The overhead is easy to miss in staging because it only appears at production traffic volume, by which point every request is paying the tracing tax. Always set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with a rate such as 0.01 to 0.1 in production, and confirm the sampling decision propagates consistently downstream so a trace isn't fragmented across services.
+The SDK falls back to its default sampler `parentbased_always_on`, which records every single span, and at high request volume the exporter itself becomes the bottleneck. A service handling 50,000 requests per second with 20 spans per request produces roughly 1 million spans per second, and one team saw their OTLP exporter saturate under that load, adding 100ms of latency across the entire service. The overhead is easy to miss in staging because it only appears at production traffic volume, by which point every request is paying the tracing tax. Configure the sampler with two environment variables, not one — `OTEL_TRACES_SAMPLER=parentbased_traceidratio` selects the sampler and `OTEL_TRACES_SAMPLER_ARG=0.01` supplies the ratio; putting the ratio in `OTEL_TRACES_SAMPLER` leaves you on the default 1.0 and changes nothing. Then confirm the sampling decision propagates consistently downstream so a trace isn't fragmented across services.
 
 ---
 
@@ -545,7 +553,7 @@ Without an explicit sampler, OpenTelemetry records every single span by default,
 - Log at INFO level for every significant state transition (order created, payment initiated, shipment dispatched)
 - Never log authentication tokens, passwords, credit card numbers, or PII at any level — use masking patterns
 - Use `AsyncAppender` in Logback to avoid blocking request threads on disk I/O
-- Set OTel Java agent's sampler to `parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1` (10%) in production
+- Override the OTel SDK default (`parentbased_always_on`) in production with both variables: `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and `OTEL_TRACES_SAMPLER_ARG=0.1` (10%)
 - Create SLO-based dashboards first, then drill-down dashboards for investigation
 - Burn rate alerts (consuming error budget faster than 1x) are better than threshold alerts
 - Validate alerting is working with synthetic monitors (always-on requests from external locations)
