@@ -78,10 +78,12 @@ PostgreSQL's MVCC creates dead tuples (old row versions after UPDATE/DELETE). VA
 
 Autovacuum fires on a table when:
 ```
-dead_tuples > autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × reltuples
-default:    50            +               0.2               × row_count
+dead_tuples > Minimum(autovacuum_vacuum_max_threshold,
+                      autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × reltuples)
+default:     Minimum(100,000,000, 50 + 0.2 × row_count)
 
 For a 10M-row table: 50 + 0.2 × 10,000,000 = 2,000,050 dead tuples before autovacuum fires
+For a 5B-row table:  0.2 × 5,000,000,000 = 1B, capped by the max threshold at 100,000,000
 ```
 
 This means a table receiving 200K updates/day won't trigger autovacuum for 10 days — 2M dead tuples accumulate.
@@ -93,6 +95,7 @@ This means a table receiving 200K updates/day won't trigger autovacuum for 10 da
 | `dead_tuples` | Current count of dead row versions — `n_dead_tup` in `pg_stat_user_tables` |
 | `autovacuum_vacuum_threshold` | Flat floor, default `50` rows. Only decisive on tiny tables |
 | `autovacuum_vacuum_scale_factor` | Fraction of the table, default `0.2` — that is 20% |
+| `autovacuum_vacuum_max_threshold` | Hard cap on the computed gate, default `100,000,000` dead tuples |
 | `reltuples` | Planner's estimate of live rows, refreshed by the last ANALYZE |
 
 **Walk one example.** The same 10M-row table, at the default scale factor and at the tuned one:

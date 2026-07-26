@@ -637,18 +637,17 @@ All SDKs below are **official**, hosted under the `modelcontextprotocol` GitHub 
 
 ### Reference Server Implementations
 
-Only seven reference servers remain actively maintained in `modelcontextprotocol/servers`; everything else was archived during 2025 and the npm packages carry a deprecation notice.
+Seven reference servers are maintained in `modelcontextprotocol/servers`. Everything vendor-specific lives in the vendor's own repository instead — `github/github-mcp-server` for GitHub, `@playwright/mcp` for the browser, and equivalents from Slack, Atlassian, Stripe and others.
 
-| Server Package | Capabilities | Status |
-|----------------|-------------|-----------|
-| `@modelcontextprotocol/server-filesystem` | Read, write, list local files | Current |
-| `@modelcontextprotocol/server-memory` | Knowledge-graph memory for agents | Current |
-| `@modelcontextprotocol/server-everything` | Exercises every MCP feature; a test/reference server | Current |
-| `@modelcontextprotocol/server-sequential-thinking` | Structured step-by-step reasoning aid | Current |
-| `mcp-server-git` (PyPI, run via `uvx`) | Git read/search/manipulate | Current |
-| `mcp-server-fetch` (PyPI, run via `uvx`) | Fetch a URL and convert to Markdown | Current |
-| `mcp-server-time` (PyPI, run via `uvx`) | Time and timezone conversion | Current |
-| `server-github`, `server-postgres`, `server-slack`, `server-sqlite`, `server-puppeteer`, `server-brave-search`, `server-gitlab`, `server-google-drive`, `server-redis`, `server-sentry` | Various | **Archived / deprecated** — prefer the vendor's own server (e.g. `github/github-mcp-server`, `@playwright/mcp`) |
+| Server Package | Capabilities |
+|----------------|-------------|
+| `@modelcontextprotocol/server-filesystem` | Read, write, list local files |
+| `@modelcontextprotocol/server-memory` | Knowledge-graph memory for agents |
+| `@modelcontextprotocol/server-everything` | Exercises every MCP feature; a test/reference server |
+| `@modelcontextprotocol/server-sequential-thinking` | Structured step-by-step reasoning aid |
+| `mcp-server-git` (PyPI, run via `uvx`) | Git read/search/manipulate |
+| `mcp-server-fetch` (PyPI, run via `uvx`) | Fetch a URL and convert to Markdown |
+| `mcp-server-time` (PyPI, run via `uvx`) | Time and timezone conversion |
 
 ### MCP-Compatible Client Applications
 

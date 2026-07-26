@@ -450,7 +450,7 @@ is withholding the information that determines whether the retry succeeds.
 ## 12. Interview Questions with Answers
 
 **Q: What are the MCP primitives and how do they differ?**
-Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer three back to servers: Sampling (the server asks the client to run an LLM call on its behalf), Roots (the server asks which URI or filesystem boundaries it may operate in), and Elicitation (added in 2025-06-18: the server asks the user for extra input mid-task). Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability at initialize.
+Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer three back to servers: Sampling (the server asks the client to run an LLM call on its behalf), Roots (the server asks which URI or filesystem boundaries it may operate in), and Elicitation (the server asks the user for extra input mid-task). Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability at initialize.
 
 **Q: What's the difference between FastMCP and the bare Python SDK?**
 FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resource()`) — closer to FastAPI ergonomics. Bare SDK gives you direct access to request handlers (more code, more control). FastMCP is recommended for most server implementations.
@@ -459,7 +459,7 @@ FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resourc
 Client sends `initialize` with protocolVersion and its capabilities (e.g., sampling support). Server responds with its capabilities (resources/tools/prompts available). Both parties know what the other supports. Notifications about list changes (e.g., `notifications/tools/list_changed`) are only sent if the recipient supports them.
 
 **Q: Why use stdio vs HTTP transport?**
-Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP, since the 2025-03-26 revision): server runs as an HTTP service on a single MCP endpoint; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
+Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP): server runs as an HTTP service on a single MCP endpoint that serves both POST and GET; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
 
 **Q: What's the right way to describe a tool?**
 Description should answer: what does this tool do? When should the LLM use it? What does it return? Include example use cases. The LLM reads the description to decide when to call — vague descriptions cause missed or wrong calls. Augment with type hints + Pydantic Field descriptions for parameters.

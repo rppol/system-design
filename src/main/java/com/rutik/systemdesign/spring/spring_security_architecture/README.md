@@ -703,7 +703,7 @@ public SecurityFilterChain apiChain(HttpSecurity http) throws Exception {
     http
         .securityMatcher("/api/**")                 // this chain only claims /api/**
         .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-        .csrf(CsrfConfigurer::disable)
+        .csrf(AbstractHttpConfigurer::disable)
         .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
         .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
     return http.build();
@@ -797,7 +797,7 @@ http.authorizeHttpRequests(auth -> auth
 | Technology | Role | Notes |
 |---|---|---|
 | `spring-boot-starter-security` | Auto-configures Spring Security with sensible defaults | Enables HTTP Basic, generates random password on startup if no config |
-| Spring Security 6.x | Core framework | Requires Spring Boot 3.x; Java 17 minimum |
+| Spring Security 7.x | Core framework | Ships with Spring Boot 4.x (Boot 4.1 → Security 7.1); Java 17 minimum |
 | `spring-security-oauth2-resource-server` | JWT/opaque token validation for APIs | `http.oauth2ResourceServer(...)` |
 | `spring-security-oauth2-client` | OAuth2 login (social login, SSO) | Handles authorization code flow |
 | `spring-security-test` | `@WithMockUser`, `@WithUserDetails`, `MockMvc` security testing | `SecurityMockMvcRequestPostProcessors.csrf()` |

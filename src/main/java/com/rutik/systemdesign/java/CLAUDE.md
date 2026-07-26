@@ -27,7 +27,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `networking_and_http_client/` | HttpClient (Java 11), NIO Selector, Reactor pattern, HTTP/2 |
 | `jdbc_and_database/` | PreparedStatement, HikariCP, transaction isolation, batch inserts |
 | `strings_and_text/` | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concat (JEP 280), StringBuilder, text blocks (JEP 378), Unicode correctness |
-| `structured_concurrency_and_loom/` | Virtual threads (JEP 444), carrier threads, pinning, StructuredTaskScope (JEP 453), ScopedValue (JEP 446), Continuation internals, Java 21 GA |
+| `structured_concurrency_and_loom/` | Virtual threads (JEP 444, Java 21 GA), carrier threads, `synchronized` no longer pins (JEP 491, Java 24), remaining native-frame pinning, StructuredTaskScope (JEP 525, preview in Java 26), ScopedValue (JEP 506, final in Java 25), Continuation internals |
 | `foreign_function_and_memory_api/` | Panama: Arena, MemorySegment, MemoryLayout, VarHandle, Linker (JEP 454), downcall/upcall handles, jextract, replacing Unsafe/JNI, Java 22 GA |
 | `reactive_programming/` | Reactor Flux/Mono, Reactive Streams/Flow, cold vs hot, flatMap/concatMap/switchMap, backpressure strategies, Schedulers (subscribeOn vs publishOn), Reactor Context, RxJava 3, StepVerifier |
 | `microservices_patterns/` | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead (thread-pool vs semaphore) |
@@ -132,9 +132,9 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 ## Java Version Tags
 
 When covering a feature, always include the version it was introduced and LTS status:
-- Java 8 (LTS), Java 11 (LTS), Java 17 (LTS), Java 21 (LTS)
-- Non-LTS: 9, 10, 12–16, 18–20
-- Format: `[Java 21]` or `[JEP 444, Java 21 GA]`
+- Java 8 (LTS), Java 11 (LTS), Java 17 (LTS), Java 21 (LTS), Java 25 (LTS — the current baseline)
+- Non-LTS: 9, 10, 12–16, 18–20, 22–24, 26
+- Format: `[Java 25]` or `[JEP 444, Java 21 GA]`
 
 ## Content Rules (Java-specific)
 
@@ -142,7 +142,7 @@ When covering a feature, always include the version it was introduced and LTS st
 - **Effective Java references** where applicable: Item 1, Item 3, Item 17, etc.
 - Q&A minimums: **15 per module** (absolute floor); **18+** for `concurrency/`, `jvm_internals/`, `java_memory_model/`, `collections_internals/`, `generics_and_type_system/`
 - Order Q&As by interview frequency: self-invocation traps, volatile vs synchronized, HashMap resize, class loading — gotchas first; internals second; edge cases last
-- Code must compile against Java 17+ (or the specific LTS relevant to the feature)
+- Code must compile against Java 21+ (Java 25 LTS is the section baseline; use an older LTS only when the feature under discussion requires it)
 
 ## Adding a New Java Module
 

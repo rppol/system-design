@@ -875,19 +875,18 @@ def worker_process(request_queue, result_queue, model_path):
         result_queue.put(result)
 
 # FIX: use vLLM's built-in async engine with proper async serving
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.engine.arg_utils import AsyncEngineArgs
-import asyncio
 
 engine_args = AsyncEngineArgs(
-    model="mistralai/Mistral-7B-Instruct-v0.2",
+    model="mistralai/Mistral-7B-Instruct-v0.3",
     tensor_parallel_size=2,        # use 2 GPUs via NVLink, not custom IPC
     max_num_seqs=256,              # max concurrent sequences
     max_num_batched_tokens=32768,  # continuous batching token budget
     block_size=16,                 # KV cache block size in tokens
     gpu_memory_utilization=0.90,   # leave 10% headroom for CUDA overhead
 )
-engine = AsyncLLMEngine.from_engine_args(engine_args)
+engine = AsyncLLM.from_engine_args(engine_args)
 
 async def generate(prompt: str, request_id: str) -> str:
     from vllm import SamplingParams
