@@ -50,7 +50,7 @@ npx -y @smithery/cli install @modelcontextprotocol/server-filesystem --client cl
 
 ### 4.3 Reference Servers (github.com/modelcontextprotocol/servers)
 
-Reference implementations described by the repo as "the small number of reference servers maintained by the MCP steering group" — Anthropic donated MCP to the Linux Foundation's Agentic AI Foundation in December 2025, so these are no longer Anthropic-owned. The repo also warns they are educational examples, not production-ready solutions. Highest quality bar; often the canonical implementation of common patterns. The set narrowed sharply during 2025 — only **everything, fetch, filesystem, git, memory, sequential-thinking and time** remain active. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers moved to an archive repo and their npm packages are marked deprecated. Several have first-party successors maintained by the vendor instead (`github/github-mcp-server`, `@playwright/mcp`).
+Reference implementations described by the repo as "the small number of reference servers maintained by the MCP steering group" — MCP is governed by the Linux Foundation's Agentic AI Foundation, to which Anthropic donated it in December 2025. The repo also warns they are educational examples, not production-ready solutions. Highest quality bar; often the canonical implementation of common patterns. The active set is deliberately narrow: **everything, fetch, filesystem, git, memory, sequential-thinking and time**. For anything with a vendor-maintained server — GitHub, Postgres, Slack, Sentry, browser automation — use the vendor's own (`github/github-mcp-server`, `@playwright/mcp`); the community wrappers for those products live in `modelcontextprotocol/servers-archived`.
 
 ### 4.4 Community Server Lists and Aggregators
 
@@ -139,7 +139,7 @@ Common Servers Categorization
     aws, gcp, cloudflare, vercel, fly
 
   Specialized:
-    puppeteer/playwright (browser), code interpreter,
+    playwright (browser), code interpreter,
     image generation, voice synthesis
 ```
 
@@ -197,7 +197,7 @@ npx -y @smithery/cli uninstall @modelcontextprotocol/server-filesystem --client 
 
 Path: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
 
-Every package above is one of the seven still-maintained reference servers. Do **not** copy the once-common `@modelcontextprotocol/server-github`, `server-postgres`, `server-slack`, `server-brave-search`, `server-puppeteer` or `server-gitlab` names from older tutorials — those were archived during 2025 and their npm entries carry a deprecation notice. Use the vendor's own server instead (`github/github-mcp-server`, `@playwright/mcp`). There was never an npm `@modelcontextprotocol/server-sqlite`; the SQLite reference server was a Python package and is likewise archived.
+Every package above is one of the seven maintained reference servers. For GitHub, Postgres, Slack, search or browser automation, configure the vendor's own server (`github/github-mcp-server`, `@playwright/mcp`, and so on) rather than the `@modelcontextprotocol/server-*` names that older tutorials still show — those npm entries are archived and carry a deprecation notice.
 
 ### Publishing Your Own Server to Smithery
 
@@ -258,15 +258,10 @@ async with install_and_use("@modelcontextprotocol/server-filesystem") as session
 **Most-downloaded `@modelcontextprotocol/*` servers on npm** (weekly downloads, npm registry API, late July 2026 — downloads are the only publicly published usage metric; nobody publishes an "install" count):
 - `server-filesystem` — ~472K/week; access local files
 - `server-sequential-thinking` — ~143K/week; reasoning aid
-- `server-postgres` — ~129K/week (**deprecated/archived**; traffic is legacy configs)
-- `server-github` — ~128K/week (**deprecated/archived**; superseded by `github/github-mcp-server`)
 - `server-memory` — ~99K/week; persistent agent memory
-- `server-slack` — ~90K/week (**deprecated/archived**)
 - `server-everything` — ~66K/week; feature/test reference server
-- `server-puppeteer` — ~35K/week (**deprecated/archived**; superseded by `@playwright/mcp`)
-- `server-brave-search` — ~30K/week (**deprecated/archived**)
 
-Note the shape of that list: four of the top nine are archived packages that are still being pulled tens of thousands of times a week by unpinned or copy-pasted configs. Download volume is a lagging indicator of tutorials, not of maintenance status.
+Read that list with one caveat: archived packages still post comparable numbers (`server-postgres` ~129K/week, `server-github` ~128K, `server-slack` ~90K) because unpinned configs copied from old tutorials keep pulling them. Download volume is a lagging indicator of tutorial reach, not of maintenance status — never use it as a health signal on its own.
 
 **Enterprise patterns**:
 - Internal registries (private Smithery deployment, internal npm)
@@ -362,7 +357,7 @@ npx @modelcontextprotocol/inspector @random/social-server
 Smithery (smithery.ai) is the leading third-party MCP server registry — analogous to npm for Node, PyPI for Python. It indexed roughly 7,300 servers as of May 2026, and supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Since September 2025 it sits downstream of the official MCP Registry, which is the canonical metadata source aggregators are expected to pull from.
 
 **Q: Where do I find the official MCP reference servers?**
-GitHub at `modelcontextprotocol/servers`, maintained by the MCP steering group rather than by Anthropic since the December 2025 donation to the Agentic AI Foundation. Only seven remain active: everything, fetch, filesystem, git, memory, sequential-thinking and time. The github, gitlab, sqlite, postgres, brave-search, slack, puppeteer, google-drive, redis and sentry servers were archived during 2025 into `modelcontextprotocol/servers-archived` and their npm packages are marked deprecated. These are reference implementations — educational examples of "how to build this kind of server," explicitly not production-ready solutions.
+GitHub at `modelcontextprotocol/servers`, maintained by the MCP steering group under the Linux Foundation's Agentic AI Foundation. Seven are active: everything, fetch, filesystem, git, memory, sequential-thinking and time. These are reference implementations — educational examples of "how to build this kind of server," explicitly not production-ready solutions. For a real product integration reach for the vendor's own server (`github/github-mcp-server`, `@playwright/mcp`); the community wrappers that used to cover those products sit in `modelcontextprotocol/servers-archived`.
 
 **Q: How do I install an MCP server for Claude Desktop?**
 Either: (1) use Smithery CLI: `npx -y @smithery/cli install @author/server --client claude`. (2) Manually edit `claude_desktop_config.json` — add server entry with command/args/env. Restart Claude Desktop to load.
@@ -438,7 +433,7 @@ Yes, and first-party vendor servers are now the norm rather than the exception. 
 
 **Server categories**:
 - Internal-built (12): Salesforce wrapper, Jira wrapper, internal API gateways, etc
-- Approved community (8): filesystem, github, brave-search, postgres, etc
+- Approved community (8): filesystem, git, fetch, memory, `github/github-mcp-server`, etc
 - Rejected (24): various security concerns — dynamic code execution, overly broad scopes, low quality
 
 **Results in 6 months**:

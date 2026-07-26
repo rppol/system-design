@@ -219,8 +219,8 @@ EDGE / ON-DEVICE SLM DEPLOYMENT
 +-------------------------------------------+
 |  Mobile App                               |
 |  +---------------------------------------+|
-|  | Inference Runtime (llama.cpp/ONNX)   ||
-|  | 1B-7B Model (quantized Q4, ~2-4 GB)  ||
+|  | Inference Runtime (llama.cpp/ONNX)   | |
+|  | 1B-7B Model (quantized Q4, ~2-4 GB)  | |
 |  | Neural Processing Unit / CPU / GPU    ||
 |  | Latency: 10-100ms (device-local)      ||
 |  +---------------------------------------+|
@@ -911,26 +911,26 @@ MOBILE APP ARCHITECTURE
 ========================
 
 +---------------------------------------------------------------+
-|                        Mobile App                             |
-|                                                               |
+|                        Mobile App                            |
+|                                                              |
 |  +------------------+  +------------------+  +------------+  |
 |  | Summarization    |  | Translation      |  | Q&A        |  |
 |  | Feature          |  | Feature          |  | Feature    |  |
 |  +--------+---------+  +--------+---------+  +-----+------+  |
-|           |                     |                  |          |
-|           v                     v                  v          |
+|           |                     |                  |         |
+|           v                     v                  v         |
 |  +-------------------------------------------------------+   |
 |  |              On-Device AI Router                      |   |
 |  |  Task classifier (rule-based + heuristic)             |   |
 |  |  Context length estimator                             |   |
 |  |  Confidence threshold evaluator                       |   |
 |  +------------------------+------------------------------+   |
-|                           |                                   |
-|            +--------------+--------------+                    |
-|            v                             v                    |
+|                           |                                  |
+|            +--------------+--------------+                   |
+|            v                             v                   |
 |  +------------------+       +--------------------------+     |
-|  | On-Device Model  |       | Cloud Fallback          |     |
-|  | (Primary)        |       | (Escalation Only)       |     |
+|  | On-Device Model  |       | Cloud Fallback          |      |
+|  | (Primary)        |       | (Escalation Only)       |      |
 |  |                  |       | - Pages > 10             |     |
 |  | Phi-3 Mini Q4    |       | - Unsupported languages  |     |
 |  | GGUF (Android)   |       | - Low confidence output  |     |

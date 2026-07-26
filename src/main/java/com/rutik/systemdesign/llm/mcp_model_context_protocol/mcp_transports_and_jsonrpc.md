@@ -6,9 +6,9 @@ Deep-dive sub-file of [MCP — Model Context Protocol](README.md).
 
 ## 1. Concept Overview
 
-MCP uses JSON-RPC 2.0 as its message format over the two transports the spec standardizes: **stdio** (client spawns server as a subprocess, communicates via standard input/output streams) and **Streamable HTTP** (HTTP service receiving POST requests and optionally emitting Server-Sent Events). The older HTTP+SSE transport from the `2024-11-05` revision is deprecated and kept only for legacy compatibility.
+MCP uses JSON-RPC 2.0 as its message format over the two transports the spec standardizes: **stdio** (client spawns server as a subprocess, communicates via standard input/output streams) and **Streamable HTTP** (HTTP service receiving POST requests and optionally emitting Server-Sent Events). Clients SHOULD support stdio whenever possible; anything else is a custom, non-standardized transport.
 
-This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications), transport selection trade-offs (stdio vs HTTP), the Streamable HTTP transport introduced in the `2025-03-26` revision, connection lifecycle (handshake, ping, transport-level shutdown), reconnection and resumability semantics, and concrete latency numbers for each. It also covers one JSON-RPC feature MCP deliberately does **not** use: request batching, removed in the `2025-06-18` revision. Descriptions here track the current released revision, `2025-11-25`.
+This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications), transport selection trade-offs (stdio vs HTTP), the Streamable HTTP transport in detail, connection lifecycle (handshake, ping, transport-level shutdown), reconnection and resumability semantics, and concrete latency numbers for each. It also covers one JSON-RPC feature MCP deliberately does **not** have: request batching — every message is its own POST. Descriptions here track the current released revision, `2025-11-25`.
 
 ---
 
@@ -20,13 +20,13 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 
 **Why it matters**: Transport choice affects latency, security, scalability, and deployment topology. Stdio is fast (~1-2ms message round-trip) but local-only. Streamable HTTP supports remote servers (10-50ms RTT) and multi-client serving. Get the transport choice wrong, and you'll fight infrastructure constraints.
 
-**Key insight**: The `2025-03-26` revision replaced the original HTTP+SSE transport with Streamable HTTP — a single endpoint that handles both stateless single-request and stateful streaming sessions. Massively simpler to deploy than the previous "two endpoints, one for events, one for requests" design. The `2026-07-28` release candidate continues in the same direction, dropping the protocol-level session entirely so any request can land on any server instance.
+**Key insight**: Streamable HTTP is *one* endpoint that serves both POST and GET, and the server decides per request whether to answer with a single JSON object or upgrade to a `text/event-stream`. That one-endpoint design is what lets the same server handle a stateless single-request client and a stateful streaming session without separate deployment topologies. The `2026-07-28` release candidate pushes further in the same direction, dropping the protocol-level session entirely so any request can land on any server instance.
 
 ---
 
 ## 3. Core Principles
 
-- **JSON-RPC 2.0 contract**: id-based correlation and error codes. Batching is part of JSON-RPC but **not** of MCP — it was removed in the `2025-06-18` revision.
+- **JSON-RPC 2.0 contract**: id-based correlation and error codes. Batching is part of JSON-RPC but **not** of MCP — one message per POST, always.
 - **Three message types**: request (id, expects response), response (echoes id), notification (no id, no response).
 - **Stdio framing**: newline-delimited JSON-RPC over stdin/stdout; messages must not contain embedded newlines, and stdout carries nothing but MCP messages.
 - **HTTP framing**: one POST per message; response may be JSON or an SSE stream.
@@ -42,15 +42,17 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 
 Client spawns server as subprocess. Server reads requests from stdin (newline-delimited JSON-RPC), writes responses to stdout. Use for local tools (filesystem, local DB, single-user CLI).
 
-### 4.2 Streamable HTTP Transport (since 2025-03-26)
+### 4.2 Streamable HTTP Transport
 
 Server is an HTTP service with a single MCP endpoint supporting both POST and GET. Client POSTs each message; server responds with either standard JSON (one-shot) or `text/event-stream` (SSE) for streaming responses. Optional stateful sessions via the `MCP-Session-Id` header, and the negotiated version must be echoed in `MCP-Protocol-Version` on every request after `initialize`.
 
-### 4.3 Legacy HTTP+SSE Transport (Deprecated)
+Three operational rules the spec makes mandatory and SDK users still get wrong:
 
-The `2024-11-05` transport: server exposed two endpoints — `/sse` (GET, server→client events) and a POST endpoint advertised via an `endpoint` event (client→server). Replaced by Streamable HTTP in the `2025-03-26` revision. Some older servers still use it; a client can detect it by POSTing `initialize` and falling back to the GET/`endpoint` handshake on a 400/404/405.
+- **Validate `Origin` on every incoming connection** and answer 403 when it is present and invalid — without this, a web page can reach a locally bound MCP server via DNS rebinding. Bind local servers to `127.0.0.1`, not `0.0.0.0`.
+- **A client GET opens a server→client SSE stream.** The server either returns `text/event-stream` or 405 to say it offers no such stream. Requests and notifications the server initiates ride this stream.
+- **Resumability is per-stream.** If the server attaches `id` fields to SSE events, a disconnected client resumes by re-issuing a GET with `Last-Event-ID`; the server replays only messages from the stream that dropped, never from a different one. Disconnection is not cancellation — to cancel, send an explicit `CancelledNotification`.
 
-### 4.4 Custom Transports
+### 4.3 Custom Transports
 
 In theory, any reliable bidirectional message channel works. Some use cases: WebSocket transports, Unix domain sockets, named pipes. Not standardized.
 
@@ -227,8 +229,8 @@ class StreamableHTTPClient:
         self.http = httpx.AsyncClient(timeout=60)
 
     async def call(self, method: str, params: dict = None) -> dict:
-        """Single JSON-RPC call. MCP removed batching in 2025-06-18: the POST body
-        MUST be exactly one request, notification, or response."""
+        """Single JSON-RPC call. The POST body MUST be exactly one request,
+        notification, or response — MCP has no batch array."""
         message = {
             "jsonrpc": "2.0",
             "id": self.next_id,
@@ -296,40 +298,29 @@ init = await client.initialize()
 tools = await client.call("tools/list")
 ```
 
-### Batching: a JSON-RPC 2.0 Feature that MCP Removed
+### One Message per POST: Overlapping the Discovery Calls
 
-JSON-RPC 2.0 allows a client to send an *array* of requests and receive an array of responses.
-**MCP supported this only briefly and removed it in the `2025-06-18` revision.** Under the current
-spec the Streamable HTTP body "MUST be a single JSON-RPC *request*, *notification*, or *response*",
-and a batch array is simply invalid. Do not send one, and do not build a client that expects a
-server to accept one.
+MCP requires the Streamable HTTP body to be "a single JSON-RPC *request*, *notification*, or
+*response*". Plain JSON-RPC 2.0 permits an *array* of requests; MCP does not, and a server is
+free to reject one with 400. So startup capability discovery is three separate POSTs:
 
 ```json
-// What batching looked like — INVALID in MCP since 2025-06-18
-[
-  {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-  {"jsonrpc": "2.0", "id": 2, "method": "resources/list"},
-  {"jsonrpc": "2.0", "id": 3, "method": "prompts/list"}
-]
-```
-
-```json
-// Current spec: one message per POST. Discovery is three separate calls.
+// One message per POST. Discovery is three calls, not one array.
 {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+{"jsonrpc": "2.0", "id": 2, "method": "resources/list"}
+{"jsonrpc": "2.0", "id": 3, "method": "prompts/list"}
 ```
 
-The arithmetic below is retained because it explains **what the removal costs and why the working
-group judged it acceptable** — not as guidance to batch. It is also the right model for the
-mitigation that *is* available: issue the three discovery calls concurrently on a connection that
-is already open, so they overlap in flight rather than serializing.
+The three are independent, so issue them **concurrently** on the already-open connection and
+they overlap in flight rather than serializing. The arithmetic below sizes that win — and, more
+usefully, shows where it stops mattering.
 
 **In plain terms.** "Three questions asked one after another cost three network round-trips;
 the same three questions issued together cost about one — the payload barely changes, the
 waiting collapses."
 
-Concurrency (like the batching it replaced) does not make the server faster or the JSON smaller.
-It removes *serialization of waiting*, which is why it only helps where the round-trip dominates
-and does nothing on stdio.
+Concurrency does not make the server faster or the JSON smaller. It removes *serialization of
+waiting*, which is why it only helps where the round-trip dominates and does nothing on stdio.
 
 ```
   serial_time     = fixed_overhead + n x RTT
@@ -378,12 +369,12 @@ discovery calls cost 3-6ms total — overlapping them saves single-digit millise
 concurrency complexity and no user-visible gain. This is a remote-transport optimization that is
 merely harmless on local ones.
 
-**Why MCP dropped batching rather than keeping it as an optimization.** The saving above is real
-but bounded and only lands once per session, at startup; against that, batching forces every
-server to correlate an array of ids, complicates streaming (which of the N responses upgrades to
-SSE?), and interacts badly with the per-message `202 Accepted` rule for notifications. The
-working group traded a one-off `(n-1) x RTT` for a materially simpler wire contract. Concurrent
-single-message requests recover most of the same saving without any of that.
+**Why the one-message rule is the right trade.** Folding the three calls into one array would
+save a one-off `(n-1) x RTT` at startup and nothing after that; the price would be paid on every
+message forever — servers correlating arrays of ids, an ambiguous streaming decision (which of
+the N responses upgrades to SSE?), and a collision with the per-message `202 Accepted` rule for
+notifications. Concurrent single-message requests recover most of the same saving with none of
+that machinery, which is exactly why the wire contract stays at one message per POST.
 
 ---
 
@@ -404,8 +395,7 @@ single-message requests recover most of the same saving without any of that.
 | Transport | Latency | Security | Scalability | Best For |
 |---|---|---|---|---|
 | Stdio | 1-2ms | High (no network) | One client per server | Local tools, single-user |
-| Streamable HTTP | 10-50ms | TLS + auth required | Many clients per server | Cloud services, shared |
-| Legacy SSE | 10-50ms | TLS + auth required | Same | Compat with older servers |
+| Streamable HTTP | 10-50ms | TLS + auth + `Origin` check | Many clients per server | Cloud services, shared |
 
 **The idea behind it.** "Stdio and HTTP differ by about 20x per message, which is invisible on
 one call and turns into hours of aggregate waiting once an agent is making half a million of
@@ -528,13 +518,13 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. The MCP `notifications/initialized` message is a notification (no id, no response). Mixing them up causes deadlocks (one party waits forever).
 
 **Q: Why does MCP use JSON-RPC 2.0 specifically?**
-JSON-RPC 2.0 is mature (spec dated 2010), simple, language-agnostic, and models requests, responses and notifications with almost no machinery. Alternatives (gRPC, custom protocols) would add weight without benefit, and JSON is human-readable for debugging. MCP adopts the message model but not the whole spec — it dropped JSON-RPC batching in the 2025-06-18 revision.
+JSON-RPC 2.0 is mature (spec dated 2010), simple, language-agnostic, and models requests, responses and notifications with almost no machinery. Alternatives (gRPC, custom protocols) would add weight without benefit, and JSON is human-readable for debugging. MCP adopts the message model but not the whole spec — it has no batch arrays, forbids a `null` id, and requires ids to be unique per requestor within a session.
 
 **Q: When should you use stdio vs HTTP transport?**
 Stdio for local tools (filesystem, local DB) — fastest, most secure, single-user per server. HTTP (Streamable HTTP) for shared cloud services, multi-tenant, requires network — adds 10-50ms RTT but enables scale.
 
-**Q: What replaced the legacy SSE-only HTTP transport?**
-Streamable HTTP, introduced in the 2025-03-26 revision. The legacy 2024-11-05 design had two endpoints (a GET `/sse` stream for events plus a separate POST endpoint advertised by an `endpoint` event), which was complex to deploy and could not work statelessly. Streamable HTTP uses a single endpoint serving both POST and GET, and the server chooses per request whether to answer with `application/json` or upgrade to a `text/event-stream`.
+**Q: How does a Streamable HTTP server decide between a JSON response and an SSE stream?**
+The server chooses per request: it may answer a POSTed JSON-RPC request with `Content-Type: application/json` (one object) or with `text/event-stream` (an SSE stream), and the client MUST support both. That is why every client POST must carry `Accept: application/json, text/event-stream` — you cannot know which form is coming until the response headers arrive, so the HTTP call has to be made in streaming mode. A POSTed notification or response is different: it gets HTTP 202 Accepted with no body. A separate client GET on the same endpoint opens a server-to-client SSE stream for server-initiated requests and notifications, or returns 405 if the server offers none.
 
 **Q: What's the role of the `MCP-Session-Id` header?**
 For stateful sessions over Streamable HTTP. The server may return `MCP-Session-Id` on the response carrying `InitializeResult`; if it does, the client MUST echo it on every subsequent request. It lets the server route requests to the right session state (e.g., conversation memory). Two related rules: a server that has expired the session answers with HTTP 404, and the client must then re-initialize without a session id; and a client leaving for good should send an HTTP DELETE with the header. Note that the 2026-07-28 release candidate removes this header along with the protocol-level session.
@@ -548,8 +538,8 @@ Protocol version and capabilities: the client proposes the newest version it sup
 **Q: What's the typical latency for each transport?**
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.
 
-**Q: How is JSON-RPC batching used in MCP?**
-It is not used at all: MCP removed JSON-RPC batching in the 2025-06-18 revision, so a batch array is now an invalid MCP message. Plain JSON-RPC 2.0 lets a client send an array of requests and get an array of responses, and MCP briefly allowed it, but the current spec requires the Streamable HTTP body to be exactly one request, notification, or response. The removal cost a one-off saving at startup, where `tools/list`, `resources/list` and `prompts/list` could have shared a round-trip; it bought a much simpler wire contract, since batching complicates id correlation, the SSE-upgrade decision, and the `202 Accepted` rule for notifications. Recover most of the lost latency by issuing those independent calls concurrently on the already-open connection rather than serially. This is a common interview trap: candidates cite batching as a live MCP optimization years after it was taken out.
+**Q: Can you batch JSON-RPC requests in MCP?**
+No — the Streamable HTTP body MUST be exactly one request, notification, or response, so a batch array is an invalid MCP message. Plain JSON-RPC 2.0 does allow a client to send an array of requests and get an array of responses; MCP deliberately does not, because batching complicates id correlation, makes the SSE-upgrade decision ambiguous, and collides with the `202 Accepted` rule for notifications. The cost is a one-off saving at startup, where `tools/list`, `resources/list` and `prompts/list` would otherwise share a round-trip; recover it by issuing those independent calls concurrently on the already-open connection rather than serially. This is a common interview trap — candidates cite batching as a live MCP optimization when the wire contract has never permitted it in a current revision.
 
 **Q: What happens if the same id is used twice in JSON-RPC?**
 MCP forbids it: a request id MUST NOT have been used before by the same requestor in that session. MCP also tightens base JSON-RPC by disallowing a `null` id and requiring a string or integer. In practice a reused id means the response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
@@ -575,7 +565,7 @@ MCP defines no shutdown or exit message — termination is signalled entirely by
 
 1. Use the SDK's built-in transports — don't roll your own JSON-RPC unless absolutely necessary.
 2. For stdio: log to stderr ONLY in your server. Stdout is sacred.
-3. For HTTP: use Streamable HTTP (2025-03-26 onward), not the deprecated HTTP+SSE transport.
+3. For HTTP: one MCP endpoint serving POST and GET, and validate the `Origin` header on every connection (403 when present and invalid) — DNS rebinding is the local-server threat.
 4. Always include `Accept: application/json, text/event-stream` on Streamable HTTP requests — server may respond with either.
 5. Handle bidirectional messages: server may send requests (sampling, notifications) — your client must process them.
 6. Use unique, monotonic ids per session — never reuse.
@@ -604,7 +594,7 @@ MCP defines no shutdown or exit message — termination is signalled entirely by
 **Wire-protocol benefits**:
 - Stateless clients to gateway (any client instance can serve any request)
 - Backend servers can use whatever transport suits them
-- Gateway issues independent discovery calls concurrently where possible (saving round-trips; MCP forbids JSON-RPC batching since 2025-06-18)
+- Gateway issues independent discovery calls concurrently where possible (saving round-trips; MCP allows only one JSON-RPC message per POST)
 
 **Results**:
 - 200+ developers using single gateway URL
@@ -614,6 +604,6 @@ MCP defines no shutdown or exit message — termination is signalled entirely by
 
 **Lessons**:
 1. Streamable HTTP at the edge + stdio internally was the right hybrid.
-2. Overlapping the independent discovery calls at the gateway cut startup capability-discovery latency by 40%. (The gateway originally did this with JSON-RPC batching, which MCP removed in the 2025-06-18 revision; issuing the calls concurrently recovers the same saving and is what a current implementation must do.)
+2. Overlapping the independent discovery calls at the gateway cut startup capability-discovery latency by 40% — the only mechanism available, since MCP permits one message per POST.
 3. Audit logs revealed which MCP tools were most used → guided investment in caching.
 4. Sticky session via `MCP-Session-Id` mattered for stateful operations (multi-turn tool sequences) — a constraint the 2026-07-28 revision removes by going stateless.

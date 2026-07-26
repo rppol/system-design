@@ -641,8 +641,6 @@ from ragas.metrics.collections import (
 )
 
 # Field names are user_input / retrieved_contexts / response / reference.
-# The pre-0.2 names (question / contexts / answer / ground_truth) and the
-# lowercase metric singletons are deprecated.
 dataset = EvaluationDataset(samples=[
     SingleTurnSample(
         user_input="...",
@@ -838,24 +836,24 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
          |
          v Offline Indexing
   ┌──────────────────────────────────────────────────────────────┐
-  │  Legal Knowledge Graph Construction                          │
+  │  Legal Knowledge Graph Construction                         │
   │  Entities: Cases, Doctrines, Courts, Judges, Parties        │
   │  Relations: CITES (case→case), APPLIES (case→doctrine),     │
   │    DISTINGUISHED (case→case), OVERRULES (case→case),        │
-  │    IN_JURISDICTION (case→jurisdiction)                       │
-  │                                                              │
+  │    IN_JURISDICTION (case→jurisdiction)                      │
+  │                                                             │
   │  NER Model: Legal-BERT fine-tuned (entity extraction)       │
-  │  RE Model: relation classification (SpanBERT + rules)        │
+  │  RE Model: relation classification (SpanBERT + rules)       │
   │  Graph DB: Neo4j (500k nodes, 4.2M edges)                   │
-  │                                                              │
+  │                                                             │
   │  Community detection: Leiden algorithm (min_community=5)    │
   │    → 12,400 communities (avg 40 cases per community)        │
-  │  Community summaries: Claude claude-sonnet-4-6 (offline batch)│
+  │  Community summaries: claude-sonnet-4-6 (offline batch)     │
   └──────────────────────────────────────────────────────────────┘
          |                    |
          v                    v
   ┌───────────────┐  ┌─────────────────────────────────────────┐
-  │  Dense Vector │  │  Community Summary Index                 │
+  │  Dense Vector │  │  Community Summary Index                │
   │  Index (HNSW) │  │  12,400 summaries (avg 300 tokens each) │
   │  500k chunks  │  │  Embedded with text-embedding-3-large   │
   │  1536-dim     │  │  Neo4j full-text index for keyword      │
@@ -863,19 +861,19 @@ Each strategy has a comprehensive standalone reference with 10+ senior-AI-engine
              │                            │
              v Online Query               │
   ┌──────────────────────────────────────▼────────────────────┐
-  │  Query Processing                                          │
+  │  Query Processing                                         │
   │  1. Entity extraction from query (Legal-NER)              │
-  │  2. Community selection: embed query → nearest community   │
+  │  2. Community selection: embed query → nearest community  │
   │     summaries (top-5) → provide global context            │
   │  3. Dense retrieval: HNSW over 500k chunks (top-20)       │
   │  4. Graph traversal: for each retrieved case, follow:     │
   │     CITES edges (2 hops), APPLIES edges (doctrine links)  │
   │     IN_JURISDICTION edges (compare across jurisdictions)  │
   │  5. Entity disambiguation: resolve "Delaware courts" →    │
-  │     Delaware Court of Chancery + Delaware Supreme Court    │
+  │     Delaware Court of Chancery + Delaware Supreme Court   │
   │  6. Context assembly: global summary + local chunks +     │
   │     graph-traversed related cases (max 8000 tokens)       │
-  │  7. Claude claude-sonnet-4-6 generates answer with citations│
+  │  7. claude-sonnet-4-6 generates answer with citations     │
   └────────────────────────────────────────────────────────────┘
 ```
 

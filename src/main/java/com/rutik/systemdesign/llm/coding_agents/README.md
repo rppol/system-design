@@ -4,7 +4,7 @@
 
 Coding agents are LLM agents specialized for software engineering tasks: reading and understanding codebases, writing new code, editing existing code, running tests, debugging, generating patches, and submitting PRs. They differ from generic agents in tool design (file editors, bash shells, test runners, language servers), evaluation frameworks (SWE-bench, HumanEval, LiveCodeBench), and the central engineering challenge of operating reliably on large, real-world codebases where ground truth is "tests pass and humans approve".
 
-The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Claude Code, Continue, Cline), autonomous platforms (Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). Best-in-class scores on SWE-bench Verified (real GitHub issues): Claude 3.5 Sonnet at ~49%, SWE-agent + GPT-4 at ~18% (2024 baseline; rapidly evolving). The frontier is moving toward multi-hour autonomous coding tasks (Cursor Background Agents, Devin sessions, Anthropic's Claude Code subagents) that span dozens of files.
+The landscape spans IDE-integrated agents (Cursor Composer, Claude Code, Continue, Cline), autonomous platforms (Devin, OpenHands, SWE-agent), and library-style agents (Aider, Plandex). Frontier models now clear 85-95% on SWE-bench Verified — 95.0% for Claude Fable 5, 88.6% for Opus 4.8, 85.2% for Sonnet 5 — which means the benchmark is close to saturated and its remaining spread says more about contamination than capability. The discriminating benchmark is now **SWE-bench Pro** (1,865 tasks over 41 actively maintained Python/Go/TypeScript/JavaScript repos, including private startup codebases, and copyleft-licensed to resist training-set leakage), where the best public-set score is around 60% and the field average is far lower. The frontier of the *product* is multi-hour autonomous tasks (Cursor Background Agents, Devin sessions, Claude Code subagents) spanning dozens of files.
 
 ---
 
@@ -38,7 +38,7 @@ The 2024-2025 coding-agent landscape spans IDE-integrated (Cursor Composer, Clau
 
 Custom shell-like commands optimized for LLM use: `find_file`, `goto`, `scroll_window`, `edit`, `submit`. Each command is precisely defined to fit LLM strengths. SWE-agent paper (Yang et al. 2024) showed ACI dramatically outperforms raw bash.
 
-### 4.2 OpenHands (formerly OpenDevin)
+### 4.2 OpenHands
 
 Open-source autonomous coding platform. Event stream architecture: agent emits actions, runtime executes, results flow back as observations. Supports multiple agent backends (CodeActAgent, BrowsingAgent). Docker sandbox per session.
 
@@ -261,7 +261,7 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 **SWE-agent** — research framework demonstrating the ACI principle.
 
-**GitHub Copilot Workspace** — multi-step task planning + execution embedded in GitHub PR flow.
+**GitHub Copilot coding agent** — assign an issue to Copilot and it plans, edits in a GitHub Actions sandbox, and opens a PR for review; multi-step task planning and execution embedded in the GitHub PR flow.
 
 ---
 
@@ -372,7 +372,7 @@ if any(re.search(p, command) for p in DESTRUCTIVE_GIT):
 | Cline (VS Code) | VS Code agent | Free, configurable models |
 | Continue | VS Code agent | Open-source, model-agnostic |
 | Plandex | Terminal agent | Plan-first, checkpointing |
-| Copilot Workspace | GitHub-integrated | PR-flow native |
+| Copilot coding agent | GitHub-integrated | PR-flow native; issue-to-PR |
 
 ---
 
@@ -487,7 +487,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
             |
             v
   ┌─────────────────────────────────────────────────────────┐
-  │  GitHub Actions Workflow                                 │
+  │  GitHub Actions Workflow                                │
   │  trigger: issues labeled "ai-solvable"                  │
   │  runner: ubuntu-latest (4 vCPU, 16 GB)                  │
   └──────────────────────────┬──────────────────────────────┘
@@ -514,7 +514,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
   │    2. Navigate repo (grep/find/LSP) to find fault        │
   │    3. Read relevant files (windowed view)                │
   │    4. Write failing test first (TDD)                     │
-  │    5. Implement fix                                       │
+  │    5. Implement fix                                      │
   │    6. Run tests — iterate until pass                     │
   │    7. Generate patch + PR description                    │
   └──────────────────────────┬──────────────────────────────┘
@@ -527,7 +527,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
   │  - Run type checker (mypy --strict)                      │
   │  - Run linter (ruff check)                               │
   │  - Security scan (bandit -ll)                            │
-  │  All pass → open draft PR                               │
+  │  All pass → open draft PR                                │
   │  Any fail → comment on issue with failure output         │
   └──────────────────────────┬──────────────────────────────┘
                              │

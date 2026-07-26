@@ -52,7 +52,7 @@ One-line analogy: gradient boosting is like a student who takes many small tests
 
 Mental model: imagine a group of friends trying to estimate the price of a house. The first person makes a rough guess of $300K. The second person focuses only on the gap (residual) between that guess and the actual $350K — they predict the residual $50K. The third person focuses on whatever residual remains. Each person becomes an expert in the mistakes of the group so far. Their combined prediction: $300K + $50K + ... converges to the true price. Shrinkage (learning rate) means each person only contributes a fraction of their correction, requiring more people but producing a more conservative, robust final answer.
 
-Why it matters: gradient boosting with XGBoost or LightGBM wins the majority of Kaggle structured data competitions and is the dominant production algorithm for tabular ML. The framework is general: by changing the loss function you get regression, classification, ranking, survival analysis, or any custom objective.
+Why it matters: gradient boosting is the dominant algorithm for tabular ML in both competitions and production. The most-cited hard number comes from the XGBoost paper itself (Chen & Guestrin, KDD 2016, arXiv:1603.02754): of the 29 winning solutions published on Kaggle's blog during 2015, 17 used XGBoost — the runner-up, deep neural networks, appeared in 11 — and all ten top KDD Cup 2015 entries used it. Treat that as a 2015 snapshot rather than a current market share; no comparable audited figure is published for later years. The framework is general: by changing the loss function you get regression, classification, ranking, survival analysis, or any custom objective.
 
 Key insight: fitting the negative gradient is gradient descent in function space. The "direction" that reduces loss most steeply is the negative gradient; each weak learner approximates a step in that direction. This unification — boosting as gradient descent — is due to Friedman (2001) and is what makes GBDT generalisable to arbitrary differentiable losses.
 
@@ -233,8 +233,8 @@ The consequence is arithmetic, not mystical. If a tree could close a row's gap c
 
 ### 4.4 LightGBM
 
-- GOSS + EFB + histogram binning + leaf-wise growth
-- 3-5× faster than XGBoost on CPU; similar GPU speed
+- Histogram binning (`max_bin` default 255) + EFB + leaf-wise growth by default; GOSS is opt-in (`data_sample_strategy="goss"`, not the default)
+- Typically 3-5× faster than XGBoost on CPU; similar GPU speed
 - See xgboost_lightgbm.md for full deep dive
 
 ### 4.5 CatBoost
@@ -798,7 +798,7 @@ print(f"Train log loss at optimum: {train_deviance[optimal_iter-1]:.4f}")
 
 ### Search Ranking (LambdaMART)
 
-Web search ranking uses gradient boosting with LambdaMART loss — a ranking loss that directly optimises NDCG (Normalised Discounted Cumulative Gain). Microsoft's original RankNet/LambdaMART paper showed GBDT outperforms pointwise regression for ranking. Production: ~50 features per (query, document) pair, 300 rounds, learning_rate=0.05, max_depth=6. Serving: ~2ms for 1000 candidate documents.
+Web search ranking uses gradient boosting with the LambdaMART objective, which targets NDCG (Normalised Discounted Cumulative Gain) indirectly: it never writes down an NDCG loss to differentiate, but scales each pairwise gradient ("lambda") by the NDCG change that swapping the two documents would cause. The lineage is Burges' RankNet (a neural net) → LambdaRank (RankNet plus the NDCG-weighted lambdas) → LambdaMART (the same lambdas fed to a GBDT); see Burges, "From RankNet to LambdaRank to LambdaMART: An Overview", Microsoft Research MSR-TR-2010-82. Illustrative production shape: ~50 features per (query, document) pair, 300 rounds, learning_rate=0.05, max_depth=6.
 
 ### Insurance Premium Pricing
 
@@ -810,7 +810,7 @@ Web search ranking uses gradient boosting with LambdaMART loss — a ranking los
 
 ### Click-Through Rate Prediction
 
-Standard industry setup: offline training on 7 days of click logs (100M rows), GBDT with log loss, deployed to serve in-memory predictions for millions of ad auctions per second. Key: each decision tree has max_depth=6 (at most 64 leaves), so prediction is a 64-entry table lookup per tree — extremely fast. 500 trees × 64-leaf lookup = 500 memory accesses per prediction, ~0.1ms on warm cache.
+Standard industry setup: offline training on 7 days of click logs (100M rows), GBDT with log loss, deployed to serve in-memory predictions for millions of ad auctions per second. Key: each decision tree has max_depth=6 (at most 64 leaves), and scoring one tree is a root-to-leaf *traversal* of at most 6 threshold comparisons — not a table lookup, because a general GBDT tree is not oblivious and the path taken depends on the feature values. 500 trees x 6 levels is ~3,000 node visits per prediction, sub-millisecond on a warm cache. (CatBoost's symmetric/oblivious trees ARE the table-lookup case: the same split is used across a whole level, so a depth-6 tree collapses to one 64-entry array indexed by a 6-bit vector.)
 
 ---
 
@@ -955,8 +955,8 @@ AdaBoost assigns exponentially growing weights to misclassified samples. If trai
 |------|---------------------|
 | sklearn GradientBoostingClassifier | Reference implementation; slow for large data |
 | sklearn HistGradientBoostingClassifier | Histogram-based, fast, native NaN handling |
-| XGBoost 2.0+ | GPU hist, regularised objective, multi-output support |
-| LightGBM 4.0+ | GOSS, EFB, fastest CPU training, categorical support |
+| XGBoost 2.0+ | GPU hist (`device="cuda"`), regularised objective, multi-output support |
+| LightGBM 4.0+ | EFB, histogram binning, fastest CPU training, categorical support; GOSS opt-in via `data_sample_strategy="goss"` |
 | CatBoost 1.2+ | Ordered boosting, native categoricals, symmetric trees |
 | SHAP 0.44+ | TreeSHAP: O(TLD^2) Shapley values; works on all tree ensembles |
 | Optuna 3.3+ | Hyperparameter search with pruning (stops unpromising trials early) |
@@ -986,7 +986,7 @@ No feature scaling is needed — like all tree ensembles, gradient boosting is i
 Stochastic gradient boosting (subsample < 1.0) trains each tree on a random fraction of the training rows drawn without replacement. This introduces variance into the boosting process: each tree sees a different subset of the data, reducing correlation between trees and acting as a form of regularisation. The mechanism is analogous to the stochastic in stochastic gradient descent — introducing noise into the gradient estimate can help escape local optima and reduce overfitting. Typical value: subsample=0.8 (train each tree on 80% of rows). Column subsampling (colsample_bytree, colsample_bylevel) adds feature-level randomness, similar to Random Forest's max_features.
 
 **Q: What is the role of max_depth in gradient boosting versus Random Forest?**
-In Random Forest, max_depth controls individual tree quality but deep trees are desirable (low bias), as variance is controlled by averaging. In gradient boosting, max_depth controls the order of feature interactions captured by each tree: max_depth=1 (stumps) captures no interactions; max_depth=6 captures up to 6-way interactions. Deeper trees in GBDT lead to faster bias reduction (fewer rounds needed) but higher risk of overfitting — variance is harder to control because trees are not independent. Typical values: max_depth=4-8 for XGBoost/sklearn; LightGBM uses num_leaves (max_depth is capped at 31 by default but leaves control actual complexity). Shallow trees + more rounds (with shrinkage) usually generalise better than deep trees + fewer rounds.
+In Random Forest, max_depth controls individual tree quality but deep trees are desirable (low bias), as variance is controlled by averaging. In gradient boosting, max_depth controls the order of feature interactions captured by each tree: max_depth=1 (stumps) captures no interactions; max_depth=6 captures up to 6-way interactions. Deeper trees in GBDT lead to faster bias reduction (fewer rounds needed) but higher risk of overfitting — variance is harder to control because trees are not independent. Typical values: max_depth=4-8 for XGBoost/sklearn; LightGBM instead leaves `max_depth` at its default of `-1` (no depth limit at all) and controls complexity through `num_leaves`, whose default is 31. Shallow trees + more rounds (with shrinkage) usually generalise better than deep trees + fewer rounds.
 
 **Q: How do you select the optimal number of boosting rounds (n_estimators)?**
 Use early stopping: train on a training set, monitor validation loss every round, stop when validation loss has not improved for N consecutive rounds (typically 50-100). This is the correct approach. Alternatives: (1) staged_predict / staged_predict_proba in sklearn GradientBoosting — evaluate all intermediate stages post-hoc; (2) cross-validated learning curves — expensive but provides variance estimate of optimal rounds; (3) Rule of thumb: use n_estimators=2000, learning_rate=0.05, early_stopping_rounds=100 as starting point for any new dataset. Never fix n_estimators based on training time alone — that is the recipe for either underfitting or overfitting.
@@ -1010,10 +1010,10 @@ With K classes, gradient boosting trains K trees per round — one per class. Ea
 Detection: plot training loss vs validation loss across rounds — the point where they diverge is the overfitting threshold. If training AUC reaches 0.99 while validation AUC plateaus at 0.88, you have overfit. Prevention strategies in priority order: (1) Early stopping — most effective, always use it; (2) Reduce learning rate + increase n_estimators; (3) Reduce max_depth (from 6 to 3-4); (4) Increase min_child_weight or min_samples_leaf; (5) Add subsampling (subsample=0.8); (6) Add L2 regularisation (lambda=5-10 in XGBoost); (7) Reduce max_features (colsample_bytree=0.7). Apply in this order — early stopping fixes most overfitting cases; the rest are for marginal improvements.
 
 **Q: When should you prefer sklearn's GradientBoostingClassifier vs HistGradientBoostingClassifier?**
-Prefer HistGradientBoostingClassifier (HGBT) almost always for datasets > 10K rows. HGBT uses histogram-based binning (discretises features into <= 255 bins) which reduces the split-finding complexity from O(N log N) to O(N + B * K) where B=255 bins, K=n_features. Training is 10-100x faster. HGBT also supports native NaN handling, monotone constraints, and interaction constraints. Use the original GradientBoostingClassifier only when: (a) you need exact split points (not binned approximations) on a small dataset; (b) you need access to staged predictions (staged_predict_proba) which HGBT does not support as of sklearn 1.4. For production on any non-trivial dataset, HGBT or XGBoost/LightGBM are the correct choices.
+Prefer HistGradientBoostingClassifier (HGBT) almost always for datasets > 10K rows. HGBT bins each feature into at most `max_bins=255` buckets once, up front, at a one-time O(n_samples x n_features) cost; every subsequent split search then costs O(n_bins x n_features) instead of the exact learner's O(n_samples x n_features) per node. Training is 10-100x faster. HGBT also supports native NaN handling, monotone constraints, and interaction constraints. Use the original GradientBoostingClassifier only when you need exact split points rather than binned approximations on a small dataset — note that "HGBT has no staged predictions" is a stale objection: `staged_predict`, `staged_predict_proba` and `staged_decision_function` have all been available on HGBT since sklearn 0.24. For production on any non-trivial dataset, HGBT or XGBoost/LightGBM are the correct choices.
 
-**Q: What is the deviance in gradient boosting and how is it different from the loss?**
-In sklearn's GradientBoostingClassifier, deviance refers to the per-sample negative log-likelihood — it is used as the training and validation loss metric displayed during training. For binary classification with log loss: deviance_i = -[y_i * log(p_i) + (1-y_i) * log(1-p_i)]. The term "deviance" comes from generalised linear model terminology where it measures goodness of fit. It is equivalent to cross-entropy loss and is the same quantity minimised by logistic regression. In the staged_deviance_ attribute, sklearn stores the training and test deviance per round — useful for plotting learning curves and diagnosing overfitting without re-running staged_predict_proba.
+**Q: What is the deviance in gradient boosting, and why is `loss="deviance"` no longer accepted by sklearn?**
+Deviance is the per-sample negative log-likelihood, which for binary classification is exactly cross-entropy and exactly what logistic regression minimises. Written out, deviance_i = -[y_i * log(p_i) + (1-y_i) * log(1-p_i)]. The term comes from generalised-linear-model theory, where it measures goodness of fit. sklearn renamed the option to `loss="log_loss"` (deprecated in 1.1, removed in 1.3) precisely because "deviance" confused people, so `GradientBoostingClassifier(loss="deviance")` now raises an error. The other common trap: there is no `staged_deviance_` attribute. The per-round training loss lives in `train_score_` (an ndarray of length n_estimators; with `subsample < 1` it is the in-bag loss, and `oob_improvement_` / `oob_scores_` carry the out-of-bag counterpart). Use those, or `staged_predict_proba`, for learning curves.
 
 **Q: What is the difference between level-wise (depth-wise) and leaf-wise tree growth in gradient boosting?**
 Level-wise growth (XGBoost's default) expands every node at a depth before going deeper, while leaf-wise growth (LightGBM's default) always splits the leaf with the highest loss reduction. Level-wise keeps trees balanced; leaf-wise produces deeper, asymmetric trees. Leaf-wise converges faster and often reaches lower loss for the same number of leaves because it always chases the biggest available gain, but it overfits more easily on small datasets — which is why LightGBM exposes num_leaves and min_child_samples as the primary guards rather than max_depth. Level-wise is more conservative and easier to regularize with a simple depth cap. CatBoost takes a third path: symmetric (oblivious) trees that use the same split across an entire level for very fast inference.
@@ -1062,7 +1062,7 @@ params = {
     "colsample_bytree": 0.7,
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
-    "scale_pos_weight": 7,       # ~1/(0.12) for balanced gradient signal
+    "scale_pos_weight": 7,       # neg/pos = (1 - 0.12)/0.12 = 7.3, for a balanced gradient signal
     "n_jobs": -1,
     "random_state": 42,
     "verbose": -1,
@@ -1071,6 +1071,7 @@ params = {
 # 5-fold CV with early stopping per fold
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 oof_preds = np.zeros(len(y))
+fold_models: list[lgb.LGBMClassifier] = []   # needed later for the mean best_iteration_
 
 for fold, (tr_idx, val_idx) in enumerate(cv.split(X, y)):
     X_tr, X_val_fold = X.iloc[tr_idx], X.iloc[val_idx]
@@ -1086,6 +1087,7 @@ for fold, (tr_idx, val_idx) in enumerate(cv.split(X, y)):
         ],
     )
     oof_preds[val_idx] = model.predict_proba(X_val_fold)[:, 1]
+    fold_models.append(model)
     print(f"Fold {fold+1} AUC: {roc_auc_score(y_val_fold, oof_preds[val_idx]):.4f}")
 
 print(f"OOF AUC: {roc_auc_score(y, oof_preds):.4f}")

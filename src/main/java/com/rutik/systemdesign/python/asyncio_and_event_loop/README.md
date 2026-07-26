@@ -281,7 +281,7 @@ loop. Calling it inside an already-running loop raises `RuntimeError` because yo
 ```python
 # These two blocks are semantically equivalent:
 
-# High-level (Python 3.5+):
+# High-level:
 async def fetch(url: str) -> bytes:
     reader, writer = await asyncio.open_connection(url, 80)
     return await reader.read(1024)
@@ -349,8 +349,8 @@ this equation.
 
 ```python
 # AVOID: asyncio.get_event_loop()
-# In Python 3.10+, this emits a DeprecationWarning if there is no current event loop.
-# In Python 3.12, it raises RuntimeError when called outside a running loop.
+# It returns the running loop when there is one, but raises RuntimeError when there
+# is not — so its behaviour depends on the caller, which library code cannot control.
 loop = asyncio.get_event_loop()   # unreliable inside library code
 
 # PREFER: asyncio.get_running_loop()
@@ -434,7 +434,7 @@ you are already concurrent.
 ```python
 import asyncio
 
-# ---- gather approach (Python 3.8+) ----
+# ---- gather approach ----
 async def gather_example() -> None:
     results = await asyncio.gather(
         fetch("http://example.com/a"),
@@ -443,7 +443,7 @@ async def gather_example() -> None:
     )
     print(results)  # [resp_a, resp_b, resp_c] in input order
 
-# ---- TaskGroup approach (Python 3.11+) ----
+# ---- TaskGroup approach ----
 async def taskgroup_example() -> None:
     async with asyncio.TaskGroup() as tg:
         ta = tg.create_task(fetch("http://example.com/a"))
@@ -679,7 +679,7 @@ common silent bug when fire-and-forget tasks are created without storing the ref
 |---|---|---|
 | Returns ordered list | Returns (done, pending) sets | Structured scope |
 | First exception cancels all | Fine-grained control | All exceptions collected |
-| Python 3.4+ | Python 3.4+ | Python 3.11+ |
+| Cancelling it cancels children | Timeout leaves pending futures running | Scope exit cancels children |
 | `return_exceptions=True` for soft errors | `FIRST_COMPLETED` for races | `except*` for multi-error |
 | Simple, common | Complex control flow | Preferred for new code |
 
@@ -788,9 +788,9 @@ flowchart TD
 cancellation and leaving the Task permanently hung.*
 
 ```python
-# BROKEN: bare `except Exception` catches CancelledError in Python < 3.8
-# and in Python 3.8+ it still works if you explicitly re-raise — but many
-# developers forget, leaving tasks permanently hung.
+# BROKEN: `CancelledError` inherits from `BaseException`, so `except Exception`
+# does not catch it — but a bare `except:` or `except BaseException` does, and
+# swallowing it leaves the Task permanently hung.
 
 async def download_broken(url: str) -> bytes:
     try:
@@ -828,14 +828,14 @@ async def download_fixed(url: str) -> bytes | None:
 ### Pitfall 3: run_until_complete Inside a Running Loop
 
 ```python
-# BROKEN: raises RuntimeError: "This event loop is already running"
-# in Python 3.10+. Common mistake in Jupyter notebooks or nested async frameworks.
+# BROKEN: raises RuntimeError: "This event loop is already running".
+# Common mistake in Jupyter notebooks or nested async frameworks.
 
 async def inner() -> str:
     return "result"
 
 async def outer_broken() -> None:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = loop.run_until_complete(inner())   # RuntimeError inside running loop
 ```
 
@@ -895,16 +895,16 @@ async def fixed_dynamic(urls: list[str]) -> list[str]:
 | `httpx` | Async HTTP client | `AsyncClient` for async code; also has sync API; HTTP/2 support |
 | `asyncpg` | Async PostgreSQL driver | Fastest Postgres driver in Python; used by SQLAlchemy async engine |
 | `motor` | Async MongoDB driver | Wraps PyMongo with asyncio support |
-| `aioredis` | Async Redis client | Superseded by `redis.asyncio` (bundled in redis-py 4.2+) |
+| `redis.asyncio` | Async Redis client | Ships inside `redis-py`; same API surface as the sync client |
 | `aiokafka` | Async Kafka producer/consumer | asyncio-native Kafka client |
 | `nest_asyncio` | Run event loops in Jupyter | Patches `asyncio` to allow nested `run_until_complete`; dev-only |
 | `greenlet` | Low-level coroutine primitive | Used by SQLAlchemy's async bridge; not a direct asyncio substitute |
 
 ### Debugging Tools
 
-- `asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())` — reset policy; on Windows
-  use `WindowsSelectorEventLoopPolicy` for compatibility with older libraries
-- `asyncio.get_event_loop().set_debug(True)` — logs slow callbacks (>100 ms), unawaited coroutines
+- `asyncio.run(main(), loop_factory=uvloop.new_event_loop)` — pick the loop implementation
+  explicitly; `loop_factory` is the supported replacement for event-loop policies
+- `asyncio.run(main(), debug=True)` — logs slow callbacks (>100 ms), unawaited coroutines
 - `sys.set_coroutine_origin_tracking_depth(10)` — adds coroutine creation traceback to
   "coroutine was never awaited" warnings
 - `PYTHONASYNCIODEBUG=1` environment variable — enables debug mode globally
@@ -939,7 +939,7 @@ exception it cancels all remaining awaitables and re-raises only that one except
 `return_exceptions=True`). `TaskGroup` (3.11+) is a structured concurrency scope: all tasks
 spawned inside the `async with` block are cancelled when any one fails, and all exceptions are
 collected into a single `ExceptionGroup` so callers can handle multiple simultaneous failures with
-`except*`. The practical guidance: prefer `TaskGroup` for new Python 3.11+ code because it
+`except*`. The practical guidance: prefer `TaskGroup` for new code because it
 enforces task lifetimes, makes error handling exhaustive, and composes correctly with cancellation.
 
 **Q4: What exactly happens when task.cancel() is called?**
@@ -1025,8 +1025,7 @@ thread (e.g., a callback-based framework) into an already-running event loop.
 This warning means a coroutine object was created (by calling `async def fn()`) but `.send(None)`
 was never called on it — the function body never executed. The most common cause is calling a
 coroutine function without `await`: `result = fetch(url)` instead of `result = await fetch(url)`.
-In Python 3.11+, the traceback includes the creation site (if `sys.set_coroutine_origin_tracking_depth`
-is set). The warning does not become an error by default, so it can hide bugs silently. The
+The traceback includes the creation site when `sys.set_coroutine_origin_tracking_depth` is set. The warning does not become an error by default, so it can hide bugs silently. The
 practical guidance: treat this warning as an error in CI by setting
 `PYTHONWARNINGS=error::RuntimeWarning`.
 
@@ -1096,7 +1095,7 @@ during shutdown.
 ## 13. Best Practices
 
 **Always use `asyncio.run()` as the entry point.** Never call `loop.run_until_complete()` directly
-in application code; it does not perform proper cleanup and is deprecated for application use.
+in application code; it skips async-generator and executor shutdown, so cleanup is incomplete.
 
 **Prefer `TaskGroup` over bare `create_task` for fan-out.** `TaskGroup` guarantees that all spawned
 tasks are awaited before the scope exits, preventing dangling tasks and making exception handling
@@ -1118,11 +1117,11 @@ semaphore of 10–50 concurrent requests is a sensible default for most APIs.
 `try/finally` as the default pattern since finally blocks run on both normal return and
 cancellation.
 
-**Prefer `asyncio.timeout()` over `asyncio.wait_for()` on Python 3.11+.** The new context manager
-API is composable, has correct cancellation semantics, and is easier to reason about.
+**Prefer `asyncio.timeout()` over `asyncio.wait_for()`.** The context-manager API is composable,
+has correct cancellation semantics, and is easier to reason about.
 
 **Use `asyncio.get_running_loop()` in library code.** Never call `asyncio.get_event_loop()` in
-library code; it creates implicit loops in old Python versions and raises in new ones.
+library code; its result depends on whether the caller happens to have a loop running.
 
 **Instrument with `loop.set_debug(True)` in development.** This catches slow callbacks, unawaited
 coroutines, and improperly closed transports early, before they cause production incidents.

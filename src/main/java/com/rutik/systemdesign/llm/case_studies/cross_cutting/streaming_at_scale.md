@@ -48,17 +48,17 @@ Related modules: [Inference and Decoding](../../inference_and_decoding/README.md
 
 ### Protocol Comparison
 
-| Dimension | SSE (Server-Sent Events) | WebSocket | HTTP/2 Server Push |
+| Dimension | SSE (Server-Sent Events) | WebSocket | gRPC server streaming (HTTP/2) |
 |-----------|--------------------------|-----------|-------------------|
-| Direction | Server to client only | Bidirectional | Server to client only |
-| Reconnect support | Automatic (browser built-in) | Manual (app code) | None |
-| Per-frame overhead | 8 bytes of framing (`data: ` + `\n\n`); ~50 bytes in practice once an `id:` line and a JSON delta envelope are added | 2-14 bytes (header) | ~9 bytes (HTTP/2 frame header) |
-| Multiplexing | No (one stream per connection) | No (one stream per connection) | Yes (multiple pushes per TCP conn) |
+| Direction | Server to client only | Bidirectional | Server to client only (bidi is a separate mode) |
+| Reconnect support | Automatic (browser built-in) | Manual (app code) | Manual (app code) |
+| Per-frame overhead | 8 bytes of framing (`data: ` + `\n\n`); ~50 bytes in practice once an `id:` line and a JSON delta envelope are added | 2-14 bytes (header) | 5-byte message prefix + 9-byte HTTP/2 frame header |
+| Multiplexing | No (one stream per connection) | No (one stream per connection) | Yes (many streams per TCP conn) |
 | Proxy/firewall compat | Excellent (plain HTTP) | Variable (CONNECT upgrade) | Requires HTTP/2 end-to-end |
-| Browser support | Universal (all modern browsers) | Universal | Limited, deprecated in Chrome 106 |
-| L7 LB sticky session | Not required | Required | Not applicable |
-| Content type | text/event-stream | Binary or text frames | application/octet-stream |
-| Best for | LLM chat, text generation | Voice agents, collaborative editing | Rarely used for LLM streaming |
+| Browser support | Universal (all modern browsers) | Universal | Not native (needs a grpc-web proxy) |
+| L7 LB sticky session | Not required | Required | Not required |
+| Content type | text/event-stream | Binary or text frames | application/grpc |
+| Best for | LLM chat, text generation | Voice agents, collaborative editing | Service-to-service streaming inside the data center |
 
 ### Deployment Patterns
 
@@ -446,7 +446,7 @@ class BackpressureAwareQueue:
 
 **Anthropic Claude API**: Returns SSE events typed by event name — `event: content_block_delta` carries token deltas; `event: message_stop` signals end of stream. The event taxonomy lets clients dispatch on event type without parsing the data field, which is the cleanest published example of using the full SSE grammar rather than `data:` alone. Streaming is requested with `"stream": true` in the request body (not an `Accept` header), and the stream carries no `id:` sequence numbers — so, as with OpenAI, resumable streaming is a property of your gateway, not of the provider API.
 
-**Vercel AI SDK**: Framework-agnostic streaming abstraction used by many Next.js apps, wrapping providers behind a unified interface. Be careful with tutorials written before AI SDK 4.0 (November 2024): the `StreamingTextResponse` helper they use was **removed**, replaced first by `streamText(...).toDataStreamResponse()` and now by the UI-message-stream helpers (`toUIMessageStreamResponse()` / `createUIMessageStreamResponse()`). The `useChat` hook consumes a fetch `ReadableStream` rather than a browser `EventSource`, so there is no free browser auto-reconnect; resumable streams are an explicit opt-in pattern (documented as "Chatbot Resume Streams", backed by the `resumable-stream` package) that you wire up yourself.
+**Vercel AI SDK**: Framework-agnostic streaming abstraction used by many Next.js apps, wrapping providers behind a unified interface. On the server, the streaming Response comes from the UI-message-stream helpers — `streamText(...).toUIMessageStreamResponse()`, or `createUIMessageStreamResponse()` when you are assembling the stream yourself. The `useChat` hook consumes a fetch `ReadableStream` rather than a browser `EventSource`, so there is no free browser auto-reconnect; resumable streams are an explicit opt-in pattern (documented as "Chatbot Resume Streams", backed by the `resumable-stream` package) that you wire up yourself.
 
 **Cloudflare Workers AI**: Edge streaming from Cloudflare's network, which spans 337 cities. Workers AI runs inference on Cloudflare's own GPU fleet rather than a distant origin, so for the models available at a given location the first-hop latency is a PoP hop rather than a transcontinental one. The Worker streams tokens using the `ReadableStream` API, which the browser consumes as SSE. Because inference and CDN are co-located, there is no need for a separate edge-buffering layer — the Worker itself is the edge. Which models are resident in which locations is not published per-city, so do not design around an assumption that any specific model is available in every PoP.
 
@@ -458,16 +458,17 @@ class BackpressureAwareQueue:
 
 ### Protocol Tradeoffs
 
-| Dimension | SSE | WebSocket | HTTP/2 Server Push |
+| Dimension | SSE | WebSocket | gRPC server streaming (HTTP/2) |
 |-----------|-----|-----------|-------------------|
 | Implementation complexity | Low | Medium | High |
-| Reconnect handling | Automatic (browser) | Manual | None |
+| Reconnect handling | Automatic (browser) | Manual | Manual |
 | Firewall traversal | Excellent | Variable | Requires HTTP/2 E2E |
 | LB requirements | Standard L7 | Sticky session or WS proxy | HTTP/2 L7 LB |
-| Per-event overhead | 8 bytes of framing, ~50 bytes with `id:` + JSON envelope | 2-14 bytes/frame | ~9 bytes/frame |
-| Bidirectional | No | Yes | No |
-| Correct choice for LLM chat | Yes | No | No |
+| Per-event overhead | 8 bytes of framing, ~50 bytes with `id:` + JSON envelope | 2-14 bytes/frame | 5-byte prefix + 9-byte frame header |
+| Bidirectional | No | Yes | Only in the bidi-streaming mode |
+| Correct choice for LLM chat | Yes | No | No (browsers cannot speak it natively) |
 | Correct choice for voice agents | No | Yes | No |
+| Correct choice for gateway-to-inference | No | No | Yes |
 
 ### Edge Buffering Tradeoffs
 
@@ -559,7 +560,7 @@ Fix: enforce a hard per-connection buffer cap of 1,000 tokens (approximately 4-8
 | Starlette `Request.is_disconnected()` | Disconnect detection | Non-blocking poll of client TCP socket state | Call every 10 tokens; overhead <1ms |
 | Redis Streams / Redis Lists | Token replay buffer | `RPUSH` + `LTRIM` for sliding window of last 500 tokens; `EXPIRE` for 60s TTL | Use pipeline for atomic push+trim+expire |
 | Cloudflare Workers | Edge streaming | `ReadableStream` API; GPU-at-edge eliminates separate buffering layer | Cloudflare AI Gateway adds caching + rate limiting |
-| Vercel AI SDK | Client/server abstraction | `useChat` hook; `streamText(...).toUIMessageStreamResponse()` server helper | `StreamingTextResponse` was REMOVED in AI SDK 4.0; `useChat` uses fetch streams (no EventSource auto-reconnect), and resume is an explicit opt-in via the `resumable-stream` package |
+| Vercel AI SDK | Client/server abstraction | `useChat` hook; `streamText(...).toUIMessageStreamResponse()` server helper | `useChat` uses fetch streams (no EventSource auto-reconnect); resume is an explicit opt-in via the `resumable-stream` package |
 | Nginx `proxy_read_timeout` | L7 LB timeout | Override to 300s minimum for LLM streaming | Default 60s kills long responses |
 | asyncio `Queue` with HWM | Backpressure | `qsize()` check before put; emit pause/resume signals | Size to expected burst: 1000 tokens ≈ 4-8KB |
 | AWS ALB / GCP HTTP(S) LB | Load balancer | Idle timeout config: ALB `idle_timeout.timeout_seconds`, GCP backend timeout | Set to 600s; SSE keepalive every 15s |
@@ -575,7 +576,7 @@ upstream llm_gateway {
 
 server {
     listen 443 ssl;
-    http2 on;                                  # `listen ... http2` is deprecated since nginx 1.25.1
+    http2 on;                                  # enable HTTP/2 for this server block
 
     location /generate {
         proxy_pass http://llm_gateway;

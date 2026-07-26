@@ -214,6 +214,7 @@ def plot_calibration(
 from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 import lightgbm as lgb
 import numpy as np
 from typing import Literal
@@ -244,6 +245,12 @@ calibrator = calibrate_model(raw_scores_cal, y_cal, method="isotonic")
 def predict_calibrated(model, calibrator, X: np.ndarray) -> np.ndarray:
     raw = model.predict_proba(X)[:, 1]
     return calibrator.predict(raw)   # isotonic: .predict(); Platt: .predict_proba()
+
+# sklearn-native equivalent for an already-fitted base model.
+# NOTE: CalibratedClassifierCV(cv="prefit") no longer exists — wrap the fitted
+# estimator in FrozenEstimator instead (ensemble="auto" then detects it).
+calibrated = CalibratedClassifierCV(FrozenEstimator(lgbm), method="isotonic")
+calibrated.fit(X_cal, y_cal)     # fits ONLY the calibrator; lgbm is not refit
 ```
 
 ### 6.3 Broken Pattern — Threshold at 0.5 on Imbalanced Problem
@@ -266,18 +273,29 @@ from sklearn.metrics import precision_recall_curve
 
 precision, recall, thresholds = precision_recall_curve(y_test, y_prob)
 
+# precision_recall_curve returns len(precision) == len(recall) == len(thresholds) + 1.
+# The trailing (precision=1, recall=0) point has NO threshold, so trim before indexing —
+# otherwise argmin/argmax can return an index that is out of range for `thresholds`.
+precision, recall = precision[:-1], recall[:-1]
+
 # Option A: fix recall at 0.80 (catch 80% of fraud), find min threshold that achieves it
 target_recall = 0.80
-idx = np.argmin(np.abs(recall - target_recall))
+idx = int(np.argmin(np.abs(recall - target_recall)))
 optimal_threshold = thresholds[idx]
 print(f"Threshold for recall={target_recall:.2f}: {optimal_threshold:.3f}, "
       f"precision={precision[idx]:.2f}")
 
-# Option B: expected value optimization given cost of FP=5, cost of FN=200
+# Option B: cost minimisation given cost of FP=5, cost of FN=200.
+# Work in counts, not rates: at each threshold TP = recall * P, FN = (1 - recall) * P,
+# and FP = TP * (1 - precision) / precision. Attaching cost_fp to `precision` and
+# cost_fn to `1 - precision` (a common slip) charges the FP cost to true positives.
+n_pos = int(y_test.sum())
 cost_fp, cost_fn = 5, 200
-ev = precision * recall * (-cost_fp) + (1 - precision) * recall * (-cost_fn)
-# simplified; full expected value includes base rate normalization
-best_idx = np.argmax(ev)
+tp = recall * n_pos
+fn = (1.0 - recall) * n_pos
+fp = tp * (1.0 - precision) / np.clip(precision, 1e-9, None)
+total_cost = fp * cost_fp + fn * cost_fn
+best_idx = int(np.argmin(total_cost))
 best_threshold = thresholds[best_idx]
 ```
 
@@ -339,7 +357,7 @@ class ThresholdMonitor:
 |---|---|---|---|
 | No calibration | No overhead | Wrong probabilities for any threshold-based decision | — |
 | Platt scaling | Simple, few parameters, stable | Only corrects monotone sigmoid miscalibration | 500+ samples |
-| Isotonic regression | Flexible, non-parametric | Can overfit; step-function output may be weird | 2,000+ samples |
+| Isotonic regression | Flexible, non-parametric | Can overfit; step-function output may be weird | 1,000+ samples |
 | Temperature scaling | Preserves rank, one parameter | Only scales (doesn't reshape); DL-specific | Any DL |
 | Beta calibration | Handles 0/1 extremes well | Less tooling support | 1,000+ samples |
 
@@ -387,7 +405,7 @@ class ThresholdMonitor:
 
 | Tool | Calibration Support | Notes |
 |---|---|---|
-| scikit-learn | `CalibratedClassifierCV`, `calibration_curve` | Platt + isotonic, ECE via `calibration_curve`, cross-val wrapper |
+| scikit-learn | `CalibratedClassifierCV`, `calibration_curve`, `FrozenEstimator` | `method` is `"sigmoid"` (Platt), `"isotonic"` or `"temperature"`; `calibration_curve` returns `(prob_true, prob_pred)` from which you compute ECE yourself. For an already-fitted model wrap it in `sklearn.frozen.FrozenEstimator` — `cv="prefit"` was removed |
 | LightGBM | Raw GBDT output; calibrate externally | Add isotonic/Platt as post-processing step |
 | netcal (Python) | Full calibration toolkit | ECE, ACE, MCE, reliability diagrams, 10+ calibration methods |
 | Torch + temperature | `torch.nn.Parameter` for temperature | Standard in DL classification; one-parameter optimization |
@@ -401,7 +419,7 @@ class ThresholdMonitor:
 Calibration measures whether predicted probabilities match empirical event rates: a model that outputs p=0.7 for a set of examples is well-calibrated if 70% of those examples are positive. Discrimination (AUC) measures whether the model correctly ranks positives above negatives, regardless of the absolute probability values. The two are independent: a model can rank perfectly (AUC=1.0) but output 0.55 for all events that happen 90% of the time (poorly calibrated), or be well-calibrated but with low AUC (correct average rates but poor separation). Both matter: AUC measures predictive value; calibration measures decision value.
 
 **Q: When would you use Platt scaling versus isotonic regression?**
-Platt scaling (logistic regression fit on raw scores) is appropriate when you have a small calibration set (<2k examples) or when miscalibration is monotone and S-shaped (overconfident in the middle of the score range, which is typical for SVMs and some neural networks). Isotonic regression is a non-parametric monotone function fitter that can correct any shape of miscalibration but requires a larger calibration set (2k+) to avoid overfitting. In practice, for LightGBM/XGBoost, isotonic regression almost always produces better calibration. For neural networks, temperature scaling is preferred because it preserves the model's learned ranking.
+Platt scaling (logistic regression fit on raw scores) is appropriate when you have a small calibration set (under ~1,000 examples) or when miscalibration is monotone and S-shaped (overconfident in the middle of the score range, which is typical for SVMs and some neural networks). Isotonic regression is a non-parametric monotone function fitter that can correct any shape of miscalibration but requires a larger calibration set (scikit-learn's own guidance is roughly 1,000+) to avoid overfitting. In practice, for LightGBM/XGBoost, isotonic regression almost always produces better calibration. For neural networks, temperature scaling is preferred because it preserves the model's learned ranking.
 
 **Q: How do you choose an optimal classification threshold?**
 The optimal threshold is a function of the cost ratio C(FP)/C(FN). If false positives and false negatives have equal cost, the threshold is 0.5 (assuming well-calibrated probabilities). In fraud detection, missing a fraud (FN) costs 10-100x more than a false alarm (FP), so the threshold is set low (0.1-0.3) to maximize recall. In medical diagnosis, the threshold depends on the severity and treatability of the condition. Practically: plot the precision-recall curve on the validation set, explicitly estimate costs from business context, compute expected value or cost at each threshold, and select the threshold that optimizes the business objective. Re-evaluate the threshold when the cost structure changes or when the event rate shifts significantly.
@@ -443,7 +461,7 @@ The model's score distribution reflects the 3% base rate used in training. At 5%
 AUC-ROC measures only rank order — it is invariant to any monotone transformation of the scores, including transformations that destroy calibration. A model with perfect calibration and a model with scores shifted by +0.3 have identical AUC. The AUC will not detect calibration degradation. For systems where the business decision depends on the absolute probability (threshold selection, cost-sensitive decisions, probability-weighted value calculations), AUC must be supplemented with ECE, Brier score, or log-loss — all of which are sensitive to both calibration and discrimination.
 
 **Q: What is the Brier score and how does it relate to calibration?**
-Brier score = mean squared error between predicted probabilities and binary outcomes: BS = (1/n) * sum((p_i - y_i)^2). Lower is better; perfect calibration + perfect discrimination gives BS = 0; random prediction at base rate r gives BS = r(1-r). Brier score decomposes into calibration (reliability) and refinement (resolution) components: BS = Calibration - Resolution + Uncertainty. Low calibration component means the model's probabilities match empirical rates. Low resolution means the model's probability distribution is spread out (it discriminates well across examples). The Brier score rewards both good calibration and good discrimination, making it a more complete metric than AUC alone for probabilistic systems.
+Brier score = mean squared error between predicted probabilities and binary outcomes: BS = (1/n) * sum((p_i - y_i)^2). Lower is better; perfect calibration + perfect discrimination gives BS = 0; random prediction at base rate r gives BS = r(1-r). Brier score decomposes (Murphy, 1973) into reliability, resolution and uncertainty: BS = Reliability - Resolution + Uncertainty. Low reliability means the model's probabilities match empirical rates. High resolution is what you want — it means the model's per-bin event rates spread away from the base rate, i.e. it discriminates across examples — and because resolution is subtracted, more of it lowers the Brier score. The Brier score rewards both good calibration and good discrimination, making it a more complete metric than AUC alone for probabilistic systems.
 
 **Q: How do you calibrate a model that predicts tomorrow's stock price (regression, not classification)?**
 Calibration for regression is uncertainty quantification. A well-calibrated regression model's 90% prediction interval should contain the true value 90% of the time. Approaches: (a) quantile regression — train separate models for the 5th, 50th, and 95th percentiles; (b) conformal prediction — compute non-conformity scores on a calibration set and derive prediction intervals with coverage guarantees; (c) Bayesian regression — posterior predictive distribution gives calibrated uncertainty. Evaluate calibration with a coverage plot (for each stated coverage level α, what fraction of test points fall within the α-interval?) and mean interval width (narrower intervals for same coverage = better).
@@ -466,12 +484,13 @@ Calibration for regression is uncertainty quantification. A well-calibrated regr
 
 ## 14. Case Study
 
-This cross-cutting file is referenced by the following case studies:
+This cross-cutting file is referenced by the following case studies. The numbers below are
+illustrative worked examples, not measurements from a published system.
 
-**[design_churn_prediction.md](../design_churn_prediction.md):** Churn probability drives intervention budget allocation — the marketing team assigns retention offers to customers above a probability threshold. ECE was measured at 0.22 on the initial LightGBM model (severely miscalibrated). After isotonic regression calibration on a 90-day holdout, ECE dropped to 0.04. The intervention budget was reallocated: 35% more budget went to the top-decile risk group, improving retention ROI by 22%.
+**[design_churn_prediction.md](../design_churn_prediction.md):** Churn probability drives intervention budget allocation — the marketing team assigns retention offers to customers above a probability threshold. In the worked example the initial LightGBM model has ECE 0.22 (severely miscalibrated); isotonic regression on a 90-day holdout drops it to 0.04 without moving AUC, and budget shifts toward the top-decile risk group. Measure the ROI change with a holdback rather than assuming a figure — §7 makes the same point.
 
 **[design_credit_risk_scoring.md](../design_credit_risk_scoring.md):** Regulatory requirement: the decision threshold must correspond to a documented default probability (e.g., cutoff = "applicants with > 8% 24-month PD are declined"). Calibration is legally required, not optional. Platt scaling is applied monthly on the prior month's originations + outcomes cohort to adjust for shifts in credit environment. The scorecard model's ECE is reported in quarterly risk committee materials.
 
-**[design_eta_prediction.md](../design_eta_prediction.md):** ETA uses quantile regression (p10 and p90 intervals) to communicate uncertainty to drivers and riders. The quantile model's calibration is measured as coverage: the p90 interval must contain the actual ETA at least 88-92% of the time (allowing 2pp margin). When coverage drops below 85%, the quantile model is retrained on recent trip data.
+**[design_eta_prediction.md](../design_eta_prediction.md):** ETA uses quantile regression (p10 and p90) to communicate uncertainty to drivers and riders. Calibration is measured as coverage, and the nominal coverage of the [p10, p90] band is 80%, not 90% — a two-sided interval covers the difference of its quantile levels. The check is therefore that the band contains the actual ETA 78-82% of the time (2pp margin), plus a one-sided check that the p90 estimate is not exceeded more than 10% of the time. Sustained under-coverage triggers a retrain on recent trip data.
 
 **[design_marketplace_matching.md](../design_marketplace_matching.md):** The demand forecasting sub-model outputs calibrated probability-of-surge estimates per zone. If miscalibrated (consistently over-predicting surge), the platform pre-positions too many drivers, increasing idle time and driver dissatisfaction. Weekly calibration checks against observed surge events ensure the forecast probabilities remain actionable.

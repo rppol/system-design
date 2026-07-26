@@ -1400,7 +1400,7 @@ A: Knowledge distillation trains a small student model using a large teacher mod
   │  8 × A100 80GB (2 replicas × TP=4)                         │
   │  Model VRAM: 70B × 2 bytes = 140 GB (4 GPUs = 35 GB each)  │
   │  KV headroom: 320 GB - 140 GB = 180 GB/replica (45 GB/GPU) │
-  │  MBPP score: 62.4%                                          │
+  │  MBPP score: 62.4%                                         │
   │  Cost: $11,680/month (8 GPUs × $2/hr × 730 hrs)            │
   └─────────────────────────────────────────────────────────────┘
            |
@@ -1411,18 +1411,18 @@ A: Knowledge distillation trains a small student model using a large teacher mod
   │  - Compute per-channel activation scales                    │
   │  - Find optimal per-group weight clipping (AWQ search)      │
   │  - Group size: 128 (standard for quality vs speed trade-off)│
-  │                                                              │
-  │  Step 2: Quantization                                        │
+  │                                                             │
+  │  Step 2: Quantization                                       │
   │  - Weights: INT4 per-group (128 elements per scale factor)  │
   │  - Activations: FP16 (NOT quantized — quality preservation) │
   │  - KV cache: FP8 (separate optimization)                    │
-  │  - Output: Llama-3-70B-AWQ (INT4, group size 128)          │
-  │                                                              │
-  │  Step 3: Deployment                                          │
-  │  Model VRAM: 70B × 0.5 bytes = 35 GB (~38 GB w/ scales)    │
+  │  - Output: Llama-3-70B-AWQ (INT4, group size 128)           │
+  │                                                             │
+  │  Step 3: Deployment                                         │
+  │  Model VRAM: 70B × 0.5 bytes = 35 GB (~38 GB w/ scales)     │
   │  → Fits on 2×A100/replica, ~122 GB free for KV (61 GB/GPU)  │
-  │  → 4×A100 total (2 replicas) vs 8×A100 before              │
-  │  MBPP score: 61.1% (-1.3% — within 2% SLA)                 │
+  │  → 4×A100 total (2 replicas) vs 8×A100 before               │
+  │  MBPP score: 61.1% (-1.3% — within 2% SLA)                  │
   │  Throughput: 185 RPS (2.3× the FP16 baseline, half the GPUs)│
   └─────────────────────────────────────────────────────────────┘
 ```
@@ -1445,10 +1445,11 @@ Block 1 — AWQ quantization with calibration data:
 
 ```python
 from __future__ import annotations
-import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
-from awq import AutoAWQForCausalLM
+from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import QuantizationModifier
+from llmcompressor.modifiers.transform import AWQModifier
 
 
 def build_calibration_data(
@@ -1457,11 +1458,14 @@ def build_calibration_data(
     subset: str = "data/python",
     n_samples: int = 512,
     max_seq_len: int = 2048,
-) -> list[str]:
+) -> Dataset:
     """
     Load domain-representative calibration samples.
     Use code data (not general text) for a code LLM — calibration data
     domain matters: wrong calibration data → worse quantization decisions.
+
+    Returns a Dataset with a "text" column, which is what `oneshot` reads
+    by default (`text_column="text"`).
     """
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     dataset = load_dataset(dataset_name, subset, split="train", streaming=True)
@@ -1477,52 +1481,53 @@ def build_calibration_data(
         if len(samples) >= n_samples:
             break
 
-    return samples
+    return Dataset.from_dict({"text": samples})
 
 
 def quantize_awq(
     model_id: str,
     output_dir: str,
-    calibration_samples: list[str],
-    group_size: int = 128,
-    bits: int = 4,
-    zero_point: bool = True,
+    calibration_data: Dataset,
+    n_samples: int = 512,
+    max_seq_len: int = 2048,
 ) -> None:
     """
-    Apply AWQ (Activation-aware Weight Quantization) to a model.
+    Apply AWQ (Activation-aware Weight Quantization) with llm-compressor.
     AWQ finds per-channel scaling factors that minimize quantization error
     for the most salient weights (those multiplied by large activations).
 
-    group_size=128: balance between granularity and speed.
-      Smaller groups (64) → better quality, more scale factors stored (+4% model size).
-      Larger groups (256) → worse quality, fewer scale factors.
-    bits=4: standard INT4, 4× compression vs FP16.
-    zero_point=True: asymmetric quantization (slightly better quality than symmetric).
+    A recipe needs BOTH modifiers. AWQModifier is a transform: it only computes
+    and applies the smoothing scales, it does not pack anything. The actual INT4
+    packing is QuantizationModifier's job, and it must run after.
+
+    scheme="W4A16_ASYM" is the compressed-tensors preset for 4-bit INT weights,
+    GROUP strategy with group_size=128, symmetric=False (i.e. a zero point) and
+    16-bit activations. Smaller groups (64) → better quality but more stored
+    scales (+4% model size); larger groups (256) → worse quality, fewer scales.
+    Use "W4A16" instead for symmetric weights.
+
+    duo_scaling=True grid-searches scales using both the input activations and
+    the weight magnitudes; "both" searches half the grid each way, at 2x cost.
     """
-    model = AutoAWQForCausalLM.from_pretrained(
-        model_id,
-        device_map="auto",
-        torch_dtype=torch.float16,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    tokenizer.pad_token = tokenizer.eos_token
+    recipe = [
+        AWQModifier(duo_scaling=True),
+        QuantizationModifier(
+            targets=["Linear"],
+            scheme="W4A16_ASYM",
+            ignore=["lm_head"],   # never quantize the output projection
+        ),
+    ]
 
-    quant_config = {
-        "zero_point": zero_point,
-        "q_group_size": group_size,
-        "w_bit": bits,
-        "version": "GEMM",   # GEMM kernel for A100/H100; use GEMV for single-token decode
-    }
-
-    model.quantize(
-        tokenizer,
-        quant_config=quant_config,
-        calib_data=calibration_samples,
+    oneshot(
+        model=model_id,
+        dataset=calibration_data,
+        recipe=recipe,
+        num_calibration_samples=n_samples,
+        max_seq_length=max_seq_len,
+        output_dir=output_dir,
     )
-    model.save_quantized(output_dir)
-    tokenizer.save_pretrained(output_dir)
     print(f"AWQ INT4 model saved to {output_dir}")
-    print(f"Model size: {_estimate_size_gb(model_id, bits)} GB")
+    print(f"Model size: {_estimate_size_gb(model_id, bits=4)} GB")
 
 
 def _estimate_size_gb(model_id: str, bits: int) -> float:

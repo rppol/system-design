@@ -4,11 +4,11 @@
 
 ## 1. Concept Overview
 
-LlamaIndex (formerly GPT Index) is a data framework for building LLM applications over custom data. Its primary specialization is the RAG pipeline: loading documents from 150+ sources, chunking and indexing them, and enabling multiple retrieval strategies (vector search, keyword search, graph traversal, tree-based summarization). Beyond RAG, LlamaIndex provides data agents that can query structured databases, APIs, and document collections.
+LlamaIndex is a data framework for building LLM applications over custom data. Its primary specialization is the RAG pipeline: loading documents from 150+ sources, chunking and indexing them, and enabling multiple retrieval strategies (vector search, keyword search, graph traversal, tree-based summarization). Beyond RAG, LlamaIndex provides data agents that can query structured databases, APIs, and document collections.
 
 Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration framework, LlamaIndex is depth-first on data access patterns. It has the most sophisticated retrieval abstractions in the ecosystem: sentence-window retrieval, recursive retrieval, auto-merging, sub-question decomposition, and query routing.
 
-**Current version**: llama-index-core 0.10.x (2024)
+**Current version**: llama-index-core 0.14.x (requires Python 3.10+); the `llama-index` meta-package pins core plus the OpenAI LLM and embedding integrations
 **Production adoption signal**: Used by Replit (codebase indexing), Jerry (insurance Q&A), Vanna.AI (SQL generation), and thousands of enterprise RAG applications.
 
 ---
@@ -29,13 +29,13 @@ Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration fram
 
 **Nodes as the unit of information**: Documents are chunked into `TextNode` objects. Each node has text, metadata (source, page number, creation date), and relationships to adjacent nodes (previous/next, parent/child). These relationships enable context-window retrieval patterns.
 
-**Index as a data structure**: An index is not just "embeddings in a vector database." Different index types structure nodes differently: `VectorStoreIndex` for semantic search, `SummaryIndex` for iterating all documents, `KnowledgeGraphIndex` for entity relationships, `TreeIndex` for hierarchical summarization.
+**Index as a data structure**: An index is not just "embeddings in a vector database." Different index types structure nodes differently: `VectorStoreIndex` for semantic search, `SummaryIndex` for iterating all documents, `PropertyGraphIndex` for entity relationships, `TreeIndex` for hierarchical summarization.
 
 **Query engines and retrievers are separate**: A `Retriever` fetches relevant nodes from an index. A `QueryEngine` wraps a retriever with an LLM to synthesize an answer. This separation allows mixing retrievers and synthesizers — e.g., use LlamaIndex's retriever with a LangChain chain for synthesis.
 
 **Pipelines are composable**: `IngestionPipeline` for offline indexing, `QueryPipeline` (or `Router`, `RetrieverQueryEngine`) for online querying. Each step is a modular component that can be swapped.
 
-**ServiceContext / Settings**: Global configuration (LLM, embed model, chunk size, chunk overlap) is set via `Settings` object (llama-index-core 0.10+) rather than passed to every component. This prevents configuration drift.
+**Settings**: Global configuration (LLM, embed model, chunk size, chunk overlap) is set on the `Settings` singleton rather than passed to every component. This prevents configuration drift.
 
 ---
 
@@ -47,7 +47,7 @@ Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration fram
 |-------|---------|----------|---------|
 | `VectorStoreIndex` | Vector DB (Pinecone, Chroma, Weaviate) | Semantic similarity search | Best general purpose |
 | `SummaryIndex` | In-memory list | Iterating all docs, summaries | Slow for large corpuses |
-| `KnowledgeGraphIndex` | Graph DB (Neo4j, Nebula) | Entity relationships, multi-hop | Complex setup |
+| `PropertyGraphIndex` | Property graph store (Neo4j, Memgraph) | Entity relationships, multi-hop | Complex setup |
 | `TreeIndex` | In-memory tree | Hierarchical Q&A, summarization | High build cost |
 | `KeywordTableIndex` | Keyword map | Exact keyword matching | No semantic understanding |
 
@@ -66,11 +66,14 @@ Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration fram
 
 ### Agent Types
 
+All agents live in `llama_index.core.agent.workflow` (re-exported from `llama_index.core.agent`) and are built on the LlamaIndex `Workflow` engine, so they are async — you drive them with `await agent.run(...)`.
+
 | Agent | Description |
 |-------|-------------|
-| `ReActAgent` | ReAct pattern; works with any model |
-| `FunctionCallingAgent` | OpenAI/Anthropic function calling; more reliable |
-| `OpenAIAgent` | Legacy OpenAI-specific agent; deprecated |
+| `FunctionAgent` | Native tool/function calling; the default for any model that supports it |
+| `ReActAgent` | ReAct prompt loop; works with models that have no tool-calling API |
+| `CodeActAgent` | Agent writes and executes Python instead of emitting discrete tool calls |
+| `AgentWorkflow` | Orchestrates several agents with handoffs and shared state |
 
 ---
 
@@ -92,7 +95,7 @@ flowchart TD
         RAW(["Raw files\nPDF · DOCX · HTML · Notion · Confluence · GitHub"])
         DC["Data Connectors / SimpleDirectoryReader"]
         DOCS["Document objects\n(metadata-rich)"]
-        NP["Node Parsers / Text Splitters\nchunk_size=512 · chunk_overlap=64 by default"]
+        NP["Node Parsers / Text Splitters\nchunk_size=1024 · chunk_overlap=20 by default"]
         TN["TextNodes\nwith parent/prev/next relationships"]
         TR["Transformations\nmetadata extractors · embeddings"]
         IDX["VectorStoreIndex.from_documents()"]
@@ -347,7 +350,7 @@ response = sub_question_engine.query(
 ### LlamaIndex Data Agent
 
 ```python
-from llama_index.core.agent import FunctionCallingAgent
+from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.tools import QueryEngineTool, FunctionTool
 import json
 
@@ -366,15 +369,19 @@ def lookup_customer(customer_id: str) -> str:
 
 customer_tool = FunctionTool.from_defaults(fn=lookup_customer)
 
-# Build agent
-agent = FunctionCallingAgent.from_tools(
+# Build agent. Workflow agents are async — drive them with `await agent.run(...)`.
+agent = FunctionAgent(
     tools=[kb_tool, customer_tool],
     llm=OpenAI(model="gpt-4o"),
-    verbose=True,
-    max_function_calls=10  # prevents infinite tool loops
+    system_prompt="You are a support assistant. Cite the policy you used.",
 )
 
-response = agent.chat("Look up customer C-1234 and find their applicable return policy.")
+# max_iterations caps the tool loop (default 20); early_stopping_method="generate"
+# asks the LLM for a best-effort answer instead of raising when the cap is hit.
+response = await agent.run(
+    "Look up customer C-1234 and find their applicable return policy.",
+    max_iterations=10,
+)
 ```
 
 ### Ingestion Pipeline with Transformations
@@ -407,7 +414,7 @@ nodes = pipeline.run(documents=documents, show_progress=True)
 
 **Jerry (insurance tech)**: Parses insurance policy documents (PDFs with complex layouts) using LlamaIndex's document loaders, builds per-customer policy indices, and answers coverage questions. Auto-merging retrieval handles policy documents with nested section structure.
 
-**Vanna.AI**: SQL generation product uses LlamaIndex to index SQL documentation, schema definitions, and query examples. VectorStoreIndex + KnowledgeGraphIndex combined for schema relationship traversal.
+**Vanna.AI**: SQL generation product uses LlamaIndex to index SQL documentation, schema definitions, and query examples. VectorStoreIndex + PropertyGraphIndex combined for schema relationship traversal.
 
 **Notion AI competitors**: Multiple startups use LlamaIndex with Notion connectors (NotionPageReader) to build Q&A over team wikis. SimpleDirectoryReader handles attachments; parent-child hierarchy preserved.
 
@@ -462,7 +469,7 @@ nodes = pipeline.run(documents=documents, show_progress=True)
 ## 10. Common Pitfalls
 
 **Pitfall 1: Default chunk size is wrong for your domain**
-Default `chunk_size=1024` tokens works for general prose. For code: split by function/class, not token count. For PDFs with tables: use `PDFMinerLoader` not `SimpleDirectoryReader` — otherwise tables are lost. For HTML: strip tags before chunking. Team built RAG over API documentation with default chunker; retrieved chunks contained half-functions, leading to syntax errors in generated code. Fix: `CodeSplitter` from `llama_index.core.node_parser`.
+Default `chunk_size=1024` tokens works for general prose. For code: split by function/class, not token count. For PDFs with tables: use LlamaParse (or `llama-index-readers-file`'s `PyMuPDFReader`) rather than letting `SimpleDirectoryReader` fall back to its plain-text PDF path — otherwise tables are flattened and lost. For HTML: strip tags before chunking. Team built RAG over API documentation with default chunker; retrieved chunks contained half-functions, leading to syntax errors in generated code. Fix: `CodeSplitter` from `llama_index.core.node_parser`.
 
 **Pitfall 2: Not persisting the index**
 ```python
@@ -488,27 +495,38 @@ Common pattern: retrieve top-K, then rerank to top-3. If `similarity_top_k=3` an
 **Pitfall 5: Ignoring metadata for filtering**
 All documents in the same index means a query about "2023 policy" retrieves chunks from "2019 policy" too. Solution: add `doc_date`, `doc_type`, `department` to node metadata during ingestion, then use `MetadataFilters` at query time:
 ```python
-from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, FilterOperator
 query_engine = index.as_query_engine(
     filters=MetadataFilters(filters=[
-        ExactMatchFilter(key="year", value="2023")
+        MetadataFilter(key="year", value="2023", operator=FilterOperator.EQ)
     ])
 )
 ```
 
 **Pitfall 6: SubQuestion engine cost explosion**
-SubQuestionQueryEngine generates N sub-questions and executes N LLM queries + N retrieval calls. For complex questions: 8 sub-questions × (1 retrieval + 1 synthesis) × GPT-4o = $0.80/query. In production, a customer asked a complex question that generated 12 sub-questions, costing $1.20 for a single query. Fix: `SubQuestionQueryEngine.from_defaults(num_questions=3)` to limit sub-questions, or use it only for confirmed complex queries.
+SubQuestionQueryEngine generates N sub-questions and executes N LLM queries + N retrieval calls. For complex questions: 8 sub-questions × (1 retrieval + 1 synthesis) × GPT-4o = $0.80/query. In production, a customer asked a complex question that generated 12 sub-questions, costing $1.20 for a single query. `from_defaults` has no count argument — the cap lives in the question generator's prompt:
+
+```python
+from llama_index.core.question_gen import LLMQuestionGenerator
+from llama_index.core.question_gen.prompts import DEFAULT_SUB_QUESTION_PROMPT_TMPL
+
+CAPPED = "Emit AT MOST 3 sub-questions.\n" + DEFAULT_SUB_QUESTION_PROMPT_TMPL
+engine = SubQuestionQueryEngine.from_defaults(
+    query_engine_tools=tools,
+    question_gen=LLMQuestionGenerator.from_defaults(prompt_template_str=CAPPED),
+)
+```
 
 **Put simply.** "The engine does not answer your question once — it answers `N` smaller questions, each with its own retrieval and its own synthesis call, so the price of a query is set by a number the model chooses at runtime."
 
-That last clause is the whole danger. `N` is decided by the LLM while decomposing, not by you, so cost per query is unbounded until you pass `num_questions`.
+That last clause is the whole danger. `N` is decided by the LLM while decomposing, not by you, so cost per query is unbounded until you cap the generator's prompt.
 
 | Symbol | What it is |
 |--------|------------|
 | `N` | Sub-questions the decomposer generated — model-chosen unless capped |
 | `c` | Cost of one sub-question: 1 retrieval + 1 synthesis LLM call, $0.10 here |
 | `N x c` | Total query cost — linear in a number you did not pick |
-| `num_questions` | The cap that converts `N` from model-chosen into engineer-chosen |
+| capped `question_gen` | The bound that converts `N` from model-chosen into engineer-chosen |
 
 **Walk one example.** Back out the unit cost from the pitfall, then apply it:
 
@@ -530,11 +548,11 @@ show up as spiky bills rather than a gradual climb.
 
 **Why `use_async=True` does not help here.** Running sub-questions in parallel cuts latency
 60-80% (Section 13), but every sub-question still issues its own retrieval and synthesis
-call — `N x c` is unchanged. Parallelism buys wall-clock time; only `num_questions` buys
-money. Conflating the two is a common and expensive mistake.
+call — `N x c` is unchanged. Parallelism buys wall-clock time; only a capped `question_gen`
+buys money. Conflating the two is a common and expensive mistake.
 
-**Pitfall 7: KnowledgeGraphIndex quality depends on LLM extraction**
-Building a knowledge graph uses an LLM to extract entity-relationship triples from text. With GPT-3.5-turbo, extraction quality is poor; with GPT-4o it's acceptable but expensive ($0.05-0.20 per document at 1K tokens). Teams built KG indices with a cheap model, got low-quality graphs, and saw worse Q&A results than basic vector search. Recommendation: use KnowledgeGraphIndex only when your data has strong entity relationships; test extraction quality before committing to it.
+**Pitfall 7: PropertyGraphIndex quality depends on LLM extraction**
+Building a property graph runs the `kg_extractors` chain — by default `SimpleLLMPathExtractor` — to pull entity-relationship triples out of every chunk with an LLM. With a small, cheap model extraction quality is poor; with a frontier model it is acceptable but expensive ($0.05-0.20 per document at 1K tokens). Teams built graph indices with a cheap model, got low-quality graphs, and saw worse Q&A results than basic vector search. Recommendation: use `PropertyGraphIndex` only when your data has strong entity relationships; test extraction quality on a sample before committing to it.
 
 ---
 
@@ -542,8 +560,8 @@ Building a knowledge graph uses an LLM to extract entity-relationship triples fr
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `llama-index-core` | Core framework | 0.10.x — breaking change from 0.9 |
-| `llama-index-llms-openai` | LLM integration | Separate package since 0.10 |
+| `llama-index-core` | Core framework | 0.14.x; Python 3.10+ |
+| `llama-index-llms-openai` | LLM integration | One package per provider |
 | `llama-index-embeddings-openai` | Embedding model | Separate package |
 | `llama-index-vector-stores-pinecone` | Vector store | One package per integration |
 | `llama-index-retrievers-bm25` | BM25 retriever | Requires `rank_bm25` |
@@ -551,10 +569,10 @@ Building a knowledge graph uses an LLM to extract entity-relationship triples fr
 | `LlamaHub` | Community integrations | 150+ data connectors, vector stores, LLMs |
 | `LlamaCloud` | Managed ingestion + parsing | Enterprise parsing service (handles tables, images) |
 
-**Version notes:**
-- llama-index 0.9.x: monolithic package, `ServiceContext` for config
-- llama-index-core 0.10.x (Jan 2024): split into packages, `Settings` replaces `ServiceContext`, namespace changed from `llama_index` to `llama_index.core`
-- Migration required from 0.9 to 0.10: `from llama_index import ...` → `from llama_index.core import ...`
+**Packaging notes:**
+- `llama-index-core` holds the abstractions and every in-tree component; each provider integration (LLM, embedding, vector store, reader, postprocessor) is its own versioned package, so an integration can ship a fix without a core release.
+- Everything imports from `llama_index.core.*`; the `llama-index` meta-package is a convenience pin of core plus the OpenAI LLM and embedding packages.
+- Configuration is the `Settings` singleton (`Settings.llm`, `Settings.embed_model`, `Settings.chunk_size`), set once at startup and read by every component that is not passed an explicit override.
 
 ---
 
@@ -579,7 +597,7 @@ Given a complex query, a question-generator LLM decomposes it into sub-questions
 `VectorStoreIndex.from_documents(documents)` processes all documents: runs node parsers, generates embeddings for all chunks, and loads them into the vector store. This is expensive (minutes to hours for large corpora, significant API costs). Loading from a persisted index (`load_index_from_storage`) reads the stored metadata and reconnects to the vector store without re-processing. In production: build the index once during deployment, persist to disk or vector DB, load on startup. Rebuild only when documents change (incremental update with `index.insert(new_document)`).
 
 **Q: How do you handle metadata filtering in LlamaIndex?**
-Add metadata to documents during loading (or set it on `TextNode` objects). At query time, pass `MetadataFilters` to the query engine or retriever. Example: `filters=MetadataFilters(filters=[ExactMatchFilter(key="department", value="legal")])`. For range filters: `FilterCondition(key="year", value=2023, operator=FilterOperator.GTE)`. Important: the metadata must exist in the vector store (most vector DBs support metadata filtering: Pinecone, Weaviate, Qdrant). Chroma supports basic filtering; Pinecone has the most flexible filter expressions.
+Add metadata to documents during loading (or set it on `TextNode` objects). At query time, pass `MetadataFilters` to the query engine or retriever. Example: `filters=MetadataFilters(filters=[MetadataFilter(key="department", value="legal")])` — `MetadataFilter` defaults to `FilterOperator.EQ`. For range filters: `MetadataFilter(key="year", value=2023, operator=FilterOperator.GTE)`, and `MetadataFilters(filters=[...], condition=FilterCondition.OR)` to change how filters combine. Important: the metadata must exist in the vector store (most vector DBs support metadata filtering: Pinecone, Weaviate, Qdrant). Chroma supports basic filtering; Pinecone has the most flexible filter expressions.
 
 **Q: What is the IngestionPipeline and what transformations does it support?**
 `IngestionPipeline` is a reusable, cacheable pipeline for document processing. Transformations include: node parsers (TokenTextSplitter, SentenceWindowNodeParser), metadata extractors (TitleExtractor, QuestionsAnsweredExtractor, KeywordExtractor, SummaryExtractor), and embedding models. The pipeline caches processed nodes by document hash — if a document is unchanged, re-running the pipeline skips it. This enables incremental indexing. Transformations run sequentially; each receives a list of nodes and returns a transformed list. Custom transformations are possible by subclassing `BaseTransformation`.
@@ -587,7 +605,7 @@ Add metadata to documents during loading (or set it on `TextNode` objects). At q
 **Q: How do you combine LlamaIndex retrieval with LangChain for generation?**
 LlamaIndex retrievers can be wrapped as LangChain Retrievers:
 ```python
-from llama_index.core.langchain_helpers.text_splitter import LangchainNodeParser
+from llama_index.core.node_parser import LangchainNodeParser
 # Or use LlamaIndex retriever output directly
 nodes = retriever.retrieve(query)
 docs = [n.node.get_content() for n in nodes]
@@ -595,17 +613,17 @@ docs = [n.node.get_content() for n in nodes]
 ```
 Alternatively, use LlamaIndex's `QueryEngineTool` in a LangChain agent. The hybrid pattern is common: LlamaIndex for retrieval quality, LangChain for orchestration and tool use.
 
-**Q: What changed in LlamaIndex 0.10 vs 0.9?**
-Breaking changes: (1) Package split — monolithic `llama_index` package split into `llama-index-core` + provider packages (`llama-index-llms-openai`, etc.); (2) Namespace change — `from llama_index import ...` → `from llama_index.core import ...`; (3) `ServiceContext` deprecated in favor of `Settings` singleton; (4) `LLMPredictor` and `PromptHelper` removed, replaced by direct `Settings.llm` configuration. Migration from 0.9 to 0.10 requires updating all imports and removing `ServiceContext` construction. Reason for change: modular architecture reduces package size and allows independent versioning of integrations.
+**Q: How is LlamaIndex packaged, and what do you actually install?**
+`llama-index-core` carries the abstractions and every in-tree component, and each provider integration ships as its own versioned package. So a Pinecone-backed RAG app installs `llama-index-core`, `llama-index-llms-openai`, `llama-index-embeddings-openai` and `llama-index-vector-stores-pinecone`; the `llama-index` meta-package is just a convenience pin of core plus the two OpenAI integrations. Everything imports from `llama_index.core.*` regardless. The point of the split is independent release cadence — a vector-store client bug can be fixed without cutting a core release, and you are not pulling every provider's transitive dependencies into your image.
 
 **Q: How does the Router Query Engine work?**
 `RouterQueryEngine` uses an LLM to select which `QueryEngineTool` to route a query to. Given multiple tools (product docs, pricing index, support FAQ), the router generates a natural language description for each tool and asks the LLM which is most appropriate for the current query. Supports single routing (pick one) and multi-routing (pick all relevant). Multi-routing is similar to SubQuestion but without decomposition — useful when the same question can be answered from multiple sources. Limitation: LLM routing adds 1-2 seconds of latency; for high-traffic systems, use a classifier-based router instead.
 
 **Q: How do you evaluate RAG quality with LlamaIndex?**
-LlamaIndex provides `RAGEvaluator` integrating with RAGAs metrics: (1) Faithfulness — does the answer stay within the retrieved context? LLM-as-judge compares answer to source nodes; (2) Answer Relevance — does the answer address the question? LLM generates hypothetical questions from the answer and measures overlap; (3) Context Precision/Recall — are the retrieved nodes relevant? Uses LLM to judge relevance of each retrieved node. Concrete workflow: collect 100 production queries, create ground truth answers, run evaluators on production data, set threshold (faithfulness > 0.85), alert if metrics drop below threshold after updates.
+`llama_index.core.evaluation` ships LLM-as-judge evaluators that you drive in bulk with `BatchEvalRunner`. The three that matter for RAG: (1) `FaithfulnessEvaluator` — does the answer stay within the retrieved context? It compares the answer to the source nodes; (2) `AnswerRelevancyEvaluator` — does the answer actually address the question? (3) `ContextRelevancyEvaluator` — are the retrieved nodes relevant to the question? For retrieval quality specifically, `RetrieverEvaluator` scores hit rate and MRR against a labelled query-to-node dataset, which is the metric to move before touching the synthesizer. Concrete workflow: collect 100 production queries, create ground truth answers, run evaluators on production data, set threshold (faithfulness > 0.85), alert if metrics drop below threshold after updates.
 
 **Q: How do LlamaIndex data agents differ from LangChain agents?**
-LlamaIndex data agents specialize in data-access tools: `QueryEngineTool` (query an index), `FunctionTool` (call a Python function). They use the same underlying patterns (ReAct or function calling) but are optimized for the case where the primary actions are querying data sources. LangChain agents have a broader ecosystem of pre-built tools (web search, calculator, shell, email, calendar). In practice: use LlamaIndex agents when the primary tools are indices/databases; use LangChain/LangGraph agents when you need diverse tool types. The frameworks are complementary and can be mixed.
+LlamaIndex data agents specialize in data-access tools: `QueryEngineTool` (query an index), `FunctionTool` (call a Python function). They use the same underlying patterns — `FunctionAgent` for native tool calling, `ReActAgent` otherwise — but are optimized for the case where the primary actions are querying data sources, and they run on the async `Workflow` engine so `await agent.run(...)` is the entry point. LangChain agents have a broader ecosystem of pre-built tools (web search, calculator, shell, email, calendar). In practice: use LlamaIndex agents when the primary tools are indices/databases; use LangChain/LangGraph agents when you need diverse tool types. The frameworks are complementary and can be mixed.
 
 **Q: What is LlamaCloud and when should you use it?**
 LlamaCloud is a managed service providing: (1) LlamaParse — cloud-based document parsing that handles tables, images, and complex PDF layouts better than local parsers; (2) Managed ingestion pipelines — scheduled re-indexing without managing infrastructure; (3) Managed indices — vector storage and retrieval without running a vector database. Use LlamaCloud when: complex document parsing is needed (LlamaParse outperforms local parsers for tables and multi-column PDFs), or when you want to skip vector database management. Self-host when: data cannot leave your infrastructure (LlamaCloud requires sending documents to their API).
@@ -617,7 +635,7 @@ Three patterns: (1) Full rebuild — delete and rebuild the entire index on a sc
 
 ## 13. Best Practices
 
-1. **Use `Settings` (0.10+) not `ServiceContext`** — global configuration; configure once at startup.
+1. **Configure `Settings` once at startup** — LLM, embed model, chunk size in one place; no per-component config drift.
 2. **Always persist the index** — never rebuild on startup; add `index.storage_context.persist()` after building.
 3. **Start with basic top-K, then add complexity** — measure retrieval quality first; add sentence window or auto-merging only if basic retrieval is insufficient.
 4. **Set `similarity_top_k` higher than you think** — retrieve 12-20 candidates, then rerank to top 3; better coverage than directly fetching top 3.
@@ -626,7 +644,7 @@ Three patterns: (1) Full rebuild — delete and rebuild the entire index on a sc
 7. **Cache ingestion pipelines** — `IngestionPipeline(cache=IngestionCache())` skips re-processing unchanged docs.
 8. **Use LlamaParse for complex PDFs** — superior table handling vs PyPDF2/pdfminer for business documents.
 9. **Evaluate with RAGAs metrics** — faithfulness and answer relevance; set thresholds and alert on regression.
-10. **Limit SubQuestionQueryEngine calls** — set `num_questions=3-5` to control cost; don't use it for simple queries.
+10. **Cap SubQuestionQueryEngine decomposition** — pass a `question_gen` whose prompt allows at most 3-5 sub-questions; don't use the engine for simple queries.
 
 ---
 
@@ -695,7 +713,8 @@ for matter_id in user.matter_ids:
 sub_question_engine = SubQuestionQueryEngine.from_defaults(
     query_engine_tools=matter_tools,
     use_async=True,
-    num_questions=4  # cost control
+    # cost control: the generator's prompt caps decomposition at 4 sub-questions
+    question_gen=LLMQuestionGenerator.from_defaults(prompt_template_str=CAPPED_AT_4),
 )
 
 # Route: simple queries go to single-matter retriever, complex to sub-question

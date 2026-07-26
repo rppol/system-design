@@ -23,7 +23,7 @@ One-line analogy: experiment tracking is a lab notebook for ML — every trial n
 
 Mental model: think of each training run as an immutable document with five fields: (1) what you tried (hyperparameters), (2) what happened (metrics over time), (3) what you produced (model artifacts), (4) what data you used (dataset version), (5) when and where you ran it (timestamp, machine, git SHA). An experiment tracker (MLflow, W&B) is a database that stores and indexes these documents.
 
-Why it matters: hyperparameter search is a high-dimensional optimization problem. Without logging all runs, engineers re-discover the same bad configurations repeatedly, and the relationship between hyperparameters and outcomes is invisible. With proper tracking, Bayesian optimization can cut the number of experiments needed to find the optimum by 3-10x compared to grid search.
+Why it matters: hyperparameter search is a high-dimensional optimization problem. Without logging all runs, engineers re-discover the same bad configurations repeatedly, and the relationship between hyperparameters and outcomes is invisible. With proper tracking, sequential methods (random search, then Bayesian optimization) reuse every past trial instead of discarding it, which is what makes them cheaper than a grid — the size of the win is problem-dependent, not a fixed multiple.
 
 Key insight: the goal is not to log more data — it is to log the right data so that any run can be exactly reproduced and directly compared to any other run. Partial logging (only final accuracy, not per-epoch curves) makes debugging impossible.
 
@@ -48,24 +48,23 @@ Key insight: the goal is not to log more data — it is to log the right data so
 ## 4. Types / Architectures / Strategies
 
 **MLflow Tracking**
-Open-source, self-hosted or Databricks-managed. Runs are grouped under Experiments. Logs: params (str key, str value), metrics (float, with step), artifacts (any file). Auto-logging (mlflow.sklearn.autolog(), mlflow.pytorch.autolog()) captures common framework calls automatically. MLflow Model Registry adds model lifecycle management (Staging → Production → Archived states).
+Open-source, self-hosted or Databricks-managed. Runs are grouped under Experiments. Logs: params (str key, str value), metrics (float, with step), artifacts (any file). Auto-logging captures common framework calls automatically — `mlflow.sklearn.autolog()` patches `fit()`, while `mlflow.pytorch.autolog()` hooks **PyTorch Lightning's `Trainer.fit()` only** and is a no-op for a hand-written PyTorch loop. MLflow Model Registry adds model lifecycle management; its `None → Staging → Production → Archived` **stages have been deprecated since MLflow 2.9** in favour of model version **aliases** (`@champion`, `@challenger`) plus version **tags**, and MLflow states stages will be removed in a future major release.
 
 **Weights & Biases (W&B)**
 SaaS (with self-hosted option). Richer visualizations than MLflow (interactive charts, side-by-side run comparison, media logging — images, audio, video). W&B Sweeps: define a hyperparameter search space, launch agents that query W&B's Bayesian optimizer for the next configuration. W&B Artifacts: versioned datasets, models, and evaluation results with lineage graph between them.
 
-**Neptune**
-SaaS, strong Python SDK. Supports logging nested dicts, custom objects. Good for research teams.
+**Neptune** — *no longer available; kept here for historical context.* Neptune was a SaaS tracker with a strong Python SDK (nested dicts, custom objects). OpenAI announced its acquisition of Neptune on 2025-12-04; Neptune stopped taking new customers and turned off the hosted app and API on 2026-03-04. Do not select it for new work.
 
 **Comet ML**
 SaaS, automatic code capturing, diff logging. Strong in NLP research community.
 
 **DVC (Data Version Control)**
-Open-source, git-native. Tracks data files and pipeline stages (not experiments directly). `dvc run` (or `dvc repro`) executes pipeline DAGs defined in dvc.yaml; caches intermediate outputs by content hash. `dvc exp run` for experiment tracking (lightweight, git branch-per-experiment model). Pairs with MLflow/W&B for full solution.
+Open-source, git-native. Tracks data files and pipeline stages (not experiments directly). `dvc stage add` defines a stage in dvc.yaml and `dvc repro` executes the pipeline DAG, caching intermediate outputs by content hash (the old `dvc run` command was deprecated and no longer exists in DVC 3.x). `dvc exp run` for experiment tracking — lightweight, storing each experiment under hidden custom git refs (`refs/exps/...`) rather than as a real branch. Pairs with MLflow/W&B for full solution.
 
 **Hyperparameter Optimization Strategies**:
 - Grid search: all combinations — O(N^k) for N values per k hyperparameters; feasible only for 1-2 hyperparameters
-- Random search: sample configurations uniformly — beats grid search for high-dimensional spaces (empirically, random search finds a configuration within 5% of optimal in 60 trials vs 10,000 for grid search in 10-dimensional spaces)
-- Bayesian optimization (Optuna TPE, SMAC): fit a surrogate model (tree-structured Parzen estimator or Gaussian process) to past results; sample next configuration in regions likely to improve over the current best — ~3-5x more sample-efficient than random search
+- Random search: sample configurations uniformly — beats grid search in high-dimensional spaces because most hyperparameters do not matter and the ones that do differ per dataset (Bergstra & Bengio, JMLR 2012). Its guarantee is dimension-independent: if the near-optimal region occupies 5% of the search volume, `T` random draws miss it with probability `0.95^T`, so `T = 60` hits it with probability `1 - 0.95^60 = 95%` — the same 60 trials whether the space is 2-D or 100-D
+- Bayesian optimization (Optuna TPE, SMAC): fit a surrogate model (tree-structured Parzen estimator or Gaussian process) to past results; sample next configuration in regions likely to improve over the current best — usually a few-fold saving over random search on the same problem, but the factor is problem-dependent, not a published constant
 - Population-based training (PBT): asynchronously train a population of models; exploit good performers by copying their weights, explore by perturbing their hyperparameters mid-training
 
 **What this actually says.** `O(N^k)` means "every hyperparameter you add multiplies the entire search you already had by N" — grid search does not get gradually more expensive, it gets exponentially more expensive.
@@ -77,7 +76,7 @@ That is why the guidance is a hard cutoff ("feasible only for 1-2 hyperparameter
 | `N` | How many values you list for one hyperparameter (e.g. lr in `[1e-5, 1e-4, 1e-3, 1e-2, 1e-1]` -> N = 5) |
 | `k` | How many hyperparameters you are tuning at once — the exponent, and the thing that hurts |
 | `N^k` | Total configurations grid search must train. Every one is a full training run |
-| "within 5% of optimal" | The bar the 60-trial random-search result is measured against — near-best, not provably best |
+| "top 5% of the volume" | The fraction of the search space treated as near-optimal — the bar the 60-trial random-search argument is measured against, not a proof of optimality |
 
 **Walk one example.** Hold `N = 5` fixed and add one hyperparameter at a time:
 
@@ -91,17 +90,20 @@ That is why the guidance is a hard cutoff ("feasible only for 1-2 hyperparameter
   Adding ONE hyperparameter at k = 5 does not add 5 runs -- it adds 4 x 3,125 = 12,500.
 ```
 
-The 10-dimensional comparison in the text is the same arithmetic seen from the other side:
+Random search's budget is the other side of the same arithmetic — it is a number you pick, and the exponent never appears:
 
 ```
-  grid  : 10,000 trials to cover 10 dims  ->  10,000^(1/10) = 2.51 values per dimension
-                                              a grid so coarse it tests ~2 values per knob
-  random:     60 trials                   ->  10,000 / 60 = 167x fewer runs, same 5% gap
-  TPE   :  a further 3-5x on top of random -> a 100-trial random budget becomes
-                                              100 / 5 = 20  to  100 / 3 = 33 trials
+  grid  : k = 10, N = 5   ->  5^10   = 9,765,625 runs
+          even N = 2.51 (the coarsest useful grid) -> 2.51^10 = 10,000 runs
+                                  a grid so coarse it tests ~2 values per knob
+
+  random: T = 60 runs     ->  P(hit the top-5% region) = 1 - 0.95^60 = 95%
+                              and T = 60 is 60 whether k = 2 or k = 100
 ```
 
 **Why the exponent, not the base, is the enemy.** Halving `N` (5 values -> 2 or 3 per knob) buys you one factor; that is what the 2.51-per-dimension grid above already did, and it still needs 10,000 runs. Random search escapes because its cost is set by the trial budget you choose, not by `N^k` — the space's dimensionality never enters the count. Bayesian optimization then spends that fixed budget better by fitting a surrogate over the trials already finished.
+
+Note what the 60-trial number is and is not: it is a statement about **volume**, so it assumes the near-optimal region really is ~5% of the space you sampled. Bergstra & Bengio's own measured results are smaller and problem-specific — 8 to 16 random trials sufficed on their 7-hyperparameter neural-network tasks, where a 4-value grid on the same axes would already have cost 256 runs.
 
 ---
 
@@ -222,6 +224,10 @@ stateDiagram-v2
 A model enters the registry linked to one run, then transitions through gated
 stages. Promotion to Production is a metadata change, so rollback is instant: the
 previous version stays Archived and can be re-promoted without a redeploy.
+The **lifecycle above is the concept; MLflow's literal stage names are deprecated**
+(since 2.9) — implement the same gates today with aliases (`@champion`,
+`@challenger`) and version tags (`validation_status: passed`), which additionally
+let one version carry several labels at once.
 
 **Reproducibility chain — the four axes that must all be pinned**
 
@@ -306,9 +312,10 @@ def train_with_mlflow(
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    # Enable PyTorch auto-logging: captures optimizer, loss, and model summary
-    # Disable if you want manual control over what gets logged
-    mlflow.pytorch.autolog(log_every_n_epoch=1, log_models=False)
+    # NOTE: mlflow.pytorch.autolog() hooks PyTorch Lightning's Trainer.fit() ONLY.
+    # The hand-written loop below is NOT covered by it, which is exactly why every
+    # param and metric is logged explicitly. Enable it only if you switch to Lightning:
+    #   mlflow.pytorch.autolog(log_every_n_epoch=1, log_models=False)
 
     with mlflow.start_run(run_name=f"lr_{config['lr']}_bs_{config['batch_size']}") as run:
         # Log all hyperparameters at run start — BEFORE training begins
@@ -447,16 +454,23 @@ def objective(trial: optuna.Trial) -> float:
 def run_hyperparameter_search(n_trials: int = 100) -> optuna.Study:
     """
     Run Bayesian hyperparameter optimization.
-    TPE (Tree-structured Parzen Estimator) is 3-5x more sample-efficient
-    than random search for typical ML hyperparameter spaces.
+    TPE (Tree-structured Parzen Estimator) reuses every finished trial, so it
+    typically needs fewer trials than random search to reach the same metric.
     """
     with mlflow.start_run(run_name="hpo_study"):
         study = optuna.create_study(
             direction="minimize",
+            # TPESampler takes keyword arguments only
             sampler=TPESampler(n_startup_trials=10),  # random for first 10 trials, then TPE
             pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=5),
         )
-        study.optimize(objective, n_trials=n_trials, n_jobs=4)  # 4 parallel trials
+        # n_jobs stays 1 on purpose. Optuna's n_jobs is THREAD-based, and MLflow's
+        # active-run stack is thread-local, so worker threads would not see the
+        # parent run and every `start_run(nested=True)` would silently become a
+        # flat top-level run. For real parallelism run separate processes against
+        # a shared Optuna storage and pass the parent explicitly:
+        #   mlflow.start_run(nested=True, parent_run_id=parent_id)
+        study.optimize(objective, n_trials=n_trials, n_jobs=1)
 
         # Log best hyperparameters to parent run
         mlflow.log_params({f"best_{k}": v for k, v in study.best_params.items()})
@@ -521,9 +535,11 @@ def train_with_wandb(config: dict[str, Any] | None = None) -> None:
         run.log_artifact(artifact)
 
 
-def launch_wandb_sweep(n_agents: int = 4) -> None:
+def launch_wandb_sweep() -> None:
     sweep_id = wandb.sweep(sweep_config, project="my-model-project")
-    # Launch N agents in parallel (each runs training jobs sequentially)
+    # One agent, running up to 25 training jobs sequentially. For N parallel
+    # agents, start this same call in N separate processes/machines with the
+    # SAME sweep_id — the sweep controller hands each one different configs.
     wandb.agent(sweep_id, function=train_with_wandb, count=25)
 ```
 
@@ -531,13 +547,13 @@ def launch_wandb_sweep(n_agents: int = 4) -> None:
 
 ## 7. Real-World Examples
 
-**Google Brain**: all research experiments tracked in an internal system (similar to MLflow). Experiments reference dataset snapshots by hash. The Gemini paper listed exact hyperparameters, data mixture proportions, and training duration — this level of tracking is only possible with systematic logging from day one.
+**Google DeepMind** (Google Brain merged into DeepMind in April 2023): frontier-model research runs on internal tracking infrastructure, not a public tool. Note the limit of what tracking buys the *reader*: the Gemini technical reports deliberately withhold model sizes, exact hyperparameters, and data-mixture proportions. Internal reproducibility and external disclosure are separate decisions — good tracking enables the first and says nothing about the second.
 
 **Hugging Face**: model hub acts as a public artifact registry. Every model card (README.md) links to training data, training code, and evaluation results. `push_to_hub()` is the equivalent of `mlflow.log_artifact()` in the HF ecosystem.
 
-**Spotify**: uses MLflow at scale (thousands of experiments/day) with PostgreSQL as the tracking backend and S3 as artifact store. Experiments organized by team + use case. Model promotion from Staging to Production is gated on experiment run_ids — only models with a tracked run can be promoted.
+**Spotify**: runs a centralized in-house ML platform (Hendrix) rather than a stock tracker — originally TensorFlow Extended plus Kubeflow Pipelines on Kubernetes (2018-2019), extended from 2023 with a managed Ray platform on GKE via KubeRay so PyTorch, XGBoost, GNN and RL workloads scale under one system. The pattern to take from it: at organization scale, tracking is usually absorbed into a platform that also owns orchestration and the feature store.
 
-**Weights & Biases customers (OpenAI, Toyota Research)**: W&B Sweeps used for LLM fine-tuning hyperparameter search. A typical sweep: 100 trials, 3 epochs each, Bayesian TPE sampler with Hyperband pruning — identifies optimal LR/batch/warmup in ~40 completed trials by pruning poor runs early.
+**Weights & Biases customers**: OpenAI and Toyota Research Institute are both publicly named W&B customers, OpenAI citing experiment logging and W&B Sweeps for hyperparameter sensitivity work. *Illustrative* shape of such a sweep (not a published figure): 100 trials, 3 epochs each, Bayesian sampler with Hyperband early termination, most of the budget spent on the ~40 trials that survive the first bracket.
 
 ---
 
@@ -546,10 +562,10 @@ def launch_wandb_sweep(n_agents: int = 4) -> None:
 | Tool | Hosting | Cost | Visualization | Hyperparameter Search | Data Versioning |
 |---|---|---|---|---|---|
 | MLflow | Self-hosted / Databricks | Free (self-host) | Basic | Via Optuna integration | No (use DVC) |
-| W&B | SaaS / self-hosted | Free tier, then paid | Excellent | Built-in Sweeps | W&B Artifacts |
-| Neptune | SaaS | Free tier, then paid | Good | No built-in | No |
+| W&B | SaaS / self-hosted | Free tier (5 GB/mo storage), then paid | Excellent | Built-in Sweeps | W&B Artifacts |
 | Comet ML | SaaS | Free tier, then paid | Good | No built-in | No |
 | DVC | Self-hosted (git + remote) | Free | Via DVCLive | Via DVC Experiments | Yes (core feature) |
+| ~~Neptune~~ | — | **Discontinued** — acquired by OpenAI (announced 2025-12-04), hosted app and API shut off 2026-03-04 | — | — | — |
 
 | HPO Strategy | Sample Efficiency | Parallelism | Implementation Complexity |
 |---|---|---|---|
@@ -632,9 +648,8 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 | Tool | Category | Key Feature |
 |---|---|---|
 | MLflow Tracking | Experiment tracking | Open-source, SQL backend, model registry |
-| MLflow Model Registry | Model lifecycle | Staging → Production promotion workflow |
+| MLflow Model Registry | Model lifecycle | Version aliases (`@champion`) + tags; the old stage names are deprecated |
 | Weights & Biases | Experiment tracking | Rich visualization, Sweeps, Artifacts |
-| Neptune | Experiment tracking | Flexible metadata, good for research |
 | Comet ML | Experiment tracking | Auto code capture, diff logging |
 | Optuna | HPO | TPE sampler, Hyperband pruner, distributed |
 | Ray Tune | HPO | Distributed HPO, PBT, integrates with all trackers |
@@ -652,31 +667,31 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 ## 12. Interview Questions with Answers
 
 **Q: What is the minimum set of information needed to make an ML experiment reproducible?**
-Five things must be recorded: (1) code version — git commit SHA of the training script and all imported libraries; (2) data version — content hash or DVC ref of every input dataset; (3) hyperparameters — all of them, including defaults that were not tuned; (4) random seeds — Python random seed, NumPy seed, PyTorch seed, and CUDA determinism settings; (5) environment — Python version, library versions (requirements.txt with hashes), CUDA version, and GPU type. Missing any one of these makes reproduction unreliable. Most teams log hyperparameters but forget data version and random seeds — those are the most common sources of irreproducibility.
+Five things must be recorded: code version, data version, hyperparameters, random seeds, and environment. Concretely: (1) code version — git commit SHA of the training script and all imported libraries; (2) data version — content hash or DVC ref of every input dataset; (3) hyperparameters — all of them, including defaults that were not tuned; (4) random seeds — Python random seed, NumPy seed, PyTorch seed, and CUDA determinism settings; (5) environment — Python version, library versions (requirements.txt with hashes), CUDA version, and GPU type. Missing any one of these makes reproduction unreliable. Most teams log hyperparameters but forget data version and random seeds — those are the most common sources of irreproducibility.
 
 **Q: How does Bayesian optimization (Optuna TPE) work and why is it more efficient than random search?**
-Bayesian optimization maintains a probabilistic surrogate model of the objective function built from past trial results. Tree-structured Parzen Estimator (TPE) models the joint distribution of hyperparameters conditioned on "good" results (top 15% of trials) and "bad" results (bottom 85%) separately. The next configuration is chosen to maximize the expected improvement: the ratio of the probability of being in the "good" distribution vs the "bad" distribution. This focuses new trials on promising regions of the search space. In practice, TPE requires 3-5x fewer trials than random search to achieve the same validation metric — for a 10-hyperparameter problem requiring 100 random trials, TPE finds the optimum in 20-35 trials.
+Bayesian optimization maintains a probabilistic surrogate model of the objective function built from past trial results. Tree-structured Parzen Estimator (TPE) splits finished trials into a "good" set and a "bad" set and fits a density to each: `l(x)` over the good trials, `g(x)` over the rest. Optuna's default split is the top `min(ceil(0.1 * n), 25)` trials — roughly the top 10%, capped at 25 — and by default it fits those densities per hyperparameter, with `multivariate=True` needed for a joint model. The next configuration is chosen to maximize the `l(x)/g(x)` ratio, which is monotonic in expected improvement, focusing new trials on promising regions. TPE usually reaches a given validation metric in fewer trials than random search, but the saving is problem-dependent — treat any fixed multiple you have seen quoted as a rule of thumb, not a measured constant.
 
 **Q: What is the difference between MLflow params, metrics, and tags?**
-Params are hyperparameters — immutable string key-value pairs logged once per run (learning_rate, batch_size, model_architecture). They cannot be updated after logging. Metrics are time-series float values logged with a step (epoch, iteration) — train_loss, val_accuracy, learning_rate. They support per-step history for visualization. Tags are free-form string annotations that CAN be updated after the run completes — used for labels like "best_model", "failed", "dataset_v3". The distinction matters for search: MLflow's `search_runs()` API can query params and metrics but not tags with full expressiveness.
+Params are hyperparameters — immutable string key-value pairs logged once per run (learning_rate, batch_size, model_architecture). They cannot be updated after logging. Metrics are time-series float values logged with a step (epoch, iteration) — train_loss, val_accuracy, learning_rate. They support per-step history for visualization. Tags are free-form string annotations that CAN be updated after the run completes — used for labels like "best_model", "failed", "dataset_v3". All three are first-class in `search_runs()` filter strings (`params.lr = '0.001'`, `metrics.val_auc > 0.9`, `tags.owner = 'fraud-team'`); the real search difference is that metrics get numeric comparators while params and tags, being strings, only get `=`, `!=`, `LIKE`, `ILIKE` and `IN` — which is why a number you want to sort or threshold on must be logged as a metric, not a param.
 
 **Q: How do you use DVC to version a dataset and ensure reproducibility?**
-Four commands: `dvc add data/train.csv` creates a `data/train.csv.dvc` file (containing the SHA256 hash) and adds the real data to .gitignore. `git add data/train.csv.dvc && git commit -m "add training data v3"` records the data version in git history. `dvc push` uploads the actual data to the configured remote (S3, GCS). Later, `git checkout <sha> && dvc pull` restores the exact dataset version corresponding to that git commit. The .dvc file is the bridge between git (code history) and the object storage (data). `dvc repro` executes the pipeline DAG, using cached outputs for stages whose inputs have not changed.
+Four commands: `dvc add data/train.csv` creates a small YAML `data/train.csv.dvc` pointer (holding the content hash — MD5 by default in DVC 3.x, not SHA256) and adds the real data to .gitignore. `git add data/train.csv.dvc && git commit -m "add training data v3"` records the data version in git history. `dvc push` uploads the actual data to the configured remote (S3, GCS). Later, `git checkout <sha> && dvc pull` restores the exact dataset version corresponding to that git commit. The .dvc file is the bridge between git (code history) and the object storage (data). `dvc repro` executes the pipeline DAG, using cached outputs for stages whose inputs have not changed.
 
 **Q: When should you use W&B Sweeps vs Optuna for hyperparameter search?**
-Use W&B Sweeps when: the team already uses W&B for experiment tracking (runs appear in the same project dashboard), you need distributed agents across multiple machines without managing a database, or you want the sweep results visualized in W&B's parallel coordinates plot. Use Optuna when: you need more control over the sampler (custom TPE, CMA-ES, grid), you use a different tracking backend (MLflow, no tracker), you want advanced pruning (MedianPruner, Hyperband, SuccessiveHalving), or you are running HPO programmatically in a Python script without a SaaS dependency. Both support Bayesian optimization; Optuna has richer built-in pruning support.
+Pick W&B Sweeps if you already live in W&B and want managed distributed agents; pick Optuna if you want sampler and pruner control independent of any tracker. Use W&B Sweeps when: the team already uses W&B for experiment tracking (runs appear in the same project dashboard), you need distributed agents across multiple machines without managing a database, or you want the sweep results visualized in W&B's parallel coordinates plot. Use Optuna when: you need more control over the sampler (custom TPE, CMA-ES, grid), you use a different tracking backend (MLflow, no tracker), you want advanced pruning (MedianPruner, Hyperband, SuccessiveHalving), or you are running HPO programmatically in a Python script without a SaaS dependency. Both support Bayesian optimization; Optuna has richer built-in pruning support.
 
 **Q: What is MLflow Model Registry and how does it relate to experiment tracking?**
-MLflow Model Registry is a model lifecycle management system separate from (but linked to) the tracking server. A model is registered by linking an artifact from a completed run: `mlflow.register_model(f"runs:/{run_id}/model", "MyModel")`. The registry manages version numbers and transition states: None → Staging → Production → Archived. Teams gate production deployment on registry state: CI/CD checks that the model in Production state was transitioned only after human approval and validation tests passing. This creates an audit trail: every production model links back to the exact training run (and thus the exact hyperparameters, dataset version, and git SHA) that produced it.
+MLflow Model Registry is a model lifecycle management system separate from (but linked to) the tracking server. A model is registered by linking an artifact from a completed run: `mlflow.register_model(f"runs:/{run_id}/model", "MyModel")`. The registry manages version numbers plus the labels that say which version is live. Note the API shift: the four stages (None → Staging → Production → Archived) have been deprecated since MLflow 2.9 and MLflow says they will be removed in a future major release — `client.transition_model_version_stage()` still runs but emits a deprecation warning. The replacement is `client.set_registered_model_alias(name, "champion", version)` plus version tags such as `validation_status: passed`, which lets one version hold several labels and lets you split environments into separate registered models. Teams gate production deployment on that label: CI/CD checks that the alias was moved only after human approval and validation tests passing. This creates an audit trail: every production model links back to the exact training run (and thus the exact hyperparameters, dataset version, and git SHA) that produced it.
 
 **Q: How do you handle random seeds for reproducibility in PyTorch?**
-Set seeds for all sources of randomness: `random.seed(seed)` (Python), `np.random.seed(seed)` (NumPy), `torch.manual_seed(seed)` (CPU), `torch.cuda.manual_seed_all(seed)` (all GPUs). Additionally, set `torch.backends.cudnn.deterministic = True` and `torch.backends.cudnn.benchmark = False` — the latter disables cuDNN's algorithm auto-tuner which selects different (faster) algorithms across runs. Warning: deterministic mode can be 10-20% slower for convolutions. For distributed training, also set the seed per rank: `torch.manual_seed(seed + rank)` to ensure different data ordering per rank while remaining deterministic across runs.
+Set seeds for all sources of randomness: `random.seed(seed)` (Python), `np.random.seed(seed)` (NumPy), `torch.manual_seed(seed)` (CPU), `torch.cuda.manual_seed_all(seed)` (all GPUs). Then call `torch.use_deterministic_algorithms(True)`, which is the modern umbrella switch and raises on any op with no deterministic implementation, and set `torch.backends.cudnn.benchmark = False` to disable cuDNN's auto-tuner, which otherwise picks different (faster) algorithms across runs. `torch.backends.cudnn.deterministic = True` is the older, narrower flag — it constrains cuDNN convolutions only. PyTorch documents that deterministic ops are often slower but publishes no figure; measure the cost on your own model rather than assuming one. For distributed training, also set the seed per rank: `torch.manual_seed(seed + rank)` to ensure different data ordering per rank while remaining deterministic across runs.
 
 **Q: What is the difference between MLflow autolog and manual logging, and when do you use each?**
-Autolog (mlflow.sklearn.autolog(), mlflow.pytorch.autolog()) uses monkey-patching to intercept framework API calls and log automatically: fit() parameters for sklearn, epoch metrics for Keras, etc. Use autolog for: rapid prototyping, standard model types where the framework API is the training entry point, cases where you do not want to modify training code. Use manual logging when: you need full control over what is logged and when, your training loop is non-standard (custom C++ extensions, unusual data loaders), you want to log custom metrics not captured by autolog, or you are logging to multiple backends simultaneously (mlflow.log_metric() + wandb.log()).
+Autolog uses monkey-patching to intercept a framework's training entry point and log automatically: `mlflow.sklearn.autolog()` patches `fit()`, and `mlflow.pytorch.autolog()` patches PyTorch Lightning's `Trainer.fit()`. That last one is the classic trap — it is Lightning-specific and logs nothing at all from a hand-written PyTorch loop, so a run that looks "instrumented" comes back empty. Use autolog for: rapid prototyping, standard model types where the framework API is the training entry point, cases where you do not want to modify training code. Use manual logging when: your training loop is a raw loop rather than a framework `fit()`, you need full control over what is logged and when, you want to log custom metrics not captured by autolog, or you are logging to multiple backends simultaneously (mlflow.log_metric() + wandb.log()).
 
 **Q: How should you structure MLflow experiments for a team working on multiple projects?**
-Use the experiment hierarchy as: one experiment per (model_family, dataset, objective). For example: "fraud_detection/xgboost/auc_maximize", "fraud_detection/lstm/auc_maximize", "churn_prediction/lgbm/f1_maximize". Within an experiment, use tags to annotate: team owner, JIRA ticket, purpose (prod_candidate, ablation, debug). Use run names to encode key hyperparameters. Set up MLflow with a PostgreSQL backend (not SQLite — SQLite has locking issues with concurrent writes) and an S3 artifact store. Access control: use MLflow's RBAC (MLflow 2.0+ on Databricks) or bucket-level S3 IAM policies to isolate team namespaces.
+Use the experiment hierarchy as: one experiment per (model_family, dataset, objective). For example: "fraud_detection/xgboost/auc_maximize", "fraud_detection/lstm/auc_maximize", "churn_prediction/lgbm/f1_maximize". Within an experiment, use tags to annotate: team owner, JIRA ticket, purpose (prod_candidate, ablation, debug). Use run names to encode key hyperparameters. Set up MLflow with a PostgreSQL backend (not SQLite — SQLite has locking issues with concurrent writes) and an S3 artifact store. Access control: open-source MLflow ships a built-in auth plugin (`mlflow server --app-name basic-auth`) with READ / EDIT / MANAGE / NO_PERMISSIONS grants per experiment and registered model — it is basic-auth based and still marked experimental, so back it with bucket-level S3 IAM policies to isolate team namespaces, or use the managed access control on Databricks.
 
 **Q: What is DVCLive and how does it integrate experiment tracking with DVC?**
 DVCLive is DVC's built-in metric logging library that writes metrics to files (metrics.json, dvclive/plots/) instead of a central server. It integrates with DVC's pipeline system: when `dvc repro` runs a training stage, DVCLive writes metrics to tracked output files, which DVC versions alongside the model artifacts. `dvc exp run` and `dvc exp show` provide a local, git-native experiment comparison table. Advantage: no external server dependency, works offline, metrics are git-versioned. Disadvantage: less rich visualization than W&B, no collaborative sharing without a git host. Best for: individual researchers, regulated environments without SaaS access, or as a supplement to DVC pipelines when W&B/MLflow is also used.
@@ -700,7 +715,7 @@ Comparison and search queries key on exact metric names, so `val_loss` in one ru
 They kill trials that are already worse than the median at a given step, freeing GPU budget for promising configs instead of running every trial to completion. In a 200-trial Optuna study where 60% of configs are clearly bad by epoch 5, running them for the full 50 epochs wastes most of the budget for zero information gain. `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` or Hyperband typically prunes 40-60% of trials, roughly halving GPU hours for the same set of useful results — pruning requires reporting an intermediate value each step via `trial.report()`.
 
 **Q: Why does random search outperform grid search in high-dimensional hyperparameter spaces?**
-Random search spends its budget across the few hyperparameters that actually matter, instead of wasting it re-sampling unimportant dimensions on a rigid grid. Bergstra and Bengio showed that in a 10-dimensional space random search finds a config within 5% of optimal in about 60 trials, while grid search would need on the order of 10,000. Grid search is only viable for 1-2 hyperparameters; beyond that its cost is O(N^k) and it repeatedly evaluates the same value of an irrelevant dimension. For anything larger, use random search as a floor and Bayesian optimization for sample efficiency.
+Random search spends its budget across the few hyperparameters that actually matter, instead of wasting it re-sampling unimportant dimensions on a rigid grid. Bergstra and Bengio (JMLR 2012) showed the objective has low effective dimensionality — only a few hyperparameters matter, and which ones differ per dataset, so no fixed grid can cover them; on their 7-hyperparameter neural-network tasks random search matched or beat a grid using 8-16 trials, where a 4-value grid on the same axes would have needed 256. The dimension-independent version of the argument: if the near-optimal region is 5% of the volume, 60 random draws hit it with probability `1 - 0.95^60 = 95%`, regardless of how many hyperparameters there are. Grid search is only viable for 1-2 hyperparameters; beyond that its cost is O(N^k) and it repeatedly evaluates the same value of an irrelevant dimension. For anything larger, use random search as a floor and Bayesian optimization for sample efficiency.
 
 **Q: What is population-based training (PBT) and when is it preferable to Bayesian optimization?**
 PBT trains a population of models in parallel, periodically copying the best performers' weights and perturbing their hyperparameters mid-run. Unlike Bayesian optimization, which picks a fixed config per trial and trains it to completion, PBT adapts hyperparameters online — so it can discover schedules (e.g. a decaying learning rate or entropy coefficient) rather than a single static value. It shines for RL and long training runs where the optimal hyperparameter changes over the course of training, at the cost of higher orchestration complexity (Ray Tune PBT).
@@ -737,7 +752,8 @@ experiment run
         |
    MLflow Tracking Server (Postgres backend + S3 artifact store)
         |
-   Model Registry:  None -> Staging -> Production -> Archived
+   Model Registry:  v7 --tag validation_status=passed--> @challenger --> @champion
+                    (rollback = point @champion at the previous version)
         |
    reproduce = checkout(git_sha) + dvc pull(data_hash) + load run params
 ```
@@ -760,7 +776,9 @@ def run_experiment(model, train_fn, params: dict, data_hash: str) -> str:
                 mlflow.log_metric("loss", loss, step=step)
                 mlflow.log_metric("auc", auc, step=step)
         mlflow.log_artifact("preprocessing.py")        # reproducibility
-        mlflow.sklearn.log_model(model, "model")
+        # `name=` is the current parameter; the old positional `artifact_path`
+        # still works but logs a deprecation warning in MLflow 3.x
+        mlflow.sklearn.log_model(model, name="model")
         return run.info.run_id
 ```
 
@@ -790,9 +808,14 @@ def promote(run_id: str, name: str, min_auc: float) -> str:
     if auc < min_auc:
         return "rejected"
     mv = client.create_model_version(name, f"runs:/{run_id}/model", run_id)
-    client.transition_model_version_stage(name, mv.version, "Staging")
-    return f"{name} v{mv.version} -> Staging"
+    # Aliases + tags, NOT transition_model_version_stage(): registry stages are
+    # deprecated since MLflow 2.9 and slated for removal in a future major release.
+    client.set_model_version_tag(name, mv.version, "validation_status", "passed")
+    client.set_registered_model_alias(name, "challenger", mv.version)
+    return f"{name} v{mv.version} -> @challenger"
 ```
+
+Promotion to live traffic is then a second alias move — `set_registered_model_alias(name, "champion", mv.version)` — and rollback is the same call pointing back at the previous version. Unlike stages, a version can carry `@champion` and `@canary` at once, which is what made the four fixed stage names too rigid.
 
 **Pitfall 1 — Logging metrics every step.** Logging on every training step generates millions of points; the MLflow UI becomes unusable and the backend store bloats.
 
@@ -814,7 +837,7 @@ mlflow.log_metric("auc", auc)
 
 # FIX: always log the model, the preprocessing code, and the data hash so the
 # run is fully reproducible.
-mlflow.sklearn.log_model(model, "model")
+mlflow.sklearn.log_model(model, name="model")
 mlflow.log_artifact("preprocessing.py")
 mlflow.set_tag("dvc_data_hash", data_hash)
 ```
@@ -840,7 +863,7 @@ with mlflow.start_run(run_name="sweep"):
 
 **Why version data separately with DVC instead of committing it to git?** Git is built for text and chokes on large binary datasets. DVC stores a small pointer (content hash) in git and the actual data in remote object storage, so git stays lightweight while the dataset version is still pinned and retrievable with `dvc pull`. This couples code and data versions without bloating the repository.
 
-**What is the role of the Model Registry?** It is the source of truth for which model version is in which stage (Staging, Production, Archived), decoupling experimentation from deployment. Serving infrastructure loads "the Production version of model X" by reference, so promotion and rollback are metadata operations rather than redeploys, with an audit trail of who promoted what.
+**What is the role of the Model Registry?** It is the source of truth for which model version is currently live, decoupling experimentation from deployment. Serving infrastructure loads a version by reference — in current MLflow that means an alias URI such as `models:/fraud-model@champion`, since the old Staging/Production stage names are deprecated — so promotion and rollback are metadata operations rather than redeploys, with an audit trail of who moved the alias.
 
 **Why throttle metric logging?** Logging every step produces enormous numbers of points that slow the tracking backend and make charts unreadable, and the marginal information per extra point is tiny. Logging every N steps (plus epoch summaries) keeps the curves informative while keeping the store and UI responsive.
 
@@ -898,11 +921,11 @@ The two fixes compose: throttling divides by `LOG_INTERVAL` (100x) and batching 
 
 **Why this shows up as "slow training" and not "slow logging."** The calls are synchronous and sit inside the step loop, so the 250 s is charged to wall-clock training time and shows as poor GPU utilization; profilers point at the data loader and the real culprit hides in a one-line `log_metric`. The tell is that utilization drops as the metric count grows, which no data-loading bug would explain.
 
-**How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small JSON pointer) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
+**How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small YAML pointer holding the content hash, MD5 by default) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
 
-**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Neptune) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which trained models are in Staging vs. Production, who approved them, what aliases they have, and their lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
+**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Comet) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which trained models are in Staging vs. Production, who approved them, what aliases they have, and their lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
 
-**What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, has lifecycle stages (Staging, Production, Archived), and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
+**What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, carries numbered versions labelled by aliases and tags (the older Staging/Production/Archived stages are deprecated), and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
 
 ---
 

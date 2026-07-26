@@ -330,7 +330,6 @@ from functools import partial
 import torch, torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-# torch.cuda.amp.autocast is deprecated ("use torch.amp.autocast('cuda', ...)").
 from torch.amp import autocast
 # LlamaDecoderLayer is NOT in transformers' top-level __all__ — importing it from
 # `transformers` directly raises ImportError. Import from the model module.

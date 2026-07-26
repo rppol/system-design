@@ -741,7 +741,7 @@ Disaggregated (PD disaggregation):
   │ compute-optimized     │   transfer    │ bandwidth/capacity-  │
   │ GPUs, sized for the   │ ────────────► │ optimized GPUs,      │
   │ TTFT SLO              │  (NVLink /    │ sized for the TPOT   │
-  │                        │  RDMA/IB)     │ SLO                  │
+  │                        │  RDMA/IB)     │ SLO                 │
   └────────────────────────┘               └──────────────────────┘
   independently scaled, independently tuned -- connected by a
   KV-cache hand-off instead of shared GPU memory

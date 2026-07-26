@@ -77,21 +77,21 @@ Each H100: 80 GB HBM3
 8 GPUs total: 640 GB available
 
 +---------------------------------------------------+
-|                  GPU 0 (80 GB)                    |
-|                                                   |
+|                  GPU 0 (80 GB)                   |
+|                                                  |
 |  Model weights (tensor parallel shard): 17.5 GB  |
 |  [140 GB total / 8 GPUs = 17.5 GB per GPU]       |
-|                                                   |
+|                                                  |
 |  KV cache (fleet total, all layers, all shards): |
-|  2 * 80_layers * 8_kv_heads_total * 128_dim     |
+|  2 * 80_layers * 8_kv_heads_total * 128_dim      |
 |  * context_len * batch_size * 2_bytes            |
-|  At ctx=4096, batch=32: 2*80*8*128*4096*32*2    |
-|  = ~43 GB (distributed across 8 GPUs = 5.4 GB)  |
-|                                                   |
+|  At ctx=4096, batch=32: 2*80*8*128*4096*32*2     |
+|  = ~43 GB (distributed across 8 GPUs = 5.4 GB)   |
+|                                                  |
 |  Activations (transient, peak):        ~2-4 GB   |
 |  CUDA kernels / fragmentation:         ~1-2 GB   |
 |  Reserved for OOM headroom:            ~3-5 GB   |
-|                                                   |
+|                                                  |
 |  Usable for additional KV cache:      ~50-54 GB  |
 +---------------------------------------------------+
 

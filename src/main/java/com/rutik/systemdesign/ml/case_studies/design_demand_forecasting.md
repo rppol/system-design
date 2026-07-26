@@ -116,8 +116,9 @@ The naive approach trains one model per SKU-store pair (10 billion models). This
 infeasible and fails for cold start (new products have no model). The global model trains a single
 LightGBM on all SKU-store pairs simultaneously. The model sees features identifying which SKU and
 which store it is predicting for. Cross-learning transfers demand patterns across similar products
-(all yogurt SKUs share seasonal patterns). One weekly retrain on ~72M rows (2 years * 52 weeks *
-all pairs sampled) runs in ~2 hours on a 64-core cluster.
+(all yogurt SKUs share seasonal patterns). One weekly retrain on ~72M rows (8 weeks of history
+across the ~9M SKU-store pairs with recent sales — the same basis used in Capacity
+Planning below) runs in ~3 hours on a 16-vCPU r5.4xlarge.
 
 ### 2. Temporal Cross-Validation (Walk-Forward)
 
@@ -170,6 +171,8 @@ weighting (recent weeks weighted 2x vs older weeks).
 ```python
 from __future__ import annotations
 
+import zlib
+
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -192,9 +195,15 @@ def create_lag_features(
     Create lag features for time series data.
 
     df must have columns: group_cols + ["date", target_col]
-    Lags are in days. For weekly data, lag=7 = same day last week.
+
+    UNITS: shift() moves by ROWS, not by calendar time. These lags are only "days"
+    because the input is one row per SKU-store per day with no gaps. On daily data
+    lag=7 is the same weekday last week; on WEEKLY rows the same shift(7) means
+    seven WEEKS back. Resample to a dense daily grid (or convert the lag to rows
+    for your own frequency) before calling this.
 
     IMPORTANT: df must be sorted by group_cols + date before calling this.
+    Rolling/lag windows below carry the same rows-not-days caveat.
     """
     df = df.sort_values(group_cols + ["date"]).copy()
 
@@ -422,8 +431,12 @@ def walk_forward_cv(
       Fold 3: train=[week 1..56], val=[week 57..60]
     """
     df = df.copy()
+    # week_of_year (1-53) is NOT usable as a fold key: it wraps every year, so week 3
+    # of 2024 and week 3 of 2023 collapse into one "fold" and future data leaks into
+    # training. Build a strictly monotonic week ordinal from the date instead.
     dates = pd.to_datetime(df["date"])
-    all_weeks = sorted(df["week_of_year"].unique())   # simplified: assumes contiguous weeks
+    df["week_index"] = ((dates - dates.min()).dt.days // 7).astype(int)
+    all_weeks = sorted(df["week_index"].unique())
     results = []
 
     total_weeks = len(all_weeks)
@@ -442,8 +455,8 @@ def walk_forward_cv(
         train_weeks = set(all_weeks[:train_end_week_idx])
         val_weeks_set = set(all_weeks[val_start_week_idx:val_end_week_idx])
 
-        train_df = df[df["week_of_year"].isin(train_weeks)]
-        val_df = df[df["week_of_year"].isin(val_weeks_set)]
+        train_df = df[df["week_index"].isin(train_weeks)]
+        val_df = df[df["week_index"].isin(val_weeks_set)]
 
         if len(train_df) == 0 or len(val_df) == 0:
             continue
@@ -502,11 +515,15 @@ def cold_start_forecast(
     Returns: pd.Series of daily demand forecasts (next 28 days)
     """
     def product_to_vector(p: ProductFeatures) -> np.ndarray:
-        # Simple one-hot encoding for categorical + numeric
+        # Hash-encode the categoricals, then scale the numerics.
+        # Use a STABLE hash: Python's built-in hash() is salted per process
+        # (PYTHONHASHSEED), so it would give a different vector — and therefore
+        # different neighbours — on every run and every Spark executor.
+        stable = lambda t: zlib.crc32(t.encode()) % 1000 / 1000.0
         tier_map = {"budget": 0, "mid": 1, "premium": 2}
         return np.array([
-            hash(p.category) % 1000 / 1000,   # category hash as float in [0,1]
-            hash(p.brand) % 1000 / 1000,
+            stable(p.category),                # category hash as float in [0,1]
+            stable(p.brand),
             p.price / 100.0,                   # normalize price by $100
             p.package_size_ml / 2000.0,        # normalize by 2L
             tier_map.get(p.price_tier, 1) / 2.0,
@@ -563,7 +580,9 @@ def mint_reconciliation(
     Full implementation uses: reconciled = S @ (S.T @ W_inv @ S)^-1 @ S.T @ W_inv @ base
     where W is the covariance matrix of base forecast errors and S is the summing matrix.
 
-    Simplified version shown here; production uses hts library or statsforecast.
+    Simplified version shown here; production uses Nixtla's `hierarchicalforecast`
+    (`hierarchicalforecast.methods.MinTrace`). Note it is NOT in `statsforecast` —
+    statsforecast produces the base forecasts, hierarchicalforecast reconciles them.
     """
     S = summing_matrix
     W_inv = np.linalg.pinv(covariance_matrix)
@@ -586,10 +605,10 @@ def mint_reconciliation(
 | LightGBM Quantile | P10/P50/P90 for safety stock | objective=quantile, alpha=0.1/0.5/0.9 |
 | Walk-Forward CV | Time-series cross-validation (no leakage) | 3 folds, 4-week validation windows |
 | STL (optional) | Detrending for residual modeling | Used in exploratory analysis |
-| MinT Reconciliation | Hierarchical coherence | statsforecast.models.MinT |
+| MinT Reconciliation | Hierarchical coherence | hierarchicalforecast.methods.MinTrace (Nixtla) |
 | MLflow | Experiment tracking, model registry | Log WMAE, WRMSSE, feature importance |
 | Databricks + Spark | Feature engineering at 10B series scale | 64 workers, Parquet I/O |
-| DynamoDB | Online forecast serving (SKU lookups) | < 5ms P99, provisioned 50K RCU |
+| DynamoDB | Online forecast serving (SKU lookups) | < 5ms P99, provisioned 1,000 RCU (see Capacity Planning) |
 | S3 Parquet | Bulk forecast export for downstream systems | Partitioned by date + store |
 
 ---
@@ -598,7 +617,7 @@ def mint_reconciliation(
 
 | Decision | Chosen Approach | Alternative | Reason |
 |----------|----------------|-------------|--------|
-| Model architecture | Global LightGBM | 10B per-SKU ARIMA | Global model: 2h training vs computationally infeasible; cross-learning improves cold-start |
+| Model architecture | Global LightGBM | 10B per-SKU ARIMA | Global model: 3h training vs computationally infeasible; cross-learning improves cold-start |
 | Temporal model | LightGBM (tabular) | Temporal Fusion Transformer | LightGBM: 10x faster, more interpretable, easier to debug; TFT better for very long sequences |
 | Lag features | Manual lag engineering | Learned temporal patterns (LSTM) | Manual lags: interpretable, no sequence padding overhead, easier to add new features |
 | Cold start | KNN proxy | Category average | KNN uses product similarity features; category average ignores price positioning |
@@ -644,6 +663,8 @@ weighted 4x). The new store flag remains a feature until 26 weeks of history acc
 ---
 
 ## Failure Scenarios and Recovery
+
+*The three scenarios below are illustrative composites — failure modes that recur in systems of this shape, written up with representative numbers so the mechanics are concrete. They are not accounts of specific, publicly documented incidents at any named company, and the dollar figures, percentages and time-to-detect values are teaching magnitudes rather than measured results.*
 
 ### Failure 1: Promotional Feature Leakage Causing 40% Forecast Inflation
 
@@ -711,7 +732,7 @@ Year 1 (10% SKU growth):
 
 Year 3 (50% growth + 2 new countries):
   1.5M SKUs × 15K stores = 22.5B pairs
-  Training table: 36GB → may need distributed Spark training (GBM on Spark MLlib)
+  Training table: 14.4GB × 2.25 = ~32GB → may need distributed Spark training (GBM on Spark MLlib)
   Forecast store: DynamoDB at 22.5B × 500B forecasts = 11.25TB per week
   S3 forecast archive: 11.25TB × 52 = 585TB/year
 ```
@@ -719,32 +740,36 @@ Year 3 (50% growth + 2 new countries):
 ### Training Compute Requirements
 
 ```
+NOTE ON UNITS: a month is 52/12 = 4.33 weeks, not 52. Multiplying a weekly cost by
+52 gives an ANNUAL figure; that mistake inflates every line below by 12x.
+
 Global LightGBM Weekly Full Retrain:
   Dataset: 72M rows × 50 features = fits in 15GB RAM
   Hardware: r5.4xlarge (16 vCPU, 128GB RAM)
   LightGBM: 500 trees, max_depth=7, num_leaves=127
   Training time: 3 hours (parallel 16-thread)
-  Cost: r5.4xlarge at $1.008/hr × 3hr = $3.02/week = $157/month
+  Cost: r5.4xlarge at $1.008/hr × 3hr = $3.02/week × 4.33 = ~$13/month
 
 Quantile Models (P10, P50, P90):
   3 separate LightGBM models, same dataset
   Training time: 9 hours total (3 × 3hr)
-  Cost: $9.07/week = $472/month
+  Cost: $9.07/week × 4.33 = ~$39/month
 
 Daily Incremental Update:
   7M new rows (1 day of sales) added to rolling window
   Warm-start from previous model (100 additional trees)
   Hardware: r5.2xlarge (8 vCPU, 64GB RAM)
   Duration: 45 minutes
-  Cost: $0.504/hr × 0.75hr = $0.38/run × 7 = $2.65/week = $138/month
+  Cost: $0.504/hr × 0.75hr = $0.38/run × 7 = $2.65/week × 4.33 = ~$11/month
 
 Forecast Serving (batch scoring, weekly):
   Score 10B SKU-store pairs using LightGBM predict()
   Spark on EMR: 20-node cluster (r5.2xlarge), each node processes 500M rows
   Duration: 4 hours (parallel Spark UDF for LightGBM scoring)
-  Cost: 20 × $0.504/hr × 4hr = $40/run = $209/month
+  Cost: 20 × $0.504/hr × 4hr = $40.32/run × 4.33 = ~$175/month EC2
+        (plus the EMR service charge on top)
 
-Total monthly training + scoring cost: ~$976
+Total monthly training + scoring cost: ~$238
 ```
 
 ### Serving Infrastructure
@@ -753,8 +778,9 @@ Total monthly training + scoring cost: ~$976
 DynamoDB Feature Store (online API, <5ms):
   Capacity: 10B items × 1KB = 10TB (too large for hot DynamoDB at standard cost)
   Strategy: DynamoDB stores only "active" SKU-store pairs (2M pairs with sales in last 4 weeks)
-  Active pairs: 2M × 1KB = 2GB — 10-node DynamoDB on-demand with 5ms read
-  Cost: DynamoDB on-demand for 1M reads/day: ~$150/month + storage $0.25/GB = ~$155/month
+  Active pairs: 2M × 1KB = 2GB. DynamoDB is serverless — you size capacity, not nodes.
+  Cost: on-demand reads are $0.125 per million, so 1M reads/day = 30M/month = ~$3.75/month,
+        plus 2GB × $0.25/GB-month = $0.50 → ~$5/month. Reads are not the expense here.
 
 REST API Service (single-SKU forecasting):
   Peak: 1,000 concurrent requests during planning cycles
@@ -764,15 +790,20 @@ REST API Service (single-SKU forecasting):
 
 Forecast Output Store (DynamoDB for inventory system consumption):
   10B forecasts refreshed weekly, ~100M reads/week from inventory system
-  DynamoDB provisioned: 1,000 RCU (read capacity units) sustained
-  Cost: 1,000 RCU × $0.00013/RCU-hr × 720hr = ~$94/month + storage = ~$250/month
+  Do NOT land all 10B in DynamoDB. The WRITE side is what costs: 10B items/week is
+  10,000M write request units at $0.625/M = ~$6,250 per refresh (~$27k/month),
+  plus 10B × 500B = 5TB at $0.25/GB-month = $1,250/month of storage.
+  Design: the full 10B forecast set goes to S3 Parquet (below); DynamoDB holds only
+  the ~2M active SKU-store pairs the API actually serves.
+  Reads: 100M/week = ~165 reads/s, so 1,000 provisioned RCU is ample headroom.
+  Cost: 1,000 RCU × $0.00013/RCU-hr × 720hr = ~$94/month + ~1GB storage = ~$95/month
 
 S3 Storage (forecast archive, training data):
   Training data (52-week rolling): 104TB × $0.023/GB = $2,392/month
   Forecast archive (2-year retention): 585TB × $0.023/GB = $13,455/month
   Compressed 5:1: $2,392/month training + $2,691/month archive = ~$5,083/month
 
-Total monthly infrastructure: ~$6,221
+Total monthly serving infrastructure: ~$5,916 (training + scoring adds ~$238)
 ```
 
 ```mermaid
@@ -780,10 +811,10 @@ xychart-beta
     title "Monthly cost by component (USD)"
     x-axis ["Train+Score", "DynamoDB FS", "REST API", "Forecast Store", "S3 Storage"]
     y-axis "USD / month" 0 --> 5500
-    bar [976, 155, 733, 250, 5083]
+    bar [238, 5, 733, 95, 5083]
 ```
 
-S3 archival storage dominates the ~$7.2K/month bill; compute is a small slice because the single global model keeps training and scoring cheap relative to storing 585TB/year of forecasts.
+S3 archival storage dominates the ~$6.2K/month bill; compute is a small slice because the single global model keeps training and scoring cheap relative to storing 585TB/year of forecasts.
 
 ---
 
@@ -1037,13 +1068,13 @@ Quarterly      Scheduled                                  Walk-forward cross-val
 ## Additional Interview Questions
 
 **Q: How do you forecast for a product launched by a competitor that directly impacts your own demand?**
-Competitor cannibalization is captured via external data signals: (1) Web scraping or third-party retail data (Nielsen, IRI) provides competitor pricing and promotional activity. (2) Category-level demand index: if total category sales drop 15% in a week coinciding with a competitor launch, the global model learns to attribute this to the category_demand_index feature rather than treating it as noise. (3) Causal inference: estimate the causal impact of the competitor's launch using a synthetic control method — identify a set of "donor" weeks and SKUs not affected by the competitor, construct a weighted average that matches pre-launch trends, use as counterfactual. The forecast for affected SKUs is then adjusted by the difference between observed and counterfactual. This requires a causal inference module separate from the main forecasting model.
+Competitor cannibalization is captured via external data signals: (1) Web scraping or third-party retail measurement data provides competitor pricing and promotional activity. The vendor names have changed — use NielsenIQ or Circana, the latter being the company formed when IRI and NPD merged in 2022 and rebranded in March 2023; "IRI" no longer exists as a brand. (2) Category-level demand index: if total category sales drop 15% in a week coinciding with a competitor launch, the global model learns to attribute this to the category_demand_index feature rather than treating it as noise. (3) Causal inference: estimate the causal impact of the competitor's launch using a synthetic control method — identify a set of "donor" weeks and SKUs not affected by the competitor, construct a weighted average that matches pre-launch trends, use as counterfactual. The forecast for affected SKUs is then adjusted by the difference between observed and counterfactual. This requires a causal inference module separate from the main forecasting model.
 
 **Q: What is hierarchical reconciliation, and why is MinT preferred over proportional or bottom-up aggregation?**
-Hierarchical reconciliation adjusts independently-produced forecasts at each level (SKU, category, store, region, national) so they are consistent — store forecasts sum to regional, regional to national. Bottom-up aggregation: use only the lowest-level forecasts, aggregate to all higher levels. Problem: lower-level forecasts have higher noise; errors accumulate upward. Top-down aggregation: use national forecast, distribute using historical proportions. Problem: ignores store-level patterns. Proportional reconciliation (middle ground): similar issues. MinT (Minimum Trace): computes a reconciled forecast vector that minimizes the total variance of the forecasting error across all levels simultaneously, using the covariance structure of the base forecast errors. MinT requires estimating the error covariance matrix (often approximated as diagonal for scalability). Result: 8-12% WMAE improvement vs bottom-up in typical retail applications, particularly at intermediate levels (store, region).
+Hierarchical reconciliation adjusts independently-produced forecasts at each level (SKU, category, store, region, national) so they are consistent — store forecasts sum to regional, regional to national. Bottom-up aggregation: use only the lowest-level forecasts, aggregate to all higher levels. Problem: lower-level forecasts have higher noise; errors accumulate upward. Top-down aggregation: use national forecast, distribute using historical proportions. Problem: ignores store-level patterns. Proportional reconciliation (middle ground): similar issues. MinT (Minimum Trace): computes a reconciled forecast vector that minimizes the total variance of the forecasting error across all levels simultaneously, using the covariance structure of the base forecast errors. MinT requires estimating the error covariance matrix (often approximated as diagonal for scalability). In published hierarchical-forecasting evaluations MinT beats bottom-up most clearly at the intermediate levels (store, region), where bottom-up is accumulating noisy leaf forecasts; the size of the gain is dataset-specific, so measure it on your own hierarchy rather than carrying a headline percentage.
 
 **Q: How would you extend the system to produce probabilistic forecasts (full distribution, not just P10/P50/P90)?**
-Three approaches: (1) Quantile regression forest: LightGBM supports quantile loss, producing P10/P50/P90 as separate models. Extending to 19 quantiles (P5 to P95 in 5% steps) requires 19 models but provides the full distribution. (2) Conformal prediction: train a point forecast model, then compute residuals on a calibration set. Conformalize the prediction intervals: for a target coverage of 90%, find the 90th percentile of calibrated residuals. This is distribution-free and computationally cheap. (3) DeepAR (Amazon): autoregressive RNN that models the full demand distribution via parametric families (Negative Binomial for count data, Student-t for continuous). DeepAR natively produces full predictive distributions but requires GPU training and is harder to interpret than LightGBM. For inventory safety stock optimization (requires the full distribution, not just percentiles), DeepAR or conformal prediction provide the necessary uncertainty estimates.
+Three approaches: (1) Quantile regression forest: LightGBM supports quantile loss, producing P10/P50/P90 as separate models. Extending to 19 quantiles (P5 to P95 in 5% steps) requires 19 models but provides the full distribution. (2) Conformal prediction: train a point forecast model, then compute residuals on a calibration set. Conformalize the prediction intervals: for a target coverage of 1-alpha, take the ceil((n+1)(1-alpha))/n empirical quantile of the calibration residuals — the (n+1)/n correction is what buys the finite-sample coverage guarantee, and using the plain 90th percentile slightly undercovers. This is distribution-free and computationally cheap. (3) DeepAR (Amazon): autoregressive RNN that models the full demand distribution via parametric families — the paper uses a negative binomial likelihood for count data and a Gaussian for real-valued data; Student-t and other heads are available in GluonTS but are not the paper's default. DeepAR natively produces full predictive distributions but requires GPU training and is harder to interpret than LightGBM. For inventory safety stock optimization (requires the full distribution, not just percentiles), DeepAR or conformal prediction provide the necessary uncertainty estimates.
 
 **Q: How does the demand forecasting system integrate with dynamic pricing to create a feedback loop risk?**
 The pricing engine uses demand forecasts to set prices: higher forecasted demand → higher price; lower demand → markdown. This creates a potential feedback loop: a forecast overestimation leads to higher pricing, which reduces actual demand, which appears to "validate" the lower demand expectation if the model is not careful. Breaking the loop: (1) Price elasticity features must be included in the forecasting model — the model must predict demand given a specific price, not just recent demand trends. (2) Training data must include the actual price as a feature, not just volume, so the model learns the price-demand relationship. (3) Monitor for Simpson's paradox: if overall demand appears stable while prices are rising, the model may be failing to account for price-induced demand suppression. (4) Periodically run price sensitivity experiments (randomly vary prices 5-10% for a short window) to estimate true elasticity independent of the model's learned behavior.

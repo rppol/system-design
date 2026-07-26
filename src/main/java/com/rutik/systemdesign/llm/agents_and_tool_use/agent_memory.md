@@ -96,7 +96,7 @@ MemGPT OS-Style Memory Layout:
               ↑ retrieve                      ↓ archive
 ┌─────────────────────────────────────────────────────────────────────┐
 │ ARCHIVAL STORAGE ("Disk" — external vector DB)                      │
-│   All past conversations, compressed summaries, learned facts        │
+│   All past conversations, compressed summaries, learned facts       │
 │   Thousands of entries; not in context unless retrieved             │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -413,7 +413,7 @@ flowchart TD
 - Conversation history in project: last N turns retained
 - Use case: a coding project always has access to the codebase README and coding conventions
 
-### Replit Agent Memory (the assistant formerly branded Ghostwriter)
+### Replit Agent Memory
 
 - Codebase index: all files embedded; retrieved on demand per query
 - User preferences: preferred libraries, code style extracted from recent edits
@@ -559,7 +559,7 @@ Student Session Start
 │  student_id = "stu_4821"                                     │
 │  subject = "algebra"                                         │
 │                                                              │
-│  Query 1: episodic_search("recent struggles", top_k=5)      │
+│  Query 1: episodic_search("recent struggles", top_k=5)       │
 │    → ["Struggled with quadratic equations 2025-05-10",       │
 │        "Confused by negative exponents 2025-05-08"]          │
 │                                                              │

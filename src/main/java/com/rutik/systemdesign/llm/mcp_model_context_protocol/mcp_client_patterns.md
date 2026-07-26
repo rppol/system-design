@@ -323,7 +323,7 @@ async def use_remote_server():
 
 **Cursor**: similar pattern for IDE-integrated MCP.
 
-**Custom agent frameworks**: LangChain MCP adapter, smolagents `ToolCollection.from_mcp`, Mastra `MCPClient` (the older `MastraMCPClient` was deprecated and removed from `@mastra/mcp`) — all wrap ClientSession differently.
+**Custom agent frameworks**: LangChain MCP adapter, smolagents `ToolCollection.from_mcp`, Mastra `MCPClient` from `@mastra/mcp` — all wrap ClientSession differently.
 
 **Internal AI platforms**: large enterprises building centralized MCP gateways that aggregate dozens of internal servers.
 

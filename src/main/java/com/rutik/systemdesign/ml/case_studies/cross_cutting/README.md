@@ -1,8 +1,8 @@
 # ML Case Studies — Cross-Cutting Shared Primitives
 
-These five files are shared infrastructure and methodology primitives that appear across multiple ML case studies. Each follows the full 14-section module template with 15+ interview Q&As. They exist here rather than inside individual case studies to prevent the same pattern (feature store design, calibration methodology, fairness audit) from being invented independently — and inconsistently — in each case study.
+These five files are shared infrastructure and methodology primitives that appear across multiple ML case studies. Each follows the full 14-section module template (12-17 interview Q&As per file). They exist here rather than inside individual case studies to prevent the same pattern (feature store design, calibration methodology, fairness audit) from being invented independently — and inconsistently — in each case study.
 
-Read a cross-cutting file when you want to understand a production ML pattern in depth. The case studies that reference each file are listed in that file's Section 14 (Case Study).
+Read a cross-cutting file when you want to understand a production ML pattern in depth. Each file's Section 14 (Case Study) works through the pattern in its anchor case studies; the full set of case studies that link to it is in the table below.
 
 ---
 
@@ -10,11 +10,11 @@ Read a cross-cutting file when you want to understand a production ML pattern in
 
 | File | Topic | Referenced by |
 |------|-------|---------------|
-| [feature_store_and_point_in_time_correctness.md](./feature_store_and_point_in_time_correctness.md) | Point-in-time correct feature joins, dual-store architecture, training-serving skew detection, freshness SLOs | design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching |
-| [model_calibration_and_thresholding.md](./model_calibration_and_thresholding.md) | Platt scaling, isotonic regression, reliability diagrams, ECE, cost-sensitive thresholds, calibration monitoring | design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching |
-| [responsible_ai_fairness_and_explainability.md](./responsible_ai_fairness_and_explainability.md) | Demographic parity, equalized odds, SHAP, LIME, counterfactual explanations, GDPR Article 22, adverse-action notices | design_credit_risk_scoring, design_churn_prediction, design_marketplace_matching, design_eta_prediction |
-| [experimentation_and_online_evaluation.md](./experimentation_and_online_evaluation.md) | OEC / metric design, A/B testing, CUPED, interleaving, switchback, SRM detection, sequential testing | design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching |
-| [drift_monitoring_and_retraining.md](./drift_monitoring_and_retraining.md) | PSI, KS test, score distribution monitoring, champion/challenger pattern, label latency, retraining automation | design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching |
+| [feature_store_and_point_in_time_correctness.md](./feature_store_and_point_in_time_correctness.md) | Point-in-time correct feature joins, dual-store architecture, training-serving skew detection, freshness SLOs | churn_prediction, credit_risk_scoring, customer_ltv_prediction, dynamic_pricing, eta_prediction, marketplace_matching, question_answering_system, real_time_personalization, video_recommendation |
+| [model_calibration_and_thresholding.md](./model_calibration_and_thresholding.md) | Platt scaling, isotonic regression, reliability diagrams, ECE, cost-sensitive thresholds, calibration monitoring | churn_prediction, credit_risk_scoring, customer_ltv_prediction, ner_pipeline, nlp_classification_pipeline, question_answering_system, semantic_search_engine |
+| [responsible_ai_fairness_and_explainability.md](./responsible_ai_fairness_and_explainability.md) | Demographic parity, equalized odds, SHAP, LIME, counterfactual explanations, GDPR Article 22, adverse-action notices | churn_prediction, credit_risk_scoring, customer_ltv_prediction, dynamic_pricing, eta_prediction, harmful_content_detection, marketplace_matching, nlp_classification_pipeline |
+| [experimentation_and_online_evaluation.md](./experimentation_and_online_evaluation.md) | OEC / metric design, A/B testing, CUPED, interleaving, switchback, SRM detection, sequential testing | churn_prediction, credit_risk_scoring, customer_ltv_prediction, dynamic_pricing, eta_prediction, marketplace_matching, multi_touch_attribution, question_answering_system, real_time_personalization, semantic_search_engine, video_recommendation |
+| [drift_monitoring_and_retraining.md](./drift_monitoring_and_retraining.md) | PSI, KS test, score distribution monitoring, champion/challenger pattern, label latency, retraining automation | churn_prediction, credit_risk_scoring, customer_ltv_prediction, dynamic_pricing, eta_prediction, harmful_content_detection, marketplace_matching, multi_touch_attribution, ner_pipeline, nlp_classification_pipeline, question_answering_system |
 
 ---
 

@@ -211,9 +211,9 @@ Text Prompt
 |    [batched as single forward pass]       |
 |    z_t-1 = z_t - eta*(cond + cfg*(cond-uncond)) |
 |                                           |
-|  Temporal attention: each frame attends  |
-|  to k=4 neighboring frames via causal    |
-|  3D attention window                     |
+|  Temporal attention: each frame attends   |
+|  to k=4 neighboring frames via causal     |
+|  3D attention window                      |
 +-------------------------------------------+
     |
     v  (z_0: latent video, 16x spatial downsample -> 1080p becomes 120x68 latents)

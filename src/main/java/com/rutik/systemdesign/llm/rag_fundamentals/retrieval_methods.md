@@ -395,19 +395,17 @@ results = pinecone_index.query(
 )
 
 # Weaviate metadata filter
-results = (
-    weaviate_client.query
-    .get("Document", ["content", "source", "date"])
-    .with_near_vector({"vector": query_embedding})
-    .with_where({
-        "operator": "And",
-        "operands": [
-            {"path": ["date"], "operator": "GreaterThanEqual", "valueText": "2024-01-01"},
-            {"path": ["department"], "operator": "Equal", "valueText": "legal"}
-        ]
-    })
-    .with_limit(20)
-    .do()
+from weaviate.classes.query import Filter
+
+collection = weaviate_client.collections.use("Document")
+results = collection.query.near_vector(
+    near_vector=query_embedding,
+    filters=(
+        Filter.by_property("date").greater_or_equal("2024-01-01")
+        & Filter.by_property("department").equal("legal")
+    ),
+    return_properties=["content", "source", "date"],
+    limit=20,
 )
 ```
 
@@ -542,15 +540,15 @@ Search for Q:
 
 ### Elasticsearch Hybrid Search (ELSER + BM25)
 - Elasticsearch combines BM25 (inverted index) with ELSER (learned sparse embedding)
-- RRF built in: first as the `rank: {rrf: ...}` search option in 8.8, then as the
-  `rrf` retriever in 8.14 (GA in 8.16), which is the form to use today
+- RRF built in as the `rrf` retriever (GA in 8.16) — fuse the BM25 and vector
+  retrievers server-side rather than merging in the client
 - Used by large e-commerce platforms for product search
 
 ### Weaviate Native Hybrid Search
 - Weaviate's `hybrid` parameter combines keyword BM25F + vector search internally
 - `alpha` parameter controls the balance: 0 = pure keyword (sparse), 1 = pure vector (dense)
-- Fusion is automatic; the default changed from `rankedFusion` (rank-based, RRF-style) to
-  `relativeScoreFusion` (score-based) in v1.24, so pick explicitly if you need RRF semantics
+- Fusion is automatic and defaults to `relativeScoreFusion` (score-based); set the fusion
+  type to `rankedFusion` explicitly when you want rank-based, RRF-style semantics
 
 ### Pinecone Hybrid Search
 - Single index holding dense + sparse vectors is the recommended pattern (fused server-side);
@@ -626,7 +624,7 @@ Fix: Apply query preprocessing: lowercase, remove stopwords for BM25 (not dense)
 |------|------|-------|
 | **Pinecone** | Vector DB (dense) | Best managed option; native sparse index support |
 | **Weaviate** | Hybrid DB | Built-in hybrid search; `alpha` parameter for balance |
-| **Qdrant** | Vector DB | Fast; Rust-based; sparse vectors since v1.7, server-side hybrid fusion (RRF or DBSF) via the Query API since v1.10 |
+| **Qdrant** | Vector DB | Fast; Rust-based; sparse vectors plus server-side hybrid fusion (RRF or DBSF) through the Query API |
 | **Elasticsearch** | Hybrid DB | ELSER + BM25; enterprise-grade; RRF query support |
 | **OpenSearch** | Hybrid DB | Fork of Elasticsearch; neural search plugin for hybrid |
 | **pgvector** | PostgreSQL extension | Dense search only; pair with pg_trgm for text search |

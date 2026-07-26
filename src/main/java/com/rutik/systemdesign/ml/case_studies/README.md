@@ -91,7 +91,7 @@ Five infrastructure patterns appear across multiple studies. Read a cross-cuttin
 
 | File | Topic | Recommended read timing |
 |---|---|---|
-| [Feature Store and PIT Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) | Online/offline stores, PIT joins, training-serving skew | Before Churn, Credit Risk, ETA, Marketplace, Video Recommendation |
+| [Feature Store and PIT Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) | Online/offline stores, PIT joins, training-serving skew | Before Churn, Credit Risk, Customer LTV, Dynamic Pricing, ETA, Marketplace, QA System, Real-Time Personalization, Video Recommendation |
 | [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md) | Platt/isotonic, ECE, cost-sensitive threshold, calibration monitoring | Before Churn, Credit Risk, Fraud, Ads, Video Recommendation, Harmful Content |
 | [Responsible AI, Fairness, and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md) | Demographic parity, equalized odds, SHAP, GDPR | Before Credit Risk, Churn, Marketplace, Harmful Content |
 | [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md) | OEC/metric design, A/B testing, CUPED, switchback | Before any study with an A/B component (incl. Video Recommendation) |
@@ -138,7 +138,7 @@ Studies that build on patterns from others — read prerequisites first.
                   (feature store, experiment tracking, registry)
 ```
 
-**New principal-template studies (4) and their dependencies:**
+**The first four principal-template studies and their cross-cutting dependencies** (the other ten principal studies reuse the same primitives):
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -206,22 +206,22 @@ Track completion status across sessions.
 |---|---|---|
 | `cross_cutting/feature_store_and_point_in_time_correctness.md` | done | 14-section, 15+ Q&As |
 | `cross_cutting/model_calibration_and_thresholding.md` | done | 14-section, 15+ Q&As |
-| `cross_cutting/responsible_ai_fairness_and_explainability.md` | done | 14-section, 14 Q&As |
-| `cross_cutting/experimentation_and_online_evaluation.md` | done | 14-section, 14 Q&As |
+| `cross_cutting/responsible_ai_fairness_and_explainability.md` | done | 14-section, 15 Q&As |
+| `cross_cutting/experimentation_and_online_evaluation.md` | done | 14-section, 13 Q&As |
 | `cross_cutting/drift_monitoring_and_retraining.md` | done | 14-section, 12 Q&As |
 | `cross_cutting/README.md` | done | Index table |
 | `design_churn_prediction.md` | done | 11-section principal template, 11 Q&As |
 | `design_credit_risk_scoring.md` | done | 11-section principal template, 11 Q&As |
 | `design_eta_prediction.md` | done | 11-section principal template, 10 Q&As |
 | `design_marketplace_matching.md` | done | 11-section principal template, 10 Q&As |
-| `ml/model_selection_and_algorithm_choice/README.md` | done | 14-section module, 15 Q&As |
+| `ml/model_selection_and_algorithm_choice/README.md` | done | 14-section module, 19 Q&As |
 | `design_customer_ltv_prediction.md` | done | 11-section principal template, 10 Q&As |
 | `design_multi_touch_attribution.md` | done | 11-section principal template, 10 Q&As |
-| `design_dynamic_pricing.md` | done | 11-section principal template, 10 Q&As |
-| `design_nlp_classification_pipeline.md` | done | 11-section principal template, 10 Q&As |
-| `design_real_time_personalization.md` | done | 11-section principal template, 10 Q&As |
-| `design_semantic_search_engine.md` | done | 11-section principal template, 10 Q&As |
+| `design_dynamic_pricing.md` | done | 11-section principal template, 8 Q&As |
+| `design_nlp_classification_pipeline.md` | done | 11-section principal template, 9 Q&As |
+| `design_real_time_personalization.md` | done | 11-section principal template, 9 Q&As |
+| `design_semantic_search_engine.md` | done | 11-section principal template, 9 Q&As |
 | `design_ner_pipeline.md` | done | 11-section principal template, 10 Q&As |
 | `design_question_answering_system.md` | done | 11-section principal template, 10 Q&As |
-| `design_video_recommendation.md` | done | 11-section principal template, 13 Q&As |
+| `design_video_recommendation.md` | done | 11-section principal template, 14 Q&As |
 | `design_harmful_content_detection.md` | done | 11-section principal template, 13 Q&As |

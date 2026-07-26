@@ -38,8 +38,8 @@ Key insight: In production, you cannot assume the test set distribution persists
 
 ## 4. Types / Architectures / Strategies
 
-### Data Drift (Covariate Shift)
-- Input distribution P(X) changes while P(Y|X) remains approximately constant
+### Data Drift
+- Input distribution P(X) changes. This says nothing about P(Y|X) — data drift is the observable symptom, and it can occur with or without a change in the prediction rule
 - Example: e-commerce model trained on desktop users; mobile users surge, feature distributions shift (smaller screen resolution, shorter session duration)
 - Detection: statistical tests on individual features or multivariate tests on joint distribution
 - Impact: model predictions are extrapolating outside its training manifold
@@ -50,13 +50,14 @@ Key insight: In production, you cannot assume the test set distribution persists
 - Detection: requires labels (delayed or approximated via proxy); performance monitoring (AUC, precision, recall decline)
 - Most dangerous type: cannot be detected from input statistics alone
 
-### Label Drift
-- The marginal output distribution P(Y) changes
+### Label Drift (Label Shift / Prior Probability Shift)
+- The marginal output distribution P(Y) changes while the class-conditional P(X|Y) stays fixed — the formal mirror image of covariate shift
 - Example: seasonal effects shift fraud base rate from 0.1% to 0.5%; prediction score distribution looks stable but calibration breaks
 - Detection: monitor prediction score distribution; compare to expected label rate when labels arrive
 
-### Covariate Shift (subset of data drift)
-- P(X) changes but P(Y|X) is stable — the model can still be accurate if it generalizes
+### Covariate Shift (the formal assumption behind data drift)
+- P(X) changes but P(Y|X) is *assumed* stable — the named assumption, not merely an observation. Data drift is the measurement; covariate shift is the claim about what caused it. You cannot confirm covariate shift from input statistics alone, because ruling out a P(Y|X) change requires labels
+- The model can still be accurate under covariate shift if it generalizes
 - Example: training on users 18–35; deployment audience shifts to include 55+ users with similar purchase behavior but different feature values
 - Response: importance weighting, domain adaptation, or targeted retraining on new demographic
 
@@ -194,7 +195,7 @@ Two things to read off that table. First, **every contribution is non-negative**
 
 Second, **the tails dominate**. Bucket 10 alone contributes `0.05498`, more than a third of the total, because a bucket that drops to 40% of its old mass has a large `ln` factor. Bucket 4, which moved the same 2 percentage points as bucket 7, contributes `0.00365` versus `0.00446` — the log factor is what breaks the tie. This is why a single collapsing tail bucket can push PSI over threshold while nine stable buckets say nothing is wrong.
 
-**Why the epsilon in the code exists.** If a production bucket goes completely empty, `a = 0` and `ln(0 / 0.10) = -inf` — the whole PSI becomes `inf` or `nan` and the alert pipeline either crashes or silently swallows the metric. Adding `epsilon = 1e-6` caps that one bucket's contribution at `(1e-6 - 0.10) * ln(1e-6 / 0.10) = 1.1513`. That is still enormous — a single emptied decile alone drives PSI above `1.0`, roughly 4x the action threshold — which is the correct behaviour: an empty bucket usually means a broken feature pipeline, not gradual drift, and you want it screaming.
+**Why the epsilon in the code exists.** If a production bucket goes completely empty, `a = 0` and `ln(0 / 0.10) = -inf` — the whole PSI becomes `inf` or `nan` and the alert pipeline either crashes or silently swallows the metric. Adding `epsilon = 1e-6` caps that one bucket's contribution at `(1e-6 - 0.10) * ln(1e-6 / 0.10) = 1.1513`. That is still enormous — a single emptied decile alone drives PSI above `1.0`, nearly 6x this file's `0.2` action threshold (4.6x the `0.25` credit-risk convention) — which is the correct behaviour: an empty bucket usually means a broken feature pipeline, not gradual drift, and you want it screaming.
 
 ### PSI Interpretation Bands
 
@@ -210,7 +211,7 @@ The two thresholds carve three zones: below 0.1 is stable (age, session), 0.1–
 
 **What the formula is telling you.** "0.1 and 0.25 are not statistical constants — they are credit-scoring folklore from the 1990s that survived because they happen to map cleanly onto three different *operational responses*."
 
-Nothing in the mathematics privileges those numbers; there is no null distribution behind them and no p-value. They are calibrated to a specific setup — roughly 10 buckets on 1,000+ samples — and the reason they are worth memorising is that each band corresponds to a different thing you actually do on Monday morning.
+Nothing in the mathematics privileges those numbers; there is no null distribution behind them and no p-value. The constants trace to Lewis, *An Introduction to Credit Scoring* (1994), and were carried forward by the standard scorecard texts; the credit-risk literature that has since studied PSI's sampling distribution is explicit that the two cut-points have no inherent statistical interpretation. They are calibrated to a specific setup — roughly 10 buckets on 1,000+ samples — and the reason they are worth memorising is that each band corresponds to a different thing you actually do on Monday morning.
 
 | Symbol | What it is |
 |--------|------------|
@@ -308,14 +309,17 @@ def compute_chi_squared_test(
     significance_level: float = 0.05,
 ) -> dict[str, float | bool]:
     """
-    Chi-squared test for categorical features.
+    Chi-squared test of homogeneity for categorical features.
     reference_counts and production_counts must have same length (one per category).
-    """
-    # Scale reference to same total as production
-    scale = production_counts.sum() / reference_counts.sum()
-    expected = reference_counts * scale
 
-    chi2, p_value = stats.chisquare(f_obs=production_counts, f_exp=expected)
+    Use chi2_contingency on the 2 x k table, NOT chisquare() against a scaled
+    reference. chisquare() treats the reference proportions as exactly known,
+    which ignores the reference window's own sampling error and inflates the
+    statistic by roughly (n_ref + n_prod) / n_ref -- a factor of 2 when the two
+    windows are the same size. Both tests carry df = k - 1.
+    """
+    table = np.vstack([reference_counts, production_counts])
+    chi2, p_value, _dof, _expected = stats.chi2_contingency(table)
     drift_detected = bool(p_value < significance_level)
     return {
         "chi2_statistic": round(chi2, 4),
@@ -371,13 +375,13 @@ That is the entire statistic. `D` is a gap between two cumulative curves, so it 
 
 **What it means.** "For each category, ask how far the observed count sits from what the reference proportions predicted, square it so direction stops mattering, and divide by the expected count so a miss of 50 on a bucket of 100 outweighs a miss of 50 on a bucket of 10,000."
 
-The division by `expected` is the part worth internalising. It converts a raw count error into a *relative* one, which is why `stats.chisquare` needs `expected >= 5` per cell: below that, the denominator is so small that ordinary Poisson noise produces huge terms and the test starts hallucinating drift on rare categories.
+The division by `expected` is the part worth internalising. It converts a raw count error into a *relative* one, which is why the chi-squared approximation carries the conventional `expected >= 5` per-cell rule of thumb (SciPy does not enforce it): below that, the denominator is so small that ordinary Poisson noise produces huge terms and the test starts hallucinating drift on rare categories.
 
 | Symbol | What it is |
 |--------|------------|
 | `scale` | `production_total / reference_total`. Shrinks the reference to the production window's size |
 | `expected` | Reference counts after scaling — "what this window should look like if nothing changed" |
-| `f_obs` | The production counts actually observed |
+| `observed` | The production counts actually observed |
 | `(obs - exp)^2 / exp` | One category's contribution. Squared so over- and under-shoots both count |
 | `chi2` | Sum of contributions. Grows with both the size of the mismatch and the number of categories |
 | `df` | Degrees of freedom, `categories - 1`. Sets how large a `chi2` is normal, so it must be reported alongside |
@@ -387,7 +391,7 @@ The division by `expected` is the part worth internalising. It converts a raw co
 ```
   category   ref count   expected (x0.2)   observed   obs - exp   (obs-exp)^2/exp
   mobile        5000          1000            900        -100         10.000
-  desktop       3000           600            620         +20          0.067
+  desktop       3000           600            620         +20          0.667
   tablet        1500           300            330         +30          3.000
   other          500           100            150         +50         25.000
   ------------------------------------------------------------------------
@@ -400,9 +404,11 @@ The division by `expected` is the part worth internalising. It converts a raw co
 
 Note which category drove the verdict. `mobile` had the largest raw miss (100 rows) but contributed `10.0`; `other` missed by only 50 rows and contributed `25.0`, more than twice as much, because its expected count was ten times smaller. Chi-squared is dominated by *proportionally* distorted small categories, the mirror image of PSI's tail sensitivity — and the reason a long tail of rare categories must be aggregated into an "other" bucket before the test is trustworthy.
 
+**The trap in that arithmetic.** The `38.667` above treats the scaled reference as *exactly* known, which throws away the reference window's own sampling error. The honest test is the 2 x k test of homogeneity (`stats.chi2_contingency`), which for this table gives `chi2 = 30.72`, `p = 9.8e-07` — same verdict here only because the reference is 5x larger than the production window. The inflation factor is `(n_ref + n_prod) / n_ref`: `1.2` here, but exactly `2` when the two windows are the same size, which is the common case in a rolling monitor. Simulated on identical distributions with two equal 2,000-row windows, the scaled-reference form fires at `alpha = 0.05` on **26.7%** of runs against the nominal 5%. Both forms use `df = k - 1`, so the bug is invisible in the degrees of freedom and shows up only as chronic false alarms.
+
 ### PSI's Relatives — KL and JS Divergence
 
-PSI is not a bespoke invention. Expand the sum and it decomposes exactly into two KL divergences pointing in opposite directions:
+PSI is not a bespoke invention. Expand the sum and it decomposes exactly into two KL divergences pointing in opposite directions — PSI *is* the symmetrized KL, known in the statistics literature as the Jeffreys divergence:
 
 ```
   PSI = Sigma (a - e) * ln(a / e)
@@ -487,7 +493,7 @@ The KS p-value is driven by `lambda = D * sqrt(n_eff)`, where `n_eff = n*m/(n+m)
   Same shift. Same D. p moved by 173 orders of magnitude on sample size alone.
 
   D_crit fell from 0.0608 to 0.0019 -- a 32x drop, exactly sqrt(1000000/1000)
-  = sqrt(1000) = 31.6. Past ~n = 8,600 this shift crosses the line and every
+  = sqrt(1000) = 31.6. Past ~n = 9,300 this shift crosses the line and every
   window after that pages someone.
 ```
 
@@ -642,13 +648,15 @@ def compute_click_through_proxy(
 
 ## 7. Real-World Examples
 
-**Spotify recommendation drift**: User listening behavior shifts seasonally (holiday music, summer genres). Spotify monitors input feature distributions (genre affinity vectors) with PSI daily. When PSI exceeds 0.15 for more than 3 consecutive days, an automatic retraining job triggers with the last 90 days of interaction data weighted toward the most recent 30 days.
+The four scenarios below are **illustrative composites** of common industry patterns, not published incident reports — the specific thresholds and timings are chosen to make the pattern concrete and are not attributable to any named company's public disclosures.
 
-**Stripe fraud detection**: Fraud patterns change as attackers adapt. Stripe monitors two proxy metrics: (1) chargeback rate (labels arrive 30–90 days late), (2) rule-based system agreement rate (fast proxy). When rule-based agreement drops 5%, an alert fires before chargebacks confirm the issue.
+**Music recommendation, seasonal drift**: User listening behavior shifts seasonally (holiday music, summer genres). Input feature distributions (genre affinity vectors) are tracked with PSI daily. A representative policy: when PSI exceeds 0.15 for more than 3 consecutive days, a retraining job triggers on the last 90 days of interaction data weighted toward the most recent 30 days. The transferable lesson is the *sustained-breach* condition — a consecutive-day requirement filters the single-day spikes that gradual seasonal drift does not produce.
 
-**Facebook ad ranking drift**: CTR (click-through rate) serves as a real-time proxy for model quality. A 10% relative drop in CTR triggers an automated investigation pipeline that compares feature distributions across 50+ input signals to identify the root cause. Shadow model predictions are logged for 72 hours before any model update, providing a controlled comparison.
+**Payments fraud detection, delayed labels**: Fraud patterns change as attackers adapt, and true labels arrive only when a cardholder disputes a charge — card-network chargeback windows typically run to 120 days, so a monitoring design must not wait on them. Two proxies are paired: chargeback rate (slow, definitive) and agreement rate with a rule-based system (instant, approximate). A drop in rule agreement fires an alert well before chargebacks confirm it.
 
-**Amazon product search**: Query distribution shifts during Prime Day (unusual query volume, different product categories). Monitoring detects query length distribution shift (PSI = 0.31) 2 hours into Prime Day and routes traffic to a model fine-tuned on previous Prime Day data. Reversion to the standard model happens automatically 48 hours post-event.
+**Ad ranking, real-time proxy**: CTR (click-through rate) serves as a real-time proxy for model quality. A representative policy: a 10% relative drop in CTR triggers an automated investigation that compares feature distributions across the ranked input signals to find the root cause, with shadow-model predictions logged for a fixed observation period before any model update so the comparison is controlled.
+
+**E-commerce search, planned distribution shift**: Query distribution shifts predictably during a mega sale event (unusual query volume, different product categories). This is the case where drift is *expected*, so the correct response is not retraining but routing: detect the shift, switch to a model fine-tuned on the previous year's event traffic, and revert automatically once the event window closes. Treating a scheduled, reversible shift as a retraining trigger is a classic over-reaction.
 
 ---
 
@@ -758,15 +766,15 @@ The catch worth stating in an interview: Bonferroni assumes the tests are indepe
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| Evidently AI | Open-source monitoring | Feature drift, data quality, model performance reports |
-| WhyLogs (whylabs) | Data logging | Statistical profiles, drift detection, lightweight |
+| Evidently AI | Open-source monitoring | Feature drift, data quality, model/LLM evaluation reports. Actively maintained (0.7.x as of July 2026); the Report/Preset API was reworked in 0.7, so pre-0.7 snippets do not run |
+| whylogs (WhyLabs) | Data logging | Statistical profiles, drift detection, lightweight. **Effectively dormant** — last PyPI release 1.6.4 (Dec 2024), last commit to the GitHub mainline Jan 2025. Do not pick it for new work without checking whether it has resumed |
 | Arize AI | Commercial monitoring | Feature/prediction drift, explainability, retraining triggers |
 | Fiddler AI | Commercial monitoring | Explainability, fairness monitoring, alert management |
 | Grafana + Prometheus | Infrastructure + custom | Custom drift metrics pushed as Prometheus gauges |
 | MLflow | Experiment tracking | Not drift-specific; use for performance metric tracking |
 | Great Expectations | Data validation | Schema and distribution tests for batch data pipelines |
 | Deepchecks | Open-source | Train/test/production comparison, drift, integrity checks |
-| NannyML | Confidence-based monitoring | Estimates performance without labels (CBPE method) |
+| NannyML | Confidence-based monitoring | Estimates performance without labels (CBPE). Requires well-calibrated probabilities and explicitly does NOT work under concept drift — it is a covariate-shift tool (latest release 0.13.1, July 2025) |
 | SciPy | Statistical tests | KS test, Chi-squared; Python standard for custom drift |
 
 ---
@@ -780,7 +788,7 @@ Data drift means the input distribution P(X) has changed — the model is receiv
 Population Stability Index measures the divergence between two distributions by comparing the percentage of samples in each bin: PSI = sum((actual_pct - expected_pct) * ln(actual_pct / expected_pct)). Thresholds: PSI < 0.1 indicates no meaningful change; 0.1–0.2 indicates moderate change worth monitoring; > 0.2 indicates significant drift requiring action. Limitations: PSI is sensitive to the number of bins and bin boundaries; small samples (< 500) produce noisy estimates; it aggregates across the distribution, potentially missing localized shifts in tails; it is not a formal statistical test with a p-value.
 
 **Q: How do you monitor model performance when ground truth labels are delayed by days or weeks?**
-Use proxy metrics that correlate with eventual outcomes and arrive faster. For fraud detection: chargeback rate (30–90 day delay) pairs with rule-based system agreement rate (instant) and declined transaction rate (1 day). For recommendation: eventual purchase rate (days) pairs with click-through rate (hours) and scroll depth (minutes). Formally, NannyML's Confidence-Based Performance Estimation (CBPE) estimates AUC from prediction score distributions without labels, using the empirical relationship between model confidence and accuracy. Always validate proxy metrics periodically against actual labels to confirm correlation has not itself drifted.
+Use proxy metrics that correlate with eventual outcomes and arrive faster. For fraud detection: chargeback rate (30–90 day delay) pairs with rule-based system agreement rate (instant) and declined transaction rate (1 day). For recommendation: eventual purchase rate (days) pairs with click-through rate (hours) and scroll depth (minutes). Formally, NannyML's Confidence-Based Performance Estimation (CBPE) estimates AUC from prediction score distributions without labels by building an expected confusion matrix from the scores — but it assumes well-calibrated probabilities and, by its own documentation, does not work under concept drift, so it covers covariate shift only and is not a substitute for labels. Always validate proxy metrics periodically against actual labels to confirm correlation has not itself drifted.
 
 **Q: What is the Bonferroni correction and when should you apply it in drift monitoring?**
 When running independent statistical tests on N features at significance level alpha, the probability of at least one false positive is 1 - (1 - alpha)^N, which approaches 1 for large N. For 100 features at alpha=0.05, ~5 will falsely trigger. The Bonferroni correction sets the individual test threshold to alpha/N, controlling the family-wise error rate at alpha. In monitoring with 150 features: use KS test threshold of 0.05/150 = 0.00033. Practically, also prioritize monitoring the top 20 features by SHAP importance, reducing both false positive volume and cognitive load.
@@ -842,7 +850,7 @@ A fixed reference is frozen at a known-good baseline, while a sliding reference 
 
 ## 14. Case Study
 
-**Scenario: Monitoring a production credit-scoring model.** A bank scores loan applications with a model whose inputs and outputs are regulated. The monitoring stack computes weekly PSI on 20 input features, a KS test for target drift (the default rate shifting), tracks SHAP feature-importance stability (a regulatory requirement), and computes online AUC on labeled outcomes that arrive with a 30-day lag. Dashboards run on Grafana fed by Evidently AI.
+**Scenario: Monitoring a production credit-scoring model.** A bank scores loan applications with a model whose inputs and outputs are regulated. The monitoring stack computes weekly PSI on 20 input features, a two-proportion test for target drift (the observed default rate shifting — a two-sample KS test is the wrong tool for a binary outcome, since its asymptotic p-value assumes a continuous distribution), tracks SHAP feature-importance stability (a regulatory requirement), and computes online AUC on labeled outcomes that arrive with a 30-day lag. Dashboards run on Grafana fed by Evidently AI.
 
 ```mermaid
 flowchart LR
@@ -858,7 +866,7 @@ flowchart LR
 
     subgraph weekly["Weekly job"]
         psi["PSI per feature 20<br/>alert if PSI > 0.2<br/>on >= 3 features"]
-        ks["KS test on default rate<br/>target drift alert"]
+        ks["Two-proportion test<br/>on default rate<br/>target drift alert"]
         shap["SHAP importance drift<br/>regulatory audit alert"]
     end
 
@@ -1002,7 +1010,7 @@ if score_psi > 0.2 or (live_scores > 0.99).mean() > 0.1:
 
 **Interview Q&A:**
 
-**What is the difference between data drift and concept drift?** Data (covariate) drift is a change in the input distribution P(X), the applicant population shifts, while the relationship P(y|X) stays the same. Concept drift is a change in P(y|X), the same inputs now imply a different outcome (e.g. an economic shock changes default behavior). PSI detects data drift; only labeled outcomes (online AUC, KS on default rate) reveal concept drift.
+**What is the difference between data drift and concept drift?** Data (covariate) drift is a change in the input distribution P(X), the applicant population shifts, while the relationship P(y|X) stays the same. Concept drift is a change in P(y|X), the same inputs now imply a different outcome (e.g. an economic shock changes default behavior). PSI detects data drift; only labeled outcomes (online AUC, a two-proportion test on the realized default rate) reveal concept drift.
 
 **How do you interpret PSI values?** PSI below 0.1 means the population is stable, 0.1 to 0.2 is a moderate shift worth watching, and above 0.2 is a significant shift that typically warrants investigation or retraining. It is computed by binning a reference distribution and comparing live proportions per bin, summing (actual - expected) * log(actual/expected).
 
@@ -1012,20 +1020,23 @@ if score_psi > 0.2 or (live_scores > 0.99).mean() > 0.1:
 
 **Why is monitoring SHAP feature-importance drift important here?** It is partly regulatory: the bank must show which features drive decisions and that they are stable and non-discriminatory. A sudden shift in feature importance (a feature suddenly dominating) can indicate a data-quality issue or an unintended change in model behavior that pure accuracy metrics would not surface, and it supports the model-risk audit trail.
 
-**What triggers a retraining decision in this system?** A combination: sustained input PSI drift across multiple features, a measured AUC drop on matured labels beyond a threshold, KS-detected target drift in the default rate, or SHAP importance shifts flagged in audit. Retraining is gated by champion/challenger evaluation on recent data so a refreshed model must beat the incumbent before replacing it.
+**What triggers a retraining decision in this system?** A combination: sustained input PSI drift across multiple features, a measured AUC drop on matured labels beyond a threshold, a significant shift in the realized default rate, or SHAP importance shifts flagged in audit. Retraining is gated by champion/challenger evaluation on recent data so a refreshed model must beat the incumbent before replacing it.
 
 **Pitfall — PSI computed on wrong binning causes false drift alarms.**
 
 ```python
 # BROKEN: bins computed on training data but applied to production data
-# If production feature range extends beyond training max, all new values
-# fall into the last bin → PSI always high for in-distribution shifts
+# np.histogram SILENTLY DROPS values outside the outermost edges (it does not
+# pile them into the last bin). If production extends beyond the training max,
+# those rows vanish, prod proportions no longer sum to 1, and PSI is computed
+# on a truncated sample -- understating the very drift you are looking for.
+# density=True compounds it: the values become densities, not proportions.
 import numpy as np
 
 def psi_broken(train: np.ndarray, prod: np.ndarray, n_bins: int = 10) -> float:
     bins = np.percentile(train, np.linspace(0, 100, n_bins + 1))  # training percentiles
     train_hist, _ = np.histogram(train, bins=bins, density=True)
-    prod_hist, _  = np.histogram(prod, bins=bins, density=True)   # out-of-range values overflow!
+    prod_hist, _  = np.histogram(prod, bins=bins, density=True)   # out-of-range rows dropped!
     return float(np.sum((prod_hist - train_hist) * np.log(prod_hist / (train_hist + 1e-8))))
 
 # FIX: extend bins with -inf/+inf to capture out-of-range values explicitly
@@ -1040,7 +1051,7 @@ def psi_fixed(train: np.ndarray, prod: np.ndarray, n_bins: int = 10) -> float:
 
 **How do you distinguish data drift from concept drift in production?** Data drift (input shift): input feature distribution changes but the true label relationship is unchanged — e.g., a new customer segment with different spending patterns. Detect via PSI on inputs. Concept drift (relationship shift): the same inputs now predict different outputs — e.g., economic shock changes fraud patterns. Detect via model performance degradation on labeled data. Key distinction: data drift may not hurt performance if the model generalizes; concept drift always hurts. Alert on data drift as a leading indicator; treat concept drift as requiring immediate retraining.
 
-**What is the KS test and why is it preferred over PSI for detecting distribution shift in small samples?** The Kolmogorov-Smirnov test compares the empirical CDFs of two samples and reports the maximum distance between them (KS statistic), along with a p-value. PSI requires enough samples to fill bins reliably — PSI is noisy below ~5,000 samples per bin. KS is distribution-free and works on samples as small as 100. Use PSI for monitoring (daily/hourly batch comparisons with 10k+ samples); use KS for alerting on small real-time windows (5-minute windows of 200 predictions).
+**What is the KS test and why is it preferred over PSI for detecting distribution shift in small samples?** The Kolmogorov-Smirnov test compares the empirical CDFs of two samples and reports the maximum distance between them (KS statistic), along with a p-value. PSI requires enough samples to fill its bins reliably — roughly 100 per bin, so about 1,000 rows for the standard 10-bin setup. KS is distribution-free, needs no binning decision, and stays usable in the low hundreds, though with n = 200 its 5% detection floor is a KS distance of about 0.10, so it only catches large shifts. Use PSI for batch monitoring with 1,000+ rows per window; use KS on small real-time windows, and remember that repeating either test every few minutes multiplies the false-positive count exactly as the Bonferroni discussion above describes.
 
 **How do you monitor a model when ground truth labels arrive with a 30-day delay (e.g., loan default)?** Use proxy metrics that correlate with the true metric but arrive faster: prediction distribution shift (immediate), feature PSI (immediate), prediction calibration on the subset where labels are available within 7 days (leading indicator). For the 30-day delayed labels, use a rolling evaluation window: at any point in time, compute AUC on the cohort that completed the 30-day window. Build a dashboard showing: (1) real-time feature drift; (2) 7-day proxy AUC; (3) 30-day true AUC on historical cohorts. Alert on any of the three.
 

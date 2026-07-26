@@ -6,7 +6,7 @@ XGBoost (Extreme Gradient Boosting, Chen & Guestrin 2016) and LightGBM (Light Gr
 
 XGBoost innovations: regularised objective with L1+L2 on leaf weights, second-order Taylor expansion of the loss function for more accurate split scoring, approximate split finding with compressed column blocks, and sparsity-aware split for missing value handling.
 
-LightGBM innovations: Gradient-based One-Side Sampling (GOSS), Exclusive Feature Bundling (EFB), histogram-based binning (256 bins), and leaf-wise (best-first) tree growth instead of level-wise. Together these reduce training time by 3-5x compared to XGBoost on CPU.
+LightGBM innovations: histogram-based binning (`max_bin` default 255), Exclusive Feature Bundling (EFB), leaf-wise (best-first) tree growth instead of level-wise, and Gradient-based One-Side Sampling (GOSS). Together these typically reduce CPU training time by 3-5x compared to XGBoost. One correction worth carrying into an interview: **GOSS is not part of the default configuration.** LightGBM's `data_sample_strategy` defaults to `"bagging"`, and in the 4.x sklearn wrapper `boosting_type` accepts only `gbdt`, `dart` and `rf` — GOSS must be requested with `data_sample_strategy="goss"`. The out-of-the-box speed advantage therefore comes from binning, EFB, leaf-wise growth and the histogram-subtraction trick, not from GOSS.
 
 CatBoost (Yandex 2017) adds ordered boosting to prevent target leakage in categorical feature processing and symmetric (oblivious) trees for fast CPU scoring.
 
@@ -18,7 +18,7 @@ One-line analogy: XGBoost is a precision craftsman who uses both first and secon
 
 Mental model for XGBoost: vanilla gradient boosting uses only the first derivative (gradient) to score splits. XGBoost additionally uses the second derivative (Hessian), which provides curvature information — like knowing not just which direction is downhill but how steeply curved the valley is. This allows more accurate step-size estimation and better split quality.
 
-Mental model for LightGBM: in a typical GBDT round, 80% of samples have small gradients (already well-predicted) and contribute little to split quality. GOSS keeps all large-gradient samples and randomly samples 10% of small-gradient ones — you get 90%+ of the information gain estimate while evaluating 30-50% fewer samples.
+Mental model for LightGBM: in a typical GBDT round, most samples have small gradients (already well-predicted) and contribute little to split quality. With the paper's defaults GOSS keeps the top 20% by |gradient| and draws a further 10% of N at random from the rest, so it scans about 30% of the rows — a 70% cut — and reweights the survivors so the gain estimate stays unbiased. Ke et al. (2017) prove the resulting approximation error shrinks as O(1/sqrt(sampled size)); they do not quote a fixed "% of information gain retained", so treat GOSS's accuracy cost as small-but-data-dependent rather than a fixed number.
 
 Key insight: XGBoost improved gradient boosting's objective; LightGBM improved gradient boosting's sampling and data structure. Both innovations are independent and complementary — LightGBM also uses a second-order approximation internally.
 
@@ -199,8 +199,11 @@ Algorithm GOSS:
 4. To maintain gradient statistics:
    weight small-gradient samples by (1-a)/b when computing gain
 
-Variance of gain estimate with GOSS: nearly identical to using all samples
-when a≥5% and b≥10% (theoretical bound in the paper)
+Defaults when enabled: top_rate (a) = 0.2, other_rate (b) = 0.1.
+NOT the default sampling strategy -- LightGBM's data_sample_strategy
+defaults to "bagging"; request GOSS with data_sample_strategy="goss".
+Ke et al. (2017) bound the approximation error of the gain estimate and show
+it decays as O(1/sqrt(sampled size)); it is not zero, just small in practice.
 ```
 
 **Put simply.** "Keep every row the model is still getting badly wrong, throw away most of the rows it has already mastered — then shout the survivors' votes louder so the tally still comes out right."
@@ -231,7 +234,9 @@ The amplification factor `(1-a)/b` is the whole trick and the only subtle part. 
   histogram work saved  = 70%
 ```
 
-The line `10,000 x 8.0 = 80,000` is the check that matters: the amplified survivors carry precisely the mass of the 80,000-row remainder they replaced, so `G` and `H` sums come out unbiased and the gain formula above is unaffected. (Reading `b` instead as "10% of the remaining 80%" gives 8,000 sampled rows and the `(a + b*(1-a)) * N = 0.28 * N` figure quoted in the Q&A and intuition sections — same story, ~70% of rows skipped either way.)
+The line `10,000 x 8.0 = 80,000` is the check that matters: the amplified survivors carry precisely the mass of the 80,000-row remainder they replaced, so `G` and `H` sums come out unbiased and the gain formula above is unaffected.
+
+Note the definition of `b`, which is easy to get backwards. In Algorithm 2 of Ke et al. (2017) the random set is `randN = b x len(I)` — `b` is a fraction of the **whole** dataset, not of the small-gradient remainder. That is why the amplification is `(1-a)/b` and the rows scanned are `(a + b) * N = 0.30 * N`. If `b` meant "10% of the remaining 80%" you would sample 8,000 rows and need a different correction factor; the `(a + b(1-a)) * N = 0.28 * N` form that circulates in blog posts comes from that misreading. Either way roughly 70% of rows are skipped, but only `(a+b)N` matches the paper and the implementation.
 
 **What breaks without the amplification.** Drop the `(1-a)/b` factor and every small-gradient row counts once instead of eight times. The easy rows are then massively under-represented in `G_L`, `G_R`, `H_L`, `H_R`, so the model sees a training set that looks far harder than it is, over-corrects on the difficult tail, and the split gains are systematically wrong. GOSS without its weight is just biased subsampling.
 
@@ -257,18 +262,18 @@ The encoding above is doing exactly that: A occupies value range 1-2, B occupies
 | bundle value | An offset integer: which feature is live, plus its value, packed into one number |
 | bundle count | The new feature count after packing. This is what split search now iterates over |
 
-**Walk one example.** A one-hot dataset with 1,000 sparse columns that pack into 100 bundles, LightGBM's 256-bin histograms:
+**Walk one example.** A one-hot dataset with 1,000 sparse columns that pack into 100 bundles, LightGBM's default 255-bin histograms (`max_bin=255`):
 
 ```
   histogram work per node = n_features x n_bins
 
-  before EFB : 1,000 features x 256 bins = 256,000 accumulate ops
-  after  EFB :   100 bundles  x 256 bins =  25,600 accumulate ops
+  before EFB : 1,000 features x 255 bins = 255,000 accumulate ops
+  after  EFB :   100 bundles  x 255 bins =  25,500 accumulate ops
 
-  reduction = 256,000 / 25,600 = 10x fewer operations per node
+  reduction = 255,000 / 25,500 = 10x fewer operations per node
 ```
 
-Compare that to what binning alone already bought, on 100K rows and 100 dense features: exact split search touches `100 x 100,000 = 10,000,000` values per node, histograms touch `100 x 256 = 25,600` — a 390x cut. EFB and binning attack different axes of the same `n_features x n_rows` cost: binning shrinks the row axis to a constant 256, EFB shrinks the feature axis. Stack them and a wide sparse dataset becomes tractable.
+Compare that to what binning alone already bought, on 100K rows and 100 dense features: exact split search touches `100 x 100,000 = 10,000,000` values per node, histograms touch `100 x 255 = 25,500` — a 392x cut. EFB and binning attack different axes of the same `n_features x n_rows` cost: binning shrinks the row axis to a constant 256, EFB shrinks the feature axis. Stack them and a wide sparse dataset becomes tractable.
 
 EFB reduces n_features from thousands to hundreds for one-hot data, dramatically reducing the number of splits to evaluate.
 
@@ -322,12 +327,15 @@ Leaf-wise makes the leaf count a *continuous* dial while level-wise makes it a p
 
 | tree_method | Use Case | Notes |
 |-------------|----------|-------|
-| hist (default) | All datasets | Histogram-based, fast, recommended |
-| approx | Large datasets | Approximate quantile sketch |
-| exact | Small datasets | Exact optimal splits, O(NlogN) |
-| gpu_hist | GPU training | Same as hist but on GPU |
+| auto (the actual default) | All datasets | Since XGBoost 2.0 this resolves to `hist` |
+| hist | All datasets | Histogram-based (`max_bin` default 256), fast, recommended |
+| approx | Large datasets | Approximate quantile sketch, rebuilt per tree |
+| exact | Small datasets | Exact optimal splits, O(N log N) |
+| ~~gpu_hist~~ | GPU training | **Removed.** Since 2.0 use `tree_method="hist", device="cuda"` |
 
 ### LightGBM Key Configurations
+
+All defaults in this file were checked against **XGBoost 3.3** and **LightGBM 4.7** (current releases, July 2026). Both libraries have moved defaults and removed parameters between major versions — re-check against your pin.
 
 | Parameter | Classification Default | Regression Default | Notes |
 |-----------|----------------------|-------------------|-------|
@@ -386,10 +394,10 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    raw(["Continuous feature\n0.1, 2.3, 5.7, 1.2, ..."]) --> bin["Bin into 256 buckets\ndiscretize once per feature"]
+    raw(["Continuous feature\n0.1, 2.3, 5.7, 1.2, ..."]) --> bin["Bin into 255 buckets\ndiscretize once per feature"]
     bin --> idx(["Bin indices\n0, 5, 12, 2, ..."])
-    idx --> acc["Per leaf: accumulate g_i, h_i\ninto 256 histogram bins"]
-    acc --> scan["Scan bins left to right\nO(256) per feature vs O(N) exact"]
+    idx --> acc["Per leaf: accumulate g_i, h_i\ninto 255 histogram bins"]
+    acc --> scan["Scan bins left to right\nO(255) per feature vs O(N) exact"]
     acc --> sub["Histogram subtraction\nright child = parent − left\ncompute ONE child only"]
     scan --> best(["Best split threshold"])
     sub --> best
@@ -398,7 +406,7 @@ flowchart TD
     class bin,acc,scan,sub mathOp
 ```
 
-Caption: binning collapses the continuous feature to 256 integer buckets once, so every subsequent split scan costs O(256) not O(N); the subtraction trick means only the smaller child's histogram is built — the sibling is the parent minus it.
+Caption: binning collapses the continuous feature to 255 integer buckets once (LightGBM's `max_bin` default; XGBoost's `max_bin` default is 256), so every subsequent split scan costs O(#bins) not O(N); the subtraction trick means only the smaller child's histogram is built — the sibling is the parent minus it.
 
 ### Training Time on 100K rows, 100 features, binary classification (approximate)
 
@@ -518,7 +526,9 @@ xgb_model = xgb.XGBClassifier(
 
     # Other
     scale_pos_weight=1.0,      # for imbalanced: sum(neg)/sum(pos)
-    use_label_encoder=False,
+    # NOTE: do NOT pass use_label_encoder — it was removed in XGBoost 1.6 and is
+    # absent from the 2.x/3.x sklearn wrapper entirely. Passing it now falls into
+    # **kwargs and is forwarded to the booster as an unknown parameter.
     random_state=42,
     n_jobs=-1,
 )
@@ -557,7 +567,9 @@ lgb_model = lgb.LGBMClassifier(
     min_split_gain=0.0,        # minimum gain for split (equivalent to gamma)
 
     # LightGBM-specific
-    boosting_type="gbdt",      # options: gbdt, dart, goss (GOSS now default in some versions)
+    boosting_type="gbdt",      # the sklearn wrapper accepts ONLY gbdt / dart / rf.
+                               # GOSS is no longer a boosting_type: pass
+                               # data_sample_strategy="goss" instead (default: "bagging").
     n_jobs=-1,
     random_state=42,
     verbose=-1,                # suppress training output
@@ -608,8 +620,11 @@ lgb_cat = lgb.LGBMClassifier(
 )
 lgb_cat.fit(df, target)
 # LightGBM automatically detects category dtype and uses optimal split finding
-# for categoricals (finds best subset of categories to put in left leaf)
-# Up to num_cat_smooth=10 categories: exhaustive; > 10: Fisher's optimal split
+# for categoricals (finds best subset of categories to put in left leaf).
+# The threshold is max_cat_to_onehot (default 4): at or below it LightGBM uses a
+# one-vs-rest split; above it, it sorts categories by their gradient statistics and
+# takes the best boundary (Fisher 1958). cat_smooth (default 10.0) is a SMOOTHING
+# strength on those per-category statistics -- it is not a category count.
 
 # XGBoost native categoricals (XGBoost 1.6+)
 import xgboost as xgb
@@ -775,21 +790,23 @@ print(f"LightGBM speedup: {xgb_time/lgb_time:.1f}x")
 
 ## 7. Real-World Examples
 
-### Netflix: Recommendation Ranking
+The first three sections below are **illustrative deployment shapes**, not sourced public case studies — no company has published these configurations or timings. They are included to show what a realistic parameter set and latency budget look like per use case. The Kaggle result that follows is public and checkable.
 
-Offline A/B tests use LightGBM to rank candidate items. ~200 features per (user, item) pair — user watch history aggregations, item popularity, contextual features. LightGBM chosen for training throughput: daily retraining on 500M rows, ~3 hours on 64-core cluster. Early stopping on a 1-week holdout prevents temporal leakage. num_leaves=255, learning_rate=0.02, 2000 rounds.
+### Streaming recommendation ranking (illustrative)
 
-### Booking.com: Price Prediction
+LightGBM ranks candidate items from ~200 features per (user, item) pair — watch-history aggregations, item popularity, contextual features. LightGBM is chosen for training throughput when retraining daily on hundreds of millions of rows. Early stopping on a forward-in-time holdout (not a shuffled split) prevents temporal leakage. Representative settings: num_leaves=255, learning_rate=0.02, 2000 rounds.
 
-XGBoost with GPU training (8× V100 GPUs), custom Tweedie loss for non-negative price distribution. The second-order Hessian approximation of Tweedie loss is numerically more stable than sklearn's implementation. 48 features. GPU reduces training from 15 minutes to 45 seconds per run, enabling daily retraining and hyperparameter search.
+### Price prediction with a skewed target (illustrative)
 
-### Ant Financial: Credit Scoring
+XGBoost on GPU with a Tweedie objective (`reg:tweedie`, `tweedie_variance_power` in (1,2)) for a non-negative, right-skewed price distribution — Tweedie interpolates between Poisson and Gamma, so it handles the point mass at zero that squared error cannot. XGBoost supplies the gradient and Hessian analytically for this objective. GPU training turns a multi-minute fit into a sub-minute one, which is what makes daily retraining plus a hyperparameter sweep affordable.
 
-CatBoost with 40 categorical features (occupation code, loan purpose, region code). Ordered boosting prevents target statistics leakage that would have inflated AUC by ~2% during offline evaluation. Symmetric trees enable batch prediction at 50K samples/second on a single CPU core — critical for real-time decisioning at scale.
+### Credit scoring dominated by categoricals (illustrative)
+
+CatBoost with dozens of categorical features (occupation code, loan purpose, region code). Ordered boosting computes each row's target statistic from only the rows preceding it in a random permutation, which removes the leakage that plain target encoding introduces and that would otherwise make offline AUC look better than production. Symmetric (oblivious) trees make batch scoring cache-efficient, which matters for real-time decisioning.
 
 ### Kaggle: Home Credit Default Risk (2018)
 
-1st place solution used LightGBM as the primary base model with 800+ engineered features. Key: GOSS + EFB reduced training time from 6 hours (without) to 1.5 hours for the full feature set, enabling 4× more hyperparameter trials. Final model: LightGBM with num_leaves=127, learning_rate=0.02, 5000 rounds with early stopping. AUC: 0.802 on leaderboard.
+The competition's top private-leaderboard score was **0.80570 AUC** (team "Home Aloan"), on a field of ~7,200 teams. Gradient-boosted trees — LightGBM above all — dominated the leaderboard, and the winning writeup is explicit that feature engineering mattered more than model tuning or stacking. Treat any specific "GOSS cut training from 6 hours to 1.5" figure with suspicion: no such measurement appears in the public writeups, and GOSS is not enabled by default, so a stock LightGBM run does not use it at all.
 
 ---
 
@@ -1011,18 +1028,20 @@ final_model = xgb.XGBClassifier(n_estimators=final_n_estimators)
 final_model.fit(X_all, y_all)
 ```
 
-### Pitfall 5: Forgetting verbose=-1 in LightGBM in Production Logs
+### Pitfall 5: LightGBM Log Noise — and the Stale Advice About It
 
-LightGBM prints training logs (one line per round) to stdout by default. A 2000-round model floods production logs with 2000 lines per training run. Many teams discovered this during incident postmortems when logs were overwhelmed.
+The often-repeated claim that "LightGBM prints one line per boosting round by default" was true of LightGBM 3.2 and earlier, where `train()` defaulted to `verbose_eval=True`. It is **not** true of LightGBM 4.x: neither `lgb.train()` nor the sklearn wrapper's `fit()` registers a `log_evaluation` callback unless you add one, so per-round eval lines are off by default. What LightGBM 4.x still emits at the default `verbosity=1` are `[LightGBM] [Info]` / `[Warning]` dataset-construction and parameter messages — a handful of lines per fit, not thousands. Setting `verbose=-1` silences those; adding `log_evaluation` is what turns per-round logging back on.
 
 ```python
-# BROKEN: default verbose=1 — floods logs
+# Default in LightGBM 4.x: a few [LightGBM] [Info] lines, NOT 2000 per-round lines
 lgb_model = lgb.LGBMClassifier(n_estimators=2000)
 
-# FIXED
+# Fully quiet in production
 lgb_model = lgb.LGBMClassifier(n_estimators=2000, verbose=-1)
-# Or control via callbacks:
-lgb_model.fit(X, y, callbacks=[lgb.log_evaluation(period=-1)])
+
+# Per-round logging is OPT-IN; period <= 0 disables it again
+lgb_model.fit(X, y, eval_set=[(X_val, y_val)],
+              callbacks=[lgb.log_evaluation(period=100)])   # every 100th round
 ```
 
 ### Pitfall 6: XGBoost Missing Value Handling Assumption
@@ -1037,8 +1056,8 @@ Always ensure training data missingness patterns match production. If a feature 
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| XGBoost | 2.0+ | Unified hist method (cpu+gpu), native categoricals, multi-output |
-| LightGBM | 4.0+ | GOSS default in some configs, Arrow/Pandas 2.0 support |
+| XGBoost | 2.0+ | Unified hist method (`tree_method="hist"` + `device="cuda"`; `gpu_hist` removed), native categoricals, multi-output. `use_label_encoder` gone since 1.6; `early_stopping_rounds` is a constructor arg, not a `fit()` arg, since 2.0 |
+| LightGBM | 4.0+ | Arrow/Pandas 2.0 support. GOSS moved out of `boosting_type` to `data_sample_strategy="goss"` and is **not** the default (`"bagging"` is) |
 | CatBoost | 1.2+ | text features, embeddings, monotone constraints |
 | SHAP | 0.44+ | TreeSHAP on all three (XGB/LGB/CB); GPU-accelerated SHAP coming |
 | Optuna | 3.3+ | Integrated XGBoost/LightGBM callbacks for pruning |
@@ -1054,8 +1073,8 @@ Always ensure training data missingness patterns match production. If a feature 
 **Q: What are the key innovations of XGBoost over vanilla gradient boosting?**
 Four core innovations: (1) Regularised objective — L1 (alpha) and L2 (lambda) penalties on leaf weights are part of the objective function, not applied post-hoc; this means the split-gain formula automatically accounts for regularisation when evaluating candidate splits; (2) Second-order Taylor expansion — uses both gradient g_i and Hessian h_i for each sample, enabling more accurate leaf weight computation (optimal weight = -G_j/(H_j+λ)) and better split scoring for any differentiable loss; (3) Approximate split finding with column blocks — pre-sorts features into compressed column blocks enabling parallelism and cache-efficient access; (4) Sparsity-aware split — for missing/zero values, learns a default branch direction during training.
 
-**Q: What is GOSS in LightGBM and how does it speed up training without sacrificing much accuracy?**
-GOSS (Gradient-based One-Side Sampling) exploits the insight that gradient magnitude indicates how "wrong" the current model is on a sample — large-gradient samples are hard, small-gradient samples are already well-predicted. GOSS keeps all large-gradient samples (top a%) and randomly samples a fraction b of the small-gradient samples. To maintain unbiased gradient statistics, the small-gradient samples receive a weight (1-a)/b when computing histogram statistics. This reduces the effective dataset size per round from N to approximately (a + b*(1-a)) * N. With a=0.2, b=0.1: effective size = (0.2 + 0.1*0.8) = 0.28*N — a 72% reduction with bounded variance increase on the gradient estimate.
+**Q: What is GOSS in LightGBM, how much data does it actually skip, and is it on by default?**
+GOSS (Gradient-based One-Side Sampling) keeps every large-gradient (hard) sample and randomly subsamples the small-gradient (already-solved) ones, cutting the rows scanned per round. Per Algorithm 2 of Ke et al. (2017): keep the top `a` fraction by |gradient| (`top_rate`, default 0.2), then draw `randN = b x N` more uniformly from the remainder (`other_rate`, default 0.1), and multiply those survivors' weights by `(1-a)/b` so `G` and `H` sums stay unbiased. Effective rows per round are therefore `(a + b) * N = 0.30 * N` — a 70% reduction. Watch for two traps: `b` is a fraction of the **whole** dataset, not of the remainder (the widely repeated `(a + b(1-a))N = 0.28N` comes from that misreading), and **GOSS is not the default** — `data_sample_strategy` defaults to `"bagging"` and the 4.x sklearn `boosting_type` accepts only `gbdt`/`dart`/`rf`, so you must ask for `data_sample_strategy="goss"`.
 
 **Q: What is EFB (Exclusive Feature Bundling) in LightGBM and when does it help most?**
 EFB bundles mutually exclusive sparse features — features that rarely have non-zero values simultaneously — into a single dense feature. This is common after one-hot encoding: a 5-category variable creates 5 binary columns, but each row has exactly one non-zero. EFB merges these into a single integer feature (value 0-4), reducing n_features from 5 to 1. The algorithm uses a graph-theoretic approach: features are nodes, conflicts (co-occurring non-zeros) are edges, and it finds a near-optimal bundling via a greedy graph colouring. EFB helps most on datasets with high-dimensional sparse features — NLP TF-IDF matrices, one-hot encoded high-cardinality categoricals. On dense numerical-only datasets, EFB has minimal effect.
@@ -1097,7 +1116,7 @@ For a general loss l(y, ŷ), the gain from a split is approximated using the sec
 XGBoost learns a default direction (left or right branch) for missing values at each split node. During training, it tries both directions for each split and picks the one that maximises gain. At inference, a sample with a missing value follows this learned default direction. This works well when missingness patterns in training and inference are similar. Problems occur when: (1) A feature has no missing values in training (learned direction is essentially uninformed) but has missing values at inference; (2) The meaning of missingness changes between train and inference (e.g., feature pipeline change). Fix: if a feature can be missing at inference, inject artificial NaNs in a fraction of training samples for that feature so XGBoost learns a meaningful default direction.
 
 **Q: How would you compare XGBoost and LightGBM on a 1 billion row dataset?**
-At this scale: (1) LightGBM wins on CPU training due to GOSS (only evaluates ~28% of samples per round) and EFB; estimated 3-5x speedup over XGBoost; (2) GPU training is competitive: both achieve similar throughput on GPU; LightGBM requires custom compilation for GPU while XGBoost GPU support is built-in with device="cuda"; (3) Distributed training: XGBoost Dask integration is more mature and production-tested at this scale (used by companies like Uber and Lyft); LightGBM MPI requires more infrastructure setup; (4) Memory: LightGBM's histogram binning uses int16 per bin vs float32 in XGBoost, roughly 50% lower memory per feature. For a 1B row Kaggle-style dataset: LightGBM with GPU + Dask is recommended; for a multi-node production cluster: XGBoost + Dask is more battle-tested.
+At this scale: (1) LightGBM wins on CPU training thanks to histogram binning, EFB and leaf-wise growth — and, if you explicitly enable `data_sample_strategy="goss"`, a further cut to ~30% of rows scanned per round; estimated 3-5x speedup over XGBoost; (2) GPU training is competitive: both achieve similar throughput on GPU; LightGBM requires custom compilation for GPU while XGBoost GPU support is built-in with device="cuda"; (3) Distributed training: XGBoost Dask integration is more mature and production-tested at this scale (used by companies like Uber and Lyft); LightGBM MPI requires more infrastructure setup; (4) Memory: LightGBM's histogram binning uses int16 per bin vs float32 in XGBoost, roughly 50% lower memory per feature. For a 1B row Kaggle-style dataset: LightGBM with GPU + Dask is recommended; for a multi-node production cluster: XGBoost + Dask is more battle-tested.
 
 **Q: What is the difference between gamma (min_split_gain) and reg_lambda in XGBoost?**
 gamma is the minimum loss reduction required to make a split, while reg_lambda is an L2 penalty on leaf weights. gamma acts as pre-pruning: a candidate split is only accepted if its gain exceeds gamma, so raising gamma produces fewer, higher-quality splits and shallower trees. reg_lambda instead shrinks every leaf's optimal weight toward zero via the -G/(H+λ) formula, dampening the magnitude of predictions without changing tree structure. They are complementary regularisers: gamma controls how many splits happen (structure), reg_lambda controls how large the outputs are (magnitude). For an overfitting model, increase gamma to 1-5 and reg_lambda to 5-10 rather than relying on either alone.
@@ -1120,7 +1139,7 @@ Monotone constraints force the model to be monotonically increasing or decreasin
 
 1. Set n_estimators=2000 and always use early stopping — let the validation metric determine the actual round count.
 2. Use learning_rate=0.05 as default; only lower to 0.01-0.02 for final competition models where maximum accuracy justifies 5-10x longer training.
-3. For LightGBM, always set verbose=-1 or use log_evaluation(period=-1) callback in production to prevent log flooding.
+3. For LightGBM, set verbose=-1 in production to silence the `[LightGBM] [Info]` construction messages, and add `log_evaluation` only when you actually want per-round output (it is off by default in 4.x).
 4. Prefer LightGBM on CPU for datasets > 50K rows; XGBoost on GPU for datasets where GPU is available.
 5. Cast categorical columns to pandas category dtype before fitting LightGBM — do not rely on label encoding for high-cardinality features.
 6. For XGBoost, always compute scale_pos_weight dynamically: y_train.value_counts()[0] / y_train.value_counts()[1].
@@ -1136,6 +1155,8 @@ Monotone constraints force the model to be monotonically increasing or decreasin
 ## 14. Case Study
 
 ### Problem: Real-Time Ad Click Prediction at 100K QPS
+
+*This case study is a worked design exercise, not a published system. Every figure below (AUC, latency, revenue) is illustrative and internally consistent, not a measurement from a real deployment.*
 
 **Context**: Online advertising platform, binary classification (will user click?), 500K training rows (1 day of logs), 150 features (user embeddings, ad features, context), serving latency SLA: < 5ms p99 for single sample prediction, model retrained daily.
 
@@ -1219,4 +1240,4 @@ print(f"1000-sample batch: {batch_time:.2f}ms")
 - Shadow deploy for 30 minutes before full traffic cutover
 - Rollback: if live CTR (1-hour rolling) drops > 3% vs previous model, automatic rollback
 
-**Outcome**: 1.8% AUC improvement over previous XGBoost model (0.793 vs 0.775), translating to 0.7% CTR improvement and $2.4M monthly additional revenue. Training time reduction (45s vs 135s) enabled 3 model versions per day (morning/afternoon/evening traffic pattern adaptation), a capability not feasible with XGBoost.
+**Outcome (illustrative)**: +0.018 AUC over the previous XGBoost model (0.793 vs 0.775 — 1.8 percentage points, a 2.3% relative gain), which at this traffic volume would plausibly translate into a sub-1% CTR lift and a seven-figure annualised revenue delta. The revenue figure is a modelled consequence of the AUC delta, not a measured result. Training time reduction (45s vs 135s) enabled 3 model versions per day (morning/afternoon/evening traffic pattern adaptation), a capability not feasible with XGBoost.

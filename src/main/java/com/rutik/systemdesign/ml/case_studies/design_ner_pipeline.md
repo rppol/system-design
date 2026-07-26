@@ -9,7 +9,7 @@
 ## 1. Requirements Clarification
 
 **Functional requirements:**
-- Tag every entity span in free-form text with its entity type (PER, ORG, LOC, DATE, MONEY, PRODUCT, and 6 domain-specific types)
+- Tag every entity span in free-form text with its entity type (PER, ORG, LOC, DATE, MONEY, PRODUCT, and 5 domain-specific types: DISEASE, DRUG, LAW, CASE_NUM, TICKER)
 - Return entity text, type, character offsets, and confidence score
 - Support batch inference for documents and streaming inference for short texts
 - Fine-tunable on domain-specific labeled corpora (medical, legal, financial)
@@ -32,25 +32,25 @@
 ## 2. Scale Estimation
 
 **Traffic:**
-- 5M documents/day at average 800 tokens per document = 4B tokens/day
-- Peak: 3× average → 15M tokens/minute
-- Synchronous API: 2,000 requests/minute (P99 = 512 tokens each)
-- Batch pipeline: 4M documents/day processed in 8-hour window → 500K docs/hour
+- 5M documents/day at average 800 tokens per document = 4B tokens/day = 2.8M tokens/minute average
+- Peak: 3× average → 8.3M tokens/minute
+- Synchronous API: 2,000 requests/minute (P99 = 512 tokens each), concentrated in business hours → ~1M docs/day
+- Batch pipeline: the remaining 4M documents/day, processed in an 8-hour window → 500K docs/hour
 
 **Compute sizing:**
-- BERT-base NER inference: ~0.8ms/doc on A10G at batch size 32 (512 tokens, mixed precision)
-- 2,000 RPS synchronous: 3 A10G replicas with 40% headroom
-- Batch 500K docs/hour: 8 A10G batch workers (64 docs/batch, ~0.1 sec/batch)
+- BERT-base NER inference: ~1.6ms/doc amortized on A10G at batch size 32 (512 tokens, mixed precision) — see §10 for the 50ms-per-32-doc batch breakdown
+- 2,000 requests/minute synchronous (33 docs/sec): 1 A10G saturated at ~640 docs/sec, so 2 replicas for HA and 2x headroom
+- Batch 500K docs/hour (139 docs/sec): 3 A10G batch workers (64 docs/batch, ~0.1 sec/batch) — 1 for load, 3 for variable document length
 
 **Storage:**
 - Annotation store: 500K labeled spans/day → 15M/month → ~3 GB/month (Postgres)
 - Model artifacts: 440 MB per BERT-base checkpoint; 20 versions retained = 9 GB
 - Active-learning queue: 50K spans/day awaiting review → <1 GB Redis ZSET
 
-**Cost:**
-- Synchronous API: 3 × A10G × $1.50/hr = $3,240/month
-- Batch workers: 8 × A10G × $1.50/hr × 8hr/day × 30 = $2,880/month
-- Total serving cost: ~$6,100/month for 150M documents/month
+**Cost** (A10G = g5.xlarge, us-east-1 on-demand $1.006/hr):
+- Synchronous API: 2 × $1.006/hr × 730 = $1,470/month
+- Batch workers: 3 × $1.006/hr × 8hr/day × 30 = $725/month
+- Total serving cost: ~$2,200/month for 150M documents/month
 
 ---
 
@@ -182,14 +182,20 @@ class BERTCRFModel(nn.Module):
             loss = -self.crf(emissions, labels, mask=attention_mask.bool(), reduction="mean")
             return {"loss": loss}
         else:
-            # Viterbi decoding: returns globally-optimal tag sequence
-            predictions = self.crf.decode(emissions, mask=attention_mask.bool())
-            # Compute per-token confidence from emission scores + CRF normalizer
+            # Viterbi decoding: returns a list of variable-length tag sequences
+            mask = attention_mask.bool()
+            predictions = self.crf.decode(emissions, mask=mask)
+            # Sequence-level confidence = exp(log P(best path | emissions)).
+            # pytorch-crf exposes only `forward`; `_compute_score` /
+            # `_compute_normalizer` are private and expect seq-first tensors,
+            # so go through forward(reduction="none"), which returns the
+            # per-sequence log-likelihood already normalized.
             with torch.no_grad():
-                log_probs = self.crf.compute_score(emissions, torch.tensor(predictions),
-                                                   mask=attention_mask.bool())
-                normalizer = self.crf.compute_normalizer(emissions, mask=attention_mask.bool())
-                confidences = torch.exp(log_probs - normalizer)  # sequence-level confidence
+                padded = torch.zeros_like(input_ids)
+                for i, tags in enumerate(predictions):
+                    padded[i, :len(tags)] = torch.tensor(tags, device=input_ids.device)
+                log_likelihood = self.crf(emissions, padded, mask=mask, reduction="none")
+                confidences = torch.exp(log_likelihood)  # (batch,)
             return {"predictions": predictions, "confidences": confidences.tolist()}
 ```
 
@@ -327,13 +333,16 @@ class BrokenNERModel(nn.Module):
         return {"predictions": preds.tolist()}
 
 # FIXED: CRF layer models transition constraints, Viterbi finds globally-optimal sequence
-# In production: CRF adds ~2% F1 on CoNLL-2003, ~4% F1 on domain-specific corpora where
-# entity boundaries are ambiguous (medical: "type 2 diabetes mellitus" spans 4 tokens)
+# Size of the win depends on the corpus: on CoNLL-2003 the published BERT numbers already
+# come from a plain softmax token-classification head (92.4 test F1 for BERT-base), and the
+# reported CRF gain on top of BERT is small there because BERT's context already resolves
+# most boundaries. The gain grows on domain corpora with ambiguous multi-token boundaries
+# (medical: "type 2 diabetes mellitus" spans 4 tokens). Measure it on your own corpus.
 ```
 
 ### 4.3 Domain Fine-Tuning with Active Learning
 
-General BERT NER (trained on CoNLL-2003) achieves ~0.85 F1 on medical text because medical entities like "HbA1c", "ICD-10 code E11.9", and "metformin 500mg BID" don't appear in news corpora. Fine-tuning on even 3,000 domain-labeled sentences recovers ~5–7 F1 points.
+A model trained on CoNLL-2003 degrades sharply on medical text: its label set does not even contain DRUG or DISEASE, and forms like "HbA1c", "ICD-10 code E11.9" and "metformin 500mg BID" never appear in news corpora, so both the tokenizer's subword splits and the tagger's priors are wrong. Fine-tuning on a few thousand domain-labeled sentences recovers most of the gap — measure it on your own eval set rather than assuming a fixed recovery.
 
 ```python
 from torch.utils.data import Dataset, DataLoader
@@ -498,17 +507,20 @@ def enumerate_candidate_spans(
 | Decision | Choice | Alternatives | Rationale |
 |---|---|---|---|
 | Tag scheme | BIO (flat) | BIOES, span-based | BIO is simpler and sufficient for non-nested entities; BIOES adds E-/S- tags but marginal gain; span-based needed only for nested NER |
-| Sequence model | BERT-base + CRF | BERT-large, RoBERTa, BiLSTM-CRF | BERT-base hits 92% F1 at 50ms; BERT-large adds 1.5% F1 but 3× slower; CRF adds 2–4% over softmax at near-zero cost |
+| Sequence model | BERT-base + CRF | BERT-large, RoBERTa, BiLSTM-CRF | BERT-base hits ~92 F1 on CoNLL-2003 at 50ms (published: 92.4 test F1); BERT-large adds only 0.4 F1 (92.8) for ~3× the latency; CRF costs almost nothing and mainly buys valid sequences |
 | Long-document handling | Sliding window (stride=256) | Hierarchical BERT, Longformer | Sliding window reuses BERT-base weights; Longformer improves cross-chunk entities but requires 10× training cost |
-| Active learning strategy | Uncertainty (min confidence) | Random, diversity (coreset) | Uncertainty beats random by 12% F1 on medical NER at same annotation budget; coreset needed only when class imbalance is severe |
+| Active learning strategy | Uncertainty (min confidence) | Random, diversity (coreset) | Uncertainty reaches a given F1 on a materially smaller annotation budget than random (measure the ratio on your own corpus); coreset needed only when class imbalance is severe |
 | Subword label assignment | First subword gets word label | Average logits across subwords | First-subword convention is de facto standard; averaging adds complexity without F1 gain in practice |
 
-**Comparison: CRF vs softmax head**
+**Comparison: CRF vs softmax head** — the accuracy rows below are illustrative in-house
+measurements on this pipeline's own corpora, not published benchmark results. The one published
+anchor: Devlin et al. report **92.4 CoNLL-2003 test F1 for BERT-base with a plain
+token-classification (softmax) head**, so do not assume a CRF is what gets you to 92 on news text.
 
 | Metric | Softmax head | CRF layer | Delta |
 |---|---|---|---|
-| CoNLL-2003 F1 | 0.907 | 0.924 | +1.7% |
-| Medical NER F1 | 0.831 | 0.868 | +3.7% |
+| CoNLL-2003 F1 (published, softmax head) | 0.924 | — | — |
+| Domain (medical) NER F1, in-house | 0.831 | 0.868 | +3.7pp |
 | Inference latency (512 tok) | 38ms | 41ms | +3ms |
 | Training time | 1× | 1.1× | +10% |
 | Invalid sequences | 0.8% of outputs | 0% | critical |
@@ -517,15 +529,15 @@ def enumerate_candidate_spans(
 
 ## 6. Real-World Implementations
 
-**Amazon Comprehend:** Offers pre-trained NER for PER/ORG/LOC/DATE/QUANTITY plus custom entity types via Amazon Comprehend Custom. Uses a BERT-based model under the hood with semi-supervised pretraining on web crawl data. Custom NER requires as few as 200 annotated documents per entity type by using active learning to select training examples. Deployed in Lambda + SageMaker for < 100ms P99.
+**Amazon Comprehend:** Offers pre-trained NER for PER/ORG/LOC/DATE/QUANTITY plus custom entity types via Amazon Comprehend Custom. AWS documents the training-data floor for custom entity recognition explicitly: with plain-text annotations you need **at least 3 annotated input documents and 25 annotations per entity type** (and a corpus of at least 5 KB); with PDF annotations the floor rises to **250 documents and 100 annotations per entity**. AWS does not publish the model architecture, so treat "it is a BERT under the hood" as an assumption, not a fact.
 
-**Bloomberg NLP (BERT-based financial NER):** Bloomberg fine-tunes BERT on financial news to detect TICKER, COMPANY, PERSON, ECONOMIC_INDICATOR entities. Key challenge: "Apple" is both a common noun and a ticker in financial text — they solve this with a domain-specific entity linking layer post-NER. Published results: 91.1 F1 on FinNER benchmark (vs 87.3 for general BERT).
+**Financial-domain NER (pattern):** Financial text needs TICKER, COMPANY, PERSON and ECONOMIC_INDICATOR types, and the hard case is that a surface form like "Apple" is simultaneously a common noun, a company and a ticker. The standard fix is a domain-specific entity-linking layer after NER that resolves the surface form against a security master, rather than trying to teach the tagger to disambiguate. Bloomberg's published work in this space is BloombergGPT (2023), which reports NER and NED results on internal and public financial datasets — its numbers are not comparable to a fine-tuned encoder tagger, so do not carry them over as a NER baseline.
 
-**Google Cloud Healthcare NLP:** Specialized BERT models for medical NER targeting ICD-10 codes, medications, procedures, lab values. Uses BERT pre-trained on PubMed and clinical notes (BioBERT variant). Challenge: nested NER for "500mg aspirin" where "aspirin" is DRUG and "500mg aspirin" is DOSAGE_INSTRUCTION. Solved with a layered span extractor that first identifies drug names, then identifies dosage spans containing them.
+**Google Cloud Healthcare Natural Language API:** Extracts medical concepts from clinical text (medications, procedures, problems) and maps them to standard vocabularies. Google does not publish the underlying architecture. The interesting design problem it surfaces is nested NER: in "500mg aspirin", "aspirin" is a DRUG while "500mg aspirin" is a dosage instruction containing it — handled by a layered span extractor that identifies drug names first, then dosage spans that contain them.
 
-**Palantir Gotham (legal/intelligence NER):** Document-scale NER over 10M+ documents with 20+ entity types including CASE_NUMBER, STATUTE, LEGAL_ENTITY. Uses sliding-window BERT with entity merging; identifies cross-sentence coreference chains post-NER. F1 on internal legal corpus: 89.2% for standard entities, 78.4% for nested/compound entities.
+**Document-scale intelligence/legal NER (pattern):** Corpora of 10M+ documents with 20+ entity types (CASE_NUMBER, STATUTE, LEGAL_ENTITY) use sliding-window BERT with cross-chunk entity merging, then post-NER coreference chaining across sentences. Vendors in this space (Palantir and others) do not publish per-entity F1 on their customers' corpora, so plan to build your own golden set rather than shopping for a headline number.
 
-**SpaCy's transformer pipeline (`spacy-transformers`):** Production-ready BERT NER via `spacy-transformers` with `tok2vec` components. Used by thousands of organizations for English and multilingual NER. Their `en_core_web_trf` model (BERT-base backbone) achieves 90.1% F1 on OntoNotes 5.0 with full subword alignment support. Deploys via FastAPI at ~60ms P95 for 512-token documents.
+**spaCy's transformer pipeline (`spacy-transformers`):** Production-ready transformer NER wired into the spaCy pipeline. Their `en_core_web_trf` model uses a **roberta-base** backbone (not BERT) and reports **NER F = 0.899 (P 0.897 / R 0.901) on OntoNotes 5** in the published model metadata, with full subword alignment support.
 
 ---
 
@@ -671,7 +683,7 @@ A media monitoring NER system was trained when "Twitter" was the brand. After re
 ```
 throughput_docs_per_sec = (GPU_count × batch_size) / (bert_forward_ms + crf_viterbi_ms + overhead_ms) × 1000
 
-For A10G (40 TFLOPS BF16):
+For A10G (24 GB GDDR6, g5.xlarge):
   bert_forward_ms   = 38ms  (batch=32, seq_len=512, BF16)
   crf_viterbi_ms    = 3ms   (23 tags, seq_len=512)
   overhead_ms       = 9ms   (tokenization + span extraction)
@@ -681,7 +693,8 @@ For A10G (40 TFLOPS BF16):
 To hit 2,000 docs/min = 33 docs/sec:
   Required GPUs = ceil(33 / 640) = 1 GPU for steady state
   With 2× safety headroom = 2 A10G GPUs
-  Monthly cost = 2 × $1.50/hr × 730hr = $2,190/month
+  Monthly cost = 2 × $1.006/hr × 730hr = $1,470/month
+    (A10G = g5.xlarge, us-east-1 on-demand)
 ```
 
 **Scaling for batch processing (500K docs/hour):**
@@ -689,14 +702,18 @@ To hit 2,000 docs/min = 33 docs/sec:
 500K docs/hr = 139 docs/sec
   Required GPUs = ceil(139 / 640) = 1 GPU
   With 3× safety headroom for variable doc length = 3 A10G GPUs
-  Batch cost = 3 × $1.50 × 8hr/day × 30 days = $1,080/month
+  Batch cost = 3 × $1.006 × 8hr/day × 30 days = $725/month
 ```
 
 **Active learning annotation queue cost:**
 - 50K spans/day reviewed by annotators
-- At 200 spans/hour/annotator at $25/hour = $6.25/span
-- Annual annotation budget: 50K × 365 × $6.25 = $114K/year
-- Uncertainty sampling reduces annotation by 40% vs random → saves $45K/year
+- At 200 spans/hour/annotator and $25/hour: $25 / 200 = $0.125/span
+- Human capacity required: 50K / 200 = 250 annotator-hours/day ≈ 31 FTE annotators
+- Annual annotation budget: 50K × 365 × $0.125 = $2.28M/year
+- Uncertainty sampling reduces annotation by 40% vs random → saves ~$910K/year
+- This is the dominant line item — it is ~85× the GPU serving bill, which is why
+  the confidence threshold that gates the queue is a budget decision, not just a
+  quality knob
 
 ---
 
@@ -706,7 +723,7 @@ To hit 2,000 docs/min = 33 docs/sec:
 BIO assigns every token one of three roles: B-TYPE (first token of an entity), I-TYPE (continuation), or O (non-entity). It is the standard because it is minimal (O(2K+1) tags for K entity types), handles multi-token entities naturally, and is compatible with both CRF and softmax decoding. BIOES adds Ending (E-) and Single-token (S-) tags for marginally better boundary detection but at the cost of 2K additional transitions in the CRF.
 
 **Q: Why add a CRF layer on top of BERT for NER?**
-A plain softmax head treats each token's label independently and can emit globally invalid sequences (I-ORG after O). The CRF layer adds a trainable transition matrix over tag pairs and uses Viterbi decoding to find the globally-optimal label sequence given BERT's contextual emissions. The cost is 3ms additional latency and a 23×23 transition matrix (~500 parameters). The benefit is 2–4% F1 improvement — critical for rare entity types where boundary errors compound.
+A plain softmax head treats each token's label independently and can emit globally invalid sequences (I-ORG after O). The CRF layer adds a trainable transition matrix over tag pairs and uses Viterbi decoding to find the globally-optimal label sequence given BERT's contextual emissions. The cost is 3ms additional latency and a 23×23 transition matrix (~500 parameters). The guaranteed benefit is structural — zero invalid tag sequences — while the F1 gain is corpus-dependent: near-zero on clean news text like CoNLL-2003, larger on domain corpora with ambiguous multi-token boundaries.
 
 **Q: How do you handle BERT's 512-token limit for long documents?**
 Sliding window with stride: split the document into overlapping chunks (e.g., stride=256 means 256-token overlap between adjacent chunks). Independently run NER on each chunk, then merge results: for spans appearing in the overlap region of two chunks, keep the one with higher confidence. Overlap prevents missing entities that straddle chunk boundaries. For very long documents (5K+ tokens), Longformer or BigBird can process up to 4,096 tokens with sparse attention at 4× the latency.
@@ -730,4 +747,4 @@ Monitor two signals: (1) PSI (Population Stability Index) on the input text's en
 Replace BERT-base-uncased with `xlm-roberta-base` (trained on 100 languages via masked LM). XLM-RoBERTa uses SentencePiece tokenization (language-agnostic) instead of WordPiece. For low-resource languages, use cross-lingual transfer: train on high-resource languages (English, Spanish, German) and zero-shot or few-shot transfer to target language. Practical gain: English + cross-lingual fine-tuning on 500 Arabic examples achieves ~0.76 F1 on Arabic NER vs 0.62 for English-only transfer.
 
 **Q: What is the trade-off between BERT-base, BERT-large, and domain-specific models?**
-BERT-base (110M parameters): 92% F1, 40ms P95 latency, fits in 4GB GPU memory. BERT-large (340M parameters): 94% F1, 110ms P95 latency (3× slower), requires 12GB GPU. Domain-specific (BioBERT, LegalBERT — same size as BERT-base): 91–95% F1 on domain text but 80–85% F1 on general text. Decision matrix: for general NER at scale, BERT-base with fine-tuning; for medical/legal/financial at strict SLO, domain-specific BERT-base; for maximum accuracy where latency > 100ms is acceptable, BERT-large or domain-specific BERT-large.
+BERT-base (110M parameters): 92.4 CoNLL-2003 test F1 as published, 40ms P95 latency, fits in 4GB GPU memory. BERT-large (340M parameters): 92.8 test F1 — only +0.4 — at 110ms P95 latency (3× slower) and ~12GB GPU. Domain-specific (BioBERT, LegalBERT — same size as BERT-base): 91–95% F1 on domain text but 80–85% F1 on general text. Decision matrix: for general NER at scale, BERT-base with fine-tuning; for medical/legal/financial at strict SLO, domain-specific BERT-base; for maximum accuracy where latency > 100ms is acceptable, BERT-large or domain-specific BERT-large.

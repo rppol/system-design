@@ -28,7 +28,7 @@ Why it matters: without online evaluation, every ML improvement is a guess. Even
 
 **Guardrail and counter-metrics prevent regression.** Alongside the primary metric, define guardrail metrics (things that must not get significantly worse) and counter-metrics (things you expect to trade off and want to quantify). Shipping a change that improves revenue per session by +1% while increasing support ticket rate by +15% is net-negative.
 
-**Power before you run, not after.** Calculate minimum detectable effect (MDE) and required sample size before running the experiment. Post-hoc power analysis (calculating power after seeing results) is always sufficient because you can adjust N to match any observed effect — it is statistically invalid.
+**Power before you run, not after.** Calculate minimum detectable effect (MDE) and required sample size before running the experiment. Post-hoc ("observed") power — computing power from the effect you just measured — is uninformative: it is a deterministic, monotone function of the p-value, so it adds no evidence beyond the test itself (Hoenig and Heisey, 2001, "The Abuse of Power").
 
 **Randomization unit matters.** The randomization unit (user, session, request, device) determines what you can measure. Randomizing at the user level: long-term effects are measurable; variance is higher than session-level. Randomizing at the session level: lower variance; user-level effects cannot be measured cleanly (same user can be in both groups across sessions).
 
@@ -62,9 +62,9 @@ Why it matters: without online evaluation, every ML improvement is a guess. Even
 
 | Method | Variance reduction | Requirement | Notes |
 |---|---|---|---|
-| CUPED | 20-50% typical | Pre-experiment covariate (same metric in pre-period) | Standard at Booking.com, Netflix, LinkedIn |
+| CUPED | 30-50% typical | Pre-experiment covariate (same metric in pre-period) | Introduced at Microsoft (Deng, Xu, Kohavi, Walker, WSDM 2013); now standard at Netflix, Booking.com, Airbnb, DoorDash |
 | Stratification | 10-30% | Stratification factor known before randomization | Applied at design time |
-| CUPAC | 30-60% | Rich pre-experiment feature set; ML covariate | ML-predicted control metric as covariate |
+| CUPAC | DoorDash reports ~25-40% shorter switchback tests | Rich pre-experiment feature set; ML covariate | ML-predicted control metric as covariate |
 | Delta method | N/A (SE correction) | Ratio metrics (CTR = clicks/impressions) | Prevents invalid t-test on ratio metrics |
 
 ---
@@ -143,7 +143,8 @@ With CUPED:
   Y_adj = Y - theta * (X - E[X])
   where X = pre-experiment value of Y, theta = Cov(Y,X) / Var(X)
   Var(Y_adj) = Var(Y) * (1 - rho^2)  <- rho = correlation of pre/post metric
-  If rho = 0.7 → 51% variance reduction → halve experiment duration
+  If rho = 0.7 → 1 - 0.49 = 0.51 of the variance remains
+              → 49% variance reduction → roughly halves the required sample
 ```
 
 ---
@@ -238,8 +239,10 @@ n_per_arm = compute_sample_size(
     baseline_std=12.00,
 )
 print(f"Required n per arm: {n_per_arm:,}")
-# ~44,700 users per arm — 89,400 total
-# At 500k DAU with 50/50 split: ~9 days to reach significance
+# 904,191 users per arm — 1,808,382 total
+#   delta = 5.00 * 0.01 = $0.05; (1.960 + 0.842) / 0.05 = 56.03; 2 * 56.03^2 * 12^2 = 904,191
+# At 500k new users entering the experiment per day: ~4 days of accrual
+# (longer in practice, because daily actives repeat and only new users add sample)
 ```
 
 ### 6.3 CUPED Variance Reduction
@@ -271,7 +274,7 @@ import numpy as np
 from scipy import stats as scipy_stats
 
 # WRONG: checking significance daily and stopping when p < 0.05
-# This inflates Type I error to ~20-40% depending on how often you peek.
+# This inflates Type I error well above the nominal 5% — the more looks, the worse.
 
 np.random.seed(42)
 n_days = 14
@@ -290,7 +293,7 @@ for _ in range(n_simulations):
             break
 
 print(f"False positive rate with peeking: {false_positives / n_simulations:.1%}")
-# Result: ~26% false positive rate instead of 5%
+# Result: 21.5% false positive rate instead of 5% (seed 42, 10,000 simulations)
 ```
 
 ```mermaid
@@ -298,10 +301,10 @@ xychart-beta
     title "Peeking inflates the false-positive rate"
     x-axis "Number of significance looks" [1, 2, 4, 7, 14]
     y-axis "False positive rate (%)" 0 --> 30
-    bar [5, 11, 16, 21, 26]
+    bar [5, 8, 12, 16, 21]
 ```
 
-One pre-specified look holds the nominal 5%; checking for significance daily across a 14-day test drives the true Type I error to roughly 26% — the reason sequential (always-valid) tests exist.
+One pre-specified look holds the nominal 5%; checking for significance daily across a 14-day test drives the true Type I error to roughly 21% — the reason sequential (always-valid) tests exist. The bars are simulated from the code above with the number of equally spaced looks varied; the inflation-with-repeated-testing result itself dates to Armitage, McPherson and Rowe (1969), "Repeated Significance Tests on Accumulating Data".
 
 ```python
 # CORRECT: sequential testing with mSPRT (mixture Sequential Probability Ratio Test)
@@ -315,11 +318,17 @@ def analyze_at_end(
     """Pre-committed single analysis at the end of the experiment."""
     stat, p_value = scipy_stats.ttest_ind(treatment_values, control_values)
     effect_size = treatment_values.mean() - control_values.mean()
+    # SE of the DIFFERENCE, not the SE of the pooled sample: sem(concat) understates
+    # it by a factor of 2 for equal-sized arms and would halve the interval width.
+    n_t, n_c = len(treatment_values), len(control_values)
+    se_diff = float(
+        np.sqrt(treatment_values.var(ddof=1) / n_t + control_values.var(ddof=1) / n_c)
+    )
     ci_low, ci_high = scipy_stats.t.interval(
         1 - alpha,
-        df=len(control_values) + len(treatment_values) - 2,
+        df=n_t + n_c - 2,
         loc=effect_size,
-        scale=scipy_stats.sem(np.concatenate([treatment_values, control_values])),
+        scale=se_diff,
     )
     return {
         "p_value": float(p_value),
@@ -334,15 +343,15 @@ def analyze_at_end(
 
 ## 7. Real-World Examples
 
-**Booking.com:** processes over 1,000 concurrent experiments at any given time, covering every part of the product. Key practices: (1) CUPED applied to all experiments by default (reduces experiment duration by 30-50%); (2) "triggers" — users are only analyzed if they encountered the changed code path (trigger analysis reduces noise from users unaffected by the change); (3) strict SRM (Sample Ratio Mismatch) detection — if the control/treatment ratio is not as designed, the experiment is automatically flagged as invalid.
+**Booking.com:** runs over 1,000 concurrent experiments at any given time — by Stefan Thomke's estimate more than 25,000 tests a year (HBR, "Building a Culture of Experimentation", 2020) — covering every part of the product. Operating at that concurrency forces the platform hygiene this file describes: variance reduction via pre-experiment covariates, "triggers" (users are only analyzed if they encountered the changed code path, which removes noise from users unaffected by the change), and automated SRM (Sample Ratio Mismatch) detection that flags an experiment as invalid when the control/treatment ratio departs from the design. Booking.com's own published account emphasizes democratized experiment ownership plus close, transparent monitoring of the data pipelines that experiments depend on (Kaufman et al., "Democratizing online controlled experiments at Booking.com", 2017).
 
-**Microsoft / Bing:** pioneered the OEC framework (Kohavi, Tang, Xu — "Trustworthy Online Controlled Experiments"). Key insight: sessions per user is a poor OEC because it can be improved by making Bing worse (frustrated users search more). Bing uses "distinct queries per user" (successful search = user finds what they need and stops querying) as the OEC. This metric resists gaming because it requires genuine user value.
+**Microsoft / Bing:** pioneered the OEC framework (Kohavi, Tang, Xu — "Trustworthy Online Controlled Experiments"). Key insight, from the KDD 2012 "Five Puzzling Outcomes Explained" paper: a ranking bug that returned very poor results pushed distinct queries up over 10% and revenue up over 30%, because degraded results make users query more to finish the same task. Queries per user is therefore a *bad* OEC. Decomposing queries/month = queries/session × sessions/user × users/month, the users/month term is fixed by the experiment design and queries/session should go *down* when the product improves — so the OEC should be the middle term, **sessions per user**.
 
-**Airbnb:** uses a holdback experiment design for long-term effect measurement. When releasing a major feature (e.g., new pricing algorithm), a 10% holdback group does not receive the feature for 6 months. This measures the long-term effect accurately, including novelty effects wearing off, which cannot be measured in a 2-week experiment.
+**Airbnb:** maintains a long-term experiment holdout group — a slice of inventory or users deliberately excluded from experiments — so the cumulative long-run effect of shipped changes can be measured after novelty has decayed. Airbnb has also published on the related problems of selection bias in sequentially shipped experiments and of interference bias in marketplace pricing tests (Management Science, cluster-randomized pricing meta-experiment). Specific holdout percentages and durations vary by team and are not published; the 10%-for-6-months figures used elsewhere in this file are illustrative.
 
-**Netflix:** uses interleaving for ranking model evaluation. Instead of showing list A to group A and list B to group B, interleaving shows a mixed list where items are drawn alternately from model A and model B. The metric is which model's items get selected. Interleaving has 10x lower variance than A/B testing for ranking comparisons because it uses within-user comparisons — the same user's preferences compared across the two lists.
+**Netflix:** uses team-draft interleaving for ranking model evaluation. Instead of showing list A to group A and list B to group B, interleaving shows a mixed list where items are drawn alternately from model A and model B, and attributes the share of hours viewed to whichever ranker sourced the video. Netflix reports that interleaving "can require >100x fewer subscribers to correctly determine ranker preference" than even its most sensitive A/B metric, because the comparison happens within a single member rather than across two populations.
 
-**Lyft (switchback experiments):** marketplace dynamics (driver supply, passenger demand) violate SUTVA — treatment of one user affects control users (a treated driver who is dispatched faster is not available to control passengers). Lyft uses switchback experiments: alternate between control and treatment in 30-minute periods within the same city, measuring outcomes during the relevant period. Key requirement: no carryover between periods (clear inventory state at switchover).
+**Lyft (switchback experiments):** marketplace dynamics (driver supply, passenger demand) violate SUTVA — treatment of one user affects control users (a treated driver who is dispatched faster is not available to control passengers). Lyft's published marketplace-experimentation work compares time-split ("switchback") designs — alternating control and treatment over time intervals, one hour in their simulation study — against coarse and fine spatial (geohash) randomization and session randomization. Key requirement: no carryover between periods (clear inventory state at switchover), which sets a floor on interval length.
 
 ---
 
@@ -368,7 +377,7 @@ def analyze_at_end(
 
 **Use interleaving instead of A/B when:**
 - Comparing two ranking models where the primary metric is click/engagement on ranked results.
-- Sample sizes are insufficient for A/B (interleaving needs 10x fewer users for same power).
+- Sample sizes are insufficient for A/B (interleaving needs orders of magnitude fewer users for the same power — Netflix reports >100x fewer subscribers).
 
 **Use switchback when:**
 - The intervention affects supply/demand equilibrium (marketplace, ride-sharing, delivery).
@@ -388,7 +397,7 @@ def analyze_at_end(
 
 **Interference / SUTVA violation.** Standard A/B analysis assumes the Stable Unit Treatment Value Assumption: one user's treatment does not affect another user's outcome. This is violated in: social networks (treated user posts content that control users see), marketplace (treated driver takes a trip that a control driver would have taken), and search (treated user's queries change the index seen by control users). When SUTVA is violated, use cluster randomization, switchback, or geo-level experiments.
 
-**Multiple testing without correction.** Running 20 metrics simultaneously and declaring success if any 5 are significant at p < 0.05 gives an expected 1 false positive by chance. Apply Bonferroni correction (divide alpha by number of tests) or Benjamini-Hochberg FDR control (5% FDR across all tests). Alternatively, pre-commit to one primary metric and treat all others as secondary (informative, not decision-making).
+**Multiple testing without correction.** Running 20 independent metrics at p < 0.05 and declaring success if any of them is significant yields an expected 1 false positive (20 x 0.05) and a 1 - 0.95^20 = 64% chance of at least one. Apply Bonferroni correction (divide alpha by number of tests) or Benjamini-Hochberg FDR control (5% FDR across all tests). Alternatively, pre-commit to one primary metric and treat all others as secondary (informative, not decision-making).
 
 **Primary metric not aligned with long-term value.** Sessions per user, clicks per session, and time on site are all gameable — they can be increased by making the product slower, more confusing, or more addictive. These are not OECs. A valid OEC requires: user value (the user achieved their goal), not just engagement (the user was on the site longer).
 
@@ -416,7 +425,7 @@ OEC (Overall Evaluation Criterion, Kohavi) is the single primary metric used to 
 A guardrail metric is a metric that must not worsen: it defines a hard floor on product quality. If the guardrail is violated, the experiment fails regardless of primary metric performance. Examples: p99 latency, error rate, support ticket rate. A counter-metric is a metric you expect may trade off against the primary metric, which you want to quantify rather than prevent. If you improve subscription revenue per user (OEC), you expect churn in the first month to slightly increase (counter-metric) — you want to measure and document this trade-off, not necessarily use it as a kill switch.
 
 **Q: How do you detect and handle a Sample Ratio Mismatch?**
-SRM occurs when the observed sample sizes in control and treatment groups differ from the planned split ratio. Detect with a chi-squared goodness-of-fit test: expected_n_treatment = total_n × planned_split; chi2 = (observed - expected)^2 / expected; if p < 0.001, SRM is present. Common causes: treatment-specific bot filtering (bots removed from treatment but not control), differential assignment logging (some treatment events are not logged), session-level re-randomization creating user-level imbalance. Always check for SRM before analyzing any experiment; invalidate and re-run if SRM is detected.
+SRM occurs when the observed sample sizes in control and treatment groups differ from the planned split ratio. Detect with a chi-squared goodness-of-fit test: expected_n_group = total_n × planned_split for each group; chi2 = sum over groups of (observed - expected)^2 / expected, on 1 degree of freedom for a two-arm test; if p < 0.001, SRM is present. Common causes: treatment-specific bot filtering (bots removed from treatment but not control), differential assignment logging (some treatment events are not logged), session-level re-randomization creating user-level imbalance. Always check for SRM before analyzing any experiment; invalidate and re-run if SRM is detected.
 
 **Q: Explain CUPED and when it helps the most.**
 CUPED (Controlled-experiment Using Pre-Experiment Data) reduces variance by subtracting the component of the post-experiment metric that is explained by pre-experiment behavior: Y_adj = Y - theta × (X - E[X]), where X is the same metric measured in the pre-experiment period and theta = Cov(Y,X)/Var(X). The variance of Y_adj is Var(Y) × (1 - rho²), where rho is the correlation between pre and post metrics. CUPED helps most when: (a) the metric is stable across periods (high pre-post correlation, rho > 0.5 — typical for revenue, retention, query volume); (b) users have heterogeneous engagement levels (high between-user variance). CUPED provides no benefit when rho ≈ 0 (the metric is a new measurement with no pre-period analog).
@@ -428,13 +437,13 @@ The novelty effect is the temporary increase in user engagement when any new exp
 Network effects violate SUTVA — a user's treatment assignment affects the outcomes of users in their network. In social networks: a treated user who posts more affects the feed quality of control users in their network. Solutions: (1) cluster randomization — randomize at the cluster level (friend graph connected component, geographic region) instead of the user level; each cluster is entirely in control or treatment. Drawback: high variance (clusters are variable size), requires many clusters for power. (2) Ego network randomization — randomize the "ego" user; all their "alters" receive the treatment through the ego's behavior. (3) Holdout experiments — remove a fraction of users from all experiments; compare the full-experiment world to the holdout world for network-wide effects. (4) Graph exposure mapping — model the fraction of a user's network that is treated and use this as a covariate.
 
 **Q: What is interleaving and when should you use it for ML evaluation?**
-Interleaving is an online evaluation technique for ranking models where, instead of showing user A a list from model A and user B a list from model B, both models' outputs are merged into a single interleaved list and shown to a single user. Items are drawn alternately from each model's ranking (team draft interleaving or balanced interleaving). The metric is which model's items are clicked/engaged with more. Interleaving provides 10-20x lower variance than A/B for ranking comparisons because it uses within-user comparisons (comparing model A vs model B for the same query at the same moment), eliminating user-level heterogeneity. Use it when: comparing ranking models is the primary objective; the primary metric is engagement on ranked results; sample size is insufficient for A/B. Do not use interleaving for: measuring absolute revenue, new feature launches (not a pure ranking comparison), or non-ranking model changes.
+Interleaving is an online evaluation technique for ranking models where, instead of showing user A a list from model A and user B a list from model B, both models' outputs are merged into a single interleaved list and shown to a single user. Items are drawn alternately from each model's ranking (team draft interleaving or balanced interleaving). The metric is which model's items are clicked/engaged with more. Interleaving is far more sensitive than A/B for ranking comparisons because it uses within-user comparisons (comparing model A vs model B for the same query at the same moment), eliminating user-level heterogeneity — Netflix reports needing over 100x fewer subscribers than its most sensitive A/B metric to identify the preferred ranker. Use it when: comparing ranking models is the primary objective; the primary metric is engagement on ranked results; sample size is insufficient for A/B. Do not use interleaving for: measuring absolute revenue, new feature launches (not a pure ranking comparison), or non-ranking model changes.
 
 **Q: What is a holdback experiment and why do you run one?**
-A holdback experiment withholds a new feature or model from a fixed percentage of users (e.g., 10%) for an extended period (3-12 months) while the rest of the user base receives it. The holdback group is the permanent control. This measures the long-term effect of the change — after novelty effects have decayed, after users have adapted their behavior, and after second-order effects (user-generated content creation, network growth) have materialized. Netflix runs holdbacks for all major algorithm changes and product features. The risk is user frustration (holdback users may notice they are getting a worse experience) and the cost of maintaining two code paths for months.
+A holdback experiment withholds a new feature or model from a fixed percentage of users (e.g., 10%) for an extended period (3-12 months) while the rest of the user base receives it. The holdback group is the permanent control. This measures the long-term effect of the change — after novelty effects have decayed, after users have adapted their behavior, and after second-order effects (user-generated content creation, network growth) have materialized. Long-term holdouts are standard practice at large consumer platforms — Airbnb, for example, excludes a long-term holdout group from experiments so cumulative impact can be measured. The risk is user frustration (holdback users may notice they are getting a worse experience) and the cost of maintaining two code paths for months.
 
 **Q: Explain the peeking problem and how sequential testing solves it.**
-Peeking is the practice of checking experiment results daily and stopping as soon as p < 0.05. The peeking problem: p-values are valid only for a single pre-specified analysis; looking at p multiple times inflates the Type I error rate significantly (checking daily for 14 days inflates alpha from 5% to ~26%). Sequential testing (SPRT, mSPRT, always-valid p-values) solves this by adjusting the significance threshold at each look so that the overall Type I error rate across all looks remains at alpha. The mSPRT (mixture SPRT) produces "anytime-valid" p-values — you can stop at any time without inflating Type I error. Statsig and Eppo use sequential testing by default. The tradeoff: sequential tests are less powerful than a fixed-sample test at the same nominal alpha (you "spend" some power on the extra validity guarantee).
+Peeking is the practice of checking experiment results daily and stopping as soon as p < 0.05. The peeking problem: p-values are valid only for a single pre-specified analysis; looking at p multiple times inflates the Type I error rate significantly (checking daily for 14 days inflates alpha from 5% to roughly 21%, as the simulation in Section 6.4 reproduces). Sequential testing (SPRT, mSPRT, always-valid p-values) solves this by adjusting the significance threshold at each look so that the overall Type I error rate across all looks remains at alpha. The mSPRT (mixture SPRT) produces "anytime-valid" p-values — you can stop at any time without inflating Type I error. Eppo makes sequential analysis its default analysis method; Statsig ships sequential testing as an option you toggle on (and recommends it precisely to survive peeking). The tradeoff: sequential tests are less powerful than a fixed-sample test at the same nominal alpha (you "spend" some power on the extra validity guarantee).
 
 **Q: How do you set up an experiment for a new ML model?**
 Step 1: pre-specify the OEC, guardrail metrics, and counter-metrics. Document this in the experiment plan before looking at any results. Step 2: compute required sample size (power calculation at alpha=0.05, power=0.80, MDE=smallest practically meaningful effect). Step 3: implement assignment via hash(user_id, experiment_id) → group. Check for SRM immediately on day 1. Step 4: run for the planned duration — no early stopping unless a guardrail is violated. Step 5: apply CUPED if the metric has a pre-period covariate. Step 6: analyze the primary metric (one-sided or two-sided t-test as pre-specified). Step 7: if significant and guardrails pass, ship. Document results including effect size, confidence interval, and secondary/counter-metric impacts.

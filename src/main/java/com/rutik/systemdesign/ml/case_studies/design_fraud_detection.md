@@ -96,13 +96,13 @@ Spend-velocity aggregates are computed off the critical path: Flink maintains pe
 
 ## Key Design Decisions
 
-**Rule engine first**: 20-30% of transactions are cleared by allowlist/blocklist in under 1ms, reducing ML model load and latency budget for the remaining transactions. Known fraud patterns (card number appears in breach database) are handled deterministically with zero false-negative risk.
+**Rule engine first**: roughly 40% of transactions are cleared by allowlist/blocklist in under 1ms (the split assumed throughout this study — see the disposition sankey above), reducing ML model load and latency budget for the remaining transactions. Known fraud patterns (card number appears in breach database) are handled deterministically with zero false-negative risk.
 
 **XGBoost over deep learning**: Regulatory requirements mandate explainability — each decline must include a human-readable reason code (e.g., "unusual transaction location," "high spend velocity"). XGBoost with SHAP values satisfies this. Deep models require post-hoc approximations (LIME) that can be inconsistent. XGBoost also trains in minutes, enabling hourly retraining on fresh fraud patterns.
 
 **Threshold tuning for asymmetric costs**: Blocking a legitimate transaction costs far more than missing fraud in brand terms. Use F-beta with beta=0.5 (precision-weighted) for threshold selection. Optimal threshold is typically 0.85 for auto-block, not the naive 0.5. Maintain a borderline zone (0.40-0.85) for human review rather than binary auto-decisions.
 
-**Class imbalance**: 0.1% fraud rate means naive training optimizes for always predicting legitimate. Three strategies applied together: (1) scale_pos_weight=999 in XGBoost (ratio of negative to positive examples), (2) SMOTE to generate synthetic minority samples in feature space, (3) undersample majority class 10:1 during training. Target training ratio: 10:1 negative to positive (still imbalanced but manageable).
+**Class imbalance**: 0.1% fraud rate means naive training optimizes for always predicting legitimate. Two strategies, applied in a fixed order: (1) resample — SMOTE to generate synthetic minority samples in feature space, then undersample the majority class; in `imbalanced-learn` a float `sampling_strategy` is the *minority-to-majority ratio after resampling*, so `SMOTE(0.1)` then `RandomUnderSampler(0.5)` lands at 2:1 negative to positive. (2) `scale_pos_weight` in XGBoost, computed on the **resampled** set, not the raw one. The common bug is stacking both at raw-data strength: `scale_pos_weight=999` on a set already rebalanced to 2:1 double-counts the correction and drives precision through the floor. Pick one primary lever and tune the other on the data the model actually sees.
 
 **Streaming features with Flink**: Spend velocity over the last 1 hour is a top-3 feature for fraud. Computing it requires stateful aggregation. Flink maintains per-card windowed state in RocksDB with exactly-once semantics. Results are written to Redis for sub-millisecond read during inference.
 
@@ -169,12 +169,26 @@ def build_fraud_features(df: pd.DataFrame) -> pd.DataFrame:
 def train_fraud_model(
     X: pd.DataFrame,
     y: np.ndarray,
-    fraud_rate: float = 0.001,
 ) -> xgb.XGBClassifier:
     """Train XGBoost with class-imbalance handling."""
-    # scale_pos_weight: ratio of negative to positive
-    # For 0.1% fraud: (1 - 0.001) / 0.001 = 999
-    scale_pos_weight = (1 - fraud_rate) / fraud_rate
+    # Combined resampling: SMOTE minority class up, then undersample majority.
+    # In imbalanced-learn a float sampling_strategy is the MINORITY-TO-MAJORITY
+    # ratio after resampling, not a fraction of the dataset:
+    #   SMOTE(0.1)               -> n_fraud = 0.10 * n_legit  (1:10)
+    #   RandomUnderSampler(0.5)  -> n_fraud = 0.50 * n_legit  (1:2)
+    smote = SMOTE(sampling_strategy=0.1, random_state=42)
+    under = RandomUnderSampler(sampling_strategy=0.5, random_state=42)
+    pipeline = ImbPipeline([("smote", smote), ("under", under)])
+
+    X_res, y_res = pipeline.fit_resample(X, np.asarray(y))
+    y_res = np.asarray(y_res)  # fit_resample returns an ndarray when y is an ndarray
+    print(f"Resampled: {np.bincount(y_res.astype(int))} (legit, fraud)")
+
+    # scale_pos_weight must be computed on the RESAMPLED set, not the raw 0.1%
+    # base rate. Passing 999 here on top of a 2:1 set double-counts the
+    # correction and collapses precision (see Failure 2).
+    n_neg, n_pos = np.bincount(y_res.astype(int))[:2]
+    scale_pos_weight = n_neg / max(n_pos, 1)  # ~2.0 after the pipeline above
 
     model = xgb.XGBClassifier(
         n_estimators=500,
@@ -184,27 +198,21 @@ def train_fraud_model(
         colsample_bytree=0.8,
         scale_pos_weight=scale_pos_weight,
         eval_metric=["logloss", "auc"],
-        use_label_encoder=False,
+        # NOTE: use_label_encoder was deprecated in xgboost 1.7 and REMOVED in
+        # 2.0. Passing it now falls through **kwargs into the booster params and
+        # is silently ignored with a warning. Encode labels as 0..n-1 yourself.
         random_state=42,
         n_jobs=-1,
         tree_method="hist",  # faster for large datasets
     )
-
-    # Combined resampling: SMOTE minority class up, then undersample majority
-    smote = SMOTE(sampling_strategy=0.1, random_state=42)  # fraud → 10% of data
-    under = RandomUnderSampler(sampling_strategy=0.5, random_state=42)  # reduce majority
-    pipeline = ImbPipeline([("smote", smote), ("under", under)])
-
-    X_res, y_res = pipeline.fit_resample(X, y)
-    print(f"Resampled: {np.bincount(y_res.astype(int))} (legit, fraud)")
 
     # Cross-val to estimate generalization
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     oof_probs = np.zeros(len(X_res))
     for fold, (train_idx, val_idx) in enumerate(cv.split(X_res, y_res)):
         model.fit(
-            X_res.iloc[train_idx], y_res.iloc[train_idx],
-            eval_set=[(X_res.iloc[val_idx], y_res.iloc[val_idx])],
+            X_res.iloc[train_idx], y_res[train_idx],
+            eval_set=[(X_res.iloc[val_idx], y_res[val_idx])],
             verbose=False,
         )
         oof_probs[val_idx] = model.predict_proba(X_res.iloc[val_idx])[:, 1]
@@ -223,6 +231,10 @@ def find_optimal_thresholds(
     """Find auto-block and review thresholds using F-beta on validation set."""
     probs = model.predict_proba(X_val)[:, 1]
     precision, recall, thresholds = precision_recall_curve(y_val, probs)
+    # sklearn returns precision/recall of length n_thresholds + 1 (the trailing
+    # point is precision=1, recall=0 and has NO threshold). Trim before indexing
+    # thresholds by an argmax, otherwise a best_idx of n raises IndexError.
+    precision, recall = precision[:-1], recall[:-1]
 
     f_scores = []
     for p, r in zip(precision, recall):
@@ -232,10 +244,10 @@ def find_optimal_thresholds(
             f_beta = (1 + beta**2) * p * r / (beta**2 * p + r)
             f_scores.append(f_beta)
 
-    best_idx = np.argmax(f_scores)
+    best_idx = int(np.argmax(f_scores))
     auto_block_threshold = float(thresholds[best_idx])
 
-    # Review zone lower bound: maximize recall above 80%
+    # Review zone lower bound: lowest threshold that still holds recall >= 80%
     recall_80_idx = np.where(recall >= 0.80)[0]
     review_lower = float(thresholds[recall_80_idx[-1]]) if len(recall_80_idx) else 0.3
 
@@ -514,13 +526,13 @@ class FraudScoringService:
 ## Interview Discussion Points
 
 **Q: How do you handle the class imbalance of 0.1% fraud rate?**
-Three-layer approach: (1) scale_pos_weight=999 in XGBoost tells the model each fraud example counts as 999 legitimate ones during gradient computation. (2) SMOTE generates synthetic fraud examples by interpolating in feature space between existing fraud cases — avoids overfitting to exact training fraud examples. (3) Threshold tuning: the naive 0.5 threshold is wrong for imbalanced data; use F-beta with beta=0.5 on a time-held-out validation set (not random split — fraud patterns are temporal). Target threshold is typically 0.85 for auto-block.
+Three-layer approach: (1) cost reweighting — on the raw 0.1% data, scale_pos_weight = 999 makes each fraud example count as 999 legitimate ones during gradient computation. (2) Resampling — SMOTE generates synthetic fraud examples by interpolating in feature space between existing fraud cases, avoiding overfit to exact training fraud rows. These two are alternatives, not additives: if you resample first, recompute scale_pos_weight on the resampled class counts, or you correct twice and precision collapses. (3) Threshold tuning: the naive 0.5 threshold is wrong for imbalanced data; use F-beta with beta=0.5 on a time-held-out validation set (not random split — fraud patterns are temporal). Target threshold is typically 0.85 for auto-block.
 
 **Q: How do you prevent model degradation as fraud patterns evolve (concept drift)?**
-Fraudsters adapt within days of a new model deploy. Mitigations: (1) Monitor PSI (Population Stability Index) on feature distributions — PSI > 0.2 triggers alert. (2) Monitor fraud rate on auto-approved transactions using delayed labels (chargebacks arrive 30-90 days later). (3) Hourly model retraining on a rolling 30-day window so fresh fraud patterns quickly dominate. (4) Maintain an "emergency rules" layer that analysts can update within minutes without model retraining.
+Fraudsters adapt within days of a new model deploy. Mitigations: (1) Monitor PSI (Population Stability Index) on feature distributions — PSI > 0.2 triggers alert. (2) Monitor fraud rate on auto-approved transactions using delayed labels — under Visa and Mastercard rules a cardholder generally has up to 120 days from the transaction date to raise a dispute (longer for some fraud and recurring-billing reason codes), so chargeback labels trail the decision by months, not days. (3) Hourly model retraining on a rolling 30-day window so fresh fraud patterns quickly dominate. (4) Maintain an "emergency rules" layer that analysts can update within minutes without model retraining.
 
 **Q: Why use F-beta with beta=0.5 for threshold selection rather than maximizing AUC?**
-AUC measures overall ranking quality but does not account for the asymmetric cost of errors. Blocking a legitimate transaction (false positive) costs an estimated $50 in customer service, potential churn, and reputation. Missing fraud costs an average $200 in loss. But the false positive rate multiplier is 1000x the false negative rate (because 99.9% of transactions are legitimate). F-beta with beta=0.5 gives precision double the weight of recall, directly encoding this business asymmetry. AUC would be 0.98+ while the system produces unacceptable false positive rates.
+AUC measures overall ranking quality but does not account for the asymmetric cost of errors. Suppose (illustrative figures — plug in your own unit economics) a wrongly blocked legitimate transaction costs $50 in support handling, churn risk and reputation, while missed fraud costs $200 in loss. Those per-event costs alone say "chase recall" — but the volume asymmetry inverts it: legitimate transactions outnumber fraudulent ones 999:1, so a false-positive rate that looks negligible still generates far more wrongful blocks than there are frauds to catch. F-beta with beta=0.5 weights precision twice as heavily as recall, directly encoding that asymmetry. AUC would sit at 0.98+ while the system produces an unacceptable absolute number of false positives.
 
 **Q: How do you ensure the fraud score is produced in <50ms given streaming feature computation?**
 The critical insight is that streaming features must be precomputed, not computed on the critical path. Flink aggregates spend velocity continuously and writes results to Redis. At scoring time, the API does a Redis GET (sub-1ms), not a Flink computation. The 50ms budget is: rule engine 1ms + Redis feature fetch 5ms + model inference 15ms + network 10ms = 31ms, leaving 19ms buffer for tail latency. SHAP explanations (50-100ms) are computed asynchronously after the decision is returned.
@@ -528,6 +540,8 @@ The critical insight is that streaming features must be precomputed, not compute
 ---
 
 ## Failure Scenarios and Recovery
+
+*The three incidents below are illustrative composites of recurring failure patterns, not accounts of specific public incidents. The mechanisms and the remediations are real; the transaction counts, loss totals and time-to-detect figures are representative numbers chosen to make the magnitude concrete, and should not be quoted as measured public record.*
 
 ### Failure 1: Redis Key Expiry During Peak Transaction Window
 
@@ -553,11 +567,11 @@ The critical insight is that streaming features must be precomputed, not compute
 
 **Recovery steps:**
 1. Rolled back to previous model (pre-SMOTE).
-2. Reduced SMOTE sampling_strategy from 0.5 to 0.1 (fraud → 10% of training data, not 50%).
+2. Reduced SMOTE sampling_strategy from 0.5 to 0.1 — in imbalanced-learn that float is the minority-to-majority ratio after resampling, so this moves the synthetic fraud class from 1:2 down to 1:10 against the majority (not "50% of the data" to "10% of the data").
 3. Validated on time-held-out test set (3-month delay to capture chargebacks) rather than random split, which better represented real distribution.
 4. Added graph features as hard guardrails: no SMOTE samples generated for transactions where shared_device_with_fraud=0 (legitimate device network reduces fraud probability strongly).
 
-**Prevention:** Precision monitoring with 24-hour lag (chargebacks from same-day approvals arrive within 24h for card-present fraud). Alert immediately if precision drops below 99.5% on a rolling 1,000-decision window.
+**Prevention:** Precision monitoring on the fastest label available, which is *not* the chargeback — a dispute travels the issuer/network cycle and cannot land within 24 hours. Use analyst adjudications of the review queue (hours) and inbound cardholder fraud reports to the issuer as the 24-hour proxy signal, and reconcile against chargebacks months later. Alert immediately if proxy precision drops below 99.5% on a rolling 1,000-decision window.
 
 ---
 
@@ -586,7 +600,8 @@ Year 0 (current):
   Transaction rate: 10K TPS, 864M transactions/day
   Transaction event size: ~2KB (features + metadata)
   Daily raw log: 864M × 2KB = 1.73TB/day
-  Click label join: chargebacks arrive 30-90 days later → 90-day retention
+  Label join: the Visa/Mastercard cardholder dispute window runs up to 120 days,
+    so 90 days is HOT (queryable Parquet) and days 91-120+ age into cold storage
   Total hot storage (90 days): 1.73TB × 90 = 156TB (Parquet on S3)
   Redis feature keys: 100M active cards × 3 windows × ~500B per key = 150GB Redis cluster
 
@@ -607,9 +622,11 @@ Year 3 (5x growth):
 ```
 XGBoost Fraud Model (daily retrain):
   Dataset: 30-day rolling window × 864M tx/day × 0.3 subsampled = 7.8B training examples
-  With class balancing (fraud:legit = 1:10 after sampling): ~15M examples
+  Fraud in that pool at the 0.1% base rate: ~7.8M positives
+  After rebalancing to fraud:legit = 1:10, the training set is ~86M rows
+    (7.8M fraud + 78M sampled legit) — NOT 15M; the negatives dominate the count
   Hardware: c5.4xlarge (16 vCPU, 32GB RAM)
-  Duration: 25 minutes (tree_method=hist)
+  Duration: ~25 minutes (tree_method=hist, 19 features, 500 trees)
   Cost: $0.68/hr × 0.42hr = $0.29/run × 365 = $106/year
 
 Graph Feature Precomputation (nightly):
@@ -723,12 +740,19 @@ def optimize_threshold_correct(
     return 0.90  # conservative default
 ```
 
-**War Story 2 — SHAP Explanation Inconsistency Under Parallel Scoring:**
+**War Story 2 — SHAP Conservation Check Compared Against the Wrong Output Space:**
 
 ```python
-# BROKEN: TreeExplainer initialized once and shared across threads
-# SHAP's internal state is not thread-safe — parallel requests cause race conditions
-# producing SHAP values that don't sum to model output (conservation violated)
+# BROKEN: two independent bugs in one class.
+# (1) A single explainer object is shared across request threads. shap's
+#     explainers are not documented as thread-safe (KernelExplainer is a
+#     confirmed offender, shap/shap#2863); a per-thread or per-process
+#     instance is the safe default rather than something to discover in prod.
+# (2) The conservation check below compares the SHAP sum against
+#     predict_proba(). TreeExplainer defaults to model_output="raw", which for
+#     an XGBoost binary:logistic model is the LOG-ODDS margin — so
+#     shap_values.sum() + expected_value never equals a probability, and the
+#     assertion fires on every well-formed explanation.
 
 import shap
 import threading
@@ -738,13 +762,11 @@ import numpy as np
 
 class FraudExplainerBroken:
     def __init__(self, model: xgb.XGBClassifier) -> None:
-        # BUG: single explainer shared across threads
+        # BUG 1: single explainer shared across threads
         self.explainer = shap.TreeExplainer(model)
 
     def explain(self, X: np.ndarray) -> np.ndarray:
-        # Race condition: multiple threads calling explain() simultaneously
-        # corrupts internal background dataset state in TreeExplainer
-        return self.explainer.shap_values(X)  # NOT thread-safe
+        return self.explainer.shap_values(X)
 
 
 # FIX: Use thread-local explainer instances, or serialize with a lock,
@@ -767,17 +789,25 @@ class FraudExplainerCorrect:
     def explain(self, X: np.ndarray) -> np.ndarray:
         explainer = self._get_explainer()
         shap_values = explainer.shap_values(X)
-        # Validate conservation property: shap_values.sum() + base_value ≈ model_output
+        # Conservation holds in the model's RAW output space. TreeExplainer's
+        # default model_output="raw" is the log-odds margin for XGBoost
+        # binary:logistic, so compare against output_margin=True — or push the
+        # sum through a sigmoid before comparing to predict_proba.
         base_value = explainer.expected_value
-        model_output = self.model.predict_proba(X)[:, 1]
+        raw_margin = self.model.predict(X, output_margin=True)
         shap_sum = shap_values.sum(axis=1) + base_value
-        if not np.allclose(shap_sum, model_output, atol=0.01):
+        if not np.allclose(shap_sum, raw_margin, atol=0.01):
             raise RuntimeError(
                 f"SHAP conservation violated: shap_sum={shap_sum}, "
-                f"model_output={model_output}"
+                f"raw_margin={raw_margin}"
             )
         return shap_values
 ```
+
+Note the two separate lessons: isolate explainer state per worker, and always
+check conservation in the space the explainer actually explains. A check written
+against `predict_proba()` fails on correct explanations and passes on nothing,
+which is worse than no check at all.
 
 ---
 
@@ -863,17 +893,17 @@ Ramp: 20% → 50% → 100% at 3-day intervals after significance confirmed
 
 ## Additional Interview Questions
 
-**Q: How do you handle feedback delays in fraud labels, where chargebacks arrive 30-90 days after a transaction?**
-The feedback delay creates a censoring problem: transactions from the last 30-90 days have incomplete labels — many fraudulent transactions have not yet been charged back. Training naively on recent data with incomplete labels underestimates fraud probability and biases the model toward legitimate predictions. Mitigations: (1) Use a training window that excludes the most recent 90 days (train on months 1-9, evaluate on month 10 with complete labels). (2) For hourly retraining on fresh data, use analyst-confirmed labels (faster: analyst reviews within 4 hours) rather than chargeback labels. (3) Implement a "pending label" state: transactions from the last 90 days are held in a label buffer; as chargebacks arrive, the buffer is updated and periodically used to fine-tune the model.
+**Q: How do you handle feedback delays in fraud labels, where a chargeback can be raised months after the transaction?**
+The feedback delay creates a censoring problem: recent transactions have incomplete labels — Visa and Mastercard generally give the cardholder up to 120 days from the transaction date to dispute (longer under some fraud and recurring-billing reason codes), so the label window stays open long after the decision — many fraudulent transactions have not yet been charged back. Training naively on recent data with incomplete labels underestimates fraud probability and biases the model toward legitimate predictions. Mitigations: (1) Use a training window that excludes the most recent 120 days, i.e. the full dispute window (train on months 1-9, evaluate on month 10 with complete labels). (2) For hourly retraining on fresh data, use analyst-confirmed labels (faster: analyst reviews within 4 hours) rather than chargeback labels. (3) Implement a "pending label" state: transactions from the last 120 days are held in a label buffer; as chargebacks arrive, the buffer is updated and periodically used to fine-tune the model.
 
 **Q: How do you maintain explainability while improving model accuracy with ensemble methods?**
 Single XGBoost provides SHAP values that are exact (not approximate) because TreeExplainer computes the exact Shapley decomposition for tree models. Stacking multiple XGBoost models or adding neural components breaks this: SHAP becomes approximate (KernelSHAP, LIME) and much slower (100-1000x). The approach that preserves explainability while improving accuracy: (1) Feature engineering — add interaction features (amount_vs_velocity_ratio, country_mismatch × new_device) to a single XGBoost model rather than ensembling two models. (2) Monotonicity constraints: constrain features like spend_velocity_1h to be monotonically increasing in fraud score, which also prevents SHAP from showing counterintuitive values. (3) If a second model is required (e.g., a graph neural network for device association), use it only as a feature input (graph_fraud_score) to the XGBoost model, not as an ensemble. The XGBoost then explains the combined signal.
 
 **Q: What is the review queue economics, and how do you size it?**
-The review queue contains transactions with fraud score in [0.40, 0.85] where human judgment is required. Sizing: at 10K TPS, roughly 8% of traffic (after rule engine pass-through) reaches the ML model. Of that, approximately 5% falls in the review zone = 0.008 × 10K = 80 transactions/second = 6.9M per day. Each analyst reviews 200 transactions per hour → 6.9M / 200 = 34,500 analyst-hours/day. At $40/hour fully-loaded cost, this is $1.38M/day — clearly unsustainable. The review queue must be ruthlessly prioritized: only transactions with expected loss > $500 AND fraud_score > 0.60 enter the queue (reduces queue by 85%). Automated disposition handles the rest with slightly lower precision. The threshold zone [0.40, 0.60] is auto-approved with enhanced monitoring; [0.60, 0.85] is auto-reviewed with transaction hold.
+The review queue contains transactions with fraud score in [0.40, 0.85] where human judgment is required. Sizing: at 10K TPS, ~60% of traffic survives the rule engine and reaches the ML model, and the score-distribution guardrail puts ~2% of *total* traffic in the review zone. That is 0.02 × 10K = 200 transactions/second = 17.3M per day. Each analyst reviews 200 transactions per hour → 17.3M / 200 = 86,400 analyst-hours/day. At $40/hour fully-loaded cost, this is $3.5M/day — clearly unsustainable. The review queue must be ruthlessly prioritized: only transactions with expected loss > $500 AND fraud_score > 0.60 enter the queue (reduces queue by 85%). Automated disposition handles the rest with slightly lower precision. The threshold zone [0.40, 0.60] is auto-approved with enhanced monitoring; [0.60, 0.85] is auto-reviewed with transaction hold.
 
 **Q: How does the system handle coordinated bot attacks targeting the scoring service itself?**
 A coordinated attack might send millions of test transactions at low amounts to probe the model's decision boundary and infer the fraud threshold. Defenses: (1) Score obfuscation: never return the exact fraud probability to the client — return only the decision (approved/declined/pending). (2) Rate limiting at the API gateway: max 100 transactions per card per hour enforced in the rule engine, regardless of fraud score. (3) Behavioral fingerprinting: transaction inter-arrival times that are too regular (bots send at fixed intervals) trigger a rule-engine flag, routing to human review. (4) Model obfuscation: periodically introduce noise into auto-approve/block decisions for borderline scores (score 0.38-0.42 gets 20% stochastic override). This makes the boundary fuzzy from the attacker's perspective. (5) Canary features: hidden features that legitimate merchants would never trigger but test-probing bots might, similar to honeypots.
 
 **Q: How do you reconcile the 99.9% precision requirement with the 80% recall requirement?**
-At 0.1% fraud rate with 99.9% precision and 80% recall: for every 1,000 transactions, 1 is fraud and 999 are legitimate. Catching 80% of fraud means catching 0.8 fraud cases. With 99.9% precision, we can have at most 0.001 × (0.8 / 0.999) ≈ 0.0008 false positives per transaction reviewed, or about 1 false positive per 1,000 auto-blocked decisions. In practice, this precision-recall operating point is achieved via the three-zone architecture: the auto-block zone (score > 0.85) must have 99.9% precision on its own, while the review zone (0.40-0.85) has lower precision (85-95%) but higher recall. The combined system recall is: auto-block recall + review recall. This separation allows optimizing each zone independently.
+At 0.1% fraud rate with 99.9% precision and 80% recall: for every 1,000 transactions, 1 is fraud and 999 are legitimate. Catching 80% of fraud means 0.8 true positives per 1,000 transactions. Precision of 99.9% caps false positives at TP × (1 − P)/P = 0.8 × 0.001/0.999 ≈ 0.0008 per 1,000 transactions — about 1 false positive per 1,000 auto-blocked decisions, which is a false-positive rate of roughly 8 in 10 million legitimate transactions. That absolute rate, not the headline precision, is what makes the operating point hard. In practice, this precision-recall operating point is achieved via the three-zone architecture: the auto-block zone (score > 0.85) must have 99.9% precision on its own, while the review zone (0.40-0.85) has lower precision (85-95%) but higher recall. The combined system recall is: auto-block recall + review recall. This separation allows optimizing each zone independently.

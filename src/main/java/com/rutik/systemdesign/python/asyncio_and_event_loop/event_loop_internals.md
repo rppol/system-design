@@ -21,7 +21,7 @@ Understanding these three queues — how items enter, when they drain, and what 
 fire — explains every observable behaviour: why `asyncio.sleep(0)` yields once, why a busy
 `_ready` queue starves I/O, and why `call_soon_threadsafe` needs a socket self-pipe trick.
 
-Scope: CPython 3.11/3.12. Source file references point to `Lib/asyncio/` without reproducing
+Scope: CPython 3.13/3.14. Source file references point to `Lib/asyncio/` without reproducing
 full source.
 
 ---
@@ -618,16 +618,16 @@ Celery spawns 1,000 threads, each consuming ~1 MB stack = 1 GB RSS. An equivalen
 | Throughput (I/O-bound) | good (~60K RPS echo) | excellent (~150K RPS) | good on Windows |
 | CPU overhead per callback | moderate (Python frames) | low (C dispatch) | moderate |
 | Installation | stdlib | `pip install uvloop` | stdlib (Windows only) |
-| Debugging / traceability | easy (`asyncio.set_debug(True)`) | harder (C stack) | moderate |
+| Debugging / traceability | easy (`loop.set_debug(True)`) | harder (C stack) | moderate |
 | Subprocess support | yes | yes | yes (native IOCP) |
 | SSL | yes | yes (faster) | yes |
 | Windows compatibility | degraded (no epoll) | not supported | native |
-| `get_event_loop()` deprecation | 3.10+ warns if no running loop | same | same |
+| How you select it | default on Linux/macOS | `asyncio.run(main(), loop_factory=uvloop.new_event_loop)` | default on Windows |
 
 | Pattern | Pros | Cons |
 |---|---|---|
 | `asyncio.gather` | simple, returns list in order | one exception cancels all (default) |
-| `asyncio.TaskGroup` (3.11+) | structured, exception propagation, cancellation safe | requires 3.11+ |
+| `asyncio.TaskGroup` | structured, exception propagation, cancellation safe | errors arrive as an `ExceptionGroup` |
 | `asyncio.wait` | fine-grained control (FIRST_COMPLETED, FIRST_EXCEPTION) | more boilerplate |
 | `loop.run_in_executor` | offload CPU/blocking work to thread pool | GIL still held for CPU |
 

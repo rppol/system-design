@@ -63,7 +63,7 @@ Why it matters: feature stores solve three painful production problems: (1) trai
 |--------|-------------|-------------|---------------|-------------|
 | Michelangelo | Uber | Cassandra | Hive | No |
 | FBLearner Feature Store | Meta | Tao (graph DB) | Hive | No |
-| Zipline | Airbnb | Redis | Hive | No |
+| Zipline / Chronon | Airbnb | Key-value store | Hive | Yes — open-sourced as Chronon (Apache 2.0, April 2024) |
 | Feast | Community | Redis / DynamoDB | BigQuery / Parquet | Yes |
 | Tecton | Startup | Redis / DynamoDB | S3 + Parquet | No (managed) |
 | Vertex AI Feature Store | Google | Bigtable | BigQuery | No (managed) |
@@ -646,13 +646,13 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 
 ## 7. Real-World Examples
 
-**Uber Michelangelo** (2017) was one of the first publicly described feature stores. It introduced the concept of a shared feature repository across ML teams, with an online store backed by Cassandra (sub-10ms reads) and an offline store backed by Hive. Key innovation: features are defined once and reused across models — Uber reported over 10,000 features used across hundreds of models.
+**Uber Michelangelo** (2017) was one of the first publicly described feature stores. It introduced the concept of a shared feature repository across ML teams, with an online store backed by Cassandra (precomputed features read at low latency at prediction time) and an offline store on HDFS/Hive. Key innovation: features are defined once and reused across models — the 2017 "Meet Michelangelo" post reported "approximately 10,000 features in Feature Store". Uber's later Palette feature platform reported more than 20,000 features by 2022.
 
 **Meta FBLearner Feature Store** uses the Tao graph database as the online store, which supports rich entity relationships beyond simple key-value lookups. Batch features are computed in Hive and materialized to Tao. The system serves features for hundreds of models including news feed ranking, ads CTR prediction, and integrity classifiers.
 
-**Airbnb Zipline** (2018) introduced the concept of "timeline join" — what this document calls point-in-time correct join. Airbnb open-sourced their thinking (though not the code) and documented how they use it to prevent label leakage in training pipelines for their search ranking and pricing models.
+**Airbnb Zipline / Chronon** (publicly described from 2018) built temporal, point-in-time-correct joins into the feature definition itself, so every feature value is guaranteed window-accurate as of the training row's timestamp and matches what the model will see at online inference. The project was renamed Chronon and Airbnb open-sourced the code under Apache 2.0 in April 2024 — the code, not just the write-up.
 
-**Feast (open source)** is the most widely used open-source feature store. It supports multiple online stores (Redis, DynamoDB, Bigtable, SQLite) and offline stores (BigQuery, S3 + Parquet, Redshift). It provides a Python SDK for defining feature views, a materialization engine for syncing offline to online, and point-in-time correct historical retrieval via a pandas-based join.
+**Feast (open source)** is the most widely used open-source feature store. It supports many online stores (Redis, DynamoDB, Postgres, Snowflake, SQLite, and 20+ others) and offline stores (BigQuery, Snowflake, Redshift, DuckDB, Parquet on S3). It provides a Python SDK for defining feature views, a materialization engine for syncing offline to online, and point-in-time correct historical retrieval through `get_historical_features` — pushed down to the offline store's own SQL where one exists, rather than always executed in pandas.
 
 ---
 
@@ -673,8 +673,8 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 | Store | Query Speed | Storage Cost | Point-in-Time | Best For |
 |-------|-------------|-------------|---------------|---------|
 | S3 + Parquet | Minutes (Spark) | Very Low | Manual join required | Large scale, cost-sensitive |
-| BigQuery | Seconds-minutes | Medium | Native support (ASOF) | GCP shops, ad-hoc queries |
-| Snowflake | Seconds-minutes | High | Via TIME TRAVEL | Enterprise data teams |
+| BigQuery | Seconds-minutes | Medium | No `ASOF JOIN` keyword — emulate with a windowed/`LATERAL` subquery | GCP shops, ad-hoc queries |
+| Snowflake | Seconds-minutes | High | Native `ASOF JOIN` (GA May 2024) | Enterprise data teams |
 | Delta Lake (S3) | Minutes (Spark) | Low | Time travel built-in | Spark-native pipelines |
 
 ### Feature Freshness vs Cost
@@ -724,19 +724,19 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 | Category | Tool | Notes |
 |----------|------|-------|
 | Open-Source Feature Store | Feast | Most mature OSS option; Python SDK; multiple backend support |
-| Managed Feature Store | Tecton | Feast-compatible API; managed infrastructure; enterprise support |
-| Cloud Feature Store | Vertex AI Feature Store (GCP) | Tight GCP integration; auto-scaling; Bigtable online store |
+| Managed Feature Store | Tecton | Managed platform from the team that originally built Feast, but its own SDK (Rift compute engine, Stream Ingest API) — not a Feast-compatible API |
+| Cloud Feature Store | Vertex AI Feature Store (GCP) | BigQuery as the data source; as of May 2026 Bigtable online serving is the only supported online-serving type ("optimized online serving" is deprecated) |
 | Cloud Feature Store | SageMaker Feature Store (AWS) | DynamoDB online; S3 offline; tight SageMaker integration |
 | Online Store | Redis | De facto standard for <5ms P99; requires cluster for >100GB |
 | Online Store | Apache Cassandra | Better for multi-region writes; 5-15ms P99 |
 | Offline Store | Apache Parquet on S3 | Standard for cost-efficient columnar storage |
 | Offline Store | Delta Lake | ACID transactions, time travel, Spark-native |
-| Offline Store | BigQuery | Serverless; SQL interface; ASOF JOIN for point-in-time |
+| Offline Store | BigQuery | Serverless; SQL interface; point-in-time joins written by hand (no `ASOF JOIN` keyword) |
 | Stream Processing | Apache Flink | Lowest latency streaming; stateful aggregations |
 | Stream Processing | Kafka Streams | Simpler ops; embedded in Kafka ecosystem |
 | Batch Processing | Apache Spark | Industry standard for large-scale feature computation |
 | Feature Monitoring | Evidently AI | Open-source drift detection; PSI, KS, Wasserstein |
-| Feature Monitoring | WhyLogs | Lightweight statistical logging; cloud-native |
+| Feature Monitoring | whylogs | Lightweight statistical data logging, still maintained as OSS. Note WhyLabs, the commercial platform behind it, wound down in 2025 — treat it as a library, not a managed service |
 
 ---
 
@@ -776,7 +776,7 @@ Start with Feast (open source) configured with local Redis and S3. Define featur
 Cold start in a feature store context means that a new entity (new user, new item) has no feature values in the online store. A Redis GET for this entity returns nil. If the serving code does not handle this, the model receives null inputs, which leads to undefined behavior (NaN predictions, crashes) or incorrect default values (all zeros, which may be out-of-distribution). Solutions: (1) define explicit per-feature defaults that match the serving-time imputation used during training; (2) implement a "cold start feature set" — a separate set of features based on non-historical signals (demographics, item metadata) for entities with <N interactions; (3) populate the online store with default values at entity creation time (e.g., when a new user account is created, write default feature values to Redis).
 
 **Q: What is the Lambda architecture for a feature store and what are its limitations?**
-The Lambda architecture combines a batch layer (Spark computing features over historical data, high accuracy, high latency) with a speed layer (Flink computing real-time features from streaming events, low accuracy, low latency). The serving layer merges both: it uses batch features for stable aggregates and streaming features for real-time signals. The limitation is operational complexity — two parallel computation systems (Spark and Flink) must produce compatible outputs, debugging discrepancies between them is difficult, and the code duplication between batch and streaming computations reintroduces the training-serving skew problem at a different layer. The Kappa architecture (streaming-only, using long retention Kafka topics for historical reprocessing) eliminates this by using a single computation path.
+Lambda pairs a slow, accurate batch layer with a fast, approximate speed layer, and merges the two at serving time. The batch layer is Spark computing features over full historical data (high accuracy, high latency); the speed layer is Flink computing real-time features from streaming events (lower accuracy, low latency). The serving layer merges both: it uses batch features for stable aggregates and streaming features for real-time signals. The limitation is operational complexity — two parallel computation systems (Spark and Flink) must produce compatible outputs, debugging discrepancies between them is difficult, and the code duplication between batch and streaming computations reintroduces the training-serving skew problem at a different layer. The Kappa architecture (streaming-only, using long retention Kafka topics for historical reprocessing) eliminates this by using a single computation path.
 
 **Q: How do you design the TTL strategy for Redis in a feature store?**
 TTL should be set to ensure stale data never misleads the model, while avoiding unnecessary Redis memory pressure. Rules: (1) set TTL to at least 2x the materialization interval (if materializing hourly, TTL = 2h) — this provides a safety margin for delayed jobs without keeping features indefinitely; (2) for session features (very short-lived), TTL should match the session timeout (e.g., 30 minutes); (3) for daily-updated features, TTL = 48 hours (2 days) — allows one missed materialization without stale reads; (4) monitor P99 feature age in the online store; alert when age > 1.5x the expected materialization interval. Never set TTL to 0 (no expiry) for frequently-updated features — a failed update job will leave stale data indefinitely.
@@ -810,7 +810,7 @@ Monitor feature freshness (age of newest value in online store) separately from 
 
 Namespace features by view and version in Redis keys: `feat:<view_name>:<feature_name>:<version>:<entity_key>`. This enables multiple versions to coexist during model migrations and simplifies debugging.
 
-Set up a feature catalog UI (Feast's built-in web UI or a custom one) so that all ML engineers can discover existing features before implementing new ones. Feature reuse is the primary ROI of a feature store; make discovery easy.
+Set up a feature catalog UI (Feast ships an experimental/beta web UI via `feast ui`, or build a custom one) so that all ML engineers can discover existing features before implementing new ones. Feature reuse is the primary ROI of a feature store; make discovery easy.
 
 Run a quarterly feature audit: identify features with zero models consuming them (orphaned features), features where drift monitoring has never been configured, and features where the TTL is mismatched with the update interval.
 

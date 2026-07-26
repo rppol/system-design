@@ -6,7 +6,7 @@ Every object in a Java program is reachable through a graph of references rooted
 
 `java.lang.ref` breaks that all-or-nothing rule by providing three weaker reference types — `SoftReference`, `WeakReference`, and `PhantomReference` — each telling the GC "this path does not count toward keeping the object alive" at a different strength. Together with plain strong references, they form a four-level hierarchy (strong > soft > weak > phantom) that lets code express exactly how badly it wants an object to survive.
 
-This module covers what each level buys you: `SoftReference` for memory-sensitive caches that should survive until the heap is genuinely tight; `WeakReference` and `WeakHashMap` for canonicalizing maps and listener registries that must never outlive their subject; and `PhantomReference` plus `ReferenceQueue` for post-mortem cleanup notification — the exact mechanism `java.lang.ref.Cleaner` (Java 9+) is built on, and the JDK's sanctioned replacement for `Object.finalize()`, deprecated for removal by JEP 421 (JDK 18). It then turns to the failure mode this whole API area exists to prevent: the classic Java memory leaks — unbounded `ThreadLocal` entries on pooled threads, `ClassLoader` leaks on application-server redeploys, forgotten listener registrations — and the heap-dump-plus-dominator-tree workflow (`jmap`/`jcmd`, Eclipse MAT) used to hunt them down in production.
+This module covers what each level buys you: `SoftReference` for memory-sensitive caches that should survive until the heap is genuinely tight; `WeakReference` and `WeakHashMap` for canonicalizing maps and listener registries that must never outlive their subject; and `PhantomReference` plus `ReferenceQueue` for post-mortem cleanup notification — the exact mechanism `java.lang.ref.Cleaner` is built on, and the JDK's sanctioned way to release a native or off-heap resource once its Java wrapper dies. It then turns to the failure mode this whole API area exists to prevent: the classic Java memory leaks — unbounded `ThreadLocal` entries on pooled threads, `ClassLoader` leaks on application-server redeploys, forgotten listener registrations — and the heap-dump-plus-dominator-tree workflow (`jmap`/`jcmd`, Eclipse MAT) used to hunt them down in production.
 
 ---
 
@@ -16,7 +16,7 @@ This module covers what each level buys you: `SoftReference` for memory-sensitiv
 
 **Mental model**: reachability, not reference counting, decides an object's lifetime in Java. An object's reachability level is the *strongest* path that currently reaches it from any GC root — wrapping an object in a `WeakReference` does nothing at all if a plain strong reference to it also exists somewhere else in the graph. The four `java.lang.ref` types exist because "keep this alive exactly as long as something else needs it, and tell me when that stops being true" is a need that shows up constantly — caches, canonicalizing registries, listener lists, native-resource wrappers — and cannot be expressed with ordinary variables.
 
-**Why it matters**: this is precisely where "the GC is magic, I don't need to think about it" stops being true. A cache built on a plain `HashMap` never shrinks and eventually OOMs. A `ThreadLocal` that is never removed on a pooled thread retains its last value for that thread's entire remaining lifetime — which, in a pool, is the process's entire lifetime. A `finalize()` override can resurrect a dying object, delay its collection by a full extra GC cycle, or silently swallow an exception that would have told you the resource never got cleaned up. Senior interviews probe exactly this boundary: "how would you build a cache that never OOMs the JVM," "why does this thread pool leak memory," "what's wrong with `finalize()`."
+**Why it matters**: this is precisely where "the GC is magic, I don't need to think about it" stops being true. A cache built on a plain `HashMap` never shrinks and eventually OOMs. A `ThreadLocal` that is never removed on a pooled thread retains its last value for that thread's entire remaining lifetime — which, in a pool, is the process's entire lifetime. A `Cleaner` action that accidentally captures the object it was registered against keeps that object permanently reachable, so the cleanup it exists to guarantee silently never runs. Senior interviews probe exactly this boundary: "how would you build a cache that never OOMs the JVM," "why does this thread pool leak memory," "why did this `Cleaner` never fire."
 
 **Key insight**: `PhantomReference.get()` is hard-coded to always return `null` — not a limitation, the entire point. Soft and weak references let code read the referent right up until the moment it is cleared, which is exactly what makes them useful for caching, but it is also what makes them unsuitable for cleanup logic — cleanup code that could still read a live object could also accidentally re-publish a strong reference to it. Phantom references trade away readability entirely in exchange for a hard guarantee: by the time you are notified, the object cannot be resurrected through this reference, ever.
 
@@ -31,7 +31,7 @@ This module covers what each level buys you: `SoftReference` for memory-sensitiv
 - **`WeakHashMap` clears lazily, not at GC time**: the GC nulls the referent immediately, but the dead map *entry* is only expunged from the table on the next `get()`/`put()`/`size()` call.
 - **`ThreadLocalMap` trades a weak key for a strong value**: this stops a `ThreadLocal` *variable* from pinning a `ClassLoader` forever, but does nothing to bound the *value* stored under it.
 - **`Cleaner` is a backstop, not a substitute for `close()`**: it exists to catch what `try-with-resources` misses, on a schedule the GC — not application code — controls.
-- **`finalize()` is deprecated for removal** ([JEP 421, JDK 18]): new code must never override it; existing overrides should migrate to `AutoCloseable` + `Cleaner`.
+- **A cleanup action must never reference the object it cleans**: capturing the registered object keeps it strongly reachable, so it never becomes phantom-reachable and the action never fires.
 - **A leak is a reachable object nobody wants anymore**: the GC has no concept of "leaked" memory, only memory some strong path still (wrongly) reaches — leak-hunting is entirely about finding that path.
 
 ---
@@ -57,7 +57,7 @@ This module covers what each level buys you: `SoftReference` for memory-sensitiv
 4. **Phantom reachable** — not strongly, softly, or weakly reachable, *has already been finalized*, and some `PhantomReference` refers to it.
 5. **Unreachable** — none of the above; eligible for reclamation.
 
-Because each level is defined in terms of "not reachable at any stronger level," a collector's practical algorithm necessarily evaluates them in this order every cycle: mark strongly-reachable objects; decide which `SoftReference`s to clear against the LRU policy; clear every remaining `WeakReference` unconditionally; run finalization for any object whose class still overrides `finalize()` (almost none, if §13 is followed); only then enqueue `PhantomReference`s for objects that have finished that step. A class that does not override `finalize()` — true of essentially every class written today — satisfies "has been finalized" trivially, so it reaches phantom-reachability in the same cycle it would otherwise have become unreachable, with no detour through a finalizer queue.
+Because each level is defined in terms of "not reachable at any stronger level," a collector's practical algorithm necessarily evaluates them in this order every cycle: mark strongly-reachable objects; decide which `SoftReference`s to clear against the LRU policy; clear every remaining `WeakReference` unconditionally; run finalization for any object whose class still overrides `finalize()` (almost none in modern code); only then enqueue `PhantomReference`s for objects that have finished that step. A class that does not override `finalize()` — true of essentially every class written today — satisfies "has been finalized" trivially, so it reaches phantom-reachability in the same cycle it would otherwise have become unreachable, with no detour through a finalizer queue.
 
 ### 4.3 Cleanup Strategy Options
 
@@ -65,7 +65,7 @@ Because each level is defined in terms of "not reachable at any stronger level,"
 |----------|-----------------|---------|-------------|---------|
 | `try-with-resources` / explicit `close()` | Yes — exact call site | Calling thread | Propagate normally | Primary mechanism — always prefer this |
 | `java.lang.ref.Cleaner` [Java 9+] | No — GC-driven, best-effort | Cleaner's own dedicated daemon thread | Isolated per registration | Safety net for forgotten `close()` calls |
-| `finalize()` (deprecated for removal, [JEP 421, Java 18]) | No — GC-driven, weaker guarantees | Single shared Finalizer thread | Silently swallowed; finalization just stops | Never use in new code |
+| FFM `Arena.ofConfined()` [JEP 454, Java 22] | Yes — closed by try-with-resources | Calling thread | Propagate normally | Off-heap memory: scope it to an arena rather than a `Cleaner` |
 
 ### 4.4 Weak/Soft-Keyed Map Patterns
 
@@ -238,32 +238,34 @@ flowchart TD
     F -.->|"idempotent - the action still runs at most once"| E
 ```
 
-The one rule that makes or breaks a `Cleaner` registration: **the `Runnable` must never hold a reference back to the object being cleaned.** A non-static inner class or a lambda that captures `this` implicitly carries a reference to its enclosing instance; if that instance is the object registered with the `Cleaner`, the action itself becomes a strong path back to it, the object can never become phantom-reachable, and the cleanup silently never fires automatically — the exact same bug shape as a `finalize()` resurrection, wearing a new API. This is precisely why the JDK's own `Cleaner` javadoc example is built around a `static class State implements Runnable` holding only the raw resource, never the enclosing object.
+The one rule that makes or breaks a `Cleaner` registration: **the `Runnable` must never hold a reference back to the object being cleaned.** A non-static inner class or a lambda that captures `this` implicitly carries a reference to its enclosing instance; if that instance is the object registered with the `Cleaner`, the action itself becomes a strong path back to it, the object can never become phantom-reachable, and the cleanup silently never fires automatically — a leak with no exception and no log line to notice it by. This is precisely why the JDK's own `Cleaner` javadoc example is built around a `static class State implements Runnable` holding only the raw resource, never the enclosing object.
 
-### `finalize()` — Broken: Resurrection via a Static Collection
+### Broken: A `Cleaner` Action That Captures the Object It Cleans
 
 ```java
-// BROKEN: finalize() resurrects `this` by stashing a reference in a static list.
-public class ConnectionHandle {
-    private static final List<ConnectionHandle> RESURRECTED = new ArrayList<>();
+// BROKEN: the cleanup action is a lambda that captures `this`.
+public final class ConnectionHandle implements AutoCloseable {
+    private static final Cleaner CLEANER = Cleaner.create();
     private final Socket socket;
+    private final Cleaner.Cleanable cleanable;
 
-    ConnectionHandle(Socket socket) { this.socket = socket; }
+    public ConnectionHandle(Socket socket) {
+        this.socket = socket;
+        // BUG: reading an instance field inside the lambda captures
+        // ConnectionHandle.this, not just the Socket it appears to name.
+        this.cleanable = CLEANER.register(this, () -> closeQuietly(this.socket));
+    }
+
+    private static void closeQuietly(Socket s) {
+        try { s.close(); } catch (IOException ignored) { }
+    }
 
     @Override
-    @SuppressWarnings("removal")   // finalize() is forRemoval since JEP 421 (Java 18)
-    protected void finalize() throws Throwable {
-        try {
-            RESURRECTED.add(this);   // BUG: republishes a strong reference to `this`
-            socket.close();
-        } finally {
-            super.finalize();
-        }
-    }
+    public void close() { cleanable.clean(); }
 }
 ```
 
-Once `RESURRECTED` holds `this`, the object is strongly reachable again from a GC root (a static field) — it survives the collection that was about to reclaim it. The JVM tracks that this object's finalizer has already run and will **not** invoke `finalize()` a second time; when the resurrected object becomes garbage again later, it is collected silently, with no further chance to clean up. This asymmetry is what makes `finalize()`-based resurrection dangerous rather than merely wasteful, and it is the basis of the classic "finalizer attack": a subclass can resurrect a partially-constructed object whose constructor threw, handing the caller a live instance that was supposed to have failed validation.
+The registration itself is now a strong path back to the object: the `Cleaner` holds the action, the action holds `ConnectionHandle.this`, so the handle can never become phantom-reachable and the backstop can never fire. Every caller that forgets `close()` leaks its socket permanently, and nothing in the JVM reports it — the object simply stays alive indefinitely, retained by the very mechanism meant to clean it up. The compiler cannot help here: `this.socket` reads like it captures only a `Socket`, but any instance-field read inside a lambda captures the enclosing instance.
 
 ```java
 // FIXED: explicit lifecycle (try-with-resources) + Cleaner as a safety net only.

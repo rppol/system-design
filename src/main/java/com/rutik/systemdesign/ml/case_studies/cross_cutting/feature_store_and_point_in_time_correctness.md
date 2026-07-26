@@ -275,7 +275,6 @@ df_train = events_df.merge(
 # CORRECT: always join on (entity_id, feature_timestamp <= label_timestamp)
 # Using Feast-style PIT join or custom implementation above
 from feast import FeatureStore
-from feast.feature_view import FeatureView
 
 store = FeatureStore(repo_path="feature_repo/")
 training_df = store.get_historical_features(
@@ -367,13 +366,13 @@ def detect_training_serving_skew(
 
 ## 7. Real-World Examples
 
-**Uber Michelangelo:** the pioneering production feature store. Offline store backed by Hive (HDFS); online store backed by Cassandra. Features are defined once in a DSL and computed by both Spark (offline) and Flink (online) from the same definition. PIT joins are performed by a Spark job that reads from Hive snapshots with event timestamps. Enabled 100+ models sharing the same feature library.
+**Uber Michelangelo:** the pioneering production feature store (Palette). Per Uber's 2017 platform post, transactional and log data lands in an HDFS data lake read via Spark and Hive SQL for offline training, while "features needed for online models [are] precomputed and stored in Cassandra where they can be read at low latency at prediction time." Features are declared once in Michelangelo's DSL and materialized by both the batch and the near-real-time paths. Uber reported "approximately 10,000 features in Feature Store" shared across dozens of teams — the reuse argument for a feature store in one number.
 
-**Netflix:** uses an internal feature platform that separates *feature definitions* (business logic, e.g., "user's 30-day genre affinity score") from *feature computation* (Spark batch) and *feature serving* (a low-latency gRPC service backed by EVCache). Their key insight: centralizing feature definitions forced teams to standardize semantics, reducing cross-team semantic drift where two teams computed "30-day purchase count" differently.
+**Netflix:** operates an internal feature platform that separates *feature definitions* (business logic, e.g., "user's 30-day genre affinity score") from *feature computation* (Spark batch) and *feature serving* (a low-latency online service). The general insight, which generalizes beyond Netflix: centralizing feature definitions forces teams to standardize semantics, removing the cross-team drift where two teams compute "30-day purchase count" differently.
 
-**LinkedIn:** Feathr (open-sourced 2022) is LinkedIn's feature store built on Spark + Redis. Enforces PIT correctness at the API level: you cannot request training data without specifying an observation timestamp per entity. Feathr rejects any join configuration where feature timestamps could post-date the observation.
+**LinkedIn:** Feathr (open-sourced April 2022, donated to LF AI & Data in September 2022) is LinkedIn's feature store built on Spark. It enforces PIT correctness at the API level: you cannot request training data without specifying an observation timestamp per entity, and Feathr rejects any join configuration where feature timestamps could post-date the observation. Note that upstream development has been dormant since April 2024.
 
-**Airbnb:** Chronon (open-sourced 2023) takes a different approach: features are defined as GroupBy aggregations over raw event tables (like SQL window functions), and the system computes both backfill (for training) and online materialization from the same definition — eliminating the dual-logic problem at the cost of requiring event-sourced raw data.
+**Airbnb:** Chronon (open-sourced April 2024, with Stripe as co-maintainer) takes a different approach: features are defined as GroupBy aggregations over raw event tables (like SQL window functions), and the system computes both backfill (for training) and online materialization from the same definition — eliminating the dual-logic problem at the cost of requiring event-sourced raw data.
 
 ---
 
@@ -422,12 +421,12 @@ def detect_training_serving_skew(
 
 | Tool | Type | Strengths | Weaknesses |
 |---|---|---|---|
-| Feast (open source) | Managed + self-hosted | PIT-correct by API design, Spark offline, Redis/DynamoDB online | Requires infrastructure management |
+| Feast (open source) | Self-hosted OSS | PIT-correct by API design, Spark offline, Redis/DynamoDB online | Requires infrastructure management; no first-party managed offering |
 | Tecton | Managed SaaS | Production-grade, stream + batch, monitoring built in | Expensive |
 | Hopsworks | Open source managed | Full stack incl. training pipelines | Complex to self-host |
 | Chronon (Airbnb OSS) | Self-hosted | Single definition → dual compute | Requires event-sourced data |
-| Feathr (LinkedIn OSS) | Self-hosted (Spark) | Cross-platform, Azure/AWS/GCP | Younger, less production-tested |
-| Vertex AI Feature Store | GCP managed | Fully managed, BigTable backend | GCP lock-in |
+| Feathr (LinkedIn OSS) | Self-hosted (Spark) | Cross-platform, Azure/AWS/GCP; LF AI & Data project | Upstream dormant since April 2024 — check before adopting |
+| Vertex AI Feature Store | GCP managed | Fully managed; BigQuery offline source + Bigtable online serving | GCP lock-in; the older "Optimized" online serving path is deprecated in favour of Bigtable — check the current deprecation notice before building on it |
 | SageMaker Feature Store | AWS managed | Tight Sagemaker integration, online+offline | AWS lock-in |
 
 ---

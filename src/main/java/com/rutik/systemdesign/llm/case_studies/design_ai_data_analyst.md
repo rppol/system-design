@@ -161,9 +161,9 @@ Supporting Infrastructure:
   │   - User accounts          - Schema cache        │
   │   - Conversation history   - Sandbox routing     │
   │                                                  │
-  │  [Kafka]                  [Prometheus + Grafana]  │
+  │  [Kafka]                  [Prometheus + Grafana] │
   │   - Async EDA jobs         - Query latency       │
-  │   - Report generation      - Sandbox utilization  │
+  │   - Report generation      - Sandbox utilization │
   │   - Usage metering         - LLM cost tracking   │
   │                                                  │
   └─────────────────────────────────────────────────┘
@@ -481,12 +481,12 @@ Sandbox architecture:
     │  Container (gVisor runtime)                      │
     │                                                  │
     │  Python 3.13 + pre-installed libraries:          │
-    │    pandas 3.0, numpy 2.5, matplotlib 3.11,      │
-    │    plotly 6.9, scipy 1.18, scikit-learn 1.9,    │
-    │    polars 1.43, openpyxl 3.1                    │
+    │    pandas 3.0, numpy 2.5, matplotlib 3.11,       │
+    │    plotly 6.9, scipy 1.18, scikit-learn 1.9,     │
+    │    polars 1.43, openpyxl 3.1                     │
     │                                                  │
     │  Resources:                                      │
-    │    CPU: 2 cores (burstable to 4)                │
+    │    CPU: 2 cores (burstable to 4)                 │
     │    RAM: 4GB (hard limit — OOMKilled if exceeded) │
     │    Disk: 10GB ephemeral (for intermediate files) │
     │    Network: NONE (no egress, no ingress)         │

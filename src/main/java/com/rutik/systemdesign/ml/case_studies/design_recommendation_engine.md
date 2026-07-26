@@ -117,13 +117,13 @@ The feature store is split by latency need: Redis serves online features with a 
 
 ## Key Design Decisions
 
-**Two-stage retrieval + ranking**: Exhaustive similarity search over 10M items is infeasible at 100ms. ANN retrieval narrows to 500 candidates in 25ms, then a richer LightGBM model (200 features, interaction terms) re-ranks. This is the standard industry pattern (YouTube DNN, Pinterest Pixie).
+**Two-stage retrieval + ranking**: Exhaustive similarity search over 10M items is infeasible at 100ms. ANN retrieval narrows to 500 candidates in 25ms, then a richer LightGBM model (200 features, interaction terms) re-ranks. This candidate-generation-then-ranking split is the standard industry pattern, published most explicitly in YouTube's deep-learning recommender (Covington, Adams & Sargin, RecSys 2016).
 
 **Sampled softmax for two-tower training**: Full softmax over 10M items is prohibitive. Sample 1000 negatives per positive. Use in-batch negatives (treat other items in minibatch as negatives) — cheap and effective. Correction for popularity bias: subtract log(item_frequency) from logits.
 
-**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes. 10M items: 10M * 32B = 320MB in RAM vs 2.5GB uncompressed. Recall@100 > 95% with nprobe=64.
+**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes — a 32× reduction. 10M items: 10M × 32B = 320MB in RAM vs 10.24GB uncompressed. Target Recall@100 > 95% at nprobe=64, and verify it: 32× quantization is aggressive, and the achieved recall depends on how clustered the embedding space is. Measure recall against an exact `IndexFlatIP` on a held-out query sample before shipping the PQ index.
 
-**LightGBM over deep ranking**: LightGBM trains in hours (vs days for deep models), handles missing features gracefully, is interpretable (feature importance), and achieves comparable NDCG on tabular ranking features. NDCG@10 = 0.47 vs 0.49 for DNN — within 4%, but 10x faster to iterate.
+**LightGBM over deep ranking**: LightGBM trains in hours (vs days for deep models), handles missing features gracefully, is interpretable (feature importance), and stays competitive on tabular ranking features. The illustrative gap used throughout this design is NDCG@10 0.47 (LightGBM) vs 0.49 (DNN) — 4% relative — bought back by an order of magnitude faster iteration. Measure the gap on your own feature set: it widens as you add sequence and embedding features, which is exactly where trees stop being competitive.
 
 **Feature store split (online/offline)**: Redis holds real-time features with 24h TTL for sub-10ms lookup. Hive holds historical features for training. Avoids training-serving skew by computing features with the same logic in both pipelines.
 
@@ -409,20 +409,31 @@ def train_lightgbm_ranker(
     group_col: str = "user_id",
 ) -> lgb.Booster:
     """Train LambdaRank with NDCG@10 objective."""
+    # Sort by group first: LightGBM's `group` argument assumes rows belonging to
+    # the same query are contiguous.
+    df = df.sort_values(group_col).reset_index(drop=True)
     X = build_ranking_features(df)
     y = df[label_col].values
-    groups = df.groupby(group_col).size().values  # items per user query
 
     splitter = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
     train_idx, val_idx = next(splitter.split(X, y, groups=df[group_col]))
 
+    # LightGBM's `group` is a list of GROUP SIZES over contiguous rows, so it must
+    # be recomputed from the rows that actually landed in each split — slicing the
+    # full group-size array by a ROW count (groups[:len(train_idx)]) silently
+    # mis-aligns every group boundary and trains on nonsense query groups.
+    def group_sizes_for(idx: np.ndarray) -> np.ndarray:
+        sub = df.iloc[np.sort(idx)]
+        return sub.groupby(group_col, sort=False).size().values
+
+    train_idx, val_idx = np.sort(train_idx), np.sort(val_idx)
     train_data = lgb.Dataset(
         X.iloc[train_idx], label=y[train_idx],
-        group=groups[:len(train_idx)],  # approximate; use proper group split
+        group=group_sizes_for(train_idx),
     )
     val_data = lgb.Dataset(
         X.iloc[val_idx], label=y[val_idx],
-        group=groups[len(train_idx):],
+        group=group_sizes_for(val_idx),
         reference=train_data,
     )
 
@@ -542,14 +553,14 @@ New videos added to the catalog need to be indexed immediately or they will neve
 
 ### Failure 1: FAISS Index Memory Overrun During Hot Reload
 
-**What failed:** A nightly index rebuild pushed a 2.8GB FAISS index (uncompressed, before switching to PQ compression) to serving nodes that had only 3GB RAM headroom. During the hot-reload (loading new index while serving requests on old index), both old and new index lived in RAM simultaneously: 5.6GB total. The serving node OOM-killed, restarting the process. Because 3 of 10 serving nodes failed simultaneously during the same rebuild window, 30% of traffic had no retrieval backend. Fallback returned global popularity list, degrading NDCG from 0.47 to 0.21 for 22 minutes.
+**What failed:** A nightly index rebuild pushed an uncompressed FAISS index (before the switch to PQ) to serving nodes with only a little more RAM headroom than the index itself. During the hot-reload (loading the new index while still serving requests off the old one), both indexes lived in RAM simultaneously — the peak is always 2× the index size, which is the number the capacity plan has to be built on. The serving node OOM-killed, restarting the process. Because 3 of 10 serving nodes failed simultaneously during the same rebuild window, 30% of traffic had no retrieval backend. Fallback returned global popularity list, degrading NDCG from 0.47 to 0.21 for 22 minutes.
 
 **Detection:** OOM alerts fired from k8s node metrics within 3 minutes. On-call received PagerDuty alert. Grafana dashboard showed FAISS retrieval error rate spiking to 30%. Time-to-detect: 3 minutes.
 
 **Recovery steps:**
 1. Rolled back to previous index version (hot-reload from S3 snapshot).
 2. Reduced rebuild parallelism: stagger rebuild across nodes at 2-minute intervals instead of all-at-once.
-3. Switched to PQ-compressed index (320MB vs 2.8GB) — this was already planned but accelerated.
+3. Switched to the PQ-compressed index (320MB vs 10.24GB uncompressed) — already planned, but accelerated.
 4. Added memory pre-check in rebuild script: abort if available RAM < 2x index size.
 
 **Prevention:** Index size monitoring in CI/CD — build pipeline fails if index size increases >20% without an explicit acknowledgment. Staged rollout: rebuild one node at a time, verify health before proceeding.
@@ -608,7 +619,8 @@ Year 1 (25% growth):
 Year 3 (3x growth):
   Users: 600M, 150M DAU
   Events: 3B/day = 35K events/sec avg
-  User embeddings: 600GB Redis (16-node cluster)
+  User embeddings: 600M × 1KB = 600GB Redis → 20-node r5.xlarge cluster
+                   (32GB/node; 16 nodes would be 512GB, short of the requirement)
   Item catalog: 20M videos, FAISS index 640MB
   Training data 30-day: 90B events (~45TB Parquet)
   FAISS rebuild time at 20M items: ~4 hours (needs GPU acceleration or sharding)
@@ -620,9 +632,12 @@ Year 3 (3x growth):
 Two-Tower Training (weekly):
   Dataset: 3B positive (user, item) pairs + in-batch negatives
   Batch size: 4096, in-batch negatives = 4095 per positive
-  Hardware: 4× A100 40GB (PyTorch DDP)
+  Hardware: one p4d.24xlarge (8× A100 40GB, PyTorch DDP); p4d is rented whole,
+            so bill the whole node even if the job uses 4 GPUs
   Duration: 18 hours per weekly retrain
-  Cost: AWS p4d.24xlarge ($32.77/hr × 18hr) = ~$590/week = $2,360/month
+  Cost: p4d.24xlarge at $21.96/hr × 18hr = ~$395/run × 4 runs = ~$1,580/month
+        (this instance was repriced down from its original $32.77/hr list rate —
+         recheck the current rate, GPU list prices move)
 
 ALS Collaborative Filtering (weekly):
   Interaction matrix: 200M users × 10M items (sparse, ~3B non-zero)
@@ -632,17 +647,19 @@ ALS Collaborative Filtering (weekly):
 
 LightGBM Ranker (daily):
   Dataset: 50M training examples per day (30-day rolling)
-  16-core CPU (c5.4xlarge)
+  16-core CPU (c5.4xlarge, $0.68/hr)
   Duration: 2 hours
-  Cost: $0.68/hr × 2hr = $1.36/day = ~$490/month
+  Cost: $0.68/hr × 2hr = $1.36/day × 30 = ~$41/month
 
-Total monthly training cost: ~$3,334
+Total monthly training cost: $1,580 + $484 + $41 = ~$2,105
 ```
 
 ### Serving Infrastructure
 
 ```
-FAISS Retrieval (50K QPS):
+FAISS Retrieval (sized for 50K recommendation req/sec peak — note this is a
+  serving-side assumption, not the 50K events/sec peak ingest rate in the
+  constraints; the two happen to coincide but are different quantities):
   10 serving nodes (c5.2xlarge, 8 vCPU, 16GB RAM)
   Each node: 5K QPS, 320MB FAISS index, nprobe=64 → 8ms latency
   Cost: 10 × $0.34/hr = $3.40/hr = ~$2,450/month
@@ -659,11 +676,15 @@ Redis Feature Store (user embeddings):
 
 Kafka (event ingestion):
   8 partitions, 3 replicas, 12K events/sec sustained
-  3-broker cluster (kafka.m5.2xlarge)
-  Cost: ~$600/month
+  3-broker Amazon MSK cluster (kafka.m5.large at $0.21/hr in us-east-1)
+  Cost: 3 × $0.21/hr × 730 = ~$460/month brokers + ~$140 EBS storage = ~$600/month
 
-Total monthly serving cost: ~$9,764
+Total monthly serving cost: $2,450 + $4,900 + $1,814 + $600 = ~$9,764
 ```
+
+Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
+c5.2xlarge $0.34/hr, c5.4xlarge $0.68/hr, r5.xlarge $0.252/hr, r5.4xlarge $1.008/hr,
+p4d.24xlarge $21.96/hr, MSK kafka.m5.large $0.21/hr.
 
 ---
 
@@ -781,7 +802,7 @@ def mmr_rerank_broken(
             def mmr_score_broken(item: dict) -> float:
                 # Diversity penalty only applies to embedding distance, not genre variety
                 # With lambda=0.7, the 0.3 diversity weight is too weak
-                selected_embs = torch.stack([s["embedding"] for s in selected])
+                selected_embs = np.stack([s["embedding"] for s in selected])
                 max_sim = float((selected_embs @ item["embedding"]).max())
                 return 0.7 * item["score"] - 0.3 * max_sim
             best = max(remaining, key=mmr_score_broken)
@@ -926,7 +947,7 @@ Offline NDCG is computed on historical click data, which suffers from selection 
 Four mechanisms: (1) Genre diversity cap in MMR post-ranking: no more than 3 items from the same genre in the top-10, regardless of user preference strength. (2) Exploration budget: 15% of every user's recommendations come from genres they have watched fewer than 5 times, sampled from popular content in those genres. (3) Creator diversity: limit recommendations from any single creator to 2 items in the top-10. (4) Long-term engagement signals: if 30-day retention is used as a secondary metric in model selection (alongside short-term engagement), models that maximize short-term clicks at the cost of user satisfaction are penalized. A/B tests that show improved 7-day CTR but declining 30-day retention are rejected.
 
 **Q: How would you design the system to handle a catalog of 1 billion items instead of 10 million?**
-At 1 billion items, FAISS IVF with PQ becomes infeasible in a single machine (even PQ-compressed: 1B × 32 bytes = 32GB per replica). Three approaches: (1) Hierarchical two-level retrieval — coarse retrieval reduces to 1M candidates using a lightweight semantic hash or product category filter, then FAISS IVF over 1M items (32MB PQ). (2) Sharded FAISS: partition the 1B item catalog into 100 shards of 10M items each, route queries to the 2-3 most relevant shards based on a coarse item-space classifier, merge top-K from those shards. (3) ScaNN (Google) or HNSW with product quantization in distributed mode — ScaNN is reported to scale to 100M+ items with <5ms latency. The two-tower training pipeline remains the same; only the index infrastructure changes.
+At 1 billion items, FAISS IVF with PQ becomes infeasible in a single machine (even PQ-compressed: 1B × 32 bytes = 32GB per replica). Three approaches: (1) Hierarchical two-level retrieval — coarse retrieval reduces to 1M candidates using a lightweight semantic hash or product category filter, then FAISS IVF over 1M items (32MB PQ). (2) Sharded FAISS: partition the 1B item catalog into 100 shards of 10M items each, route queries to the 2-3 most relevant shards based on a coarse item-space classifier, merge top-K from those shards. (3) ScaNN (Google) or HNSW with product quantization in distributed mode. Do not carry over a single-machine latency figure from a vendor benchmark at this scale — benchmark the candidate index on your own vectors and your own recall target, because ANN latency at 1B vectors is dominated by sharding and network fan-out, not by the index algorithm. The two-tower training pipeline remains the same; only the index infrastructure changes.
 
 **Q: How do you measure and optimize for long-term user retention rather than short-term engagement?**
 Short-term engagement metrics (CTR, watch time per session) are easy to optimize but can be maximized by recommendation systems that exploit user psychological biases (autoplay, thumbnail sensationalism). Long-term retention is measured as 30-day and 90-day retention rates per user cohort. To optimize for it: (1) Include 30-day retention as a secondary metric in all A/B tests — reject models that improve 7-day metrics at cost of 30-day retention. (2) Add long-term satisfaction proxies to training labels: app re-opens within 3 days, manual search (user was not passively suggested), explicit ratings. (3) Penalize models with high variance in recommendations — high predictability leads to boredom over months. Monitor recommendation entropy (diversity of genres/creators over a 30-day window per user) as a leading indicator for long-term retention.

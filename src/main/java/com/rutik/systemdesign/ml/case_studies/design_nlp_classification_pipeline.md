@@ -6,7 +6,7 @@
 
 Mental model: Think of the classification pipeline as a cascade. A fast, cheap baseline handles the 70% of clear-cut cases. A more expensive BERT model handles the ambiguous 30%. An LLM with few-shot prompting handles the 5% of novel or rare categories that neither model covers well. This cascade architecture delivers near-BERT accuracy at ~20% of BERT's serving cost.
 
-Why this system exists: Content moderation, support ticket routing, document tagging, compliance screening, and product categorization all require classifying text at scale. A ticket routing system that achieves 90% accuracy vs 85% reduces annual agent handling costs by $2M at a 10,000-ticket/day support center.
+Why this system exists: Content moderation, support ticket routing, document tagging, compliance screening, and product categorization all require classifying text at scale. Using the cost model worked in §11 (8 extra minutes of handle time per misroute, $25/hour agents = $3.33 per mistake), a ticket routing system that goes from 85% to 90% accuracy at a 10,000-ticket/day support center avoids 500 misroutes a day — about $1,700/day, or roughly $600k/year.
 
 ---
 
@@ -40,8 +40,8 @@ Why this system exists: Content moderation, support ticket routing, document tag
 **Model inference cost comparison:**
 - TF-IDF + LR: 0.5ms per doc → 500 docs/sec on a single core; easily scales.
 - DistilBERT (6 layers, 66M params): ~25ms per doc on CPU; ~3ms on GPU.
-  - CPU serving: 500 docs/sec requires 500 × 25ms / 1000ms = 12.5 CPU cores → 4 × c5.2xlarge.
-  - GPU serving (T4): 500 docs/sec via dynamic batching (batch=32, 15ms): 2 × g4dn.xlarge = $0.52/hr each.
+  - CPU serving: 500 docs/sec requires 500 × 25ms / 1000ms = 12.5 CPU cores → 2 × c5.2xlarge (8 vCPU each, 16 total).
+  - GPU serving (T4): 500 docs/sec via dynamic batching (batch=32, 15ms): 2 × g4dn.xlarge at $0.526/hr each (us-east-1 on-demand).
 - BERT-base (12 layers, 110M params): ~80ms per doc on CPU, ~10ms on GPU.
 
 **Storage:**
@@ -51,14 +51,14 @@ Why this system exists: Content moderation, support ticket routing, document tag
 
 **Training data:**
 - Initial labeled set: 50k examples; grows by ~2k/day via active learning.
-- Fine-tuning DistilBERT on 50k examples: ~45 min on 1 × A100 GPU = $0.60.
+- Fine-tuning DistilBERT on 50k examples: ~45 min on 1 × A100 GPU. At the p4d.24xlarge spot rate (~$13.07/hr for 8 GPUs ≈ $1.63/A100-hr) that is $1.22 per run; on-demand ($4.10/A100-hr) it is $3.08.
 - TF-IDF + LR: 2 minutes on CPU.
 
-**Infrastructure cost:**
-- Serving (GPU, DistilBERT): 2 × g4dn.xlarge = $1.04/hr = $745/month.
-- Active learning + labeling queue: 2 × m5.large = $70/month.
-- Training (weekly fine-tune, A100 spot): $0.60/run × 4 = $2.40/month.
-- Total: ~$820/month.
+**Infrastructure cost** (us-east-1 on-demand, 730 hr/month):
+- Serving (GPU, DistilBERT): 2 × g4dn.xlarge at $0.526/hr = $1.052/hr = $768/month.
+- Active learning + labeling queue: 2 × m5.large at $0.096/hr = $140/month.
+- Training (weekly fine-tune, A100 spot): $1.22/run × 4 = $4.90/month.
+- Total: ~$913/month.
 
 ---
 
@@ -152,9 +152,11 @@ def build_tfidf_lr_pipeline(
         C=C,
         max_iter=1000,
         solver="saga",              # fast for large sparse matrices
-        multi_class="multinomial",
         n_jobs=-1,
     )
+    # Note: the `multi_class` parameter was deprecated in scikit-learn 1.5 and
+    # REMOVED in 1.7 — passing it now raises TypeError. Multinomial (softmax) is
+    # the behaviour for all solvers except liblinear, so nothing needs to be set.
     # Calibration: isotonic regression via 5-fold CV produces well-calibrated probabilities
     calibrated_clf = CalibratedClassifierCV(base_clf, cv=5, method="isotonic")
     return Pipeline([("tfidf", vectorizer), ("clf", calibrated_clf)])
@@ -262,7 +264,7 @@ def fine_tune_distilbert(
         per_device_eval_batch_size=64,
         warmup_ratio=0.06,
         weight_decay=0.01,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",   # renamed from `evaluation_strategy`, which is gone in transformers 5.x
         load_best_model_at_end=True,
         metric_for_best_model="eval_f1",
         fp16=torch.cuda.is_available(),
@@ -434,14 +436,14 @@ class DistillationLoss(nn.Module):
 | TF-IDF + LR | 0.82 | 2ms | 5 min | High (feature weights) |
 | DistilBERT (fine-tuned) | 0.88 | 25ms | 45 min (GPU) | Low |
 | BERT-base (fine-tuned) | 0.90 | 80ms | 2h (GPU) | Low |
-| GPT-4 (few-shot, 5 examples) | 0.85 | 1,200ms | None (inference cost) | None |
+| Frontier LLM (few-shot, 5 examples) | 0.85 | 1,200ms | None (inference cost) | None |
 
 The cascade (TF-IDF+LR → DistilBERT → LLM) achieves 0.89 macro F1 at 8ms average latency and < 25ms p99. This beats any single-model approach on the accuracy × latency Pareto front. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
 
 ```mermaid
 xychart-beta
     title "Macro F1 by Model and Cascade"
-    x-axis ["TF-IDF+LR", "DistilBERT", "BERT-base", "GPT-4 few-shot", "Cascade"]
+    x-axis ["TF-IDF+LR", "DistilBERT", "BERT-base", "LLM few-shot", "Cascade"]
     y-axis "Macro F1" 0.8 --> 0.92
     bar [0.82, 0.88, 0.90, 0.85, 0.89]
 ```
@@ -468,15 +470,13 @@ Online learning (update model after each labeled batch) introduces instability �
 
 ## 6. Real-World Implementations
 
-**Twitter/X (Content Moderation):** Twitter's content moderation pipeline uses a cascade architecture similar to the design above. Their Tier-1 is a fine-tuned BERT model for binary "safe / needs review" classification, running at ~5ms per tweet on GPU. Documents flagged by Tier-1 go to a fine-grained classifier (hate speech, spam, adult content, etc.). Human review is reserved for borderline cases, targeting < 5% of tweet volume to human reviewers while maintaining > 95% recall on policy violations. Key engineering challenge: the classifier must be updated within hours of new policy rollouts, requiring rapid fine-tuning infrastructure.
+**Uber (COTA — support ticket handling):** The one well-documented public example of this architecture. Uber's Customer Obsession Ticket Assistant handles "hundreds of thousands of tickets surfacing daily on the platform across 400+ cities worldwide," choosing among "over 1,000 possible solutions." Notably, COTA v1 was *not* a transformer: it used TF-IDF plus latent semantic analysis to extract topic features, cosine-similarity features to collapse thousands of dimensions to a handful, and a random forest in a retrieval-based pointwise ranking setup. Uber reports it "can reduce ticket resolution time by over 10 percent while delivering service with similar or higher levels of customer satisfaction." Later CNN/RNN experiments gave about 10 percent greater accuracy than the random forest, and the simpler CNN was what went to production in COTA v2 — a direct real-world instance of this case study's "start cheap, escalate only where it pays" thesis. See [COTA](https://www.uber.com/blog/cota/) and [COTA v2](https://www.uber.com/blog/cota-v2/).
 
-**Airbnb (Review Classification):** Airbnb classifies guest reviews into quality signals (cleanliness, location, communication) and policy violations (discrimination, harassment). Their engineering blog described using a two-stage approach: a lightweight keyword model as a pre-filter (handles 80% of clear cases in < 1ms), followed by BERT for ambiguous cases. Key annotation challenge: many reviews contain both positive and negative signals about multiple categories — they use multi-label rather than multi-class to capture this complexity.
+**Content moderation (pattern):** Large platforms run a binary "safe / needs review" first stage over full traffic, then a fine-grained policy classifier (hate speech, spam, adult content) only on what the first stage flags, with human review reserved for the borderline band. The dominant engineering constraint is not accuracy but turnaround: a policy change has to be reflected in the model within hours, which forces the fine-tuning and eval pipeline to be fully automated. Specific per-platform recall and human-review percentages are not published; do not quote them.
 
-**Uber (Support Ticket Routing):** Uber routes 100k+ daily support contacts across 300+ routing categories. Their ML team (2019 blog post) trained a hierarchical BERT classifier: top-level routing (rider vs driver vs Uber Eats vs business account) is a 4-class classifier. Second-level routing (issue type within each top-level) is a separate model loaded conditionally. This conditional loading reduces memory footprint vs a flat 300-class classifier and allows per-segment model updates without redeploying the entire system.
+**Marketplace listing / merchant categorization (pattern):** The characteristic difficulty is a single free-text self-description with enormous lexical variance ("I sell handmade jewelry" / "artisan metalwork accessories" / "custom silver rings"). TF-IDF + LR does well on head categories with plenty of examples and collapses on the long tail, which is exactly where zero-shot classification with an NLI entailment model earns its keep — it needs no labeled data for a new category. Treat the head/tail accuracy gap as something to measure on your own taxonomy.
 
-**Shopify (Merchant Category Classification):** Shopify classifies merchants into business categories for compliance and recommendation purposes. Their unique challenge: merchants describe their business in one free-text field, using highly varied language ("I sell handmade jewelry" vs "artisan metalwork accessories" vs "custom silver rings"). They found that TF-IDF + LR achieved 91% accuracy for the 20 most common categories but dropped to 65% for niche categories with < 100 training examples. Zero-shot classification using a pre-trained entailment model (NLI) achieved 78% on the niche categories without additional labeled data.
-
-**Stripe (Compliance and Risk Screening):** Stripe classifies business descriptions against restricted business categories (regulated financial products, adult content, weapons). Their requirement: recall > 99.9% on restricted categories (false negatives have severe regulatory consequences). They trade precision for recall: the classifier flags 5× more documents for human review than actually violate policy. The key design decision is that classification thresholds are set per-category based on the cost asymmetry: missing one restricted merchant costs far more than incorrectly flagging 10 legitimate merchants for review.
+**Compliance and risk screening (pattern):** Screening business descriptions against restricted categories (regulated financial products, adult content, weapons) is a recall-dominated problem: a false negative can be a regulatory event, a false positive costs a few minutes of review. The design consequence is that thresholds are set per category from the cost asymmetry rather than by maximizing F1, deliberately over-flagging by a large multiple so recall stays near the top of its range.
 
 ---
 
@@ -539,7 +539,7 @@ DistilBERT with dynamic batching:
   Batch size 32, seq length 128: ~15ms on T4 GPU
   Throughput: 32 / 15ms = 2,133 docs/sec per GPU
   Required GPUs: ceil(150 / 2,133) = 1 GPU (with large headroom)
-  Deploy 2 GPUs for HA: 2 × g4dn.xlarge = $745/month
+  Deploy 2 GPUs for HA: 2 × g4dn.xlarge × $0.526/hr × 730 = $768/month
 
 TF-IDF + LR (Tier-1): 500 docs/sec × 0.5ms = negligible
   4 CPU cores sufficient; co-locate on the same instance
@@ -580,7 +580,7 @@ Three common annotation biases: (1) annotator drift — annotators' interpretati
 A cascade of optimizations: (1) ONNX export removes the Python overhead and enables hardware-specific optimizations — typically 2× speedup with no accuracy loss; (2) TensorRT conversion (NVIDIA) adds kernel fusion and mixed-precision (FP16) — another 2× speedup; (3) dynamic batching (Triton Inference Server) groups concurrent requests into batches — utilizes GPU parallelism, reducing per-document cost; (4) sequence length reduction — truncate or pad to the actual 95th percentile token count of your data (often 64 tokens for short text, not the default 512) — 4× speedup for short text; (5) model distillation — a 2-layer BERT student achieves 95% of 12-layer BERT quality at 6× the speed. Together these can reduce BERT-base from 80ms to 6ms per document.
 
 **Q: How do you ensure fairness in content classification?**
-Content classifiers can exhibit demographic disparities: spam classifiers are more likely to flag African-American Vernacular English (AAVE) as spam; sentiment classifiers systematically underestimate positive sentiment in certain languages or dialects. Audit by: (1) collecting a stratified held-out set with demographic labels (self-reported or proxy features); (2) computing per-group precision and recall; (3) testing whether false positive rate is equal across groups (equal false positive rate criterion). If disparities exceed 5pp, apply group-level threshold calibration or collect additional training data for underperforming groups. See [responsible_ai_fairness_and_explainability.md](cross_cutting/responsible_ai_fairness_and_explainability.md).
+Content classifiers exhibit demographic disparities that a single aggregate accuracy number hides. Sap, Card, Gabriel, Choi and Smith (ACL 2019, "The Risk of Racial Bias in Hate Speech Detection") found tweets in African American English were up to twice as likely to be labelled offensive by models trained on standard hate-speech corpora; sentiment classifiers can likewise underestimate positive sentiment in some dialects. Audit by: (1) collecting a stratified held-out set with demographic labels (self-reported or proxy features); (2) computing per-group precision and recall; (3) testing whether false positive rate is equal across groups (equal false positive rate criterion). If disparities exceed 5pp, apply group-level threshold calibration or collect additional training data for underperforming groups. See [responsible_ai_fairness_and_explainability.md](cross_cutting/responsible_ai_fairness_and_explainability.md).
 
 **Q: What is knowledge distillation and when should you apply it in NLP?**
 Knowledge distillation trains a small "student" model to mimic the output distribution (soft probabilities) of a large "teacher" model, not just its hard predictions. The soft targets carry richer information than hard labels — for example, if the teacher assigns 0.6 to "billing" and 0.3 to "technical" for a ticket, the student learns that these categories are related and often co-occur, which hard labels (just "billing") cannot convey. Apply distillation when: (1) you need < 10ms serving latency but BERT gives you best accuracy; (2) you have a teacher model with > 95% validation performance that you want to compress for edge/mobile deployment; (3) you have limited labeled data but can generate unlimited soft-labeled examples using the teacher. The teacher-student gap is typically < 3pp F1 for a 2× compression ratio.

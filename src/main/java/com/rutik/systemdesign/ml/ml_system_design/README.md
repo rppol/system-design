@@ -39,7 +39,7 @@ Mental model: think of the ML system as three coupled loops:
 - The training loop: features -> model training -> model registry -> serving
 - The feedback loop: serving -> outcome labels -> retraining triggers
 
-Why it matters: 85% of ML projects fail to reach production not because of model quality but because of infrastructure gaps — training-serving skew, missing monitoring, inability to retrain quickly when data distribution shifts.
+Why it matters: models fail to reach or survive production far more often because of infrastructure gaps — training-serving skew, missing monitoring, inability to retrain quickly when the data distribution shifts — than because of model quality. (The widely quoted "85% of ML projects fail" figure is a misreading of a Gartner forecast that 85% of AI projects through 2022 would deliver *erroneous outcomes* due to data bias and governance gaps; it was never a measured project-failure rate, so do not cite it as one.)
 
 Key insight: the most important design decision is often not the model architecture but the feedback loop latency — how quickly can the system incorporate new signal to update predictions?
 
@@ -97,7 +97,7 @@ Key insight: the most important design decision is often not the model architect
 **Model Cascade**:
 - Cheap model (LR) handles 80% of requests with high confidence.
 - Expensive model (DNN) handles remaining 20% where cheap model is uncertain.
-- Reduces cost by 4-5x while maintaining quality.
+- At the Section 8 prices ($0.001 LR, $0.01 DNN), blended cost is `0.8*0.001 + 0.2*0.01 = $0.0028` per request versus `$0.01` for DNN-on-everything — about 3.6x cheaper, or 3.3x if the cheap model's cost is also paid on escalated requests.
 
 ---
 
@@ -189,7 +189,7 @@ flowchart TD
     class out1,out2 io
 ```
 
-Only the uncertain ~20% of traffic pays for the expensive model, so a cascade cuts serving cost 4-5x versus running the DNN on everything — provided the confidence gate is well calibrated.
+Only the uncertain ~20% of traffic pays for the expensive model, so at the prices shown a cascade cuts serving cost roughly 3.3-3.6x versus running the DNN on everything — provided the confidence gate is well calibrated. The multiple is set entirely by the escalation rate and the price ratio, so recompute it for your own numbers rather than quoting a rule of thumb.
 
 ### The 6-Step Design Framework as a Funnel
 
@@ -389,7 +389,7 @@ def _choose_monitoring(req: MLSystemRequirements) -> str:
 
 **Airbnb search ranking** uses a two-stage pipeline where retrieval uses approximate nearest neighbor search on listing embeddings, and ranking uses a neural network with listing features, user features, and query features. They famously wrote about position bias — listings shown higher get more clicks regardless of quality — and use inverse propensity weighting to correct for it.
 
-**Stripe fraud detection** uses a model cascade: a fast gradient-boosted tree runs on every transaction in <5ms and blocks high-confidence fraud immediately. Uncertain cases are escalated to a slower, more expensive deep learning model that uses graph features (shared cards, devices, merchants). Less than 20% of transactions reach the expensive model.
+**Stripe Radar fraud detection** scores every transaction synchronously inside the payment authorization path, with the whole decision — feature collection plus inference — budgeted under 100ms. Stripe has published that Radar moved off a Wide-and-Deep architecture (XGBoost combined with a DNN) to a pure DNN in mid-2022, and that it assesses more than 1,000 characteristics per transaction. Note it is a *single* model applied uniformly, not a cascade: the interesting engineering constraint is that a hard real-time budget forces feature computation, not inference, to be the thing you optimize.
 
 ---
 
@@ -517,13 +517,13 @@ Offline evaluation: compute ranking metrics (NDCG@10, MAP, Recall@K) on a held-o
 Label leakage is training on a feature that would not be available at prediction time, inflating offline metrics while production collapses. Skew is a value mismatch for a feature that IS available at serving; leakage is using a feature that is simply not knowable yet. Classic example: a fraud model with "account_closed_within_7_days" scores 99% AUC offline and 55% in production. Fix: enforce point-in-time correctness and audit every feature for whether it is actually observable at inference time.
 
 **Q: When does a model cascade reduce cost, and what is the main risk?**
-A cascade runs a cheap model on all traffic and escalates only low-confidence cases to an expensive model, cutting cost 4-5x. It works when the cheap model is confidently correct on the easy majority (typically ~80% of requests) so the DNN only sees the hard ~20%. The main risk is a miscalibrated confidence gate: if the cheap model is overconfident on hard cases, those never escalate and quality drops silently. Calibrate the threshold on held-out data and monitor the escalation rate.
+A cascade runs a cheap model on all traffic and escalates only low-confidence cases to an expensive model. That cuts cost by roughly the price ratio weighted by the escalation rate — about 3.5x at an 80/20 split with a 10x price gap. It works when the cheap model is confidently correct on the easy majority (typically ~80% of requests) so the DNN only sees the hard ~20%. The main risk is a miscalibrated confidence gate: if the cheap model is overconfident on hard cases, those never escalate and quality drops silently. Calibrate the threshold on held-out data and monitor the escalation rate.
 
 **Q: Why use multi-task learning in a recommender, and what is negative transfer?**
 Multi-task learning trains one shared backbone to predict several objectives (CTR, CVR, dwell time) at once, improving data efficiency and preventing over-optimizing one metric. Auxiliary tasks let data-poor objectives borrow signal from related ones. Negative transfer is the failure mode where conflicting task gradients degrade the shared representation so no task is served well. Mitigate with task-specific heads, uncertainty-based task weighting, or gradient surgery.
 
 **Q: How do you decompose a P99 latency budget across an ML serving pipeline?**
-Assign each stage a slice of the total budget — network, feature fetch, retrieval, ranking, post-processing — and keep headroom for tail latency. For a 100ms P99 budget a typical split is 10ms network, 8ms feature fetch, 12ms retrieval, 18ms ranking, 4ms post-processing, leaving ~35ms for GC pauses and tail effects. Measure each stage independently so a regression is attributable to one component rather than the whole request.
+Assign each stage a slice of the total budget — network, feature fetch, retrieval, ranking, post-processing — and keep headroom for tail latency. For a 100ms P99 budget a typical split is 10ms network, 3ms gateway, 8ms feature fetch, 12ms retrieval, 18ms ranking, 4ms post-processing and 8ms serialization — 63ms modeled, leaving ~37ms for GC pauses and tail effects. Measure each stage independently so a regression is attributable to one component rather than the whole request.
 
 **Q: What should an ML system do when the model or feature store is unavailable?**
 Fall back to a simpler strategy — popularity ranking, cached features, or a rule-based default — rather than failing the request. Wrap the hot path in bounded-timeout calls and circuit breakers; serve cached or default feature values when the store is slow. A slightly worse prediction is almost always better than a hard failure on the serving path, so design graceful degradation at every layer from the design phase.
@@ -606,7 +606,7 @@ flowchart TD
 
 **Where the floor comes from, and why it is not arbitrary.** Labels arrive roughly an hour late because the click attribution window has to close first. So even at `T = 1h` the serving model was trained on data that is itself about an hour old, and pushing `T` to 15 minutes buys nothing — there is no fresher label to train on. The refresh cadence is bounded below by label latency, not by compute. This is the general shape of the tradeoff: shorten `T` until it hits the label-availability floor, then stop, and spend the remaining effort on shrinking that floor instead.
 
-LightGBM offline AUC = 0.78, log-loss = 0.39, calibration error < 2%. Serving p99 = 2ms (ONNX, batch of 1), throughput 5M/hr = ~1400 req/s sustained per replica. Online AUC tracked on labels that arrive ~1 hour after impression (click attribution window).
+LightGBM offline AUC = 0.78, log-loss = 0.39, calibration error < 2%. Serving p99 = 2ms (ONNX, batch of 1); the arrival rate of 5M/hr is ~1,400 req/s in aggregate, which one single-threaded worker at 2ms cannot absorb alone — see the fleet sizing below. Online AUC tracked on labels that arrive ~1 hour after impression (click attribution window).
 
 **What the formula is telling you.** "Convert the traffic to a per-second rate, divide by what one replica absorbs, then divide again by the utilization you are willing to run at — the last division is the one people skip."
 

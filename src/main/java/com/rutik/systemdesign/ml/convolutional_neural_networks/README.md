@@ -150,16 +150,16 @@ The 4x activation drop is per pooling layer and it compounds: four such stages c
 | Architecture | Params | ImageNet Top-1 | Year | Key Innovation |
 |-------------|--------|----------------|------|----------------|
 | AlexNet | 60M | 63.3% | 2012 | First deep CNN, ReLU, Dropout |
-| VGGNet-16 | 138M | 74.4% | 2014 | Small 3x3 convs stacked |
+| VGGNet-16 | 138M | 71.6% | 2014 | Small 3x3 convs stacked |
 | ResNet-18 | 11M | 69.8% | 2015 | Skip connections |
-| ResNet-50 | 25M | 76.2% | 2015 | Bottleneck blocks |
+| ResNet-50 | 25M | 76.1% | 2015 | Bottleneck blocks |
 | ResNet-101 | 44M | 77.4% | 2015 | Deeper residual network |
 | MobileNetV2 | 3.4M | 72.0% | 2018 | Depthwise separable convs |
 | EfficientNet-B0 | 5.3M | 77.1% | 2019 | Compound scaling |
-| EfficientNet-B7 | 66M | 84.4% | 2019 | Scaled up B0 |
+| EfficientNet-B7 | 66M | 84.3% | 2019 | Scaled up B0 |
 | ConvNeXt-L | 197M | 84.3% | 2022 | Modernized ResNet |
 
-Two rows need a caveat. AlexNet's 63.3% is the paper's best ILSVRC-2012 entry — a 7-model ensemble pretrained on the ImageNet-2011 release; a single AlexNet scores 56.5% in torchvision. ConvNeXt-L's frequently quoted 87.5% requires ImageNet-22K pretraining evaluated at 384x384 (101 GFLOPs); its ImageNet-1K 224x224 result is the 84.3% shown. Every other row is a single model trained on ImageNet-1K only.
+Three rows need a caveat. AlexNet's 63.3% is the paper's best ILSVRC-2012 validation entry (36.7% top-1 error, Table 2) — an ensemble of 7 CNNs, 2 of which were pretrained on the ImageNet Fall 2011 release; a single AlexNet scores 56.5% in torchvision. VGG-16's 71.6% is torchvision's single-crop reference number; the VGG paper's best single-net result is 75.6% top-1 (24.4% error) using multi-scale multi-crop plus dense evaluation, which is not comparable to the single-crop numbers in the other rows. ConvNeXt-L's frequently quoted 87.5% requires ImageNet-22K pretraining evaluated at 384x384 (101 GFLOPs); its ImageNet-1K 224x224 result is the 84.3% shown. Every other row is a single model trained on ImageNet-1K only and evaluated single-crop — the ResNet rows are torchvision `IMAGENET1K_V1` weights, the MobileNetV2 / EfficientNet / ConvNeXt rows are the originating papers' own figures.
 
 **Standard Convolution vs Depthwise Separable Convolution (MobileNet):**
 
@@ -167,7 +167,7 @@ Standard: one kernel of shape (K, K, C_in) per output channel -> total ops: K^2 
 
 Depthwise separable = depthwise (one filter per input channel: K^2 * C_in * H * W) + pointwise (1x1 conv: C_in * C_out * H * W). Total ops: K^2 * C_in + C_in * C_out per spatial position. Speedup factor: 1 / (1/C_out + 1/K^2), roughly 8-9x for 3x3 conv with large C_out.
 
-**EfficientNet Compound Scaling**: jointly scale width (channels), depth (layers), and resolution (input size) with a fixed ratio. Given a resource budget multiplier phi: depth *= alpha^phi, width *= beta^phi, resolution *= gamma^phi with alpha*beta^2*gamma^2 ~= 2. EfficientNet-B7 uses phi=7 over B0 baseline.
+**EfficientNet Compound Scaling**: jointly scale width (channels), depth (layers), and resolution (input size) with a fixed ratio. Given a resource budget multiplier phi: depth *= alpha^phi, width *= beta^phi, resolution *= gamma^phi with alpha*beta^2*gamma^2 ~= 2. The paper's grid search at phi=1 gives alpha=1.2, beta=1.1, gamma=1.15; B1 through B7 are then produced by holding those coefficients fixed and raising phi (the paper does not tabulate a per-variant phi).
 
 **ResNet Bottleneck Block** (ResNet-50+): 1x1 conv (reduce channels) -> 3x3 conv -> 1x1 conv (expand channels). Reduces computation vs a naive 3x3-3x3 block. Identity shortcut for same-dimension blocks, 1x1 projection shortcut when dimensions change.
 
@@ -504,7 +504,7 @@ rf = compute_receptive_field(example_layers)
 
 L3 and L6 are the identical layer — `3x3`, stride 1 — yet L3 adds 8 pixels of reach and L6 adds 16. The only difference is that a stride-2 (L5) doubled the scale beneath L6. This is why stride, not kernel size, is the dominant lever on receptive field.
 
-**Why the stride_product term exists.** Delete it and the recurrence collapses to the stride-1 case `RF = 1 + 2K`: those same 8 layers would reach `1 + 2*8 = 17` pixels instead of 83, and covering a 224px image would take roughly 112 stacked `3x3` layers. Downsampling is what makes depth compound rather than accumulate — each stride-2 doubles the value of every layer after it, which is how ResNet-50 gets an 83px view out of 8 layers and sees the whole scene well before its final stage.
+**Why the stride_product term exists.** Delete it and every layer contributes only its raw `kernel - 1`: those same 8 layers would reach `1 + 6 + 7 x 2 = 21` pixels instead of 83, and under the pure stride-1 rule `RF = 1 + 2K` covering a 224px image would take roughly 112 stacked `3x3` layers. Downsampling is what makes depth compound rather than accumulate — each stride-2 doubles the value of every layer after it, which is how ResNet-50 gets an 83px view out of 8 layers and sees the whole scene well before its final stage.
 
 ---
 
@@ -530,6 +530,8 @@ L3 and L6 are the identical layer — `3x3`, stride 1 — yet L3 adds 8 pixels o
 | MobileNetV3 | 5M | Competitive | Very fast | Very low | Mobile/edge |
 | EfficientNet-B0 | 5.3M | Excellent | Fast | Low | Efficiency-focused |
 | EfficientNet-B7 | 66M | SOTA (2019) | Slow | High | Max accuracy |
+
+The latency column is an illustrative order of magnitude for batch-1 fp32 inference, not a published benchmark — actual numbers depend on precision, batch size, runtime and driver, so measure on your own hardware before designing to them.
 
 | Transfer Learning Strategy | Data Size | Training Time | Final Accuracy |
 |---------------------------|-----------|--------------|----------------|
@@ -617,7 +619,7 @@ Fine-tuning a ResNet-50 on a thermal infrared dataset (very different pixel stat
 ```python
 # Enable cuDNN auto-tuner for fixed-size inputs (finds fastest algorithm)
 import torch.backends.cudnn as cudnn
-cudnn.benchmark = True  # ~10-30% speedup for CNNs with fixed input size
+cudnn.benchmark = True  # picks the fastest conv algorithm; often a large win at fixed input size
 # Note: disable if input sizes vary batch-to-batch (benchmark overhead dominates)
 ```
 
@@ -674,19 +676,19 @@ The model learned to expect normalized inputs, so raw pixel values are wildly ou
 A 1x1 convolution mixes information across channels at each spatial location, acting as a per-pixel fully connected layer over the channel dimension. It changes channel count without touching spatial extent, which is why ResNet bottlenecks use it to cheaply reduce channels before an expensive 3x3 conv and expand them afterward. It also adds a nonlinearity (via the following ReLU) and underpins pointwise convs in MobileNet and channel projections in skip connections.
 
 **Q: What are dilated (atrous) convolutions and when would you use them?**
-Dilated convolutions insert gaps between kernel taps to enlarge the receptive field without adding parameters or reducing spatial resolution. A 3x3 kernel with dilation 2 covers a 5x5 region but still uses only 9 weights, so stacking dilated convs grows the receptive field exponentially while keeping full-resolution feature maps. This is essential for dense prediction tasks like semantic segmentation (DeepLab), where downsampling would destroy the pixel-level detail the output needs.
+Dilated convolutions insert gaps between kernel taps to enlarge the receptive field without adding parameters or reducing spatial resolution. A 3x3 kernel with dilation 2 covers a 5x5 region but still uses only 9 weights, so stacking them with doubling dilation rates (1, 2, 4, 8) grows the receptive field exponentially while keeping full-resolution feature maps. This is essential for dense prediction tasks like semantic segmentation (DeepLab), where downsampling would destroy the pixel-level detail the output needs.
 
 ---
 
 ## 13. Best Practices
 
 - Always start with transfer learning from ImageNet-pretrained weights unless the domain is radically different (e.g., satellite imagery, medical scans) — even then, try ImageNet init first.
-- Apply `cudnn.benchmark = True` for fixed input-size CNN training to get 10-30% speedup via automatic algorithm selection.
+- Apply `cudnn.benchmark = True` for fixed input-size CNN training: cuDNN benchmarks the available convolution algorithms on the first iteration and reuses the fastest. The size of the win is model- and shape-dependent, so time it rather than assuming a fixed percentage.
 - Use `num_workers=4` and `pin_memory=True` in DataLoader for GPU training to overlap data loading with GPU computation.
 - Normalize input with dataset-specific or ImageNet statistics (mean, std per channel) — mismatched normalization is a common silent accuracy killer.
 - For transfer learning, use differential learning rates: backbone LR = head LR / 10 to avoid catastrophically forgetting pretrained features.
 - Monitor validation loss and accuracy per epoch; implement early stopping with patience=10 to prevent wasted compute.
-- Use mixed precision (`torch.amp.autocast` + `GradScaler`) — ResNet-50 training saves ~40% memory and runs ~1.7x faster with negligible accuracy impact.
+- Use mixed precision (`torch.amp.autocast` + `GradScaler`) — fp16 activations roughly halve activation memory, and NVIDIA's published ResNet-50 v1.5 PyTorch benchmarks report 2.3-3.3x training throughput versus the FP32/TF32 baseline (single- and 8-GPU DGX V100 and A100), with negligible accuracy impact.
 - Always set `bias=False` in conv layers that feed a BatchNorm — BN subtracts the mean, so the conv bias is redundant and BN's own beta absorbs the offset. This is the standard in every reference ResNet/EfficientNet implementation.
 - Preferred augmentation library: `albumentations` for speed — its published benchmarks show a ~1.4x median throughput win over torchvision and Pillow in a full DataLoader pipeline, and roughly 4-6x on isolated transforms measured in the micro-benchmark.
 
@@ -698,7 +700,7 @@ Dilated convolutions insert gaps between kernel taps to enlarge the receptive fi
 
 **Architecture:**
 ```
-Camera Array (6 cameras per line, 4K at 30 FPS)
+Camera Array (6 cameras per line, 1080p at 30 FPS)
   Resolution: 1920x1080, JPEG-compressed
          |
          v
@@ -723,7 +725,7 @@ Multi-class + Multi-label Output
 Edge Inference (TensorRT INT8, Jetson AGX Xavier)
   Inference: 85ms p50, 112ms p99
   Model size: 18 MB (INT8 quantised)
-  Throughput: 11 boards/second per camera at p50 (8.9/s if sized off p99)
+  Throughput: 11.8 boards/second per camera at p50 (8.9/s if sized off p99)
 ```
 
 **Step-by-step implementation:**
@@ -937,29 +939,42 @@ probs = torch.sigmoid(logits)
 preds = (probs >= thresholds).float()   # thresholds tuned per-class
 ```
 
-**Pitfall 3 - INT8 quantisation without calibration causes precision degradation on defect-heavy images:**
+**Pitfall 3 - INT8 quantisation calibrated on unrepresentative images degrades precision on defect-heavy boards:**
 ```python
-# BROKEN: enable INT8 without supplying a calibrator
-# With no IInt8Calibrator attached, TensorRT has no observed activation ranges to
-# derive per-tensor scales from; defect-specific dynamic range is missed
-import tensorrt as trt
-config.set_flag(trt.BuilderFlag.INT8)            # no config.int8_calibrator set
-plan = builder.build_serialized_network(network, config)
-# (builder.build_engine(network, config) was removed in TensorRT 10 - the current
-#  entry points are build_serialized_network / build_engine_with_config)
+# BROKEN: calibrate on defect-free boards only
+# TensorRT 11 removed implicit quantisation outright: BuilderFlag.INT8,
+# config.int8_calibrator and the whole IInt8Calibrator / IInt8EntropyCalibrator2
+# family are gone, and every network is strongly typed. Scales now come from Q/DQ
+# nodes baked into the ONNX ahead of the build, so the calibration set is the only
+# thing that determines them - clean boards never exercise the solder-bridge
+# activation range, so INT8 clips exactly the signal the classifier needs.
+from modelopt.onnx.quantization import quantize
+
+quantize(
+    onnx_path="pcb_b3.onnx",
+    quantize_mode="int8",
+    calibration_data=clean_boards_only,        # WRONG: 500 defect-free boards
+    output_path="pcb_b3_int8.onnx",
+)
 # Solder bridge detection precision drops from 0.97 to 0.71 post-quantisation
 
-# FIX: use INT8 calibration with representative defect images (min 500 per class)
-class PCBCalibrator(trt.IInt8EntropyCalibrator2):
-    def __init__(self, calibration_images: list[np.ndarray], cache_file: str) -> None:
-        trt.IInt8EntropyCalibrator2.__init__(self)   # REQUIRED: pybind11 base init
-        self.images = calibration_images   # 500 images covering all defect types
-        self.cache_file = cache_file
-        self.current_index = 0
-    # get_batch_size, get_batch, read/write_calibration_cache methods...
+# FIX: calibrate on representative defect images (min 500 per class)
+quantize(
+    onnx_path="pcb_b3.onnx",
+    quantize_mode="int8",
+    calibration_method="entropy",              # default for int8
+    calibration_data=defect_balanced_calib,    # 500 images per defect class
+    output_path="pcb_b3_int8.onnx",
+)
 
-config.int8_calibrator = PCBCalibrator(calib_images, "pcb_calib.cache")
+import tensorrt as trt
+# The quantised ONNX carries its own Q/DQ scales - the build sets no precision flag
+parser = trt.OnnxParser(network, logger)
+with open("pcb_b3_int8.onnx", "rb") as f:
+    parser.parse(f.read())
 plan = builder.build_serialized_network(network, config)
+# (builder.build_engine(network, config) was removed in TensorRT 10; the current
+#  entry points are build_serialized_network / build_engine_with_config)
 # Post-calibration precision: 0.96 (< 1% drop from fp32)
 ```
 
@@ -988,6 +1003,6 @@ plan = builder.build_serialized_network(network, config)
 
 **What is catastrophic forgetting and why does the two-phase training prevent it?** Catastrophic forgetting occurs when a neural network rapidly overwrites previously learned representations when exposed to a new task. When fine-tuning EfficientNet-B3 on 8K PCB images with a high backbone LR (3e-4), the ImageNet-learned edge and texture detectors in early layers are overwritten within 2 epochs because the gradient signal from 8K samples is insufficient to maintain 12M parameter values. Phase 1 (frozen backbone) trains only the ~0.79M head parameters (1536x512 + 512 = 786,944, plus 1,024 for BatchNorm1d(512), plus 512x8 + 8 = 4,104) on the new task, allowing the head to learn PCB-relevant feature combinations from the existing backbone. Phase 2 uses 10x lower LR on the backbone to make small, targeted adjustments to domain-specific features (solder texture, PCB green colour) without destroying the general visual primitives.
 
-**How do you validate that INT8 quantisation does not degrade safety-critical defect recall?** Run the INT8 model and the fp32 model on a held-out test set of 10,000 images, computing per-class precision and recall. For safety-critical classes (solder_bridge, missing_component), set a maximum acceptable precision/recall drop of 2pp versus fp32. If any class exceeds this threshold, use mixed precision quantisation: INT8 for early and middle layers (low sensitivity), fp16 for the final two convolutional blocks and classifier head (high sensitivity). NVIDIA TensorRT supports layer-by-layer precision assignment, so sensitive layers can be pinned to fp16 while the rest stay INT8; the accuracy recovered is model- and data-specific, so measure it per class rather than assuming a fixed recovery.
+**How do you validate that INT8 quantisation does not degrade safety-critical defect recall?** Run the INT8 model and the fp32 model on a held-out test set of 10,000 images, computing per-class precision and recall. For safety-critical classes (solder_bridge, missing_component), set a maximum acceptable precision/recall drop of 2pp versus fp32. If any class exceeds this threshold, use mixed precision quantisation: INT8 for early and middle layers (low sensitivity), fp16 for the final two convolutional blocks and classifier head (high sensitivity). TensorRT 11 removed the builder-side per-layer precision override, so this is now expressed at quantisation time: exclude the sensitive nodes from quantisation (ModelOpt's `nodes_to_exclude` / `op_types_to_exclude`) so they keep the `high_precision_dtype` (fp16 by default) while the rest carry Q/DQ. The accuracy recovered is model- and data-specific, so measure it per class rather than assuming a fixed recovery.
 
-**What data augmentation strategy is most effective for PCB defect detection and why?** Geometric augmentations (rotation +-15 degrees, horizontal flip) simulate PCB orientation variations on the conveyor belt. Colour jitter (brightness +-20%, contrast +-20%) simulates lighting variations across production lines and times of day. MixUp and CutMix are avoided because combining two PCB images creates unrealistic composite boards that confuse defect localisation. Mosaic augmentation (combining 4 images into one) from YOLOv5 is effective if using a detection head rather than classification, as it increases the effective number of defect instances per training step. Cutout (random rectangular masking) improves robustness to partial occlusion from surface contaminants.
+**What data augmentation strategy is most effective for PCB defect detection and why?** Geometric augmentations (rotation +-15 degrees, horizontal flip) simulate PCB orientation variations on the conveyor belt. Colour jitter (brightness +-20%, contrast +-20%) simulates lighting variations across production lines and times of day. MixUp and CutMix are avoided because combining two PCB images creates unrealistic composite boards that confuse defect localisation. Mosaic augmentation (combining 4 images into one), introduced with YOLOv4 and carried into YOLOv5, is effective if using a detection head rather than classification, as it increases the effective number of defect instances per training step. Cutout (random rectangular masking) improves robustness to partial occlusion from surface contaminants.

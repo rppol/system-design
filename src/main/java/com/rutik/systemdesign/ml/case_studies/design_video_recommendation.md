@@ -2,11 +2,11 @@
 
 > "A video recommender is a TV channel that reprograms itself for every viewer between one video ending and the next one starting — and it is graded not on whether you press play, but on whether you are still watching an hour later."
 
-**Key insight:** The defining decision in video recommendation is the *objective*, not the architecture. If you optimize click-through rate you get clickbait — thumbnails and titles that win the click and lose the hour. YouTube's answer (Covington et al., 2016) is a ranking model trained as **weighted logistic regression** where each positive impression is weighted by its watch time, so the learned odds approximate *expected watch time per impression* rather than P(click). The 2019 successor (Zhao et al.) generalizes this to a **multi-gate mixture-of-experts (MMoE)** that jointly predicts many engagement and satisfaction signals, with a shallow tower that removes position/selection bias. Everything else — two-tower candidate generation, ANN retrieval, feature stores — is shared with any large recommender; the watch-time objective and the multitask ranking head are what make this problem *video*.
+**Key insight:** The defining decision in video recommendation is the *objective*, not the architecture. If you optimize click-through rate you get clickbait — thumbnails and titles that win the click and lose the hour. YouTube's answer (Covington et al., 2016) is a ranking model trained as **weighted logistic regression** where each positive impression is weighted by its watch time, so the learned odds approximate *expected watch time per impression* rather than P(click). The 2019 successor (Zhao et al.) generalizes this by adopting **multi-gate mixture-of-experts (MMoE**, introduced by Ma et al., KDD 2018**)** to jointly predict many engagement and satisfaction signals, with a shallow tower that removes position/selection bias. Everything else — two-tower candidate generation, ANN retrieval, feature stores — is shared with any large recommender; the watch-time objective and the multitask ranking head are what make this problem *video*.
 
 Mental model: two funnels in series. **Candidate generation** turns "millions of videos" into "a few hundred plausible ones" using cheap, high-recall retrieval (you are allowed to be sloppy — you only need the right videos *somewhere* in the few hundred). **Ranking** turns "a few hundred" into "an ordered list of ~20" using an expensive, high-precision model that can afford hundreds of features per (user, video) pair. The two stages have opposite cost/quality tradeoffs on purpose.
 
-Why this system exists: YouTube has reported that recommendations drive ~70% of watch time on the platform. At the scale of a billion-video corpus and a billion users, a 1% relative improvement in watch time is worth an enormous amount of engagement — and, just as importantly, a badly-tuned objective (raw clicks, raw watch time without satisfaction guards) can actively degrade the product by promoting outrage and clickbait. This case study is asked at Google, Meta (Reels), TikTok, Netflix, and Spotify for senior/staff MLE roles.
+Why this system exists: YouTube's then-chief product officer Neal Mohan said at CES in January 2018 that recommendations drive ~70% of watch time on the platform (the company has not published an updated figure since). At the scale of a multi-billion-video corpus and billions of users, a 1% relative improvement in watch time is worth an enormous amount of engagement — and, just as importantly, a badly-tuned objective (raw clicks, raw watch time without satisfaction guards) can actively degrade the product by promoting outrage and clickbait. This case study is asked at Google, Meta (Reels), TikTok, Netflix, and Spotify for senior/staff MLE roles.
 
 This study is deliberately **distinct** from two neighbors you should cross-read:
 - [Content Feed Ranking](design_content_feed_ranking.md) — multi-objective *feed* ranking (a scrollable timeline; the unit is a post, engagement is like/comment/share). Video-rec here centers watch-time regression and sequential "what to watch next".
@@ -43,9 +43,9 @@ This study is deliberately **distinct** from two neighbors you should cross-read
 ## 2. Scale Estimation
 
 **Corpus and users:**
-- Total videos: ~1B lifetime; **eligible/retrievable corpus** ~ 100M (recently uploaded or with recent engagement — you never retrieve from the full billion). This distinction is the whole reason candidate generation is tractable.
-- Users: 2B monthly, ~500M DAU.
-- Uploads: ~500 hours of video/minute → ~30k new videos/hour needing cold-start handling.
+- Total videos: YouTube said at its 20th anniversary (April 2025) that **over 20B videos** have been uploaded to date; the **eligible/retrievable corpus** we assume here is ~100M (recently uploaded or with recent engagement — you never retrieve from the full lifetime corpus). This distinction is the whole reason candidate generation is tractable.
+- Users: 2B+ monthly logged-in (YouTube's last published figure, 2019; third-party trackers now put reach above 2.5B). DAU is not published — assume ~500M for this exercise.
+- Uploads: YouTube reported **>20M videos uploaded per day** as of March 2025 → ~800k new videos/hour needing cold-start handling. (The older, still widely repeated "500 hours of video per minute" figure is ~30k *hours* of new video per hour — hours, not videos; do not convert one to the other without an average-duration assumption.)
 
 **Traffic:**
 - 1M req/sec peak, ~300k req/sec average.
@@ -53,8 +53,8 @@ This study is deliberately **distinct** from two neighbors you should cross-read
 
 **Candidate generation (two-tower ANN):**
 - User/video embedding dim: 256 floats.
-- Video ANN index: 100M × 256 × 4 bytes = **~100 GB** → does NOT fit one node; shard across ~8–16 ANN replicas (IVF-PQ or ScaNN), or compress with product quantization to ~8 GB. Contrast with the personalization study's 256 MB single-node FAISS — the corpus size flips the architecture from in-process to sharded.
-- ANN retrieve top-500: ~5–10 ms per shard, fan-out + merge.
+- Video ANN index: 100M × 256 × 4 bytes = **~100 GB** raw → does NOT fit one node; shard across ~16 ANN shards (IVF-PQ or ScaNN) and compress with product quantization to 32-byte codes = ~3 GB total (see §4.1), so each shard replica holds ~200 MB. Contrast with the personalization study's 256 MB single-node FAISS — the corpus size flips the architecture from in-process to sharded.
+- ANN retrieve top-500: ~5–10 ms **wall-clock**, because the ~16 shard queries run in parallel and are then merged; the aggregate CPU cost per request is the sum over shards, not the wall-clock number (see §10).
 
 **Ranking:**
 - 500 candidates × ~500 features each. A DNN ranker on GPU scores 500 candidates in ~10–20 ms batched.
@@ -67,9 +67,9 @@ This study is deliberately **distinct** from two neighbors you should cross-read
 
 **Rough infra cost (order-of-magnitude):**
 - Ranking GPUs: ~200 × A10G-class to hold 1M req/sec × 500-candidate scoring with headroom.
-- ANN serving: ~50 CPU nodes across shards + replicas.
+- ANN serving: order 10^4 CPU cores (~300 × 32-core nodes) across shards + replicas — every request fans out to all shards, so the shard count multiplies the CPU bill (see §10).
 - Streaming + feature store: Kafka + Flink + Bigtable clusters.
-- This is a "thousands of cores + hundreds of GPUs" system; the interview point is *where* the cost concentrates (ranking scoring), not the exact dollar figure.
+- This is a "tens of thousands of cores + hundreds of GPUs" system; the interview point is *where* the compute concentrates (ranking scoring dominates FLOPs; ANN fan-out dominates core count), not the exact dollar figure.
 
 ---
 
@@ -174,17 +174,21 @@ class UserTower(nn.Module):
     """
     Encodes a user into a query vector. Inputs: average of the embeddings of
     recently watched videos, average of recent search tokens, plus dense
-    context (geo, device, age of account). Covington-style watch-history
-    averaging is deliberately simple and cheap; the sequence models live in
-    the ranker, not the retriever.
+    context (geo, device, age of account). Covington et al. use a 1M-video
+    vocabulary and a SEPARATE 1M search-token vocabulary, each embedded in 256
+    floats, with a max bag size of 50 recent watches and 50 recent searches.
+    The watch-history averaging is deliberately simple and cheap; the sequence
+    models live in the ranker, not the retriever.
     """
 
-    def __init__(self, video_vocab_emb: nn.Embedding, dense_dim: int, out_dim: int = 256):
+    def __init__(self, video_vocab_emb: nn.Embedding, search_vocab_emb: nn.Embedding,
+                 dense_dim: int, out_dim: int = 256):
         super().__init__()
         self.video_emb = video_vocab_emb          # shared with the video tower
+        self.search_emb = search_vocab_emb        # separate search-token vocabulary
         emb_dim = video_vocab_emb.embedding_dim
         self.mlp = nn.Sequential(
-            nn.Linear(emb_dim * 2 + dense_dim, 1024), nn.ReLU(),
+            nn.Linear(emb_dim + search_vocab_emb.embedding_dim + dense_dim, 1024), nn.ReLU(),
             nn.Linear(1024, 512), nn.ReLU(),
             nn.Linear(512, out_dim),
         )
@@ -192,7 +196,7 @@ class UserTower(nn.Module):
     def forward(self, watch_hist_ids, search_hist_ids, dense_feats):
         # watch_hist_ids: (B, H) recent watched video ids; mean-pool their embeddings
         watch_vec = self.video_emb(watch_hist_ids).mean(dim=1)     # (B, emb)
-        search_vec = self.video_emb(search_hist_ids).mean(dim=1)   # (B, emb)
+        search_vec = self.search_emb(search_hist_ids).mean(dim=1)  # (B, emb)
         x = torch.cat([watch_vec, search_vec, dense_feats], dim=-1)
         return F.normalize(self.mlp(x), dim=-1)                    # unit vectors → cosine ANN
 
@@ -201,9 +205,14 @@ def sampled_softmax_loss(user_vec, pos_video_ids, video_emb_table,
                          num_neg: int = 2000):
     """
     Extreme multiclass over millions of videos is intractable with a full
-    softmax. Train with *sampled* negatives (importance-corrected). This is the
-    retriever's whole trick: high recall, cheap, negatives sampled from the
-    corpus so the user vector learns to point at watched videos.
+    softmax. Train with *sampled* negatives. This is the retriever's whole
+    trick: high recall, cheap, negatives sampled from the corpus so the user
+    vector learns to point at watched videos. Covington et al. sample "several
+    thousand" negatives from the background (popularity) distribution and then
+    correct for the sampling with importance weighting — i.e. subtract
+    log q(class) from each sampled logit. The uniform sampling below omits both
+    the popularity prior and that correction for brevity; a production
+    implementation needs them (e.g. tf.nn.sampled_softmax_loss).
     """
     B = user_vec.size(0)
     pos_emb = video_emb_table(pos_video_ids)                       # (B, d)
@@ -217,7 +226,7 @@ def sampled_softmax_loss(user_vec, pos_video_ids, video_emb_table,
     return F.cross_entropy(logits, target)
 ```
 
-At serving time the video embedding table is exported into a sharded ANN index (IVF-PQ / ScaNN). Retrieval is `index.search(user_vec, top_k=500)` fanned across shards. Because the corpus is 100M, the index is quantized: product quantization compresses 256-float vectors to ~32-byte codes, trading a small recall loss for a 32× memory reduction — the difference between 100 GB and ~3 GB per replica.
+At serving time the video embedding table is exported into a sharded ANN index (IVF-PQ / ScaNN). Retrieval is `index.search(user_vec, 500)` fanned across shards. Because the corpus is 100M, the index is quantized: product quantization compresses 256-float vectors to ~32-byte codes, trading a small recall loss for a 32× memory reduction — the difference between 100 GB and ~3 GB per replica.
 
 ### 4.2 The ranking objective — watch-time-weighted logistic regression
 
@@ -228,8 +237,10 @@ This is the heart of the design. The ranker sees ~500 candidates and hundreds of
 ```python
 # WRONG: binary click label. The model learns that sensational thumbnails and
 # misleading titles get clicked, regardless of whether the video is watched.
-# Observed failure: CTR up 12%, average watch time DOWN 8% — classic clickbait
-# amplification. The objective rewards the click, not the watch.
+# Illustrative failure shape (not a published measurement): CTR up, average
+# watch time down — classic clickbait amplification. Covington et al. give the
+# qualitative version: ranking by click probability promotes deceptive videos
+# the user does not complete, whereas watch time captures engagement.
 label = 1.0 if impression.clicked else 0.0
 loss = F.binary_cross_entropy_with_logits(logit, label)
 ```
@@ -330,9 +341,14 @@ import torch.nn.functional as F
 
 class MMoE(nn.Module):
     """
-    Multi-gate Mixture-of-Experts ranking trunk (Zhao et al. 2019).
+    Multi-gate Mixture-of-Experts ranking trunk. MMoE is from Ma et al.,
+    KDD 2018; Zhao et al. 2019 adopt it for YouTube ranking, placing the
+    experts on top of a shared hidden layer (not directly on the input layer,
+    which would be far more expensive) and running 4 or 8 experts.
     n_experts shared experts; one gate per task produces a softmax mixture,
-    so each task reads a task-specific blend of the experts.
+    so each task reads a task-specific blend of the experts. Zhao et al. also
+    apply 10% dropout on the gating softmax to stop gates from collapsing onto
+    a single expert (observed in ~20% of distributed training runs).
     """
 
     def __init__(self, in_dim: int, n_experts: int = 8, expert_dim: int = 256,
@@ -360,10 +376,15 @@ class MMoE(nn.Module):
 class RankerWithBiasTower(nn.Module):
     """
     Main MMoE + a SHALLOW tower fed only position/device (the features that
-    cause selection bias). At training the shallow tower explains away the
-    position effect; at serving we drop it (or set position=neutral), so the
-    main model's score is position-unbiased. This is Zhao et al.'s fix for the
-    feedback loop where high positions get clicked because they are high.
+    cause selection bias; Zhao et al. cross the two because position bias
+    differs by device). Its output is ADDED to the final logit of the main
+    model — a Wide & Deep factorization into user-utility and bias components.
+    In training all impression positions are used with a 10% feature dropout so
+    the model cannot over-rely on position; at serving the position feature is
+    treated as missing, so the main model's score is position-unbiased. This is
+    Zhao et al.'s fix for the feedback loop where high positions get clicked
+    because they are high; in their live A/B it beat both "position as a plain
+    input feature" and an adversarial-loss baseline.
     """
 
     def __init__(self, feat_dim: int, bias_dim: int):
@@ -389,7 +410,10 @@ def fuse_scores(heads: dict, w=(1.0, 0.3, -1.5)) -> torch.Tensor:
     Combine heads into one ranking score. Weights are tuned by online A/B, not
     offline loss: watch time positive, like mildly positive, 'not interested'
     strongly negative. The negative weight on dissatisfaction is what stops the
-    compulsive-but-regretted content from dominating.
+    compulsive-but-regretted content from dominating. Note Zhao et al. describe
+    their production combination function as a *weighted multiplication* of the
+    per-task predictions with manually tuned weights; the additive form below is
+    the simpler variant and is easier to reason about in an interview.
     """
     w_wt, w_like, w_skip = w
     return (w_wt * torch.exp(heads["watch_time"])
@@ -409,9 +433,10 @@ def example_age_feature(upload_time, context_time) -> float:
     """
     Covington's 'example age' trick: feed the age of the training example as a
     feature so the model learns the empirical freshness-decay curve instead of
-    averaging it away. At serving, set age=0 (or a small value) to bias toward
-    fresh content; sweeping this feature reproduces the observed upload-time
-    popularity spike-and-decay.
+    averaging it away over the multi-week training window. At serving the paper
+    sets this feature to zero (or slightly negative), reflecting that prediction
+    happens at the very end of the training window; sweeping it reproduces the
+    observed upload-time popularity spike-and-decay.
     """
     return (context_time - upload_time).total_seconds() / 3600.0  # hours
 
@@ -420,8 +445,9 @@ def cold_start_video_embedding(meta, category_centroids, text_encoder) -> np.nda
     """
     A brand-new video has no collaborative signal. Warm-start its retrieval
     embedding from content: category centroid + title/description text embedding
-    + creator's average video embedding. Once it accrues ~50-100 watches, the
-    learned collaborative embedding takes over at the next index build.
+    + creator's average video embedding. Once it accrues enough watches (a
+    tunable threshold, order 10^2) the learned collaborative embedding takes
+    over at the next index build.
     """
     cat = category_centroids[meta["category"]]
     txt = text_encoder(meta["title"] + " " + meta["description"])
@@ -493,13 +519,13 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 
 **YouTube (Covington et al., RecSys 2016 — "Deep Neural Networks for YouTube Recommendations").** The canonical two-stage design: a candidate-generation network trained as extreme multiclass classification (serving via nearest-neighbor in embedding space) and a ranking network trained as watch-time-weighted logistic regression. Introduced the "example age" feature to model the upload-time freshness spike and showed that averaging recent watch/search embeddings as the user representation is a strong, cheap retriever.
 
-**YouTube (Zhao et al., RecSys 2019 — "Recommending What Video to Watch Next: A Multitask Ranking System").** Generalized the ranker to a Multi-gate Mixture-of-Experts predicting multiple engagement and satisfaction objectives, and added a shallow "bias tower" to remove selection/position bias. Reported that MMoE reduced negative transfer versus shared-bottom and that the bias tower measurably improved engagement by breaking the position feedback loop.
+**YouTube (Zhao et al., RecSys 2019 — "Recommending What Video to Watch Next: A Multitask Ranking System").** Adopted Multi-gate Mixture-of-Experts (Ma et al., KDD 2018) for the ranker, predicting multiple engagement (clicks, watches) and satisfaction (likes, dismissals, survey ratings) objectives, and added a shallow "bias tower" to remove selection/position bias. In their YouTube live experiments, at matched model complexity MMoE with 8 experts beat the shared-bottom baseline by **+0.45% engagement and +3.07% satisfaction** (4 experts: +0.20% / +1.22%), and the shallow tower improved the engagement metric by **+0.24%** versus -0.07% for feeding position as a plain input feature and +0.01% for an adversarial-loss baseline. Note these are single-digit-fraction-of-a-percent lifts on a platform metric — the paper does not claim large absolute gains.
 
-**Meta (Reels) and TikTok.** Short-video "For You" systems push the freshness and objective-design points to the extreme: near-real-time engagement signals, heavy multitask ranking (finish rate, replays, shares, "not interested"), and aggressive exploration for new creators. TikTok's cold-start "traffic valve" (giving a new video a small guaranteed audience, then promoting based on early completion rate) is a productionized version of the fresh-pool + example-age idea.
+**Meta (Reels) and TikTok.** Short-video "For You" systems push the freshness and objective-design points to the extreme: near-real-time engagement signals, heavy multitask ranking (finish rate, replays, shares, "not interested"), and aggressive exploration for new creators. Third-party write-ups commonly describe a cold-start "traffic pool" — giving a new video a small guaranteed test audience and promoting it on early completion rate — as a productionized version of the fresh-pool + example-age idea; note that TikTok's own public description of the For You feed does not document such a mechanism, so treat the specifics as folklore rather than published design.
 
 **Netflix.** Ranks rows/titles rather than a next-video stream, but shares the two-stage retrieval+ranking and the "optimize long-term member value, not immediate clicks" philosophy. Netflix emphasizes calibrated ranking and diversity across the home page.
 
-**Spotify.** Session-vs-history split (Discover Weekly = history; Daily Mix = session/mood). The interview-relevant transfer is that *context strongly matters for some media (music/short video) and weakly for others (long documentaries)* — the objective and freshness weighting should be tuned per surface.
+**Spotify.** A discovery-vs-familiarity split rather than a session-vs-history one: Discover Weekly is 30 tracks of music you have *not* heard, while Daily Mix clusters your own listening history into several genre/mood mixes of mostly familiar artists. The interview-relevant transfer is that *context strongly matters for some media (music/short video) and weakly for others (long documentaries)* — the objective and freshness weighting should be tuned per surface.
 
 ---
 
@@ -540,13 +566,13 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 
 ## 9. Common Pitfalls & War Stories
 
-**Pitfall 1: Optimizing clicks and shipping clickbait.** A team switched the ranker from watch-time-weighted logistic to plain click BCE "to simplify." CTR rose ~12% and leadership celebrated — until the 28-day watch-time metric fell ~8% and "not interested" reports rose. The model had learned that lurid thumbnails win clicks and lose watches. Fix: restore watch-time weighting; add the satisfaction head with a negative fusion weight. Lesson: *the label is the product decision*; a one-line objective change can silently degrade the platform.
+**Pitfall 1: Optimizing clicks and shipping clickbait.** (Illustrative composite, not a published incident.) A team switches the ranker from watch-time-weighted logistic to plain click BCE "to simplify." CTR rises and leadership celebrates — until the 28-day watch-time metric falls and "not interested" reports rise. The model had learned that lurid thumbnails win clicks and lose watches. Fix: restore watch-time weighting; add the satisfaction head with a negative fusion weight. Lesson: *the label is the product decision*; a one-line objective change can silently degrade the platform.
 
 **Pitfall 2: Training-serving skew from label maturation.** Watch-time labels are not known at impression time — they mature over minutes/hours. A pipeline joined impressions to labels using the impression timestamp but read the feature store "as of now," leaking future counters (a video's total views) into training features. Offline AUC looked great; online was far worse. Fix: point-in-time correct joins — features as of impression time only. See [feature_store_and_point_in_time_correctness.md](cross_cutting/feature_store_and_point_in_time_correctness.md).
 
 **Pitfall 3: Position bias feedback loop.** Trained on logged clicks without debiasing, the ranker learned that top-position videos are "better" (they were merely more visible), then kept them on top, reinforcing the bias every retrain. Diversity and new-creator exposure collapsed. Fix: the shallow bias tower (or IPW) so position stops leaking into the main model. See [experimentation_and_online_evaluation.md](cross_cutting/experimentation_and_online_evaluation.md).
 
-**Pitfall 4: Retrieval recall bottleneck ignored.** A team spent a quarter improving the ranker while watch time barely moved. Root cause: recall@500 was only ~60% — 40% of the videos users would have watched were never *retrieved*, so no ranking improvement could surface them. Fix: monitor and optimize retrieval recall first; add candidate sources (co-watch, fresh pool). Lesson: in a two-stage system, the ranker cannot fix what retrieval never proposes.
+**Pitfall 4: Retrieval recall bottleneck ignored.** (Illustrative composite.) A team spends a quarter improving the ranker while watch time barely moves. Root cause: recall@500 is well short of 100% — say ~60%, meaning 40% of the videos users would have watched were never *retrieved*, so no ranking improvement could surface them. Fix: monitor and optimize retrieval recall first; add candidate sources (co-watch, fresh pool). Lesson: in a two-stage system, the ranker cannot fix what retrieval never proposes.
 
 **Pitfall 5: Heavy-tail watch time destabilizing training.** A few multi-hour videos (live streams, lectures) produced enormous sample weights, and the weighted-logistic loss chased them, degrading everything else. Fix: clip/transform watch-time weights (e.g., cap at a high percentile, or use log-watch-time) before weighting. Watch the calibration curve, not just AUC.
 
@@ -556,7 +582,7 @@ Engagement distributions shift on a daily/weekly cycle and around events. Daily 
 
 ## 10. Capacity Planning
 
-**Primary bottleneck: ranking-model scoring at 1M req/sec × 500 candidates.**
+**Primary compute bottleneck: ranking-model scoring at 1M req/sec × 500 candidates** — that is where the FLOPs and the GPU spend go. The largest *core* count, however, is the ANN fan-out, because every request touches every index shard. Both per-unit throughput figures below are modeling assumptions to be replaced with your own measurements.
 
 ```
 Target: 1M req/sec, 200 ms p99, 500 candidates ranked per request
@@ -567,14 +593,20 @@ Ranking (GPU):
   Required GPUs: 5e8 / 4e6 ≈ 125 GPUs; with headroom + redundancy → ~200 GPUs
 
 Candidate generation (ANN, CPU):
-  100M-vector IVF-PQ index sharded ×16; each query fans to shards
-  Per-query ANN: ~5-10 ms; per-core throughput ~1-2k queries/sec
-  1M req/sec / 1.5k qps ≈ 670 cores across shards+replicas → ~50 nodes
+  100M-vector IVF-PQ index sharded ×16; EVERY query fans out to all 16 shards
+  Per shard-query: ~0.5-1 ms of CPU → ~1-2k shard-queries/sec/core
+  Aggregate: 1M req/sec × 16 shards = 1.6 × 10^7 shard-queries/sec
+  Required cores: 1.6e7 / 1.5e3 ≈ 1.1 × 10^4 cores → ~330 × 32-core nodes
+  Wall-clock stays ~5-10 ms because the 16 shard queries run in parallel;
+  do NOT divide request rate by per-core throughput without the fan-out factor
 
 Feature store:
   1M req/sec × (1 user + ~500 video feature reads, batched) → Bigtable/Redis
-  Hot-key mitigation: cache viral-video features in an in-process L1 (top 0.1%
-  of videos serve ~30% of impressions)
+  Hot-key mitigation: cache viral-video features in an in-process L1. Video
+  popularity is extremely head-heavy — a random-sample study of YouTube
+  (McGrady et al. 2023) found the 3.67% of videos with 10k+ views drew 93.6%
+  of all views — so a small L1 covers most impressions; size it from your own
+  measured head, not a guessed percentile
 
 Streaming (freshness counters):
   Ingest all watch events; Flink keyed by video_id; Redis write-through
@@ -597,34 +629,34 @@ Weight each clicked (positive) impression by its watch time and each non-clicked
 You cannot run a 500-feature DNN over a 100M-video corpus within a 200 ms budget. Candidate generation is cheap and high-recall (millions → hundreds) using two-tower ANN; ranking is expensive and high-precision (hundreds → ~20) with many features per pair. The two stages have deliberately opposite cost/quality tradeoffs. The catch: retrieval recall caps the whole system — a video not retrieved can never be ranked — so recall@K is a first-class metric.
 
 **Q: What is MMoE and what problem does it solve here?**
-Multi-gate Mixture-of-Experts is a multitask trunk with several shared experts and a per-task gate that softmax-mixes those experts. It lets each objective (watch time, like, "not interested") read a task-specific blend of experts, reducing negative transfer — the "seesaw" where improving one objective hurts another in a shared-bottom network. It matters for video because engagement and satisfaction objectives genuinely conflict, and you want to combine them without them fighting inside one shared representation.
+Multi-gate Mixture-of-Experts is a multitask trunk with several shared experts and a per-task gate that softmax-mixes those experts. It comes from Ma et al. (KDD 2018); Zhao et al. (RecSys 2019) adopted it for YouTube ranking with 4 or 8 experts sitting on a shared hidden layer. It lets each objective (watch time, like, "not interested") read a task-specific blend of experts, reducing negative transfer — the "seesaw" where improving one objective hurts another in a shared-bottom network. It matters for video because engagement and satisfaction objectives genuinely conflict, and you want to combine them without them fighting inside one shared representation.
 
 **Q: How do you correct for position/selection bias?**
-Logged clicks are biased: high-position videos get clicked because they are visible, and training on that creates a feedback loop that re-promotes them. Two fixes: (1) a shallow "bias tower" fed only position/device that jointly explains the position effect during training and is neutralized at serving, so the main model's score is position-unbiased; (2) inverse propensity weighting, reweighting examples by `1/P(click|position)`. The shallow tower is simpler to serve and avoids high-variance propensity estimates; IPW is more principled with reliable position-CTR data.
+Logged clicks are biased: high-position videos get clicked because they are visible, and training on that creates a feedback loop that re-promotes them. Two fixes: (1) a shallow "bias tower" fed only position/device whose output is added to the main model's final logit during training (with 10% position-feature dropout) and whose input is treated as missing at serving, so the served score is position-unbiased; (2) inverse propensity weighting, reweighting examples by `1/P(click|position)`. The shallow tower is simpler to serve and avoids high-variance propensity estimates; IPW is more principled with reliable position-CTR data.
 
 **Q: How do you recommend a video uploaded five minutes ago with no watch history?**
 Two mechanisms. Content warm-start: initialize the video's retrieval embedding from its category centroid, title/description text embedding, and the creator's average video embedding, so it is retrievable before any collaborative signal exists. And a dedicated fresh-upload candidate pool (uploads < 24h) that bypasses the slower full ANN index rebuild, meeting a ~5-minute freshness SLO. Covington's "example age" feature additionally lets the model learn the freshness-decay curve so fresh content is boosted appropriately.
 
 **Q: Why is recall@K the metric you watch for retrieval, and what happens if it is low?**
-Recall@K measures whether the video the user eventually watched was among the K retrieved candidates. If it is low, the ranker is structurally incapable of surfacing the right video no matter how good it is — you are ranking the wrong shortlist. A real failure mode is spending months improving the ranker while watch time stagnates because recall@500 is ~60%. You fix retrieval first: better two-tower training, more/better candidate sources (co-watch graph, fresh pool, subscriptions).
+Recall@K measures whether the video the user eventually watched was among the K retrieved candidates. If it is low, the ranker is structurally incapable of surfacing the right video no matter how good it is — you are ranking the wrong shortlist. A classic failure mode is spending months improving the ranker while watch time stagnates because recall@500 is far below 100%. You fix retrieval first: better two-tower training, more/better candidate sources (co-watch graph, fresh pool, subscriptions).
 
 **Q: How do you prevent the recommender from collapsing into a filter bubble or a loop of near-identical videos?**
-Several layers: Maximal Marginal Relevance reranking on *topic-cluster* embeddings (not just creator id, so two videos on the same news event count as similar); per-creator/per-topic caps in the rules stage; an exploration budget that injects novel items at non-top positions; and satisfaction heads (with negative fusion weight) that penalize content users mark "not interested". You monitor topic entropy and catalog coverage in the top-20 to catch collapse early.
+You stack several defences, none of which is sufficient alone: diversity reranking, hard caps, exploration, and satisfaction signals. Maximal Marginal Relevance reranks on *topic-cluster* embeddings (not just creator id, so two videos on the same news event count as similar); per-creator/per-topic caps sit in the rules stage; an exploration budget that injects novel items at non-top positions; and satisfaction heads (with negative fusion weight) that penalize content users mark "not interested". You monitor topic entropy and catalog coverage in the top-20 to catch collapse early.
 
 **Q: How should you evaluate a change offline before an A/B test, given watch-time labels mature over time?**
-Use strictly chronological splits (train on the past, evaluate on the future) so you never leak future engagement, and evaluate the watch-time head on calibration (predicted vs actual seconds) as well as AUC, plus per-head AUC for satisfaction tasks and retrieval recall@K. But treat offline metrics as a filter, not a verdict: the real objective is long-horizon (7/28-day retention and watch time), which only an online experiment measures, because a model that adds healthy exploration can look slightly worse on immediate offline CTR.
+Use strictly chronological splits — train on the past, evaluate on the future — so you never leak engagement that had not matured at impression time. Then evaluate the watch-time head on calibration (predicted vs actual seconds) as well as AUC, plus per-head AUC for satisfaction tasks and retrieval recall@K. But treat offline metrics as a filter, not a verdict: the real objective is long-horizon (7/28-day retention and watch time), which only an online experiment measures, because a model that adds healthy exploration can look slightly worse on immediate offline CTR.
 
 **Q: Why weight watch time by a clipped or log transform rather than raw seconds?**
 Raw watch time is heavy-tailed — multi-hour live streams and lectures produce enormous sample weights that dominate the weighted-logistic loss and destabilize training, degrading recommendations for ordinary videos. Clipping the weight at a high percentile (or using log-watch-time) keeps the objective focused on typical viewing while still ranking longer-engagement videos higher. You verify the fix by watching the calibration curve, not just AUC.
 
 **Q: How does this differ from ranking a scrollable feed (e.g., a social timeline)?**
-A feed ranks many heterogeneous items (posts, images, short clips) for simultaneous display and optimizes a blend of engagement actions (like/comment/share) with strong position effects across the visible list; "watch next" ranks a homogeneous item type (videos) for sequential consumption where watch time is the dominant, directly-measurable objective and there is often a strong seed (currently-playing) signal. The retrieval+ranking skeleton is shared, but the objective (watch time vs multi-action engagement) and the sequential vs simultaneous consumption pattern differ. See [Content Feed Ranking](design_content_feed_ranking.md).
+A feed ranks heterogeneous items for simultaneous display and optimizes a blend of engagement actions, while "watch next" ranks one homogeneous item type for sequential consumption against a watch-time objective. A feed's items are posts, images and short clips shown together, with strong position effects across the whole visible list; watch-next has a single dominant, directly-measurable objective and often a strong seed (currently-playing) signal. The retrieval+ranking skeleton is shared, but the objective (watch time vs multi-action engagement) and the sequential vs simultaneous consumption pattern differ. See [Content Feed Ranking](design_content_feed_ranking.md).
 
 **Q: Where does the system's compute cost concentrate, and how do you plan capacity?**
-On ranking-model scoring: 1M req/sec × ~500 candidates ≈ 5×10^8 candidate-scores/sec, which dominates GPU spend (~200 GPUs), whereas ANN retrieval is a comparatively modest CPU cost (~50 nodes) because product quantization shrinks the 100 GB index to a few GB per replica. The other risk is not average throughput but *hot keys* — a viral or live video whose features and real-time counters concentrate load — mitigated with in-process L1 caching of the top ~0.1% of videos and sharded counters summed on read.
+Compute concentrates on ranking-model scoring: 1M req/sec × ~500 candidates ≈ 5×10^8 candidate-scores/sec, which is where the FLOPs and the GPU spend go (~200 GPUs). ANN retrieval is cheap *per vector* — product quantization shrinks the 100 GB index to ~3 GB — but it is not a small fleet, because every request fans out to all ~16 shards: 1.6×10^7 shard-queries/sec is order 10^4 cores. Multiply by the shard count; forgetting the fan-out is the classic capacity-estimate error here. The other risk is not average throughput but *hot keys* — a viral or live video whose features and real-time counters concentrate load — mitigated with in-process L1 caching of the head of the popularity distribution and sharded counters summed on read.
 
 **Q: Would you use online learning to update the ranker in real time?**
 Usually not fully online. The standard is daily batch retraining plus real-time *features* (streaming freshness counters), which captures most of the benefit of recency without the instability of continuous gradient updates on noisy, position-biased, not-yet-matured labels. True online learning is reserved for narrow, well-calibrated signals; for the main multitask ranker, daily retrain + fresh features is more stable and easier to validate before rollout.
 
 **Q: How do you keep watch-time maximization from harming long-term user wellbeing and retention?**
-Add explicit satisfaction objectives to the MMoE — likes, dismissals, "not interested", and periodic user-satisfaction surveys — and give dissatisfaction a strong negative weight in score fusion, so compulsive-but-regretted content is demoted even if it wins raw watch time. Evaluate on long-horizon retention rather than same-session watch time, and maintain a holdout that is never optimized purely for engagement, so you can detect when short-term watch-time gains are eroding the longer-term metric.
+Add explicit satisfaction objectives to the MMoE and weight dissatisfaction strongly negative in score fusion, so compulsive-but-regretted content is demoted even if it wins raw watch time. Those objectives are the signals Zhao et al. group as satisfaction: likes, dismissals, "not interested", and periodic user-satisfaction survey ratings. Evaluate on long-horizon retention rather than same-session watch time, and maintain a holdout that is never optimized purely for engagement, so you can detect when short-term watch-time gains are eroding the longer-term metric.

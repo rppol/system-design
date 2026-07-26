@@ -46,15 +46,12 @@ Meyer's original OCP (1988) referred to **implementation inheritance** as the ex
 public class AreaCalculator {
 
     public double calculateArea(Object shape) {
-        if (shape instanceof Circle) {
-            Circle c = (Circle) shape;
+        if (shape instanceof Circle c) {
             return Math.PI * c.getRadius() * c.getRadius();
-        } else if (shape instanceof Rectangle) {
-            Rectangle r = (Rectangle) shape;
+        } else if (shape instanceof Rectangle r) {
             return r.getWidth() * r.getHeight();
-        } else if (shape instanceof Triangle) {
+        } else if (shape instanceof Triangle t) {
             // Added when Triangle was introduced — touched existing class
-            Triangle t = (Triangle) shape;
             return 0.5 * t.getBase() * t.getHeight();
         }
         // Tomorrow: add Hexagon, Pentagon, etc. — always modify this class
@@ -254,9 +251,9 @@ public class PaymentProcessor {
 1. **Long if-else / switch chains on type or enum:**
    ```java
    switch (notification.getType()) {
-       case EMAIL: sendEmail(...); break;
-       case SMS: sendSms(...); break;
-       case PUSH: sendPush(...); break;
+       case EMAIL -> sendEmail(...);
+       case SMS   -> sendSms(...);
+       case PUSH  -> sendPush(...);
        // Adding SLACK requires modifying this class
    }
    ```

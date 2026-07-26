@@ -291,9 +291,7 @@ Score: most frontier models: 8.5-9.5/10
 
 ```python
 from ragas import evaluate
-# ragas 0.4.x: metrics are classes constructed with their own judge LLM.
-# The old lowercase singletons (`from ragas.metrics import faithfulness, ...`)
-# still resolve but raise DeprecationWarning and are slated for removal in 1.0.
+# Metrics are classes, each constructed with its own judge LLM.
 from ragas.metrics.collections import (
     Faithfulness, AnswerRelevancy, ContextRecall, ContextPrecision,
 )
@@ -401,7 +399,7 @@ Rate each criterion 1-5:
 
 Return JSON: {{"criterion": score, ...}}"""
 
-    result = gpt4.complete(prompt)
+    result = judge_llm.complete(prompt)
     return json.loads(result)
 
 # Common criteria for helpfulness:
@@ -426,7 +424,7 @@ Answer with A, B, or Tie. Then explain why."""
 ```
 Position bias: prefers the first response shown (show both orders, average)
 Verbosity bias: prefers longer responses (explicitly penalize verbosity in rubric)
-Self-preference: GPT-4 prefers GPT-4 style responses
+Self-preference: a judge prefers responses written in its own family's style
 Instruction-following bias: prefers well-formatted responses regardless of accuracy
 ```
 
@@ -793,7 +791,7 @@ Alert thresholds:
 Shadow evaluation pattern (production best practice):
   ┌──────────────┐    ┌───────────────────┐
   │ Production    │    │ Shadow Pipeline    │
-  │ Model v2.1   │    │ Candidate v2.2     │
+  │ Model v2.1   │    │ Candidate v2.2      │
   │ (serves users)│    │ (no user traffic)  │
   └──────┬───────┘    └──────┬────────────┘
          │                    │
@@ -804,7 +802,7 @@ Shadow evaluation pattern (production best practice):
                     │
               ┌─────v─────┐
               │ Compare    │
-              │ v2.1 vs   │
+              │ v2.1 vs    │
               │ v2.2       │
               └─────┬─────┘
                     │
@@ -1161,7 +1159,7 @@ LLM-as-judge reaches over 80% agreement with human evaluators on pairwise prefer
 Benchmark contamination happens when test set data appears in the model's training corpus, inflating benchmark scores beyond true capability. Sources: (1) web crawl — popular benchmarks (MMLU, HumanEval) appear on blogs, forums, and GitHub discussions; (2) synthetic data — models trained on GPT-4 outputs may inherit GPT-4's memorized benchmark answers; (3) data pipeline leaks — evaluation datasets accidentally included in training splits. Detection: (1) n-gram overlap analysis — check for exact or near-exact matches between training data and benchmark questions; (2) canary strings — embed unique identifiers in evaluation data and check if models reproduce them; (3) performance gap analysis — if a model scores 90% on public benchmarks but only 70% on held-out private tests of similar difficulty, suspect contamination; (4) memorization probing — test if the model can complete benchmark questions from partial prompts. Frontier labs (OpenAI, Anthropic, Google) now maintain private evaluation suites specifically to avoid contamination. For your own evaluations: always create domain-specific test sets from data generated after your model's training cutoff.
 
 **Q: How do you interpret RAGAS metrics for RAG evaluation?**
-RAGAS (Retrieval-Augmented Generation Assessment) provides four automated metrics: (1) Faithfulness — what fraction of claims in the generated answer are supported by the retrieved context (target: >0.85); (2) Answer Relevancy — how relevant the answer is to the question, measured by generating questions from the answer and checking similarity to the original question (target: >0.80); (3) Context Precision — are the relevant chunks ranked higher in the retrieved set (target: >0.75); (4) Context Recall — what fraction of the ground-truth answer can be attributed to the retrieved context (target: >0.80). Interpretation: low faithfulness + high context recall = the LLM is ignoring retrieved context and hallucinating; low context recall + high faithfulness = retrieval is the bottleneck (model is faithful to what it gets, but it's not getting the right information); low answer relevancy = the model is generating off-topic responses. RAGAS uses an LLM (GPT-4 recommended) to compute these metrics, so scores are approximate. Calibrate RAGAS scores against human judgments on 50-100 examples before trusting them for automated monitoring.
+RAGAS (Retrieval-Augmented Generation Assessment) provides four automated metrics: (1) Faithfulness — what fraction of claims in the generated answer are supported by the retrieved context (target: >0.85); (2) Answer Relevancy — how relevant the answer is to the question, measured by generating questions from the answer and checking similarity to the original question (target: >0.80); (3) Context Precision — are the relevant chunks ranked higher in the retrieved set (target: >0.75); (4) Context Recall — what fraction of the ground-truth answer can be attributed to the retrieved context (target: >0.80). Interpretation: low faithfulness + high context recall = the LLM is ignoring retrieved context and hallucinating; low context recall + high faithfulness = retrieval is the bottleneck (model is faithful to what it gets, but it's not getting the right information); low answer relevancy = the model is generating off-topic responses. RAGAS uses a judge LLM (use a capable frontier model) to compute these metrics, so scores are approximate. Calibrate RAGAS scores against human judgments on 50-100 examples before trusting them for automated monitoring.
 
 **Q: How does the Chatbot Arena / ELO methodology work and why is it considered the gold standard?**
 Chatbot Arena uses blind pairwise comparisons where users submit a prompt to two anonymous models simultaneously, then vote for the better response. ELO ratings are computed from these votes using the Bradley-Terry model — each vote updates both models' ratings based on the expected vs actual outcome (upset victories cause larger rating changes). Why it's the gold standard: (1) it uses real user prompts (not synthetic benchmarks), reflecting actual use cases; (2) blind evaluation eliminates brand bias; (3) the ELO system naturally handles the fact that different models are compared different numbers of times; (4) diverse evaluators (thousands of users) average out individual biases. Limitations: (1) English-centric — most users submit English prompts; (2) conversational bias — favors chatty, helpful responses over concise expert answers; (3) recency bias — users may favor newer models; (4) sample size — rare model pairs may have insufficient comparisons for reliable ratings. The platform (now run as LMArena) has accumulated millions of blind pairwise votes across hundreds of models, making it the largest running human evaluation of LLMs; quote the live board rather than a remembered vote count or rating.
@@ -1208,7 +1206,7 @@ Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on
   Code Review Eval Pipeline
   ┌────────────────────────────────────────────────────────────────┐
   │  Golden Dataset (human-authored, never shown to model)         │
-  │  - 500 code snippets per language (Python, JS, Go, Rust)      │
+  │  - 500 code snippets per language (Python, JS, Go, Rust)       │
   │  - Each snippet has 3-5 expert-written review comments         │
   │  - Snippet categories: security bugs, style, performance,      │
   │    correctness, maintainability                                │
@@ -1220,7 +1218,7 @@ Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on
   ┌────────────────────────────────────────────────────────────────┐
   │  Eval Runner (async, 50 concurrent requests)                   │
   │  Input per example:                                            │
-  │    - Code snippet + language + context (file name, git diff)  │
+  │    - Code snippet + language + context (file name, git diff)   │
   │    - Reference expert reviews (gold standard)                  │
   │  Model output: list of review comments with severity           │
   └──────────────────────────────┬─────────────────────────────────┘
@@ -1232,8 +1230,8 @@ Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on
   │  Automated   │ │  LLM-as-Judge    │ │  Human Spot-Check         │
   │  Metrics     │ │  (Claude Opus)   │ │  (20 examples/run)        │
   │  - ExactMatch│ │  - Review quality│ │  - 2 senior engineers     │
-  │  - ROUGE-L   │ │  - Severity acc  │ │  - Rate 1-5 per example  │
-  │  - Issue type│ │  - False positive│ │  - Calibrates LLM judge  │
+  │  - ROUGE-L   │ │  - Severity acc  │ │  - Rate 1-5 per example   │
+  │  - Issue type│ │  - False positive│ │  - Calibrates LLM judge   │
   │    F1 score  │ │    rate          │ │    bias                   │
   └──────────────┘ └──────────────────┘ └──────────────────────────┘
                                  │
@@ -1241,8 +1239,8 @@ Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on
   ┌────────────────────────────────────────────────────────────────┐
   │  Regression Detection                                          │
   │  - Compare to previous model version scores                    │
-  │  - Alert if any metric drops > 3% (block release)             │
-  │  - Track per-language, per-issue-type breakdown               │
+  │  - Alert if any metric drops > 3% (block release)              │
+  │  - Track per-language, per-issue-type breakdown                │
   │  - Trend dashboard: Grafana + PostgreSQL eval history          │
   └────────────────────────────────────────────────────────────────┘
 

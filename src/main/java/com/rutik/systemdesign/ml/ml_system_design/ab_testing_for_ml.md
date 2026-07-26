@@ -16,7 +16,7 @@ One-line analogy: an A/B test is a clinical trial for ML models — randomly ass
 
 Mental model: imagine two parallel universes — in universe A, users interact with the old model; in universe B, users interact with the new model. An A/B test creates these universes by random assignment, ensuring the only difference between groups is the model. Any measured difference in business outcomes is therefore caused by the model.
 
-Why it matters: offline metrics (AUC, NDCG) often do not predict online business metrics. A model improvement of 2% in AUC has been observed to produce no measurable CTR change, while a 0.3% AUC improvement has produced a 1.5% revenue increase. The only way to know the true business impact is to run an A/B test.
+Why it matters: offline metrics (AUC, NDCG) often do not predict online business metrics. The correlation is weak enough in both directions that a large offline gain can move no business metric at all while a small one moves revenue — the offline-to-online relationship has to be measured for your own system, not assumed. The only way to know the true business impact is to run an A/B test.
 
 ---
 
@@ -135,7 +135,7 @@ flowchart TD
     class win lossN
 ```
 
-Both models' items compete at every position inside one merged list, so position bias cancels out. A single interleaved query yields far more signal than an A/B test of the same query — roughly 100x fewer impressions for the same statistical power.
+Both models' items compete at every position inside one merged list, so position bias cancels out. A single interleaved query yields far more signal than an A/B test of the same query — Netflix reports needing roughly 100x fewer subscribers than a population-split A/B test to reach 95% power, and the retrieval literature generally puts the gain at one to two orders of magnitude.
 
 ### Sample Size Determination
 
@@ -374,9 +374,10 @@ def compute_sample_size_continuous(
     Compute sample size for continuous metrics (revenue per user, watch time).
     Uses two-sample t-test formula.
 
-    Note: revenue is often high-variance and heavy-tailed.
-    n may be 10x larger than for CTR.
-    Use CUPED or variance reduction to reduce n.
+    Note: revenue per user is right-skewed (most users spend 0), so the
+    standard deviation is typically several times the mean. That variance,
+    not the metric type, is what makes n orders of magnitude larger than
+    for CTR. Use CUPED or winsorization to reduce n.
     """
     z_alpha = stats.norm.ppf(1 - alpha / 2)
     z_beta = stats.norm.ppf(power)
@@ -412,13 +413,15 @@ if __name__ == "__main__":
     )
     print(f"CTR test: {result_ctr.n_per_variant:,} per variant, "
           f"{result_ctr.required_days:.1f} days")
-    # Output: ~31,195 per variant, 1.2 days at 50K users/day
+    # Output: 31,231 per variant, 1.2 days at 50K users/day
+    # (31,195 if you plug in the rounded z-values 1.96 and 0.84 by hand)
 
-    # Revenue experiment: $25 mean, $15 std, detect $0.50 change
-    # Revenue has much higher variance -> needs far more samples
+    # Revenue experiment: $25 mean, $150 std, detect $0.50 change.
+    # std = 6x mean is typical for revenue per user: most users spend $0 and a
+    # few spend hundreds. That variance is what makes the test expensive.
     result_rev = compute_sample_size_continuous(
         mean_control=25.0,
-        std_control=15.0,
+        std_control=150.0,
         mde_absolute=0.50,
         alpha=0.05,
         power=0.80,
@@ -426,17 +429,18 @@ if __name__ == "__main__":
     )
     print(f"Revenue test: {result_rev.n_per_variant:,} per variant, "
           f"{result_rev.required_days:.1f} days")
-    # Output: ~3,457,920 per variant, 138 days — revenue tests are expensive!
+    # Output: 1,412,799 per variant, 56.5 days — revenue tests are expensive!
+    # Halve the std to $75 and n falls 4x to ~353,200: n scales with sigma^2.
 ```
 
 ### Significance Testing
 
 ```python
+import math
+
 import numpy as np
-import pandas as pd
 from scipy import stats
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -698,13 +702,13 @@ The subtraction is safe because it is centered: `X - E[X]` averages to zero, so 
 
 ```
   rho = 0.5  ->  variance -25%  ->  n x 0.75  ->  a 30-day test becomes 23 days
-  rho = 0.7  ->  variance -49%  ->  n x 0.51  ->  a 30-day test becomes 16 days
+  rho = 0.7  ->  variance -49%  ->  n x 0.51  ->  a 30-day test becomes 15 days
   rho = 0.9  ->  variance -81%  ->  n x 0.19  ->  a 30-day test becomes  6 days
 
-  Applied to the revenue test above (3,457,920 per variant raw, rho = 0.7):
+  Applied to the revenue test above (1,412,799 per variant raw, rho = 0.7):
 
-      3,457,920 x 0.51 = 1,763,539 per variant
-      138 days  x 0.51 = 70 days
+      1,412,799 x 0.51 =  720,527 per variant
+      56.5 days x 0.51 = 28.8 days
 ```
 
 Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre covariate is nearly worthless while a strong one is transformative. At `rho = 0.3` you save 9% of the sample — not worth the pipeline. This is why the covariate is almost always *the same metric from the prior period*: nothing else correlates with a user's revenue like that user's own past revenue.
@@ -713,13 +717,13 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 
 ## 7. Real-World Examples
 
-**Booking.com** runs thousands of A/B experiments simultaneously and has published extensively on their experimentation platform. They use interleaving for ranking experiments (booking.com's search results), Bonferroni correction across their primary metrics, and have a dedicated experimentation team that reviews statistical validity. They report that the majority of their experiments show no statistically significant effect, which is the correct outcome — not every change is an improvement.
+**Booking.com** runs thousands of A/B experiments simultaneously and has published extensively on their experimentation practice — most visibly the KDD 2019 paper "150 Successful Machine Learning Models: 6 Lessons Learned at Booking.com", where every model is validated through a randomized controlled trial rather than an offline metric. They have also published on using CUPED to raise the power of their experiments. Their widely repeated position is that the large majority of experiments show no positive effect, which is the correct outcome — not every change is an improvement.
 
-**LinkedIn** uses CUPED extensively to reduce experiment duration. For revenue metrics (high variance), CUPED reduces required sample size by approximately 50%, halving experiment duration. They apply it by using the prior week's revenue as the covariate.
+**LinkedIn** publishes on variance reduction for its feed and revenue experiments. Jin and Ba (arXiv 2110.13406) report that an optimally-weighted variance-reduction procedure for ratio metrics cut variance by up to 80% versus a plain difference-in-means estimator, and by up to a further 30% versus CUPED. Their own caveat is worth keeping: member revenue is volatile and its autocorrelation across periods is weak, so the pre-period covariate that makes CUPED powerful on engagement metrics is much weaker on revenue.
 
-**Netflix** uses a multi-armed bandit approach for allocating users to new content recommendation algorithms in early testing phases, then transitions to a fixed A/B test once promising signals are identified. They also use synthetic control methods for experiments where randomization at the user level is difficult (e.g., when the recommendation changes the global content popularity distribution).
+**Netflix** runs a two-stage evaluation pipeline: interleaving first, as a cheap pruning step that identifies the promising ranking algorithms out of a large idea pool, then a conventional A/B test on the survivors to measure longer-term member behaviour. Separately, they use contextual bandits for artwork personalization, and quasi-experimental methods (synthetic controls, structural time-series models) when user-level randomization is not possible — for example when only aggregate, region-level data exists.
 
-**Google** pioneered interleaving for search ranking experiments. A single interleaved query provides more signal than a standard A/B test of the same query, because position effects are controlled — both models' results are shown to the same user. Google requires approximately 1/100th the traffic volume compared to standard A/B tests for the same statistical power.
+**Interleaving** was not invented by any one platform: balanced interleaving comes from Joachims's work on evaluating retrieval functions from clickthrough data, and team-draft interleaving from Radlinski, Kurup and Joachims (2008). Its practical selling point is sensitivity — a single interleaved query provides far more signal than a standard A/B test of the same query, because position effects are controlled when both models' results are shown to the same user. Netflix reports needing roughly 1/100th the subscribers of a population-split A/B test to reach 95% power.
 
 ---
 
@@ -740,8 +744,8 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 
 | Dimension | A/B Test | Interleaving |
 |-----------|---------|-------------|
-| Statistical power | Baseline | 100x more sensitive |
-| Required traffic | 100x more | Baseline |
+| Statistical power | Baseline | 10-100x more sensitive |
+| Required traffic | 10-100x more | Baseline |
 | Measures | Business metric impact | Model relative preference |
 | Implementation | Simple | Complex (must handle deduplication) |
 | Time to result | Days to weeks | Hours |
@@ -800,7 +804,7 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 - The change is purely internal (model compression for latency, not quality change)
 - The effect size is too large to need a test (e.g., replacing a completely broken model)
 - Running a fair experiment is impossible (e.g., all users must receive the new behavior simultaneously — infrastructure change)
-- The experiment cannot reach statistical power in a reasonable time (< 1,000 users/day and MDE of 1% CTR — needs 500K users)
+- The experiment cannot reach statistical power in a reasonable time (at 1,000 users/day, detecting a 1% *relative* CTR lift on a 5% baseline needs ~3.0M users per variant — about 16 years)
 
 ### Use holdback (permanent control) instead when:
 - You want to measure the long-term value of a feature (not just immediate impact)
@@ -810,7 +814,7 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 
 ## 10. Common Pitfalls
 
-**Peeking at results and stopping early**: a team runs an A/B test and checks results daily. On day 5 (of a planned 30-day test), they see p = 0.04 and declare the test successful. The true false positive rate at this point is approximately 29%, not 5%. The model is deployed and later shown to have no real effect. Fix: pre-specify the sample size and duration before the experiment; use sequential testing (SPRT) if early stopping is required; never make decisions on interim results unless using a sequentially valid test.
+**Peeking at results and stopping early**: a team runs an A/B test and checks results daily. On day 5 (of a planned 30-day test), they see p = 0.04 and declare the test successful. The alpha they are actually spending is the alpha of the whole stop-at-the-first-significant-look plan, not 5%: simulating a 30-day daily-peeking plan under a true null gives a false positive rate around 28% (already about 14% by day 5, and about 19% by day 10). The model is deployed and later shown to have no real effect. Fix: pre-specify the sample size and duration before the experiment; use sequential testing (SPRT) if early stopping is required; never make decisions on interim results unless using a sequentially valid test.
 
 **SRM (Sample Ratio Mismatch)**: the experiment is set up as a 50/50 split, but the actual observed ratio is 52% control / 48% treatment. This indicates a bug in the randomization or logging pipeline, not a real treatment effect. Metrics computed on imbalanced groups are biased. Fix: always check SRM before analyzing any metric — a chi-square test on the observed group sizes should produce p > 0.01; if not, debug the randomization before looking at any metric.
 
@@ -818,7 +822,7 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 
 **SUTVA violation in social networks**: a recommendation model is tested on 50% of users. Treatment users receive recommendations that increase their engagement. They share recommended content with control users (who do not receive the new recommendations). Control users' engagement also increases due to social spillover. The experiment underestimates the true treatment effect (because control is contaminated) or overestimates it (network amplification). Fix: use cluster-based randomization (assign all users in a social cluster to the same variant); measure network effects explicitly; use isolated markets or regions for clean experiments.
 
-**Testing on insufficient traffic segments**: a model for enterprise users is A/B tested on the 5% of users who are enterprise accounts. Enterprise users have highly variable revenue (std = 5x mean). With only 5% of 100K users (5,000 enterprise users), the experiment needs 690,000 per variant for revenue metric — it can never reach power. Fix: compute sample size before designing the experiment; if insufficient traffic exists, use a proxy metric with lower variance or consider a qualitative evaluation.
+**Testing on insufficient traffic segments**: a model for enterprise users is A/B tested on the 5% of users who are enterprise accounts. Enterprise users have highly variable revenue (std = 5x mean). To detect a 2% relative revenue change at alpha = 0.05 and 80% power, `n = 2 * (5m)^2 * 2.80^2 / (0.02m)^2` — the mean `m` cancels — which is about 981,000 per variant. With only 5% of 100K users (5,000 enterprise users), the experiment can never reach power. Fix: compute sample size before designing the experiment; if insufficient traffic exists, use a proxy metric with lower variance or consider a qualitative evaluation.
 
 ---
 
@@ -828,9 +832,9 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 |----------|------|-------|
 | Experimentation Platform | Optimizely | Managed; client-side and server-side |
 | Experimentation Platform | LaunchDarkly | Feature flags + experiments |
-| Experimentation Platform | Statsig | ML-team-friendly; auto stats, sequential testing |
-| Experimentation Platform | Eppo | Modern; BH correction; CUPED built-in |
-| In-House Platform | Most large tech companies | Google Experimentation, Meta ExperimentNow, Airbnb ERF |
+| Experimentation Platform | Statsig | ML-team-friendly; auto stats, sequential testing. Acquired by OpenAI (Sept 2025) |
+| Experimentation Platform | Eppo | Warehouse-native; BH correction; CUPED built-in. Acquired by Datadog (May 2025), now "Eppo by Datadog" |
+| In-House Platform | Most large tech companies | Google's overlapping-experiment infrastructure (Tang et al., KDD 2010), Meta's PlanOut (open-sourced 2014), Airbnb's ERF |
 | Statistical Libraries | scipy.stats | Gold standard for statistical tests |
 | Statistical Libraries | statsmodels | Power calculations, regression, ANOVA |
 | Statistical Libraries | PyMC | Bayesian A/B testing |
@@ -843,7 +847,7 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 ## 12. Interview Questions with Answers
 
 **Q: How do you determine how long to run an A/B test?**
-Pre-calculate the required sample size before starting the experiment using the two-proportion z-test (for proportions) or t-test formula (for continuous). Inputs: baseline rate, minimum detectable effect (MDE), significance level (alpha = 0.05), and desired power (80%). Example: CTR = 5%, MDE = 0.5% absolute, alpha = 0.05, power = 80% → ~156K users per variant. If daily unique users = 50K per variant, run for 156K/50K = 3.2 days minimum. Add a buffer for novelty effects (at least 1 full week to account for day-of-week patterns). Never stop early unless using a sequentially valid test.
+Pre-calculate the required sample size before starting the experiment using the two-proportion z-test (for proportions) or t-test formula (for continuous). Inputs: baseline rate, minimum detectable effect (MDE), significance level (alpha = 0.05), and desired power (80%). Example: CTR = 5%, MDE = 0.5% absolute, alpha = 0.05, power = 80% → ~31,200 users per variant, 62,400 total. At 50K daily unique users across both variants that is 62,400/50,000 ≈ 1.2 days minimum. Add a buffer for novelty effects (at least 1 full week to account for day-of-week patterns). Never stop early unless using a sequentially valid test.
 
 **Q: What is a sequential test (SPRT), and how does it let you stop an A/B test early without inflating the false positive rate?**
 A sequential probability ratio test evaluates the accumulated evidence after every batch and stops only when the likelihood ratio crosses a pre-set boundary. Unlike a fixed-horizon test — where peeking and stopping at the first p < 0.05 inflates the Type I error to 20-30% — the SPRT boundaries are constructed so that continuous monitoring keeps the overall alpha at target. The tradeoff is a slightly larger maximum sample size in exchange for the ability to stop early when the effect is strong. Use always-valid inference (SPRT, mSPRT, or a Bayesian sequential test) whenever the team will look at results before the planned end.
@@ -858,10 +862,10 @@ Guardrail metrics are safety metrics — latency, error rate, crash rate, unsubs
 SRM occurs when the actual allocation of users across experiment variants differs from the planned allocation. For a 50/50 experiment, if 51.8% of observations are in the control group, the randomization or logging is broken. SRM invalidates all metric analysis because the groups may differ on user characteristics, not just the treatment. Detection: run a chi-square goodness-of-fit test on observed group sizes vs expected. If p < 0.01 (using a conservative threshold), flag the experiment for investigation before computing any metrics. Common causes: client-side experiment logic with browser bugs, bot traffic assigned to one group, logging pipeline failures.
 
 **Q: How do you measure the impact of a recommendation model change on revenue, given that revenue is high-variance?**
-Revenue per user is typically right-skewed (most users spend $0, a few spend $100+), making the t-test require large sample sizes. Strategies: (1) CUPED — use each user's revenue from the week before the experiment as a covariate; this can reduce variance by 30-60%, halving the required experiment duration; (2) winsorization — cap the top 1% of revenue values at the 99th percentile to reduce variance from outliers; (3) use a proxy metric with lower variance (add-to-cart rate, or order rate) as the primary metric and measure revenue as a secondary metric; (4) extend the experiment duration to reach the required sample size. For a platform with $25 mean revenue, $15 std, and MDE of $0.50, raw sample size is ~3.5M per variant; CUPED with 50% variance reduction reduces to ~1.75M.
+Revenue per user is typically right-skewed (most users spend $0, a few spend $100+), making the t-test require large sample sizes. Strategies: (1) CUPED — use each user's revenue from the week before the experiment as a covariate; this can reduce variance by 30-60%, halving the required experiment duration; (2) winsorization — cap the top 1% of revenue values at the 99th percentile to reduce variance from outliers; (3) use a proxy metric with lower variance (add-to-cart rate, or order rate) as the primary metric and measure revenue as a secondary metric; (4) extend the experiment duration to reach the required sample size. For a platform with $25 mean revenue, $150 std (revenue per user is right-skewed, so std several times the mean is normal), and MDE of $0.50, raw sample size is ~1.41M per variant; CUPED at rho = 0.7 (49% variance reduction) brings that to ~720K.
 
 **Q: What is interleaving and when should you use it instead of a classic A/B test?**
-Interleaving merges the ranked lists from two models into a single ranked list shown to the user. User clicks on interleaved items are attributed to the model that placed that item. Because both models compete for clicks in the same session, position effects are controlled (both models have items at every position), making interleaving 100x more sensitive than standard A/B testing for ranking tasks. Use interleaving for: early-stage ranking model comparisons where the goal is "which model ranks better?"; situations where you need results in hours instead of weeks. Use standard A/B test for: final validation of business metric impact (revenue, engagement) where the absolute effect size matters; situations where interleaving introduces product inconsistency.
+Interleaving merges the ranked lists from two models into a single ranked list shown to the user. User clicks on interleaved items are attributed to the model that placed that item. Because both models compete for clicks in the same session, position effects are controlled (both models have items at every position), making interleaving one to two orders of magnitude more sensitive than standard A/B testing for ranking tasks — Netflix reports needing ~100x fewer subscribers for the same power. Use interleaving for: early-stage ranking model comparisons where the goal is "which model ranks better?"; situations where you need results in hours instead of weeks. Use standard A/B test for: final validation of business metric impact (revenue, engagement) where the absolute effect size matters; situations where interleaving introduces product inconsistency.
 
 **Q: How do you handle multiple testing in a product A/B test that measures 10 metrics?**
 The standard approach: pre-register exactly one primary metric before the experiment; this metric alone is used for the go/no-go decision with alpha = 0.05, requiring no correction. Apply Bonferroni or BH correction to all secondary and guardrail metrics (e.g., alpha/10 = 0.005 per metric for Bonferroni). Report the corrected p-values transparently. Never switch the primary metric after seeing results. If you pre-specified three primary metrics (e.g., for a multi-objective experiment), apply Bonferroni correction across all three (alpha = 0.05/3 = 0.0167).
@@ -885,7 +889,7 @@ Bonferroni correction controls the Family-Wise Error Rate (FWER) — the probabi
 NDCG per query is a continuous metric (values between 0 and 1). Compute NDCG@K for each query in the treatment and control groups, then compare using a paired t-test (if the same query appears in both groups) or a two-sample t-test (if queries are independent). For user-level analysis, average NDCG per user across their queries and use a t-test or Mann-Whitney test. However, NDCG measured in an A/B test is subject to position bias — users in the treatment group may click on items that rank higher (changing the NDCG signal), not necessarily better items. Interleaving avoids this by showing both models' rankings to the same user. In practice: use interleaving for model comparison (relative quality), then run a standard A/B test on a business metric (CTR, revenue) to measure absolute impact.
 
 **Q: How do you decide between a frequentist and Bayesian approach to A/B testing for ML?**
-Frequentist A/B testing (z-test, t-test) is the standard: it controls Type I error rate at a pre-specified alpha, requires pre-specified sample size, and produces p-values and confidence intervals with clear frequentist interpretation. Bayesian A/B testing treats parameters as distributions, produces posterior probabilities (e.g., "90% probability that treatment is better than control"), and allows more intuitive interpretation. Bayesian is preferable when: (1) you need to stop the experiment early with a controlled false positive rate (using Bayesian stopping rules); (2) you want to incorporate prior knowledge about effect sizes; (3) you prefer the "probability of being best" framing. Frequentist is preferable when: (1) you need a well-understood, auditable methodology; (2) regulatory or compliance requirements mandate frequentist statistics; (3) your experimentation platform has been validated on frequentist methods. Most large-scale ML teams use frequentist methods with CUPED variance reduction and sequential testing for early stopping.
+Default to frequentist and reach for Bayesian only when its stopping rules or priors buy you something concrete. Frequentist A/B testing (z-test, t-test) controls the Type I error rate at a pre-specified alpha, requires a pre-specified sample size, and produces p-values and confidence intervals with a clear frequentist interpretation. Bayesian A/B testing treats parameters as distributions, produces posterior probabilities (e.g., "90% probability that treatment is better than control"), and allows more intuitive interpretation. Bayesian is preferable when: (1) you need to stop the experiment early with a controlled false positive rate (using Bayesian stopping rules); (2) you want to incorporate prior knowledge about effect sizes; (3) you prefer the "probability of being best" framing. Frequentist is preferable when: (1) you need a well-understood, auditable methodology; (2) regulatory or compliance requirements mandate frequentist statistics; (3) your experimentation platform has been validated on frequentist methods. Most large-scale ML teams use frequentist methods with CUPED variance reduction and sequential testing for early stopping.
 
 **Q: What is a holdback experiment and when do you use it?**
 A holdback experiment maintains a permanent control group (e.g., 5% of users) that never receives a new model or feature, while 95% of users receive the current production model. The holdback group measures the counterfactual — what would engagement look like without any ML improvements. Use holdback when: (1) you want to measure the cumulative long-term value of a series of model improvements over months; (2) individual A/B tests showed significant effects, but you want to confirm the effects are durable (not novelty); (3) you need to justify continued ML investment by showing the baseline without the system. A holdback group that never gets any improvements gradually diverges in behavior from the treatment group — after 6-12 months, the difference represents the value added by all model improvements combined.
@@ -923,19 +927,19 @@ Monitor for guardrail metric regressions (latency, error rate, content policy vi
 **Setup**: replacing a logistic regression CTR model (baseline CTR = 4.8%) with a LightGBM model. MDE = 0.3% absolute CTR improvement (desired ROI justification). Daily unique users: 200,000 (100,000 per variant in 50/50 split). Primary metric: CTR. Secondary metrics: Revenue per user (CUPED applied), add-to-cart rate, P99 page load latency (guardrail).
 
 **Sample size calculation**: baseline = 4.8%, treatment estimate = 5.1% (MDE = 0.3%), alpha = 0.05, power = 0.80.
-n = (1.96 + 0.84)^2 * (0.048 * 0.952 + 0.051 * 0.949) / (0.003)^2 ≈ 183,000 per variant.
-At 100,000 users/day per variant → 2 days required. Running for 7 days (full week to capture day-of-week effects).
+n = (1.96 + 0.84)^2 * (0.048 * 0.952 + 0.051 * 0.949) / (0.003)^2 ≈ 82,000 per variant.
+At 100,000 users/day per variant → under 1 day required. Running for 7 days anyway (full week to capture day-of-week effects), which yields 700,000 per variant — roughly 8.5x the minimum, so the test is heavily over-powered for the stated MDE.
 
-**SRM check (day 7)**: observed 700,412 control, 699,588 treatment. Chi-square p = 0.42. No SRM.
+**SRM check (day 7)**: observed 700,412 control, 699,588 treatment against 700,000 expected each. Chi-square goodness-of-fit on 1 df: X^2 = 2 * 412^2 / 700,000 = 0.485, p = 0.49. No SRM.
 
-**Results**:
-- CTR: control = 4.81%, treatment = 5.14%, lift = +0.33%, p = 0.0008, CI = [0.21%, 0.45%]. Statistically and practically significant.
+**Results** (n = 700,000 per variant, seven days at 100,000/day/variant):
+- CTR: control = 4.81%, treatment = 5.14%, lift = +0.33pp, z = 8.98, p < 1e-15, CI = [0.26pp, 0.40pp]. Statistically and practically significant. The tiny p-value is a direct consequence of running 8.5x the required sample size, not of an unusually large effect.
 - Revenue per user (CUPED): control = $24.80, treatment = $25.30, lift = +$0.50, p = 0.023. Significant.
 - Add-to-cart rate: p = 0.18. Not significant (consistent with no effect or underpowered).
 - P99 latency: control = 87ms, treatment = 91ms. Increase of 4ms — within SLA (< 100ms), no regression.
 
 **Multiple comparison correction**: primary metric (CTR) at alpha = 0.05: significant. Secondary metrics (3): Bonferroni alpha = 0.05/3 = 0.0167. Revenue p = 0.023 > 0.0167: marginally not significant after correction. Add-to-cart not significant.
 
-**Decision**: deploy the LightGBM model. CTR improvement is statistically and practically significant. Revenue shows a directional positive signal. Latency within SLA. Expected annual revenue impact: $0.50/user * 200,000 DAU * 365 = $36.5M.
+**Decision**: deploy the LightGBM model. CTR improvement is statistically and practically significant. Revenue shows a directional positive signal but does not survive the Bonferroni correction, so it is not a claim, only a reason to keep measuring. Latency within SLA. The revenue figure should therefore not be annualized as if it were established: `$0.50/user * 200,000 DAU * 365 = $36.5M` is the *upper* end of a range whose lower end is zero, and it additionally assumes the $0.50 is a per-user-per-day figure. If revenue per user was measured over the full 7-day window, the correct annualization is `$0.50 * 200,000 * 365/7 = $5.2M`. State which period the metric covers before quoting any annual number.
 
 **Post-launch monitoring**: CTR monitored for 2 weeks post-rollout. Effect stable at +0.31%. No novelty effect decay detected.

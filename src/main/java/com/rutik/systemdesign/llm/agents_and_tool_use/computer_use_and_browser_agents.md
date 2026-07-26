@@ -53,7 +53,6 @@ def take_screenshot() -> str:
 #   computer_20251124 + "computer-use-2025-11-24": Claude Opus 5, Sonnet 5,
 #     Opus 4.8/4.7/4.6, Sonnet 4.6, Opus 4.5
 #   computer_20250124 + "computer-use-2025-01-24": Claude Sonnet 4.5, Haiku 4.5
-#   computer_20241022 was the original Oct-2024 version (Claude 3.5 Sonnet)
 
 def run_computer_use_step(task: str, screenshot_b64: str) -> dict:
     response = client.beta.messages.create(
@@ -81,7 +80,7 @@ def run_computer_use_step(task: str, screenshot_b64: str) -> dict:
     )
     return response
 
-# Supported action types (basic set, all tool versions):
+# Supported action types (basic set, present in every tool version):
 ACTION_TYPES = {
     "screenshot":         "Take a screenshot of the current screen",
     "left_click":         "Left click at coordinate [x, y]",
@@ -89,11 +88,11 @@ ACTION_TYPES = {
     "key":                "Press a keyboard key or combination",
     "mouse_move":         "Move mouse to [x, y] without clicking",
 }
-# Enhanced actions added in computer_20250124 and later:
+# The rest of the computer_20251124 action set:
 #   scroll, left_click_drag, right_click, middle_click, double_click,
 #   triple_click, left_mouse_down, left_mouse_up, hold_key, wait
-# Added in computer_20251124 (requires enable_zoom: true on the tool):
 #   zoom — inspect region [x1, y1, x2, y2] at full resolution
+#          (requires enable_zoom: true on the tool)
 
 # Agent loop for computer use
 def computer_use_loop(task: str, max_steps: int = 50):
@@ -172,8 +171,8 @@ print(result.final_result())
 # - Multi-tab management
 
 # Custom browser configuration.
-# `Browser` is an alias for `BrowserSession`; the old `BrowserConfig` object is gone
-# and its fields are now passed directly (or via a BrowserProfile).
+# `Browser` is an alias for `BrowserSession`; configuration fields are passed
+# directly on it (or grouped into a BrowserProfile).
 from browser_use import Browser
 
 browser = Browser(
@@ -218,8 +217,11 @@ async def playwright_agent_step(page, action: dict) -> str:
         screenshot = await page.screenshot()
         return base64.b64encode(screenshot).decode()
 
-    # Wait for page to settle after action
-    await page.wait_for_load_state("networkidle", timeout=3000)
+    # Wait for the page to settle by asserting on the element the next step
+    # needs — locators auto-wait, so this is both faster and more reliable
+    # than any global load-state wait.
+    if action.get("wait_for"):
+        await page.locator(action["wait_for"]).wait_for(state="visible", timeout=3000)
     return "success"
 
 # Get accessibility tree instead of screenshot for text-heavy pages
@@ -297,7 +299,7 @@ Action step timing breakdown (typical values):
   Screenshot base64 encode: 50-100ms
   LLM API call:            1,000-3,000ms
   Action execution:        100-500ms
-  Page load/settle:        200-2,000ms (wait for networkidle)
+  Page load/settle:        200-2,000ms (wait for the next element)
                           ─────────────
   Total per action step:   1,500-6,000ms (1.5-6 seconds)
 
@@ -324,7 +326,7 @@ The five components are strictly serial: nothing can be overlapped, because each
 | screenshot + encode | Capturing and base64-ing the frame. Grows with resolution, `1280 x 800` here |
 | LLM API call | The dominant term. One full inference per action, with an image in the prompt |
 | action execution | The click or keystroke itself. Genuinely fast |
-| page load / settle | Waiting for `networkidle`. The most variable term — the site controls it, not you |
+| page load / settle | Waiting for the next element to appear. The most variable term — the site controls it, not you |
 | total per step | The sum of all five. Multiplied by step count to get task duration |
 
 **Walk one example.** Add the column ends to get the quoted 1.5-6 s band, then scale by step count:
@@ -349,18 +351,19 @@ The five components are strictly serial: nothing can be overlapped, because each
     6,000 / 1,000 = 6.0x        1,500 / 200 = 7.5x        midpoints 3,750/600 = 6.3x
 ```
 
-**Why optimizing the wrong term is the usual mistake.** Teams reach first for screenshot compression, since it is the part they control — but capture plus encode is only 150 ms of a 1,450 ms fast step, so halving it buys about 5%. The LLM call is 51-69% of every step and the page settle is the term that spikes. The two changes that actually move the number are dropping the screenshot entirely in favour of the accessibility tree (a text prompt infers far faster than an image one) and replacing blanket `networkidle` waits with a targeted `wait_for_selector` on the one element the next action needs.
+**Why optimizing the wrong term is the usual mistake.** Teams reach first for screenshot compression, since it is the part they control — but capture plus encode is only 150 ms of a 1,450 ms fast step, so halving it buys about 5%. The LLM call is 51-69% of every step and the page settle is the term that spikes. The two changes that actually move the number are dropping the screenshot entirely in favour of the accessibility tree (a text prompt infers far faster than an image one) and replacing blanket page-level settle waits with a targeted `locator(...).wait_for()` on the one element the next action needs.
 
 ### Reliability Challenges
 
 ```
 1. Stale elements (DOM changes during interaction)
    Problem: element clicked, then DOM re-renders, element moves
-   Solution: retry with exponential backoff; wait for networkidle before acting
+   Solution: retry with exponential backoff; re-resolve the locator each attempt
 
 2. Dynamic JavaScript pages
    Problem: content loads asynchronously; model acts before content loads
-   Solution: wait_for_selector(); wait_for_load_state("networkidle")
+   Solution: locator(target).wait_for(state="visible") on the element the
+             next action needs — locators auto-wait and re-query the DOM
 
 3. CAPTCHAs
    Problem: automated browsing detected; CAPTCHA presented
@@ -378,12 +381,6 @@ The five components are strictly serial: nothing can be overlapped, because each
 6. Rate limiting / IP blocks
    Problem: rapid automated browsing triggers bot detection
    Solution: human-like delays (200-500ms between actions), headless=False for sites using JS detection
-
-Note on networkidle: Playwright's own docs mark the `networkidle` load state as
-DISCOURAGED and recommend asserting on a specific element instead. It remains a
-useful blunt instrument for agents that do not know the page's DOM in advance,
-but prefer `wait_for_selector()` on the element the next action needs whenever
-that element is known.
 ```
 
 The retry, verification, and step-budget patterns above are instances of the general agent reliability toolkit — see [agent_reliability.md](agent_reliability.md).
@@ -400,7 +397,7 @@ flowchart TD
     Task([Task Input]) --> Observe
     Observe["OBSERVATION\nTake screenshot → encode as base64 PNG\n(optionally: parse accessibility tree)"] --> Reason
     Reason["REASONING (vision-language model)\nDescribe what is visible\nSelect next action"] --> Execute
-    Execute["EXECUTION (Playwright / OS API)\npage.fill / page.click\nwait_for_load_state networkidle"] --> Done{"task\ncomplete?"}
+    Execute["EXECUTION (Playwright / OS API)\npage.fill / page.click\nlocator wait_for visible"] --> Done{"task\ncomplete?"}
     Done -- NO --> Observe
     Done -- YES --> Output([Task complete])
 
@@ -445,21 +442,20 @@ The accessibility tree path is preferred (structured, reliable); the vision mode
 
 ### Anthropic Computer Use
 
-Launched October 22, 2024 on an upgraded Claude 3.5 Sonnet
-(`claude-3-5-sonnet-20241022`) with the `computer_20241022` tool. At launch
-Anthropic reported OSWorld scores of **14.9% in the screenshot-only category**
-(next-best system 7.8%) and **22.0% when given more steps** — both far below the
-72.36% human baseline the OSWorld paper reports.
+A beta feature of the Claude API: tool version `computer_20251124` behind the
+beta header `computer-use-2025-11-24` on Claude Opus 5, Sonnet 5, Opus
+4.8/4.7/4.6, Sonnet 4.6 and Opus 4.5; `computer_20250124` on Sonnet 4.5 and
+Haiku 4.5.
 
-Current state (July 2026):
-- Still a beta feature; tool version `computer_20251124` with beta header
-  `computer-use-2025-11-24` on Claude Opus 5, Sonnet 5, Opus 4.8/4.7/4.6,
-  Sonnet 4.6 and Opus 4.5; `computer_20250124` on Sonnet 4.5 and Haiku 4.5
-- Action space grew from the original five (screenshot, left_click, type, key,
-  mouse_move) to include scroll, drag, multi-button and multi-click actions,
-  `hold_key`, `wait`, and a `zoom` action for reading small on-screen text
+- Action space: screenshot, `left_click`, `type`, `key`, `mouse_move`, scroll,
+  drag, right/middle/double/triple click, `left_mouse_down`/`left_mouse_up`,
+  `hold_key`, `wait`, and `zoom` for reading small on-screen text
 - Use cases: software testing, RPA automation, data entry, web scraping
 - Latency: ~3-8 seconds per action step at typical network conditions
+- Benchmark anchor: Anthropic's published OSWorld figures for its computer-use
+  agent are **14.9% screenshot-only** (next-best system 7.8%) and **22.0% when
+  given more steps** — both far below the 72.36% human baseline the OSWorld
+  paper reports
 
 ### browser-use (Open Source)
 
@@ -470,19 +466,15 @@ Python library, ~295M cumulative PyPI downloads as of July 2026 (v0.13.6):
 - Memory: extracts key information during browsing and stores in structured format
 - Cost: roughly $0.01-0.05 per simple web task at mid-tier frontier model prices
 
-### OpenAI Operator, and what replaced it
+### OpenAI Computer-Using Agent (CUA)
 
-Operator launched in January 2025 as a research preview: a consumer product for
-autonomous web task completion, powered by a Computer-Using Agent (CUA) model
-built on GPT-4o and later refreshed on o3 in the product. It specialized in food
-ordering, travel booking and form completion, and paused for user confirmation on
-payment steps.
-
-Operator no longer exists as a standalone product. It was folded into **ChatGPT
-agent** in July 2025 and the standalone surface shut down on **August 31, 2025**.
-The CUA capability survives in two places: inside ChatGPT agent for consumers, and
-for developers via the `computer-use-preview` model, which is usable only through
-the OpenAI Responses API.
+OpenAI ships computer use in two places. For consumers it lives inside **ChatGPT
+agent**, which completes autonomous web tasks — food ordering, travel booking,
+form completion — and pauses for user confirmation on payment steps. For
+developers it is the built-in **`computer`** tool on the Responses API
+(`tools=[{"type": "computer"}]`, models `gpt-5.6` and `gpt-5.4`): you send a
+screenshot plus the task, the model returns a `computer_call` output item with
+the action, your code executes it and returns the next screenshot.
 
 ---
 
@@ -527,7 +519,7 @@ the OpenAI Responses API.
 
 2. **Coordinate drift**: hardcoding pixel coordinates from a specific screen resolution. A 4K monitor has different coordinates than a 1080p monitor. Use semantic selectors (aria-label, role+text) over coordinates wherever possible.
 
-3. **Ignoring page load state**: acting on a page that's still loading causes clicks on elements that move or disappear. Always wait for `networkidle` or specific element visibility before acting.
+3. **Ignoring page load state**: acting on a page that's still loading causes clicks on elements that move or disappear. Always wait for the specific element the next action needs — `locator(target).wait_for(state="visible")` — before acting.
 
 4. **Escalating all CAPTCHAs to API**: some sites tolerate a human-like user agent with realistic delays. Reduce headless bot signatures before assuming CAPTCHA escalation is needed.
 
@@ -544,8 +536,8 @@ the OpenAI Responses API.
 | **Anthropic Computer Use API** | Screen-based agent | Beta; `computer_20251124` on Opus 5 / Sonnet 5 |
 | **browser-use** | Web automation library | Python; LLM-driven Chromium; open source |
 | **Playwright** | Browser automation | Microsoft; Chromium/Firefox/WebKit |
-| **Selenium** | Browser automation | Legacy; WebDriver protocol |
-| **OpenAI `computer-use-preview`** | CUA model for developers | Responses API only; ex-Operator engine |
+| **Selenium** | Browser automation | W3C WebDriver protocol; widest language coverage |
+| **OpenAI `computer` tool** | CUA for developers | Responses API; `gpt-5.6` / `gpt-5.4` |
 | **SomAgent** | Web navigation research | Grounding model for web elements |
 | **WebArena** | Web agent benchmark | 812 tasks; realistic web environments |
 | **OSWorld** | OS-level agent benchmark | Ubuntu VM; GUI tasks |
@@ -569,13 +561,13 @@ A: Grounding is the problem of translating a high-level intent ("click the Submi
 A: Manual Playwright scripts hardcode selectors (`page.click("#submit-btn")`) — they break whenever the DOM changes. browser-use uses an LLM to decide dynamically what to click based on semantic understanding of the page's accessibility tree and visual state. When the site redesigns and moves the Submit button, the manual script breaks; browser-use adapts because it looks for "the button labeled Submit" not a hardcoded ID. The trade-off: browser-use is 10-100× slower per page action (LLM call per step vs. direct Playwright call), 10-100× more expensive, and less deterministic. Use manual Playwright for stable, well-known sites with deterministic workflows; use browser-use for adaptive automation on sites that change or for tasks with variable UI states.
 
 **Q: What are the main reliability challenges in production browser agents?**
-A: (1) Stale elements: the agent clicks an element that the JavaScript framework removes and re-renders; fix with explicit wait strategies and retry; (2) Dynamic JS pages: content loads after the DOM event fires; fix with `wait_for_load_state("networkidle")`; (3) CAPTCHAs: automated browsing detected; fix with human-in-the-loop or anti-CAPTCHA services for legitimate automation; (4) A/B tests: site runs experiments that move UI elements between agent sessions; fix with semantic grounding over coordinate grounding; (5) Popup interruptions: cookie consent, notification modals, chat widgets appear mid-task; the agent must detect and dismiss them before continuing the primary task.
+A: (1) Stale elements: the agent clicks an element that the JavaScript framework removes and re-renders; fix with explicit wait strategies and retry; (2) Dynamic JS pages: content loads after the DOM event fires; fix by waiting on the target element with `locator(target).wait_for(state="visible")`; (3) CAPTCHAs: automated browsing detected; fix with human-in-the-loop or anti-CAPTCHA services for legitimate automation; (4) A/B tests: site runs experiments that move UI elements between agent sessions; fix with semantic grounding over coordinate grounding; (5) Popup interruptions: cookie consent, notification modals, chat widgets appear mid-task; the agent must detect and dismiss them before continuing the primary task.
 
 **Q: How do you handle high-risk actions (form submissions, purchases) in a computer use agent?**
 A: Human-in-the-loop (HITL) is mandatory for irreversible actions. Architecture: (1) Risk classification — before executing, classify the pending action (low: navigate, search; medium: form fill; high: submit, purchase, delete); (2) HITL gate — for high-risk actions, pause the agent and surface the pending action with its context to a human; (3) Wait for approval — the agent is suspended until the human approves or rejects; (4) Audit log — log all high-risk actions with agent reasoning, human decision, and outcome. Implementation in Playwright: before `page.click("#checkout-button")`, check the action type; if high-risk, trigger an interrupt and wait for an approval event. Never allow purchases or data deletions to proceed without explicit human confirmation in production.
 
 **Q: What is the typical latency per computer use step and what drives it?**
-A: A single computer use step takes 1.5-6 seconds. Breakdown: screenshot capture (100-300ms) + base64 encoding (50-100ms) + LLM API call (1,000-3,000ms) + action execution (100-500ms) + page settle/networkidle wait (200-2,000ms). The LLM call is the dominant cost at ~1-3 seconds. For a 20-step web task, total wall time is 30-120 seconds. Optimizations: (1) use accessibility tree instead of screenshot when possible — skips vision model call (~500ms savings per step); (2) stream screenshots at lower quality (lower bandwidth); (3) skip networkidle wait for known fast pages; (4) pipeline: start the next screenshot while the previous action executes. Compare: API tool call completes in 200-1000ms — 3-10× faster than computer use per step.
+A: A single computer use step takes 1.5-6 seconds. Breakdown: screenshot capture (100-300ms) + base64 encoding (50-100ms) + LLM API call (1,000-3,000ms) + action execution (100-500ms) + page settle, waiting for the next element (200-2,000ms). The LLM call is the dominant cost at ~1-3 seconds. For a 20-step web task, total wall time is 30-120 seconds. Optimizations: (1) use accessibility tree instead of screenshot when possible — skips vision model call (~500ms savings per step); (2) stream screenshots at lower quality (lower bandwidth); (3) skip the settle wait for known-static pages; (4) pipeline: start the next screenshot while the previous action executes. Compare: API tool call completes in 200-1000ms — 3-10× faster than computer use per step.
 
 **Q: How do you benchmark computer use agents?**
 A: OSWorld (2024): 369 GUI tasks on an Ubuntu VM across real desktop and web applications — the most comprehensive desktop benchmark; humans complete 72.36%, while the best model in the original paper reached 12.24% and Anthropic's launch computer-use agent reported 14.9% screenshot-only / 22.0% with extra steps. WebArena: 812 web navigation tasks on realistic self-hosted websites — the paper's best GPT-4 agent scored 14.41% against 78.24% human performance, and leading systems have since climbed well above that. Mind2Web: 2,350 tasks across 137 real websites in 31 domains, using recorded demonstrations as ground truth. Scoring: function-based verification of backend state for WebArena; task completion for OSWorld. Custom eval: for production, build domain-specific task sets (your target websites/apps) and measure success rate and cost-per-task. Public benchmarks set directional expectations but your production task distribution matters most.
@@ -590,7 +582,7 @@ A: Build API integration when: the service has a stable, documented API (REST, G
 A: Screenshot-based (pixel grounding): the model receives a PNG of the screen and outputs pixel coordinates. It works universally — any GUI, any technology stack, desktop apps, games, Canvas-rendered UIs. Accuracy: ~70-85% on typical web tasks. Per-step cost: high (vision model inference + screenshot transfer). Main failure mode: coordinate drift when layout changes between screenshot capture and action execution. DOM/accessibility-tree-based: the browser exposes a structured tree of UI elements with roles, labels, and bounds. The model receives this as text and outputs element identifiers. Accuracy: ~85-95% when the accessibility tree is complete. Per-step cost: lower (no vision model, smaller input). Main failure mode: elements without aria labels or role attributes are invisible to the tree. Practical recommendation: use accessibility tree as the primary approach; fall back to screenshot-based pixel grounding for Canvas elements, SVG charts, and custom web components that lack accessibility attributes. The hybrid approach achieves 90%+ accuracy across diverse web applications.
 
 **Q: How do you handle dynamic web content — SPAs, lazy loading, and JavaScript-rendered pages?**
-A: Single-page applications (SPAs) and lazily-loaded content are the top reliability challenge for browser agents. Common failure patterns: (1) clicking a button that triggers an AJAX request, then immediately reading the page before the response arrives; (2) scrolling to the bottom to trigger lazy loading, then acting on elements that haven't been injected yet; (3) navigating to a route that starts rendering before all data is fetched. Mitigations: (a) use `wait_for_load_state("networkidle")` after navigation and after clicks that trigger navigation — it waits until there have been no network connections for at least 500ms, though Playwright's docs mark this state DISCOURAGED and prefer element assertions where the target element is known; (b) for lazy loading, use `wait_for_selector("[data-loaded='true']")` or a specific element that appears only when content is ready; (c) add explicit observation step after each action — take a new screenshot and verify the expected change is visible before proceeding; (d) for AJAX responses, poll for a specific DOM state change rather than using fixed sleep delays. Fixed sleeps (`time.sleep(2)`) are brittle — page load time varies by network and server load.
+A: Single-page applications (SPAs) and lazily-loaded content are the top reliability challenge for browser agents. Common failure patterns: (1) clicking a button that triggers an AJAX request, then immediately reading the page before the response arrives; (2) scrolling to the bottom to trigger lazy loading, then acting on elements that haven't been injected yet; (3) navigating to a route that starts rendering before all data is fetched. Mitigations: (a) after navigation and after clicks that trigger navigation, wait on the element the next step needs — `page.locator(target).wait_for(state="visible")`; Playwright locators auto-wait and re-query the DOM, so asserting the target element is both faster and more reliable than any page-level load-state wait; (b) for lazy loading, wait on a specific element that appears only when content is ready, e.g. `page.locator("[data-loaded='true']").wait_for()`; (c) add explicit observation step after each action — take a new screenshot and verify the expected change is visible before proceeding; (d) for AJAX responses, poll for a specific DOM state change rather than using fixed sleep delays. Fixed sleeps (`time.sleep(2)`) are brittle — page load time varies by network and server load.
 
 **Q: What safety guardrails are necessary for production computer use agents?**
 A: Computer use agents executing real actions require layered safety: (1) action risk classification — every action type gets a risk level: navigate (low), fill form (medium), click submit/send/purchase (high), download/upload files (high), system commands (critical); (2) allowlist of approved domains — the agent may only navigate to domains in an explicit whitelist; attempts to visit unknown domains are blocked; (3) human-in-the-loop for high-risk actions — any action classified "high" or "critical" triggers a pause, surfaces the pending action to a human, and waits for explicit approval before executing; (4) audit log with full screenshots — every action is logged with: timestamp, action type, arguments, screenshot before, screenshot after; retained for 30 days for compliance; (5) kill switch — a session-level abort mechanism that terminates the agent and reverts any reversible actions (form fills, not submitted forms); (6) rate limiting — cap actions per minute to detect runaway loops before they cause harm. Without these guardrails, a single agent bug can trigger unintended purchases, form submissions, or data deletions at scale.
@@ -848,7 +840,7 @@ Scenario count is the number teams quote; steps per scenario is the number that 
   versus manual QA:  16 h / 42 min  =  22.9x faster
 ```
 
-**Where the missing 9.8 seconds per step go.** The latency model measures a step on an already-open page. The measured 15.8 s absorbs everything the model excludes: launching a fresh Chromium per scenario, initial navigation and login, retries on stale elements, and the `networkidle` waits that a real checkout flow triggers repeatedly. Treat the per-step model as a floor for capacity planning, not a forecast — and note that concurrency fixed the clock without touching the $28.80, because parallelism buys latency, never cost.
+**Where the missing 9.8 seconds per step go.** The latency model measures a step on an already-open page. The measured 15.8 s absorbs everything the model excludes: launching a fresh Chromium per scenario, initial navigation and login, retries on stale elements, and the element waits that a real checkout flow triggers repeatedly. Treat the per-step model as a floor for capacity planning, not a forecast — and note that concurrency fixed the clock without touching the $28.80, because parallelism buys latency, never cost.
 
 **Tradeoffs and Alternatives**:
 

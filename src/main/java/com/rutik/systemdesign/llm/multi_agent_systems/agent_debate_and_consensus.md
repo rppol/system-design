@@ -819,7 +819,7 @@ than by whether the debate is still producing value.
 
 **Anthropic SDK (Python/TypeScript)** — direct API access. Use `asyncio.gather` for parallel round-0 calls. No built-in debate orchestration; implement as shown in Section 6.
 
-**OpenAI Assistants API** — deprecated: OpenAI notified developers on 2025-08-26 and removes it from the API on 2026-08-26, directing new work to the Responses and Conversations APIs. Threads could hold debate history natively, but each thread is one agent, so a debate needed N threads plus manual cross-thread context injection. Do not start here.
+**OpenAI Responses / Conversations API** — server-side conversation state: a Conversation object (passed as `conversation="conv_..."` on each Response) holds debate history natively, but one conversation is one agent, so an N-agent debate needs N conversations plus manual cross-agent context injection. No built-in debate orchestration — round-0 parallelism and answer fusion are yours to write.
 
 **[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. In the current `autogen-agentchat` package the class is `RoundRobinGroupChat` (import from `autogen_agentchat.teams`); in the legacy 0.2 API the equivalent is `GroupChat(..., speaker_selection_method="round_robin")`. There is no `RoundRobinSpeakerSelection` class in either. Most feature-complete out-of-the-box for multi-agent debate.
 
@@ -917,7 +917,7 @@ Monitor cost per query in production. Debate token cost grows superlinearly with
 > derivation are real and reproducible; the firm, the incident, and the outcome
 > percentages are a worked scenario, not a published case.
 
-**Context.** A financial services firm uses LLMs to extract and verify numerical claims from analyst reports before they are published. The original pipeline used a single GPT-4 call to check whether each numerical claim in a draft report was consistent with the cited source documents. The hallucination rate (agent-confirmed claims that were factually wrong) was 11% in internal audits, which was unacceptable for regulatory reasons.
+**Context.** A financial services firm uses LLMs to extract and verify numerical claims from analyst reports before they are published. The original pipeline used a single frontier-model call to check whether each numerical claim in a draft report was consistent with the cited source documents. The hallucination rate (agent-confirmed claims that were factually wrong) was 11% in internal audits, which was unacceptable for regulatory reasons.
 
 **Problem statement.** Reduce hallucination rate on numerical claim verification to below 3% without increasing latency beyond 30 seconds per claim and without replacing the LLM with a deterministic rules engine (which could not handle the variety of claim formats).
 
@@ -965,7 +965,7 @@ Two debate rounds. Round 1 resolves most disagreements. Round 2 handles cases wh
 
 Judge agent activation. When agents do not reach unanimous agreement after 2 rounds, a judge agent is invoked. The judge reads the full transcript and renders a verdict with LOW / MEDIUM / HIGH confidence. LOW-confidence verdicts are routed to a human compliance officer rather than automatically accepted or rejected.
 
-Token budget. Average claim: 400-token source excerpt + 80-token claim = 480 input tokens. With 3 agents, 2 rounds, temperature diversity: approximately 4,800 total tokens per claim (10x multiplier). At $0.003 per 1K tokens (GPT-4 pricing at deployment time), cost was $0.014 per claim versus $0.0014 for single-agent — a 10x cost increase that was accepted because the downstream cost of a published hallucinated figure was orders of magnitude higher.
+Token budget. Average claim: 400-token source excerpt + 80-token claim = 480 input tokens. With 3 agents, 2 rounds, temperature diversity: approximately 4,800 total tokens per claim (10x multiplier). At a blended $3 per MTok (Claude Sonnet 5 list input price), cost was $0.014 per claim versus $0.0014 for single-agent — a 10x cost increase that was accepted because the downstream cost of a published hallucinated figure was orders of magnitude higher.
 
 **Results.**
 

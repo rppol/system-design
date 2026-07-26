@@ -666,13 +666,13 @@ Communication overhead in distributed training comes from gradient synchronizati
 
   Parallelism Strategy:
   ┌────────────────────────────────────────────────────────────┐
-  │  Tensor Parallel (TP) = 1 (7B fits on 1 GPU in BF16)      │
-  │  Pipeline Parallel (PP) = 1 (pipeline bubble < 5% at 7B)  │
-  │  Data Parallel (DP) = 64 (ZeRO Stage 2)                   │
+  │  Tensor Parallel (TP) = 1 (7B fits on 1 GPU in BF16)       │
+  │  Pipeline Parallel (PP) = 1 (pipeline bubble < 5% at 7B)   │
+  │  Data Parallel (DP) = 64 (ZeRO Stage 2)                    │
   │                                                            │
   │  Choice rationale:                                         │
-  │  7B × 2 bytes (BF16) = 14 GB < 80 GB → no TP needed       │
-  │  Optimizer states (AdamW): 7B × 8 bytes = 56 GB           │
+  │  7B × 2 bytes (BF16) = 14 GB < 80 GB → no TP needed        │
+  │  Optimizer states (AdamW): 7B × 8 bytes = 56 GB            │
   │  ZeRO Stage 2 shards optimizer+grads across 64 GPUs:       │
   │    Per-GPU optimizer: 56 GB / 64 = 0.875 GB                │
   │    Per-GPU gradients: 14 GB / 64 = 0.22 GB                 │
@@ -684,16 +684,16 @@ Communication overhead in distributed training comes from gradient synchronizati
   Training Loop:
   ┌──────────────────────────────────────────────────────────┐
   │  Megatron-LM + DeepSpeed ZeRO Stage 2                   │
-  │  Global batch size: 4M tokens                            │
-  │  Micro-batch per GPU: 4 sequences × 4096 tokens = 16K    │
+  │  Global batch size: 4M tokens                           │
+  │  Micro-batch per GPU: 4 sequences × 4096 tokens = 16K   │
   │  Gradient accumulation steps: 4M / (64 GPUs × 16K) = 4  │
-  │                                                          │
-  │  Data pipeline (asynchronous):                           │
+  │                                                         │
+  │  Data pipeline (asynchronous):                          │
   │  ┌──────────┐    ┌──────────┐    ┌──────────────────┐   │
   │  │ S3 data  │ →  │ tokenize │ →  │ GPU prefetch     │   │
   │  │ shards   │    │ workers  │    │ (pinned memory)  │   │
   │  └──────────┘    │ (8 CPU)  │    └──────────────────┘   │
-  │                  └──────────┘                            │
+  │                  └──────────┘                           │
   │  Data never bottlenecks GPU — 8 CPU workers saturate    │
   │  InfiniBand at 20 GB/s; tokenizer throughput 800 MB/s   │
   └──────────────────────────────────────────────────────────┘

@@ -905,9 +905,9 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
   │    C4/RedPajama mixture: 25B tokens                         │
   │                                                             │
   │  Data Quality Pipeline:                                     │
-  │  1. Dedup: MinHash LSH, threshold=0.80 → removed 12%       │
-  │  2. Quality: perplexity filter (base LLM < 150 ppl) → -8% │
-  │  3. PII: regex + NER → remove patient names, study IDs     │
+  │  1. Dedup: MinHash LSH, threshold=0.80 → removed 12%        │
+  │  2. Quality: perplexity filter (base LLM < 150 ppl) → -8%   │
+  │  3. PII: regex + NER → remove patient names, study IDs      │
   │  4. License check: CC BY, CC0, public domain only           │
   └────────────────────────────────┬────────────────────────────┘
                                    │
@@ -918,22 +918,22 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
   │  Parallelism: DP=32 (7B fits on 1 GPU in BF16)              │
   │  Batch: 2M tokens (smaller than base pre-training ~4M)      │
   │    rationale: domain data is less noisy → smaller batch ok  │
-  │  LR: 1e-5 (30× lower than base pre-training's 3e-4)        │
+  │  LR: 1e-5 (30× lower than base pre-training's 3e-4)         │
   │    rationale: continued pre-training — don't overshoot      │
   │  LR schedule: cosine decay, 2000-step warmup                │
-  │  Epochs: ~1.0 (500B tokens / 500B dataset = 1 pass)        │
-  │  Gradient clipping: 1.0                                      │
-  │  Mixed precision: BF16 weights, FP32 optimizer states        │
+  │  Epochs: ~1.0 (500B tokens / 500B dataset = 1 pass)         │
+  │  Gradient clipping: 1.0                                     │
+  │  Mixed precision: BF16 weights, FP32 optimizer states       │
   └────────────────────────────────┬────────────────────────────┘
                                    │
   ┌────────────────────────────────▼────────────────────────────┐
-  │  Training Timeline                                           │
-  │  32 × A100 at ~50% MFU: 32 × 312 × 0.5 = 4992 TFLOPS      │
-  │  7B model: 42B FLOPs/token (6N training, not 2N forward)     │
+  │  Training Timeline                                          │
+  │  32 × A100 at ~50% MFU: 32 × 312 × 0.5 = 4992 TFLOPS        │
+  │  7B model: 42B FLOPs/token (6N training, not 2N forward)    │
   │  Tokens/sec: 4992e12 / 42e9 = 118,857 tok/s                 │
   │  500B / 118,857 = 4,206,731 sec = 48.7 days                 │
   │  With 85% availability: 57.3 days                           │
-  │  Cost: 32 GPUs × $2/hr × 24h × 57.3 days = $88,000         │
+  │  Cost: 32 GPUs × $2/hr × 24h × 57.3 days = $88,000          │
   └─────────────────────────────────────────────────────────────┘
 ```
 

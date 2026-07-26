@@ -46,24 +46,24 @@ Why this system exists: Keyword search (BM25) breaks down when queries and docum
 - Incremental indexing: 10k new documents/hour → 6 min/hour on 1 × T4 GPU.
 
 **Query encoding:**
-- SBERT query encoding: ~5ms on CPU (384-dim pooled output, no dynamic batching needed).
-- Cross-encoder re-ranking: 100 candidates × 10ms = 1,000ms serial → parallelize to 4 cores: ~50ms.
+- SBERT query encoding: ~5ms on CPU (128-dim Matryoshka-truncated output, no dynamic batching needed).
+- Cross-encoder re-ranking (MiniLM-L6, ~2.5ms per pair per core): 100 candidates × 2.5ms = 250ms serial → parallelize to 4 cores: ~62ms.
 
 **Total budget breakdown:**
 - Query encoding: 5ms
 - ANN retrieval (FAISS): 4ms
-- BM25 retrieval (Elasticsearch): 15ms (parallel with FAISS)
+- BM25 retrieval (Elasticsearch): 15ms (parallel with FAISS, so 15ms covers both)
 - RRF (Reciprocal Rank Fusion) merge: 1ms
-- Cross-encoder re-rank (top-100 on 4 cores): 50ms
+- Cross-encoder re-rank (top-100 on 4 cores): 62ms
 - Serialization + network: 10ms
-- Total: ~85ms p50 → 200ms p99 (with tail latency headroom).
+- Total: ~93ms p50 → 200ms p99 (with tail latency headroom).
 
-**Infrastructure cost:**
-- Encoding service (query): 4 × c5.2xlarge = $280/month.
-- Cross-encoder re-ranker: 4 × c5.2xlarge = $280/month (CPU; GPU not needed for 100-doc re-rank).
-- FAISS index servers: 2 × r5.2xlarge (8 GB RAM each) = $140/month.
-- Elasticsearch cluster: 3 × m5.2xlarge = $540/month.
-- Total: ~$1,240/month.
+**Infrastructure cost** (AWS on-demand, us-east-1, Linux, 730 hr/month):
+- Encoding service (query): 4 × c5.2xlarge at $0.34/hr = $993/month.
+- Cross-encoder re-ranker: 4 × c5.2xlarge at $0.34/hr = $993/month (CPU; GPU not needed for a 100-doc re-rank at this QPS).
+- FAISS index servers: 2 × r5.large (16 GiB each, ample for the 5.1 GB index) at $0.126/hr = $184/month.
+- Elasticsearch cluster: 3 × m5.2xlarge at $0.384/hr = $841/month.
+- Total: ~$3,011/month.
 
 ---
 
@@ -87,7 +87,7 @@ flowchart TD
     SR --> RRF{"Hybrid merge — RRF ~1ms\nscore = Σ 1/(rank+k)\nmerged top-200"}
     KR --> RRF
 
-    RRF --> CE["Cross-encoder re-ranker ~50ms\nMiniLM-L6 joint query+doc\nreranks top-100"]
+    RRF --> CE["Cross-encoder re-ranker ~62ms\nMiniLM-L6 joint query+doc\nreranks top-100"]
     CE --> RES(["Results\ntop-K with snippets"])
 
     subgraph OFF["Offline indexing pipeline"]
@@ -112,7 +112,7 @@ flowchart TD
 - FAISS IVF index: 10M document embeddings; nlist=1024 clusters; nprobe=64 for recall/speed balance.
 - Elasticsearch BM25: existing; provides keyword recall for exact-match queries.
 - RRF merger: combines dense + sparse rankings using reciprocal rank fusion (k=60).
-- Cross-encoder re-ranker: MiniLM-L6 (22M params, 4× smaller than BERT-base) fine-tuned for relevance; scores top-100 jointly.
+- Cross-encoder re-ranker: MiniLM-L6 (22.7M params, ~5× smaller than BERT-base's 110M) fine-tuned for relevance; scores top-100 jointly.
 
 ---
 
@@ -143,7 +143,7 @@ class DocumentIndex:
         self.nprobe = nprobe
         self.doc_ids: list[str] = []
 
-        # IVF with L2 quantizer — requires training on representative vectors
+        # IVF with an inner-product coarse quantizer — requires training on representative vectors
         quantizer = faiss.IndexFlatIP(dimension)  # inner product for cosine similarity
         self.index = faiss.IndexIVFFlat(
             quantizer, dimension, nlist, faiss.METRIC_INNER_PRODUCT
@@ -161,7 +161,8 @@ class DocumentIndex:
     ) -> None:
         for i in range(0, len(documents), batch_size):
             batch = documents[i : i + batch_size]
-            texts = [d["text"][:512] for d in batch]  # truncate to model max
+            texts = [d["text"][:2000] for d in batch]  # coarse char cap; the model
+            # itself truncates anything beyond 256 word pieces (all-MiniLM-L6-v2 default)
             embeddings = self.model.encode(
                 texts, batch_size=64, normalize_embeddings=True, show_progress_bar=False
             ).astype(np.float32)
@@ -228,11 +229,12 @@ def reciprocal_rank_fusion(
 # WRONG: bi-encoder dot-product similarity is used as final ranking signal.
 # Bi-encoder embeds query and document independently — it cannot model
 # fine-grained interactions (e.g., "bank" meaning financial institution vs river bank).
-# For top-10 precision on ambiguous queries, bi-encoder alone gives 0.71 NDCG@10.
+# Illustrative magnitude: on ambiguous queries a bi-encoder alone typically
+# trails a cross-encoder re-rank by several NDCG@10 points — measure on your corpus.
 
 def rank_naive(query_embedding, doc_embeddings):
     scores = query_embedding @ doc_embeddings.T
-    return scores.argsort()[::-1]  # BUG: misses 25% of top-10 relevant docs
+    return scores.argsort()[::-1]  # BUG: no query-document cross-attention
 ```
 
 **Correct approach — cross-encoder joint encoding for re-ranking:**
@@ -249,7 +251,7 @@ class CrossEncoderReranker:
     Output: scalar relevance score per (query, doc) pair.
     """
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L6-v2"):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
         self.model.eval()
@@ -263,7 +265,10 @@ class CrossEncoderReranker:
     ) -> list[tuple[str, float]]:
         """
         Score all (query, document) pairs and return sorted by score.
-        MiniLM-L6 (22M params) achieves 95% of BERT-base accuracy at 4× speed.
+        cross-encoder/ms-marco-MiniLM-L6-v2 (22.7M params) is the sentence-transformers
+        recommended re-ranker: NDCG@10 74.30 on TREC DL 19, MRR@10 39.01 on MS MARCO Dev,
+        ~1,800 docs/sec — roughly 5x the throughput of the base-size ELECTRA cross-encoder
+        (340 docs/sec) at a HIGHER score. See sbert.net cross-encoder pretrained models.
         """
         scores = []
         for i in range(0, len(candidates), batch_size):
@@ -385,11 +390,11 @@ class IncrementalIndexUpdater:
 | 384 (MiniLM-L6) | 15.4 GB | 9ms | 0.91 | MiniLM fine-tune |
 | 128 (Matryoshka) | 5.1 GB | 4ms | 0.88 | Matryoshka training |
 
-Use 384-dim for a balance of quality and cost. If FAISS memory is limited, use Matryoshka-trained 128-dim (3pp recall@100 drop is acceptable when combined with cross-encoder re-ranking). See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+384-dim is the balanced default. This design picks the Matryoshka-trained 128-dim index (§1, §2) because the 5.1 GB index is what keeps the FAISS tier on two small instances; the 3pp recall@100 drop is acceptable when a cross-encoder re-ranks the candidates anyway. Use 384-dim when RAM is not the binding constraint. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
 
 **Decision 2: IVF vs HNSW for FAISS**
 
-HNSW achieves higher recall@100 (~0.98) at the same query time vs IVF (~0.91 at nprobe=64) but requires 4× more RAM (HNSW stores the graph structure in addition to embeddings). At 10M documents, HNSW needs ~40 GB RAM vs IVF's 10 GB. Use IVF for corpora > 5M documents; HNSW for corpora < 5M where RAM is available. Tune nprobe: default 8 is too low (0.77 recall@100); use 64 for production.
+HNSW reaches higher recall@100 than IVF at comparable query time, but costs extra RAM for the graph links. FAISS's own sizing guideline puts HNSW at `(d * 4 + M * 2 * 4)` bytes per vector versus `d * 4` for IVF-Flat — so at d=128, M=32 that is 768 vs 512 bytes (7.7 GB vs 5.1 GB for 10M docs), a ~1.5× overhead, not the order-of-magnitude sometimes assumed. The overhead shrinks as d grows (at d=384 it is ~1.17×). The real reasons to prefer IVF at large corpora are build time and the ability to layer PQ compression on top; HNSW's advantage is real-time `add()` without a retrain. Tune nprobe deliberately: FAISS's `IndexIVF` default is `nprobe = 1`, which is far too low for production; use 64 here.
 
 **Decision 3: Hard negative mining vs random negatives**
 
@@ -397,17 +402,20 @@ Random negatives (train SBERT by contrasting a query's positive with random othe
 
 **Decision 4: Cross-encoder model size — BERT-base vs MiniLM-L6 vs MiniLM-L12**
 
-| Model | Params | Re-ranking latency (100 docs, CPU) | NDCG@10 on MS MARCO |
-|-------|--------|-----------------------------------|--------------------|
-| BERT-base | 110M | 800ms | 0.416 |
-| MiniLM-L12 | 33M | 200ms | 0.408 |
-| MiniLM-L6 | 22M | 80ms | 0.390 |
+Published sentence-transformers figures for the MS MARCO cross-encoders (NDCG@10 on TREC DL 19, MRR@10 on MS MARCO Dev, throughput measured on a V100 GPU):
 
-MiniLM-L6 is the right choice for < 200ms p99 on CPU. The 2.6pp NDCG gap vs BERT-base is acceptable given the latency constraint. See [model_calibration_and_thresholding.md](cross_cutting/model_calibration_and_thresholding.md) for calibrating the cross-encoder relevance scores.
+| Model | Params | Docs/sec | NDCG@10 (TREC DL 19) | MRR@10 (MS MARCO Dev) |
+|-------|--------|----------|---------------------|----------------------|
+| ms-marco-electra-base | 110M | 340 | 71.99 | 36.41 |
+| ms-marco-MiniLM-L12-v2 | 33M | 960 | 74.31 | 39.02 |
+| ms-marco-MiniLM-L6-v2 | 22.7M | 1,800 | 74.30 | 39.01 |
+| ms-marco-MiniLM-L4-v2 | ~19M | 2,500 | 73.04 | 37.70 |
+
+MiniLM-L6 is the right choice: it matches L12 on both metrics at nearly 2× the throughput, and beats the base-size ELECTRA cross-encoder outright — there is no accuracy sacrifice to justify here, only a throughput gain. Drop to L4 only if the latency budget forces it (1.3 NDCG@10 points). See [model_calibration_and_thresholding.md](cross_cutting/model_calibration_and_thresholding.md) for calibrating the cross-encoder relevance scores.
 
 **Decision 5: RRF vs learned linear combination for hybrid fusion**
 
-Learned fusion (train a model to weight dense and sparse scores) is more accurate but requires labeled training data for the fusion model and adds model versioning complexity. RRF is a simple closed-form combination that performs within 2% of learned fusion on standard BEIR benchmarks and requires no additional training. Use RRF as the default; consider learned fusion only if you have >10k human-labeled query-result pairs.
+Learned fusion (train a model to weight dense and sparse scores) is more accurate but requires labeled training data for the fusion model and adds model versioning complexity. RRF is a simple closed-form combination that requires no additional training and, in most reported hybrid-search comparisons, lands within a couple of NDCG@10 points of a learned combiner. Use RRF as the default; consider learned fusion only once you have on the order of 5,000+ human-labeled query-result pairs (below that the fusion model overfits) — and validate the gain on your own held-out set rather than assuming it.
 
 ---
 
@@ -415,13 +423,13 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 
 **Elasticsearch (dense_vector and kNN search):** Elasticsearch added native dense vector search (kNN) in version 8.0. Their architecture uses HNSW for approximate search within each shard, with shard-level results merged at the coordinator. The hybrid search feature (combining BM25 and kNN) uses a linear combination of normalized scores, which requires careful BM25 score normalization (BM25 scores are unbounded; cosine similarity is bounded at [-1, 1]). Their engineering blog notes that RRF (added in ES 8.8) outperforms the linear combination approach for most users because it avoids the normalization problem.
 
-**OpenSearch / AWS (Neural Search):** AWS Neural Search plugin for OpenSearch provides a semantic search pipeline with bi-encoder retrieval and BM25 hybrid fusion. Key engineering decision described in their 2023 blog: they moved from storing full float32 embeddings (high recall) to product quantization (PQ) compressed embeddings (4× smaller, 1% recall drop) at scale, because 768-dim float32 for 100M documents requires ~300 GB RAM — too expensive for commodity instances.
+**OpenSearch / AWS (Neural Search):** The Neural Search plugin for OpenSearch provides a semantic search pipeline with bi-encoder retrieval and BM25 hybrid fusion, and supports FAISS product quantization (PQ) for the vector field. The forcing function is arithmetic, not vendor-specific: 768-dim float32 for 100M documents is 100M × 768 × 4 = 307 GB of RAM, which is why quantization (PQ, or scalar-quantized `byte`/`binary` vectors) is the default recommendation above roughly 10M vectors. Measure the recall cost of the specific quantizer on your own corpus rather than assuming a fixed percentage.
 
-**LinkedIn (Semantic Search for Jobs):** LinkedIn's job search system (described in their 2021 paper) uses a bi-encoder where both query (candidate resume) and document (job description) are encoded with separate BERT models fine-tuned on historical apply/not-apply data. Key insight: the query and document encoders use different architectures (asymmetric encoding) because candidate profiles and job descriptions have different statistical properties — job descriptions are longer and more keyword-dense; resumes are shorter and experience-structured. Asymmetric encoding improved Recall@10 by 12% over symmetric bi-encoding.
+**LinkedIn (Semantic Search for Jobs):** Job search is the canonical *asymmetric* retrieval problem: the query side (a member profile or resume) and the document side (a job description) have different length and vocabulary statistics — job posts are longer and keyword-dense, profiles are shorter and experience-structured. Systems in this shape typically train separate query and document encoders rather than sharing one tower. Treat the size of the gain as corpus-specific; measure symmetric vs asymmetric encoding on your own labelled pairs.
 
-**Google (Multitask Unified Model — MUM):** Google's MUM combines semantic search with multimodal understanding. For text-to-text semantic search, their production system (pre-MUM, described in the REALM paper) uses a bi-encoder over a 3B-document corpus with a 768-dim index stored in a distributed parameter server. Their key engineering insight: document re-encoding is expensive (3B documents × re-encode when model updates) — they cache document embeddings and perform incremental re-encoding only for changed/new documents using content fingerprinting.
+**REALM (Google Research, 2020):** REALM is the reference design for jointly pre-training a retriever with the language model, so the retriever is updated by the LM's own training signal instead of a fixed relevance label. Its knowledge corpus was Wikipedia (roughly 13M passages), not web-scale — it is a research architecture, not Google's production web ranking stack. The operationally important lesson generalizes regardless of scale: because the document index must be re-encoded whenever the encoder changes, REALM re-built its index asynchronously during training. In a production system the equivalent is content-fingerprinted incremental re-encoding of changed documents.
 
-**Vespa (E-commerce Semantic Search):** Vespa (used by Yahoo, Spotify, and others) provides a production-ready hybrid search engine that natively combines dense (FAISS-like) and sparse (BM25) retrieval in a single query plan. Their engineering blog (2022) described a key production optimization: for product search (e-commerce), they add a "diversity" constraint to the hybrid retrieval stage — retrieve top-50 per product category, then merge across categories. This prevents category imbalance (a query for "Apple" should return both Apple iPhones and apple fruit rather than 50 iPhone results).
+**Vespa (E-commerce Semantic Search):** Vespa (originating at Yahoo and used by Spotify, among others) natively combines dense and sparse retrieval in a single query plan rather than merging two systems at the application layer. A common production pattern in e-commerce on top of that: apply a per-category diversity constraint at the retrieval stage — retrieve top-N per product category, then merge — so that an ambiguous query ("Apple") returns both electronics and produce rather than 50 near-duplicate phones.
 
 ---
 
@@ -434,7 +442,7 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 | Elasticsearch (kNN) | Hybrid dense+sparse search | Managed; native BM25+kNN; shard-level HNSW | HNSW memory-intensive at > 50M docs |
 | Qdrant / Weaviate | Managed vector DB with hybrid search | Out-of-box filtering, metadata, CRUD updates | Less battle-tested at 100M+ scale |
 | Cohere Re-Rank API | Managed cross-encoder re-ranking | No infrastructure; state-of-art models | Per-query cost; vendor lock-in |
-| BEIR benchmark | Offline evaluation of retrieval quality | 18 diverse datasets; standardized evaluation | Does not capture latency or production concerns |
+| BEIR benchmark | Offline evaluation of retrieval quality | 18 diverse datasets (Thakur et al., NeurIPS D&B 2021); standardized zero-shot evaluation | Does not capture latency or production concerns |
 
 ---
 
@@ -461,9 +469,9 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 
 ## 9. Common Pitfalls & War Stories
 
-**Pitfall 1: Using generic SBERT on domain-specific corpus without fine-tuning.** A healthcare company deployed `all-MiniLM-L6-v2` on clinical notes. General SBERT treats "MI" (myocardial infarction) and "MI" (Michigan) identically because the abbreviation is ambiguous in training data. On their domain-specific test set, Recall@10 was 0.52 — below the BM25 baseline of 0.61. Fine-tuning SBERT on clinical note query-document pairs using domain-specific hard negatives brought Recall@10 to 0.83, a 31pp improvement over the baseline.
+**Pitfall 1: Using generic SBERT on domain-specific corpus without fine-tuning.** A healthcare company deployed `all-MiniLM-L6-v2` on clinical notes. General SBERT treats "MI" (myocardial infarction) and "MI" (Michigan) identically because the abbreviation is ambiguous in training data. On their domain-specific test set, Recall@10 was 0.52 — below the BM25 baseline of 0.61. Fine-tuning SBERT on clinical note query-document pairs using domain-specific hard negatives brought Recall@10 to 0.83 — 31pp above the un-tuned SBERT (0.52) and 22pp above the BM25 baseline (0.61). (Anonymized incident, illustrative magnitudes.)
 
-**Pitfall 2: FAISS nprobe set too low.** A legal search startup deployed FAISS IVF with default nprobe=8. Recall@100 was 0.71 — they were missing 29% of relevant documents before re-ranking. The issue: with nlist=1024 clusters and nprobe=8, only 0.8% of the index was searched per query. Increasing nprobe to 64 improved Recall@100 to 0.91 at the cost of 2.5× latency increase — still within the 200ms budget. Rule of thumb: set nprobe ≥ sqrt(nlist) for balanced recall/speed.
+**Pitfall 2: FAISS nprobe set too low.** A legal search startup deployed FAISS IVF at nprobe=8 (FAISS's own `IndexIVF` default is `nprobe = 1`, so any value left near the default is a trap). Recall@100 was 0.71 — they were missing 29% of relevant documents before re-ranking. The issue: with nlist=1024 clusters and nprobe=8, only 0.8% of the index was searched per query. Increasing nprobe to 64 improved Recall@100 to 0.91 at the cost of 2.5× latency increase — still within the 200ms budget. Rule of thumb: set nprobe ≥ sqrt(nlist) for balanced recall/speed.
 
 **Pitfall 3: Cross-encoder re-ranking the wrong candidates.** A document search team achieved 0.88 Recall@100 from bi-encoder retrieval but found their final NDCG@10 was only 0.61 — surprisingly low. Investigation revealed the cross-encoder was re-ranking the top-100 by cosine similarity (not by relevance), which was biased toward documents that happened to match the query embedding. The top-100 by cosine similarity often excluded highly relevant documents ranked 50–100 in the dense results but ranked 1–5 in the sparse results. Fix: re-rank the top-100 of the *hybrid-fused* list, not the top-100 of the dense list alone.
 
@@ -478,29 +486,46 @@ Learned fusion (train a model to weight dense and sparse scores) is more accurat
 **Primary bottleneck:** Cross-encoder re-ranking throughput.
 
 ```
-100 candidates × 10ms per (query, doc) pair on single CPU core = 1,000ms
-Parallelize across 4 cores: 250ms (still tight on 200ms budget)
+Base-size cross-encoder: 100 candidates x 10ms per (query, doc) pair on one core = 1,000ms
+Parallelize across 4 cores: 250ms (blows the 200ms budget on its own)
 
 Optimization options:
-  1. MiniLM-L6 instead of BERT-base: 10ms → 2.5ms per pair → 250ms → 62ms total
-  2. Batch inference (batch_size=32): GPU T4 handles 32 pairs in 15ms → 4 batches = 60ms
-  3. Reduce candidates to 50 from 100: 62ms → 31ms (accept 2pp NDCG@10 tradeoff)
+  1. MiniLM-L6 instead of a base-size encoder: 10ms -> 2.5ms per pair
+     -> 250ms serial -> 62ms on 4 cores
+  2. Batch inference on a GPU: MiniLM-L6 is benchmarked at ~1,800 docs/sec on a V100,
+     so 100 pairs is ~55ms of pure model time on one GPU
+  3. Reduce candidates from 100 to 50: 62ms -> 31ms (accept a small NDCG@10 tradeoff)
 
-Recommended: MiniLM-L6 on CPU with batch_size=16 → ~80ms for 100 candidates
-Headroom: 200ms total budget - 80ms re-rank - 4ms FAISS - 15ms ES - 10ms network = 91ms buffer
+Recommended: MiniLM-L6 on 4 CPU cores with batching -> ~62-80ms for 100 candidates
+Headroom (using 80ms): 200ms budget - 80ms re-rank - 15ms retrieval (FAISS and ES
+in parallel) - 1ms RRF - 5ms query encode - 10ms network = 89ms buffer
 ```
 
-**Scaling to 20k queries/sec:**
-- FAISS retrieval: 10 sharded FAISS nodes (2M docs each, 1 GB RAM each) = 10 × r5.xlarge.
-- Cross-encoder: 40 × c5.2xlarge (20k × 80ms / 1000ms = 1,600 concurrent re-rank requests; 1 per core).
-- Monthly cost: $3,600 for cross-encoder fleet + $700 for FAISS nodes = $4,300/month serving.
+**Scaling to 20k queries/sec** (AWS on-demand, us-east-1, 730 hr/month):
+
+The cross-encoder, not the ANN index, is what breaks. Work it out in core-seconds rather than in instances:
+
+```
+Cross-encoder demand:
+  20,000 qps x 100 pairs/query          = 2,000,000 (query, doc) pairs/sec
+  At 2.5ms/pair/core                    = 400 pairs/sec/core
+  Required cores: 2,000,000 / 400       = 5,000 cores
+  c5.2xlarge = 8 vCPU                   -> 625 instances
+  Cost: 625 x $0.34/hr x 730            = ~$155,000/month
+
+FAISS retrieval:
+  10 shards x 2M docs (128-dim) = ~0.5 GB/shard; r5.large (16 GiB) is ample
+  Cost: 10 x $0.126/hr x 730            = ~$920/month
+```
+
+CPU re-ranking stops being economic well before 20k qps. The fix is to change the work, not to buy 625 instances: cut re-rank depth from 100 to 25 candidates (4× less work), cache re-ranked results for head queries, and move the re-ranker to batched GPU inference. Any of the three moves the cross-encoder bill by roughly an order of magnitude; sizing the GPU fleet requires benchmarking on the target accelerator, so do not carry the CPU figure over.
 
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: What is the difference between a bi-encoder and a cross-encoder, and when do you use each?**
-A bi-encoder independently encodes the query and document into separate embeddings, then computes similarity via dot product or cosine. Encoding is fast (once per document, cacheable), and retrieval via ANN is sub-millisecond at scale — but accuracy is limited because the model cannot see both query and document jointly (no cross-attention between them). A cross-encoder feeds [query, document] jointly through BERT's cross-attention layers, producing a single relevance score — much more accurate but requires a forward pass per (query, doc) pair, which is O(N) in corpus size. The production pattern is always bi-encoder for retrieval (top-100), cross-encoder for re-ranking (top-10 from those 100). Never use a cross-encoder alone — it cannot scale; never use only a bi-encoder for final ranking — it leaves 10–15pp NDCG@10 on the table.
+A bi-encoder independently encodes the query and document into separate embeddings, then computes similarity via dot product or cosine. Encoding is fast (once per document, cacheable), and retrieval via ANN is sub-millisecond at scale — but accuracy is limited because the model cannot see both query and document jointly (no cross-attention between them). A cross-encoder feeds [query, document] jointly through BERT's cross-attention layers, producing a single relevance score — much more accurate but requires a forward pass per (query, doc) pair, which is O(N) in corpus size. The production pattern is always bi-encoder for retrieval (top-100), cross-encoder for re-ranking (top-10 from those 100). Never use a cross-encoder alone — it cannot scale; and a bi-encoder alone leaves measurable NDCG@10 on the table, which is why every published hybrid stack adds a re-ranking stage (quantify the gap on your own corpus — it is strongly domain-dependent).
 
 **Q: How do you handle queries for which neither keyword nor semantic search returns good results?**
 Three fallback strategies: (1) query expansion — use an LLM or T5 model to generate 3–5 paraphrases of the original query, then merge the retrieval results across all paraphrases via RRF; (2) entity-aware search — run NER on the query, then perform entity-specific searches using structured fields (e.g., match on entity type + name in document metadata, not just text); (3) hybrid fallback logging — log zero/low-result queries and use them as priority targets for active learning data collection. Never silently return empty results; always have a fallback (e.g., BM25-only if semantic retrieval fails).
@@ -521,4 +546,4 @@ Matryoshka Representation Learning (MRL) trains SBERT to produce embeddings wher
 Three patterns: (1) incremental FAISS flat index — append new embeddings to a small flat index alongside the main IVF index; query both and merge results; rebuild the main index weekly when the flat delta grows large; (2) HNSW with real-time inserts — HNSW supports `add()` without full rebuild, at the cost of slightly degraded recall as the graph becomes less balanced; (3) streaming index update — use a document encoding pipeline (Kafka → encoder service → Vespa/Qdrant vector store) where new documents flow through encoding and are indexed within a configurable latency SLA. For 60-minute freshness on a 10M document index, the incremental flat index approach with hourly merges is the simplest operationally.
 
 **Q: How does reciprocal rank fusion compare to a trained fusion model?**
-RRF is a parameter-free algorithm that requires no training data. Its score is 1/(rank + k) for each result list, summed across lists. It is robust to scale differences between BM25 and cosine similarity scores because it operates on ranks, not raw scores. Trained fusion fits a logistic regression or shallow network on the BM25 score, cosine score, and other signals to predict relevance. Trained fusion outperforms RRF by 1–3pp NDCG@10 when you have ≥ 5,000 labeled query-result pairs. Below that threshold, the trained model overfits. For most enterprise deployments with limited labeled data, RRF is the better default.
+RRF is a parameter-free algorithm that requires no training data. Its score is 1/(rank + k) for each result list, summed across lists. It is robust to scale differences between BM25 and cosine similarity scores because it operates on ranks, not raw scores. Trained fusion fits a logistic regression or shallow network on the BM25 score, cosine score, and other signals to predict relevance. Trained fusion typically outperforms RRF by a small margin once you have on the order of 5,000+ labeled query-result pairs; below that threshold the trained model overfits and RRF wins. For most enterprise deployments with limited labeled data, RRF is the better default.

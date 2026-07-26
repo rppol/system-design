@@ -358,7 +358,7 @@ Communication: "structured communication" via PRD, design docs
   (not just unstructured conversation → reduces hallucination)
 ```
 
-### OpenAI Swarm (Handoff Pattern)
+### Handoff Pattern (OpenAI Agents SDK)
 ```
 Triage Agent → routes to appropriate specialized agent
      |
@@ -392,7 +392,7 @@ Structured message passing:
   "requires_action": true
 }
 
-Natural language handoff (Swarm-style):
+Natural language handoff (Agents SDK style):
   Triage agent outputs: "I need to transfer you to billing for this"
   + Context passed: user_id, conversation_history, issue_type
 
@@ -463,11 +463,11 @@ Cascading failure prevention:
 - Role-play based: each agent has specific responsibilities
 - ~70K GitHub stars; repository now at `FoundationAgents/MetaGPT` (moved from `geekan/`)
 
-### OpenAI Swarm (Experimental, 2024) — deprecated
-- Lightweight multi-agent handoff framework, released October 2024
-- Core concepts: agents + handoffs (transfer control between agents)
-- Explicitly an **educational** framework, never production-hardened; OpenAI now directs all production use to the **OpenAI Agents SDK**, which is the maintained successor
-- Still worth reading as the clearest minimal statement of the handoff primitive — under 1,000 lines of Python
+### OpenAI Agents SDK
+- Production multi-agent framework built on the handoff primitive
+- Core concepts: `Agent`, `Runner`, `handoff`, guardrails, sessions, and built-in tracing
+- Handoffs are exposed to the model as `transfer_to_<agent>` tools, so routing is a normal tool call rather than a bespoke control protocol
+- Runs on the Responses API by default, with adapters for other model providers
 
 ### Anthropic Multi-Agent Research
 - Internal research system using Claude for long-horizon research workflows
@@ -485,7 +485,7 @@ Cascading failure prevention:
 | Orchestrator-Worker | High | Medium | Medium | Complex parallelizable tasks |
 | Debate/Critique | None | High | Medium | Quality-critical outputs |
 | Hierarchical | Medium | High | High | Long-horizon planning |
-| Swarm/Handoff | Medium | High | Low | Routing, specialization |
+| Handoff/routing | Medium | High | Low | Routing, specialization |
 
 ---
 
@@ -524,8 +524,7 @@ Cascading failure prevention:
 | **LangGraph** | Multi-agent orchestration | Best for production; stateful graphs |
 | **CrewAI** | Role-based multi-agent | Easy to set up; good for teams |
 | **AutoGen** | Conversation-based agents | Microsoft; code execution focus |
-| **OpenAI Agents SDK** | Production handoffs | Maintained successor to Swarm; use this, not Swarm |
-| **Swarm (OpenAI)** | Lightweight handoffs | Deprecated/educational; clean abstractions |
+| **OpenAI Agents SDK** | Production handoffs | `Agent`/`Runner`/`handoff`; guardrails, sessions, built-in tracing |
 | **MetaGPT** | Software development | Structured multi-role SOP |
 | **ChatDev** | Software company sim | Research-oriented; open source |
 | **Microsoft Semantic Kernel** | Enterprise multi-agent | C#, Python, Java |
@@ -554,14 +553,14 @@ A: ChatDev simulates a software company with specialized agents for different ro
 **Q: How do you handle failures in a multi-agent pipeline?**
 A: (1) Per-agent timeouts — each agent has a max execution time; (2) Retry logic — retry failed agents once before failing; (3) Graceful degradation — return partial results if some agents succeed; (4) Checkpointing — save state after each successful agent so you can resume from failures; (5) Fallback agents — if primary agent fails, use a simpler backup; (6) Human escalation — for critical failures, alert a human operator.
 
-**Q: What is agent handoff (Swarm pattern)?**
+**Q: What is agent handoff?**
 A: Handoff is when one agent determines that another specialized agent would handle the current request better, and explicitly passes control along with context. Example: Triage agent receives "I was charged twice" → recognizes billing issue → hands off to Billing agent with the user's issue context. The receiving agent continues with full awareness of what the triage agent learned. This creates natural routing without a central orchestrator.
 
 **Q: How do you prevent cascading failures when one sub-agent crashes?**
 A: Treat each agent as an isolated unit of failure with clear boundaries. (1) Per-agent timeouts: kill the agent at T seconds rather than waiting indefinitely; (2) Circuit breaker: if an agent fails 3 times in a row, stop dispatching to it; (3) Checkpoint state after each successful step so you can resume rather than restart from zero; (4) Design for partial completion: the orchestrator must handle "agent_3 produced no result" without crashing; (5) Fallback agents: simpler backup for critical roles. The cascading failure pattern is when Agent A hallucinates → Agent B uses that hallucination → Agent C builds on it — caught only by inserting validation checkpoints between pipeline stages.
 
 **Q: What communication protocol should agents use — shared memory vs message passing?**
-A: Message passing is preferred for production; shared memory is simpler for prototypes. Message passing (LangGraph TypedDict state, Swarm handoffs, AutoGen messages): each agent has explicit inputs and outputs, easy to log and replay, natural fit for LLM function calling. Shared memory (blackboard pattern): all agents read/write a global state object, simpler coordination, but requires locking for concurrent agents and creates hidden dependencies. Use shared memory for simple sequential pipelines; use message passing for parallel or complex workflows where you need traceability and audit logging.
+A: Message passing is preferred for production; shared memory is simpler for prototypes. Message passing (LangGraph TypedDict state, Agents SDK handoffs, AutoGen messages): each agent has explicit inputs and outputs, easy to log and replay, natural fit for LLM function calling. Shared memory (blackboard pattern): all agents read/write a global state object, simpler coordination, but requires locking for concurrent agents and creates hidden dependencies. Use shared memory for simple sequential pipelines; use message passing for parallel or complex workflows where you need traceability and audit logging.
 
 **Q: How do you handle conflicting outputs from parallel agents?**
 A: Three strategies: (1) Voting/majority: if 3 agents answer independently and 2 agree, take the majority — works well for factual questions; (2) Judge agent: a separate LLM evaluates all parallel outputs and selects the best, explaining its reasoning; (3) Merge strategy: domain-specific — for code, run all versions through tests and pick the one with the highest pass rate; for summaries, combine distinct facts and deduplicate. The key is defining the conflict resolution rule before running agents, not after receiving contradictory results.
@@ -706,7 +705,7 @@ class OrchestratorV2:
 | Orchestrator-worker (centralized) | Parallelizable subtasks with shared state synthesis | Single orchestrator is a bottleneck; all inter-agent communication routes through it |
 | Agent debate (adversarial critique) | High-stakes decisions, policy analysis, ambiguous architectural choices | 3-5x cost; does not improve factual accuracy; can introduce spurious controversy |
 | ChatDev-style simulation (role-play) | Code generation, document drafting with iterative review | Long multi-turn chains accumulate errors; hard to debug; role confusion in LLMs |
-| Swarm-style handoffs (flat, decentralized) | Customer support routing, sequential specialist delegation | No global state; hard to reason about system behavior; handoff context can be lost |
+| Handoffs (flat, decentralized) | Customer support routing, sequential specialist delegation | No global state; hard to reason about system behavior; handoff context can be lost |
 
 **Pitfall — Orchestrator sends full conversation history to every worker, ballooning token cost.**
 

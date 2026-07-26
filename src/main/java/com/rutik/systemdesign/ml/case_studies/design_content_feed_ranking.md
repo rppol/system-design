@@ -50,7 +50,7 @@ flowchart TD
     uf["User Feature Fetcher\n5ms"]
     pool["Candidate Pool ~2000 posts\nfollower graph + two-tower ANN + ads"]
     s1["Stage 1: Lightweight Filter\nseen-posts Bloom, business rules, dedup\n2000 to 800"]
-    s2["Stage 2: MMOE Ranker (80ms)\n8 shared + 4 per-task experts\nengagement / dwell / quality towers"]
+    s2["Stage 2: MMOE Ranker (80ms)\n8 shared experts + 3 task gates\nengagement / dwell / quality towers"]
     s3["Stage 3: Multi-Objective Aggregation\n0.4 engage + 0.3 dwell + 0.2 quality + 0.1 fresh\nads at 4,12,25,40 - top 150"]
     s4["Stage 4: DPP Diversity Re-rank\npenalize same-author, topic diversity\nfinal 100"]
     resp(["Feed Response\n100 ranked posts"])
@@ -123,11 +123,14 @@ experts that learned long-form quality signals.
 
 ### 2. Two-Tower Model for Algorithmic Candidate Retrieval
 
-For non-followed content (recommendations), exact scoring of all 10 billion posts per user is
+For non-followed content (recommendations), exact scoring of the whole corpus per user is
 impossible at 100K QPS. Two-tower (dual encoder): user tower encodes user embedding, content tower
 encodes post embedding. Similarity = dot product. Both towers are pre-computed — user embeddings
-updated every 5 minutes, post embeddings at index time. FAISS HNSW index enables approximate
-nearest neighbor search in < 10ms for 10B posts.
+updated every 5 minutes, post embeddings at index time. FAISS enables approximate nearest neighbor
+search in < 10ms. Scope the index deliberately: it covers the *eligible* recent corpus (~10M posts,
+the figure carried into Capacity Planning), not the multi-billion-post archive. 10B 256-dim float32
+vectors are 10TB of raw vectors before any graph overhead, so an unquantized HNSW graph over the
+full archive is not servable — the production index is IVF+PQ over the eligible window.
 
 ### 3. Determinantal Point Processes for Diversity
 
@@ -412,6 +415,11 @@ class DPPReranker:
         """
         Greedy MAP inference for DPP.
         Returns target_size posts maximizing DPP objective.
+
+        COMPLEXITY: this reference version recomputes a full Cholesky per candidate
+        per step, so it is O(k * n * k^3), NOT the O(k * n) quoted for greedy MAP.
+        Production uses the incremental rank-1 gain update (see War Story 1 below,
+        `dpp_greedy_map_correct`), which is what actually fits the latency budget.
         """
         n = len(posts)
         if n <= self.target_size:
@@ -550,7 +558,7 @@ def ips_corrected_label(
 | Two-Tower Model | Candidate retrieval for non-followed content | 256-dim embeddings, FAISS HNSW index |
 | MMOE | Multi-task ranking: engagement + dwell + quality | 8 experts, 3 tasks, joint training |
 | DPP (Greedy MAP) | Diversity re-ranking, author diversity | diversity_weight=0.3, greedy O(k*n) |
-| Bloom Filter | De-duplicate seen posts at O(1) per post | 10M bits, 5 hash functions, 1% FPR |
+| Bloom Filter | De-duplicate seen posts at O(1) per post | 10M bits, 5 hash functions -> ~1% FPR at ~1M items; re-size as seen-history grows |
 | IPS Correction | De-bias training labels for position effects | propensity from 1% randomized bucket |
 | Delayed Negative Sampling | Prevent false negatives from unviewed posts | 48-hour label assignment window |
 | Kafka | User action event stream (clicks, likes, dwells) | 16 partitions, 7-day retention |
@@ -592,12 +600,18 @@ no single "best" weight — it is a business decision about which tradeoff is ac
 metrics (A/B test) are the source of truth; offline NDCG metrics are used only for fast iteration.
 
 **Q: How do you prevent the DPP re-ranking from being too slow at 100K QPS?**
-A: Three optimizations. First, greedy MAP instead of exact DPP: O(k*n) = O(100 * 800) = 80,000
-operations per request, feasible in < 10ms. Second, topic dimension reduction: 64-dim topic
-vectors (from BERTopic) instead of full embedding for the kernel matrix, reducing memory and compute.
-Third, hardware: DPP runs on CPU (no GPU required for matrix operations on 800x800 matrices).
-At 100K QPS, this requires ~50 CPU cores. For further speedup: approximate DPP via random
-sketching reduces the 800-item pool to a quality-stratified sample of 200 before DPP.
+A: Three optimizations. First, greedy MAP instead of exact DPP, and specifically the incremental
+Cholesky-update form (Chen, Zhang and Zhou, "Fast Greedy MAP Inference for Determinantal Point
+Process to Improve Recommendation Diversity", arXiv:1709.05135) rather than recomputing a
+determinant per candidate. Be careful with the arithmetic here: k*n = 100 * 800 = 80,000 counts
+*candidate evaluations*, not floating-point operations — each evaluation is a vector update over
+the already-selected set, so the real per-request cost is several million flops and the core count
+must be measured on your own kernel, not read off the 80,000. Second, topic dimension reduction:
+64-dim topic vectors (from BERTopic) instead of full embedding for the kernel matrix, reducing
+memory and compute. Third, hardware: DPP runs on CPU (no GPU required for matrix operations on
+800x800 matrices). For further speedup: approximate DPP via random sketching reduces the 800-item
+pool to a quality-stratified sample of 200 before DPP — this is the lever that actually moves the
+cost, since the work is roughly quadratic in the pool size.
 
 **Q: How do you A/B test a new ranking model without degrading the full user base?**
 A: Shadow mode first, then canary, then full rollout. Shadow mode: new model runs for 5% of
@@ -610,6 +624,8 @@ trigger: any 10% degradation in session engagement rate or any latency regressio
 ---
 
 ## Failure Scenarios and Recovery
+
+*The three scenarios below are illustrative composites — failure modes that recur in systems of this shape, written up with representative numbers so the mechanics are concrete. They are not accounts of specific, publicly documented incidents at any named company, and the dollar figures, percentages and time-to-detect values are teaching magnitudes rather than measured results.*
 
 ### Failure 1: MMOE Expert Collapse During Multi-Task Training
 
@@ -629,7 +645,7 @@ trigger: any 10% degradation in session engagement rate or any latency regressio
 
 ### Failure 2: Bloom Filter False Positive Eliminating Freshly-Published Content
 
-**What failed:** The candidate filter used a Bloom filter to exclude already-seen posts from the feed. The Bloom filter was initialized with 10M items per user (7-day seen history) at 0.1% false positive rate (well-designed for that capacity). However, the platform grew rapidly and the number of posts per user grew to 25M items without resizing the Bloom filter. The false positive rate climbed to 3.2%, meaning 3.2% of new posts were incorrectly classified as already-seen and excluded from retrieval. For posts published in the last 2 hours (freshness-critical), 3.2% false positive exclusion was significant — popular new posts were invisible to some users. Content creator trust dropped; several large accounts threatened to leave.
+**What failed:** The candidate filter used a Bloom filter to exclude already-seen posts from the feed. The Bloom filter was initialized with 10M items per user (7-day seen history) at 0.1% false positive rate (well-designed for that capacity). However, the platform grew rapidly and the number of posts per user grew to 25M items without resizing the Bloom filter. The false positive rate climbed accordingly: a filter sized for 10M items at 0.1% holds about 14.4 bits per item with k=10 hashes, so at 25M items it has only 5.75 bits per item and its false positive rate is (1 - e^(-10x25/144))^10 = roughly 14%. That means roughly one new post in seven was incorrectly classified as already-seen and excluded from retrieval. For posts published in the last 2 hours (freshness-critical), 14% false positive exclusion was severe — popular new posts were invisible to some users. Content creator trust dropped; several large accounts threatened to leave.
 
 **Detection:** Creator analytics team noticed specific new posts had dramatically lower reach than expected despite high engagement rates on the posts that did surface. Post-hoc analysis showed Bloom filter capacity mismatch. Time-to-detect: 3 weeks.
 
@@ -712,7 +728,9 @@ Total monthly training cost: ~$2,268
 ```
 MMOE Inference (100K QPS × 800 candidates):
   Total inference calls: 100K × 800 = 80M model forward passes/sec
-  MMOE model: 8 experts + 3 gates, ~2M parameters
+  MMOE model: 8 experts + 3 gates + 3 towers = ~0.47M parameters at the defaults
+    in the code above (131k projection + 329k experts + 6k gates + 6k towers).
+    ID-embedding tables that feed it are far larger but are lookups, not FLOPs.
   GPU throughput: 1 A10G processes 100K candidates/sec (batch 256)
   GPUs needed: 80M / 100K = 800 GPUs — clearly infeasible for 100K QPS
 
@@ -720,12 +738,17 @@ MMOE Inference (100K QPS × 800 candidates):
   Stage-2 ranking is 800 candidates per user, batched together.
   100K user requests/sec × 800 candidates = 80M feature vectors assembled,
   but only 100K MMOE forward passes of batch-800.
-  MMOE of batch 800: ~5ms on A10G.
-  Each node handles 200 requests/sec → 100K / 200 = 500 GPU node-equivalents.
-  Use 50× multi-GPU nodes (8× A10G per node): 50 × 8 = 400 A10Gs.
-  Cost: 50× p4d.24xlarge equivalent: ~$1.64/hr × 50 = $82/hr = ~$59,040/month
-  (In practice, use G5.48xlarge at $16.29/hr × 100 nodes = ~$1.17M/month — too expensive)
-  Optimization: quantize MMOE to INT8 → 3x speedup, 20 nodes at $23,400/month.
+  MMOE of batch 800: ~5ms on one A10G → 200 requests/sec per A10G.
+  A10Gs needed: 100K / 200 = 500.
+  g5.48xlarge carries 8× A10G at $16.288/hr (us-east-1 on-demand),
+  so ceil(500 / 8) = 63 nodes.
+  Cost: 63 × $16.288/hr × 730hr = ~$749,000/month.
+  This single line dwarfs everything else by two orders of magnitude, which is the
+  real lesson: at 100K QPS the stage-2 candidate count, not the model, sets the bill.
+  Optimization 1 — INT8 quantization (~3x throughput): 167 A10Gs → 21 nodes
+    → 21 × $16.288 × 730 = ~$250,000/month.
+  Optimization 2 — shrink the stage-2 set. Halving 800 candidates to 400 halves this
+    line outright and usually costs less ranking quality than any serving trick.
 
 Two-Tower ANN Retrieval:
   FAISS IVF+PQ over 10M posts, per-user query
@@ -737,8 +760,11 @@ Redis User Embeddings:
   500M users × 256-dim × 4B = 500GB Redis cluster
   20-node Redis Cluster (r5.4xlarge 128GB RAM): ~$15,000/month
 
-Total monthly serving infrastructure: ~$62,880 (before INT8 optimization)
-Post-INT8 optimization: ~$40,000/month
+Total monthly serving infrastructure: ~$788,000 before quantization
+  (MMOE $749k + FAISS $24.5k + Redis $15k)
+Post-INT8 optimization: ~$290,000/month (MMOE $250k + FAISS $24.5k + Redis $15k)
+Serving, not training, is the entire cost story here: the ~$2.3K/month training bill
+is a rounding error against it.
 ```
 
 ---

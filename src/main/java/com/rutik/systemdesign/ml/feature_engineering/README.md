@@ -240,6 +240,7 @@ from sklearn.feature_selection import (
     SelectKBest,
     mutual_info_classif,
 )
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401 — required before the import below
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
@@ -257,9 +258,11 @@ from typing import Any
 
 # ── Target Encoding (out-of-fold to prevent leakage) ──────────────────────────
 
-class TargetEncoder(BaseEstimator, TransformerMixin):
+class SmoothedTargetEncoder(BaseEstimator, TransformerMixin):
     """
-    Mean-target encoding with smoothing and out-of-fold fitting.
+    Mean-target encoding with m-estimate smoothing, written out so the arithmetic
+    is visible. In production prefer `sklearn.preprocessing.TargetEncoder` (>= 1.3),
+    whose `fit_transform` applies an internal cross-fitting scheme — see below.
 
     Formula per category c:
         encoded(c) = (n_c * mean_c + m * global_mean) / (n_c + m)
@@ -268,22 +271,22 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
     vs the category-level mean. m=10 is a common starting point.
 
     High cardinality (> ~50 unique values): use this instead of one-hot.
-    CRITICAL: fit only on training fold, never on full dataset before split.
+    CRITICAL: this class does NOT cross-fit. `fit(X, y).transform(X)` still leaks a
+    row's own label into its own encoding — fit it inside a CV fold and use it only
+    to transform *held-out* rows, or use sklearn's TargetEncoder.fit_transform.
     """
 
-    def __init__(self, smoothing: float = 10.0, min_samples_leaf: int = 1) -> None:
+    def __init__(self, smoothing: float = 10.0) -> None:
         self.smoothing = smoothing
-        self.min_samples_leaf = min_samples_leaf
-        self.encoding_map_: dict[str, dict[Any, float]] = {}
-        self.global_mean_: float = 0.0
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "TargetEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "SmoothedTargetEncoder":
+        self.encoding_map_: dict[str, dict[Any, float]] = {}
         self.global_mean_ = float(y.mean())
         for col in X.columns:
             stats = y.groupby(X[col]).agg(["mean", "count"])
-            # Smoothed encoding: pull low-count categories toward global mean
-            smoother = 1 / (1 + np.exp(-(stats["count"] - self.min_samples_leaf) / self.smoothing))
-            encoded = smoother * stats["mean"] + (1 - smoother) * self.global_mean_
+            # Trust weight n_c / (n_c + m): pull low-count categories toward global mean
+            weight = stats["count"] / (stats["count"] + self.smoothing)
+            encoded = weight * stats["mean"] + (1 - weight) * self.global_mean_
             self.encoding_map_[col] = encoded.to_dict()
         return self
 
@@ -305,8 +308,8 @@ def build_pipeline(
     """
     Numeric: median imputation + RobustScaler (handles outliers better than Standard).
     Low-card categorical: mode imputation + one-hot.
-    High-card categorical: TargetEncoder (must be fit inside CV fold, not here directly
-        — use TransformedTargetRegressor or custom CV for target-encoded columns).
+    High-card categorical: target encoding (must be cross-fitted, not plain-fitted on the
+        whole training set — use sklearn's TargetEncoder, whose fit_transform cross-fits).
     """
     numeric_transformer = Pipeline([
         ("impute", SimpleImputer(strategy="median")),
@@ -395,7 +398,11 @@ def select_features_rfecv(
     )
     X_selected = rfecv.fit_transform(X, y)
     print(f"Optimal number of features: {rfecv.n_features_}")
-    print(f"CV score at optimal: {rfecv.cv_results_['mean_test_score'][rfecv.n_features_-1]:.4f}")
+    # cv_results_ rows are indexed by the candidate sequence, which STARTS at
+    # min_features_to_select — not by feature count. Index via cv_results_["n_features"].
+    best = int(np.argmax(rfecv.cv_results_["mean_test_score"]))
+    print(f"CV score at optimal ({rfecv.cv_results_['n_features'][best]} feats): "
+          f"{rfecv.cv_results_['mean_test_score'][best]:.4f}")
     return X_selected, rfecv.get_support(indices=True)
 
 
@@ -547,7 +554,8 @@ because it swaps in statistics an outlier cannot move:
     50         +0.60
    500        +18.60      <- the outlier is flagged, not the other five
 
-  The five real values keep their original 1.6-wide spread. Only the outlier moves.
+  The five real values keep a 1.6-wide spread (their 40-unit raw range over an IQR of
+  25). Compare min-max, which squeezed the same five into 0.0816. Only the outlier moves.
 ```
 
 That is the entire argument for `RobustScaler` on fraud amounts and sensor spikes: the median and
@@ -556,7 +564,7 @@ all.
 
 ### Decoding smoothed target encoding, and exactly how it leaks
 
-The `TargetEncoder` docstring above gives the smoothing formula:
+The `SmoothedTargetEncoder` docstring above gives the smoothing formula:
 
 ```
   encoded(c) = (n_c * mean_c + m * global_mean) / (n_c + m)
@@ -586,8 +594,8 @@ training rows, `global_mean = 0.5` (3 defaults of 6), `m = 10`:
   ACME check: (3 x 0.6667 + 10 x 0.5) / (3 + 10) = (2.0 + 5.0) / 13 = 0.5385
 ```
 
-Read the `weight` column: with only 1-3 rows of evidence, every category is pulled to within 0.05 of
-the global 0.5. Raw `mean_c` said ZORP was a certain default (`1.0000`) and BOLT a certain repayer
+Read the `weight` column: with only 1-3 rows of evidence, every category is pulled to within 0.09 of
+the global 0.5 (ACME 0.0385 away, ZORP 0.0455, BOLT 0.0833). Raw `mean_c` said ZORP was a certain default (`1.0000`) and BOLT a certain repayer
 (`0.0000`); smoothing says both are basically unknown. Push `n_c` up and the weight climbs -- at
 `n_c = 40` the weight is 0.80, and at `n_c = 4000` it is 0.9975, so a large category is encoded at
 essentially its own mean. That is the design goal: **`m` sets the sample size at which a category
@@ -757,6 +765,10 @@ which is why the same AUC (0.764) survived on 18% of the features.
 
 ## 7. Real-World Examples
 
+The four vignettes below are anonymized, illustrative composites of common production
+patterns — the mechanisms are real and the magnitudes are representative, but the
+specific metric deltas are not drawn from any published record.
+
 **Credit scoring (target encoding + indicator):** A fintech startup had a `zip_code` column with 12,000 unique values. One-hot encoding created a 12,000-column sparse matrix that made gradient boosting 20x slower with no accuracy gain. Replacing with smoothed target encoding (mean default rate per zip, smoothed toward global mean) reduced feature count by 99.9% while improving AUC from 0.782 to 0.791.
 
 **E-commerce churn (log transform):** Customer purchase amounts spanned 4 orders of magnitude ($1 to $50,000). A logistic regression trained on raw `purchase_amount` converged poorly and gave large weight to extreme purchases. After `log1p` transform, residuals normalized and coefficient for purchase_amount became interpretable (one unit log increase correlated with 12% reduced churn probability).
@@ -779,8 +791,8 @@ which is why the same AUC (0.764) survived on 18% of the features.
 | Imputer          | Pros                              | Cons                            |
 |------------------|-----------------------------------|---------------------------------|
 | Mean/Median      | Fast, simple                      | Ignores correlations            |
-| KNN              | Correlation-aware                 | O(n^2) memory for large n       |
-| Iterative (MICE) | Best statistical properties       | Slow, hyperparameter-sensitive  |
+| KNN              | Correlation-aware                 | O(n^2 * d) distance work; sklearn chunks memory, but runtime still blows up |
+| Iterative (MICE-style) | Best statistical properties | Slow; sklearn returns a single imputation, not MICE's multiple |
 | Indicator + fill | Preserves missingness signal      | Doubles features                |
 
 | Scaler           | Handles outliers | Output range       | Use when |
@@ -805,7 +817,7 @@ which is why the same AUC (0.764) survived on 18% of the features.
 **MinMaxScaler — use when:** neural network inputs expected in [0,1], image pixel normalization.
 **No scaling needed when:** tree-based models (decision trees, random forest, XGBoost) — they are invariant to monotonic feature transformations.
 
-**KNN imputer — do NOT use when:** n > 100,000 (quadratic time/memory); use iterative imputer or simple imputer with indicator instead.
+**KNN imputer — do NOT use when:** n > 100,000 — every row to impute is scored against every fit row, so runtime is quadratic (sklearn chunks the distance matrix, so it is time, not memory, that fails first); use iterative imputer or simple imputer with indicator instead.
 
 **RFECV — use when:** you need the most reliable feature subset and have compute budget. Expect O(n_features * cv_folds) model fits.
 
@@ -866,7 +878,8 @@ df["amount_transformed"] = pt.fit_transform(df[["amount"]])
 | Tool                         | Purpose                                   | Notes |
 |------------------------------|-------------------------------------------|-------|
 | scikit-learn Pipeline        | Leakage-free feature transformation       | Production standard |
-| category_encoders (pip)      | TargetEncoder, BinaryEncoder, HashingEncoder | Richer than sklearn encoders |
+| sklearn `TargetEncoder`      | Cross-fitted target encoding (since 1.3)  | `fit_transform` cross-fits; `fit().transform()` does not — use `fit_transform` on train |
+| category_encoders (pip)      | BinaryEncoder, HashingEncoder, JamesSteinEncoder, CatBoostEncoder | Encoder families sklearn still lacks. Its `TargetEncoder` uses a sigmoid weight (`min_samples_leaf` default 20), not the m-estimate, and does NOT cross-fit |
 | feature-engine (pip)         | Outlier cappers, lag features, cyclic encoding | Time-series friendly |
 | featuretools (pip)            | Automated deep feature synthesis          | Relational data |
 | Feast                        | Open-source feature store                 | Offline + online serving |
@@ -886,7 +899,7 @@ Data leakage occurs when information from outside the training set (including th
 Use target encoding when a categorical feature has more than ~15–50 unique values (high cardinality) and the category has a meaningful relationship with the target. One-hot becomes impractical at high cardinality due to dimensionality explosion. Target encoding requires cross-validation guards to prevent leakage — fit the encoder on k-1 folds and apply to the kth fold. For very low cardinality (2–15 categories) with no natural order, one-hot is simpler and transparent.
 
 **Q: Explain the target encoding formula with smoothing.**
-The smoothed target encoding for category c is: `(n_c * mean_c + m * global_mean) / (n_c + m)` where `n_c` is the count of observations with category c, `mean_c` is the mean target for category c, `global_mean` is the overall target mean, and `m` is the smoothing parameter. When `n_c` is small (few samples for that category), the estimate pulls strongly toward the global mean (regularization). When `n_c` is large, the category-level mean dominates. `m=10` is a common default.
+Smoothed target encoding blends a category's own target mean with the global mean, weighted by how many rows back the category up. The formula is `(n_c * mean_c + m * global_mean) / (n_c + m)`, where `n_c` is the count of observations with category c, `mean_c` is the mean target for category c, `global_mean` is the overall target mean, and `m` is the smoothing parameter. When `n_c` is small (few samples for that category), the estimate pulls strongly toward the global mean (regularization). When `n_c` is large, the category-level mean dominates. `m=10` is a common default.
 
 **Q: What is the difference between StandardScaler, MinMaxScaler, and RobustScaler?**
 `StandardScaler` subtracts the mean and divides by standard deviation; output is unbounded with mean 0 and variance 1; sensitive to outliers because outliers inflate the standard deviation. `MinMaxScaler` scales to [0, 1]; sensitive to outliers (one extreme value compresses all others). `RobustScaler` uses median and interquartile range (IQR) instead of mean and std — outliers have minimal effect. Use RobustScaler when data has meaningful outliers that you want to keep, StandardScaler for roughly normal distributions, MinMaxScaler for neural networks expecting bounded inputs.
@@ -925,7 +938,7 @@ Use log1p for right-skewed non-negative data, Box-Cox when all values are strict
 Normalization (min-max scaling) rescales features to a fixed bounded range such as [0, 1], while standardization (z-score) centers to zero mean and unit variance with an unbounded range. Normalization is preferred when a model expects bounded inputs (neural-net activations, image pixels) but a single extreme outlier compresses all other values toward zero. Standardization suits roughly Gaussian features and algorithms that assume centered data (PCA, logistic regression), and RobustScaler (median/IQR) is the outlier-resistant middle ground.
 
 **Q: What is the hashing trick and when do you use it?**
-The hashing trick maps categories to a fixed number of buckets via a hash function, giving constant memory regardless of cardinality. Because it is stateless — no fitted vocabulary to store — it handles previously unseen categories automatically and works in streaming or online-learning settings where the category set grows over time. The cost is collisions: two distinct categories can hash to the same bucket and become indistinguishable, so you size the bucket count to trade memory against collision rate, and you lose the interpretability that named one-hot columns provide.
+The hashing trick maps categories to a fixed number of buckets via a hash function, giving constant memory regardless of cardinality. Because it is stateless — no fitted vocabulary to store — it handles previously unseen categories automatically and works in streaming or online-learning settings where the category set grows over time. The cost is collisions: two distinct categories can hash to the same bucket and become indistinguishable, so you size the bucket count to trade memory against collision rate, and you lose the interpretability that named one-hot columns provide. One trap: the hash must be *stable across processes*. Python's built-in `hash()` on `str` and `bytes` is salted per interpreter process (PEP 456), so `hash(x) % n_buckets` returns different buckets in the training job than in the serving process and silently destroys the feature — use `zlib.crc32`, `hashlib.md5`, or sklearn's `FeatureHasher` (which uses MurmurHash3), never the builtin.
 
 **Q: How do you encode cyclical features like hour of day or month?**
 Encode cyclical features with paired sine and cosine transforms so that the values wrap around — hour 23 sits right next to hour 0. Raw integer encoding tells the model that hour 23 and hour 0 are 23 units apart when they are actually one hour apart, distorting any distance- or gradient-based model. Mapping each value to `(sin(2*pi*x / period), cos(2*pi*x / period))` places it on a circle so adjacent times are adjacent in feature space; the same trick applies to day-of-week, month, and compass bearing.
@@ -946,13 +959,13 @@ Detect multicollinearity with a correlation matrix or the Variance Inflation Fac
 7. Run `SelectFromModel` (L1 / tree importance) first for fast reduction, then RFECV on the surviving subset for final selection.
 8. Check Pearson correlation matrix and remove features with |corr| > 0.95 (one of the pair adds no new information).
 9. Validate the pipeline end-to-end on a temporal hold-out (most recent 20% of data) to detect time-based leakage.
-10. Use `category_encoders` library for richer encoding options (binary, hash, James-Stein) that sklearn lacks.
+10. Reach for `sklearn.preprocessing.TargetEncoder` first — its `fit_transform` cross-fits, so it is leakage-safe on training data by construction; use `category_encoders` only for families sklearn lacks (binary, hash, James-Stein, CatBoost), and remember those do not cross-fit.
 
 ---
 
 ## 14. Case Study
 
-**Scenario:** A consumer lending platform (3.2M active borrowers, $4.8B loan book) needs to rebuild its credit scoring pipeline. The current system uses 28 manually crafted features and a logistic regression, yielding a Gini coefficient of 0.61 and 18% default rate on approved loans. The target: Gini >= 0.74, default rate <= 12% on same approval volume, using a feature store that serves 250 features in under 5ms for real-time decisions at 800 applications per minute, with automated feature freshness enforcement (no stale features older than 24h).
+**Scenario:** A consumer lending platform (3.2M active borrowers, $4.8B loan book) needs to rebuild its credit scoring pipeline. The current system uses 28 manually crafted features and a logistic regression, yielding a Gini coefficient of 0.61 and 18% default rate on approved loans. The target: Gini >= 0.74, default rate <= 12% on same approval volume, using a feature store that serves 250 features at p50 under 5ms and p99 under 15ms for real-time decisions, sized for a peak design capacity of 800 applications per minute, with automated feature freshness enforcement (no stale features older than 24h).
 
 **Architecture:**
 ```
@@ -983,7 +996,7 @@ GBM Scoring Model (LightGBM, 500 trees)
   monotonic constraints on income, DTI features
          |
          v
-Decision Engine (800 applications/min, p99 < 15ms)
+Decision Engine (peak 800 applications/min, p99 < 15ms)
   score -> approve/decline/refer-to-underwriter
 ```
 
@@ -993,9 +1006,9 @@ Decision Engine (800 applications/min, p99 < 15ms)
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from category_encoders import TargetEncoder
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import TargetEncoder   # >= 1.3; fit_transform cross-fits
 import lightgbm as lgb
 
 # High-cardinality: employer_name (40K categories), zip_code (30K), occupation (1.2K)
@@ -1005,22 +1018,15 @@ NUMERIC_COLS: list[str] = [
     "num_open_trades", "delinquency_score", "revolving_balance",
 ]
 
-def build_target_encoder_cv(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    cat_cols: list[str],
-    n_splits: int = 5,
-    smoothing: float = 10.0,
-) -> TargetEncoder:
-    """Fit TargetEncoder using cross-validated mean to avoid leakage."""
-    encoder = TargetEncoder(
-        cols=cat_cols,
-        smoothing=smoothing,     # shrink toward global mean for rare categories
-        return_df=True,
-    )
-    # Must fit only on training folds; outer CV handles this
-    encoder.fit(X_train, y_train)
-    return encoder
+def build_target_encoder_cv(n_splits: int = 5, smoothing: float = 10.0) -> TargetEncoder:
+    """Target encoder that cross-fits internally.
+
+    sklearn's TargetEncoder applies `(n_c * mean_c + m * global_mean) / (n_c + m)` with
+    `m = smooth`, and its fit_transform() encodes each inner fold from the OTHER folds.
+    That is the load-bearing detail: fit(X, y).transform(X) does NOT cross-fit and still
+    leaks each row's own label into its own encoding.
+    """
+    return TargetEncoder(smooth=smoothing, cv=n_splits)
 
 def compute_bureau_ratios(df: pd.DataFrame) -> pd.DataFrame:
     """Derive credit bureau ratio features with null safety."""
@@ -1037,10 +1043,12 @@ def compute_bureau_ratios(df: pd.DataFrame) -> pd.DataFrame:
         1.0,   # no payment due -> full compliance
     ).clip(0, 5.0)
 
-    df["months_since_delinquency"] = (
-        df["last_delinquency_date"]
-        .apply(lambda d: (pd.Timestamp.now() - d).days // 30 if pd.notnull(d) else 999)
-    )
+    # Point-in-time correct: age the event against the APPLICATION timestamp, never
+    # against pd.Timestamp.now(). Using now() makes the training value depend on when
+    # the backfill ran, so every historical row silently gets a larger "months since"
+    # than the scorer saw at decision time — classic temporal leakage/skew.
+    delta = df["application_ts"] - df["last_delinquency_date"]
+    df["months_since_delinquency"] = (delta.dt.days // 30).fillna(999).astype(int)
     return df
 ```
 
@@ -1076,7 +1084,7 @@ def train_lgbm_with_constraints(
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
         "monotone_constraints": constraint_list,
-        "monotone_constraints_method": "advanced",   # more powerful than basic
+        "monotone_constraints_method": "advanced",   # least constraining of the three, slowest
         "lambda_l1": 0.1,
         "lambda_l2": 0.5,
         "seed": 42,
@@ -1106,9 +1114,15 @@ def cross_validate_pipeline(
         X_tr = compute_bureau_ratios(X_tr)
         X_val = compute_bureau_ratios(X_val)
 
-        encoder = build_target_encoder_cv(X_tr, y_tr, HIGH_CARDINALITY_COLS)
-        X_tr_enc = encoder.transform(X_tr)
-        X_val_enc = encoder.transform(X_val)
+        encoder = build_target_encoder_cv()
+        # fit_transform on the fold-train (cross-fitted -> no self-label leakage);
+        # transform on the fold-val (full fold-train statistics, val labels unused).
+        X_tr_enc = X_tr.copy()
+        X_val_enc = X_val.copy()
+        X_tr_enc[HIGH_CARDINALITY_COLS] = encoder.fit_transform(
+            X_tr[HIGH_CARDINALITY_COLS], y_tr
+        )
+        X_val_enc[HIGH_CARDINALITY_COLS] = encoder.transform(X_val[HIGH_CARDINALITY_COLS])
 
         model = train_lgbm_with_constraints(X_tr_enc, y_tr, list(X_tr_enc.columns))
         preds = model.predict(X_val_enc)
@@ -1136,6 +1150,10 @@ def serve_features_realtime(
         "borrower_features:months_employed",
         "behavioural_features:session_depth_7d",
         "velocity_features:app_logins_24h",
+        # The freshness fields must themselves be requested, or the .get() calls below
+        # fall through to the 999 default and the staleness guard fires on every request.
+        "borrower_features:bureau_pull_age_hours",
+        "behavioural_features:behavioural_age_hours",
     ]
     online_features = feature_store.get_online_features(
         features=feature_refs,
@@ -1160,18 +1178,22 @@ def serve_features_realtime(
 
 **Pitfall 1 - Target encoding leakage when fitted on full training set:**
 ```python
-# BROKEN: encoder sees y for all samples during fit, leaks target into training features
-encoder = TargetEncoder(cols=["employer_name"])
-X_train["employer_name_enc"] = encoder.fit_transform(X_train, y_train)
-# AUC on CV fold inflated by ~0.03 vs held-out test
+# BROKEN: plain fit() learns ONE mapping over all rows, so every training row's own
+# label is baked into its own encoded value. Note this stays broken even inside a CV
+# fold -- restricting fit() to the fold's training rows only protects the VALIDATION
+# rows; the training rows still read their own labels back out of column 7.
+enc = TargetEncoder(smooth=10)
+X_train["employer_name_enc"] = enc.fit(X_train[["employer_name"]], y_train) \
+                                  .transform(X_train[["employer_name"]])
 
-# FIX: fit encoder only on training split within each CV fold
+# FIX: cross-fit the training rows. sklearn's fit_transform() encodes each inner fold
+# from the other folds only, so no row contributes to its own encoding.
 skf = StratifiedKFold(n_splits=5)
 for train_idx, val_idx in skf.split(X, y):
-    enc = TargetEncoder(cols=["employer_name"], smoothing=10)
-    enc.fit(X.iloc[train_idx], y.iloc[train_idx])        # fit on fold train
-    X_train_enc = enc.transform(X.iloc[train_idx])       # transform fold train
-    X_val_enc = enc.transform(X.iloc[val_idx])           # transform fold val (no leakage)
+    enc = TargetEncoder(smooth=10, cv=5)
+    cols = ["employer_name"]
+    X_train_enc = enc.fit_transform(X.iloc[train_idx][cols], y.iloc[train_idx])
+    X_val_enc = enc.transform(X.iloc[val_idx][cols])     # full fold-train stats, no val labels
 ```
 
 **Pitfall 2 - Dividing by zero in ratio features causes inf/-inf in tree models:**
@@ -1219,14 +1241,14 @@ model = lgb.train(params, dtrain)
 
 **Interview discussion points:**
 
-**Why is smoothing in TargetEncoder critical for high-cardinality credit features?** Without smoothing, rare employer names (e.g., a company with 2 borrowers in training, 1 defaulted) get encoded as 50% default rate - wildly overestimated. Smoothing shrinks rare category estimates toward the global mean proportionally to sample size: encoded_value = (n * category_mean + k * global_mean) / (n + k) where k is the smoothing factor. With k=10, the 2-sample employer gets 2/(2+10) * 50% + 10/(2+10) * 8% = 15.0% rather than 50%, preventing the model from over-indexing on rare employers.
+**Why is smoothing in TargetEncoder critical for high-cardinality credit features?** Without smoothing, rare employer names (e.g., a company with 2 borrowers in training, 1 defaulted) get encoded as 50% default rate - wildly overestimated. Smoothing shrinks rare category estimates toward the global mean proportionally to sample size: encoded_value = (n * category_mean + k * global_mean) / (n + k) where k is the smoothing factor (sklearn's `smooth`). With k=10, the 2-sample employer gets 2/(2+10) * 50% + 10/(2+10) * 8% = 15.0% rather than 50%, preventing the model from over-indexing on rare employers. Watch the parameterisation: `category_encoders.TargetEncoder`'s `smoothing` is not this k — it scales a sigmoid `expit((n - min_samples_leaf) / smoothing)` whose `min_samples_leaf` defaults to 20, so the same nominal "smoothing=10" yields ~14.0% here, not 15.0%.
 
 **How do you prevent feature staleness from silently corrupting model scores?** Each feature in the Feast feature store is registered with a TTL (time-to-live) metadata field. The serving layer checks feature_timestamp - now() against the TTL before returning features. For bureau features (TTL=30d), stale data triggers a re-pull request queued for next-day batch; the application is placed in a "pending bureau refresh" queue rather than scored with stale data. For behavioural features (TTL=24h), the fallback is global-mean imputation, logged as a data quality event for monitoring.
 
-**What are monotonic constraints in LightGBM and why are they required for credit scoring?** Monotonic constraints force the model's prediction to be non-decreasing (constraint=+1) or non-increasing (constraint=-1) with respect to a feature, holding all others constant. In credit, regulators and compliance teams require that higher income never increases predicted default probability - a reversal would constitute disparate impact. The `advanced` method enforces constraints at leaf level using a repair step after each split, reducing Gini by only 0.008 versus unconstrained while eliminating all constraint violations.
+**What are monotonic constraints in LightGBM and why are they required for credit scoring?** Monotonic constraints force the model's prediction to be non-decreasing (constraint=+1) or non-increasing (constraint=-1) with respect to a feature, holding all others constant. In credit, compliance teams require that higher income never increases predicted default probability, because a reversal makes the ECOA / Regulation B adverse-action notice indefensible - you cannot state "insufficient income" as a specific principal reason when the model sometimes penalises more income, and CFPB Circular 2022-03 confirms model complexity is not a defence. (This is an explainability and model-governance failure, not disparate impact, which is a separate test about outcome rates across protected groups.) The three enforcement methods differ in tightness, not correctness: `basic` bounds each child leaf at the parent's mid value, `intermediate` and `advanced` memorise progressively tighter ancestor bounds so the tree keeps more flexibility while still never violating the constraint - `advanced` is the least constraining and the slowest. In practice the accuracy cost of constraining a handful of features is small (single-digit Gini basis points in this build), which is what makes it an easy trade.
 
 **How does the Feast feature store handle the read-after-write consistency problem for real-time features?** When a borrower submits an application, in-session behavioural features (clicks, form field changes) are written to Kafka, consumed by Flink within 30 seconds, and materialised to Redis. However, the scoring request can arrive within milliseconds of the session start, before Flink processes the event. The fix is a two-layer lookup: first check Redis for the materialised feature; if missing (TTL expired or not yet written), fall back to computing the feature on-demand from the Kafka consumer group offset, accepting 200ms additional latency for the first request from a cold-start session.
 
-**Why is cross-validated target encoding preferable to leave-one-out encoding for credit scoring?** Leave-one-out (LOO) encoding computes each sample's encoding using all other samples' target values, which is leak-free but computationally expensive for 3M borrowers and unstable for rare categories. Cross-validated target encoding divides training data into K folds, encoding each fold using the remaining K-1 folds. This is equivalent to LOO in expectation but runs in O(K * n) rather than O(n^2), and produces stable estimates for rare categories because each encoding uses n*(K-1)/K samples rather than n-1 samples (effectively the same for large datasets).
+**Why is cross-validated target encoding preferable to leave-one-out encoding for credit scoring?** Leave-one-out (LOO) encoding is cheap but pathological: it leaks the target back through the *complement*. LOO is not the O(n^2) operation it looks like — each row's value is `(sum_c - y_i) / (n_c - 1)`, computed in one pass — so cost is not the objection. The objection is that subtracting your own label makes the encoded value deterministically anti-correlated with it: within a category, every default row gets a strictly lower encoding than every non-default row, and a tree can recover `y_i` almost exactly by splitting on that gap. K-fold encoding breaks this because a whole fold shares one statistic, so no single row's label is individually recoverable. The price is a noisier estimate (each fold's statistic rests on `n_c * (K-1)/K` rows rather than `n_c - 1`), which is exactly what the smoothing term is there to absorb.
 
 **What is the population stability index (PSI) and when do you trigger model retraining?** PSI measures how much the distribution of a feature or model score has shifted between a baseline (training) period and current production: PSI = sum((actual_% - expected_%) * ln(actual_% / expected_%)) across bins. PSI < 0.1 means no significant shift (no action), 0.1-0.2 means moderate shift (investigate), >0.2 means major shift (retrain required). We monitor PSI daily on the model output score distribution and on the top 20 input features; PSI > 0.2 on the score distribution or > 0.25 on income/DTI triggers an emergency retraining pipeline.

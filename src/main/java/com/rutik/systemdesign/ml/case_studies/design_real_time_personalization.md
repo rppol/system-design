@@ -6,7 +6,7 @@
 
 Mental model: Think of personalization as having two memory systems — long-term memory (who this user is historically) and working memory (what they are doing right now). Historical collaborative filtering captures the long-term; session-based sequence models capture the working memory. Neither alone is sufficient: long-term models miss intent shifts; session models have no prior for new users or new contexts.
 
-Why this system exists: Netflix reports that 80% of streamed content is discovered via recommendations. Amazon attributes 35% of revenue to personalized recommendations. A 1% improvement in click-through rate on the homepage recommendation row translates to tens of millions in revenue at scale.
+Why this system exists: Netflix's own published account (Gomez-Uribe & Hunt, *ACM TMIS* 2015) reports that recommendations influence about 80% of hours streamed, with the remaining 20% coming from search. The widely repeated "35% of Amazon's revenue comes from recommendations" figure is a **McKinsey estimate**, not an Amazon disclosure — cite it as such. At either scale, a 1% lift in click-through on the homepage recommendation row is worth a large absolute revenue number, which is why this system earns dedicated infrastructure.
 
 ---
 
@@ -50,13 +50,15 @@ Why this system exists: Netflix reports that 80% of streamed content is discover
 - Item embedding index: 500k items × 128 floats × 4 bytes = 256 MB → fits in FAISS in-memory index per machine.
 - ANN retrieval (HNSW, top-100 candidates): ~2ms.
 
-**Scoring:** 50 candidates × 1ms per item = 50ms if serial; 5ms with vectorized batch inference.
+**Scoring:** 500 candidates scored per request; ~5ms per request with vectorized batch inference (scoring them one at a time would be ~500ms and is not viable).
 
-**Infrastructure cost estimate:**
-- Serving cluster (50k req/sec): 20 × c5.4xlarge = $1,200/month.
-- Redis cluster (feature store): 3 × r5.4xlarge = $700/month.
-- Model training (weekly): 4 × A100 4hr/week = $28/month.
-- Total: ~$1,928/month.
+**Infrastructure cost estimate** (AWS on-demand, us-east-1, Linux, 730 hr/month) — see §10 for how the instance counts are derived:
+- Serving cluster: 90 × c5.2xlarge at $0.34/hr = ~$22,300/month (retrieval + scoring at 50k req/sec, including 2× headroom).
+- Redis cluster (feature store): 3 × r5.4xlarge at $1.008/hr = ~$2,207/month.
+- Model training (weekly): 4 hr/week on a p4d.24xlarge (8× A100) at $21.96/hr = ~$88/run × 4.33 = ~$380/month.
+- Total: ~$24,900/month.
+
+Note how lopsided this is: training is under 1% of the bill. Real-time personalization is a **serving-cost** problem, and the levers that matter are candidate-set size and per-request CPU, not training efficiency.
 
 ---
 
@@ -153,8 +155,11 @@ Feature store management: see [feature_store_and_point_in_time_correctness.md](c
 
 ```python
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+
+# datetime.utcnow() is deprecated from Python 3.12 — it returns a naive datetime
+# that silently misbehaves under arithmetic. Use timezone-aware now(timezone.utc).
 
 @dataclass
 class SessionState:
@@ -168,9 +173,9 @@ class SessionState:
             "type": event_type,  # click | view | add_to_cart | purchase | search
             "item_id": item_id,
             "dwell_seconds": dwell_seconds,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
-        self.last_updated = datetime.utcnow()
+        self.last_updated = datetime.now(timezone.utc)
 
     def to_features(self) -> dict:
         """Extract session-level features for use in retrieval and scoring."""
@@ -185,7 +190,7 @@ class SessionState:
             "last_clicked_item": click_items[-1] if click_items else None,
             "avg_dwell_seconds": avg_dwell,
             "session_length_minutes": (
-                (datetime.utcnow() - datetime.fromisoformat(self.events[0]["timestamp"])).total_seconds() / 60
+                (datetime.now(timezone.utc) - datetime.fromisoformat(self.events[0]["timestamp"])).total_seconds() / 60
                 if self.events else 0
             ),
             "is_high_intent": len(cart_items) > 0,
@@ -286,12 +291,13 @@ class RetrievalEngine:
 ```python
 # WRONG: popularity-based ranking ignores personalization entirely.
 # Users who have diverse or niche interests see the same top-10 popular items
-# as everyone else. CTR for popularity-based ranking: ~1.2%.
-# CTR for personalized ranking: ~3.8% (observed in A/B tests).
+# as everyone else. Illustrative magnitudes from an internal A/B test:
+# popularity ranking ~1.2% CTR vs ~3.8% CTR for personalized ranking.
+# Treat the ratio, not the absolute rates, as the transferable lesson.
 
 def rank_candidates_naive(candidates: list[str], item_stats: dict) -> list[str]:
     return sorted(candidates, key=lambda i: item_stats[i]["total_views"], reverse=True)
-    # CTR: 1.2% — leaves 68% of personalization value on the table
+    # Leaves roughly two-thirds of the achievable CTR on the table
 ```
 
 **Correct approach — interaction scoring with user × item features:**
@@ -516,7 +522,7 @@ See [feature_store_and_point_in_time_correctness.md](cross_cutting/feature_store
 
 **Decision 3: Scoring model — LightGBM vs deep neural network**
 
-LightGBM with 200 trees achieves 0.82 AUC at 5ms p99 per request (batch of 500 candidates). A 2-layer DNN achieves 0.85 AUC at 20ms p99. Given the 100ms total budget with 70ms already allocated to retrieval + feature assembly, LightGBM is the right choice for the scoring layer. The DNN is used as a teacher to distill improved GBDT leaf values (offline, weekly).
+LightGBM with 200 trees achieves 0.82 AUC at 5ms p99 per request (batch of 500 candidates). A 2-layer DNN achieves 0.85 AUC at 20ms p99. The stage budget in §3 is ~10ms feature assembly + ~3ms retrieval + ~5ms rules, so the scoring layer can afford roughly 20ms of the 100ms p99 budget once network, serialization, and tail headroom are reserved — which the DNN only just fits and the GBDT fits comfortably. LightGBM is the right choice here, and the DNN becomes viable only if you first reclaim budget elsewhere. The DNN is used as a teacher to distill improved GBDT leaf values (offline, weekly).
 
 **Decision 4: Exploration rate and placement**
 
@@ -530,15 +536,15 @@ Personalization A/B tests face SUTVA violations because users in the control gro
 
 ## 6. Real-World Implementations
 
-**Netflix (Personalized Recommendation):** Netflix's recommendation system uses a three-stage pipeline: (1) candidate generation using a two-tower model with user history + session embeddings (retrieves ~500 candidates from a 100M item catalog using FAISS); (2) ranking using a wide-and-deep model that incorporates user context, item features, and user-item interaction features; (3) post-ranking business rules (freshness boost for recently released content, diversity enforcement, sponsored placement). Their 2016 engineering blog described the shift from matrix factorization to neural two-tower models as driven by the need to incorporate context features (device, time-of-day, current show being watched) that static user embeddings cannot capture.
+**Netflix (Personalized Recommendation):** Netflix is the reference case for *ranking* personalization rather than large-catalog retrieval — its catalog is on the order of 10,000 titles per country (roughly 13,600 titles worldwide across all licensing regions), not millions. That inverts the usual design: with a catalog this small, exhaustive scoring is affordable and the hard problem moves entirely into ranking, row construction, and artwork selection. Netflix's published account (Gomez-Uribe & Hunt, *ACM TMIS* 2015) describes a portfolio of algorithms per homepage row rather than one model, and attributes ~80% of streamed hours to recommendations. Do not copy the two-stage retrieval architecture in this case study onto a Netflix-sized catalog; it is designed for the 10M+ item regime.
 
-**Pinterest (Homefeed Personalization):** Pinterest's homefeed uses a two-stage system similar to the design above, with a key innovation in the session encoder: they use a "PinSage" graph convolutional network to encode items using both their feature vectors and their co-engagement graph structure. This is particularly valuable for visual content (pins) where the image embedding alone misses the intent context (the same pin can appear in both a "wedding decoration" board and a "DIY project" board — the graph neighborhood captures which context is relevant). Pinterest reported a 40% improvement in fresh pin engagement after deploying PinSage.
+**Pinterest (Homefeed Personalization):** PinSage (Ying et al., KDD 2018) is a graph convolutional network that produces **item embeddings** from both content features and the pin-board co-engagement graph — it is an embedding model, not a session encoder. The graph neighborhood is what disambiguates intent: the same pin sitting in a "wedding decoration" board and a "DIY project" board gets different context from its neighbors, which image features alone cannot supply. Published results: 67% hit-rate versus 46% for the best baseline (150% relative), MRR 0.59 versus 0.56, and in production A/B tests "10-30% improvements in repin rate" on the homefeed, with the abstract citing 30-100% engagement improvements across settings.
 
-**Spotify (Session-Based Recommendations):** Spotify's "Daily Mix" and "Discover Weekly" use different personalization strategies. Daily Mix is session-contextual (what mood are you in right now — working, exercising, relaxing?). Discover Weekly is historical (what have you loved over the past 30 days that you haven't heard in 6 months?). Key insight from Spotify's engineering: context-awareness dramatically matters for music but less for podcast recommendations. For podcasts, historical listening patterns are the dominant signal; for music, session context (first track listened to, time of day, playback speed) is as important as history.
+**Spotify (Session-Based Recommendations):** "Daily Mix" and "Discover Weekly" illustrate the two-stream split at the product level rather than inside one model: one surface is session-contextual (what are you doing right now), the other is historical (what have you loved that you have not heard recently). The generalizable design lesson is that the right freshness/stability blend is **content-type dependent** — short-form, mood-driven items reward session context far more than long-form serial content, where historical affinity dominates. Validate the split for your own content type; do not assume it.
 
-**Taobao (Alibaba):** Alibaba's recommendation system uses the largest scale two-tower deployment described in public literature: 500M users, 1B items. Their 2019 SIGIR paper described their solution to the "exposure bias" problem: items that appear higher in the recommendation list are clicked more (not because they are more relevant, but because they are more visible). They train a position-debiased scoring model using IPW (inverse propensity weighting) based on observed position CTR, similar to the approach used in search ranking systems.
+**Alibaba / Taobao:** Alibaba has published some of the largest recommender deployments in the literature, and their work is the standard reference for the *exposure bias* problem: items placed higher get clicked more because they are more visible, not because they are more relevant. The mitigation is a position-debiased scoring model trained with inverse propensity weighting on observed position CTR — the same technique used in the search-ranking case study. Treat any specific user/item counts as version-specific to the paper you are citing.
 
-**DoorDash (Restaurant Personalization):** DoorDash's recommendation system personalizes restaurant rankings for each user-location pair. Key challenge: item availability changes in real time (restaurants open/close, menu items sell out). Their system maintains a real-time availability feed that filters candidates downstream of retrieval — the FAISS index is updated daily, but out-of-stock filtering happens at serving time using Redis availability flags. They found that availability-aware ranking reduced "item unavailable" order cancellations by 23%.
+**Marketplace personalization and real-time availability:** For food delivery, travel, and marketplace inventory, item availability changes on a minute timescale (a restaurant closes, an item sells out), which the daily ANN index cannot track. The robust pattern is to keep the index stale-tolerant and enforce availability as a **serving-time filter** downstream of retrieval, reading a live Redis availability flag. Retrieval over-fetches to compensate for the filter's drop rate. This is worth doing purely on cancellation and trust grounds; measure the effect on your own cancellation rate rather than importing a published percentage.
 
 ---
 
@@ -547,7 +553,7 @@ Personalization A/B tests face SUTVA violations because users in the control gro
 | Tool | Use case | Advantage | Limitation |
 |------|----------|-----------|------------|
 | FAISS (Meta) | ANN retrieval (HNSW/IVF) | Industry-standard, in-process, sub-millisecond | Index must fit in RAM; real-time updates require index rebuild |
-| ScaNN (Google) | ANN retrieval (asymmetric quantization) | 2× faster than FAISS for large-scale (> 50M items) | Google-specific; less community tooling |
+| ScaNN (Google) | ANN retrieval (anisotropic vector quantization) | Strong recall-vs-latency on public ANN benchmarks at large scale | Benchmark it on your own vectors — relative speed vs FAISS is index- and dataset-dependent; less community tooling |
 | Redis | Session features, item availability flags | Sub-millisecond GET; Streams API for Flink integration | Memory cost; no native vector search without RediSearch |
 | Apache Flink | Real-time session feature computation | Stateful streaming, event-time semantics, exactly-once | Operational complexity; cluster management overhead |
 | LightGBM | Scoring model | SHAP, 5ms inference for 500 candidates, stable | No native sequential feature support |
@@ -594,40 +600,51 @@ Personalization A/B tests face SUTVA violations because users in the control gro
 
 **Primary bottleneck:** FAISS retrieval and feature assembly at peak 50k req/sec.
 
+Size everything in **core-seconds per second**, not in "instances", or the latency figure and the throughput figure will silently contradict each other. A stage that takes L seconds of single-core work per request serves exactly 1/L requests/sec/core.
+
 ```
 Target: 50k req/sec, 100ms p99 total budget
 
 Feature assembly (Redis pipeline):
-  3 key lookups (user, session, item stats) × 200μs each = 0.6ms
-  At 50k req/sec: 50k × 0.6ms = 30,000ms of Redis work/sec
-  Redis throughput: 1M ops/sec per node (single thread)
-  Required Redis nodes: ceil(50k × 3 ops / 1M ops/node) = 1 node (with headroom: 3 nodes HA)
+  3 key lookups (user, session, item stats), pipelined = ~0.6ms per request
+  At 50k req/sec: 150,000 Redis ops/sec
+  Redis: ~100k ops/sec/node is the conservative planning number for a single
+    node serving real GET traffic; pipelining pushes it far higher, but do not
+    plan on the pipelined benchmark number
+  Required Redis nodes: ceil(150k / 100k) = 2, run 3 for HA
 
 FAISS retrieval:
-  2ms per query × 50k req/sec = 100,000ms of CPU/sec
-  FAISS per-core throughput: ~2k queries/sec (HNSW ef=64, d=128)
-  Required cores: ceil(50k / 2k) = 25 cores → 7 × c5.2xlarge (4 cores each) = 28 cores
+  2ms of single-core work per query (HNSW efSearch=64, d=128)
+  Per-core throughput: 1 / 0.002 = 500 queries/sec/core
+  Required cores: 50,000 / 500 = 100 cores
+  c5.2xlarge = 8 vCPU -> ceil(100 / 8) = 13 instances
 
 Scoring (LightGBM, 500 candidates/request):
-  5ms per batch × 50k req/sec = 250,000ms CPU/sec
-  LightGBM per-core throughput: ~1k batches/sec
-  Required cores: ceil(50k / 1k) = 50 cores → 13 × c5.2xlarge
+  5ms of single-core work per request batch
+  Per-core throughput: 1 / 0.005 = 200 batches/sec/core
+  Required cores: 50,000 / 200 = 250 cores
+  c5.2xlarge = 8 vCPU -> ceil(250 / 8) = 32 instances
 
-Total serving cost: 20 × c5.4xlarge ≈ $1,200/month (combining retrieval + scoring)
+Subtotal at zero headroom: 45 x c5.2xlarge
+With 2x headroom for p99 tail and failure domains: ~90 instances
+
+Serving cost: 90 x $0.34/hr x 730 = ~$22,300/month
 ```
 
+This is the ~90-instance figure quoted in §2. The structural point: scoring consumes roughly 2.5× the cores that retrieval does, so cutting the candidate set from 500 to 250 is the single highest-leverage cost lever available — worth more than any per-instance optimization.
+
 **Scaling to 500k req/sec (10× — Super Bowl-level traffic):**
-- Redis: 30 node cluster; activate local L1 cache (process-level LRU) to absorb hot user reads.
-- FAISS: 70 × c5.2xlarge; use IVF index (partition-based) to reduce per-query latency to < 0.5ms.
-- Scoring: 130 × c5.2xlarge or switch to GPU scoring (2 × A10G handles 500k scoring batches/sec).
-- Estimated peak cost: $12,000/month — acceptable for a business generating $50M+ daily revenue.
+- Redis: 15-20 nodes at 100k ops/sec each; activate a local L1 cache (process-level LRU) to absorb hot user reads.
+- FAISS: 130 × c5.2xlarge at 2ms/query; a partitioned IVF index that cuts per-query work to 0.5ms would cut this to ~33 instances, which is the reason to do it.
+- Scoring: 320 × c5.2xlarge, or move scoring to GPU. Do not assume a GPU count without benchmarking — LightGBM does not run on GPU at inference the way a neural scorer does, so this is a model change, not a hardware swap.
+- The 130 + 320 = 450 instances above are at zero headroom; with the same 2× headroom applied at 50k req/sec that is ~900 × c5.2xlarge. Estimated peak cost: 900 × $0.34/hr × 730 = ~$223,000/month. A bill this size is the forcing function for the optimizations above (smaller candidate set, cached scores for repeat requests, cheaper index), not something to absorb.
 
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: Why does real-time session context matter for personalization?**
-User intent changes within a session. A user who arrived at the site looking for running shoes (clicking on 3 running shoe product pages) has different immediate needs from their historical profile (a casual fashion buyer). Historical features predict long-term preferences; session features predict current intent. Combining both — a session-aware query vector fusing historical embedding and recent-click encoding — achieves significantly higher CTR than either alone. In Netflix's experiments, including session context improved recommendation CTR by 20–35% versus history-only recommendations.
+User intent changes within a session. A user who arrived at the site looking for running shoes (clicking on 3 running shoe product pages) has different immediate needs from their historical profile (a casual fashion buyer). Historical features predict long-term preferences; session features predict current intent. Combining both — a session-aware query vector fusing historical embedding and recent-click encoding — achieves significantly higher CTR than either alone. The size of the gain is strongly product-dependent (it is largest where sessions carry a sharp, short-lived intent, as in e-commerce search-adjacent surfaces), so measure it with an A/B test against a history-only control rather than importing a number from another company's blog post.
 
 **Q: How do you train the two-tower model without introducing future information?**
 Training data for the two-tower model uses (user, session, item) triples where the session features are computed from events strictly before the interaction event. This is a PIT correctness requirement: if the training example is "user clicked item X at 3pm," the session features must only include actions before 3pm. Random shuffling of training examples and then computing session features from the full session would leak future-session information. Always generate training examples in chronological order and compute session features using only the preceding events.

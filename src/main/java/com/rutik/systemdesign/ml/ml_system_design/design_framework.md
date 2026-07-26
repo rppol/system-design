@@ -257,8 +257,9 @@ def compute_inverse_propensity_weights(
         sample weights to pass to model training
     """
     propensity = 1.0 / (positions.astype(np.float64) ** eta)
+    raw_weights = 1.0 / propensity            # == positions ** eta
     # Normalize so weights sum to n (to preserve gradient scale)
-    weights = propensity / propensity.mean()
+    weights = raw_weights / raw_weights.mean()
     return weights
 
 
@@ -303,7 +304,7 @@ weights   = compute_inverse_propensity_weights(positions, eta=0.8)
 
 A click at rank 10 counts **6.31 times** a click at rank 1. Without that correction the model learns "items shown at the top get clicked", which is a fact about the old ranker's layout rather than about relevance — and retraining on it locks the current ordering in place, a feedback loop that never surfaces a good item the previous model happened to bury.
 
-**Why `eta` is tuned rather than fixed at 1.0.** `eta = 1.0` assumes examination probability falls exactly as `1/k`, which over-corrects on interfaces where users scan the whole page; `eta = 0` disables the correction entirely. It is normally estimated from result-randomization or swap experiments. Two directions to check when weights look wrong: an over-large `eta` makes deep-position clicks dominate the loss and blows up gradient variance, and a weight column that *falls* with depth means the propensity was normalized in place of its inverse — the correction is then running backwards, amplifying exactly the bias it was meant to remove.
+**Why `eta` is tuned rather than fixed at 1.0.** `eta = 1.0` assumes examination probability falls exactly as `1/k`, which over-corrects on interfaces where users scan the whole page; `eta = 0` disables the correction entirely. It is normally estimated from result-randomization or swap experiments. Two directions to check when weights look wrong: an over-large `eta` makes deep-position clicks dominate the loss and blows up gradient variance, and a weight column that *falls* with depth means the propensity was normalized in place of its inverse — the correction is then running backwards, amplifying exactly the bias it was meant to remove. That inversion is the single easiest mistake to ship here, which is why the code above computes `raw_weights = 1.0 / propensity` explicitly instead of normalizing `propensity` directly. Assert it: `weights[positions.argmax()] > weights[positions.argmin()]` must hold.
 
 ### Step 3: Point-in-Time Feature Join (the critical data correctness step)
 
@@ -612,11 +613,11 @@ def should_retrain(
 
 ## 7. Real-World Examples
 
-**Netflix content ranking**: uses a three-stage pipeline — (1) candidate generation uses matrix factorization to produce 1,000 candidates per user; (2) ranking uses a neural network with user taste profile, item metadata, and contextual features; (3) row/shelf ordering uses a separate model that optimizes for "percentage of shows that are clicked from the first row." Each stage has its own training pipeline, serving infrastructure, and monitoring.
+**Netflix homepage construction**: the page is built in stages rather than as one ranked list — candidates are generated per row, a ranking model orders items inside each row, and a separate model orders the rows themselves, all under a page-level objective. Each stage has its own training pipeline, serving infrastructure, and monitoring, which is the transferable lesson: a "recommendation system" in production is several models with different objectives, not one.
 
-**Twitter (X) timeline ranking**: the For You feed uses a two-tower retrieval model to retrieve 1,500 candidates from 500 million tweets, then a 48-million-parameter neural ranking model that predicts 10 engagement probabilities (like, reply, retweet, click profile, etc.) simultaneously. A utility function combines these into a final ranking score. The system is described in their 2023 open-source release.
+**Twitter (X) timeline ranking**: the For You feed narrows roughly 500 million posts per day down to about 1,500 candidates per request, drawn from several candidate sources (in-network and out-of-network, using graph and embedding signals rather than a single retrieval model), then scores them with a ~48-million-parameter neural ranker that outputs ten engagement probabilities (like, reply, retweet, profile click, and others). A weighted utility function combines those ten into the final score. Described in their March 2023 open-source release and accompanying engineering blog post.
 
-**Amazon product recommendations**: "Customers who bought X also bought Y" uses item-to-item collaborative filtering (offline precomputed) for the cold path. The hot path uses a real-time DNN that incorporates the user's current session clicks, which changes the recommendations within seconds of each interaction.
+**Amazon product recommendations**: "Customers who bought X also bought Y" is item-to-item collaborative filtering (Linden, Smith and York, 2003), which precomputes an item-to-item similarity table offline so the online step is a cheap lookup against the user's recent items. The design point that still holds: pushing the expensive computation offline is what let the online path scale to the full catalog.
 
 ---
 

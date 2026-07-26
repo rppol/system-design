@@ -162,8 +162,10 @@ Standard Kubernetes job scheduling is not designed for ML: a 4-GPU training job 
 simultaneously or it cannot start (gang scheduling). Volcano extends Kubernetes with gang scheduling
 (a job either gets all requested resources or waits), priority queues (research queue vs production
 queue), and queue preemption. Spot instance support: training jobs checkpoint every 15 minutes;
-when a spot node is preempted, the job resumes from the last checkpoint on a new node. GPU
-utilization goes from 55% (standard K8s) to > 80% with Volcano gang scheduling.
+when a spot node is preempted, the job resumes from the last checkpoint on a new node. Gang
+scheduling removes the dominant source of idle GPU time under stock Kubernetes — partially
+allocated jobs that hold some GPUs while blocking on the rest — which is what makes the platform's
+> 80% GPU-utilization target reachable.
 
 ### 4. MLflow as Experiment and Model Registry
 
@@ -280,7 +282,7 @@ class OnlineFeatureStore:
     Write path: materialization job writes batch-computed features
     Read path: model servers read during inference (< 5ms P99 target)
 
-    Redis Cluster config: 6 shards * 2 replicas = 12 nodes
+    Redis Cluster config: 6 shards x 2 nodes (1 primary + 1 replica each) = 12 nodes
     Total capacity: 500GB (covers all user/item features for 100M entities)
     Throughput: 50K reads/sec per feature group
     """
@@ -484,6 +486,11 @@ class ModelRegistry:
     Wrapper around MLflow Model Registry.
     Enforces promotion workflow: model must pass validation before Production.
     Records full lineage: dataset + code + training run -> model version.
+
+    Note: registry *stages* (Staging/Production/Archived) have been deprecated
+    since MLflow 2.9 and still emit a deprecation warning in MLflow 3.x; new
+    deployments should use registry aliases plus tags instead. The stage calls
+    below still work and are kept because the platform predates the change.
     """
 
     def __init__(self, mlflow_tracking_uri: str = "http://mlflow.internal:5000") -> None:
@@ -613,11 +620,13 @@ class CostTracker:
     Tracks GPU-hour consumption per team and per model.
     Called at training job completion and serving inference.
 
-    GPU cost: $2.50/hour per A100 (approximate cloud spot price).
+    GPU cost: $4.10/hour per A100, i.e. p4d.24xlarge us-east-1 on-demand
+    ($32.7726/hr for 8 x A100 40GB) divided by 8. Spot on the same instance
+    runs about $13.07/hr, or ~$1.63 per A100-hour.
     Stored in PostgreSQL for monthly chargeback reports.
     """
 
-    GPU_COST_PER_HOUR_USD: float = 2.50
+    GPU_COST_PER_HOUR_USD: float = 4.10
 
     def record_training_cost(
         self,
@@ -676,7 +685,7 @@ class CostTracker:
 | Decision | Chosen Approach | Alternative | Reason |
 |----------|----------------|-------------|--------|
 | Online store | Redis Cluster | DynamoDB, Cassandra | Redis: lowest latency (< 2ms typical); DynamoDB: fully managed but 5-10ms; Cassandra: high ops burden |
-| Offline store | Hive + Parquet | Delta Lake / Iceberg | Delta Lake: better ACID transactions and time travel; Hive: more mature tooling in 2024, lower migration cost |
+| Offline store | Hive + Parquet | Delta Lake / Iceberg | Delta Lake: better ACID transactions and time travel; Hive: more mature tooling in the existing stack, lower migration cost |
 | Experiment tracking | MLflow | Weights & Biases (W&B) | MLflow: self-hosted (data privacy), open source, no per-seat cost; W&B: better UI, more features |
 | Training orchestration | Kubeflow + Volcano | Ray Train | Ray Train: simpler Python API; Kubeflow: more flexible for heterogeneous workloads, better K8s integration |
 | Model serving | Multi-framework (TorchServe + TF Serving) | Triton Inference Server | Triton: single serving solution for all frameworks; chosen approach: easier model packaging per framework |
@@ -702,10 +711,11 @@ A: Checkpoint-based fault tolerance. Training jobs checkpoint model weights to S
 minutes (configurable per job). The Kubeflow pipeline tracks the last successful checkpoint.
 When Volcano detects a node failure (preemption or crash), it reschedules the job gang on available
 nodes and the job resumes from the last checkpoint. The job requeues automatically — engineers
-only see a 15-minute delay in training completion. For spot instance preemption (30-second warning),
-the job receives a SIGTERM and synchronously writes an emergency checkpoint before the node is
-reclaimed. Fault tolerance makes spot instances (3x cheaper than on-demand) viable for 95% of
-training jobs.
+only see a 15-minute delay in training completion. For EC2 spot preemption the instance gets a
+two-minute interruption notice (and, earlier when available, a rebalance recommendation); the job
+receives a SIGTERM and synchronously writes an emergency checkpoint before the node is reclaimed.
+Fault tolerance makes spot instances (p4d.24xlarge us-east-1: ~$13.07/hr spot vs $32.77/hr
+on-demand, about 2.5x cheaper) viable for 95% of training jobs.
 
 **Q: How do you ensure feature access control for PII features (user location, email)?**
 A: Three-layer access control. First, feature registry: each feature definition includes a
@@ -740,14 +750,14 @@ The experiment tracking database recorded the run as "running" but the process w
 - Prevention: enforce memory budgets with `ulimit` inside the training container; set `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` to reduce fragmentation-induced OOM.
 
 **Failure 2 — Feature store serving layer returns stale features after Redis failover.**
-Redis Sentinel promoted a replica to primary during a failover. The replica had a 4-second replication lag. Feature values for 12,000 users were stale, causing the model to serve degraded recommendations for ~90 seconds.
+Redis Cluster's automatic failover promoted a replica to primary. Because Redis replication is asynchronous, the replica was ~4 seconds behind and those writes were lost. Feature values for 12,000 users were stale, causing the model to serve degraded recommendations for ~90 seconds.
 
 - Detection: feature freshness metric (difference between feature `event_timestamp` and current time) crossed 30s threshold; Grafana alerted.
-- Recovery: automatic — once new primary caught up, fresh features resumed. No manual intervention.
-- Prevention: use synchronous replication (`min-replicas-to-write 1`) for real-time features; accept async replication only for historical/batch features where staleness is acceptable.
+- Recovery: automatic — once the new primary caught up, fresh features resumed. No manual intervention.
+- Prevention: Redis has no synchronous replication mode, so bound the loss window instead — `min-replicas-to-write 1` with a low `min-replicas-max-lag` makes the primary reject writes when no replica is within that lag, and `WAIT` blocks a specific write until N replicas have acknowledged it. Neither makes the system CP; use them for real-time features and accept plain async replication for historical/batch features where staleness is acceptable.
 
 **Failure 3 — Model registry API rate limit caused deployment pipeline deadlock.**
-10 teams ran `mlflow.register_model()` simultaneously during a post-deploy validation window. The Model Registry REST API hit its 100 req/min limit. All 10 pipelines blocked with exponential backoff, but their lock on the CI job queue starved other teams' pipelines for 40 minutes.
+10 teams ran `mlflow.register_model()` simultaneously during a post-deploy validation window. Self-hosted MLflow has no built-in rate limiter, but the ingress fronting it enforced 100 req/min per client, and every pipeline shared one service account. All 10 pipelines blocked with exponential backoff, but their lock on the CI job queue starved other teams' pipelines for 40 minutes.
 
 - Detection: CI pipeline duration alert (> 20 minutes), combined with MLflow API 429 errors in logs.
 - Recovery: manually cancelled 8 of the 10 blocked pipelines; let the remaining 2 proceed sequentially.
@@ -767,8 +777,10 @@ Year 3:  300 services → 72M/day
 Feature store storage (Parquet, 1KB/row):
   Year 1: 24M × 1KB = 24GB/day × 365 = 8.76TB/year
   Retention 2 years → 17.5TB offline store (S3, ~$400/month at $0.023/GB)
-  Online store (Redis, top-5 features × 1M active entities × 100B/feature):
+  Online store working set (Redis, top-5 features × 1M active entities × 100B/feature):
     5 × 1M × 100 = 500MB active RAM — fits in a 4GB Redis instance
+    (the 500GB cluster sized in the Implementation section covers the full
+     100M-entity catalogue, not just the daily-active working set)
 ```
 
 **Training compute:**
@@ -780,7 +792,9 @@ XGBoost fraud model:  12M rows × 200 features × 500 trees × 8 leaves
 
 Deep recommender (two-tower, 100M params):
   50M training pairs × 5 epochs on 4×A100 → ~8 hours per run
-  Weekly retraining: 8h × 52 = 416 A100-hours/year → $1,600/year at $3.85/A100-hr
+  Weekly retraining: 8h × 4 GPUs × 52 = 1,664 A100-hours/year
+    → $6,800/year at $4.10/A100-hr on-demand (p4d.24xlarge $32.7726/hr ÷ 8)
+    → $2,700/year on spot (~$1.63/A100-hr)
 ```
 
 **Serving infrastructure:**
@@ -789,7 +803,8 @@ Deep recommender (two-tower, 100M params):
 Prediction API: 100k req/hr = 28 RPS average, 140 RPS peak (5× burst)
   FastAPI + ONNX Runtime, p99 < 20ms
   1 replica handles 200 RPS → 1 replica sustains peak with 30% headroom
-  Run 2 replicas for HA: 2 × (1 vCPU, 2GB RAM) = $120/month
+  Run 2 replicas for HA: 2 × t3.small (2 vCPU, 2 GiB) at $0.0208/hr
+    = 2 × $0.0208 × 730 = $30/month
 ```
 
 ---
@@ -815,7 +830,8 @@ serve_rate = redis.get(f"clicks:{user_id}") / redis.get(f"impressions:{user_id}"
 
 # FIX: define all features in Feast; materialize to both offline (Parquet)
 # and online (Redis) from the same transformation
-from feast import Feature, FeatureView, Field
+from feast import FeatureView, Field
+from feast.types import Float32
 ctr_7d_fv = FeatureView(
     name="user_ctr_7d",
     source=daily_push_source,
@@ -869,8 +885,11 @@ Prediction distribution drift (KS test on score histograms):
   p-value < 0.01 → alert (distribution shifted significantly)
 
 Model performance (online evaluation where labels arrive with delay):
-  XGBoost fraud: labels arrive in ~2h (chargeback window)
-    → compute AUC and precision@0.1% FPR every 4h
+  XGBoost fraud: chargeback labels mature slowly — card networks allow
+    disputes up to ~120 days after the transaction
+    → evaluate on matured cohorts (AUC, precision@0.1% FPR recomputed
+      every 4h over transactions old enough to be settled), and track a
+      fast proxy label (manual-review outcomes, ~2h) in the meantime
   Recommender: CTR label arrives in 30min
     → compute online NDCG@10 on logged impressions hourly
 
@@ -893,7 +912,7 @@ A/B testing for model promotion:
 
 **What is the difference between online and batch feature computation, and how does the platform serve both?** Batch features are computed on historical data in scheduled Spark/SQL jobs and stored in the offline feature store (Parquet/Delta Lake). Online features are computed in real-time (stream processing or point-in-time lookup) and stored in the online feature store (Redis/DynamoDB) for low-latency serving. The platform exposes a unified feature retrieval API: `get_historical_features()` for training (returns Parquet), `get_online_features()` for inference (returns Redis values). Feature definitions are written once; the platform materializes to both stores.
 
-**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with stage transitions audited. Rollback is a stage transition: `client.transition_model_version_stage(MODEL_NAME, previous_version, "Production")`. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
+**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with stage transitions audited. Rollback is a stage transition: `client.transition_model_version_stage(MODEL_NAME, previous_version, "Production")` — an API deprecated since MLflow 2.9, where the current equivalent is repointing a registry alias. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
 
 **What is a feature store and why is it worth the operational overhead?** A feature store solves three problems: (1) training/serving skew — features are computed once and read identically by both; (2) feature reuse — teams share computed features instead of re-implementing the same 7-day CTR in 5 different codebases; (3) point-in-time correctness — historical training data is fetched with the feature values that were available at each training example's timestamp, preventing future data leakage. The overhead (maintaining Feast/Tecton, running materialization jobs) pays off once 3+ teams share the same feature.
 

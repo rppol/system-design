@@ -360,7 +360,8 @@ base_models = [
     ),
     lgb.LGBMClassifier(
         n_estimators=300, learning_rate=0.05, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1, verbose=-1,
+        subsample=0.8, subsample_freq=1,   # subsample_freq defaults to 0 = bagging DISABLED
+        colsample_bytree=0.8, random_state=42, n_jobs=-1, verbose=-1,
     ),
 ]
 
@@ -649,16 +650,16 @@ The `0.050` gap is the optimiser moving share away from RF (`0.25` instead of `0
 
 ### Kaggle Patterns: 2018 Avito Demand Prediction
 
-1st place used 3-level stacking:
-- Level 1: LightGBM, XGBoost, CatBoost, FastText, ridge regression, neural network (6 models)
-- Level 2: LightGBM trained on level-1 OOF predictions + 20 original features
-- Level 3: Simple linear combination of level-2 predictions from different CV seeds
+Note the metric: Avito was scored on **RMSE**, not AUC — the target was a continuous "deal probability", so any "X% AUC gain" attributed to this competition is a misremembering. Top solutions shared a recognisable multi-level shape:
+- Level 1: LightGBM, XGBoost, CatBoost, plus text models (FastText / RNNs on title and description), image-feature models, and ridge regression — deliberately different *modalities*, not just different tree hyperparameters
+- Level 2: a LightGBM or linear meta-learner trained on level-1 OOF predictions, sometimes with a handful of original features passed through
+- Level 3 (where used): a simple linear combination across CV seeds
 
-The 6 base models covered radically different approaches: tree ensembles for tabular features, neural nets for image features, FastText for text. Diversity was maximum because modalities were different. AUC gain from stacking: ~1.8% over best single model.
+The transferable lesson is the diversity source: gains came from covering tabular, text and image signal with different model families. Per-team stacking deltas are not published in a form worth quoting, so no numeric gain is claimed here.
 
 ### Netflix Prize (2009)
 
-The winning solution (BellKor's Pragmatic Chaos) used a 3-tier ensemble of 107 different collaborative filtering algorithms. The blending layer used linear regression with cross-validated weights. The key lesson: stacking 107 similar models produces diminishing returns; the ~20% RMSE improvement over Netflix's baseline came primarily from algorithm diversity (SVD, RBM, KNN, temporal models) rather than sheer number of models.
+The Grand Prize went to **BellKor's Pragmatic Chaos** — itself a merger of three teams (BellKor, Pragmatic Theory, BigChaos) — with a large blended ensemble whose final combination was learned by linear regression / GBDT over held-out predictions. The headline number is often misquoted: the winning entry improved RMSE to **0.8567**, a **10.06% improvement** over Netflix's Cinematch baseline of 0.9525, not 20%. (10% was the prize threshold, and it took three years and 41,305 teams to clear it.) The frequently cited "107 algorithms" figure comes from BellKor's **2008 Progress Prize** write-up, describing a blend of 107 results — it is not the composition of the 2009 grand-prize solution, which blended a different and larger set. The durable lesson survives the correction: the gain came from algorithm diversity (matrix factorisation, RBMs, KNN, temporal models) rather than model count, and Netflix famously never deployed the full ensemble because the engineering cost outweighed the accuracy.
 
 ### Production Fraud Detection (Major Bank)
 
@@ -1048,7 +1049,8 @@ kf = KFold(n_splits=5, shuffle=True, random_state=42)
 base_models = {
     "lgb": lgb.LGBMRegressor(
         n_estimators=1000, learning_rate=0.03, num_leaves=63,
-        subsample=0.8, colsample_bytree=0.7, verbose=-1, random_state=42,
+        subsample=0.8, subsample_freq=1,   # without subsample_freq > 0, subsample is a no-op
+        colsample_bytree=0.7, verbose=-1, random_state=42,
     ),
     "xgb": xgb.XGBRegressor(
         n_estimators=800, learning_rate=0.03, max_depth=6,
@@ -1085,10 +1087,13 @@ for model_idx, (model_name, model) in enumerate(base_models.items()):
                     callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(-1)],
                 )
             else:
+                # XGBoost >= 2.0: early_stopping_rounds is a CONSTRUCTOR argument.
+                # Passing it to fit() raises TypeError -- it was removed from the
+                # fit() signature (deprecated in 1.6).
+                fold_model.set_params(early_stopping_rounds=100)
                 fold_model.fit(
                     X_tr, y_tr,
                     eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=100,
                     verbose=False,
                 )
         else:

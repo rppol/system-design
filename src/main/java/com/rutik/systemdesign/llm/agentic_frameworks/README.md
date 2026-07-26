@@ -10,13 +10,13 @@ This directory contains a README index (this file) plus 18 deep-dive files, each
 | [langgraph.md](langgraph.md) | LangGraph | StateGraph, TypedDict state, reducers, checkpointing, human-in-the-loop, multi-agent |
 | [llamaindex.md](llamaindex.md) | LlamaIndex | Node parsers, index types, sentence window, auto-merging, sub-question engine |
 | [crewai.md](crewai.md) | CrewAI | Agent roles/goals/backstory, Task delegation, sequential vs hierarchical process |
-| [autogen.md](autogen.md) | AutoGen | ConversableAgent, code execution loop, GroupChat, human_input_mode, code safety |
-| [semantic_kernel.md](semantic_kernel.md) | Semantic Kernel | Kernel, plugins, planners, Kernel filters, OpenAPI import, enterprise patterns |
+| [autogen.md](autogen.md) | AutoGen — conversation lineage of Microsoft Agent Framework | ConversableAgent, code execution loop, GroupChat, human_input_mode, code safety |
+| [semantic_kernel.md](semantic_kernel.md) | Semantic Kernel — enterprise lineage of Microsoft Agent Framework | Kernel, plugins, planners, Kernel filters, OpenAPI import, enterprise patterns |
 | [haystack.md](haystack.md) | Haystack | Pipeline DAG, typed components, document stores, hybrid retrieval, serialization |
 | [dspy.md](dspy.md) | DSPy | Signatures, modules, optimizers (BootstrapFewShot, MIPRO), metrics, compilation |
 | [framework_observability.md](framework_observability.md) | Observability | LangSmith, Langfuse, OpenTelemetry, cost tracking, LLM-as-judge evaluation |
 | [structured_outputs_and_instructor.md](structured_outputs_and_instructor.md) | Structured Outputs | Instructor, Pydantic extraction, native structured outputs, retry on validation |
-| [openai_agents_sdk.md](openai_agents_sdk.md) | OpenAI Agents SDK | Agent primitives, Runner, handoffs, guardrails, tracing (2025) |
+| [openai_agents_sdk.md](openai_agents_sdk.md) | OpenAI Agents SDK | Agent primitives, Runner, handoffs, guardrails, tracing |
 | [claude_agent_sdk.md](claude_agent_sdk.md) | Anthropic API native | Tool use loop, parallel tools, subagents, computer use, prompt caching |
 | [pydantic_ai.md](pydantic_ai.md) | PydanticAI | Typed Agent[Deps,Result], dependency injection, structured output, evals |
 | [smolagents.md](smolagents.md) | HuggingFace smolagents | CodeAgent vs ToolCallingAgent, secure_executor, MCP tools |
@@ -31,7 +31,7 @@ This directory contains a README index (this file) plus 18 deep-dive files, each
 
 Agentic frameworks provide abstractions, components, and patterns for building LLM-powered applications and agents. Rather than writing every LLM call, tool invocation, memory management, and error handling from scratch, frameworks provide reusable building blocks — prompt templates, chain composition, memory integrations, tool libraries, and agent loops.
 
-The trade-off: frameworks accelerate development but add abstraction layers that can make debugging harder. In 2023, LangChain became the de facto standard and also the poster child for over-abstraction. The ecosystem has since matured — LangGraph addresses stateful workflows; LlamaIndex focuses on data ingestion and RAG; CrewAI and AutoGen handle multi-agent coordination.
+The trade-off: frameworks accelerate development but add abstraction layers that can make debugging harder. The ecosystem has consolidated around a handful of durable shapes: LangChain builds agents with `create_agent` running on the LangGraph runtime; LangGraph itself models stateful, cyclical workflows as explicit graphs; LlamaIndex owns data ingestion and RAG; CrewAI models role-based crews; and Microsoft's Agent Framework is the supported .NET/Python SDK for enterprise agents, merging the Semantic Kernel and AutoGen lineages into one graph-based programming model.
 
 Understanding frameworks is critical for engineering interviews because production LLM systems almost always use at least one.
 
@@ -67,32 +67,49 @@ The most widely-used LLM framework. Provides: prompt templates, chains (compose 
 
 **Core concepts:**
 ```python
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.chains import LLMChain
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
 
-# Simple chain
+# LCEL (LangChain Expression Language) - pipe syntax over Runnables
 prompt = ChatPromptTemplate.from_template("Summarize: {text}")
-chain = prompt | ChatOpenAI(model="gpt-4o") | StrOutputParser()
+chain = prompt | ChatOpenAI(model="gpt-5.6") | StrOutputParser()
 result = chain.invoke({"text": "Long article..."})
-
-# LCEL (LangChain Expression Language) - pipe syntax
-chain = prompt | llm | output_parser
 ```
 
 **LangChain components:**
 | Component | Purpose |
 |-----------|---------|
-| Chains | Compose sequential LLM calls |
-| Agents | ReAct, OpenAI functions, custom |
-| Memory | ConversationBuffer, Summary, VectorStore |
+| Runnables / LCEL | Compose prompts, models and parsers with `\|` |
+| Agents | `create_agent`, running on the LangGraph runtime, with middleware hooks |
+| Memory | Checkpointed graph state (thread-scoped), vector-store recall |
 | Retrievers | Vector store + BM25 + web search |
 | Tools | 100+ pre-built tool integrations |
 | Callbacks | Logging, tracing, cost tracking |
 
-**LCEL (LangChain Expression Language):**
+**Building an agent:**
 ```python
-# Modern LangChain with LCEL
+from langchain.agents import create_agent
+
+def check_weather(location: str) -> str:
+    """Return the weather forecast for the specified location."""
+    return f"It's always sunny in {location}"
+
+agent = create_agent(
+    model="anthropic:claude-sonnet-5",
+    tools=[check_weather],
+    system_prompt="You are a helpful assistant",
+)
+
+for chunk in agent.stream(
+    {"messages": [{"role": "user", "content": "what is the weather in sf"}]},
+    stream_mode="updates",
+):
+    print(chunk)
+```
+
+**RAG with LCEL:**
+```python
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 
 retrieval_chain = (
@@ -103,7 +120,7 @@ retrieval_chain = (
 )
 ```
 
-**Verdict:** Most mature ecosystem, most integrations, but complex internals. Use LCEL (modern) not legacy chains.
+**Verdict:** Most mature ecosystem, most integrations, but complex internals. LCEL composes the deterministic pipelines; `create_agent` on the LangGraph runtime builds the agentic ones.
 
 ### 4.2 LangGraph
 
@@ -157,7 +174,7 @@ Focused on data ingestion, indexing, and retrieval. Best-in-class for RAG applic
 
 ```python
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
-from llama_index.core.agent import ReActAgent
+from llama_index.core.agent.workflow import FunctionAgent
 from llama_index.core.tools import QueryEngineTool
 
 # Build RAG index
@@ -170,9 +187,13 @@ query_tool = QueryEngineTool.from_defaults(
     description="Query company knowledge base"
 )
 
-# Build agent
-agent = ReActAgent.from_tools([query_tool, web_search_tool], verbose=True)
-response = agent.chat("What is our refund policy?")
+# Build agent (agents live in llama_index.core.agent.workflow and are async)
+agent = FunctionAgent(
+    tools=[query_tool, web_search_tool],
+    llm=llm,
+    system_prompt="Answer policy questions from the knowledge base.",
+)
+response = await agent.run("What is our refund policy?")
 ```
 
 **Key features:**
@@ -187,14 +208,14 @@ response = agent.chat("What is our refund policy?")
 Multi-agent framework centered on "crews" of specialized AI agents collaborating on tasks.
 
 ```python
-from crewai import Agent, Task, Crew
+from crewai import Agent, Task, Crew, LLM
 
 researcher = Agent(
     role="Senior Research Analyst",
     goal="Uncover cutting-edge developments in AI",
     backstory="Expert at synthesizing complex information from multiple sources",
     tools=[web_search, arxiv_search],
-    llm=ChatOpenAI(model="gpt-4o")
+    llm=LLM(model="openai/gpt-5.6")
 )
 
 writer = Agent(
@@ -202,11 +223,11 @@ writer = Agent(
     goal="Craft compelling content about AI developments",
     backstory="Transforms technical findings into engaging narratives",
     tools=[],
-    llm=ChatOpenAI(model="gpt-4o")
+    llm=LLM(model="openai/gpt-5.6")
 )
 
 research_task = Task(
-    description="Research latest LLM developments in 2024",
+    description="Research the latest LLM developments of the past quarter",
     agent=researcher,
     expected_output="Structured report with key findings"
 )
@@ -221,55 +242,54 @@ crew = Crew(agents=[researcher, writer], tasks=[research_task, write_task])
 result = crew.kickoff()
 ```
 
-### 4.5 AutoGen (Microsoft)
+### 4.5 Microsoft Agent Framework — conversation and code-execution agents
 
-Conversation-based multi-agent framework. Agents communicate by sending messages to each other.
+Microsoft's supported agent SDK for Python and .NET, GA since April 2026 (`pip install agent-framework`). It carries forward AutoGen's multi-agent orchestration and Semantic Kernel's plugin/enterprise plumbing in a single, graph-based programming model, and ships first-party chat clients for Microsoft Foundry, Azure OpenAI, OpenAI, Anthropic, Amazon Bedrock, Google Gemini and Ollama — swapping providers is a one-line change.
 
 ```python
-import autogen
+from agent_framework import ChatAgent
+from agent_framework.openai import OpenAIChatClient
 
-llm_config = {"model": "gpt-4o", "api_key": "..."}
+def run_python(source: str) -> str:
+    """Execute Python in a sandbox and return stdout/stderr."""
+    return sandbox.execute(source)
 
-assistant = autogen.AssistantAgent(
-    name="assistant",
-    llm_config=llm_config,
-    system_message="You are a helpful assistant"
+agent = ChatAgent(
+    chat_client=OpenAIChatClient(model_id="gpt-5.6"),
+    instructions="Write Python, run it, and fix it from the error output before answering.",
+    name="coder",
+    tools=[run_python],
 )
 
-user_proxy = autogen.UserProxyAgent(
-    name="user_proxy",
-    human_input_mode="NEVER",  # NEVER, ALWAYS, TERMINATE
-    code_execution_config={"work_dir": "coding"},
-    max_consecutive_auto_reply=10
+result = await agent.run(
+    "Write and test a Python function to sort a list of dicts by a key"
 )
-
-# Agent conversation
-user_proxy.initiate_chat(
-    assistant,
-    message="Write and test a Python function to sort a list of dicts by a key"
-)
-# Conversation runs automatically: assistant writes code, proxy executes, feedback loop
+# The write -> execute -> read-error -> revise loop is what makes code agents
+# reliable: the model sees its own traceback rather than guessing.
 ```
 
 **Key features:**
-- Human-in-the-loop: human_input_mode controls when humans are consulted
-- Code execution: UserProxyAgent executes code automatically
-- Group chat: multiple agents discussing in a round-table format
-- Custom agent types: inherit from ConversableAgent
+- Code execution loop: the agent writes code, a sandboxed tool runs it, stderr feeds back for self-correction
+- Workflows: multi-agent orchestration expressed as a graph rather than a free-form chat
+- Human-in-the-loop: approval gates on individual tool invocations
+- Enterprise plumbing: dependency injection, typed plugins, filters usable as audit/compliance hooks
+- Native MCP and A2A interop
+
+The conversation-centric `ConversableAgent`/`UserProxyAgent` API is what you will still meet in existing Microsoft-stack codebases; the mechanism to carry across is the code-execution feedback loop, not the message-passing surface.
 
 Deeper multi-agent coordination patterns (debate, orchestrator-worker, handoffs) are covered in
 [Multi-Agent Systems](../multi_agent_systems/README.md).
 
-### 4.6 Semantic Kernel (Microsoft)
+### 4.6 Semantic Kernel (Microsoft) — the JVM/.NET plugin model
 
-Enterprise-grade SDK for building AI applications in C#, Python, and Java. Focused on enterprise integration patterns.
+The Agent Framework above is the supported path on Python and .NET. Semantic Kernel remains the option where you need a Java SDK, and its kernel/plugin/planner vocabulary is what the Agent Framework's enterprise layer inherited.
 
 ```python
 import semantic_kernel as sk
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
 
 kernel = sk.Kernel()
-kernel.add_service(OpenAIChatCompletion(service_id="chat", ai_model_id="gpt-4o"))
+kernel.add_service(OpenAIChatCompletion(service_id="chat", ai_model_id="gpt-5.6"))
 
 # Define a semantic function
 summarize = kernel.add_function(
@@ -282,11 +302,10 @@ result = await kernel.invoke(summarize, sk.KernelArguments(input="Long text...")
 ```
 
 **Key features:**
-- Enterprise patterns: dependency injection, plugins, planners
-- Multi-language: Python, C#, Java (enterprise-friendly)
-- Planner: automatically generates plans from user goals
-- Memory: integrated memory concepts (embeddings, recallable memories)
-- Copilot Stack: foundational to Microsoft's AI product line
+- Enterprise patterns: dependency injection, typed plugins, filters as audit hooks
+- Multi-language: Python, C#, Java — Java is the differentiator that survives
+- Memory: integrated embedding and recall concepts
+- OpenAPI import: turn a spec into a callable plugin without hand-writing tool schemas
 
 ### 4.7 Haystack (deepset)
 
@@ -294,19 +313,31 @@ Pipeline-based framework for building production RAG and NLP systems.
 
 ```python
 from haystack import Pipeline
-from haystack.components.retrievers import InMemoryBM25Retriever
-from haystack.components.generators import OpenAIGenerator
-from haystack.components.builders import RAGPromptBuilder
+from haystack.components.builders import ChatPromptBuilder
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.components.retrievers.in_memory import InMemoryBM25Retriever
+from haystack.dataclasses import ChatMessage
+
+template = [ChatMessage.from_user(
+    "Given the following documents, answer the question.\n"
+    "{% for doc in documents %}{{ doc.content }}\n{% endfor %}\n"
+    "Question: {{question}}\nAnswer:"
+)]
 
 pipeline = Pipeline()
 pipeline.add_component("retriever", InMemoryBM25Retriever(document_store=store))
-pipeline.add_component("prompt_builder", RAGPromptBuilder())
-pipeline.add_component("generator", OpenAIGenerator(model="gpt-4o"))
+pipeline.add_component("prompt_builder", ChatPromptBuilder(template=template,
+                                                           required_variables="*"))
+pipeline.add_component("llm", OpenAIChatGenerator(model="gpt-5.6"))
 
 pipeline.connect("retriever", "prompt_builder.documents")
-pipeline.connect("prompt_builder", "generator")
+pipeline.connect("prompt_builder.prompt", "llm.messages")
 
-result = pipeline.run({"retriever": {"query": "What is AI?"}})
+result = pipeline.run({
+    "retriever": {"query": "What is AI?"},
+    "prompt_builder": {"question": "What is AI?"},
+})
+print(result["llm"]["replies"][0].text)
 ```
 
 ---
@@ -319,8 +350,8 @@ LangChain:     [LLM] + [Prompt] + [Memory] + [Tools] → general purpose
 LangGraph:     [Nodes] → [Edges] → [State] → stateful, cyclical workflows
 LlamaIndex:    [Data] → [Index] → [Retriever] → [LLM] → data-first RAG
 CrewAI:        [Agent1] → [Agent2] → [Agent3] → [Output] → role-based collaboration
-AutoGen:       [Agent1] ↔ [Agent2] ↔ conversation → code execution
-Semantic Kernel: [Kernel] + [Plugins] + [Planner] → enterprise patterns
+MS Agent Fwk:  [ChatAgent] + [Workflow graph] + [Plugins] → .NET/Python enterprise
+Semantic Kernel: [Kernel] + [Plugins] + [Planner] → Java-capable plugin model
 Haystack:      [Component1] → [Component2] → [Output] → pipeline architecture
 ```
 
@@ -393,7 +424,7 @@ Observability: LangSmith, Langfuse, or OpenTelemetry traces
 
 Error handling:
   - Retry with exponential backoff for transient failures
-  - Fallback model (gpt-4o → gpt-3.5-turbo if overloaded)
+  - Fallback model (claude-opus-5 → claude-sonnet-5 if overloaded)
   - Graceful degradation (return partial answer if agent fails)
 
 Cost control:
@@ -412,7 +443,7 @@ Cost control:
 - Custom RAG pipeline over user's workspace documents
 - Chains: retrieve → summarize → rerank → generate
 
-### Replit Ghostwriter (Custom + LlamaIndex)
+### Replit AI (Custom + LlamaIndex)
 - LlamaIndex for codebase indexing
 - Custom agent loop for code completion
 - Replaced LangChain with custom code for performance
@@ -432,8 +463,8 @@ Cost control:
 | LangGraph | High | Very High | Excellent | Complex agents |
 | LlamaIndex | Medium | High | Excellent | Data-heavy RAG |
 | CrewAI | Low | Medium | Good | Multi-agent collaboration |
-| AutoGen | Medium | High | Good | Conversational agents |
-| Semantic Kernel | High | High | Excellent | Enterprise |
+| Microsoft Agent Framework | Medium | High | Excellent | .NET/Python enterprise agents and workflows |
+| Semantic Kernel | High | High | Excellent | Enterprise plugin model where Java is required |
 | Haystack | Medium | High | Excellent | Production NLP pipelines |
 | Custom | Highest | Maximum | Depends | Simple or perf-critical |
 
@@ -467,12 +498,12 @@ Cost control:
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| **LangChain** | General framework | Most popular; LCEL is modern API |
-| **LangGraph** | Stateful agents | Production agent orchestration |
+| **LangChain** | General framework | LCEL for pipelines, `create_agent` for agents |
+| **LangGraph** | Stateful agents | Production agent orchestration; the runtime under `create_agent` |
 | **LlamaIndex** | Data + RAG | Best for data-intensive apps |
 | **CrewAI** | Multi-agent | Role-based; easy to start |
-| **AutoGen** | Conversational agents | Microsoft; code execution |
-| **Semantic Kernel** | Enterprise | C#, Java, Python |
+| **Microsoft Agent Framework** | Enterprise agents + workflows | Python and .NET; MCP and A2A native |
+| **Semantic Kernel** | Enterprise plugin model | The Java-capable option; C#, Java, Python |
 | **Haystack** | Production NLP | Pipeline-based; deepset |
 | **LangSmith** | Observability | LangChain's tracing/evaluation tool |
 | **Langfuse** | Observability | Open-source; works with any framework |

@@ -287,7 +287,7 @@ flowchart LR
 *Guava's `AsyncEventBus` decouples the payment thread from all eight subscribers — `post()` returns in under 1ms while each handler runs independently on the 16-thread pool, so a slow fraud check can no longer stall billing or notifications.*
 
 ```java
-// Java 17 LTS — Guava 32.x AsyncEventBus with bounded executor
+// Java 25 LTS — Guava AsyncEventBus with bounded executor
 // Production payment event fan-out
 
 import com.google.common.eventbus.AsyncEventBus;
@@ -349,9 +349,11 @@ public class PaymentService {
 @Component
 public class FraudCheckSubscriber {
 
+    private final AsyncEventBus eventBus;
     private final FraudClient fraudClient;
 
     public FraudCheckSubscriber(AsyncEventBus eventBus, FraudClient fraudClient) {
+        this.eventBus = eventBus;
         this.fraudClient = fraudClient;
         eventBus.register(this);  // explicit registration — must match explicit unregister
     }
@@ -362,8 +364,8 @@ public class FraudCheckSubscriber {
         fraudClient.score(event.paymentId(), event.amountCents());
     }
 
-    @PreDestroy
-    public void destroy(AsyncEventBus eventBus) {
+    @PreDestroy    // must be no-arg — the container invokes it reflectively
+    public void destroy() {
         eventBus.unregister(this);  // prevents memory leak
     }
 }
@@ -390,7 +392,7 @@ public class FraudCheckSubscriber {
 ### Anti-Pattern 1: Synchronous Observer Exception Blocks Subject Thread
 
 ```java
-// BROKEN — Java 17 LTS
+// BROKEN — Java 25 LTS
 // If FraudCheckObserver throws a RuntimeException, the payment thread propagates it
 // and the remaining 7 subscribers (ledger, notification, analytics...) never run.
 
@@ -407,7 +409,7 @@ public class PaymentSubject {
 
 ```java
 // FIX — defensive notification with per-observer try/catch and structured logging
-// Java 17 LTS
+// Java 25 LTS
 
 public class PaymentSubject {
     private final List<PaymentObserver> observers = new CopyOnWriteArrayList<>();
@@ -592,10 +594,10 @@ flowchart LR
 
 *Every listener is registered with `phase = AFTER_COMMIT`, so inventory, billing, email, shipping, and analytics only fire once the order transaction actually commits — a rollback produces zero phantom events.*
 
-### Code 1: Spring `@TransactionalEventListener` (Java 17 LTS, Spring Boot 3.x)
+### Code 1: Spring `@TransactionalEventListener` (Java 25 LTS, Spring Boot 4)
 
 ```java
-// Event record (Java 16+ record, immutable value object)
+// Event record — immutable value object
 public record OrderPlacedEvent(
     String orderId,
     String customerId,
@@ -854,7 +856,7 @@ public class EmailObserver implements OrderObserver {
 @Component
 public class EmailObserver implements OrderObserver {
 
-    @Async("orderEventExecutor")   // Spring Boot 3.x thread pool bean
+    @Async("orderEventExecutor")   // Spring Boot 4 thread pool bean
     @Override
     public void onOrderPlaced(OrderPlacedEvent event) {
         emailService.sendConfirmation(event.customerId());

@@ -879,22 +879,21 @@ A natural language-to-SQL application takes user questions, generates SQL with a
 
 No independent, reproducible benchmark scores these products on a common attack suite, so the Detection Rate column that used to sit here has been removed rather than repeat vendor marketing. Benchmark candidates yourself, on your own traffic, against your own attack suite.
 
-| Tool | Type | Status (July 2026) | Notes |
-|------|------|--------------------|-------|
-| **Lakera Guard** | API-based injection/content detection | Lakera acquired by Check Point (announced Sept 2025) | Also publishes Gandalf, a crowdsourced prompt-injection challenge |
-| **LLM Guard** | Open-source input/output scanner suite | Originally Protect AI; Protect AI acquired by Palo Alto Networks (completed July 2025) | Composable scanners (PII, toxicity, injection, secrets) |
-| **Rebuff** | Open-source injection detector | **Repository archived by the owner in May 2025 — read-only, unmaintained** | Its own README described it as a prototype that "cannot provide 100% protection". Useful to read, not to depend on |
-| **PromptArmor** | Commercial multi-layer defense | Active | Verify current capability against your own suite before adopting |
+| Tool | Type | Vendor | Notes |
+|------|------|--------|-------|
+| **Lakera Guard** | API-based injection/content detection | Check Point | Also publishes Gandalf, a crowdsourced prompt-injection challenge |
+| **LLM Guard** | Open-source input/output scanner suite | Palo Alto Networks | Composable scanners (PII, toxicity, injection, secrets) |
+| **PromptArmor** | Commercial multi-layer defense | PromptArmor | Verify current capability against your own suite before adopting |
 
 ### Comprehensive Security Platforms
 
-Note the consolidation: most of the 2023-2024 independent AI-security vendors are now product lines inside larger security platforms. Check licensing and product naming before designing around any of them.
+AI-security tooling ships almost entirely as product lines inside the large security platforms. Check licensing and product naming before designing around any of them.
 
 | Tool | Focus | Deployment | Notes |
 |------|-------|-----------|-------|
 | **NeMo Guardrails** | Programmable rails (topic, safety, security) | Self-hosted | NVIDIA, Colang language for defining rules |
-| **Cisco AI Defense** (formerly Robust Intelligence) | AI firewall + continuous validation | SaaS | Robust Intelligence acquired by Cisco, October 2024; no longer sold standalone |
-| **Palo Alto Prisma AIRS** (formerly Protect AI) | ML supply chain security + runtime | Hybrid | Acquisition completed July 2025; `ModelScan` continues as a community-maintained open-source project |
+| **Cisco AI Defense** | AI firewall + continuous validation | SaaS | Sold only as part of the Cisco security platform, not standalone |
+| **Palo Alto Prisma AIRS** | ML supply chain security + runtime | Hybrid | Ships `ModelScan` as its open-source model-file scanner |
 | **Arthur** | Model monitoring with a real-time firewall layer | SaaS/On-prem | Confirm the current product name and scope before citing it in a design |
 
 ### Red Teaming and Vulnerability Scanning
@@ -904,7 +903,6 @@ Note the consolidation: most of the 2023-2024 independent AI-security vendors ar
 | **garak** | LLM vulnerability scanner | ~20 probe families (dan, encoding, gcg, glitch, leakreplay, malwaregen, promptinject, xss, …) | Maintained by NVIDIA, Apache 2.0, plug-in architecture |
 | **Promptfoo** | Red teaming + evaluation | Injection, jailbreak, extraction, custom | Open source, CI/CD integration |
 | **PyRIT** | Red teaming orchestration | Multi-turn attacks, automated scoring | Microsoft, open source, model-agnostic targets (not Azure-only) |
-| **Counterfit** | Adversarial ML attack framework | Evasion, poisoning, extraction | Microsoft/Azure; predates the generative-AI wave and targets classical ML — garak and PyRIT are the current tools for LLMs |
 
 ### Safe Model Formats and Supply Chain
 

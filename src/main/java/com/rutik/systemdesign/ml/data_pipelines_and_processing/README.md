@@ -222,7 +222,7 @@ from datetime import date
 def create_spark_session(app_name: str, shuffle_partitions: int = 200) -> SparkSession:
     """
     Create a configured SparkSession.
-    Default shuffle partitions is 200 in Spark 3 — tune based on data size.
+    Default shuffle partitions is 200 (unchanged through Spark 4) — tune based on data size.
     Rule of thumb: target 128-256 MB per partition.
     """
     return (
@@ -443,12 +443,14 @@ which it does only for the narrow (shuffle-free) part of the job. The shuffle do
 linearly, which is what the next two decoders are about.
 
 Volume estimation runs the same divisions backwards, from an event count. Section 7's Spotify figure
-of ~500 billion events/day, at an assumed 200 bytes per serialized event:
+of ~500 billion events/day, at an assumed 200 bytes per serialized event (Spotify publishes the
+storage side directly — over 350 TB/day raw and ~70 TB/day after compression — so 200 bytes/event
+lands on the compressed side of the real range):
 
 ```
   events/sec  = 500e9 / 86,400        = 5,787,037 events/s     (~5.8M/s average)
   bytes/day   = 500e9 x 200 bytes     = 100 TB/day  (90.9 TiB)
-  at 34 MB/s  = 100e12 / 34.13e6      = 2.93e6 s = 33.9 days    <- one cluster cannot
+  at 34 MB/s  = 90.9 TiB / 34.13      = 2.79e6 s = 32.3 days    <- one cluster cannot
 ```
 
 The ~5.8M/s average is a useful sanity check against Spotify's published 8M events/sec peak: a
@@ -611,7 +613,7 @@ first, then every one of the 20 executors holds a full copy, so the memory cost 
 
 **Uber**: Michelangelo platform. Offline feature computation on Spark (HDFS/Hive), online feature serving from Cassandra. Uber's 2017 platform post reported approximately 10,000 features in the Feature Store (later productized as Palette). Temporal joins prevent future leakage in trip demand forecasting.
 
-**Airbnb**: Zipline feature platform, renamed Chronon and open-sourced in April 2024. Search ranking models consume large numbers of features computed from host/listing/guest interaction history, and a strict schema registry (Thrift) is enforced at every pipeline stage — a schema change requires a migration PR reviewed by the data platform team. (The exact per-model feature count is not public; treat any specific figure as illustrative.)
+**Airbnb**: Zipline feature platform, renamed Chronon and open-sourced in April 2024. Search ranking models consume large numbers of features computed from host/listing/guest interaction history, and event schemas are defined centrally in a Thrift schema repository (Airbnb's Jitney/Kafka stack) rather than declared ad hoc inside a pipeline. (The exact per-model feature count and the internal schema-review process are not public; treat any specific figure as illustrative.)
 
 **Netflix**: pipeline orchestration ran on "Meson" from 2016, and was replaced by **Maestro** — horizontally scalable, open-sourced Apache-2.0 in July 2024 — after Meson hit the vertical-scaling ceiling of a single AWS instance. A workload like video-quality prediction joins frame-level encoding features with CDN delivery metrics across two disparate source systems, and point-in-time joins ensure the training dataset reflects what was known at stream start, not what happened during the stream. (The specific Netflix model is illustrative; the orchestrator history is public.)
 
@@ -631,7 +633,7 @@ first, then every one of the 20 executors holds a full copy, so the memory cost 
 |---|---|---|---|
 | Great Expectations | Medium | High | Airflow, dbt, Spark |
 | Pandera | Easy | Medium | Pandas, Spark |
-| TFX Data Validation | Hard | Very high | TensorFlow ecosystem |
+| TensorFlow Data Validation (TFDV) | Hard | Very high | TensorFlow / TFX ecosystem |
 | Custom SQL assertions | Easy | Low | Any warehouse |
 
 ---
@@ -641,7 +643,7 @@ first, then every one of the 20 executors holds a full copy, so the memory cost 
 **Use batch pipelines when**:
 - Training data is refreshed daily or weekly
 - Dataset fits in cluster memory at scale (Spark can handle TB range)
-- Cost matters — spot/preemptible instances for batch jobs cut costs 60-80%
+- Cost matters — spot/preemptible instances for batch jobs cut costs steeply (AWS advertises up to 90% off On-Demand for EC2 Spot; GCP Spot VMs are 60-91% off)
 - Reproducibility is critical (reruns must be possible months later)
 
 **Use streaming pipelines when**:
@@ -656,7 +658,7 @@ first, then every one of the 20 executors holds a full copy, so the memory cost 
 
 **Do NOT use Spark when**:
 - Dataset fits in a single machine (< 50 GB) — Spark overhead is not worth it
-- You need sub-minute iteration cycles — Spark startup time (JVM, cluster allocation) is 2-5 minutes
+- You need sub-minute iteration cycles — JVM startup plus managed-cluster provisioning (EMR/Databricks) costs minutes per run, not seconds
 
 ---
 
@@ -695,7 +697,7 @@ Training pipeline uses `.fillna(0)` for missing purchase features. Serving pipel
 | Feast | Feature store | Offline + online feature serving, point-in-time joins |
 | Tecton | Feature store (managed) | Enterprise managed feature platform |
 | Apache Airflow | Orchestration | DAG scheduling, dependency management |
-| Prefect | Orchestration | Python-native DAGs, better error handling than Airflow |
+| Prefect | Orchestration | Python-native flows; dropped the explicit-DAG constraint in Prefect 2, so tasks can be created dynamically at runtime |
 | AWS EMR | Managed Spark | Spot instance Spark clusters |
 | Databricks | Managed Spark | Unified analytics + ML platform |
 | OpenLineage | Lineage | Vendor-neutral data lineage standard |
@@ -738,7 +740,7 @@ A multi-layer approach: (1) schema validation — column names, types, null cons
 Avro is a row-oriented binary format with a JSON schema embedded in the file header — ideal for write-heavy streaming pipelines (Kafka messages, event logs) because appending rows is efficient and schema is self-describing. Parquet is a column-oriented binary format — ideal for read-heavy analytical workloads where queries filter and aggregate specific columns (ML feature computation reads "user_id" and "purchase_amount" but not all 50 columns). For ML pipelines: use Avro for Kafka topics and event ingestion; use Parquet (or Delta Lake) for feature datasets and training data.
 
 **Q: When should you use a batch pipeline versus a streaming pipeline?**
-Use batch when features can be refreshed on a schedule and cost matters; use streaming only when online serving needs features fresher than about an hour. Batch processes a bounded window, runs on cheap spot/preemptible instances (60-80% cost savings), and is trivially reproducible — the default for training datasets and daily features. Streaming pays a steep operational and cost premium (Flink/Kafka clusters run 24/7, steep expertise curve) that is only justified by real-time reactions: fraud scoring, live recommendations, or session features that decay in minutes. The trap is reaching for streaming by default — if data volume is low or windows span the full history, a cron job with pandas or a nightly Spark batch is simpler, cheaper, and easier to debug.
+Use batch when features can be refreshed on a schedule and cost matters; use streaming only when online serving needs features fresher than about an hour. Batch processes a bounded window, runs on cheap spot/preemptible instances (vendors advertise 60-90% off On-Demand), and is trivially reproducible — the default for training datasets and daily features. Streaming pays a steep operational and cost premium (Flink/Kafka clusters run 24/7, steep expertise curve) that is only justified by real-time reactions: fraud scoring, live recommendations, or session features that decay in minutes. The trap is reaching for streaming by default — if data volume is low or windows span the full history, a cron job with pandas or a nightly Spark batch is simpler, cheaper, and easier to debug.
 
 **Q: What is the difference between Lambda and Kappa architectures?**
 Lambda runs a batch layer and a speed layer in parallel and merges them at serving time; Kappa is streaming-only and replays the immutable log to rebuild historical results. Lambda gives you an accurate but high-latency batch view plus an approximate low-latency streaming view, at the cost of maintaining the same feature logic in two codebases — a notorious source of training/serving skew when the two drift apart. Kappa collapses this to one codebase by treating everything as a stream and reprocessing from a long-retention Kafka log when logic changes, trading the operational simplicity of one code path for the requirement of a durable, replayable event store. Choose Kappa when a single codebase matters more than squeezing out the last bit of batch accuracy.
@@ -771,7 +773,7 @@ At-least-once may reprocess an event on failure and risk duplicates; exactly-onc
 - Write intermediate results as versioned Parquet partitions — never overwrite; use `mode("overwrite")` with deterministic output paths keyed by date + pipeline version
 - Apply Great Expectations validation as the first stage after data extraction — fail fast on bad data before expensive transformations
 - Store all pipeline parameters in a versioned config file (YAML) committed alongside the code — never hardcode thresholds or paths
-- Use column pruning aggressively: select only columns needed for downstream steps; Parquet's column-oriented storage makes this free
+- Use column pruning aggressively: select only columns needed for downstream steps; Parquet's column-oriented layout means unselected columns are never read off disk (you still pay for footer/metadata reads)
 - Cache DataFrames that are used in multiple downstream joins: `df.cache()` after an expensive aggregation if the result is consumed more than once
 - Monitor pipeline SLAs with data freshness alerts: if the feature dataset for date D is not available by H+2 hours, page on-call
 - For streaming pipelines, set checkpointing intervals (every 30-60 seconds) to enable recovery from Flink/Spark task failures without data loss or duplication
@@ -952,6 +954,6 @@ spark.sql("ALTER TABLE features ALTER COLUMN user_tier SET DEFAULT 'standard'")
 spark.sql("UPDATE features SET user_tier = 'standard' WHERE user_tier IS NULL")
 ```
 
-**How does Apache Spark handle data skew in joins, and what is the remedy?** Data skew occurs when a small number of partition keys hold a disproportionate fraction of data — e.g., 80% of records have `country='US'`. The `US` partition task takes 100× longer than others, stalling the job. Remedy: (1) salting — append a random suffix to the skewed key before join, broadcast the small table with the suffix expanded, then aggregate results: `df.withColumn("salt", F.concat("country", F.lit("_"), (F.rand() * 100).cast("int")))`; (2) broadcast join — if the small table is under `spark.sql.autoBroadcastJoinThreshold` (default 10 MB), Spark broadcasts it automatically, or force it with `F.broadcast(small_df)` to avoid the shuffle entirely; (3) skew join hint in Spark 3.x: `spark.sql.adaptive.skewJoin.enabled=true` detects and splits skewed partitions automatically.
+**How does Apache Spark handle data skew in joins, and what is the remedy?** Data skew occurs when a small number of partition keys hold a disproportionate fraction of data — e.g., 80% of records have `country='US'`. The `US` partition task takes 100× longer than others, stalling the job. Remedy: (1) salting — append a random suffix to the skewed key before join, broadcast the small table with the suffix expanded, then aggregate results: `df.withColumn("salt", F.concat("country", F.lit("_"), (F.rand() * 100).cast("int")))`; (2) broadcast join — if the small table is under `spark.sql.autoBroadcastJoinThreshold` (default 10 MB), Spark broadcasts it automatically, or force it with `F.broadcast(small_df)` to avoid the shuffle entirely; (3) AQE skew-join handling, on by default since Spark 3.0 (`spark.sql.adaptive.skewJoin.enabled=true`, which requires `spark.sql.adaptive.enabled`) — it detects and splits skewed partitions automatically at runtime.
 
 **What is the role of Great Expectations in a production data pipeline?** Great Expectations defines data quality rules ("expectations") as code and validates them at pipeline boundaries. An expectation like `expect_column_values_to_be_between("price", 0.01, 10_000)` runs on every batch — if any row violates it, the pipeline fails and an alert fires before bad data reaches the feature store or model. This shifts data quality left: instead of discovering that the model degraded because price was encoded as negative numbers 3 days after it happened, you catch the anomaly at ingestion time. Store expectations in version control alongside pipeline code so they evolve with schema changes.

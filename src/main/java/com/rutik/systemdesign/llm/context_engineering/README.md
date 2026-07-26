@@ -9,13 +9,13 @@ and RAG (retrieving documents) and addresses the meta-level problem: given a fix
 how do you allocate it optimally across system instructions, tools, retrieved content, memory,
 conversation history, and scratchpad space?
 
-The practical need arises because modern models have context windows from 128k (GPT-4o) to 1M
-(Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line) tokens, but larger context
+The practical need arises because modern models have context windows from 200k (Claude Haiku 4.5)
+to 1M (Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line) tokens, but larger context
 does not uniformly improve performance — there are
 reliability, cost, and latency penalties. Context engineering produces the smallest, most
 signal-dense context that answers the question.
 
-**Cost anchor:** At GPT-4o rates ($2.50/1M input tokens), a 100k-token context at 10 queries per
+**Cost anchor:** At gpt-5.4 rates ($2.50/1M input tokens), a 100k-token context at 10 queries per
 second costs $2.50/second in input tokens alone — $9,000/hour. Even with prompt caching, the
 uncached portion grows with every conversation turn. Context engineering is simultaneously a
 quality and a cost discipline.
@@ -112,13 +112,13 @@ retrieval itself."
 | Symbol | What it actually is |
 |--------|---------------------|
 | `C` | Total tokens you would stuff into the window. The whole knowledge base |
-| `p` | Input price per token. $2.50/1M for GPT-4o = $0.0000025 per token |
+| `p` | Input price per token. $2.50/1M for gpt-5.4 = $0.0000025 per token |
 | `k` | How many chunks the retriever returns. 4 in the Section 5 layout |
 | `s` | Average tokens per chunk. 1,750 in the Section 5 layout |
 | `r` | Per-query cost of embedding the query plus the vector search. Fractions of a cent |
 | `C*` | Corpus size above which RAG is cheaper. Everything larger favours retrieval |
 
-**Walk one example.** GPT-4o pricing, the `k = 4` and `s = 1,750` from the Section 5 budget:
+**Walk one example.** gpt-5.4 pricing, the `k = 4` and `s = 1,750` from the Section 5 budget:
 
 ```
   p = $2.50/1M       = $0.0000025 per token
@@ -224,7 +224,7 @@ produces truncated answers under exactly the conditions where the answer matters
 
 | Symbol | What it actually is |
 |--------|---------------------|
-| `total` | The model's full context window. 32,000 here; 128k on GPT-4o, 1M on Claude Opus 5 |
+| `total` | The model's full context window. 32,000 here; 200k on Claude Haiku 4.5, 1M on Claude Opus 5 |
 | `sum(zones)` | Everything you send. Input tokens, billed at the input rate |
 | `output_reserve` | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
 | `slack` | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
@@ -371,7 +371,8 @@ flowchart LR
 import tiktoken
 from dataclasses import dataclass
 
-ENCODER = tiktoken.encoding_for_model("gpt-4o")
+# o200k_base is the encoding used by the current OpenAI model families.
+ENCODER = tiktoken.get_encoding("o200k_base")
 
 @dataclass
 class ContextBudget:

@@ -222,10 +222,9 @@ def retrieve_broken(query_vector: list[float], limit: int = 10) -> list[ScoredPo
     # Returns docs from tenant_A, tenant_B, tenant_C indiscriminately
 ```
 
-Note the API surface: `QdrantClient.search()` was superseded by the universal
-`query_points()` endpoint and is no longer present on the current client, so the
-vector argument is `query=` (not `query_vector=`) and the hits live on
-`response.points` rather than the response itself.
+Note the API surface: every vector query goes through the universal
+`QdrantClient.query_points()` endpoint, so the vector argument is `query=` and the
+hits live on `response.points` rather than on the response itself.
 
 ### FIX: TenantAwareRetriever
 

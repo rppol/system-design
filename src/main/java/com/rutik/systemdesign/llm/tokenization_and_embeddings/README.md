@@ -543,7 +543,7 @@ A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embeddi
   │  Tokenizer: SentencePiece (multilingual BPE, 100k vocab)  │
   │  - Automatic language detection via fastText              │
   │  - Token fertility monitoring (tokens/word per language)  │
-  │  - OOV rate alert: < 0.1% unknown pieces target          │
+  │  - OOV rate alert: < 0.1% unknown pieces target           │
   └──────────────────────────┬────────────────────────────────┘
                              │ token IDs
                              v
@@ -552,17 +552,17 @@ A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embeddi
   │  (560M params, 1024-dim, supports 100 languages)          │
   │  Instruction prefix on QUERIES only (docs take none)      │
   │  Batch size: 64 (GPU) / 8 (CPU fallback)                  │
-  │  Quantization: INT8 (2× speedup, < 0.5% quality loss)    │
+  │  Quantization: INT8 (2× speedup, < 0.5% quality loss)     │
   └──────────────────────────┬────────────────────────────────┘
                              │ 1024-dim embedding
                              v
   ┌───────────────────────────────────────────────────────────┐
   │  HNSW Vector Index (Qdrant)                               │
   │  - 50M product embeddings (1024-dim, float32)             │
-  │  - Index size: 50M × 1024 × 4 bytes = 200 GB             │
-  │  - Distributed: 5 shards × 40 GB per node                │
+  │  - Index size: 50M × 1024 × 4 bytes = 200 GB              │
+  │  - Distributed: 5 shards × 40 GB per node                 │
   │  - HNSW params: M=32, ef_construction=200                 │
-  │  - Query ef: 128 (recall@10 = 97.3%)                     │
+  │  - Query ef: 128 (recall@10 = 97.3%)                      │
   │  - p50 query: 8ms; p99: 24ms                              │
   └──────────────────────────┬────────────────────────────────┘
                              │ top-100 candidates
@@ -576,7 +576,7 @@ A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embeddi
                              │ top-10 results
                              v
   ┌───────────────────────────────────────────────────────────┐
-  │  Offline Indexing Pipeline                                 │
+  │  Offline Indexing Pipeline                                │
   │  - New products: embed within 5 min of listing            │
   │  - Batch re-embedding: monthly (model update)             │
   │  - Embedding worker: 8×A10G GPUs, 1.2M products/hour      │

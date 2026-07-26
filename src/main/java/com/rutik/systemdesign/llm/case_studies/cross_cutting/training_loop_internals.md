@@ -172,7 +172,7 @@ Checkpoint:               *                   *                   *
 
 Loss spike detected at step 820:
         |                             CKP@500        CKP@500 (bad)  |
-        |                                |                           |
+        |                                |                          |
         |    rollback to step 500 <------|  [spike: loss 3x mean]   |
         
 After rollback: resume from step 500, skip bad data batch, continue

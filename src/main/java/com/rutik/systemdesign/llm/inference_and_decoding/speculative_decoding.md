@@ -99,7 +99,7 @@ in the SAME target forward pass):
    │   discard x_i and all subsequent draft tokens       │
    │   sample replacement y ~ normalize(max(0, p - q))   │
    │   emit y, STOP (this round produced i accepted      │
-   │   tokens + 1 corrected token = i+1 total)            │
+   │   tokens + 1 corrected token = i+1 total)           │
    └──────────────────────────────────────────────────────┘
 ```
 

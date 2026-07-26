@@ -57,15 +57,6 @@ GPT-5.4 family (cost tier):
   gpt-5.4-nano  input $0.20/1M, output  $1.25/1M
   Use: high-volume, cost-sensitive applications
 
-o-series (legacy reasoning):
-  o1  input $15/1M, output $60/1M;  o1-pro input $150/1M, output $600/1M
-  o3  input  $2/1M, output  $8/1M
-  Largely superseded by GPT-5.x reasoning; older o3 snapshots are
-  scheduled for API removal on 2026-12-11
-
-Retired: GPT-4o, GPT-4o-mini, GPT-4.1, o4-mini and o1-preview/o1-mini
-  have been retired or deprecated — do not target them in new systems
-
 text-embedding-3 (embeddings):
   small (1536d): $0.02/1M tokens
   large (3072d): $0.13/1M tokens
@@ -134,8 +125,6 @@ Llama 4 (current open-weight flagship, April 2025):
   Scout: MoE, 17B active params, ~109B total; fits on a single high-end
     GPU; very long context (10M tokens advertised)
   Maverick: MoE, 17B active params, ~400B total; flagship generalist
-  Behemoth: announced as still training at launch; no public release
-    as of July 2026
   License: Llama 4 Community License — commercial use permitted with
     restrictions (700M MAU threshold, acceptable-use policy). Not OSI
     open source.
@@ -143,10 +132,6 @@ Llama 4 (current open-weight flagship, April 2025):
 Llama 3.1 / 3.2 / 3.3 (previous generation, still widely self-hosted):
   8B / 70B / 405B (3.1); 1B, 3B edge and 11B, 90B vision (3.2)
   128K context; the 70B remains a common self-hosting baseline
-
-Code LLaMA:
-  Specialized on code; FIM training
-  Superseded by the general Llama 3.x/4 models
 ```
 
 ### 4.5 Mistral AI
@@ -156,16 +141,13 @@ Mistral Large 3 (flagship, December 2025):
   675B total params, 41B active (sparse MoE)
   Apache 2.0 — open weights, self-hostable, no per-token fees
   ~73% MMLU-Pro; among the strongest permissively licensed models
-  Note: earlier Mistral Large releases were closed-weight API-only;
-  Large 3 reversed that
 
 Mistral 7B:
-  First model; outperformed LLaMA 2 13B
-  Apache 2.0; community fine-tune standard
+  Apache 2.0; the community fine-tuning baseline at the 7B size
 
 Mistral Nemo 12B:
   12B; Tekken tokenizer (128K vocab); strong multilingual
-  Apache 2.0; replacement for 7B
+  Apache 2.0; the default small Mistral for new work
 
 Mixtral 8x7B:
   46.7B params, 12.9B active (MoE)
@@ -201,11 +183,10 @@ DeepSeek-R1:
   Trained with RL on math/code (GRPO)
   Distilled variants: 1.5B, 7B, 14B, 32B (Qwen 2.5 base) and
     8B, 70B (Llama 3.1/3.3 base) — six checkpoints in total
-  No R2 successor has shipped as of July 2026
 
 DeepSeek-Coder:
-  Code-specialized; the 33B variant was the top open-source code model
-  of its generation
+  Code-specialized; the 33B variant is the sizing most teams
+  self-host when they want a dedicated code model
 ```
 
 ### 4.7 Other Key Players
@@ -260,26 +241,27 @@ Phi (Microsoft):
 
 ```mermaid
 quadrantChart
-    title Model quality vs cost (approximate, 2025)
+    title Model quality vs cost (approximate, 2026)
     x-axis Low cost --> High cost
     y-axis Lower quality --> Higher quality
     quadrant-1 Premium frontier
     quadrant-2 Best value
     quadrant-3 Budget
     quadrant-4 Overpriced
-    "o3": [0.92, 0.97]
-    "GPT-4o": [0.72, 0.90]
-    "Claude 3.5 Sonnet": [0.60, 0.90]
-    "Gemini 1.5 Pro": [0.50, 0.85]
-    "DeepSeek V3 self-hosted": [0.20, 0.82]
-    "LLaMA 3.1 70B self-hosted": [0.18, 0.72]
-    "Claude Haiku": [0.30, 0.55]
-    "GPT-4o-mini": [0.22, 0.55]
-    "Gemini Flash": [0.12, 0.50]
-    "LLaMA 3.1 8B self-hosted": [0.08, 0.38]
+    "Claude Fable 5": [0.92, 0.97]
+    "Claude Opus 5": [0.78, 0.95]
+    "gpt-5.6-sol": [0.75, 0.93]
+    "Claude Sonnet 5": [0.62, 0.90]
+    "Gemini 3.1 Pro": [0.50, 0.88]
+    "DeepSeek V4 self-hosted": [0.22, 0.85]
+    "Mistral Large 3 self-hosted": [0.19, 0.78]
+    "Llama 4 Maverick self-hosted": [0.16, 0.74]
+    "Claude Haiku 4.5": [0.30, 0.60]
+    "gpt-5.4-nano": [0.13, 0.52]
+    "Gemini 3.5 Flash-Lite": [0.15, 0.50]
 ```
 
-This chart is a **2025 snapshot**, kept because the *shape* of the landscape has been stable even as every name on it has been replaced — see Section 6 for the current price table. The upper-left quadrant (high quality, low cost) is where self-hosted open models sat, and where their 2026 successors (DeepSeek V4, Llama 4, Mistral Large 3) still sit; frontier API models bought the top of the quality axis at 10-100x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these 2025 anchors (per 1M tokens): far left = free/self-hosted (infra cost only), ~0.1 = $0.15 (Gemini Flash), ~0.2-0.3 = $0.60-$3 (GPT-4o-mini, Haiku), ~0.6-0.7 = $15 (Sonnet, GPT-4o), far right = $60+ (o3).
+The upper-left quadrant (high quality, low cost) is where self-hosted open-weight models sit — DeepSeek V4, Mistral Large 3 and Llama 4 buy most of the quality axis for infrastructure cost alone; frontier API models buy the top of that axis at 10-70x the cost per 1M tokens, and that multiple has not closed. quadrantChart normalizes positions to 0-1, so calibrate the cost axis with these anchors (input price per 1M tokens, matching the Section 6 table): far left = free/self-hosted (infra cost only), ~0.15 = $0.20-$0.30 (gpt-5.4-nano, Gemini Flash-Lite), ~0.30 = $1 (Claude Haiku 4.5), ~0.6 = $3 (Sonnet 5), ~0.78 = $5 (Opus 5, gpt-5.6-sol), far right = $10 (Fable 5).
 
 ### LLM Timeline (Key Milestones)
 
@@ -351,7 +333,6 @@ flowchart TD
 | Anthropic | claude-opus-5 | $5 | $25 | 1M |
 | OpenAI | gpt-5.5 / gpt-5.6-sol | $5 | $30 | 1M |
 | Anthropic | claude-fable-5 | $10 | $50 | 1M |
-| OpenAI | o1 (legacy reasoning) | $15 | $60 | 200K |
 | Serverless open-weight | Llama 3.1 70B | ~$0.88 | ~$0.88 | 128K |
 | Self-hosted 2x H100 | Llama 3.1 70B | ~$0.20 | ~$0.80 | 128K |
 
@@ -386,22 +367,22 @@ though the table is identical.
     gpt-5.4-nano       1.0 x  $0.20 + 0.2 x  $1.25 =  $0.450
     claude-haiku-4-5   1.0 x  $1.00 + 0.2 x  $5.00 =  $2.000
     claude-sonnet-5    1.0 x  $3.00 + 0.2 x $15.00 =  $6.000
-    gpt-5.5            1.0 x  $5.00 + 0.2 x $30.00 = $11.000
-    o1                 1.0 x $15.00 + 0.2 x $60.00 = $27.000
+    gpt-5.6-sol        1.0 x  $5.00 + 0.2 x $30.00 = $11.000
+    claude-fable-5     1.0 x $10.00 + 0.2 x $50.00 = $20.000
 
   SPREAD ACROSS THE TABLE
-    o1 / deepseek-v4-flash = $27.00 / $0.196 = 138x
+    claude-fable-5 / deepseek-v4-flash = $20.00 / $0.196 = 102x
 
   SAME SPREAD, SCALED TO A REAL MONTH (1B input + 200M output tokens)
     deepseek-v4-flash    $196/month
-    gpt-5.5           $11,000/month
-    o1                $27,000/month
+    gpt-5.6-sol       $11,000/month
+    claude-fable-5    $20,000/month
 ```
 
-A ~140x spread across a single table is the practical meaning of "cost commoditization" — the same
-task can cost $196 or $27,000 a month depending only on model choice. That is why this module
+A ~100x spread across a single table is the practical meaning of "cost commoditization" — the same
+task can cost $196 or $20,000 a month depending only on model choice. That is why this module
 insists on **cost-tier routing rather than fixed model choices**: routing even 80% of traffic from
-gpt-5.5 down to gpt-5.4-nano on the queries that do not need frontier reasoning takes the bill from
+gpt-5.6-sol down to gpt-5.4-nano on the queries that do not need frontier reasoning takes the bill from
 $11,000 to roughly `0.2 x $11,000 + 0.8 x $450 = $2,560` — a 77% cut with no change to the hard
 queries. Note also the context column: deepseek-v4-flash offers a 1M window at the *lowest* price in
 the table, so "cheap" and "small context" have fully decoupled — an assumption from 2023 that no
@@ -546,7 +527,7 @@ Start with:
   Cost budget (input rate):
     <$1/1M tokens: deepseek-v4-flash, gpt-5.4-nano, gemini-flash-lite, local 8B
     $1-5/1M tokens: claude-haiku-4-5, gemini-3.x flash/pro, claude-sonnet-5
-    >$5/1M tokens: claude-opus-5, gpt-5.5/5.6-sol, claude-fable-5, o1
+    >$5/1M tokens: claude-opus-5, gpt-5.6-sol, claude-fable-5
 
   Quality requirements:
     Basic task: local 8B or gpt-5.4-nano
@@ -672,7 +653,7 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 
 ## 10. Common Pitfalls
 
-**Vendor lock-in to a single provider**: Teams that build tightly against one provider's API surface (OpenAI-specific features: Assistants API, specific function-calling schema, file search) find migration expensive when pricing changes or a competitor releases a better model. Production incident pattern: OpenAI deprecates gpt-4-0314 with 3 months notice; all prompt engineering and evals were tuned to that checkpoint; replacement model behaves differently; 6 weeks of re-evaluation required. Fix: abstract all model calls behind a unified interface from day one; test with at least two providers in CI.
+**Vendor lock-in to a single provider**: Teams that build tightly against one provider's API surface (OpenAI-specific features: Assistants API, specific function-calling schema, file search) find migration expensive when pricing changes or a competitor releases a better model. Production incident pattern: the provider retires the exact snapshot you pinned with three months' notice; all prompt engineering and evals were tuned to that checkpoint; the replacement model behaves differently; 6 weeks of re-evaluation required. Fix: abstract all model calls behind a unified interface from day one; test with at least two providers in CI.
 
 **Overestimating benchmark scores for your domain**: A team selects Model A over Model B because MMLU shows Model A is 4 points higher. In production on their legal document classification task, Model B outperforms Model A by 12 points. Benchmark distributions do not match production distributions. Fix: build a domain evaluation set of at least 100-200 representative examples before committing to a model, and re-run evals on every significant model release.
 
@@ -680,7 +661,7 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 
 **Choosing open source without MLOps expertise**: Open-weight models require GPU provisioning, serving framework selection (vLLM, TGI, llama.cpp), load balancer configuration, auto-scaling policies, model version management, quantization decisions, and serving latency optimization. Teams that underestimate this complexity deploy a model that works in a notebook but fails under production load (KV cache exhaustion, GPU OOM at batch size 32, cold start latency). Fix: use a managed inference service (Together AI, Replicate, Bedrock) as an intermediate step to validate quality before committing to full self-hosting.
 
-**Not planning for model deprecation**: OpenAI has retired GPT-3, gpt-4-0314, gpt-4-32k, the entire GPT-4o and GPT-4.1 families, o4-mini, and multiple embedding model versions; its stated policy is a minimum of six months' notice before a generally available model is retired, and older o3 and GPT-5 snapshots are already scheduled for removal on 2026-12-11. Teams that hard-code model IDs and do not maintain evaluation harnesses discover deprecation when production calls start returning 404. Fix: (1) pin model IDs explicitly and track deprecation dates; (2) maintain a continuous eval pipeline that runs on the replacement model in shadow mode 60+ days before deprecation; (3) design prompts to be model-version-agnostic where possible.
+**Not planning for model deprecation**: every provider retires model generations on a rolling schedule — OpenAI's stated policy is a minimum of six months' notice before a generally available model is retired, and Anthropic publishes a retirement date per model ID. Teams that hard-code model IDs and do not maintain evaluation harnesses discover deprecation when production calls start returning 404. Fix: (1) pin model IDs explicitly and track deprecation dates; (2) maintain a continuous eval pipeline that runs on the replacement model in shadow mode 60+ days before deprecation; (3) design prompts to be model-version-agnostic where possible.
 
 ---
 
@@ -706,8 +687,8 @@ Mistral AI was founded in April 2023 by ex-Google DeepMind and Meta researchers.
 **Q: How would you choose between OpenAI, Anthropic, and self-hosted models for a production application?**
 Decision factors are: (1) Volume — above 10M tokens/day, self-hosting becomes cost-competitive; (2) Privacy — regulated industries (HIPAA, GDPR) require self-hosting or verified vendor BAA; (3) Quality requirements — if frontier API quality cannot be matched by open models for your specific task, use API; (4) Latency — self-hosted is more predictable; (5) Development speed — API ships faster. Start with API, evaluate quality and cost, migrate specific workloads to self-hosted as volume grows. Use LiteLLM from the start so the migration is a config change.
 
-**Q: When should you reach for a reasoning model (o1, o3, DeepSeek-R1) instead of a standard chat model?**
-Use a reasoning model only when the task requires multi-step deduction that standard models get wrong — competition math, hard coding, scientific problem solving, complex planning. Reasoning models spend hidden "thinking" tokens before answering, which is why o1 costs $15/$60 per 1M input/output tokens (10-30x a mid-tier model) and can take 10-60 seconds per response. For the majority of production traffic — classification, extraction, summarization, routine chat — they are pure waste: slower, more expensive, and no more accurate. The right pattern is routing: send hard/low-confidence queries to a reasoning model and everything else to a cheaper model, and note that open reasoning models (DeepSeek-R1 and its six distilled checkpoints at 1.5B, 7B, 8B, 14B, 32B and 70B) now let you self-host this capability instead of paying o1 rates.
+**Q: When should you reach for a reasoning model instead of a standard chat model?**
+Use a reasoning model only when the task requires multi-step deduction that standard models get wrong — competition math, hard coding, scientific problem solving, complex planning. Reasoning models spend hidden "thinking" tokens before answering, which is why a frontier reasoning tier such as claude-fable-5 ($10/$50 per 1M input/output tokens) costs 40-50x gpt-5.4-nano and can take 10-60 seconds per response. For the majority of production traffic — classification, extraction, summarization, routine chat — they are pure waste: slower, more expensive, and no more accurate. The right pattern is routing: send hard/low-confidence queries to a reasoning model and everything else to a cheaper model, and note that open reasoning models (DeepSeek-R1 and its six distilled checkpoints at 1.5B, 7B, 8B, 14B, 32B and 70B) now let you self-host this capability instead of paying frontier rates.
 
 **Q: How does benchmark contamination distort public leaderboards, and what do you do about it?**
 Contamination happens when benchmark questions (or close paraphrases) leak into a model's training data, so a high MMLU or HumanEval score partly reflects memorization rather than capability. Symptoms: a model tops a public benchmark but underperforms on your held-out task, or scores drop sharply on a freshly released variant of the same benchmark (e.g., GSM8K vs the newer GSM1K). Because model builders scrape the web where these datasets live, contamination is pervasive and grows over time. The defenses are the same as the general rule: never trust a leaderboard number as a selection signal, build a private evaluation set from your own recent production data that could not have been in any pretraining corpus, and prefer benchmarks with rotating or held-out test sets. Treat public scores as a coarse filter, your domain eval as the decision.

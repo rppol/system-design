@@ -67,11 +67,11 @@ flowchart TD
 
 **Supply/demand zones:** each city divided into 500m × 500m geo-hash cells. A major city (Los Angeles): ~15k zones. Demand and supply forecasting runs every 5 minutes per zone: 15k × (1/5min) = 50 forecasts/second for one city; 50 cities = 2,500 forecasts/second.
 
-**Training data:** 3 years × 10M rides/day = 10B training examples for the match scoring model. Subsampled to 500M for practical training. Demand forecasting training: 15k zones × 3 years × 365 days × 96 5-minute intervals/day = 1.6B zone-interval records.
+**Training data:** 3 years × 10M rides/day = 10B training examples for the match scoring model. Subsampled to 500M for practical training. Demand forecasting training: 15k zones × 1,095 days × 288 5-minute intervals/day = 4.7B zone-interval records.
 
 **Infrastructure:**
-- Match scoring: stateless horizontal service; 416k scorings/second requires 1,000 CPU cores (at 0.5ms per GBDT inference); 125 × 8-core servers.
-- Assignment optimization (Hungarian algorithm or auction): for N=50 riders × M=500 drivers, Hungarian O(N²M) is too slow; use greedy or LP relaxation at <50ms.
+- Match scoring: stateless horizontal service; 416k scorings/second at ~1.3ms per scored pair (0.3ms GBDT inference + ~1ms feature assembly) requires ~540 CPU cores; 34 × 16-core servers before headroom (see §10).
+- Assignment optimization: at N=50 riders × M=500 drivers, Hungarian is O(N²M) ≈ 1.25M operations — comfortably sub-10ms, so it runs exactly. Greedy or LP relaxation is the fallback only once N grows past ~1,000 per batch.
 - Demand/supply forecasting: 50 parallel forecasting workers, one per city; update every 5 minutes.
 
 ---
@@ -121,6 +121,7 @@ flowchart TD
 ### 4.1 Demand Forecasting — Time-Series Model
 
 ```python
+import zlib
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -161,14 +162,18 @@ def create_demand_features(
         "roll_std_12": float(zone_hist["demand"].tail(12).std()),    # 1h volatility
     }
 
-    return {**temporal, **lags, "zone_id_hash": hash(zone_id) % 1000}
+    # NOTE: use a stable hash, not Python's built-in hash(). String hashing is
+    # randomized per interpreter process (PYTHONHASHSEED), so hash(zone_id)
+    # would give a different feature value in training and in serving.
+    zone_bucket = zlib.crc32(zone_id.encode()) % 1000
+    return {**temporal, **lags, "zone_id_hash": zone_bucket}
 
 # Model: LightGBM with quantile objective at q=0.5 (demand forecast) and q=0.85 (surge buffer)
 # Why LightGBM over ARIMA or Prophet:
 # - 50 cities × 15k zones = 750k separate series → fitting ARIMA per series is infeasible
 # - LightGBM shares patterns across zones (zone_id_hash feature) and cities
 # - Handles exogenous variables (events, weather) natively as features
-# - 15% MAPE vs 22% MAPE for Prophet on this dataset
+# - 12% MAPE vs 18% MAPE for Prophet on this dataset (see Decision 4)
 ```
 
 ### 4.2 Match Scoring — GBDT Ranking Model
@@ -336,11 +341,11 @@ Collecting requests for 500ms before solving allows batched optimal assignment, 
 
 ## 6. Real-World Implementations
 
-**Uber:** published "Marketplace Optimization at Uber" (2021). Key design: a 3-tier architecture — city-level demand model (LightGBM with 500m hex zones), zone-level supply model (LSTM for sequential driver state prediction), and a global assignment optimizer (Vickrey auction mechanism). The Vickrey auction generalizes beyond simple bipartite matching: drivers "bid" their value for each trip (based on position, remaining online time, destination preferences) and the platform assigns trips to maximize social welfare. At Uber's scale (8M daily trips, 100+ cities), the auction runs every 3 seconds with a 1-second decision window.
+**Uber:** the published marketplace paper is "Practical Marketplace Optimization at Uber Using Causally-Informed Machine Learning" (arXiv 2407.19078, KDD 2024). Its subject is the *lever* layer above matching — allocating a budget of driver incentives and rider promotions — and its central point is the one this case study makes about SUTVA: naive observational estimates of a lever's effect are biased, so the allocation must be driven by causally-estimated treatment effects rather than by correlational uplift. Read it as the companion to §5 Decision 1 (where ML belongs) rather than as a dispatch algorithm.
 
-**Lyft:** published "Multi-Objective Optimization in Ride-Sharing" (2020). Lyft's matching uses a reinforcement learning-based optimizer trained on a simulation of the city's ride patterns. The RL policy learns that dispatching drivers toward anticipated demand (pre-positioning) improves long-term driver utilization better than greedy assignment of the current request. Key challenge: the RL policy must be trained on a simulator that is an accurate-enough model of the city — an ML modeling problem in itself.
+**Lyft:** Lyft has published both the optimization and the learning half. The engineering post "Solving Dispatch in a Ridesharing Problem Space" describes batching open requests and drivers over a short interval and computing the optimal batch match with the Hungarian method — exactly the batched-assignment design in §4.3. Azagirre et al., "A Better Match for Drivers and Riders: Reinforcement Learning at Lyft" (INFORMS Journal on Applied Analytics, 2024; arXiv 2310.13810) then describes what the ML layer contributes: the *matching values* fed into that solver are updated dynamically through the day by an RL policy, so the optimizer stays combinatorial while the edge weights become forward-looking. That split — RL on the edge values, exact solver on the assignment — is the practical answer to "should dispatch be RL?".
 
-**DiDi (China):** operates at 10M daily orders (larger than Uber in volume). Uses a distributed matching architecture where each city region runs an independent matching subproblem. Every 3 seconds, a central coordinator collects assignment solutions from all regions and resolves cross-region boundary conflicts. Demand forecasting uses a spatial-temporal graph neural network (STGNN) that captures the flow of demand across adjacent zones (demand in one zone predicts future demand in neighboring zones 15 minutes later).
+**DiDi (China):** operates one of the largest ride-hailing marketplaces by daily order volume, and its published research is the best public source on the spatio-temporal forecasting half of this system. Geng et al., "Spatiotemporal Multi-Graph Convolution Network for Ride-hailing Demand Forecasting" (AAAI 2019, Didi Chuxing), models the city as multiple graphs over regions — neighborhood, functional similarity, transportation connectivity — so that demand in one zone informs the forecast for related zones, which a per-zone tabular model cannot express. Architecturally, region-level matching subproblems are solved independently and reconciled at the boundaries.
 
 **Amazon Flex (delivery):** similar bipartite matching but with different constraints — packages must be delivered in time windows; drivers have capacity constraints (van vs bicycle). Amazon uses ILP (Integer Linear Programming) with time-window constraints for assignment, not simple bipartite matching. ML is used to forecast delivery time per package-driver pair (the edge weights) and to predict failed delivery probability (used to reorder package assignments). This demonstrates that "which algorithm to use" depends critically on the constraint structure of the problem.
 
@@ -418,7 +423,7 @@ City transit authority added 5 new subway stations. Demand patterns shifted: are
 **Pitfall 3 — Feedback loop in driver supply model, major platform (2021).**
 Supply model predicted "high driver availability in Zone A" → platform didn't surge Zone A → fewer new drivers went online in Zone A (no financial incentive). Next training cycle included this outcome: Zone A appeared to have adequate supply with no surge → model reinforced its prediction. The supply model learned a self-fulfilling prophecy: low surge prediction caused low supply, which it then used as evidence that surge wasn't needed. Detection: compare model-predicted supply vs actual supply across surge/non-surge zones using propensity-adjusted analysis. Fix: include a counterfactual supply estimate ("what would supply have been if surge had been triggered?") using causal inference (DoublyRobust estimator from EconML). See [Responsible AI](./cross_cutting/responsible_ai_fairness_and_explainability.md).
 
-**Pitfall 4 — SUTVA violation in A/B test of matching algorithm, Uber (internal, 2018).**
+**Pitfall 4 — SUTVA violation in A/B test of matching algorithm (illustrative; composite of a well-known marketplace failure mode, not a published incident).**
 A matching algorithm A/B test was run at the user level (riders randomly assigned to Algorithm A or B). A driver could serve riders from both groups — a driver matched to a Group A rider was not available to Group B riders. This violated SUTVA: treatment assignment of one unit affected outcomes of control units. The experiment showed Algorithm B improved wait times by 2.3 minutes (significant, p < 0.001). After correcting for SUTVA violation using geo-level randomization (Algorithm B for the entire city of Austin vs Algorithm A for the entire city of Denver), the effect was 1.1 minutes — less than half the naive estimate. Decision based on the biased experiment would have overstated the improvement and potentially misdirected engineering resources. See [Experimentation](./cross_cutting/experimentation_and_online_evaluation.md).
 
 **Pitfall 5 — Match scorer overfit to historically popular driver-rider pairs, regional platform (2022).**
@@ -454,25 +459,33 @@ Hungarian: O(N²M) = O(416² × 500) ≈ 86M operations per batch
 At 10 GFLOPS/s per server: <10ms per batch → well within SLO
 ```
 
-**Scaling formula (demand doubles to 1.66M req/min = 27k req/s):**
+**Scaling formula (demand doubles to 100k req/min = 1.67k req/s):**
 - Match scoring: scales linearly → 96 servers needed.
-- Assignment optimizer: N doubles to 14k per batch window; Hungarian too slow (O(N³)); switch to Auction algorithm (O(NM log N)) at this scale.
+- Assignment optimizer: N doubles to ~830 requests per 500ms batch; Hungarian becomes O(N²M) = 830² × 500 ≈ 345M operations (~35ms), still inside the SLO. Past roughly 4× today's peak, switch to the Auction algorithm (O(NM log N)) or LP relaxation.
 - Supply/demand forecasting: MAPE sensitivity to zone granularity increases; may need to refine from 500m to 250m zones (4x more zones) and add compute proportionally.
 
 **Cost model:**
 
-| Component | Configuration | Cost/month |
-|---|---|---|
-| Match scoring servers | 48 × c5.2xlarge | ~$36k/month |
-| Redis (driver state) | 10 nodes × r5.2xlarge | ~$20k/month |
-| Kafka cluster | 6 brokers × m5.2xlarge | ~$8k/month |
-| Demand/supply forecasting | 50 workers × m5.xlarge | ~$10k/month |
-| Training (bi-weekly) | EMR 100 nodes × 4h | ~$12k/month |
-| Storage (training data, logs) | 1TB/day compressed | ~$15k/month |
-| **Total** | | **~$101k/month** |
+All rates are us-east-1 EC2 on-demand at 730 hr/month; self-managed (a managed service such as
+ElastiCache or MSK is roughly 1.3–1.8× these figures).
+
+| Component | Configuration | Rate | Cost/month |
+|---|---|---|---|
+| Match scoring servers | 48 × c5.4xlarge (16 vCPU each, matching the 16-core sizing above) | $0.68/hr | ~$23.8k |
+| Redis (driver state) | 10 × r5.2xlarge | $0.504/hr | ~$3.7k |
+| Kafka cluster | 6 × m5.2xlarge | $0.384/hr | ~$1.7k |
+| Demand/supply forecasting | 50 × m5.xlarge | $0.192/hr | ~$7.0k |
+| Training (bi-weekly) | EMR 100 × m5.2xlarge × 4h × 2 runs | $0.384 + $0.096 EMR | ~$0.4k |
+| Storage (training data, logs) | 1TB/day compressed, 12-month rolling (365 TB) | $0.023/GB-mo | ~$8.4k |
+| **Total** | | | **~$45k/month** |
+
+Note the earlier sizing said "16 cores each" — a c5.2xlarge has only 8 vCPU, so the fleet is
+c5.4xlarge. Pricing 16-core servers at the 8-core rate is the single most common way these
+capacity tables end up wrong by 2×.
 
 At 10M rides/day × $0.50 platform take-rate contribution from improved match quality (vs greedy):
-$5M/day × 6% improvement = $300k/day attributable value. Model cost is 0.01% of value generated.
+$5M/day × 6% improvement = $300k/day attributable value. Infrastructure cost is ~$1.5k/day, or
+about 0.5% of the value generated.
 
 ---
 

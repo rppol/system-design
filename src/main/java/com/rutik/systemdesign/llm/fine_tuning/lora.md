@@ -395,7 +395,7 @@ from transformers import AutoModelForCausalLM
 # Load base model
 base_model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Meta-Llama-3-8B-Instruct",
-    dtype=torch.bfloat16,   # `torch_dtype` was renamed `dtype` in transformers 4.56+
+    dtype=torch.bfloat16,
     device_map="auto"
 )
 
@@ -757,13 +757,13 @@ flowchart TD
 **Implementation**:
 ```python
 from peft import LoraConfig, get_peft_model, TaskType
-from transformers import AutoModelForCausalLM, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM
+from trl import SFTConfig, SFTTrainer
 import torch
 
 base_model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Meta-Llama-3-8B-Instruct",
-    dtype=torch.bfloat16,   # `torch_dtype` was renamed `dtype` in transformers 4.56+
+    dtype=torch.bfloat16,
     device_map="auto"
 )
 
@@ -782,8 +782,9 @@ model = get_peft_model(base_model, lora_config)
 #  16 x (1024 + 4096) each, not 16 x 8192. Assuming square k/v would give the
 #  wrong answer, 33,554,432 — a 2.5x overcount.)
 
-training_args = TrainingArguments(
+training_args = SFTConfig(
     output_dir="./support_lora",
+    max_length=2048,                 # tokenized sequence length lives on SFTConfig
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,   # effective batch = 32
     num_train_epochs=3,
@@ -792,7 +793,7 @@ training_args = TrainingArguments(
     warmup_ratio=0.03,
     bf16=True,
     logging_steps=50,
-    eval_strategy="steps",   # `evaluation_strategy` was removed in transformers 4.46
+    eval_strategy="steps",
     eval_steps=200,
     save_strategy="best",
     metric_for_best_model="eval_loss"
@@ -802,8 +803,8 @@ trainer = SFTTrainer(
     model=model,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    args=training_args,   # TRL converts a plain TrainingArguments into an SFTConfig;
-)                         # sequence length now lives on SFTConfig as `max_length`
+    args=training_args,
+)
 
 trainer.train()
 model.save_pretrained("./support_lora_adapter")

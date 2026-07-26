@@ -57,8 +57,8 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 - Speedup over REST: 2–10x faster serialization, persistent connections, bidirectional streaming
 - Tools: grpcio, TorchServe gRPC endpoint, TF Serving gRPC
 
-### TorchServe
-- PyTorch-native model server
+### TorchServe (no longer maintained — study the design, do not start new work on it)
+- PyTorch-native model server. The upstream project states "This project is no longer actively maintained... there are no planned updates, bug fixes, new features, or security patches"; the `pytorch/serve` repo was archived read-only in August 2025. Treat it as a reference architecture, and pick Triton (Dynamo Triton), KServe, Ray Serve or BentoML for new deployments.
 - Handler-based: custom Python handlers for preprocessing, inference, postprocessing
 - Supports model versioning, dynamic batching (max_batch_size, batch_delay_ms), metrics
 - Management API (port 8081) for model registration/deregistration
@@ -72,7 +72,7 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 ### ONNX + ONNXRuntime
 - Open Neural Network Exchange: cross-framework model interchange format
 - Convert PyTorch/TF/sklearn → ONNX once, run everywhere
-- ONNXRuntime: 2–5x speedup over PyTorch CPU; graph optimizations, operator fusion
+- ONNXRuntime: graph optimizations, operator fusion, no Python runtime needed. CPU speedups over eager PyTorch are model-dependent and commonly land in the low single digits — benchmark your own model rather than assuming a multiplier
 - Execution providers: CPUExecutionProvider, CUDAExecutionProvider, TensorrtExecutionProvider
 
 ### Streaming / SSE
@@ -225,6 +225,7 @@ from __future__ import annotations
 
 import numpy as np
 import onnxruntime as ort
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import time
@@ -239,18 +240,21 @@ class PredictResponse(BaseModel):
     predictions: list[float]
     latency_ms: float
 
-app = FastAPI(title="ML Model Server")
-
-# Global session — loaded once at startup, thread-safe for inference
+# Global session — loaded once at startup, safe to call run() concurrently
 _session: ort.InferenceSession | None = None
 
-@app.on_event("startup")
-def load_model() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # `@app.on_event("startup")` is deprecated; lifespan is the supported hook.
     global _session
     # Use CUDAExecutionProvider if GPU available, fall back to CPU
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     _session = ort.InferenceSession("model.onnx", providers=providers)
     logger.info("ONNX model loaded. Providers: %s", _session.get_providers())
+    yield
+    _session = None
+
+app = FastAPI(title="ML Model Server", lifespan=lifespan)
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -356,15 +360,18 @@ class SimpleClassifier(nn.Module):
 
 def export_to_onnx(model: nn.Module, input_dim: int, path: str) -> None:
     model.eval()
-    dummy_input = torch.randn(1, input_dim)  # batch_size=1 with dynamic axes
+    dummy_input = torch.randn(1, input_dim)  # batch_size=1, made dynamic below
+    # PyTorch 2.9+ defaults torch.onnx.export to dynamo=True, where `dynamic_axes`
+    # is deprecated in favour of `dynamic_shapes` keyed by the forward() arg name.
     torch.onnx.export(
         model,
-        dummy_input,
+        (dummy_input,),
         path,
         input_names=["features"],
         output_names=["logits"],
-        dynamic_axes={"features": {0: "batch_size"}, "logits": {0: "batch_size"}},
+        dynamic_shapes={"x": {0: torch.export.Dim.DYNAMIC}},
         opset_version=17,
+        dynamo=True,
     )
     print(f"Exported to {path}")
 ```
@@ -446,8 +453,9 @@ It only requires that the system is not growing without bound.
 **Walk one example.** Size the fleet for 12,000 QPS at the `B = 32` operating point above:
 
 ```
-  step 1  in-flight concurrency
-          12,000 rps x 0.012 s          = 144 requests resident at any instant
+  step 1  in-flight concurrency  (latency must include the batcher wait, not
+                                  just the 12ms batch run: 5 + 12 = 17ms)
+          12,000 rps x 0.017 s          = 204 requests resident at any instant
 
   step 2  per-replica throughput (from the batching block)
           32 / 0.012 s                  = 2,667 rps per replica
@@ -462,15 +470,17 @@ It only requires that the system is not growing without bound.
           12,000 / (235 x 0.70)         = 72.9  -> 73 replicas
 ```
 
-Seven pods versus seventy-three, for the same traffic and a 7.75ms latency concession. `144` is
+Seven pods versus seventy-three, for the same traffic and a 7.75ms latency concession. `204` is
 the other half of the answer: it is the number your connection pool, queue depth, and `max_num_seqs`
-must accommodate, and if any of them is set below 144 you will shed load at target QPS while the
+must accommodate, and if any of them is set below 204 you will shed load at target QPS while the
 GPUs sit idle.
 
 **Why `target_utilization` exists.** Little's Law describes a stable system; at 100% utilization
 queueing theory says wait time goes to infinity. Traffic is bursty, so the mean is not what kills
-you — sizing to exactly 5 pods means the first 20% spike pushes latency past the SLA before the
-autoscaler's 300-500ms GPU cold start can respond. The 0.70 factor is what buys the autoscaler time.
+you — sizing to exactly 5 pods means the first 20% spike pushes latency past the SLA long before a
+replacement GPU pod is serving, and that is tens of seconds to minutes once you count the scale-up
+decision, scheduling onto a GPU node, image pull, and loading weights. The 0.70 factor is what buys
+the autoscaler that time.
 
 ### Decoding Tail Latency — Why Percentiles Do Not Add
 
@@ -546,7 +556,9 @@ in that hour."
 | `cost_per_prediction` | Dollars per single inference. Usually quoted per million to stay readable |
 
 **Walk one example.** Both fleets sized above, at $3.06/hour per instance (AWS `p3.2xlarge`
-on-demand) and 12,000 QPS:
+on-demand, us-east-1, verified 2026-07) and 12,000 QPS. Re-run the arithmetic with your own
+region's current rate — GPU list prices move (AWS cut P4/P5 on-demand by up to 45% in June 2025,
+which left P3 untouched but would change every figure below if you sized on a P4d or P5):
 
 ```
   predictions per hour = 12,000 x 3,600 = 43,200,000
@@ -564,21 +576,22 @@ on-demand) and 12,000 QPS:
 ```
 
 That last line is the whole argument for dynamic batching stated in the only unit that ends
-budget debates. It is also why the Uber Michelangelo figure in Section 7 — "dynamic batching
-reduces GPU cost by 40% at peak" — is a conservative real-world result rather than a marketing
-number: their models had a smaller `fixed_overhead` share to amortize than this example does.
+budget debates. Treat the absolute dollars as illustrative — they are driven entirely by the
+assumed `fixed_overhead = 4.0ms` / `per_sample_cost = 0.25ms` pair. A model with a smaller fixed
+overhead has less to amortize and a flatter curve, which is why you measure your own
+latency-vs-batch curve before quoting a saving to anyone.
 
 ---
 
 ## 7. Real-World Examples
 
-**Uber Michelangelo**: Serves hundreds of models for ETA, surge pricing, fraud detection. Uses a custom gRPC serving layer with feature store integration. Dynamic batching reduces GPU cost by 40% at peak hours.
+**Uber Michelangelo**: Uber reports "more than 5K models in production, serving 10 million real-time predictions per second at peak" across ETA, pricing and fraud use cases, backed by the Palette feature store (20,000+ features). The online prediction service is a Java service that forwards requests to a gRPC server inside the model's own container over a Unix domain socket, which is how Python models are hosted without a cross-network hop.
 
-**Netflix recommendation serving**: REST API backed by TensorFlow Serving. A/B testing infrastructure routes 5% traffic to candidate models. Rollback is automatic if P95 latency exceeds SLA by 20%.
+**Netflix Model Scoring Service (MSS)**: one shared inference backend behind a single gRPC interface for XGBoost, TensorFlow, PyTorch and LLMs, with NVIDIA Triton underneath handling model loading, batching and GPU scheduling, vLLM as the LLM engine, and a Java control plane owning deployment, versioning, health checking, autoscaling and multi-region rollout. The lesson is the boundary: the inference server owns batching and the GPU, the control plane owns rollout.
 
-**Stripe fraud detection**: Low-latency (P99 < 10ms) requirement drives CPU-based ONNX serving. GPU would increase throughput but add cold-start latency unsuitable for synchronous payment flows.
+**Stripe Radar (fraud detection)**: Stripe states Radar decides "in less than 100 milliseconds" whether to let a payment through, and has migrated from a Wide-and-Deep ensemble (XGBoost plus a DNN) to a DNN-only multi-branch architecture inspired by ResNeXt. Stripe does not publish the serving stack; the general pattern for a synchronous authorization path is CPU inference, because a sub-100ms hard deadline leaves no room for GPU queueing or cold starts.
 
-**OpenAI ChatGPT**: Continuous batching in vLLM-style inference for generative models. Streaming via SSE so users see tokens as they are generated, masking actual inference time.
+**Hosted LLM chat products**: stream tokens over SSE so users see output as it is generated, which masks total inference time. Providers do not publish their internal serving stacks, but the open-source engines in the same class (vLLM, TensorRT-LLM) all use continuous batching for exactly this workload.
 
 ---
 
@@ -615,14 +628,15 @@ number: their models had a smaller `fixed_overhead` share to amortize than this 
 - Latency SLA is tight (< 20ms P99)
 
 **Use ONNX Runtime when:**
-- Need 2–5x speedup over PyTorch CPU with no GPU
+- You need more CPU throughput than eager PyTorch gives and have no GPU (measure the actual multiplier for your model)
 - Cross-framework portability required (TF model serving in PyTorch ecosystem)
 - Edge deployment with limited runtime
 
-**Use TorchServe / TF Serving when:**
+**Use a dedicated model server (Triton / KServe / TF Serving / Ray Serve / BentoML) when:**
 - Need production-grade model versioning, A/B testing out of the box
 - Multi-model serving on the same instance
 - Metrics and management API required without custom code
+- Note: TorchServe used to be the default answer for PyTorch here; it is no longer maintained (repo archived August 2025), so do not pick it for new systems
 
 **Do NOT use GPU for:**
 - Low-QPS (< 10 RPS) synchronous single-request services — GPU cold-start dominates
@@ -633,24 +647,43 @@ number: their models had a smaller `fixed_overhead` share to amortize than this 
 
 ## 10. Common Pitfalls
 
-**War story 1: The cold-start latency spike.** A team deployed a PyTorch model on GPU for a payment fraud endpoint. P99 latency was acceptable at steady state but spiked to 800ms after autoscaler added a new pod. Root cause: CUDA context initialization takes 300–500ms on first request. Fix: warm-up requests sent during pod startup in the readiness probe.
+**War story 1: The cold-start latency spike.** A team deployed a PyTorch model on GPU for a payment fraud endpoint. P99 latency was acceptable at steady state but spiked after the autoscaler added a new pod. Root cause: the first CUDA call on a fresh process pays for context creation (on the order of tens to a couple hundred milliseconds — it scales with the memory mapped), and the first inference then pays again for cuDNN/cuBLAS algorithm selection at that input shape. Fix: warm-up requests sent during pod startup, gated behind the readiness probe so no user request is the one that pays.
 
-**War story 2: Thread-unsafe session.** An engineer created a new `ort.InferenceSession` per request to avoid shared state. Under 100 RPS load, memory grew 4GB in 10 minutes. Fix: create one session at startup, reuse it — ONNXRuntime inference sessions are thread-safe for concurrent `run()` calls.
+**War story 2: Session-per-request memory leak.** An engineer created a new `ort.InferenceSession` per request to avoid shared state. Each session re-loads the weights and allocates its own arenas, so memory grew by gigabytes under sustained load. Fix: create one session at startup and reuse it — with the CPU and CUDA execution providers, concurrent `run()` calls on one session are supported (this is not universal: the DirectML provider does not support concurrent `Run` on a shared session).
 
 **Broken pattern: Missing dynamic axes in ONNX export.**
 ```python
 # BROKEN: fixed batch size baked into graph
-torch.onnx.export(model, torch.randn(1, 128), "model.onnx")
-# At serving time, batch of 16 raises: "Got inputs with shapes [16, 128] but expected [1, 128]"
+torch.onnx.export(model, (torch.randn(1, 128),), "model.onnx")
+# At serving time a batch of 16 fails in ORT with INVALID_ARGUMENT:
+# "Got invalid dimensions for input ... index: 0 Got: 16 Expected: 1"
 
-# FIXED: declare batch_size as dynamic
+# ALSO BROKEN: dynamic_axes keys that are not declared names are silently ignored,
+# so this exports the same fixed-batch graph as above.
 torch.onnx.export(
-    model, torch.randn(1, 128), "model.onnx",
+    model, (torch.randn(1, 128),), "model.onnx",
     dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+)
+
+# FIXED (legacy exporter, dynamo=False): every dynamic_axes key must also appear
+# in input_names / output_names.
+torch.onnx.export(
+    model, (torch.randn(1, 128),), "model.onnx",
+    input_names=["input"], output_names=["output"],
+    dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+    dynamo=False,
+)
+
+# FIXED (PyTorch 2.9+ default, dynamo=True): dynamic_axes is deprecated here;
+# dynamic_shapes is keyed by the forward() argument name.
+torch.onnx.export(
+    model, (torch.randn(1, 128),), "model.onnx",
+    input_names=["input"], output_names=["output"],
+    dynamic_shapes={"x": {0: torch.export.Dim.DYNAMIC}},
 )
 ```
 
-**War story 3: JSON deserialization dominates latency.** A model took 2ms to run but P99 was 45ms. Profiling revealed that deserializing a 500-feature JSON array took 40ms in Python. Fix: switched to gRPC with Protobuf; deserialization dropped to 1ms.
+**War story 3: JSON deserialization dominates latency.** A model took 2ms to run but P99 was 45ms. Profiling revealed the request body was the problem: a batch of ~500 rows x 200 features is ~100,000 JSON numbers and about 2MB, which costs roughly 20ms in `json.loads` alone on CPython before Pydantic validates a single field. Fix: switched to gRPC with Protobuf and validated shapes instead of per-element types. Note the scale that makes this real — a *single* 500-feature vector parses in about 0.1ms, so if your payload is one small row, deserialization is not your problem and you should keep profiling.
 
 **War story 4: No readiness probe; traffic before model loaded.** Kubernetes sent live traffic to a pod before `model.onnx` was downloaded from S3 (15 seconds). Result: 15 seconds of 500 errors on every deploy. Fix: added `/ready` endpoint that returns 503 until session is initialized; configured readiness probe in Kubernetes deployment spec.
 
@@ -662,12 +695,12 @@ torch.onnx.export(
 |------|----------|-------|
 | FastAPI | REST serving | Async, Pydantic, OpenAPI docs auto-generated |
 | Flask | REST serving | Sync, simpler for prototypes |
-| TorchServe | PyTorch serving | Handler-based, dynamic batching, metrics |
-| TF Serving | TF serving | SavedModel, versioning, A/B routing |
+| TorchServe | PyTorch serving | Handler-based, dynamic batching, metrics. **No longer maintained — repo archived August 2025**; no bug fixes or security patches |
+| TF Serving | TF serving | SavedModel, versioning, A/B routing; still actively released |
 | ONNX | Model format | Cross-framework interchange |
-| ONNXRuntime | Inference engine | 2–5x speedup on CPU, GPU/NPU execution providers |
-| TensorRT | NVIDIA optimization | INT8/FP16, layer fusion; ResNet-50: 7ms CPU → 1.5ms |
-| Triton Inference Server | Multi-framework | NVIDIA, supports TF/PyTorch/ONNX/TensorRT, HTTP+gRPC |
+| ONNXRuntime | Inference engine | Graph fusion + no Python runtime; CPU speedup is model-dependent, GPU/NPU execution providers |
+| TensorRT | NVIDIA optimization | INT8/FP16, layer fusion, kernel auto-tuning on NVIDIA GPUs; speedup over eager PyTorch CUDA is model- and precision-dependent, so benchmark it |
+| Dynamo Triton (formerly Triton Inference Server) | Multi-framework | NVIDIA, renamed March 2025 when it became part of the Dynamo platform; supports TF/PyTorch/ONNX/TensorRT, HTTP+gRPC |
 | BentoML | Serving framework | Python-native, Docker/Kubernetes baked in |
 | Ray Serve | Distributed serving | Composable pipelines, autoscaling, model multiplexing |
 | Seldon Core | K8s-native serving | Inference graphs, drift detection sidecar |
@@ -681,16 +714,16 @@ torch.onnx.export(
 REST uses HTTP/1.1 with JSON bodies; gRPC uses HTTP/2 with binary Protocol Buffers. gRPC serialization is 2–10x faster and connections are persistent, reducing overhead. For high-QPS internal microservice calls or latency-sensitive paths, gRPC is preferred. REST is better for external-facing APIs, diverse clients, or when human readability of payloads matters for debugging.
 
 **Q: How does dynamic batching reduce cost while maintaining latency SLAs?**
-Dynamic batching waits up to `max_wait_ms` (e.g., 5ms) or until `max_batch_size` (e.g., 32) requests accumulate before sending a single GPU kernel launch. A GPU running one sample at a time is 10–30x less efficient than running a full batch. By tolerating 5ms additional latency, throughput can increase 10x, cutting per-prediction GPU cost proportionally. The SLA is maintained because the maximum added latency is bounded by `max_wait_ms`.
+Dynamic batching waits up to `max_wait_ms` (e.g., 5ms) or until `max_batch_size` (e.g., 32) requests accumulate before sending a single GPU kernel launch. The mechanism is amortization: the per-launch cost (kernel launch, reading model weights out of HBM, the framework frame) is paid once per batch instead of once per request. With the worked example in Section 6 — 4.0ms fixed overhead, 0.25ms per sample — going from B=1 to B=32 raises throughput about 11x for 7.75ms of worst-case added latency. The SLA is maintained because the added latency is bounded by `max_wait_ms`.
 
 **Q: Why might you choose ONNX Runtime over native PyTorch for CPU-based serving?**
-ONNXRuntime applies graph-level optimizations (operator fusion, constant folding, memory layout optimization) that PyTorch's eager mode cannot. On CPU, this typically yields a 2–5x throughput improvement and reduced memory bandwidth. ONNX also enables cross-framework portability — a model trained in TensorFlow can be exported to ONNX and served in an ONNXRuntime-based PyTorch microservice.
+ONNXRuntime applies graph-level optimizations (operator fusion, constant folding, memory layout optimization) that PyTorch's eager mode cannot. It also drops the Python interpreter from the request path entirely. The size of the CPU win is model-dependent — small dense models with many little ops gain the most from fusion, and you should measure it rather than quote a multiplier. ONNX also enables cross-framework portability — a model trained in TensorFlow can be exported to ONNX and served in an ONNXRuntime-based PyTorch microservice.
 
 **Q: Explain the cold-start problem in GPU-based model serving and how to mitigate it.**
-When a new serving instance starts, the CUDA runtime must initialize (300–500ms), load model weights to GPU memory (100ms–several seconds for large models), and JIT-compile kernels on first input shape. Until this completes, requests fail or time out. Mitigation: send warm-up requests during pod startup; use Kubernetes readiness probes to hold traffic until the model is ready; use pre-built TensorRT engines that skip JIT compilation.
+A fresh serving process pays several one-time costs before its first prediction, so early requests are far slower than steady state. Those costs are CUDA context creation on the first CUDA call (tens to a couple hundred milliseconds, scaling with the memory mapped), copying model weights to GPU memory (100ms to several seconds for large models), and cuDNN/cuBLAS algorithm selection or JIT compilation at the first input shape. At the pod level, image pull and node provisioning dominate everything else and push the real cold start into tens of seconds. Mitigation: send warm-up requests during pod startup; use Kubernetes readiness probes to hold traffic until the model is ready; use pre-built TensorRT engines that skip JIT compilation; keep a warm buffer of pods so scale-up is not on the critical path.
 
 **Q: What is continuous batching and why is it important for LLM serving?**
-Traditional static batching for LLMs waits until all sequences in a batch finish generation, wasting GPU cycles on idle sequences. Continuous batching (iteration-level scheduling) allows inserting new requests into the batch at each forward pass step, filling slots freed by completed sequences. This increases GPU utilization from ~40% (static) to ~80–90%, directly doubling throughput for the same hardware cost.
+Traditional static batching for LLMs waits until all sequences in a batch finish generation, wasting GPU cycles on idle sequences. Continuous batching (iteration-level scheduling) allows inserting new requests into the batch at each forward pass step, filling slots freed by completed sequences. The published Anyscale benchmark (OPT-13B on one A100-40GB) measured up to 23x throughput over naive static batching for vLLM, and about 8x for continuous-batching servers without vLLM's paged KV cache — and median latency improved rather than regressed, because queued requests start generating sooner.
 
 **Q: How do you implement A/B testing for model updates in production?**
 Deploy both model versions as separate serving instances. Configure the load balancer or a feature flag system to route a small percentage of traffic (e.g., 5%) to the new version. Collect business and technical metrics (conversion rate, latency, accuracy on delayed labels) for both versions. After a statistically significant observation period, either promote the new version to 100% or roll back. Shadow mode (run both, compare offline without affecting users) is safer for high-stakes models.
@@ -702,16 +735,16 @@ GPU maximizes throughput for large models and high QPS but has high fixed cost, 
 Store model artifacts in a versioned artifact store (S3 with versioning, GCS, MLflow artifact store). Assign semantic or timestamp-based version identifiers. Register models in a model registry (MLflow Model Registry) with stage labels (Staging, Production). Serving infrastructure loads the model pinned to the Production stage. Rolling updates swap the serving pointer atomically, keeping the previous version registered for instant rollback.
 
 **Q: What observability signals should every model serving endpoint emit?**
-Request latency (P50, P95, P99) per model version; request throughput (RPS); error rate (5xx, timeout); batch size distribution; input feature statistics (mean, std, null rate for drift detection); model output distribution (prediction score histogram); hardware utilization (GPU memory, CPU, memory). These should feed into Prometheus/Grafana with alerts on SLA breaches.
+Every endpoint must emit latency percentiles, throughput, error rate, and the prediction distribution, all labelled by model version. Concretely: request latency (P50, P95, P99) per model version; throughput (RPS); error rate (5xx, timeout); batch size distribution; input feature statistics (mean, std, null rate for drift detection); model output distribution (prediction score histogram); hardware utilization (GPU memory and utilization, CPU, memory). These should feed into Prometheus/Grafana with alerts on SLA breaches.
 
 **Q: How does TorchServe's handler architecture work?**
-TorchServe loads a model archive (.mar file) containing the serialized model and a handler Python class. The handler implements three methods: `preprocess` (raw request bytes → tensor), `inference` (tensor → tensor via model.forward), and `postprocess` (tensor → response bytes). The server manages concurrency, batching, and versioning; the handler is the only user-authored code. This separation allows infrastructure teams to own the server and ML engineers to own the handler.
+TorchServe loads a model archive (.mar file) containing the serialized model and a handler Python class. The handler implements three methods: `preprocess` (raw request bytes → tensor), `inference` (tensor → tensor via model.forward), and `postprocess` (tensor → response bytes). The server manages concurrency, batching, and versioning; the handler is the only user-authored code. This separation allows infrastructure teams to own the server and ML engineers to own the handler. Know the pattern, but note that TorchServe itself is no longer maintained (repo archived August 2025), so the same three-stage handler contract is what you now look for in Triton's Python backend or a BentoML service.
 
 **Q: What is shadow mode serving and when do you use it?**
 Shadow mode runs a candidate model on live traffic alongside the production model, but only the production model's response is returned to users. The candidate's predictions are logged and compared offline. This is used when the model update is high-risk (medical, financial), when labeling is slow, or when you want to validate model behavior at real traffic distribution before any user is affected. It doubles inference cost during the shadow period.
 
 **Q: Your model runs in 2ms but P99 latency is 45ms — where is the time going?**
-The time is almost certainly in serialization, not inference. A 500-feature JSON array can take 40ms to deserialize in Python, dwarfing the 2ms model call, so profile the whole request lifecycle (deserialization, feature assembly, inference, serialization) before touching the model. Switching from JSON to gRPC with Protobuf typically drops deserialization to ~1ms; connection reuse and batching remove the rest.
+The time is almost certainly outside inference, so profile the whole request lifecycle before touching the model. Check payload deserialization, feature-store lookups, queue wait, and response serialization. Size each one instead of guessing: on CPython a single 500-float JSON array parses in about 0.1ms and cannot explain 43ms, but a 2MB batch payload of ~100,000 numbers costs around 20ms in `json.loads` plus more in validation, and a synchronous feature-store round trip easily costs tens of milliseconds. Switching JSON to gRPC with Protobuf, reusing connections, and moving remote lookups off the critical path are the usual fixes.
 
 **Q: What is the difference between a liveness (`/health`) and a readiness (`/ready`) probe, and why does confusing them cause deploy outages?**
 Liveness answers "is the process alive?" and readiness answers "can it serve traffic yet?". If you only implement liveness, Kubernetes routes traffic to a pod the moment the process starts — before the model is downloaded and loaded — producing seconds of 500 errors on every deploy. The readiness endpoint must return 503 until the model session is initialized so the load balancer holds traffic until the pod is genuinely ready.
@@ -723,7 +756,7 @@ Derive them from your latency budget, not from defaults. `max_wait_ms` is worst-
 Stateless instances can be freely added or removed behind a load balancer, which is what makes horizontal scaling work. If an instance holds per-user state (a session cache, an accumulating counter) in local memory, requests must be pinned to one pod via sticky sessions, scaling and failover break, and predictions become non-reproducible. Push shared state to an external store (feature store, Redis) and keep the loaded model weights the only in-process state.
 
 **Q: How do you autoscale GPU-backed model servers, and why is it harder than autoscaling CPU services?**
-GPU autoscaling is harder because pods have 300–500ms+ cold starts and GPUs are expensive, so reactive scaling lags demand. Scale on a leading signal — queue depth or in-flight batch size — rather than CPU%, which is meaningless for GPU work. Keep a warm buffer of pre-initialized pods so a traffic spike does not hit cold CUDA-context initialization, and set conservative scale-down to avoid thrashing pods up and down.
+GPU autoscaling is harder because a new pod takes tens of seconds to become useful and GPUs are expensive, so reactive scaling always lags demand. That cold start is node provisioning, image pull, weight load and CUDA/kernel warm-up stacked together, not a sub-second event. Scale on a leading signal that tracks the actual bottleneck — request queue depth, in-flight sequences, or GPU utilization — never CPU%, which on a GPU-bound server stays low while the GPU saturates and will simply never trigger the scale-up. Keep a warm buffer of pre-initialized pods so a traffic spike does not hit cold CUDA-context initialization, and set conservative scale-down to avoid thrashing pods up and down.
 
 **Q: What is the difference between blue-green and canary deployment for models?**
 Blue-green keeps two full environments and flips 100% of traffic from the old (blue) to the new (green) at once after validating green, giving instant rollback by flipping back. Canary instead shifts traffic gradually (5% → 25% → 100%), limiting blast radius and letting you watch metrics at each step, but exposing some users to a bad model before you catch it. Blue-green optimizes for fast, clean cutover; canary optimizes for early detection on real traffic.
@@ -782,9 +815,9 @@ flowchart LR
     class sched,paged,tp base
 ```
 
-*Throughput ~1200 tok/s aggregate, p99 = 800ms for a 200-token response.*
+*Illustrative operating point: ~3,000 output tok/s aggregate, p99 time-to-first-token ~800ms.*
 
-Throughput ~1200 tokens/sec aggregate, p99 latency 800ms for a 200-token completion. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
+**Illustrative operating point, and how to sanity-check one.** Take ~3,000 output tokens/sec aggregate at 100-way concurrency. With continuous batching every live sequence advances one token per decode step, so that is ~30 steps/sec — about 30 tokens/sec per stream, and a 200-token completion streams over roughly 7 seconds. The user-visible number is time-to-first-token, ~800ms at p99; the 7 seconds is hidden by streaming. Check it against the hardware before believing it: 7B weights in FP16 are ~13.5GB, split across 2x A100-80GB (2,039 GB/s each), so the weight read alone floors a decode step at ~3.3ms, and at 100 sequences of a few thousand tokens the KV-cache read (~0.5MB per token per sequence) is the dominant term and lands the step in the tens of milliseconds — consistent with ~30 steps/sec. Published vLLM benchmarks put a 7-8B model on a single A100-80GB at roughly 2,500-2,800 output tok/s at 50 concurrent requests, so a few thousand tok/s across two GPUs is the right order of magnitude. Any "p99 800ms for the full 200-token completion" claim would mean 250 tok/s *per stream*, which is above what a single stream can do on this hardware and 8x the aggregate budget — that is the arithmetic trap to catch in a design review. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
 
 **Launching vLLM with tensor parallelism and bounded concurrency:**
 
@@ -795,7 +828,8 @@ def build_engine() -> LLM:
     return LLM(
         model="meta-llama/Llama-2-7b-chat-hf",
         tensor_parallel_size=2,            # split across 2 A100s
-        gpu_memory_utilization=0.90,       # reserve headroom for KV cache
+        gpu_memory_utilization=0.90,       # fraction of GPU memory vLLM may use
+                                           # (weights + activations + KV cache)
         max_num_seqs=100,                  # cap concurrent sequences
         max_model_len=4096,
     )
@@ -808,6 +842,7 @@ PARAMS = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=200)
 ```python
 from vllm import AsyncLLMEngine, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.sampling_params import RequestOutputKind
 import uuid
 
 class LLMService:
@@ -817,9 +852,12 @@ class LLMService:
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
     async def stream(self, prompt: str):
-        params = SamplingParams(temperature=0.7, max_tokens=200)
+        # output_kind defaults to CUMULATIVE — every RequestOutput repeats the
+        # whole text so far. Ask for DELTA or you will re-send the prefix each step.
+        params = SamplingParams(temperature=0.7, max_tokens=200,
+                                output_kind=RequestOutputKind.DELTA)
         async for out in self.engine.generate(prompt, params, str(uuid.uuid4())):
-            yield out.outputs[0].text   # incremental tokens to the client
+            yield out.outputs[0].text   # just the new tokens for this step
 ```
 
 **Server-side timeout to protect GPU memory:**
@@ -915,6 +953,6 @@ def group_by_length(requests, bucket_sizes=(64, 128, 256, 512)):
     return buckets
 ```
 
-**How do you decide between TorchServe, ONNX Runtime, and TensorRT for serving?** TorchServe wraps PyTorch models with a REST/gRPC server, custom handlers, and model archive format — lowest engineering effort, good for experimentation and Python-heavy postprocessing. ONNX Runtime converts PyTorch to ONNX graph IR; runs on CPU/GPU/edge without a Python runtime; 2-5× faster than native PyTorch CPU inference. TensorRT performs hardware-specific layer fusion, precision calibration (INT8/FP16), and kernel auto-tuning for NVIDIA GPUs — achieves 3-10× speedup vs. PyTorch CUDA for production GPU inference. Choose based on: ONNX for CPU/edge portability, TensorRT for maximum GPU throughput (requires NVIDIA hardware), TorchServe for rapid iteration.
+**How do you decide between a model server, ONNX Runtime, and TensorRT for serving?** They sit at different layers, so the question is really which one you need first. A model server (Triton, KServe, Ray Serve, BentoML — TorchServe filled this slot until the project was archived in August 2025) gives you the HTTP/gRPC surface, model archive, versioning and batching for the least engineering effort, and hosts Python-heavy pre/postprocessing. ONNX Runtime is a runtime, not a server: export to the ONNX graph IR and run on CPU/GPU/edge with no Python interpreter in the request path. TensorRT is a compiler: hardware-specific layer fusion, precision calibration (INT8/FP16) and kernel auto-tuning for one NVIDIA GPU family, which is also why its engines are not portable across GPU generations. Choose on constraint rather than on a quoted multiplier: ONNX for CPU and edge portability, TensorRT for maximum GPU throughput on fixed NVIDIA hardware, a model server for rapid iteration and multi-model hosting. Benchmark the speedup on your own model — it ranges from marginal to large depending on op mix and precision.
 
-**What is canary deployment for ML models and what metrics gate the rollout?** Canary deploys the new model to 5% of traffic. Gate metrics typically include: (1) primary business metric (CTR, AUC, revenue-per-user) vs. baseline — require no regression > 1%; (2) serving latency p99 — require no regression > 20%; (3) error rate — require < 0.01%. Monitor for 24-48 hours at each traffic step (5% → 25% → 50% → 100%). Automatic rollback triggers if any gate metric degrades. The key is that the canary runs on real production traffic, not synthetic load — shadow mode (offline scoring without serving) cannot catch distribution-specific latency issues.
+**What is canary deployment for ML models and what metrics gate the rollout?** Canary deploys the new model to 5% of traffic. Gate metrics typically include: (1) primary business metric (CTR, AUC, revenue-per-user) vs. baseline — require no regression > 1%; (2) serving latency p99 — require no regression > 20%; (3) error rate — require < 0.01%. Monitor for 24-48 hours at each traffic step (5% → 25% → 50% → 100%). Automatic rollback triggers if any gate metric degrades. The key is what only a canary can measure: shadow mode also runs on mirrored production traffic, but because its responses are never returned it cannot measure any business metric that depends on a user reacting to the prediction.

@@ -27,7 +27,7 @@ Three fundamental strategies dominate:
 
 One-line analogy: an ensemble is a panel of doctors — each with different training and specialties — who vote on a diagnosis; their collective judgment outperforms any single doctor.
 
-Mental model: suppose you have 100 classifiers, each with 70% accuracy, but whose errors are independent. The probability that a majority vote is wrong is the probability that more than 50 of them err — by the binomial distribution this is roughly 0.006%. Independence of errors is the key assumption; diversity is how you achieve it in practice.
+Mental model: suppose you have 100 classifiers, each with 70% accuracy, but whose errors are independent. The probability that a majority vote is wrong is the probability that more than 50 of them err — by the binomial distribution this is about 0.0009% (9.0e-6). Independence of errors is the key assumption; diversity is how you achieve it in practice.
 
 **What this actually says.** "If every model beats a coin flip and their mistakes are unrelated, the majority vote is almost never wrong — and it gets there far faster than intuition suggests."
 
@@ -141,7 +141,7 @@ Stacking:   Reduces Both (indirectly) via diversity
   Boosting a deep tree: variance 0.400 already high, extra rounds push it higher
 ```
 
-The last two lines are the practical warning. Bagging 100 stumps leaves you at `0.4605` — worse than a single deep tree — because you spent 100x the compute shrinking a term that was only `0.050` to begin with. Match the method to the dominant term, not to whichever library you like.
+The last two lines are the practical warning. Bagging 100 stumps leaves you at `0.4605` — far worse than the `0.294` that *boosting* those same stumps reaches — because you spent 100x the compute shrinking a term that was only `0.050` to begin with while the `0.360` bias bill went untouched. Match the method to the dominant term, not to whichever library you like.
 
 ### Diversity Requirement
 
@@ -515,7 +515,6 @@ models: dict[str, object] = {
         max_depth=6,
         subsample=0.8,
         colsample_bytree=0.8,
-        use_label_encoder=False,
         eval_metric="logloss",
         random_state=42,
         n_jobs=-1,
@@ -525,6 +524,7 @@ models: dict[str, object] = {
         learning_rate=0.05,
         num_leaves=63,
         subsample=0.8,
+        subsample_freq=1,   # REQUIRED: subsample_freq defaults to 0 = bagging OFF
         colsample_bytree=0.8,
         random_state=42,
         n_jobs=-1,
@@ -571,7 +571,7 @@ The winning pattern for structured/tabular competitions since 2014:
 3. Stack with 5-fold OOF predictions as meta-features
 4. Meta-learner: LogisticRegression or simple LightGBM with low n_estimators
 
-The 2015 Higgs Boson competition winner used an ensemble of 70+ models with multi-level stacking, gaining 3%+ AUC over their best single model.
+The 2014 ATLAS Higgs Boson Machine Learning Challenge (1,785 teams) was won by Gábor Melis with a *bag* of 70 dropout neural networks — plain averaging over one model family, not multi-level stacking, and scored on AMS rather than AUC. It is the cleanest public demonstration that ensembling alone, with no algorithm diversity at all, can win a major competition.
 
 ### Credit Scoring (Production)
 
@@ -679,7 +679,8 @@ rf = RandomForestClassifier(n_estimators=100)
 
 # FIXED
 rf = RandomForestClassifier(n_estimators=500, n_jobs=-1, oob_score=True)
-print(f"OOB AUC: {rf.oob_score_:.4f}")
+rf.fit(X, y)                       # oob_score_ only exists after fit
+print(f"OOB accuracy: {rf.oob_score_:.4f}")   # oob_score_ is accuracy, not AUC
 # OOB error is approximately equal to 3-fold CV error
 ```
 
@@ -733,6 +734,8 @@ In production, base model drift can be masked by the ensemble's average. Track e
 | MLflow | 2.0+ | Tracking ensemble experiments, registering models |
 | BentoML / Seldon | latest | Serving multiple models with ensemble logic |
 
+Every default value quoted in this module and its sub-files was checked against **scikit-learn 1.9, XGBoost 3.3, LightGBM 4.7** (the releases current as of July 2026). Defaults in these libraries do move — sklearn's `RandomForestClassifier.max_features` went `"auto"` → `"sqrt"` in 1.1 and `"auto"` was later removed; XGBoost dropped `use_label_encoder` and moved `early_stopping_rounds` from `fit()` to the constructor; LightGBM moved GOSS from `boosting_type` to `data_sample_strategy`. Re-check against your pinned versions before copying a config.
+
 ---
 
 ## 12. Interview Questions with Answers
@@ -749,8 +752,8 @@ Boosting is far more sensitive: it up-weights hard or mislabeled examples every 
 **Q: Why are raw probabilities from tree ensembles often miscalibrated, and how do you fix it?**
 Tree ensembles optimize impurity or ranking, not probability accuracy, so their scores are often miscalibrated and should be corrected with Platt scaling or isotonic regression before you threshold or soft-vote. Random Forest averages 0/1 leaf votes and is pulled toward the middle (rarely outputs near 0 or 1); boosting tends to push scores toward the extremes. Use `CalibratedClassifierCV` (method="isotonic" for large data, "sigmoid" for small) fit on a held-out set. Calibration matters most when a downstream decision uses a probability threshold or when you soft-vote across model families.
 
-**Q: Why does a random forest use sqrt(n_features) for classification but n_features/3 for regression?**
-Both choices de-correlate the trees by limiting which features each tree can split on at any node, which is the core mechanism for variance reduction. Classification uses sqrt because labels are categorical — each tree's optimal split set is smaller relative to the feature space. Regression uses n_features/3 empirically because continuous targets benefit from slightly more features to find good numeric splits. These are defaults; both should be tuned via OOB error or cross-validation for your specific dataset.
+**Q: Why is sqrt(n_features) the classification rule of thumb while regression uses more features per split?**
+Both choices de-correlate the trees by limiting which features each tree can split on at any node, which is the core mechanism for variance reduction. Classification uses sqrt(p) because a categorical target gives a strong signal from few candidates, so heavy restriction costs little per tree and buys a lot of diversity. Regression needs more candidates to find good numeric split points, which is why Breiman recommended p/3 — the default in R's `randomForest`. Note that sklearn does NOT use p/3: `RandomForestRegressor` defaults to `max_features=1.0` (all features, i.e. plain bagged trees), so if you want Breiman's rule you must set it explicitly. Treat all of these as starting points and tune via OOB error or cross-validation.
 
 **Q: What is OOB (Out-Of-Bag) error and why is it approximately equivalent to 3-fold CV?**
 Each bootstrap sample leaves out approximately 36.8% of training examples (probability of not being selected in N draws with replacement = (1-1/N)^N → 1/e ≈ 0.368). OOB error is computed by predicting each training sample only with trees that did not see it. This naturally provides an unbiased estimate of generalisation error. It approximates 3-fold CV because ~37% holdout is close to the 33% holdout of 3-fold; the estimate is slightly noisier because OOB sets overlap, but it is computed for free with no additional training.
@@ -767,14 +770,14 @@ Shrinkage scales each tree's contribution by a factor η (typically 0.01–0.3):
 **Q: What innovations does XGBoost introduce over vanilla gradient boosting?**
 Four key innovations: (1) Regularised objective — adds L1 (alpha) and L2 (lambda) penalties on leaf weights in the objective, reducing overfitting; (2) Second-order Taylor approximation — uses both first and second derivatives of the loss, enabling more accurate split scoring for arbitrary loss functions; (3) Approximate split finding with column blocks — pre-sorts features into compressed column blocks for cache-efficient parallel split evaluation; (4) Sparsity-aware split — handles missing values natively by learning a default direction for missing values at each split. Together these make XGBoost regularised by construction, faster to train, and robust to sparse/missing data.
 
-**Q: What is GOSS in LightGBM and why does it make LightGBM 3-5x faster than XGBoost?**
-GOSS (Gradient-based One-Side Sampling) observes that samples with large gradients contribute more to information gain and should always be kept; samples with small gradients contribute little and can be subsampled. LightGBM keeps all large-gradient samples and randomly samples a fraction (default 10%) of small-gradient samples, introducing a correction factor to maintain gradient statistics. Combined with Exclusive Feature Bundling (EFB, which bundles mutually exclusive sparse features into fewer dense features) and histogram-based binning (discretising continuous features into 255 bins), LightGBM reduces both the number of samples considered per split and the number of feature evaluations. On 100K row datasets LightGBM typically trains in ~3s vs XGBoost's ~10s on CPU.
+**Q: What is GOSS in LightGBM and how much of its speed advantage over XGBoost does it actually explain?**
+GOSS (Gradient-based One-Side Sampling) keeps every large-gradient sample and randomly subsamples the small-gradient ones, so each round scans far fewer rows. It keeps the top `a` fraction by |gradient| (`top_rate`, default 0.2) and randomly draws `b*N` more from the rest (`other_rate`, default 0.1), amplifying those survivors' weight by `(1-a)/b` so the gain statistics stay unbiased — roughly 30% of rows scanned per round. The critical caveat interviewers probe: **GOSS is not on by default.** LightGBM's default is `data_sample_strategy="bagging"`, so an out-of-the-box LGBMClassifier uses none of it, and the routine ~3s-vs-~10s CPU gap on 100K rows comes from histogram binning (`max_bin` default 255), Exclusive Feature Bundling, leaf-wise growth and the histogram-subtraction trick instead. Enable GOSS explicitly with `data_sample_strategy="goss"` if you want it.
 
 **Q: Why is data leakage the most critical pitfall in stacking, and how do out-of-fold predictions fix it?**
 If base models are trained on all training data and then used to predict on that same training data to create meta-features, the meta-learner sees "memorised" predictions — base models have zero bias on their own training data for high-capacity models. The meta-learner learns from signals that do not exist at test time, leading to severe overfit. Out-of-fold (OOF) prediction fixes this by ensuring that for every training sample, the prediction used as a meta-feature comes from a base model that never saw that sample during training, giving honest, generalisation-quality predictions for the meta-learner to learn from.
 
 **Q: When does soft voting outperform hard voting?**
-Soft voting averages predicted class probabilities then takes the argmax; hard voting takes the majority class. Soft voting outperforms hard voting when models produce well-calibrated probabilities that convey confidence. If model A predicts class 1 with 0.99 probability and models B and C predict class 0 with 0.51 probability each, hard voting picks class 0 (2 vs 1) but soft voting correctly picks class 1 (0.99 > 0.51+0.49/2). Soft voting fails when models are poorly calibrated (e.g., naive Bayes with extreme probability estimates); in that case calibration (Platt scaling, isotonic regression) should precede soft voting.
+Soft voting averages predicted class probabilities then takes the argmax; hard voting takes the majority class. Soft voting outperforms hard voting when models produce well-calibrated probabilities that convey confidence. If model A predicts class 1 with probability 0.99 while models B and C each predict class 0 with probability 0.51 (i.e. class 1 at 0.49), hard voting picks class 0 by 2 votes to 1, but soft voting averages the class-1 probabilities — (0.99 + 0.49 + 0.49)/3 = 0.657 > 0.5 — and picks class 1. Soft voting fails when models are poorly calibrated (e.g., naive Bayes with extreme probability estimates); in that case calibration (Platt scaling, isotonic regression) should precede soft voting.
 
 **Q: What are the diminishing returns of adding more models to an ensemble?**
 The variance reduction from averaging B models is σ^2*(ρ + (1-ρ)/B). Adding models reduces the second term but the floor ρ*σ^2 (from correlated errors) is not reducible. In practice: going from 1 to 3 diverse models yields most of the gain; 3 to 5 models gives modest additional gain; beyond 5 models with similar algorithms, improvement is marginal (typically < 0.1% AUC) while serving cost and maintenance complexity scale linearly. For stacking, the meta-learner's gains also plateau — a second stacking level typically adds 0.1-0.5% over the first; a third level is almost never worth it in production.
@@ -783,7 +786,7 @@ The variance reduction from averaging B models is σ^2*(ρ + (1-ρ)/B). Adding m
 Extra Trees (Extremely Randomized Trees) picks split thresholds at random instead of searching for the best one, which adds a little bias, further reduces variance, and trains faster than Random Forest. It also uses the whole dataset per tree by default rather than bootstrap samples. The extra randomness de-correlates the trees more aggressively, so Extra Trees can outperform RF on noisy, high-variance problems and trains faster because it skips the exhaustive threshold search. Prefer it when RF is overfitting or training too slowly; prefer RF when you need the best single-split quality per node.
 
 **Q: What is the difference between bagging and pasting?**
-Bagging draws each model's training subset with replacement (bootstrap), while pasting samples without replacement. Bagging's bootstrap means each subset has ~63.2% unique rows and duplicates, which leaves ~36.8% out-of-bag for free validation; pasting has no OOB set because nothing is left out across the full dataset in the same way. Bagging generally gives slightly more diverse (less correlated) models due to resampling variety, so it is the more common default; pasting is used when data is plentiful and you want each model to see distinct rows.
+Bagging draws each model's training subset with replacement (bootstrap), while pasting samples without replacement. Bagging's bootstrap means each subset has ~63.2% unique rows plus duplicates, leaving ~36.8% out-of-bag for free validation, and crucially that 36.8% falls out automatically at any subset size. Pasting can also leave rows out — sample 70% without replacement and 30% is unseen — but the held-out fraction is now a knob you chose rather than a property of the resampling, and sklearn declines to compute it: `BaggingClassifier` raises "Out of bag estimation only available if bootstrap=True". Bagging generally gives slightly more diverse (less correlated) models due to resampling variety, so it is the more common default; pasting is used when data is plentiful and you want each model to see distinct rows.
 
 **Q: What is the tradeoff between LightGBM's leaf-wise growth and XGBoost's level-wise growth?**
 Leaf-wise growth (LightGBM) splits the highest-loss leaf, reaching lower loss faster but overfitting small data; level-wise growth (XGBoost) expands a whole depth at once, which is more balanced. Leaf-wise can produce deep, unbalanced trees, so LightGBM controls complexity primarily with `num_leaves` and `min_child_samples` rather than `max_depth`. On large datasets leaf-wise usually wins on both speed and accuracy; on small or noisy datasets cap `num_leaves` (e.g. 15–31) or it will overfit.
@@ -989,8 +992,9 @@ honest = cross_val_score(estimator, X, y, cv=outer_cv, scoring="average_precisio
 import xgboost as xgb
 
 booster = xgb.train(params, dtrain)
-scores = booster.get_fscore()  # split count importance
-keep = [f for f, s in scores.items() if s >= 0.01]
+scores = booster.get_fscore()  # raw split COUNTS, not a normalised 0-1 score
+total = sum(scores.values())
+keep = [f for f, s in scores.items() if s / total >= 0.01]  # normalise before thresholding
 # Removes account_age_days → model loses fraud-ring detection ability
 # AUC drops from 0.987 → 0.961 silently (no error thrown)
 

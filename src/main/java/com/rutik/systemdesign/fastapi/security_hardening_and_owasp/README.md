@@ -17,7 +17,7 @@ Key capabilities:
 - Static analysis integration in CI: `bandit`, `safety`, `pip-audit`
 - Cross-links: [`../authentication_and_security/README.md`](../authentication_and_security/README.md), [`../error_handling_and_validation/README.md`](../error_handling_and_validation/README.md)
 
-Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
+Python version: 3.12/3.13. FastAPI version: 0.140+. Pydantic version: v2.
 
 ---
 
@@ -97,7 +97,7 @@ Fix: allowlist of permitted domains; reject private IP ranges (`10.0.0.0/8`, `17
 
 `CORSMiddleware(allow_origins=["*"])` in production, `app = FastAPI(debug=True)` leaking stack traces, verbose error messages exposing internal paths, default admin credentials, open Swagger UI on `/docs` in production.
 
-Fix: explicit `allow_origins` list; `debug=False` in production; custom exception handler returning RFC 7807 `application/problem+json` without internal detail; `app = FastAPI(docs_url=None, redoc_url=None)` in production (or protect `/docs` with auth).
+Fix: explicit `allow_origins` list; `debug=False` in production; custom exception handler returning RFC 9457 `application/problem+json` without internal detail; `app = FastAPI(docs_url=None, redoc_url=None)` in production (or protect `/docs` with auth).
 
 **API9: Improper Inventory Management**
 
@@ -329,9 +329,10 @@ bandwidth — it is a bound on how much RAM one request can force the process to
 
 The cap converts an unbounded number into a multiplication you can actually plan capacity against.
 Note that `content-length` is attacker-supplied: a client that lies about it, or uses chunked
-transfer encoding with no `content-length` at all, slips past this check — the ASGI server's own
-body limit (Uvicorn `--limit-max-request-size`, or the reverse proxy's `client_max_body_size`) is
-the layer that catches those, which is why this middleware is one of several, not the only one.
+transfer encoding with no `content-length` at all, slips past this check. Uvicorn has no body-size
+option, so the layer that catches those is the reverse proxy (nginx `client_max_body_size`, Envoy
+`max_request_bytes`) plus a streaming byte counter over `request.stream()` inside the handler —
+which is why this middleware is one of several, not the only one.
 
 ### Security Headers Middleware
 
@@ -465,17 +466,15 @@ except ValidationError as exc:
 
 ```python
 from pydantic import SecretStr
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     database_url: SecretStr          # never logged as plaintext
     jwt_secret_key: SecretStr
     stripe_api_key: SecretStr
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 settings = Settings()
@@ -806,10 +805,10 @@ async def sync_from_upstream(order_id: str):
 | `pip-audit` | Vulnerability scanning of installed packages vs OSV and PyPI Advisory DB | Run in CI; blocks deploy on CRITICAL/HIGH CVEs |
 | `detect-secrets` | Pre-commit hook scanning for secrets in source code | Add to `.pre-commit-config.yaml`; run in CI |
 | `safety` | Alternative CVE scanner (commercial DB) | Supplement `pip-audit` for broader coverage |
-| `python-jose` / `PyJWT` | JWT encode/decode | `python-jose` for JWKS (RS256); `PyJWT` for simpler HS256 |
-| `passlib[bcrypt]` | Password hashing with bcrypt cost 12 | User password storage; ~250 ms at cost 12 |
+| `PyJWT` | JWT encode/decode, HS256 and RS256 | All token verification; `PyJWKClient` fetches and caches an OIDC JWKS |
+| `pwdlib[argon2]` | Password hashing with argon2id | User password storage; `PasswordHash.recommended()` |
 | `pydantic-settings` | Environment variable injection with `SecretStr` | All production configuration |
-| `starlette-exceptionhandler` | Custom exception → RFC 7807 JSON responses | Hide stack traces in production |
+| `app.exception_handler` / `add_exception_handler` | Custom exception → RFC 9457 JSON responses | Hide stack traces in production; no extra dependency needed |
 | `httpx` | Async HTTP client for external API calls | With `timeout=5.0`, `follow_redirects=False` for user-supplied URLs |
 
 ---
@@ -943,7 +942,7 @@ flowchart LR
         Resp --> ExcHandler(Global exception<br/>handler)
     end
 
-    ExcHandler -->|"RFC 7807<br/>problem+json"| ClientOut([Client])
+    ExcHandler -->|"RFC 9457<br/>problem+json"| ClientOut([Client])
     Fetch -.-> PG
     RateLim -.-> Redis
 
@@ -962,17 +961,16 @@ flowchart LR
 ```python
 # config.py — secrets via SecretStr
 from pydantic import SecretStr
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     database_url: SecretStr
     jwt_secret_key: SecretStr
     cors_origins: list[str] = ["https://app.invoiceapp.com"]
     rate_limit_redis_url: str = "redis://localhost:6379/1"
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
@@ -1103,7 +1101,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-# Global exception handler: RFC 7807, no stack traces
+# Global exception handler: RFC 9457, no stack traces
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(
@@ -1126,7 +1124,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 | BOPLA (response) | Return full ORM object | `response_model=InvoicePublic` |
 | BOPLA (update) | Accept any field in PATCH body | `InvoiceUpdate` with `extra="forbid"` |
 | BFLA | DELETE protected only by auth | `require_role("admin","billing")` |
-| Security misconfiguration | `allow_origins=["*"]`, stack traces | Explicit origins, RFC 7807 handler |
+| Security misconfiguration | `allow_origins=["*"]`, stack traces | Explicit origins, RFC 9457 handler |
 | Secret exposure | DB URL in source code | `SecretStr` via env vars |
 | Request DoS | No body size limit | `RequestSizeLimitMiddleware` 1 MB |
 

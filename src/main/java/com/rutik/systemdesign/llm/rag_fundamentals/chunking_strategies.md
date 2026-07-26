@@ -102,9 +102,6 @@ At corpus scale the difference is a capacity-planning number, not a curiosity. T
 Split at natural linguistic boundaries:
 
 ```python
-import nltk
-# The `langchain.text_splitter` module no longer exists — splitters moved to the
-# standalone `langchain-text-splitters` package.
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Recursive splitting: tries paragraph → sentence → word boundaries

@@ -26,7 +26,7 @@ Why it matters: wrong algorithm choice is not caught by offline metrics during d
 
 **Match inductive bias to problem structure.** Inductive bias is the set of assumptions an algorithm encodes. Tree methods assume piecewise-constant functions; linear models assume additive feature effects; CNNs assume spatial locality and translation invariance. When the assumption fits the data, you need less data to learn a good model.
 
-**Constraints drive algorithm class before accuracy drives it.** Latency budget (p99 < 10 ms), interpretability requirement (scorecard for credit), regulatory constraint (GDPR right-to-explanation), data volume (5k rows), and retraining frequency (hourly) all eliminate algorithm classes before you ever measure accuracy.
+**Constraints drive algorithm class before accuracy drives it.** Latency budget (p99 < 10 ms), interpretability requirement (scorecard for credit), regulatory constraint (ECOA/Regulation B adverse-action notices; the GDPR's Art. 13-15 duty to give "meaningful information about the logic involved" — note the widely cited GDPR "right to explanation" sits in non-binding Recital 71, not in Art. 22, and Wachter, Mittelstadt and Floridi (2017) argue no such enforceable right exists), data volume (5k rows), and retraining frequency (hourly) all eliminate algorithm classes before you ever measure accuracy.
 
 **Calibration is a separate concern.** A model that ranks instances correctly (high AUC) but outputs miscalibrated probabilities (50% predicted probability for events that happen 90% of the time) is wrong for decision-making systems. Always check calibration when probabilities drive business decisions.
 
@@ -47,7 +47,7 @@ Why it matters: wrong algorithm choice is not caught by offline metrics during d
 | Multi-class, low cardinality | any tabular | Softmax logistic / LightGBM | — | 1-vs-rest SVMs |
 | Regression, tabular | < 50k rows | Ridge / Lasso | LightGBM if residuals structured | DNN (data hungry) |
 | Regression, tabular | > 50k rows | LightGBM | Quantile regression with CatBoost for uncertainty | Linear (misses interactions) |
-| Regression, spatial/temporal | any | LightGBM + lag/rolling features | Temporal Fusion Transformer at scale | ARIMA (can't handle exog. well) |
+| Regression, spatial/temporal | any | LightGBM + lag/rolling features | Temporal Fusion Transformer at scale | ARIMA/SARIMAX (linear, one series at a time) |
 | Ranking / LTR | any | LambdaMART (LightGBM ranking) | Neural LTR (listNet, DLRM) | Pointwise regression naively |
 | Recommendation retrieval | > 100M items | Two-tower (dot product) | Cross-attention if quality >> latency | Matrix factorization (poor cold-start) |
 | Recommendation ranking | — | GBDT over retrieved candidates | Wide & Deep, DLRM for embedding-heavy | Pure CF (no context features) |
@@ -58,7 +58,7 @@ Why it matters: wrong algorithm choice is not caught by offline metrics during d
 | Text classification | < 100k samples | Fine-tune BERT (DistilBERT) | Full BERT / domain-specific | Bag-of-words TF-IDF at scale |
 | Sequence labeling / NER | — | BERT + CRF / token classifier | Custom domain pre-training | Vanilla LSTM (weaker context) |
 | Computer vision classification | transfer OK | ResNet-50 or EfficientNet-B0 fine-tuned | ViT for large datasets, DINO for SSL | Training from scratch (<500k images) |
-| Object detection | real-time required | YOLOv8 / YOLOv9 | Faster R-CNN for highest mAP | Transformer-based (high latency) |
+| Object detection | real-time required | YOLO26 / YOLO11 (Ultralytics) | RT-DETR / RF-DETR — NMS-free, real-time, higher mAP | Two-stage Faster R-CNN (slow, no longer SOTA) |
 | Time series forecasting | < 100 series | Prophet / ARIMA + ensemble | LightGBM with lags | LSTM (unstable with short series) |
 | Time series forecasting | > 1000 series | LightGBM or N-BEATS | Temporal Fusion Transformer | Global ARIMA (doesn't share patterns) |
 | Causal uplift / treatment effect | observational data | S-learner (LightGBM) → T-learner | Causal Forest (EconML) | A/B proxy without confounder adjustment |
@@ -88,7 +88,7 @@ once data is large and unstructured. Anything landing in the top-left
 "overfitting risk" quadrant (complex model, little data) is exactly the mistake
 §6.1 demonstrates.
 
-Below 10k rows for tabular data: regularized linear or shallow tree ensembles beat deep networks in almost every controlled experiment. The reason is variance: deep networks have enormous parameter counts relative to data, leading to high generalization error.
+Below roughly 10k rows of tabular data, tree ensembles have been the reliable default. The strongest published evidence is Grinsztajn, Oyallon and Varoquaux (2022), who benchmarked 45 real tabular datasets and found tree-based models still state-of-the-art at around 10k samples, tracing the gap to their robustness to uninformative features and to the ease of fitting irregular, non-smooth target functions. Two caveats keep this from being a law. First, the classical "too many parameters for the data" variance argument is a screening heuristic, not a proof — over-parameterized networks often generalize better than capacity bounds predict. Second, the result no longer holds unconditionally: TabPFN v2 (Hollmann et al., *Nature*, January 2025), a transformer pretrained on synthetic tabular tasks, reports beating prior methods on datasets up to 10,000 samples and 500 features. Treat "GBDT for small tabular" as a strong prior to be tested on your own data, not a settled fact.
 
 ### 4.3 Constraint-Driven Elimination
 
@@ -200,7 +200,7 @@ prune the shortlist before any accuracy number is compared.
 
 ## 6. How It Works — Detailed Mechanics
 
-### 6.1 Broken Choice — DNN on Small Tabular Data
+### 6.1 Capacity Check — DNN vs GBDT on Small Tabular Data
 
 ```python
 import numpy as np
@@ -210,7 +210,7 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
 
-# WRONG: deep network on 5k tabular rows
+# A deep network on 5k tabular rows — count its parameters before training it
 X, y = make_classification(n_samples=5_000, n_features=30, n_informative=15, random_state=42)
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
@@ -223,16 +223,17 @@ class DeepNet(nn.Module):
             nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3),
             nn.Linear(128, 64),  nn.ReLU(),
             nn.Linear(64, 1),    nn.Sigmoid(),
-        )  # 100k+ parameters on 5k samples → high variance
+        )  # 49,153 parameters on 5k samples → ~10 free parameters per row
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze()
 
-# result: ~0.72 AUC CV (overfitting, needs >100k rows to generalize)
+# Measured, 5-fold stratified CV, Adam(1e-3), 100 epochs, torch 2.x:
+#   CV AUC 0.992 ± 0.002, ~12 s total. 49,153 parameters on 5,000 rows.
 ```
 
 ```python
-# CORRECT: LightGBM — gradient boosted trees are the right inductive bias for tabular
+# The tabular default: LightGBM — piecewise-constant inductive bias, far cheaper to tune
 import lightgbm as lgb
 from sklearn.model_selection import cross_val_score
 
@@ -242,13 +243,31 @@ model = lgb.LGBMClassifier(
     num_leaves=31,
     min_child_samples=20,   # regularize for small data
     subsample=0.8,
+    subsample_freq=1,       # REQUIRED: subsample is a silent no-op without this
     colsample_bytree=0.8,
     random_state=42,
 )
 scores = cross_val_score(model, X, y, cv=5, scoring="roc_auc")
 print(f"LightGBM CV AUC: {scores.mean():.3f} ± {scores.std():.3f}")
-# result: ~0.84 AUC CV — 12pp gain with lower complexity and 50x faster training
+# Measured, lightgbm 4.7 / scikit-learn 1.9: CV AUC 0.989 ± 0.003, ~5 s total
 ```
+
+**Read the result before you read the lesson.** On this synthetic generator the two
+models tie — 0.992 for the network against 0.989 for LightGBM, a gap of roughly one
+standard deviation across folds. That is the honest outcome, and it is worth stating
+plainly because `make_classification` builds its classes from Gaussian clusters on the
+vertices of a hypercube: smooth, rotation-friendly boundaries that suit a dense network
+at least as well as an axis-aligned tree. A synthetic benchmark cannot demonstrate the
+tabular deep-learning gap, and any tutorial claiming it does has reported a number it
+did not measure. What the example *can* teach is the capacity arithmetic below, and why
+LightGBM is still the better choice here on cost rather than on accuracy.
+
+**LightGBM's `subsample` trap.** `subsample=0.8` alone does nothing: LightGBM's
+`bagging_freq` defaults to `0`, which disables bagging entirely, and the scikit-learn
+wrapper's `subsample_freq` maps onto it. Verified — with `subsample=0.8` and no
+`subsample_freq`, predictions are bit-identical to `subsample=1.0`. XGBoost has no such
+requirement, so a configuration ported between the two libraries silently loses its row
+sampling.
 
 **What the formula is telling you.** "Count the weights, count the rows, and if the weights badly outnumber the rows the model has enough freedom to memorize the training set instead of learning from it."
 
@@ -278,9 +297,11 @@ The parameter-to-sample ratio is the crudest possible capacity check, and that i
    parameters per row              49,153 / 5,000  =          9.8
 ```
 
-Just under **ten free parameters for every single training row**. Dropout at `0.3` and early stopping are being asked to hold that back on their own, and they cannot — hence the `~0.72` CV AUC. (The exact figure is `49,153`; the prose above rounds it up. Either way the conclusion is unchanged: the capacity is an order of magnitude past what 5,000 rows can constrain.)
+Just under **ten free parameters for every single training row**. The two `Dropout(0.3)` layers are the only explicit regularizer in the network, and on a harder or noisier problem they would not be enough on their own. (The exact figure is `49,153`; the prose above rounds it up.) The ratio is a screening signal, not a verdict — here the network generalizes fine, because the generator's structure is easy and 15 of the 30 features are genuinely informative.
 
-Now read the correction in the same terms. LightGBM's `num_leaves = 31` over `300` trees is a comparable raw count, but the capacity is *shaped*: each tree is a piecewise-constant partition, `min_child_samples = 20` forbids any leaf from fitting fewer than 20 rows, and `subsample`/`colsample` at `0.8` decorrelate the trees. The result is `~0.84` AUC — a 12-point gain that is really a 43% cut in the remaining error (`0.12 / 0.28`), achieved by choosing a better inductive bias rather than by collecting more data.
+Now read the alternative in the same terms. LightGBM's `num_leaves = 31` over `300` trees is a comparable raw count, but the capacity is *shaped*: each tree is a piecewise-constant partition, `min_child_samples = 20` forbids any leaf from fitting fewer than 20 rows, and `subsample`/`colsample` at `0.8` — once `subsample_freq` is set — decorrelate the trees. It reaches statistically indistinguishable accuracy in less than half the wall-clock time, with no scaling step, no epoch budget, no learning-rate schedule, and native handling of missing values and categoricals. That is the argument for the GBDT on this problem: equal accuracy at a fraction of the tuning surface.
+
+For evidence that trees actually *win* on tabular data you need real datasets, not a generator. Grinsztajn, Oyallon and Varoquaux ("Why do tree-based models still outperform deep learning on tabular data?", 2022) benchmarked 45 real tabular datasets and found tree ensembles state-of-the-art on medium-sized data of roughly 10k samples, attributing the gap to robustness to uninformative features, sensitivity to data orientation, and the ease of fitting irregular target functions. That result is also no longer the last word below 10k rows: Hollmann et al., "Accurate predictions on small data with a tabular foundation model" (*Nature*, January 2025), report that the pretrained TabPFN v2 transformer outperforms prior methods on datasets up to 10,000 samples and 500 features, in seconds rather than hours of tuning.
 
 **Read it like this.** "Split the data into `k` blocks, train `k` times leaving a different block out each time, and report the spread as well as the mean — because on data this small the spread is the number that tells you whether the comparison is real."
 
@@ -307,13 +328,13 @@ Now read the correction in the same terms. LightGBM's `num_leaves = 31` over `30
       times each row is trained on                     4
 ```
 
-Now the decision rule. The reported gap is `0.84 - 0.72 = 0.12` AUC. If `scores.std()` came back around `0.01`, that gap is roughly twelve standard deviations and the conclusion is safe. If it came back around `0.05` — entirely plausible when each fold validates on only 1,000 rows — the gap is only about `2.4`, and "LightGBM beats the DNN" is a much weaker claim than the point estimate suggests. This is why the print statement carries `± scores.std()` and why a candidate quoting a bare CV mean invites the follow-up question.
+Now the decision rule, applied to the numbers actually measured above. The gap is `0.992 - 0.989 = 0.003` AUC and the fold spread is `0.003` for LightGBM and `0.002` for the network — the gap is about one standard deviation, so there is no winner here and reporting one would be reporting noise. Turn it around to see the rule bite: had the spread come back at `0.03`, even a `0.05` gap would be under two standard deviations and still not a result. This is why the print statement carries `± scores.std()`, and why a candidate quoting a bare CV mean invites the follow-up question. Note also how small the spread is at `n = 5,000` with 1,000 validation rows per fold — a fold-to-fold standard deviation in the `0.05` range would itself be a signal that something is wrong with the split, not just that the data is small.
 
 **Why `k = 5` rather than 10 or leave-one-out.** Raising `k` trains on more data per fit (`90%` at `k = 10`), lowering bias, but the folds overlap more so their scores become correlated and the variance estimate degrades — while the cost rises linearly, `k` full fits. At the extreme, leave-one-out means 5,000 fits for a variance estimate that is famously unreliable. `k = 5` and `k = 10` are the standard compromise; go to `k = 10` when data is scarce enough that losing `20%` per fit hurts, and stay at `5` when fits are expensive.
 
 **The fold-splitting trap this code does not guard against.** Plain `cv=5` uses random splits. That is correct here because `make_classification` produces i.i.d. rows, but on real data it is the single most common way to manufacture a fake result: random folds on time-series data let the model see the future, and random folds on grouped data (multiple rows per user) leak the same user across train and validation. Reach for `TimeSeriesSplit` or `GroupKFold` the moment either structure is present, and remember that any preprocessing — scaling, target encoding, imputation — must be fitted *inside* the fold, not before the split.
 
-The DNN has 49,153 parameters on 5k samples — a parameter-to-sample ratio of roughly 10:1. Generalization theory (VC dimension, PAC learning bounds) predicts high variance. The GBDT has a regularized tree structure that is essentially a piecewise-constant function fitter, which matches how most tabular data is generated (rule-based business logic + noise).
+The DNN has 49,153 parameters on 5k samples — a parameter-to-sample ratio of roughly 10:1. Classical capacity bounds (VC dimension, PAC learning) treat that as a variance warning, though modern over-parameterized networks routinely generalize past what those bounds predict, which is exactly why the measurement above matters more than the ratio. The GBDT has a regularized tree structure that is essentially a piecewise-constant function fitter, which matches how much tabular data is generated (rule-based business logic + noise) — and on real tabular benchmarks that is where its edge comes from.
 
 ### 6.2 Constraint-Driven Selection — Credit Risk (Regulated)
 
@@ -419,7 +440,8 @@ def latency_budget_check(
         "within_budget": p99 <= p99_budget_ms,
     }
 
-# Typical results (single-core inference):
+# Illustrative order-of-magnitude figures (single-core CPU, batch size 1). Treat the
+# ratios, not the absolute values, as the lesson — measure on your own hardware.
 # LightGBM (300 trees): p50=0.4ms, p99=1.2ms  -> OK for <10ms SLO
 # XGBoost  (300 trees): p50=0.6ms, p99=2.1ms  -> OK
 # 3-layer MLP (PyTorch CPU): p50=4ms, p99=18ms -> FAILS <10ms SLO
@@ -439,7 +461,7 @@ The reason `within_budget` compares `p99` and not `p50` is the entire lesson. A 
 | `within_budget` | The verdict — computed on `p99`, never on `p50` |
 | `n_trials = 1000` | Enough samples that `p99` is estimated from ~10 observations, the bare minimum |
 
-**Walk one example.** The four measured models against the `10ms` p99 SLO:
+**Walk one example.** The four illustrative models above against the `10ms` p99 SLO:
 
 ```
    model                    p50      p99    tail ratio   % of budget    verdict
@@ -459,15 +481,15 @@ Meanwhile LightGBM uses `12%` of budget at p99, leaving `8.8ms` for feature retr
 
 ## 7. Real-World Examples
 
-**Stripe (fraud detection):** uses gradient boosted trees as the primary model for payment fraud. Despite having DL capabilities, GBDT remains preferred for its speed, debuggability, and the ability to add hand-crafted features (velocity counters, rule outputs) directly into the feature vector. Neural networks are used for embedding raw graph features which then feed the GBDT.
+**Stripe (fraud detection):** a worked example of the opposite migration. Stripe's published account of Radar says it moved in mid-2022 *from* an ensemble Wide & Deep model containing an XGBoost component *to* a DNN-only multi-branch architecture inspired by ResNeXt, and reports blocking just 0.1% of legitimate payments incorrectly. Stripe then went further, announcing at Sessions 2025 a transformer-based Payments Foundation Model trained on tens of billions of transactions that embeds each payment; it raised the detection rate for card-testing attacks on large businesses by 64% "practically overnight". Scale of proprietary data, not the tabular/DL rule of thumb, is what made the deep model the right call here.
 
-**Airbnb (pricing recommendations):** regression problem. Uses GBDT with custom quantile loss for price interval prediction. Neural networks are used for the demand forecasting sub-problem (long horizon, cross-listing signals) while GBDT handles the individual listing context where feature interpretability matters for host trust.
+**Airbnb (pricing recommendations):** the KDD 2018 paper "Customized Regression Model for Airbnb Dynamic Pricing" (Ye et al.) describes the Price Tips / Smart Pricing system as two GBM stages — a binary classifier for a listing-night's booking probability, then a regression model for the optimal price trained with a *customized asymmetric loss* rather than a standard objective. The lesson is that the loss function, not the algorithm class, carried the domain constraint.
 
-**Credit Suisse / banking industry (credit scoring):** regulatory requirement (Basel III, ECOA in the US) for adverse-action notices means scorecards (logistic regression over WOE bins) dominate consumer credit. Each applicant who is declined must receive a written explanation of the top 4 reasons, which is impossible from a GBDT leaf path.
+**Consumer credit scoring (banking industry):** scorecards — logistic regression over WOE bins — dominate because of the adverse-action rule in ECOA / Regulation B (12 CFR 1002.9), which requires a declined applicant to be told the *specific principal reasons* for the decision. Regulation B does not fix a number; its official commentary says disclosing more than four reasons is unlikely to be helpful, which is where the "top 4 reasons" convention comes from. (Basel III governs bank capital adequacy, not applicant notices — a common conflation.) A GBDT leaf path is a unique conjunction of conditions that is not stable across retrains, so it does not map cleanly onto a principal-reason statement.
 
-**Netflix (content ranking):** two-phase architecture — retrieval uses a two-tower neural model (user embedding × item embedding) at billion-item scale; ranking uses GBDT over the top-100 retrieved candidates. This separation lets each phase optimize its own inductive bias and latency budget.
+**Netflix (content ranking):** two-phase retrieval-then-rank is the standard architecture — a cheap retrieval stage narrows the candidate set, then an expensive ranker scores the survivors — and it lets each phase optimize its own inductive bias and latency budget. Do not attach billion-item retrieval scale to Netflix: its global catalogue is on the order of 18,000 titles (about 7,000-8,000 in the US). Billion-scale two-tower retrieval is the regime of open user-generated catalogues such as YouTube, not of a licensed video library.
 
-**Google Maps (ETA):** hybrid — GBDT for the base ETA from historical segment traversal times; DL (graph neural network over road graph topology) for real-time incident propagation; linear correction for time-of-day/day-of-week periodicity.
+**Google Maps (ETA):** the published system (Derrow-Pinion et al., "ETA Prediction with Graph Neural Networks in Google Maps", CIKM 2021, arXiv 2108.11482) is a graph neural network as the ETA model itself, not as a side correction. The road network is partitioned into Supersegments — runs of roughly 20 adjacent road segments sharing significant traffic volume — and the GNN predicts travel time per Supersegment. The paper reports a 40+% reduction in negative ETA outcomes against the previous production baseline in metros such as Sydney.
 
 ---
 
@@ -481,7 +503,7 @@ Meanwhile LightGBM uses `12%` of budget at p99, leaving `8.8ms` for feature retr
 | Decision tree | Medium | Fast | <1ms | High | Medium | Medium |
 | Random forest | Medium–High | Medium | 2–10ms | Medium | Medium | Low–Medium |
 | LightGBM / XGBoost | High | Fast | 1–5ms | Low (SHAP needed) | Medium (10k+) | Medium |
-| SVM (RBF kernel) | Medium–High | Slow (n²) | 1–10ms | Very low | Low–Medium | High |
+| SVM (RBF kernel) | Medium–High | Slow (n² to n³) | 1–10ms | Very low | Low–Medium | High |
 | MLP / DNN | Medium (tabular) | Slow | Variable | Very low | High (100k+) | High |
 | CNN | High (vision) | Very slow | 10–200ms | Very low | Very high | High |
 | Transformer / BERT | High (NLP) | Very slow | 20–500ms | Very low | High | High |
@@ -572,9 +594,9 @@ points toward the rare top-right "ideal" corner.
 | Tool | Category | Strengths | Weaknesses | Best for |
 |---|---|---|---|---|
 | LightGBM | GBDT | Fastest training, leaf-wise splits, categorical support | Memory for wide data | Tabular, ranking |
-| XGBoost | GBDT | Mature, GPU support, monotonic constraints | Slower than LightGBM | Regulated scenarios (monotonic) |
-| CatBoost | GBDT | Native categoricals, ordered boosting | Slower training | High-cardinality cats |
-| scikit-learn | Classical ML | Full pipeline API, cross-val, preprocessing | No GPU, slow on large data | Baselines, preprocessing |
+| XGBoost | GBDT | Mature, GPU support, `subsample` needs no companion flag | Historically slower than LightGBM; gap narrowed with `hist` | Portability, distributed training |
+| CatBoost | GBDT | Native categoricals via ordered target statistics; ordered boosting | Slower training | High-cardinality cats |
+| scikit-learn | Classical ML | Full pipeline API, cross-val, preprocessing | GPU only via experimental array-API dispatch; slow on large data | Baselines, preprocessing |
 | PyTorch | DL | Dynamic graph, research-friendly | Verbose, manual optim loop | Custom DL architectures |
 | EconML | Causal ML | T-learner, S-learner, Causal Forest, Double ML | Narrow scope | HTE / uplift estimation |
 | Optuna | HPO | Efficient Bayesian search, pruning | Requires study management | All algorithm tuning |
@@ -597,7 +619,7 @@ Neural networks require large amounts of labeled data to generalize (typically 1
 Inductive bias is the set of assumptions an algorithm encodes about the data-generating process. Linear models assume the target is a weighted sum of inputs. Decision trees assume the target is piecewise constant in feature space. CNNs assume spatial locality and translation invariance. When the true function matches the inductive bias, you need exponentially less data to learn it. When it doesn't, the algorithm has systematic errors (bias) that more data cannot fix. Model selection is fundamentally the task of identifying which assumptions are correct for your problem.
 
 **Q: How do you handle a situation where the business needs both accuracy and interpretability?**
-Tiered approach: (a) train a high-accuracy GBDT or neural model as the production scorer; (b) build a surrogate interpretable model (logistic regression or shallow decision tree) trained to approximate the GBDT's predictions; (c) use the surrogate for explanation only, not for scoring. This is approved by regulators in some jurisdictions. Alternatively, use SHAP values on the GBDT directly — SHAP provides additive local explanations that satisfy many interpretability requirements without the accuracy penalty of a true linear model. Document which approach is used in the model card.
+Use a tiered approach that separates the scorer from the explainer. Specifically: (a) train a high-accuracy GBDT or neural model as the production scorer; (b) build a surrogate interpretable model (logistic regression or shallow decision tree) trained to approximate the GBDT's predictions; (c) use the surrogate for explanation only, not for scoring. Surrogate explanations are contested — a surrogate that disagrees with the scorer produces a reason that did not drive the decision, and CFPB Circular 2022-03 states that a creditor cannot justify noncompliance with ECOA and Regulation B on the grounds that its technology is too complicated or opaque to understand. Alternatively, use SHAP values on the GBDT directly — SHAP provides additive local explanations that satisfy many interpretability requirements without the accuracy penalty of a true linear model. Document which approach is used in the model card.
 
 **Q: When would you choose survival analysis over logistic regression for churn prediction?**
 When the timing of churn matters, not just whether it happens. Logistic regression on a fixed horizon (e.g., "churned within 30 days?") discards information about customers who have been retained for varying lengths of time — they are all treated as "not churned" regardless of how close they are to the event. Survival models (Cox PH, Kaplan-Meier, DeepSurv) properly handle right-censored observations and output a hazard function over time. This matters for: pricing retention interventions (intervene when hazard rate spikes), long-contract businesses (SaaS, insurance), and any setting where time-to-event heterogeneity is large.
@@ -606,7 +628,7 @@ When the timing of churn matters, not just whether it happens. Logistic regressi
 (1) Is AUC the right metric? High AUC means good ranking, not good probabilities. If the business uses a fixed threshold to make decisions, check precision/recall at that threshold. (2) Calibration: plot a reliability diagram. If 60% predicted probability events happen 20% of the time, the model is miscalibrated and scores are not actionable. (3) Segment performance: overall AUC can mask poor performance on the specific subgroup the business cares about. (4) Temporal drift: AUC measured on a random split may not reflect AUC on future data; rerun with a temporal hold-out. (5) Feedback loop: if the model's predictions drive interventions that change the outcome, the model's training distribution shifts. This is common in fraud and churn.
 
 **Q: How do you choose between a two-tower retrieval model and matrix factorization for a recommendation system?**
-Two-tower wins when: (a) item/user features beyond IDs are available (content, context); (b) cold-start is important (new items have features but no interaction history); (c) the catalog is large and ANN search over FAISS is needed for sub-100ms retrieval. Matrix factorization wins when: (a) the catalog is small (<100k items); (b) interactions are dense; (c) training infrastructure is constrained (ALS on Spark is simpler than training a DL model). In practice, two-tower has replaced matrix factorization at most large-scale recommendation systems (YouTube, Pinterest, Airbnb) because feature richness dominates over simplicity at scale.
+Pick two-tower when features beyond raw IDs matter, and matrix factorization when the catalogue is small and interactions are dense. Two-tower wins when: (a) item/user features beyond IDs are available (content, context); (b) cold-start is important (new items have features but no interaction history); (c) the catalog is large and ANN search over FAISS is needed for sub-100ms retrieval. Matrix factorization wins when: (a) the catalog is small (<100k items); (b) interactions are dense; (c) training infrastructure is constrained (ALS on Spark is simpler than training a DL model). In practice, two-tower has replaced matrix factorization at most large-scale recommendation systems (YouTube, Pinterest, Airbnb) because feature richness dominates over simplicity at scale.
 
 **Q: What is the cost of wrong inductive bias and how do you diagnose it?**
 Wrong inductive bias shows up as irreducible error — bias that doesn't decrease with more data or more regularization. Diagnostic: plot learning curves (train AUC and val AUC vs log training set size). If both curves plateau well below the target metric and remain flat as you add data, the model class is likely misspecified. Compare to a different algorithm class (e.g., switch from linear to GBDT). If the new class continues to improve with data while the old one didn't, the inductive bias was the bottleneck. This is the canonical "high bias" diagnosis in the bias-variance framework.
@@ -615,13 +637,13 @@ Wrong inductive bias shows up as irreducible error — bias that doesn't decreas
 Model selection chooses the algorithm class (logistic vs GBDT vs DNN). Hyperparameter tuning finds the best configuration within a chosen class (learning rate, depth, number of trees). The two should not be conflated because the search space is different and the right tools are different. Model selection uses offline CV with a simple default config per class to get a rough ordering; tuning then optimizes the winner. Running Optuna over both LightGBM and XGBoost simultaneously is valid but expensive; it is better to select the class first, then tune.
 
 **Q: When should you pre-compute model outputs rather than running inference online?**
-Pre-compute when: (a) the feature space is closed (finite set of user-item pairs) and can be enumerated; (b) latency requirement is sub-millisecond and the model is complex (DL); (c) features are expensive to compute at request time (graph traversal, external API calls). Do not pre-compute when: (a) context features change at request time (current session behavior); (b) candidate set is unbounded; (c) item catalog updates frequently (pre-computed scores go stale). Netflix pre-computes recommendation candidates daily but re-ranks at request time using real-time context. This hybrid covers both requirements.
+Pre-compute when the input space is enumerable and stable, and score online when the request itself carries signal. Pre-compute when: (a) the feature space is closed (finite set of user-item pairs) and can be enumerated; (b) latency requirement is sub-millisecond and the model is complex (DL); (c) features are expensive to compute at request time (graph traversal, external API calls). Do not pre-compute when: (a) context features change at request time (current session behavior); (b) candidate set is unbounded; (c) item catalog updates frequently (pre-computed scores go stale). Netflix pre-computes recommendation candidates daily but re-ranks at request time using real-time context. This hybrid covers both requirements.
 
 **Q: A feature that is critical in the training data is unavailable at serving time. What do you do?**
 This is a training-serving skew problem. Options in priority order: (a) eliminate the feature — if it cannot be served, it should not be trained on; using it creates a model that will silently degrade at serving (the model learned to rely on a signal it won't have). (b) Approximate the feature: compute a proxy from available signals at serving time (e.g., use session-level data instead of profile-level). (c) Pre-compute and cache the feature at a recent timestamp, accepting staleness. Always retrain after removing/replacing the feature. See [Feature Store and PIT Correctness](../case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md).
 
 **Q: How does monotonic constraint support in XGBoost change the model selection decision for credit risk?**
-Monotonic constraints enforce that the model's output is monotonically increasing (or decreasing) with respect to a specified feature, regardless of the training data. For credit risk, regulators and intuition require: higher income → lower risk, higher debt-to-income → higher risk. Without monotonic constraints, a GBDT can fit spurious reversals (high income → higher risk in a narrow income range) due to collinearity or noise. With monotonic constraints, XGBoost can produce a model that is both more accurate than logistic regression and satisfies the monotonicity requirement — bridging the interpretability/accuracy tradeoff in regulated settings.
+Monotonic constraints enforce that the model's output is monotonically increasing (or decreasing) with respect to a specified feature, regardless of the training data. For credit risk, regulators and intuition require: higher income → lower risk, higher debt-to-income → higher risk. Without monotonic constraints, a GBDT can fit spurious reversals (high income → higher risk in a narrow income range) due to collinearity or noise. With monotonic constraints, XGBoost can produce a model that is both more accurate than logistic regression and satisfies the monotonicity requirement — bridging the interpretability/accuracy tradeoff in regulated settings. Note this is not an XGBoost differentiator: LightGBM (`monotone_constraints`) and CatBoost support the same feature, so the choice among the three rests on other grounds. Monotonicity also buys direction, not explanation — you still owe the regulator specific principal reasons.
 
 **Q: What is the difference between feature importance and SHAP values, and which should you use for model explanation?**
 Feature importance (gain, split count) measures global contribution across all training samples and can be misleading: a feature used in many splits may have zero net effect if it splits in opposite directions equally. SHAP values are locally additive — each prediction is decomposed into contributions from each feature for that specific instance, with the guarantee that contributions sum to the model's output minus the baseline. SHAP is preferred for model explanation because it is consistent (a feature that contributes more always gets a higher SHAP value, unlike gain importance which can reverse), it supports both global analysis (mean absolute SHAP) and local explanation (per-instance waterfall chart), and it satisfies the axioms of fair credit allocation from game theory (Shapley values). Use gain importance for fast debugging; use SHAP for audits, regulators, and product stakeholders.
@@ -636,10 +658,10 @@ Tree models cannot extrapolate — they output a constant beyond the range of th
 Change the metric first: use PR-AUC or recall at a fixed precision rather than accuracy, because a model that always predicts the majority class scores 99% accuracy while catching zero positives. For the algorithm, GBDT with class weights (scale_pos_weight) or focal loss usually beats resampling; SMOTE and random oversampling help on small data but can synthesize unrealistic minority points that inflate offline metrics. Calibrate afterward, since reweighting and resampling both distort predicted probabilities — fit Platt or isotonic scaling on an unresampled validation set. Reframe as anomaly detection (Isolation Forest) only when positives are so rare or heterogeneous that they behave more like outliers than a learnable class.
 
 **Q: How do you choose an encoding approach for high-cardinality categorical features with 100k+ unique values?**
-Match the encoding to the model class: CatBoost's ordered target encoding for GBDT, hashing for linear models, and learned embeddings for deep networks. Naive one-hot encoding explodes dimensionality and memory, and plain mean/target encoding leaks the label unless computed out-of-fold. For tabular GBDT, CatBoost handles high cardinality natively with ordered boosting that avoids target leakage, while LightGBM supports native categorical splits up to a cardinality limit beyond which hashing or frequency encoding is needed. When the ID itself is the dominant signal (user_id, item_id in recommendation), embeddings in a two-tower or DLRM model beat any tabular encoding because they learn a dense representation that generalizes across related IDs.
+Match the encoding to the model class: CatBoost's ordered target encoding for GBDT, hashing for linear models, and learned embeddings for deep networks. Naive one-hot encoding explodes dimensionality and memory, and plain mean/target encoding leaks the label unless computed out-of-fold. For tabular GBDT, CatBoost handles high cardinality natively with *ordered target statistics* — a permutation-based encoding that computes each row's statistic from preceding rows only, so the label never leaks into its own feature. (Do not confuse this with *ordered boosting*, the paper's separate permutation trick for the prediction shift in the boosting loop; both appear in Prokhorenkova et al. 2018, but they solve different problems.) LightGBM supports native categorical splits, though it caps the split points it considers per categorical feature via `max_cat_threshold` (default 32), beyond which hashing or frequency encoding is worth trying. When the ID itself is the dominant signal (user_id, item_id in recommendation), embeddings in a two-tower or DLRM model beat any tabular encoding because they learn a dense representation that generalizes across related IDs.
 
 **Q: What does the No Free Lunch theorem imply for model selection in practice?**
-No single algorithm is best across all possible problems — averaged over every conceivable data distribution, all learners perform equally. In practice this does not license trying everything blindly: real data is not drawn uniformly from all distributions, so algorithms whose inductive bias matches the structure of the problem (GBDT for tabular business data, CNNs for images) dominate on those problems. The practical takeaway is that model selection is an empirical search for the inductive bias that fits your specific problem, which is why you benchmark a small shortlist under a shared harness rather than trusting a universal "best" algorithm. It also justifies always keeping a strong baseline, because the theorem guarantees no complex model is universally safe.
+No single algorithm is best across all possible problems. Wolpert's 1996 result is narrower than the folklore version: averaged *uniformly over all possible target functions*, and measured on *off-training-set* error, every learner has identical expected performance — it says nothing about the non-uniform distribution of problems that actually arise. In practice this does not license trying everything blindly: real data is not drawn uniformly from all distributions, so algorithms whose inductive bias matches the structure of the problem (GBDT for tabular business data, CNNs for images) dominate on those problems. The practical takeaway is that model selection is an empirical search for the inductive bias that fits your specific problem, which is why you benchmark a small shortlist under a shared harness rather than trusting a universal "best" algorithm. It also justifies always keeping a strong baseline, because the theorem guarantees no complex model is universally safe.
 
 ---
 
@@ -679,7 +701,7 @@ Step 5 — Calibration of tier cutoffs: The LightGBM outputs raw dollar predicti
 
 Step 6 — Serving: Export LightGBM model to ONNX. p99 inference on CPU pod: 1.8ms. Meets 5ms budget. Deploy behind a feature lookup service that provides RFM features precomputed hourly.
 
-**Outcome:** Bid price optimization using LTV predictions increased ROI on paid acquisition by 12% over the heuristic model. Marketing team adopted the SHAP-based explanations for customer segment reports. Model retrains weekly on rolling 24-month window.
+**Outcome (illustrative — this is a worked hypothetical, not a published result):** Bid price optimization using LTV predictions increased ROI on paid acquisition by 12% over the heuristic model. Marketing team adopted the SHAP-based explanations for customer segment reports. Model retrains weekly on rolling 24-month window.
 
 **Cross-references:**
 - Algorithm choice rationale: this module (model_selection_and_algorithm_choice)

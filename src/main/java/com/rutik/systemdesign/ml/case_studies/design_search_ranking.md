@@ -108,11 +108,11 @@ Position 1 draws roughly 5x the clicks of position 5 regardless of true relevanc
 
 **Hybrid retrieval (BM25 + dense)**: BM25 handles exact keyword matching well ("iPhone 14 Pro 256GB") but fails on semantic queries ("phone with good camera under $500"). Dense retrieval handles semantics but misses rare exact terms. RRF fusion exploits both without needing to tune a combination weight.
 
-**LambdaMART for LTR**: LambdaMART (MART = gradient boosted trees with LambdaRank gradients targeting NDCG) is the industry standard for search ranking. It optimizes NDCG directly via approximated gradients, handles mixed feature types and missing values, and is interpretable via feature importance. Comparable to deep learning LTR (DLRM) on tabular features but trains in 2 hours vs 12 hours.
+**LambdaMART for LTR**: LambdaMART (MART = gradient boosted trees with LambdaRank gradients targeting NDCG) is the industry standard for search ranking. It optimizes NDCG via the lambda gradients (an approximation — NDCG itself is non-differentiable), handles mixed feature types and missing values, and is interpretable via feature importance. Neural rankers can match or beat it, but on the purely tabular feature set used here the accuracy gap is small while the training-time and operational gap is large (2 hours on CPU here vs a multi-hour GPU job).
 
 **Position bias debiasing**: Users click on position 1 items 5-10x more than position 5 items regardless of relevance. Training directly on click counts produces a ranker that learns to rank what was already ranked highly. IPW (Inverse Propensity Weighting) corrects this: each click is weighted by 1/P(examined|position). P(examined|position) is estimated from randomization experiments (swap positions for 1% of traffic, observe CTR ratio).
 
-**Dense retrieval model choice**: BERT-mini (66M params, 4 layers) provides 80% of BERT-large quality at 10x inference speed. Query encoder runs on CPU in 8ms; item encoders are precomputed and stored in FAISS. Fine-tuned on in-domain (query, product title) pairs with in-batch negatives.
+**Dense retrieval model choice**: BERT-mini (Turc et al. 2019: L=4, H=256, ~11M params — the `google/bert_uncased_L-4_H-256_A-4` checkpoint) is small enough to encode a query on CPU inside the latency budget while its 256-dim hidden size is exactly the retrieval embedding width used downstream. Query encoder runs on CPU in 8ms; item encoders are precomputed and stored in FAISS. Fine-tuned on in-domain (query, product title) pairs with in-batch negatives. Expect a real quality gap versus a base-size encoder — measure it against your own relevance labels rather than assuming a fixed retention percentage.
 
 **Query expansion with caution**: Synonym expansion ("shoes" → "footwear, sneakers") increases recall but risks precision loss (expanding "apple" in a grocery context to "iPhone" is a failure mode). Expansion is applied only to BM25 retrieval, not dense retrieval (dense already captures semantics). Expansion candidates are filtered by co-occurrence in the product catalog.
 
@@ -191,14 +191,19 @@ def train_lambdamart(
     group_col: str = "query_id",
 ) -> xgb.XGBRanker:
     """Train LambdaMART ranker optimizing NDCG@10."""
+    # Sort by query id first: XGBoost's ranking objective requires rows of the
+    # same query to be contiguous, and `qid` must be non-decreasing.
+    df = df.sort_values(group_col).reset_index(drop=True)
     X = build_ltr_features(df)
     y = df[label_col].values.astype(np.float32)
-
-    # Group by query: each query is one "group" for pairwise ranking
-    group_sizes = df.groupby(group_col).size().values
+    qid = df[group_col].values
 
     splitter = GroupShuffleSplit(n_splits=1, test_size=0.1, random_state=42)
-    train_idx, val_idx = next(splitter.split(X, y, groups=df[group_col]))
+    train_idx, val_idx = next(splitter.split(X, y, groups=qid))
+    # GroupShuffleSplit keeps whole queries on one side of the split, but returns
+    # them unsorted; re-sort so qid stays non-decreasing within each side.
+    train_idx = np.sort(train_idx)
+    val_idx = np.sort(val_idx)
 
     ranker = xgb.XGBRanker(
         objective="rank:ndcg",
@@ -219,11 +224,14 @@ def train_lambdamart(
         tree_method="hist",
     )
 
+    # Pass `qid` rather than `group`: XGBRanker.fit accepts either, but qid is
+    # per-row and cannot silently desynchronize from the split the way a
+    # sliced group-size array does.
     ranker.fit(
         X.iloc[train_idx], y[train_idx],
-        group=group_sizes[:len(set(df.iloc[train_idx][group_col]))],
+        qid=qid[train_idx],
         eval_set=[(X.iloc[val_idx], y[val_idx])],
-        eval_group=[group_sizes[len(set(df.iloc[train_idx][group_col])):]],
+        eval_qid=[qid[val_idx]],
         verbose=100,
     )
     return ranker
@@ -385,10 +393,10 @@ def build_debiased_training_data(
 | Decision | Chosen | Alternative | Reasoning |
 |----------|--------|-------------|-----------|
 | Retrieval fusion | RRF | Linear score combination | RRF requires no weight tuning; robust across query types |
-| LTR model | LambdaMART (XGBoost) | Neural LTR (DNN, DLRM) | LambdaMART: 2h training, interpretable, same NDCG as DNN on tabular features |
+| LTR model | LambdaMART (XGBoost) | Neural LTR (DNN) | LambdaMART: 2h CPU training, interpretable, competitive NDCG on a purely tabular feature set |
 | Bias correction | IPW / regression EM | Randomization experiments | EM requires no traffic sacrifice; swap experiments give cleaner estimates but costly |
 | Query expansion | Catalog-filtered BERT synonyms | WordNet / thesaurus | Catalog-filtered prevents off-domain expansions |
-| Dense retrieval encoder | BERT-mini (66M) | BERT-base (110M) | BERT-mini: 10x faster, 80% quality; acceptable for real-time retrieval |
+| Dense retrieval encoder | BERT-mini (L=4, H=256, ~11M) | BERT-base (L=12, H=768, 110M) | BERT-mini is ~10x smaller and its 256-dim output halves index size; the relevance gap must be measured per-corpus, not assumed |
 | Label source | Click + purchase + dwell time | Purchase only | Purchase signal is too sparse; blending improves coverage at cost of noise |
 
 ---
@@ -402,7 +410,7 @@ Click data is the most abundant training signal but heavily biased: position 1 r
 Three-layer approach: (1) LambdaMART optimizes a combined relevance label (click=0.5, long dwell=1, cart=2, purchase=3) capturing both relevance and conversion signals in one model. (2) Post-ranking business rules apply constraints: out-of-stock items are demoted, promoted listings receive a bounded boost (cap at +3 positions to avoid quality degradation), brand diversity enforced via cap-3-per-brand. (3) Separate margin-weighted ranking model for "sponsored" slots. This separation keeps the organic ranker clean while allowing business control.
 
 **Q: How do you evaluate the ranking system? When do you trust offline metrics vs online experiments?**
-Offline NDCG@10 on a held-out click dataset measures ranking quality but is biased by the same position bias present in training data. Use a randomization experiment (5% of traffic with fully randomized results) to collect an unbiased offline evaluation set. Online A/B tests measure CTR, conversion rate, and revenue per search. The correlation between offline NDCG and online CTR is typically 0.7-0.8 — sufficient to use offline metrics for fast iteration and A/B tests for final validation before full rollout. Never skip A/B testing: a model with +2% offline NDCG has failed to improve online CTR in practice.
+Offline NDCG@10 on a held-out click dataset measures ranking quality but is biased by the same position bias present in training data. Use a randomization experiment (5% of traffic with fully randomized results) to collect an unbiased offline evaluation set. Online A/B tests measure CTR, conversion rate, and revenue per search. Measure the correlation between your own offline NDCG and online CTR before trusting it — in most search teams it is positive but well short of 1, which is enough to use offline metrics for fast iteration but not enough to skip the A/B test. Never skip A/B testing: a model with +2% offline NDCG routinely fails to move online CTR.
 
 ---
 
@@ -466,12 +474,13 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  Advantage over linear combination:                              │
   │  - No weight tuning across query types                           │
   │  - Rank-based: robust to score magnitude differences             │
-  │  - Tested at Elasticsearch: 10-15% NDCG gain vs single-system   │
+  │  - Elastic ships RRF for hybrid search from ES 8.8 precisely     │
+  │    because linear score blending needs BM25/cosine normalization │
   │                                                                  │
   │  Output: top-500 candidate products (deduplicated)               │
   └──────────────────────────┬───────────────────────────────────────┘
                              │
-                             v (40ms)
+                             v (8ms, only on the ~10% of queries that qualify)
   ┌──────────────────────────────────────────────────────────────────┐
   │  CROSS-ENCODER RERANKER (optional, for high-value queries)       │
   │                                                                  │
@@ -487,10 +496,11 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  Cross-encoder vs bi-encoder:                                    │
   │  - Cross-encoder: attends over both query+doc jointly → richer  │
   │  - Bi-encoder: independently encodes; used for retrieval scale   │
-  │  - Cross-encoder NDCG is 3-5% higher but 100x slower            │
+  │  - Cross-encoder NDCG is materially higher, throughput is       │
+  │    orders of magnitude lower (one forward pass per pair)         │
   └──────────────────────────┬───────────────────────────────────────┘
                              │
-                             v (35ms)
+                             v (40ms)
   ┌──────────────────────────────────────────────────────────────────┐
   │  LAMBDAMART LTR RANKER (XGBoost rank:ndcg)                       │
   │                                                                  │
@@ -633,17 +643,22 @@ LambdaMART (XGBoost LTR):
 
 Two-Tower Dense Retrieval (BERT-mini fine-tuning):
   Dataset: 100M (query, product) pairs with in-batch negatives
-  Hardware: 4× A100 40GB GPUs (p4d.24xlarge)
+  Hardware: one p4d.24xlarge (8x A100 40GB); the job uses 4 GPUs, but p4d is
+            rented whole, so bill the whole node
   Duration: 8 hours per weekly retrain
-  Cost: ~$150/run (p4d.24xlarge at $32.77/hr × 8hr / 7 days)
-  Monthly: ~$650
+  Cost: $21.96/hr x 8hr = ~$176/run
+  Monthly: ~$176 x 4.33 weekly runs = ~$760
 
 Cross-Encoder Reranker:
-  Fine-tuning: 8× A100, 12 hours, monthly refresh
-  Cost: ~$300/month
+  Fine-tuning: one p4d.24xlarge (8x A100), 12 hours, monthly refresh
+  Cost: $21.96/hr x 12hr = ~$264/month
 
-Total monthly training cost estimate: ~$1,350
+Total monthly training cost estimate: ~$360 + $760 + $264 = ~$1,384
 ```
+
+All GPU figures use the p4d.24xlarge us-east-1 on-demand rate of $21.96/hr (this
+instance was repriced downward from its original $32.77/hr list rate — recheck it,
+GPU list prices move).
 
 ### Serving Infrastructure
 
@@ -651,6 +666,8 @@ Total monthly training cost estimate: ~$1,350
 LTR Ranker Serving:
   Query: 50K QPS × 500 candidates = 25M feature vectors/sec
   XGBoost inference: 500 features × 1000 trees = ~5ms on CPU
+    (the 40ms LTR stage in the pipeline above is ~5ms of model inference
+     plus ~35ms assembling 500 candidates × 500 features from the feature store)
   Servers: 20× c5.2xlarge (8 vCPU, 16GB RAM), each serving 2,500 QPS
   Memory per server: XGBoost model = 200MB; feature cache = 2GB
   Cost: 20 × $0.34/hr = $6.80/hr = ~$4,900/month
@@ -658,9 +675,10 @@ LTR Ranker Serving:
 FAISS Dense Retrieval:
   Index: 320MB PQ-compressed in RAM per node
   3 replicas for high availability
-  Servers: 6× r5.large (2 vCPU, 16GB RAM), each handles 8K QPS search
+  Servers: 7× r5.large (2 vCPU, 16GB RAM), each handles 8K QPS search
+           (7 × 8K = 56K QPS, covering the 50K QPS peak with headroom)
   Latency: 8ms @ nprobe=64 on single thread
-  Cost: 6 × $0.126/hr = $0.756/hr = ~$545/month
+  Cost: 7 × $0.126/hr = $0.882/hr = ~$644/month
 
 ElasticSearch BM25:
   10M product documents with inverted index
@@ -671,11 +689,16 @@ ElasticSearch BM25:
 Feature Store (Redis for real-time user features):
   50K QPS × 10 feature lookups = 500K Redis GET/sec
   Redis Cluster: 10 nodes (r5.xlarge, 32GB RAM), 50K ops/node
-  Memory: 200M users × 1KB per user profile = 200GB → 7 nodes saturated
+  Memory: 100M users × 1KB per user profile = 100GB → 4 nodes' worth of RAM;
+          the node count is driven by ops/sec (500K / 50K = 10), not by memory
   Cost: 10 × $0.252/hr = ~$1,800/month
 
-Total monthly serving infrastructure: ~$9,045
+Total monthly serving infrastructure: $4,900 + $644 + $1,800 + $1,800 = ~$9,144
 ```
+
+Instance rates used above (AWS on-demand, us-east-1, Linux, 730 hr/month):
+c5.2xlarge $0.34/hr, r5.large $0.126/hr, r5.xlarge $0.252/hr, r5.2xlarge $0.504/hr,
+r5.4xlarge $1.008/hr. These scale linearly with instance size within a family.
 
 ### Storage Costs
 
@@ -749,7 +772,7 @@ The broken version caused the model to learn from future data: product CTR measu
 
 def reciprocal_rank_fusion_broken(
     ranked_lists: list[list[str]],
-    k: int = 0,  # BUG: k=0 makes position 1 have infinite weight
+    k: int = 0,  # BUG: k=0 makes rank 1 dominate every other rank
 ) -> list[tuple[str, float]]:
     scores: dict[str, float] = {}
     for ranked_list in ranked_lists:
@@ -885,7 +908,7 @@ Experiment lifecycle:
 ## Additional Interview Questions
 
 **Q: How does a cross-encoder reranker differ from a bi-encoder, and when do you use each?**
-A bi-encoder independently encodes the query and document into separate embedding vectors, then computes similarity via dot product. This enables precomputing document embeddings offline, making retrieval over millions of documents feasible in milliseconds. A cross-encoder takes the concatenation of query and document tokens as a single input and produces a relevance score via full attention between both, capturing complex query-document interactions. Cross-encoders score 3-5% higher NDCG but are 100x slower because they cannot precompute embeddings. The standard pattern is bi-encoder for retrieval (top-1000 candidates) and cross-encoder for reranking (top-50 candidates) where latency budget permits.
+A bi-encoder independently encodes the query and document into separate embedding vectors, then computes similarity via dot product. This enables precomputing document embeddings offline, making retrieval over millions of documents feasible in milliseconds. A cross-encoder takes the concatenation of query and document tokens as a single input and produces a relevance score via full attention between both, capturing complex query-document interactions. Cross-encoders score meaningfully higher NDCG but are orders of magnitude slower because they cannot precompute document embeddings — every (query, document) pair needs its own forward pass. The standard pattern is bi-encoder for retrieval (top-1000 candidates) and cross-encoder for reranking (top-50 candidates) where latency budget permits.
 
 **Q: How would you handle a query with no relevant results in the catalog?**
 Three signals indicate zero-result situations: (1) retrieval candidate count below 20, (2) all LTR scores below 0.01, (3) cross-encoder max score below 0.10. Recovery strategies in order: (1) Query relaxation — drop the most specific tokens (size, color) and re-retrieve; (2) Spell-corrected alternative query; (3) Semantic fallback — use dense retrieval only without BM25 exact-match constraints; (4) Category-level fallback — if query intent is classified as "shoes," return top-10 most popular shoes even with low relevance. Zero-result rate should be monitored per category; spikes indicate catalog gaps, not ranking failures.
@@ -894,7 +917,7 @@ Three signals indicate zero-result situations: (1) retrieval candidate count bel
 Three mechanisms: (1) SHAP feature importance computed weekly on a 10K-sample hold-out set and published in an internal dashboard, showing the top-20 features and their average impact on rank score. (2) PDP (Partial Dependence Plots) for the 5 most important continuous features (e.g., product_ctr_7d vs rank score), showing the model's learned relationship. (3) Monotonicity constraints in XGBoost: constrain features like `product_avg_rating` and `product_review_count` to be monotonically increasing — the ranker cannot learn that a product with a 4.9 rating should rank below one with a 4.5 rating. This prevents the model from learning spurious negative correlations that would alarm stakeholders.
 
 **Q: How do you handle long-tail queries that have very few clicks in training data?**
-Long-tail queries (appearing <10 times in 30 days) are 60% of unique queries but 5% of total traffic. Strategies: (1) Dense retrieval is the primary mechanism for long-tail — it generalizes via semantic similarity even without query-specific training examples. (2) In LTR training, long-tail queries have high-variance labels (few clicks = noisy signal); minimum 10 click events required for a query to contribute to LTR training. (3) Query clustering: group semantically similar long-tail queries together for LTR training, treating the cluster as a single "meta-query." (4) The two-stage fallback ensures long-tail queries receive BM25 results as a safety net even if dense retrieval quality is low.
+Long-tail queries are usually most of the *unique* queries but only a small share of *total traffic*. Measure the exact split on your own log (a common cut is "fewer than 10 occurrences in 30 days") — it decides how much LTR capacity is worth spending on them. Strategies: (1) Dense retrieval is the primary mechanism for long-tail — it generalizes via semantic similarity even without query-specific training examples. (2) In LTR training, long-tail queries have high-variance labels (few clicks = noisy signal); minimum 10 click events required for a query to contribute to LTR training. (3) Query clustering: group semantically similar long-tail queries together for LTR training, treating the cluster as a single "meta-query." (4) The two-stage fallback ensures long-tail queries receive BM25 results as a safety net even if dense retrieval quality is low.
 
 **Q: What is interleaving and why is it preferred over A/B testing for ranking evaluation?**
-Interleaving presents a single merged list to the user where items from two competing ranking models are interleaved according to team-draft algorithm: model A picks its top unselected item, then model B, alternating until the list is full. User clicks on interleaved results indicate which model produced more clicked items. Interleaving detects ranking differences with 10-100x fewer user impressions than traditional A/B testing because each user serves as their own control — the same user sees items from both models in the same session. Sensitivity: interleaving can detect a 1% NDCG difference with 10K sessions vs A/B tests requiring 1M sessions for the same statistical power. Drawback: interleaving measures pairwise preference, not absolute business metrics; use A/B for final revenue and conversion validation.
+Interleaving presents a single merged list to the user where items from two competing ranking models are interleaved according to team-draft algorithm: model A picks its top unselected item, then model B, alternating until the list is full. User clicks on interleaved results indicate which model produced more clicked items. Interleaving detects ranking differences with roughly 10-100x fewer user impressions than traditional A/B testing (the range reported across the interleaving literature, e.g. Chapelle et al. 2012) because each user serves as their own control — the same user sees items from both models in the same session. Drawback: interleaving measures pairwise preference, not absolute business metrics; use A/B for final revenue and conversion validation.

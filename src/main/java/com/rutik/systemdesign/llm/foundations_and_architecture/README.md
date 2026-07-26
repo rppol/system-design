@@ -1110,7 +1110,7 @@ A: Because Chinchilla optimizes *training* compute only, while production models
   │  KV cache (paged, 16-tok blocks):        │
   │    Remaining: ~62 GB                     │
   │    Each block: 80 layers × 2 × 8 KV heads│
-  │    × 128 head dim × 16 tokens × 1 byte  │
+  │    × 128 head dim × 16 tokens × 1 byte   │
   │    = 80×2×8×128×16 = 2.62 MB/block       │
   │    Blocks available: 62,000 MB / 2.62 MB │
   │    = ~23,700 blocks = 379,000 KV tokens  │

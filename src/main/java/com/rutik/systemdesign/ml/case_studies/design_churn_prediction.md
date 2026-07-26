@@ -39,7 +39,7 @@ Mental model: think of churn as a funnel — many customers are at mild risk (ch
 
 **Daily scoring volume:** 5M customers × 150 features = 750M feature values to compute and join daily. At 1KB per customer's feature vector: 5GB of feature data per daily run.
 
-**Training data:** 24 months of history × 5M customers per month = ~60M customer-month records. With 100 features per record: ~600GB training dataset in Parquet (compressed).
+**Training data:** 24 months of history × 5M customers per month = ~120M customer-month records. At 100 features per record and ~0.7KB/row (the same ~7 bytes/feature as the daily scoring vector above): ~85GB raw, materially less after Parquet compression.
 
 **Label distribution:** 8% churn = 400k positive labels per month → significant class imbalance (1:11.5 ratio). Handle with class weighting (`scale_pos_weight`) plus threshold tuning — not synthetic oversampling, which does not help strong GBDTs (see §11).
 
@@ -373,7 +373,7 @@ See [Experimentation and Online Evaluation](./cross_cutting/experimentation_and_
 - Pipeline SLO alert: if daily scoring does not complete by 10:00 AM, page on-call.
 - Score distribution alert: KS p-value < 0.001 vs training baseline → P2 investigation.
 - Feature PSI alert: any of top-10 SHAP features PSI > 0.2 → P2, trigger investigation.
-- AUC alert: if 30-day holdout AUC < 0.80 (4pp below target) → P1, trigger emergency retrain.
+- AUC alert: if 30-day holdout AUC < 0.80 (2pp below the 0.82 target, 4pp below the 0.84 the shipped model actually achieves) → P1, trigger emergency retrain.
 
 See [Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md) for full PSI/KS implementation.
 
@@ -452,14 +452,14 @@ magnitude faster, so always calibrate this constant against your own job before 
 
 | Component | Configuration | Cost/day |
 |---|---|---|
-| Spark cluster (EMR) | 50 × m5.4xlarge, 45 min | ~$80/day |
-| LightGBM scoring | 1 × c5.4xlarge, 20 min | ~$3/day |
-| SHAP computation | 1 × c5.4xlarge, 40 min | ~$6/day |
-| DynamoDB (5M records, 48h TTL) | On-demand | ~$8/day |
+| Spark cluster (EMR) | 50 × m5.4xlarge ($0.768/hr EC2), 45 min | 50 × 0.768 × 0.75 = ~$29/day EC2, plus the EMR service charge on top |
+| LightGBM scoring | 1 × c5.4xlarge ($0.68/hr), 20 min | ~$0.25/day |
+| SHAP computation | 1 × c5.4xlarge ($0.68/hr), 40 min | ~$0.45/day |
+| DynamoDB (5M writes/day, 48h TTL) | On-demand: $0.625 per million writes + $0.25/GB-month | ~$3/day |
 | S3 storage (prediction logs) | 60GB/month | ~$1.40/month |
-| **Total** | | **~$100/day (~$3,000/month)** |
+| **Total** | | **~$35/day (~$1,050/month)** |
 
-At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. The ML pipeline itself costs $3k/month — a 1000:1 ratio on that line alone, but that is the wrong denominator to quote to finance. Add the ~$150k/month of contact delivery from §2 and the retention offers themselves (capped at $5 per high-risk customer, §4.3) and the campaign-level return lands around 15-20:1. Quote the campaign number, not the infrastructure number.
+At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. The ML pipeline itself costs about $1k/month — a roughly 3000:1 ratio on that line alone, but that is the wrong denominator to quote to finance. Add the ~$150k/month of contact delivery from §2 and the retention offers themselves (capped at $5 per high-risk customer, §4.3) and the campaign-level return lands around 15-20:1. Quote the campaign number, not the infrastructure number.
 
 ---
 

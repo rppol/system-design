@@ -121,8 +121,10 @@ univariate detectors miss.
 
 When 200 metrics spike simultaneously (e.g., host failure), naive detection fires 200 alerts.
 Correlation layer builds a similarity graph on anomaly timestamps and scores. Connected components
-with > 3 co-occurring anomalies are grouped into one incident. Reduces alert volume by 95% during
-infrastructure incidents.
+with > 3 co-occurring anomalies are grouped into one incident. The reduction is not a fixed
+percentage — it is 1 - (incidents / raw alerts), so it scales with how correlated the event is:
+a single host failure firing 200 alerts collapses to 1 (99.5%), while a scattered mix of
+independent anomalies collapses hardly at all. Size the win from your own incident distribution.
 
 ```mermaid
 sankey-beta
@@ -131,7 +133,7 @@ Timestamp grouping,Correlated incident,1
 Timestamp grouping,Suppressed duplicates,9999
 ```
 
-During an AZ-down event, connected-component grouping on anomaly timestamps collapses ~10,000 individual metric alerts into a single incident — the 95% alert-volume reduction that keeps on-call engineers from drowning in duplicates.
+During an AZ-down event, connected-component grouping on anomaly timestamps collapses ~10,000 individual metric alerts into a single incident — a 99.99% reduction in that scenario, which is what keeps on-call engineers from drowning in duplicates. A correlated blast radius is the best case for this technique, not the average case.
 
 ### 6. CUSUM for Slow Drift Detection
 
@@ -643,7 +645,7 @@ class AnomalyDetectionPipeline:
 | Decision | Chosen Approach | Alternative | Reason for Choice |
 |----------|----------------|-------------|------------------|
 | Primary detector | Isolation Forest | One-class SVM | IF is O(log n) inference vs O(n) for OCSVM; scales to 100K metrics/sec |
-| Seasonal adjustment | STL decomposition | Facebook Prophet | STL is 10x faster for streaming; Prophet better for long-horizon forecasting |
+| Seasonal adjustment | STL decomposition | Prophet | STL is a Loess smoother with no parameter fitting, so it is far cheaper per series than Prophet's Bayesian curve fit — benchmark the ratio on your own series rather than assuming a fixed multiple; Prophet is better for long-horizon forecasting |
 | Drift detection | CUSUM | ADWIN | CUSUM is simpler to tune; ADWIN better for concept drift in non-stationary series |
 | Ensemble method | Max score | Weighted average | Max score is conservative (high recall); weighted average gives more false positives |
 | Alert grouping | Timestamp proximity graph | ML-based clustering | Proximity is deterministic and debuggable; ML clustering adds latency |
@@ -652,8 +654,9 @@ class AnomalyDetectionPipeline:
 
 ### False Positive Control Strategy
 
-The 0.1% FPR target is achieved through defense in depth:
-1. Seasonal adjustment (STL) eliminates ~60% of naive false positives from daily cycles
+The 0.1% FPR target is achieved through defense in depth (the relative contribution of each
+layer is workload-specific — measure it by ablating one layer at a time, do not assume a split):
+1. Seasonal adjustment (STL) removes the false positives caused by daily and weekly cycles, which on a strongly seasonal fleet is the single largest source
 2. Threshold calibration: Isolation Forest contamination=0.01 tuned on 30-day baseline
 3. Alert deduplication: 5-minute cooldown prevents alarm storms
 4. Correlated alert grouping: co-occurring anomalies grouped into one incident
@@ -691,8 +694,12 @@ False positive rate: track alert-to-incident ratio; alerts that are acknowledged
 an issue" count as false positives.
 
 **Q: Why Isolation Forest over supervised methods like XGBoost on labeled data?**
-A: Label scarcity and distribution shift. In infrastructure monitoring, fewer than 0.1% of metric
-windows are true anomalies. Collecting enough labels for supervised training requires months of
+A: Label scarcity and distribution shift. In infrastructure monitoring, well under 1% of metric
+windows are true anomalies — the contamination=0.01 setting used above is a deliberately
+conservative upper bound on that rate, and the 0.1% figure in the FPR target is the *alerting*
+budget, not the true anomaly prevalence. Confusing the two is how contamination gets set to
+0.001 and recall silently collapses (see War Story 1).
+Collecting enough labels for supervised training requires months of
 on-call annotation. Worse, infrastructure changes monthly — labeled anomalies from Q1 (memory
 leak in old service) may not represent Q3 anomalies. Isolation Forest adapts to whatever "normal"
 is in the last 30 days. Supervised methods are used as a second pass when labels accumulate
@@ -735,14 +742,14 @@ for specific known failure modes (e.g., "database connection pool exhaustion" pa
 
 ### Failure 3: Kafka Consumer Lag Causing 60-Second Detection Delay to Inflate to 8 Minutes
 
-**What failed:** The Flink streaming job processing metric data from Kafka fell behind during a traffic spike. Kafka consumer lag reached 500,000 messages (approximately 5 seconds of data at 100K metrics/sec). Processing rate was 95K messages/sec (5% below ingestion rate) due to STL decomposition being CPU-bound. The lag compounded: after 30 minutes, the processing was 8 minutes behind real time. Anomalies were detected 8 minutes late — the 60-second SLA was violated for 2 hours. Two real infrastructure incidents were detected after their cascade had already caused user-visible impact.
+**What failed:** The Flink streaming job processing metric data from Kafka fell behind during a traffic spike. Processing rate dropped to 80K messages/sec — 20% below the 100K/sec ingestion rate — because STL decomposition was CPU-bound. Lag accumulated at the 20K/sec deficit: after 30 minutes it had reached 20K × 1,800 s = 36M messages, and at the 80K/sec drain rate that is 36M / 80K = ~7.5 minutes behind real time. (A 5% deficit, as an earlier version of this write-up assumed, only produces ~1.6 minutes of lag in 30 minutes — nowhere near an SLA breach. The size of the deficit, not its existence, is what turns lag into an incident.) The 60-second SLA was violated for 2 hours, and two real infrastructure incidents were detected after their cascade had already caused user-visible impact.
 
-**Detection:** Flink lag monitoring alerted at 100K message lag (30-second delay threshold). Time-to-detect the lag: 8 minutes. Time-to-detect that detection was delayed: after the fact, from post-mortem.
+**Detection:** Convert lag to delay before you set a threshold: at 100K metrics/sec, 100K messages of lag is only ~1 second of data, so the old "100K messages = 30-second delay" alert was mis-scaled by 30x and fired far too late relative to its label. A genuine 30-second delay is ~3M messages. Time-to-detect the lag: 8 minutes. Time-to-detect that detection was delayed: after the fact, from post-mortem.
 
 **Recovery steps:**
 1. Profiled Flink job: STL decomposition consumed 70% of CPU. Moved STL to a daily precompute (deseasonalized baseline computed offline), replacing the streaming STL with a simple baseline subtraction using the precomputed seasonal component. STL streaming CPU dropped from 70% to 15%.
-2. Added Kafka consumer lag alert at 50K messages (15-second delay) — earlier than the previous 100K threshold.
-3. Enabled Flink autoscaling: task managers scale from 32 to 64 when lag > 50K messages.
+2. Re-derived the lag alert from the delay it is meant to represent: 1.5M messages = 15 seconds of data at 100K/sec. Alerts are now defined in seconds-of-delay and converted to a message count from the measured ingestion rate, so they stay correct when the rate changes.
+3. Enabled Flink autoscaling: task managers scale from 32 to 64 when lag exceeds 1.5M messages (15 seconds).
 
 **Prevention:** Processing throughput must be >= 1.3× peak ingestion rate (30% headroom) measured on the 99th percentile of historical ingestion spikes. This is validated quarterly with a load test.
 
@@ -756,8 +763,10 @@ for specific known failure modes (e.g., "database connection pool exhaustion" pa
 Year 0 (current):
   Ingestion: 100K metrics/sec × 30 days × 86400 sec = 259B metric data points/month
   InfluxDB (30-day hot): 259B × 16 bytes/point = 4.14TB hot storage
-  Parquet cold (2yr): 259B × 12 months = 3.1T points/yr × 2yr × 16B = 99TB/yr
-  Kafka: 100K × 100 bytes/msg = 10MB/sec sustained, 7-day retention = 6TB total
+  Parquet cold: 259B/month × 12 = 3.1T points/yr × 16B = ~50TB/yr (so ~100TB
+    for the 2-year retention window, not 100TB per year)
+  Kafka: 100K × 100 bytes/msg = 10MB/sec sustained, 7-day retention = 6TB of
+    log data (×3 replicas on disk = ~18TB provisioned)
 
 Year 1 (50% fleet growth):
   150K metrics/sec, 6.2TB InfluxDB hot, 9TB Kafka
@@ -765,32 +774,39 @@ Year 1 (50% fleet growth):
 
 Year 3 (3x growth — new data centers, more services):
   300K metrics/sec, 12.4TB InfluxDB hot
-  Parquet cold: ~300TB/yr
+  Parquet cold: ~150TB/yr
   May require InfluxDB cluster expansion: from 6-node to 12-node cluster
 ```
 
 ### Training Compute Requirements
 
 ```
+A 15-minute tumbling window yields 96 windows/day, not 2,880 — 2,880 is the number
+of windows one metric accumulates over the whole 30-day training window.
+
 Isolation Forest Weekly Retrain:
   Dataset: 30-day rolling window × 100K metrics × 15-min windows
-  = 100K metrics × 2,880 windows/day × 30 days = 8.64B samples (subsample 1% = 86.4M)
-  Hardware: c5.4xlarge (16 vCPU, 32GB RAM)
+  = 100K metrics × 96 windows/day × 30 days = 288M samples (subsample 1% = 2.88M)
+  Hardware: c5.4xlarge (16 vCPU, 32GB RAM) at $0.68/hr
   Duration: 3 hours (parallel sklearn with n_jobs=-1)
-  Cost: $0.68/hr × 3hr = $2.04/week = $106/month
+  Cost: $0.68/hr × 3hr = $2.04/run; at ~4.33 runs/month = ~$8.84/month
 
 Autoencoder Weekly Retrain:
-  Dataset: same 86.4M subsampled windows, each as (1024-dim feature vector)
-  Hardware: 1× A10G GPU (g5.xlarge)
+  Dataset: same 2.88M subsampled windows, each a 10-dim feature vector
+    (matches MetricAutoencoder input_dim=10; the 10->64->32->8 bottleneck
+     is sized for that, not for a 1024-dim input)
+  Hardware: 1× A10G GPU (g5.xlarge) at $1.006/hr
   Duration: 4 hours (early stopping typical at epoch 50)
-  Cost: $1.006/hr × 4hr = $4.02/week = $209/month
+  Cost: $1.006/hr × 4hr = $4.02/run; at ~4.33 runs/month = ~$17.42/month
 
 CUSUM Parameters Re-optimization (monthly):
   Grid search over k ∈ [0.25, 0.5, 1.0] × h ∈ [3, 5, 7] on labeled anomaly set
-  CPU-only: 1 hour on c5.2xlarge
-  Cost: $0.34/hr × 1hr = $0.34/month ≈ negligible
+  CPU-only: 1 hour on c5.2xlarge at $0.34/hr
+  Cost: $0.34/month ≈ negligible
 
-Total monthly training cost: ~$315
+Total monthly training cost: ~$27
+(A weekly job costs ~4.33x its per-run price per month, not 52x. Multiplying the
+ weekly figure by 52 gives the ANNUAL cost — the source of the old ~$315 total.)
 ```
 
 ### Serving Infrastructure
@@ -802,15 +818,24 @@ Flink Streaming (feature extraction):
   Cost: 32 × $0.17/hr = $5.44/hr = ~$3,917/month
 
 Anomaly Scoring Service:
-  100K scores/sec across 5 detectors
+  Two very different rates — do not conflate them:
+    fast path (3-sigma, CUSUM) runs per data point: 100K scores/sec
+    slow path (Isolation Forest, Autoencoder) runs per 15-min window:
+      100K metrics / 900 sec = ~111 window scores/sec
   3-sigma and CUSUM: in-process, no additional infrastructure
-  Isolation Forest: serialized model loaded in-memory (100MB), 10ms inference per batch of 1K
-  Autoencoder: GPU inference, 1× g5.xlarge handles 50K samples/sec
+  Isolation Forest: serialized model loaded in-memory (100MB), 10ms per batch of 1K
+    = 100K window scores/sec per core — ~900x the required 111/sec
+  Autoencoder: GPU inference, 1× g5.xlarge at ~50K samples/sec is likewise far
+    above the 111/sec the slow path needs; it is sized for burst re-scoring
   Cost: 1 × $1.006/hr = ~$724/month
 
 InfluxDB Cluster:
   6-node cluster (r5.2xlarge, 64GB RAM): 100K writes/sec, 4.14TB hot storage
-  Cost: 6 × $0.504/hr = $3.03/hr = ~$2,182/month
+  Cost: 6 × $0.504/hr = $3.03/hr = ~$2,182/month of EC2
+  Caveat: the open-source InfluxDB editions are single-node. Horizontal clustering
+  is a commercial (Enterprise / Cloud Dedicated) capability, so the $2,182 above is
+  the compute line only — budget licensing separately, or the "cluster expansion
+  from 6 to 12 nodes" in Year 3 is not a purchase you can actually make on OSS.
 
 Redis (anomaly score cache, 5-min TTL):
   100K active metrics × 500B per score = 50MB working set
@@ -818,7 +843,8 @@ Redis (anomaly score cache, 5-min TTL):
   Cost: $0.126/hr = ~$91/month
 
 PostgreSQL (alert history + suppression):
-  Alert volume: 1,200/hr baseline, 50GB/year
+  Alert volume: 120/hr baseline (matches DETECTOR_HEALTH_METRICS), 50GB/year
+    including per-alert scoring context and suppression state
   1× r5.large: adequate
   Cost: $0.126/hr = ~$91/month
 
@@ -920,7 +946,7 @@ def train_autoencoder_broken(
     epochs: int = 100,
 ) -> nn.Module:
     """Broken: training data includes gradual drift patterns labeled as 'normal'."""
-    model = Autoencoder(input_dim=normal_data.shape[1])
+    model = MetricAutoencoder(input_dim=normal_data.shape[1])
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     X = torch.FloatTensor(normal_data)
 
@@ -965,7 +991,7 @@ def train_autoencoder_on_residuals_correct(
     residual_std = residuals.std(axis=0) + 1e-8
     normalized = (residuals - residual_mean) / residual_std
 
-    model = Autoencoder(input_dim=normalized.shape[1])
+    model = MetricAutoencoder(input_dim=normalized.shape[1])
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     X = torch.FloatTensor(normalized)
 

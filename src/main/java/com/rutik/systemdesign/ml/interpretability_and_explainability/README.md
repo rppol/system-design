@@ -21,7 +21,7 @@ Interpretability is the degree to which a human can understand *why* a model mad
 
 The distinction matters because production ML increasingly runs into three walls that raw accuracy cannot clear:
 
-1. **Regulatory** — the US Equal Credit Opportunity Act (ECOA / Regulation B) requires an *adverse-action notice* listing the specific reasons a loan was denied; GDPR Article 22 grants a right to explanation for automated decisions; the EU AI Act classifies credit and hiring models as high-risk and demands documented transparency.
+1. **Regulatory** — the US Equal Credit Opportunity Act (ECOA / Regulation B, 12 CFR 1002.9) requires an *adverse-action notice* stating the specific principal reasons a loan was denied; GDPR Article 22 gives the right not to be subject to a decision based *solely* on automated processing that produces legal or similarly significant effects, plus safeguards (human intervention, expressing a view, contesting the decision) — the phrase "right to explanation" appears only in the non-binding Recital 71, while Articles 13–15 mandate "meaningful information about the logic involved"; the EU AI Act classifies creditworthiness evaluation (Annex III, 5(b), excluding fraud detection) and employment/recruitment (Annex III, 4) as high-risk, and Article 86 does grant affected persons a right to "clear and meaningful explanations" of Annex III decisions.
 2. **Debugging** — a model with 0.92 AUC that keys on a leaked timestamp column is worthless in production; explanations surface leakage, spurious correlations, and shortcut learning that metrics hide.
 3. **Trust** — a radiologist will not act on a "malignant, p=0.87" score without seeing *where* the model looked; a Grad-CAM heatmap over the actual lesion (not the scanner watermark) earns adoption.
 
@@ -359,7 +359,7 @@ kern_expl = shap.KernelExplainer(lr.predict_proba, background)
 sv_kernel = kern_expl.shap_values(X_te.iloc[:20], nsamples=200)   # SAMPLED, not exact
 ```
 
-TreeSHAP is exact and runs in `O(T · L · D^2)` (trees × leaves × depth^2) — milliseconds for a whole batch. KernelSHAP is model-agnostic but pays for it: the exact version is `O(2^n)`; the sampled version with `nsamples=m` costs `m` model evaluations *per explained instance*, and its variance shrinks only as `1/sqrt(m)`. Rule of thumb: never KernelSHAP a tree model — you would throw away a polynomial-time exact answer for a slow noisy one.
+TreeSHAP is exact and runs in `O(T · L · D^2)` — `T` trees, `L` the maximum leaves in any tree, `D` the maximum depth — milliseconds for a whole batch. That bound, and the fact that it is an *exponential* improvement over the `O(T·L·M·2^M)` cost of previous exact tree-Shapley methods (`M` = number of features), are stated in Lundberg et al., "From local explanations to global understanding with explainable AI for trees," *Nature Machine Intelligence* 2(1):56–67 (2020). KernelSHAP is model-agnostic but pays for it: the exact version is `O(2^n)`; the sampled version with `nsamples=m` costs `m` model evaluations *per explained instance*, and its standard error shrinks only as `1/sqrt(m)` (variance as `1/m`). Rule of thumb: never KernelSHAP a tree model — you would throw away a polynomial-time exact answer for a slow noisy one.
 
 ### 6.3 LIME — local surrogate and its instability
 
@@ -369,16 +369,19 @@ LIME fits an interpretable surrogate (sparse linear model) on perturbations of a
 import numpy as np
 from lime.lime_tabular import LimeTabularExplainer
 
-explainer = LimeTabularExplainer(
-    training_data=X_tr.values,
-    feature_names=cols,
-    class_names=["neg", "pos"],
-    discretize_continuous=True,
-    random_state=0,
-)
+def make_explainer(seed: int) -> LimeTabularExplainer:
+    return LimeTabularExplainer(
+        training_data=X_tr.values,
+        feature_names=cols,
+        class_names=["neg", "pos"],
+        discretize_continuous=True,
+        random_state=seed,
+    )
 
 def explain_once(seed: int) -> dict[str, float]:
-    exp = explainer.explain_instance(
+    # The seed must actually be threaded into the explainer. Reusing one explainer
+    # advances a single RandomState, which is re-sampling, not seed sensitivity.
+    exp = make_explainer(seed).explain_instance(
         X_te.values[0], gbm.predict_proba, num_features=6, num_samples=5000,
     )
     return dict(exp.as_list())
@@ -410,7 +413,7 @@ That single line is where "local" in *Local* Interpretable Model-agnostic Explan
 | `sigma` | Kernel width, the bandwidth. Small = a tight neighborhood; large = nearly global |
 | `pi_x(z)` | The weight this sample carries in the surrogate's weighted least-squares fit, in `(0, 1]` |
 
-**Walk one example.** Weights at five distances, with `sigma = 0.75` versus `sklearn`-style default `sigma = sqrt(n_features) * 0.75 = sqrt(12) * 0.75 = 2.598` for this module's 12-feature data:
+**Walk one example.** Weights at five distances, with `sigma = 0.75` versus the `lime` package's own default `kernel_width = sqrt(n_features) * 0.75 = sqrt(12) * 0.75 = 2.598` for this module's 12-feature data (set in `lime_tabular.py`). The table evaluates the *paper's* kernel `exp(-D^2/sigma^2)`; note that the shipped `lime` code computes `sqrt(exp(-D^2/w^2))`, so its actual weights are the square roots of these — a gentler falloff, same qualitative conclusion:
 
 ```
                     sigma = 0.75            sigma = 2.598
@@ -426,7 +429,7 @@ That single line is where "local" in *Local* Interpretable Model-agnostic Explan
     Wide kernel:   the same point contributes 0.5529 -- over half a vote.
 ```
 
-A sample 2.0 away is worth **691x more** under the wide kernel than the narrow one (`0.5529 / 0.0008`). Nothing about the model changed; only `sigma` did — yet the surrogate is now fit to a completely different cloud of points and can easily rank a different feature first. This is the concrete mechanism behind LIME's reputation for instability, and it is why a single LIME run is a hypothesis rather than a fact.
+A sample 2.0 away is worth about **678x more** under the wide kernel than the narrow one (`0.55289 / 0.000816` at full precision; under `lime`'s square-rooted kernel the same ratio is `sqrt(678) ≈ 26x`). Nothing about the model changed; only `sigma` did — yet the surrogate is now fit to a completely different cloud of points and can easily rank a different feature first. This is the concrete mechanism behind LIME's reputation for instability, and it is why a single LIME run is a hypothesis rather than a fact.
 
 **Why the squaring matters.** Squaring the distance before the exponential makes the falloff *superlinear*: doubling the distance quadruples the exponent, so the weight falls by a power of four rather than a factor of two. At `sigma = 0.75`, moving from `D = 0.5` to `D = 1.0` drops the weight from `0.6412` to `0.1690` — a 3.79x cut for a 2x move. Without the square (a plain `exp(-D/sigma)`) the tail is much heavier and distant, off-manifold points keep meaningful influence, which is exactly the failure mode LIME is trying to avoid.
 
@@ -479,7 +482,7 @@ Shuffling rather than deleting the column is the design choice that makes this w
 
 A **negative** importance is not a bug and not noise to be clipped at zero: it means the model scored *better* with the feature destroyed, i.e. it was fitting noise in that column. `zip_hash` at `-0.001` is within shuffle noise, but a clearly negative value (say `-0.02`) is a live signal that the feature is hurting generalization and is a candidate for removal.
 
-**Why `n_repeats` exists.** A single shuffle is one random draw; with a weak feature the drop can land on either side of zero purely by luck. Averaging `R = 10` shuffles shrinks that variance by roughly `sqrt(10) = 3.16x`, which is what separates `age`'s real `+0.003` from `zip_hash`'s noise-level `-0.001`. Set `n_repeats=1` and you cannot tell those two apart at all — always report the spread (`perm.importances_std`) alongside the mean.
+**Why `n_repeats` exists.** A single shuffle is one random draw; with a weak feature the drop can land on either side of zero purely by luck. Averaging `R = 10` shuffles shrinks the *variance* of the estimate by `10x` and its standard error by `sqrt(10) = 3.16x`, which is what separates `age`'s real `+0.003` from `zip_hash`'s noise-level `-0.001`. Set `n_repeats=1` and you cannot tell those two apart at all — always report the spread (`perm.importances_std`) alongside the mean.
 
 **The correlated-feature trap.** If features A and B are highly correlated, shuffling A alone barely hurts the model because B still carries the signal — so *both* look unimportant, hiding a driver the model actually relies on. Fix: cluster correlated features (e.g. hierarchical clustering on Spearman correlation) and permute whole clusters, or use conditional/grouped permutation. Never conclude "the model doesn't use X" from a low permutation importance without checking X's correlations.
 
@@ -601,19 +604,19 @@ A counterfactual answers "what is the smallest change that flips the decision?" 
 
 ### Google — Grad-CAM, Integrated Gradients, and the What-If Tool
 
-Integrated Gradients originated at Google (Sundararajan, Taly, Yan, 2017) precisely to fix the axiom violations of raw gradients and DeconvNet-style saliency. Google Health used Grad-CAM-style saliency on diabetic-retinopathy and mammography models so ophthalmologists could confirm the model attended to actual lesions rather than imaging artifacts, and shipped the What-If Tool in TensorBoard for interactive PDP/counterfactual exploration.
+Integrated Gradients originated at Google (Sundararajan, Taly, Yan, 2017) precisely to fix the axiom violations of raw gradients and DeconvNet-style saliency. Google then used Integrated Gradients — not Grad-CAM — as the explanation layer over its diabetic-retinopathy model: Sayres et al., *Ophthalmology* 126(4):552–564 (2019) had ten ophthalmologists grade 1,796 fundus images unassisted, with grades only, and with grades plus an IG heatmap, to test whether the model attended to actual lesions. Google's PAIR team also shipped the What-If Tool in TensorBoard for interactive partial-dependence and counterfactual exploration.
 
 ### Microsoft — InterpretML, EBM, and DiCE
 
-Microsoft Research maintains InterpretML, whose Explainable Boosting Machine (EBM) is a glass-box GAM that reaches GBDT-competitive accuracy while remaining directly readable (one shape function per feature). DiCE (Diverse Counterfactual Explanations) is also a Microsoft project, used internally and by customers to generate actionable "what would change the decision" explanations for lending and HR models.
+Microsoft Research maintains InterpretML, whose Explainable Boosting Machine (EBM) is a glass-box GAM that reaches GBDT-competitive accuracy while remaining directly readable (one shape function per feature). DiCE (Diverse Counterfactual Explanations) is also a Microsoft project (Mothilal, Sharma & Tan, FAT* 2020), generating actionable "what would change the decision" explanations; lending and HR are the motivating examples in its own documentation, not a verified customer roster.
 
-### LinkedIn — SHAP at feed and hiring scale
+### LinkedIn — narrative explanations from SHAP, and a separate fairness toolkit
 
-LinkedIn built intelligible-explanation tooling (internally described as generating natural-language narratives from SHAP values) to explain job-recommendation and feed-ranking scores to members and to internal reviewers, and to satisfy fairness audits under employment-law scrutiny.
+LinkedIn built **CrystalCandle** (Yang, Negoescu, Ahammad, arXiv 2105.12941), a user-facing model explainer that converts attributions into natural-language narratives. Its Model Interpreter plugs into SHAP, LIME and K-LIME; it runs on Spark and was deployed on the "Project Account Prioritizer" upsell/churn propensity models so *sales representatives* — not ML engineers — could act on the reasoning. Fairness measurement at LinkedIn is a separate stack: the LinkedIn Fairness Toolkit (**LiFT**, open-sourced August 2020, arXiv 2008.07433), a Scala/Spark library for demographic parity, equalized odds and permutation-based significance testing at dataset scale.
 
-### Capital One and FICO — reason codes for lending
+### Wells Fargo and FICO — reason codes for lending
 
-US lenders must issue ECOA/Regulation B adverse-action notices. Capital One and other banks use SHAP/Shapley-based reason-code generation on GBDT credit models; FICO's regulatory-grade scorecards and its Explainable ML challenge pushed the industry toward monotone GBDTs plus Shapley reason codes so a denial can be traced to the specific factors that drove it.
+US lenders must issue ECOA/Regulation B adverse-action notices. Wells Fargo's Corporate Model Risk group published a Shapley-decomposition methodology for exactly this problem (Nair et al., "Explaining Adverse Actions in Credit Decisions Using Shapley Decomposition," arXiv 2204.12365), arguing for Baseline Shapley because it is computationally tractable from plain function evaluations. FICO's 2018 Explainable ML Challenge released the HELOC dataset (10,459 applicants, 23 features) and required *both* local and global explanations plus monotonicity constraints on several variables — pushing the field toward monotone and intrinsically interpretable credit models (the winning entry was a rule-based interpretable model from IBM Research), with Shapley reason codes the common post-hoc alternative.
 
 ### Fiddler AI and Arize — explainability as a monitoring product
 
@@ -725,7 +728,7 @@ KernelSHAP marginalizes absent features over the background distribution; a tiny
 
 ### Pitfall 6: Explaining probabilities when the model reasons in log-odds
 
-TreeSHAP on a classifier defaults to explaining the *margin* (log-odds), and log-odds SHAP values are additive while probability-space values are not. Mixing the two ("these SHAP values should sum to the 0.73 probability") produces contradictions. Decide up front whether you explain log-odds (additive, correct) or probabilities (use `model_output="probability"` and accept the interventional-perturbation cost) and label it in the report.
+TreeSHAP defaults to `model_output="raw"`, which for XGBoost / LightGBM / CatBoost classifiers is the *margin* (log-odds); log-odds SHAP values are additive while probability-space values are not. Note that "raw" is model-specific: an sklearn `RandomForestClassifier` raw output is already class probabilities, so its SHAP values come back shaped `(n, n_features, 2)` with a length-2 `expected_value`. Mixing the two ("these SHAP values should sum to the 0.73 probability") produces contradictions. Decide up front whether you explain log-odds (additive, correct) or probabilities (use `model_output="probability"` and accept the interventional-perturbation cost) and label it in the report.
 
 ---
 
@@ -733,14 +736,14 @@ TreeSHAP on a classifier defaults to explaining the *margin* (log-odds), and log
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| shap | 0.44+ | TreeSHAP (XGB/LGB/CatBoost/sklearn), KernelSHAP, DeepSHAP, plots (beeswarm, force, waterfall, dependence) |
-| lime | 0.2+ | Tabular, text, image (super-pixels); unstable — aggregate runs |
-| captum | 0.7+ | PyTorch: Integrated Gradients, DeepLIFT, GradientSHAP, Occlusion, LayerGradCam |
-| pytorch-grad-cam | 1.5+ | Grad-CAM, Grad-CAM++, Score-CAM, Ablation-CAM for CNNs and ViTs |
-| dice-ml | 0.11+ | Diverse counterfactual explanations (random, genetic, gradient methods) |
-| interpret (InterpretML) | 0.6+ | EBM glass-box GAM; unified explain API; dashboard |
-| sklearn.inspection | 1.3+ | permutation_importance, PartialDependenceDisplay (PDP + ICE) |
-| alibi | 0.9+ | Anchors, counterfactuals, ALE, integrated gradients (TF/Keras) |
+| shap | 0.52 (May 2026) | TreeSHAP (XGB/LGB/CatBoost/sklearn), KernelSHAP, DeepSHAP, plots (beeswarm, force, waterfall, dependence). Since 0.45 multi-output `shap_values` returns an ndarray, not a list |
+| lime | 0.2.0.1 | Tabular, text, image (super-pixels); unstable — aggregate runs. **No release since June 2020** — effectively unmaintained |
+| captum | 0.9 (Apr 2026) | PyTorch: Integrated Gradients, DeepLIFT, GradientSHAP, Occlusion, LayerGradCam |
+| pytorch-grad-cam (`grad-cam`) | 1.5.5 | Grad-CAM, Grad-CAM++, Score-CAM, Ablation-CAM for CNNs and ViTs |
+| dice-ml | 0.12 | Diverse counterfactual explanations (random, genetic, gradient methods) |
+| interpret (InterpretML) | 0.7.x | EBM glass-box GAM; unified explain API; dashboard |
+| sklearn.inspection | 1.9 | permutation_importance, PartialDependenceDisplay (PDP + ICE) |
+| alibi | 0.9.6 | Anchors, counterfactuals, ALE, integrated gradients (TF/Keras only). Last release April 2024 — check maintenance before adopting |
 | shapash / explainerdashboard | latest | Turnkey explanation dashboards over SHAP for stakeholders |
 | Fiddler / Arize | SaaS | Production explanation logging + SHAP-drift monitoring |
 
@@ -758,7 +761,7 @@ LIME is unstable because its explanation depends on the random perturbation samp
 When two features are correlated, shuffling one alone barely hurts the model because the other still carries the signal, so both look unimportant and hide a real driver. Permutation importance measures the metric drop when a single column is shuffled, and collinear partners substitute for each other under that shuffle. Fix by clustering features on Spearman correlation and permuting whole clusters, or use conditional permutation — never conclude a feature is unused from low permutation importance without checking its correlations.
 
 **Q: When would you use TreeSHAP versus KernelSHAP?**
-Use TreeSHAP for any tree-based model because it is exact and polynomial-time, and KernelSHAP only for non-tree black boxes where you have no internals to exploit. TreeSHAP runs in O(T·L·D^2) — milliseconds for a batch — while KernelSHAP costs many model evaluations per instance and only approximates the Shapley values with 1/sqrt(m) variance. Running KernelSHAP on an XGBoost model is a classic mistake: it is slower, noisier, and strictly worse than the exact TreeSHAP answer.
+Use TreeSHAP for any tree-based model because it is exact and polynomial-time, and KernelSHAP only for non-tree black boxes where you have no internals to exploit. TreeSHAP runs in O(T·L·D^2) (Lundberg et al., Nature Machine Intelligence 2020) — milliseconds for a batch — while KernelSHAP costs many model evaluations per instance and only approximates the Shapley values, with standard error falling as 1/sqrt(m). Running KernelSHAP on an XGBoost model is a classic mistake: it is slower, noisier, and strictly worse than the exact TreeSHAP answer.
 
 **Q: Does a large SHAP value mean the feature causes the outcome?**
 No — a large SHAP value means the model relies on that feature, not that the feature causes the target. SHAP explains the model's function, so if the model learned a proxy (ZIP code standing in for income), SHAP faithfully reports the model's reliance on the proxy, which is a correlation the model exploited, not a causal effect. For causal questions use causal inference methods; presenting SHAP as "change X to change the outcome" is a common and dangerous overreach.
@@ -770,7 +773,7 @@ Shapley values are the unique attribution satisfying efficiency, symmetry, dummy
 The baseline defines the reference the attribution is measured against, so IG explains the input relative to it and a poor baseline distorts every attribution. An all-zeros image baseline assigns zero attribution to any pixel that is itself zero, which can hide dark but important regions; better choices are a blurred input, a mean image, or averaging over several baselines (Expected Gradients). Always verify the completeness axiom via captum's convergence_delta and increase n_steps if it is not near zero.
 
 **Q: What is the completeness axiom and how do you check it holds?**
-Completeness means the attributions sum exactly to f(input) minus f(baseline), so nothing about the prediction is left unexplained. Integrated Gradients and SHAP both guarantee it in theory, but IG approximates the path integral with a finite Riemann sum, so too few steps under-integrate. Captum returns a convergence_delta; if its magnitude is not tiny (say > 1e-2), raise n_steps from 50 toward 200–300 until the sum reconciles.
+Completeness means the attributions sum exactly to f(input) minus f(baseline), so nothing about the prediction is left unexplained. Integrated Gradients and SHAP both guarantee it in theory, but IG approximates the path integral with a finite quadrature — a Riemann sum in the paper, Gauss-Legendre by default in captum — so too few steps under-integrate. Captum returns a convergence_delta; if its magnitude is not tiny (say > 1e-2), raise n_steps from its default of 50 toward 200–300 until the sum reconciles.
 
 **Q: How does Grad-CAM work, and why the last convolutional layer?**
 Grad-CAM weights each last-conv feature map by the average gradient of the target class score, sums them, and applies ReLU to produce a class-discriminative heatmap. The last conv layer is chosen because it holds the richest high-level semantics while still preserving a spatial grid — deeper fully-connected layers lose spatial layout, and earlier conv layers carry only low-level edges. The result is coarse (7×7 for ResNet-50), so it is upsampled and often paired with a pixel-level method for sharp boundaries.
@@ -782,7 +785,7 @@ Grad-CAM is class-discriminative and localizes the object, whereas a raw-gradien
 Local explanations justify a single prediction, while global explanations describe the model's overall behavior. As examples, a local reason is "this loan was denied because debt ratio and delinquencies dominated," while a global summary is "across all applicants, payment history is the top driver." A single SHAP force plot is local; the mean absolute SHAP across the dataset (beeswarm summary) is global. You cannot justify one applicant's adverse-action notice with a global ranking — regulators require the local, instance-specific reasons.
 
 **Q: What is the extrapolation caveat with partial dependence plots?**
-A PDP can evaluate the model on impossible feature combinations because it marginalizes over the marginal distribution of the other features, ignoring their correlation. Fixing age to 20 while the data has years_employed = 40 asks the model about a person who cannot exist, and the resulting curve is unreliable in those regions. Use accumulated local effects (ALE), which conditions on the local distribution, or restrict the PDP to the observed support, and always inspect ICE curves for hidden interactions.
+A PDP can evaluate the model on impossible feature combinations because it marginalizes over the marginal distribution of the other features, ignoring their correlation. Fixing age to 20 while the data has years_employed = 40 asks the model about a person who cannot exist, and the resulting curve is unreliable in those regions. Use accumulated local effects (ALE), which averages the model's *differences* inside small conditional windows and accumulates them so it never leaves the data manifold, or restrict the PDP to the observed support, and always inspect ICE curves for hidden interactions.
 
 **Q: How do PDP and ICE relate, and when does ICE reveal something PDP hides?**
 ICE draws one line per instance and PDP is the average of those lines, so ICE exposes heterogeneity that averaging erases. When a feature increases the prediction for one subgroup and decreases it for another, the two effects cancel and the PDP looks flat even though the feature matters strongly. A fanned-out ICE bundle under a flat PDP is the signature of an interaction — that is when you reach for ICE or a two-way PDP.
@@ -797,7 +800,7 @@ Anchors produce a high-precision IF-THEN rule that holds for the instance and it
 Pick the attribution engine by model type first: TreeSHAP for trees, Grad-CAM and Integrated Gradients for CNNs and other differentiable nets, and KernelSHAP or LIME only for true black boxes. Exploiting internals gives exact or faithful results cheaply, whereas model-agnostic sampling is slow and approximate. Then layer an audience-appropriate presentation — counterfactuals or a single top reason for end users and regulators, and SHAP summary plus PDP/ICE for engineers debugging the model.
 
 **Q: What does it mean to explain SHAP values in log-odds versus probability space?**
-TreeSHAP defaults to explaining the margin (log-odds), where attributions are additive, whereas probability-space attributions are not additive and cannot be summed to the predicted probability. If you report probability-space SHAP and claim the values sum to 0.73, you will contradict yourself because the logistic link is nonlinear. Choose the space explicitly — log-odds for additive correctness, or model_output="probability" with the interventional perturbation cost — and label it in the report.
+TreeSHAP defaults to model_output="raw", which for XGBoost and LightGBM is the margin (log-odds) and is additive, whereas probability-space attributions cannot be summed to the predicted probability. Beware that "raw" is model-specific: an sklearn RandomForestClassifier emits probabilities as its raw output. If you report probability-space SHAP and claim the values sum to 0.73, you will contradict yourself because the logistic link is nonlinear. Choose the space explicitly — log-odds for additive correctness, or model_output="probability" with the interventional perturbation cost — and label it in the report.
 
 **Q: Can you make a model both accurate and intrinsically interpretable?**
 Yes — on tabular data, Explainable Boosting Machines and monotone GBDTs often match black-box accuracy while staying auditable, so the accuracy-interpretability tradeoff is frequently a myth. An EBM is a generalized additive model with one learned shape function per feature, readable directly, and monotone constraints encode domain rules (income only helps creditworthiness). The real cost is engineering effort, not accuracy, and for regulated domains a glass-box model avoids the risk of unfaithful post-hoc explanations entirely.
@@ -825,7 +828,7 @@ Yes — on tabular data, Explainable Boosting Machines and monotone GBDTs often 
 
 ### Problem: Explainable Credit-Risk Scoring for Regulatory Adverse-Action Notices
 
-**Context.** A US consumer lender (think Capital One / LendingClub class) deploys a GBDT probability-of-default model on ~2M applications/year. Every denial must ship an ECOA/Regulation B adverse-action notice listing up to 4 principal reason codes, and the EU-facing arm must satisfy GDPR Article 22. Requirements: (1) per-decision reason codes at scoring time, p99 < 50ms including explanation; (2) monotone constraints for regulator defensibility (more income never lowers approval odds); (3) a global fairness/leakage audit before each model promotion; (4) an immutable audit log of every explanation. Design decisions link to the full pipeline in [`../case_studies/design_credit_risk_scoring.md`](../case_studies/design_credit_risk_scoring.md).
+**Context.** A US consumer lender (think Capital One / LendingClub class) deploys a GBDT probability-of-default model on ~2M applications/year. Every denial must ship an ECOA/Regulation B adverse-action notice stating the specific principal reasons — the official commentary to 12 CFR 1002.9(b)(2) sets no fixed count but says "disclosure of more than four reasons is not likely to be helpful to the applicant," which is why lenders standardize on four — and the EU-facing arm must satisfy GDPR Article 22. Requirements: (1) per-decision reason codes at scoring time, p99 < 50ms including explanation; (2) monotone constraints for regulator defensibility (more income never lowers approval odds); (3) a global fairness/leakage audit before each model promotion; (4) an immutable audit log of every explanation. Design decisions link to the full pipeline in [`../case_studies/design_credit_risk_scoring.md`](../case_studies/design_credit_risk_scoring.md).
 
 **Why this method stack.** The scoring model is a monotone LightGBM, so TreeSHAP gives *exact* Shapley values in a few milliseconds per applicant — no sampling, no latency risk. Reason codes come from the top-|SHAP| features mapped to human-readable factor descriptions. For the applicant-facing "how to improve" guidance, DiCE generates a feasible, minimal counterfactual. Global audits use mean-absolute-SHAP plus PDP/ICE to catch proxy features (ZIP as a race proxy) and monotonicity violations before promotion.
 
@@ -848,9 +851,13 @@ REASON_CODE_MAP = {
     "annual_income":          "R06: Insufficient stated income",
 }
 
-def build_explainer(model: lgb.LGBMClassifier) -> shap.TreeExplainer:
+def build_explainer(model: lgb.LGBMClassifier, background: pd.DataFrame) -> shap.TreeExplainer:
     # interventional perturbation + log-odds keeps additivity exact and stable.
-    return shap.TreeExplainer(model, feature_perturbation="interventional")
+    # A background dataset is REQUIRED for "interventional": passing the flag without
+    # `data` only warns and silently falls back to tree_path_dependent today, and is
+    # slated to raise in shap 0.48. ~100-1000 rows is the documented sweet spot.
+    return shap.TreeExplainer(model, data=shap.sample(background, 200, random_state=0),
+                              feature_perturbation="interventional")
 
 def adverse_action_reasons(
     explainer: shap.TreeExplainer,
@@ -858,8 +865,10 @@ def adverse_action_reasons(
     feature_names: list[str],
     top_k: int = 4,
 ) -> list[str]:
+    # shap >= 0.45 returns an ndarray (binary LightGBM: (n_rows, n_features),
+    # log-odds); older versions returned a list per class.
     sv = explainer.shap_values(x)                      # log-odds space, additive
-    contrib = sv[0] if isinstance(sv, list) else sv[0]  # (n_features,)
+    contrib = np.asarray(sv[1] if isinstance(sv, list) else sv)[0]   # (n_features,)
     # A denial is driven by features PUSHING TOWARD default (positive contribution to risk).
     order = np.argsort(contrib)[::-1]                  # most risk-increasing first
     reasons: list[str] = []
@@ -908,7 +917,7 @@ def improvement_paths(data_iface, model_iface, applicant: pd.DataFrame):
 def promotion_audit(explainer: shap.TreeExplainer, X_val: pd.DataFrame,
                     protected_proxies: list[str], names: list[str]) -> dict[str, float]:
     sv = explainer.shap_values(X_val)
-    sv = sv[0] if isinstance(sv, list) else sv
+    sv = np.asarray(sv[1] if isinstance(sv, list) else sv)   # positive class, log-odds
     global_imp = pd.Series(np.abs(sv).mean(axis=0), index=names)
     # RED FLAG: a protected-proxy feature (zip_code, first_name_gender) in the top drivers.
     flags = {p: float(global_imp.get(p, 0.0)) for p in protected_proxies}
@@ -917,9 +926,9 @@ def promotion_audit(explainer: shap.TreeExplainer, X_val: pd.DataFrame,
 
 **Design decisions and tradeoffs.**
 
-- **TreeSHAP over KernelSHAP**: exact and ~2–4 ms/applicant vs ~200 ms sampled — KernelSHAP would blow the 50 ms SLA and add nondeterminism a regulator would reject.
-- **Log-odds, interventional perturbation**: additive and stable so reason codes reconcile to the margin; probability-space would break additivity in the audit.
-- **Monotone constraints**: cost ~0.6% AUC (0.812 → 0.806) but make every reason code defensible and eliminate the "higher income lowered my score" failure mode.
+- **TreeSHAP over KernelSHAP** (latencies below are illustrative of the gap, not measured on a named system): exact and single-digit ms/applicant vs hundreds of ms sampled — KernelSHAP would blow the 50 ms SLA and add nondeterminism a regulator would reject.
+- **Log-odds, interventional perturbation**: additive and stable so reason codes reconcile to the margin; probability-space would break additivity in the audit. Note the interventional (Independent Tree SHAP) path costs `O(T·R·L)` for `R` background rows, so the background size is a latency knob.
+- **Monotone constraints**: cost about 0.006 AUC in this illustrative setup (0.812 → 0.806, i.e. 0.6 AUC *points*, not 0.6 percent) but make every reason code defensible and eliminate the "higher income lowered my score" failure mode.
 - **DiCE feature masking**: protected and immutable features are excluded from counterfactual variation, so guidance is legal and actionable.
 
 **Outcome (illustrative).** Exact TreeSHAP reason codes replaced a legacy scorecard's coarse reason list; adverse-action complaint rate about "unclear reasons" dropped materially, and the pre-promotion SHAP audit caught a leaked `application_timestamp` feature and a `zip_code` proxy that a raw AUC gate had passed. The same per-prediction SHAP logs feed drift monitoring ([`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/README.md)); a shift in the SHAP profile of `revolving_utilization` fired weeks before accuracy degraded, triggering a retrain. Governance and fairness framing for this stack live in [`../case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md`](../case_studies/cross_cutting/responsible_ai_fairness_and_explainability.md); the GBDT internals and TreeSHAP complexity are in [`../ensemble_methods/xgboost_lightgbm.md`](../ensemble_methods/xgboost_lightgbm.md).

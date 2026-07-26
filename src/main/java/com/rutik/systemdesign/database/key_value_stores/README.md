@@ -10,7 +10,7 @@ Key-value stores are the simplest NoSQL data model: a distributed hash map mappi
 
 Redis is like a Swiss Army knife: the basic knife is the string (simple key-value), but the attached tools — sorted sets, streams, HyperLogLog — handle complex use cases that would otherwise require multiple systems. The right data structure choice can be the difference between a 0.5ms and 50ms operation.
 
-- **Key insight**: Every Redis data structure has two internal encodings — a compact one for small sizes and an efficient one for large sizes. Staying below the threshold (default 64 bytes / 128 entries) keeps data in the compact encoding, dramatically reducing memory.
+- **Key insight**: Every Redis data structure has two internal encodings — a compact one for small sizes and an efficient one for large sizes. Staying below the threshold (default 64-byte values; 512 entries for hashes, 128 for sets and sorted sets) keeps data in the compact encoding, dramatically reducing memory.
 
 ---
 
@@ -24,25 +24,26 @@ String:
   Large: raw (separate allocation, INCR for integers)
   Use: cache values, counters, rate limiters, session tokens
 
-List (doubly-linked list / quicklist):
-  Small (≤ 128 elements, ≤ 64 bytes each): listpack (compact sequential)
-  Large: quicklist (doubly-linked list of listpacks, default listpack size=128 bytes)
+List (quicklist of listpacks):
+  Small: a single listpack node (compact sequential)
+  Large: quicklist (doubly-linked list of listpacks, default node cap 8 KB)
   Use: message queues, activity feeds, recent items, pub/sub queues
 
 Hash (dict / listpack):
-  Small (≤ 128 fields, ≤ 64 bytes each): listpack (compact, linear scan)
+  Small (≤ 512 fields, ≤ 64 bytes each): listpack (compact, linear scan)
   Large: hashtable (O(1) ops)
   Use: user sessions, object attributes, counters per entity
 
-Set (hashtable / intset):
-  Small integers only: intset (compact sorted array, O(log n) lookup)
+Set (hashtable / intset / listpack):
+  Small integers only (≤ 512): intset (compact sorted array, O(log n) lookup)
+  Small non-integers (≤ 128 members, ≤ 64 bytes each): listpack
   Otherwise: hashtable (O(1) ops)
   Use: unique members, tags, follower/following relationships
 
 Sorted Set / ZSet (skiplist + hashtable / listpack):
   Small (≤ 128 members, ≤ 64 bytes each): listpack (linear scan)
   Large: skiplist + hashtable dual structure
-         skiplist: O(log n) for range queries (ZRANGE, ZRANGEBYSCORE)
+         skiplist: O(log n) for range queries (ZRANGE by index, BYSCORE, BYLEX)
          hashtable: O(1) for member lookup (ZSCORE, ZADD update)
   Use: leaderboards, rate limiters (sliding window), delayed tasks
 
@@ -106,9 +107,9 @@ Swap: rename temporary file to dump.rdb.
 Fork overhead: 50-500ms for 10GB dataset (memory pages must be allocated for CoW)
 During fork: parent continues serving requests (CoW = only modified pages are copied)
 
-Configuration:
-save 900 1        # Save if ≥1 key changed in 900 seconds
-save 300 10       # Save if ≥10 keys changed in 300 seconds
+Configuration (shipped defaults):
+save 3600 1       # Save if ≥1 key changed in 3600 seconds
+save 300 100      # Save if ≥100 keys changed in 300 seconds
 save 60 10000     # Save if ≥10000 keys changed in 60 seconds
 ```
 
@@ -178,12 +179,11 @@ quadrantChart
 
 `always` fsyncs every write (zero loss, but throughput capped around 1,000 writes/second on HDD); `no` skips explicit fsyncs entirely (highest throughput, most risk); `everysec` fsyncs once per second in the background, losing at most 1 second of writes on a crash while keeping near-native throughput.
 
-**RDB + AOF Hybrid (Redis 4.0+)**:
+**RDB + AOF Hybrid** (`aof-use-rdb-preamble yes`, the shipped default):
 ```
 AOF file begins with a compact RDB snapshot,
 followed by AOF commands from that point forward.
 Faster restart (RDB portion loads quickly) + durability (AOF guarantees from that point).
-Enable with: aof-use-rdb-preamble yes
 ```
 
 ---
@@ -287,7 +287,7 @@ event into a bounded slot migration.
 noeviction     -- Return error when memory full. Use for durability-critical data.
 allkeys-lru    -- Evict least recently used keys from all keys. Common choice.
 volatile-lru   -- LRU eviction only among keys with TTL set.
-allkeys-lfu    -- Evict least frequently used (LFU, Redis 4+). Better for non-uniform access.
+allkeys-lfu    -- Evict least frequently used (LFU). Better for non-uniform access.
 volatile-lfu   -- LFU only among keys with TTL.
 allkeys-random -- Random eviction. Rarely useful.
 volatile-random-- Random from TTL keys.
@@ -375,7 +375,7 @@ Level 2: → → [score=20] → [score=50] → [score=80] → [score=90]
 Level 1: [10] → [20] → [30] → [50] → [60] → [80] → [90]
 ```
 
-`ZRANGE`/`ZRANGEBYSCORE` are O(log n): navigate the skiplist from the highest level down. `ZSCORE` is O(1): a parallel hashtable maps member to score without touching the skiplist at all.
+`ZRANGE` — by index, `BYSCORE`, or `BYLEX` — is O(log n): navigate the skiplist from the highest level down. `ZSCORE` is O(1): a parallel hashtable maps member to score without touching the skiplist at all.
 
 **In plain terms.** `O(log n)` on a skiplist says: "each level up halves the number of nodes, so the
 number of hops to reach any score is the number of times you can halve `n` before reaching 1." That
@@ -396,7 +396,7 @@ single hop every time the player base *doubles*.
 
   descent cost       log2(50,000,000) = 25.58  ->  about 25 hops to locate the start
 
-  ZREVRANGE 0 99     25 hops (locate)  +  100 sequential steps (emit)
+  ZRANGE 0 99 REV    25 hops (locate)  +  100 sequential steps (emit)
                      = 125 node visits total
 
   compare a plain sorted array scan:  50,000,000 visits
@@ -449,13 +449,14 @@ Redlock only counts a lock as held if a majority of the N=5 instances (greater t
 ### Redis Memory Encoding Thresholds
 
 ```
-# Change encoding thresholds:
-hash-max-listpack-entries 128    # Use listpack for hashes with ≤128 fields
+# Change encoding thresholds (values shown are the shipped defaults):
+hash-max-listpack-entries 512    # Use listpack for hashes with ≤512 fields
 hash-max-listpack-value 64       # Use listpack if all values ≤64 bytes
 zset-max-listpack-entries 128
 zset-max-listpack-value 64
-list-max-listpack-size 128       # elements per listpack node in quicklist
+list-max-listpack-size -2        # -2 = cap each quicklist node at 8 KB
 set-max-intset-entries 512       # intset for sets with ≤512 integers
+set-max-listpack-entries 128     # listpack for small non-integer sets
 
 # Memory impact:
 # Listpack (small): ~30-50% less memory than hashtable/skiplist
@@ -497,11 +498,11 @@ EXEC
 
 - **Session storage**: HSET user:session:{token} user_id 42 role admin; EXPIRE 86400. Hash stores session fields; TTL auto-expires.
 - **Rate limiting**: INCR rate:user:42:min:1711234567; EXPIRE 60. Atomic increment + TTL = sliding window rate limiter.
-- **Leaderboard**: ZADD game:scores user:1 1500 user:2 2300. ZREVRANGE with scores = real-time leaderboard.
+- **Leaderboard**: ZADD game:scores 1500 user:1 2300 user:2. `ZRANGE game:scores 0 9 REV WITHSCORES` = real-time leaderboard.
 - **Job queue**: LPUSH jobs:email '{"to":"alice@example.com"}'. BRPOP jobs:email 0 for blocking worker.
 - **Pub/Sub**: PUBLISH chat:room1 "Hello". SUBSCRIBE chat:room1 for real-time messaging.
 - **Distributed counter**: INCR page:views:homepage — atomic, no locking needed.
-- **Bloom filter**: RedisBloom extension; or `SETBIT bloom_filter <hash1> 1` for DIY implementation.
+- **Bloom filter**: built into Redis Open Source — `BF.RESERVE seen 0.001 1000000`, then `BF.ADD` / `BF.EXISTS`. A 0.1% error rate costs ~14.4 bits per item.
 
 ---
 
@@ -516,7 +517,7 @@ EXEC
 | Lua scripting | Yes (atomic) | No |
 | Pub/Sub | Yes | No |
 | Memory overhead | Higher (rich structures) | Lower (string-only) |
-| Multi-threading | I/O via epoll, commands single-threaded (Redis 6: I/O threads) | Multi-threaded |
+| Multi-threading | Commands single-threaded; `io-threads` offloads socket read/write and protocol parsing | Multi-threaded |
 | Best for | Complex use cases, sessions, queues, Streams | Simple cache (highest throughput/core) |
 
 ---
@@ -550,7 +551,7 @@ EXEC
 A Redis instance stores Python pickle objects averaging 5MB each (session data). The `BGSAVE` fork causes a 3-second pause on a 20GB dataset — every 60 seconds. Fix: use a more efficient serialization (protobuf, msgpack), split large objects across smaller keys, or disable RDB and rely only on AOF with `appendfsync everysec`.
 
 **Pitfall 2: Hot key in Redis Cluster**
-A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: `slave-serve-stale-data yes` + client routing to replicas for read-only queries. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
+A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: `replica-serve-stale-data yes` + client routing to replicas for read-only queries. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
 
 **Put simply.** Key sharding says: "one key can only ever live on one node, so if the traffic won't
 fit on one node, make more keys." Sharding the cluster does nothing here — the load is concentrated
@@ -612,7 +613,7 @@ MULTI/EXEC queues commands but doesn't execute them until EXEC — you cannot re
 | `INFO replication` | Replication lag, connected replicas |
 | `MONITOR` | Real-time command stream (never in production — single-threaded bottleneck) |
 | `redis-memory-analyzer` | Analyze key distribution and memory usage |
-| `RedisInsight` | GUI for Redis (DataDog/Redis Labs) |
+| `RedisInsight` | Official Redis GUI — keyspace browser, profiler, slowlog |
 | `KeyDB` | Redis fork with multi-threading support |
 | `Dragonfly` | Redis-compatible, multi-threaded, higher memory efficiency |
 | `Valkey` | Linux Foundation Redis fork (community alternative) |
@@ -631,7 +632,7 @@ Redlock acquires locks across N independent Redis instances. Martin Kleppmann id
 (1) Client library (or the user) computes the slot: `CRC16(key) % 16384`. Key tags (`{tag}`) hash only the tag portion. (2) The client maintains a slot-to-node mapping (downloaded from cluster on connection). (3) Client connects directly to the node owning that slot and sends the command. (4) If the slot has moved (resharding), the node responds with `MOVED <slot> <ip:port>`. (5) Client updates its slot map and retries on the correct node. (6) During live slot migration: `ASK` redirect is temporary (ask this once, don't update map). Client sends `ASKING` before the command on the destination node. Operations requiring keys on multiple slots (MGET, transactions): all keys must be in the same slot — use key tags `{user:42}session` and `{user:42}cart` to force same slot.
 
 **Q: What are the internal encodings for a Redis Sorted Set and why are two structures maintained?**
-Small sorted sets (≤128 members, ≤64 bytes each): listpack — a compact sequential byte array. Linear scan for all operations, but cache-friendly and very memory-efficient. Large sorted sets: dual structure — a skiplist for ordered operations and a hashtable for member lookups. Skiplist: O(log n) for ZADD, ZRANGE, ZRANGEBYSCORE, ZRANK — range queries navigate through level pointers. Hashtable: O(1) for ZSCORE (member → score lookup) and ZADD update (find existing score to remove from skiplist). Two structures because: range queries need ordering (skiplist), but score lookups by member name need O(1) (hashtable). Maintaining both doubles memory overhead vs a single structure but provides O(log n) for ranges and O(1) for point lookups simultaneously.
+Small sorted sets (≤128 members, ≤64 bytes each): listpack — a compact sequential byte array. Linear scan for all operations, but cache-friendly and very memory-efficient. Large sorted sets: dual structure — a skiplist for ordered operations and a hashtable for member lookups. Skiplist: O(log n) for ZADD, ZRANGE (by index, BYSCORE or BYLEX) and ZRANK — range queries navigate through level pointers. Hashtable: O(1) for ZSCORE (member → score lookup) and ZADD update (find existing score to remove from skiplist). Two structures because: range queries need ordering (skiplist), but score lookups by member name need O(1) (hashtable). Maintaining both doubles memory overhead vs a single structure but provides O(log n) for ranges and O(1) for point lookups simultaneously.
 
 **Q: Explain RDB snapshotting using fork and copy-on-write, and what the pause cost is.**
 `BGSAVE` (or triggered by `save` configuration): Redis calls `fork()`. The kernel creates a child process that shares all memory pages with the parent — no immediate copy. The child writes the snapshot to a `.rdb` file while the parent continues serving requests. Copy-on-Write (CoW): when the parent modifies a page (e.g., updating a key), the kernel copies that page for the child before the parent modifies it. The child sees the original. Cost: (1) Fork itself: proportional to the page table size, not data size — roughly 1ms per GB of data. For a 10GB dataset: 10ms fork pause. (2) Memory: in the worst case (all pages modified during fork), total memory temporarily doubles. (3) I/O: child writes entire dataset to disk — throughput impact during snapshot.
@@ -652,7 +653,7 @@ Normal Redis: each command = one network round trip (RTT). At 1ms RTT, max throu
 Redis Streams: an append-only log per key. Producers: `XADD stream-key * field value` — auto-ID based on timestamp-sequence. Consumer groups: multiple consumers in a group each get different messages, tracked by last-consumed ID. XACK removes from pending. XPENDING shows unacknowledged messages. Comparison to Kafka: Redis Streams are simpler (in-memory, no broker fleet), support sub-millisecond latency, but have limited retention (capped by memory). Kafka: disk-persisted, petabyte-scale retention, consumer offset managed by consumer (not server). Use Redis Streams when: low latency required, small-to-medium throughput (< 1M events/second), same team owns producer and consumer. Use Kafka when: high durability, high throughput, long retention, multiple independent consumer teams, complex consumer topologies.
 
 **Q: What is the ziplist/listpack and why does it matter for Redis memory?**
-Listpack (successor to ziplist in Redis 7.0): a compact sequential byte encoding for small hashes, sorted sets, and lists. Stores entries consecutively in memory with no pointer overhead — entries can be as small as 11 bytes total for an integer vs 40+ bytes in a hashtable node. For a hash with 50 fields (≤64 bytes each), listpack uses ~3KB; a hashtable for the same data uses ~12KB — 4x more memory. The encoding automatically upgrades to hashtable/skiplist when the threshold is exceeded. This makes Redis efficient for many small objects: a session object with 10 string fields stays in listpack, dramatically reducing memory for high-cardinality session stores. Tuning: `hash-max-listpack-entries 128, hash-max-listpack-value 64` — reduce thresholds if memory is tight, increase if encoding transitions are frequent and data is just over threshold.
+Listpack is the compact sequential byte encoding Redis uses for small hashes, sets, sorted sets, and list nodes. Stores entries consecutively in memory with no pointer overhead — entries can be as small as 11 bytes total for an integer vs 40+ bytes in a hashtable node. For a hash with 50 fields (≤64 bytes each), listpack uses ~3KB; a hashtable for the same data uses ~12KB — 4x more memory. The encoding automatically upgrades to hashtable/skiplist when the threshold is exceeded. This makes Redis efficient for many small objects: a session object with 10 string fields stays in listpack, dramatically reducing memory for high-cardinality session stores. Tuning: `hash-max-listpack-entries 512, hash-max-listpack-value 64` — reduce thresholds if memory is tight, increase if encoding transitions are frequent and data is just over threshold.
 
 **Q: How do you implement a distributed rate limiter using Redis?**
 Fixed window with atomic counter:
@@ -673,7 +674,7 @@ count = ZCARD rate:user:42
 EXPIRE rate:user:42 <window_seconds>
 -- All four commands: pipeline or Lua for pseudo-atomicity
 ```
-Token bucket: more complex — requires GETSET to read and update remaining tokens atomically. Lua script reads current tokens, computes refill based on time elapsed, checks if request can proceed, writes new state atomically.
+Token bucket: more complex — the read-refill-write cycle has to be one atomic step, so it belongs in a Lua script (or `SET key value GET` if all you need is read-and-replace). The script reads current tokens, computes refill based on time elapsed, checks if the request can proceed, and writes the new state atomically.
 
 **Q: What is the difference between Redis Sentinel and Redis Cluster?**
 Redis Sentinel: HA solution for a single-primary/multi-replica setup. Sentinel processes (minimum 3) monitor the primary; if a majority agrees it's down, they promote a replica to primary. No horizontal scale — all data on one shard. Use for: datasets that fit on one server, simple HA, maximum key compatibility. Redis Cluster: horizontal scaling — data split across multiple shards (each a primary + replicas). Provides both HA (replica promotion) and scale. Limitations: multi-key operations require all keys on same slot (use key tags), no databases 1-15 (only db0), some commands not supported in cluster mode. Use for: datasets exceeding single-server capacity, write throughput beyond single-server limits.
@@ -693,7 +694,7 @@ MULTI queues every command without executing it, so a GET inside the block retur
 
 1. Set `maxmemory` and choose `allkeys-lru` or `allkeys-lfu` for cache use cases.
 2. Use `allkeys-lfu` for Zipfian access distributions (most cache workloads) — better hit rates than LRU.
-3. Keep values under encoding thresholds (128 entries, 64 bytes) for maximum memory efficiency.
+3. Keep values under encoding thresholds (512 entries for hashes, 128 for sets/zsets, 64-byte values) for maximum memory efficiency.
 4. Use `SCAN` instead of `KEYS` for key iteration in production.
 5. Set TTL on all cache keys — keys without TTL leak memory indefinitely.
 6. Monitor `mem_fragmentation_ratio` — above 1.5 indicates wasted memory from fragmentation.
@@ -715,7 +716,7 @@ ZADD leaderboard:global <score> <player_id>
 # e.g., ZADD leaderboard:global 15423 player:42
 
 # Top 100 globally (O(log n + 100)):
-ZREVRANGE leaderboard:global 0 99 WITHSCORES
+ZRANGE leaderboard:global 0 99 REV WITHSCORES
 # Returns top 100 players with scores in O(log(50M) + 100) ≈ 25 + 100 operations
 
 # Player rank (O(log n)):
@@ -724,7 +725,7 @@ ZREVRANK leaderboard:global player:42
 
 # Players within ±10 of rank (O(log n + 20)):
 rank = ZREVRANK leaderboard:global player:42
-ZREVRANGE leaderboard:global (rank-10) (rank+10) WITHSCORES
+ZRANGE leaderboard:global (rank-10) (rank+10) REV WITHSCORES
 # Returns 21 players with scores centered on the player
 
 # Memory:
@@ -754,7 +755,7 @@ hashtable, that makes it 50 rather than the ~16 bytes the raw score and pointer 
 
   reads        500,000/s against ONE key -> one node, exactly the Pitfall 2 shape
   mitigation   top-100 cached app-side for 5s
-               ZREVRANGE calls surviving to Redis = 1 per 5s per app instance
+               ZRANGE REV calls surviving to Redis = 1 per 5s per app instance
                only the per-player ZREVRANK queries stay uncached
 ```
 

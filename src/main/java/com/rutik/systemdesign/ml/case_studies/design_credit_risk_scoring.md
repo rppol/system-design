@@ -131,7 +131,9 @@ def compute_woe_bins(
     Weight of Evidence (WOE) encoding for credit scorecard.
     WOE = ln(P(X in bin | Bad) / P(X in bin | Good))
     IV (Information Value) = sum((P_bad - P_good) * WOE)
-    IV > 0.5: very strong predictor. 0.3-0.5: strong. 0.1-0.3: medium. <0.1: weak.
+    Siddiqi's conventional bands: <0.02 unpredictive; 0.02-0.1 weak; 0.1-0.3 medium;
+    0.3-0.5 strong; >0.5 is NOT "stronger still" — it is the standard leakage smell,
+    so investigate the feature before using it.
     """
     df = df.copy()
     df["bin"] = pd.qcut(df[feature], q=n_bins, duplicates="drop")
@@ -159,17 +161,19 @@ def compute_woe_bins(
     return bins
 
 def scorecard_points(
-    log_odds_offset: float,
+    log_odds_offset: float,   # ln(base_odds) at which the score equals base_score
     pdo: int,           # Points to Double Odds (standard: 20 or 25)
     base_score: int,    # typically 600 or 700
 ) -> dict[str, float]:
     """
-    Converts log-odds to a scorecard point scale.
-    Standard formula: Score = A - B × log(odds), where:
-    B = PDO / ln(2), A = base_score + B × ln(base_odds)
+    Converts log-odds to a scorecard point scale (Siddiqi convention).
+    Score  = Offset + Factor × ln(odds)      # odds = good:bad, so score rises with
+    Factor = PDO / ln(2)                     # creditworthiness and each doubling of
+    Offset = base_score - Factor × ln(base_odds)   # the odds adds exactly PDO points
+    Mirror the signs throughout if you define odds as bad:good instead.
     """
-    factor = pdo / np.log(2)  # B
-    offset = base_score - factor * log_odds_offset  # A
+    factor = pdo / np.log(2)
+    offset = base_score - factor * log_odds_offset
     return {"factor": factor, "offset": offset}
 ```
 
@@ -453,7 +457,7 @@ A model calibrated on a 3% default rate base was deployed with a threshold corre
 
 **Primary bottleneck: bureau API latency.**
 
-The bureau API is the binding constraint at 500ms p99 per call. Credit decision p99 = bureau_p99 + model_inference + SHAP = 500ms + 8ms + 4ms ≈ 515ms (well within 2s SLO). The bottleneck shifts to application volume:
+The bureau API is the binding constraint at 500ms p99 per call. Credit decision p99 = bureau_p99 + model_inference + SHAP = 500ms + 8ms + 4ms = 512ms (well within 2s SLO). The bottleneck shifts to application volume:
 
 ```mermaid
 xychart-beta
@@ -473,7 +477,7 @@ Bureau API concurrency: 5 simultaneous calls → 5 connections to bureau API nee
 
 Application server sizing:
 Each server: 4 cores × 2 threads = 8 concurrent requests
-At 515ms avg latency: 8 / 0.515 = 15.5 req/s per server
+At 512ms avg latency: 8 / 0.512 = 15.6 req/s per server
 Peak: 5 req/s → 1 server sufficient; deploy 2 for redundancy
 ```
 
@@ -517,7 +521,7 @@ Compute approval rates segmented by race and ethnicity, then test the gaps again
 The threshold is a risk policy decision, not a model decision. The model outputs a 2-year default probability. Risk policy translates this to a threshold: "We will approve applicants with predicted 24-month PD < 8%." This target PD corresponds to an expected loss rate that the product's APR can sustain profitably (the spread between loan APR and cost of funds must exceed expected losses + operating costs + target return). After threshold setting, validate calibration: at the chosen threshold, is the observed default rate in a recent holdout cohort actually close to 8%? If not, recalibrate. The threshold is re-evaluated quarterly against actual performance and may be adjusted (tightened in economic downturns, loosened in expansions) as part of the regular credit policy review. This re-evaluation does NOT require a model retrain — it is a threshold shift on the existing calibrated probabilities. See [Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md).
 
 **Q: How do you validate a credit model before deployment?**
-Four validation layers: (1) offline backtesting — evaluate model on 2+ years of historical originations using temporal holdout (train on data before date T, test on data after T); measure AUC, Gini, KS statistic, and PSI vs prior model; (2) out-of-time validation — test on the most recent 6-month cohort where 6-month delinquency proxy is available; (3) model risk management review — independent team validates methodology, data, assumptions, and regulatory compliance; they train a challenger model and compare; (4) shadow scoring — new model scores production applications alongside the live model for 30-60 days; approval rate, score distribution, and feature distribution are compared; if consistent, promote to production. Regulatory requirement (SR 11-7): all four layers must be completed and documented before deployment of a material model change.
+Four validation layers: (1) offline backtesting — evaluate model on 2+ years of historical originations using temporal holdout (train on data before date T, test on data after T); measure AUC, Gini, KS statistic, and PSI vs prior model; (2) out-of-time validation — test on the most recent 6-month cohort where 6-month delinquency proxy is available; (3) model risk management review — independent team validates methodology, data, assumptions, and regulatory compliance; they train a challenger model and compare; (4) shadow scoring — new model scores production applications alongside the live model for 30-60 days; approval rate, score distribution, and feature distribution are compared; if consistent, promote to production. The interagency model risk guidance — SR 26-2 since April 2026, SR 11-7 before it — does not prescribe these four layers by name; what it requires is independent validation, ongoing monitoring and full documentation before a material model change goes live, and these four layers are how a consumer-credit team typically discharges that.
 
 **Q: What happens to the model during an economic recession?**
 Two types of drift occur simultaneously: (a) concept drift — the relationship between features and default changes (customers with DTI=0.35 who were low-risk in 2019 may be high-risk in 2023 due to wage stagnation and rising interest rates); (b) label shift — the overall default rate increases (the prior shifts). Both require response: (a) for label shift, recalibrate the model monthly to adjust the predicted probability to match the new base rate; (b) for concept drift, track AUC on recent cohorts using short-term proxy labels (30-day delinquency, 60-day delinquency) rather than waiting for 24-month outcomes. If AUC on 60-day proxy degrades > 3pp, trigger an emergency MRM review and off-cycle model retrain. In a recession: also tighten the approval threshold immediately (credit policy decision) while the model is being updated, because the model's 24-month PD estimates were calibrated for the pre-recession distribution.

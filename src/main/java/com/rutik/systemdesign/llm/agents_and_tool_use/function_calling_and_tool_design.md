@@ -392,29 +392,38 @@ flowchart TD
 
 ## Real-World Examples
 
-### OpenAI Assistants API — Built-in Tools
+### OpenAI Responses API — Built-in Tools
 
-The Assistants API is **deprecated** and shuts down on **August 26, 2026**; new work
-should use the Responses API (plus the Conversations API for thread state), which
-reached feature parity and adds computer use, MCP and deep research. The shape below
-is retained because the built-in-tool idea carries over directly.
+Alongside your own functions, the Responses API exposes provider-hosted tools that run
+on OpenAI's side: you declare them and read the results, but never implement or execute
+them. Conversation state lives in the companion Conversations API.
 
 ```python
-assistant = client.beta.assistants.create(
+response = client.responses.create(
     model="gpt-5.6-terra",
+    input="Chart the revenue trend in the attached filings.",
     tools=[
-        {"type": "code_interpreter"},   # Python sandbox
-        {"type": "file_search"},        # RAG over uploaded files
-        {
-            "type": "function",         # Custom tool
-            "function": {...}
-        }
-    ]
+        {"type": "code_interpreter",              # Python sandbox
+         "container": {"type": "auto"}},
+        {"type": "file_search",                   # RAG over uploaded files
+         "vector_store_ids": ["vs_abc123"]},
+        {"type": "web_search"},                   # live web lookup
+        {"type": "function",                      # your own tool — flat shape
+         "name": "get_weather",
+         "description": "...",
+         "parameters": {...},
+         "strict": True},
+    ],
 )
 # code_interpreter: executes Python; generates charts; solves math
-# file_search: vector search over uploaded PDFs/docs
-# function: any custom API call
+# file_search: vector search over the named vector stores
+# web_search / mcp / computer_use_preview: further hosted tools
+# function: any custom API call, which you execute yourself
 ```
+
+Note the shape difference for your own tools: Responses declares a function tool **flat**
+(`type`/`name`/`description`/`parameters`/`strict` at the top level), while Chat Completions
+nests the same fields under a `"function"` key.
 
 ### Structured Data Extraction
 
@@ -580,7 +589,7 @@ The "$0.50+ per run" quoted in the pitfall only makes sense on the accumulating 
 | **LangChain tools** | Tool abstraction layer | 100+ pre-built tools |
 | **[LangGraph tool node](../agentic_frameworks/langgraph.md)** | Tool execution in graphs | Built-in error handling |
 | **Marvin** | Type-safe extraction | Maps LLM output to Python types |
-| **OpenAI Assistants** | Managed tool execution | Deprecated; shuts down 2026-08-26 — use Responses API |
+| **OpenAI Responses API** | Managed tool execution | Hosted `code_interpreter`, `file_search`, `web_search`, MCP, computer use |
 | **E2B** | Code execution tool | Secure sandbox; fast spin-up |
 
 ---

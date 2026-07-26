@@ -507,7 +507,6 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | [**LangGraph**](../agentic_frameworks/langgraph.md) | Plan-and-execute implementation | Reference template; stateful |
-| **LangChain Plan-and-Execute** | Legacy implementation | Deprecated; use LangGraph |
 | **OpenAI reasoning models** | Built-in planning | Internal CoT is implicit P&E; steer with `reasoning.effort` |
 | **Claude thinking** | Built-in planning | `thinking` parameter — `adaptive` on current models |
 | **BabyAGI** | Task queue management | Early Plan-and-Execute variant |
@@ -628,18 +627,18 @@ Task: "Migrate module payments/core.py from Python 2 to Python 3"
 │  PHASE 2: EXECUTOR LOOP (GPT-5.6 Luna per step)                 │
 │                                                                 │
 │  Step 1: read_file("payments/core.py")                          │
-│  Step 2: analyze_patterns(content) → [print_stmt, dict_items,  │
+│  Step 2: analyze_patterns(content) → [print_stmt, dict_items,   │
 │                                        unicode_str, xrange]     │
-│  Step 3a: lookup_migration("print_stmt") → "print() function"  │
-│  Step 3b: lookup_migration("dict_items") → ".items() returns   │
+│  Step 3a: lookup_migration("print_stmt") → "print() function"   │
+│  Step 3b: lookup_migration("dict_items") → ".items() returns    │
 │            view, not list — wrap in list() if needed"           │
-│  Step 4: apply_2to3(file, patterns) → modified_content         │
-│  Step 5: write_file + run_tests → {pass:142, fail:3, error:0}  │
+│  Step 4: apply_2to3(file, patterns) → modified_content          │
+│  Step 5: write_file + run_tests → {pass:142, fail:3, error:0}   │
 │        |                                                        │
-│  [3 failures → REPLAN: diagnose why and add fix steps]         │
+│  [3 failures → REPLAN: diagnose why and add fix steps]          │
 │        |                                                        │
 │  Step 6: fix_test_failures(failure_details)                     │
-│  Step 7: run_tests → {pass:145, fail:0, error:0}               │
+│  Step 7: run_tests → {pass:145, fail:0, error:0}                │
 │  Step 8: generate_migration_report()                            │
 └─────────────────────────────────────────────────────────────────┘
       |
@@ -736,5 +735,5 @@ async def migrate_module(filepath: str) -> MigrationResult:
 **Tradeoffs and Alternatives**:
 
 - Pure ReAct was prototyped first: it achieved 74% success rate but frequently "lost the thread" after step 8 and began repeating pattern lookups without making progress. Plan-and-Execute improved success rate to 91%.
-- Using `2to3` CLI directly without an LLM planner was considered for simple files: implemented as a fast path — files with only syntactic changes (print statements, integer division) skip the LLM planner entirely and use the CLI tool. Note that `2to3` and its `lib2to3` backend were removed from the Python standard library in Python 3.13, so this fast path now needs the separately packaged tool or an equivalent such as `pyupgrade`. The LLM planner handles only files with semantic changes.
+- Running a deterministic 2to3 refactoring pass without an LLM planner was considered for simple files: implemented as a fast path — files with only syntactic changes (print statements, integer division) skip the LLM planner entirely and run the standard 2to3 fixers through the separately packaged `fissix` backport (the `modernize` tool builds on it). The LLM planner handles only files with semantic changes.
 - Human review gate was added after Step 4 (apply transforms) for files touching the core payment calculation engine — the plan pauses and emails a diff to the team lead before running tests. This added 2-4 hours per such file but eliminated the risk of merging semantically incorrect financial logic.

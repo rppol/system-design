@@ -343,12 +343,10 @@ Cross-encoders read query and candidate together → much better relevance judgm
   than comparing separate embeddings
 
 Models:
-  - BGE-reranker-v2-m3 (0.6B, multilingual; current BAAI open-source default,
-    successor to bge-reranker-large / bge-reranker-base)
-  - Cohere Rerank API (managed; current IDs rerank-v4.0-fast / rerank-v4.0-pro.
-    On Pinecone's hosted catalog cohere-rerank-3.5 was deprecated 2026-07-01 and
-    is auto-served by cohere-rerank-4-fast from 2026-08-01, on a different score
-    scale — re-tune any hard-coded threshold)
+  - BGE-reranker-v2-m3 (0.6B, multilingual; BAAI's open-source default)
+  - Cohere Rerank API (managed; rerank-v4.0-fast for latency, rerank-v4.0-pro
+    for accuracy. Score scales differ between reranker families, so re-tune any
+    hard-coded relevance threshold whenever you change model)
   - ColBERT (token-level matching, faster than full cross-encoder)
 ```
 
@@ -731,7 +729,7 @@ A: Combine prompt-level and pipeline-level defenses. Prompt level: instruct the 
 A: Because long-context stuffing fails on cost, latency, and attention quality at corpus scale. Cost: re-sending 200K tokens on every query costs roughly $0.60 at $3/1M input pricing — per query — versus a few tens of milliseconds of vector search over a pre-built index, and a 10M-document corpus does not fit in any window regardless. Attention: "lost in the middle" degradation means relevance ordering still matters even when everything fits. Long context wins for single-document workflows ("analyze this contract") and small static corpora; RAG wins whenever the corpus is large, shared, or frequently updated — and in practice they combine: retrieval narrows millions of documents to the best 5 chunks, and the long window lets you include generous parent context around them.
 
 **Q: What is the minimal viable RAG stack for a production system?**
-A: Minimum viable production RAG: (1) Document parsing — Unstructured.io or PyMuPDF for PDFs; (2) Chunking — sentence-boundary, 300-500 tokens, 50-token overlap; (3) Embedding — BAAI/bge-base-en-v1.5 (self-hosted) or text-embedding-3-small (API); (4) Vector DB — Qdrant (self-hosted) or Pinecone (managed); (5) Retrieval — hybrid (dense + BM25) via Weaviate or Qdrant hybrid; (6) Reranker — BGE-reranker-base; (7) Generation — any current frontier model (Claude Sonnet 5, GPT-5.6) with a system prompt requiring source attribution and an "I don't know" fallback. Treat accuracy as something you measure on your own corpus; there is no stack-level accuracy figure that transfers between document sets.
+A: Minimum viable production RAG: (1) Document parsing — Unstructured.io or PyMuPDF for PDFs; (2) Chunking — sentence-boundary, 300-500 tokens, 50-token overlap; (3) Embedding — BAAI/bge-base-en-v1.5 (self-hosted) or text-embedding-3-small (API); (4) Vector DB — Qdrant (self-hosted) or Pinecone (managed); (5) Retrieval — hybrid (dense + BM25) via Weaviate or Qdrant hybrid; (6) Reranker — BGE-reranker-v2-m3; (7) Generation — any current frontier model (Claude Sonnet 5, GPT-5.6) with a system prompt requiring source attribution and an "I don't know" fallback. Treat accuracy as something you measure on your own corpus; there is no stack-level accuracy figure that transfers between document sets.
 
 **Q: How does chunk size affect retrieval recall and generation quality in RAG?**
 Chunk size creates a fundamental tradeoff: smaller chunks (128-256 tokens) improve retrieval precision by isolating specific facts, while larger chunks (512-1024 tokens) provide more context but may dilute relevance. A chunk too small may miss surrounding context needed to answer the question; a chunk too large may contain irrelevant information that confuses the LLM. Empirically, 256-512 tokens is the sweet spot for most document types. For dense technical documents, smaller chunks (200-300 tokens) work better. For narrative documents (legal briefs, case studies), larger chunks (500-800 tokens) preserve important context. Always test on your actual queries — measure retrieval recall@5 and downstream answer quality (correctness, faithfulness) across chunk sizes. A common pattern: use small chunks for retrieval, then expand to the surrounding parent chunk for generation (parent-child chunking).
@@ -970,9 +968,9 @@ response = llm.complete(prompt)
          v Offline Ingestion Pipeline
   ┌──────────────────────────────────────────────────────────────┐
   │  Chunking Strategy (adaptive by document type):              │
-  │  - HR Policies: sentence-boundary, 512 tokens, 128 overlap  │
-  │  - Legal Contracts: section-boundary (## clause markers)    │
-  │  - Technical Docs: code-block-aware, 800 tokens             │
+  │  - HR Policies: sentence-boundary, 512 tokens, 128 overlap   │
+  │  - Legal Contracts: section-boundary (## clause markers)     │
+  │  - Technical Docs: code-block-aware, 800 tokens              │
   │  - Financial Reports: table-aware, preserve table structure  │
   │                                                              │
   │  Embedding: text-embedding-3-large (OpenAI)                  │
@@ -980,10 +978,10 @@ response = llm.complete(prompt)
   │  (MRL truncation, not PCA; halves storage. OpenAI's only     │
   │  published anchor is that 3-large at 256 dims still beats    │
   │  ada-002 at 1536 — measure your own retention at 1536)       │
-  │  Batch API: $0.065/1M tok (50% of the $0.13 standard rate)  │
+  │  Batch API: $0.065/1M tok (50% of the $0.13 standard rate)   │
   │  10M docs × 500 avg tokens = 5B tokens = $325 one-time cost  │
   │                                                              │
-  │  Vector DB: Qdrant (self-hosted, 5 nodes)                   │
+  │  Vector DB: Qdrant (self-hosted, 5 nodes)                    │
   │  HNSW index: M=32, ef_construction=200                       │
   │  Payload filters: document_type, business_unit, last_updated │
   └──────────────────────────────────────────────────────────────┘
@@ -999,7 +997,7 @@ response = llm.complete(prompt)
              v                            │
   ┌──────────────────────────────────────▼───────────────────┐
   │  Hybrid Retrieval (RRF fusion)                           │
-  │  BM25 top-20 + HNSW top-20 → RRF → unified top-30       │
+  │  BM25 top-20 + HNSW top-20 → RRF → unified top-30        │
   │  RRF score: 1/(rank + 60) summed across systems          │
   └──────────────────────────────────────────────────────────┘
              |
@@ -1015,7 +1013,7 @@ response = llm.complete(prompt)
   │  LLM: Claude claude-sonnet-4-6                           │
   │  System: "Answer ONLY from the provided context.         │
   │           If not in context, say 'I don't know.'"        │
-  │  Context: 5 chunks + metadata (source, date, BU)        │
+  │  Context: 5 chunks + metadata (source, date, BU)         │
   │  Max tokens: 1024 output                                 │
   └──────────────────────────────────────────────────────────┘
 
@@ -1252,9 +1250,8 @@ async def hybrid_search(
             ]
         )
 
-    # Parallel: vector search + BM25 search
-    # NOTE: `search()` was removed from qdrant-client; `query_points()` is the
-    # current API and returns a QueryResponse whose `.points` holds the hits.
+    # Parallel: vector search + BM25 search.
+    # `query_points()` returns a QueryResponse whose `.points` holds the hits.
     vector_task = qdrant.query_points(
         collection_name=collection_name,
         query=query_embedding,

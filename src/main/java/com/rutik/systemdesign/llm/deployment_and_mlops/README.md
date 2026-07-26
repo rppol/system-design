@@ -842,7 +842,7 @@ context saves single-digit percentages.
 - Published deprecation table gives every model a tentative retirement date, so callers can
   plan migrations (e.g. `claude-opus-4-1-20250805` retires 2026-08-05, replaced by `claude-opus-4-8`)
 - API parameters are versioned the same way: `temperature`/`top_p`/`top_k` return 400 on
-  Claude Opus 4.7 and later rather than being silently ignored
+  Claude Opus 4.7 and later, so an unsupported sampling parameter fails loudly at the call site
 - Rollout mechanics and internal safety-monitoring thresholds are not published
 
 ### Netflix LLM Platform (per the Netflix Tech Blog, "In-House LLM Serving at Netflix", 2026)
@@ -909,9 +909,9 @@ context saves single-digit percentages.
 
 ### Use Managed API When:
 - <1M tokens/day (API is cheaper than idle GPU time)
-- Need cutting-edge model quality (frontier tiers such as GPT-5.6 or Claude Opus 5); note that
-  older API names age out fast — Claude 3.5 Sonnet retired 2025-10-28 and Claude 3.5 Haiku
-  retired 2026-02-19, so pin against the vendor's live model list, never against a tutorial
+- Need cutting-edge model quality (frontier tiers such as GPT-5.6 or Claude Opus 5); pin the
+  exact model id against the vendor's live model list, never against a tutorial — API model
+  names turn over roughly every two quarters
 - Don't have ML infrastructure expertise
 - Fast time-to-market is the priority
 
@@ -955,7 +955,6 @@ context saves single-digit percentages.
 |------|---------|-------|
 | **LangSmith** | LLM observability | Traces, evaluations, prompt management |
 | **Langfuse** | Open-source observability | Self-hostable alternative to LangSmith |
-| **Helicone** | LLM proxy + analytics | Drop-in proxy; zero code change |
 | **Arize Phoenix** | ML + LLM monitoring | Good for RAG evaluation |
 | **Prometheus + Grafana** | Metrics | GPU utilization, latency, throughput |
 | **OpenTelemetry** | Distributed tracing | Trace across gateway → model → tools |
@@ -999,7 +998,7 @@ Shadow mode runs a candidate model or prompt on a copy of production traffic wit
 Semantic caching stores LLM responses keyed by the semantic meaning of the query (not exact string match), returning cached responses for semantically similar queries. Implementation: embed each query, search a vector index of previous queries, and if similarity exceeds a threshold (cosine > 0.95), return the cached response. Cost-effective when: (1) queries are repetitive — customer support bots see 30-60% repeated questions; (2) responses are deterministic — factual lookups, not creative generation; (3) LLM cost is high — caching saves $0.01-$0.10 per cached hit. Not effective when: responses must be personalized, queries are unique (research, coding), or freshness matters (news, stock prices). Cache invalidation is the hard part — when underlying data changes, semantically cached responses become stale. Set TTLs based on data change frequency: 24 hours for product info, 1 hour for pricing, no caching for real-time data. GPTCache is an open-source implementation. At 50% cache hit rate with GPT-4o, semantic caching reduces LLM costs by 40-50%.
 
 **Q: How do you design a model routing system for multi-model deployments?**
-Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (GPT-4o-mini, LLaMA 8B) for simple queries or expensive model (GPT-4o, Claude Sonnet 5) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Not Diamond, OpenRouter, and Unify offer managed routing (Martian, an early entrant, has since refocused on interpretability research); for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
+Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (GPT-4o-mini, LLaMA 8B) for simple queries or expensive model (GPT-4o, Claude Sonnet 5) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Not Diamond, OpenRouter, and Unify offer managed routing; for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
 
 **Q: How do you estimate and optimize GPU cost for LLM serving?**
 GPU cost estimation starts with throughput capacity: an A100 80GB serving LLaMA 3 8B with vLLM achieves ~1,200 tokens/second throughput. At $2/hour on-demand (2026 median A100 80GB list is ~$1.81/hr; spot runs $0.60-1.20), a fully saturated GPU costs $2 / (1,200 x 3,600) = $0.00046 per 1K tokens. Compare to GPT-4o-mini at $0.60 per 1M output tokens ($0.0006/1K) — API is cheaper at low volume. Break-even calculation: self-hosted becomes cheaper when monthly volume exceeds the point where (GPU_cost_per_month) < (API_cost_per_token * monthly_tokens). For A100 at $1,500/month vs GPT-4o-mini: break-even at ~2.5B tokens/month (~83M tokens/day). Optimization strategies: (1) right-size GPU — use T4 for small models, A10G for medium, A100/H100 for large; (2) spot instances for batch workloads (60-70% savings); (3) quantization — FP8 or INT4 models serve from smaller/fewer GPUs; (4) batching — higher batch sizes increase throughput sublinearly up to memory limits (the Section 6 table shows 32x batch buying 12.8x throughput); (5) auto-scaling — scale to zero during off-hours if traffic permits.
@@ -1054,12 +1053,12 @@ A B2B SaaS platform serving 5,000 enterprise customers routes 40 million LLM req
   Client Request        │  ┌──────────────┐    ┌───────────────────────────────┐ │
   (prompt, tenant_id,   │  │ Auth &       │    │  Routing Engine               │ │
    budget_tier)  ──────►│  │ Rate Limiter │───►│  1. Heuristic classifier      │ │
-                        │  └──────────────┘    │  2. Embedding-based router    │ │
-                        │                      │  3. Cost/latency optimizer    │ │
-                        │                      └───────────┬───────────────────┘ │
-                        │                                  │                     │
-                        │         ┌────────────────────────┼──────────────────┐  │
-                        │         v                        v                  v  │
+                        │  └──────────────┘    │  2. Embedding-based router    │  │
+                        │                      │  3. Cost/latency optimizer    │  │
+                        │                      └───────────┬───────────────────┘  │
+                        │                                  │                      │
+                        │         ┌────────────────────────┼──────────────────┐   │
+                        │         v                        v                  v   │
                         │  ┌─────────────┐      ┌──────────────────┐  ┌──────────┐│
                         │  │ Semantic    │      │ Model Pool       │  │ Shadow   ││
                         │  │ Cache       │      │                  │  │ Eval (1%)││

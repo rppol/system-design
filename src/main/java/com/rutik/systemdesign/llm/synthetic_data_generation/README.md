@@ -475,7 +475,7 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
   Step 1: Seed Data Collection
   ┌──────────────────────────────────────────────────────────────┐
   │  800 human-annotated examples                                │
-  │  + 2,000 unlabeled legal contracts (public domain, EDGAR)   │
+  │  + 2,000 unlabeled legal contracts (public domain, EDGAR)    │
   │  + Legal clause taxonomy (50 clause types from CUAD dataset) │
   └─────────────────────────────┬────────────────────────────────┘
                                 │
@@ -488,7 +488,7 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
   │    (3) create adversarial variants, (4) cross-clause combos  │
   │                                                              │
   │  Output per seed: 5 evolved variants                         │
-  │  Total generated: 800 × 5 × 3 rounds = 12,000 base pairs    │
+  │  Total generated: 800 × 5 × 3 rounds = 12,000 base pairs     │
   │  + Open-source legal clause extraction: 30,000 pairs         │
   │  + Synthetic from unlabeled contracts: 60,000 pairs          │
   │  Raw total: 102,000 pairs                                    │
@@ -496,22 +496,22 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
                                 │
                                 v Step 3: Quality Filtering
   ┌──────────────────────────────────────────────────────────────┐
-  │  Filters applied in sequence:                                │
+  │  Filters applied in sequence:                               │
   │  1. Deduplication: SimHash, threshold=0.85 → remove 8,200   │
   │  2. Length filter: prompt 20-500 tokens; response 20-1000   │
   │     → remove 3,100                                          │
   │  3. Legal accuracy: Mistral-7B-Legal-Instruct scores each   │
-  │     clause extraction → remove if score < 0.6 → -4,800     │
+  │     clause extraction → remove if score < 0.6 → -4,800      │
   │  4. Instruction following: GPT-4o-mini judge checks if      │
-  │     response follows prompt → remove if "no" → -6,200      │
+  │     response follows prompt → remove if "no" → -6,200       │
   │  5. Diversity sampling: cluster by embedding, sample K=2    │
   │     per cluster → retain 52,000 diverse examples            │
-  │  Final dataset: 52,000 high-quality instruction pairs        │
+  │  Final dataset: 52,000 high-quality instruction pairs       │
   └─────────────────────────────┬────────────────────────────────┘
                                 │
                                 v Step 4: Fine-tuning
   ┌──────────────────────────────────────────────────────────────┐
-  │  Model: Mistral-7B-Instruct v0.3                             │
+  │  Model: Mistral-7B-Instruct v0.3                            │
   │  Method: LoRA (r=16, alpha=32) on 52k pairs                 │
   │  Training: 3 epochs, 1×A100, 8 hours                        │
   │  Eval: CUAD held-out (100 contracts, 41 clause types)       │

@@ -19,7 +19,7 @@ One-line analogy: optimizing ML inference is like optimizing a restaurant kitche
 
 Mental model: think of the prediction pipeline as a chain of stages, each with its own latency contribution. The total latency is the sum of all stage latencies. Optimize the slowest stage first (Amdahl's Law). Common stages: network, feature fetch, model inference, post-processing. Model inference is usually the largest contributor and the most optimizable.
 
-Key insight: a 4x reduction in model size via quantization produces a 3x speedup and 4x memory reduction with < 1% quality loss. This is almost always worth doing before considering more complex optimizations.
+Key insight: INT8 post-training quantization cuts FP32 weight memory by exactly 4x, and on hardware that has INT8 tensor cores (or AVX-512 VNNI / AMX on CPU) it typically buys 2-4x throughput. Reported quality loss is often under 1% on classification and ranking tasks, but that is a per-model measurement, not a guarantee — quantization is cheap to try first, not a universal free multiplier.
 
 ---
 
@@ -29,7 +29,7 @@ Key insight: a 4x reduction in model size via quantization produces a 3x speedup
 
 **Latency budget decomposition**: allocate a P99 budget to each pipeline stage before optimizing. Every stage must meet its budget individually; no stage can borrow from another at P99.
 
-**Hardware-software co-design**: choose the optimization technique based on the serving hardware. INT8 quantization yields 3x speedup on CPUs and modern GPUs; it provides minimal benefit on older GPUs without INT8 tensor cores.
+**Hardware-software co-design**: choose the optimization technique based on the serving hardware. INT8 quantization yields roughly 2-4x speedup only where the silicon has INT8 math units (NVIDIA Turing tensor cores onward, or AVX-512 VNNI / AMX on Intel CPUs); on hardware without them the dequantize-then-compute path can be no faster than FP16, and sometimes slower.
 
 **Quality-efficiency tradeoff**: every optimization reduces some combination of accuracy, latency, cost, or complexity. Quantify the quality loss before deploying any compression technique.
 
@@ -41,20 +41,24 @@ Key insight: a 4x reduction in model size via quantization produces a 3x speedup
 
 ### Optimization Technique Taxonomy
 
+All multipliers below are ranges commonly reported for mid-size DNN and GBT serving, not
+guarantees: every one is conditional on the model, the batch size, and the hardware, and
+must be re-measured on your own workload before it is budgeted for.
+
 | Technique | Latency Reduction | Memory Reduction | Quality Loss | Complexity |
 |-----------|-----------------|----------------|-------------|-----------|
-| Request batching | 2-10x throughput | None | None | Low |
-| Quantization (INT8) | 2-4x | 4x (FP32 → INT8) | <1% on most tasks | Medium |
-| Quantization (INT4) | 3-6x | 8x | 1-3% | Medium |
+| Request batching | 2-10x throughput, only when arrivals fill batches | None | None | Low |
+| Quantization (INT8) | 2-4x on INT8-capable hardware; ~1x without | 4x (FP32 → INT8) | often <1%, task-dependent | Medium |
+| Quantization (INT4) | Weight-only; helps memory-bound decode, no INT4 tensor cores after Ampere | 8x | 1-3% | Medium |
 | Model pruning (unstructured) | Minimal without sparse hardware | 2-10x | 1-5% | High |
 | Model pruning (structured) | 2-4x | 2-4x | 1-5% | High |
 | Knowledge distillation | 5-50x (student vs teacher) | 5-50x | 5-20% | High |
 | ONNX export | 1.3-2x | None | None | Low |
 | TensorRT optimization | 2-8x (GPU) | 1.5-2x | <1% | Medium |
 | Feature caching (Redis) | Up to 10x on feature fetch | None (Redis cost) | None | Low |
-| Prediction caching | Up to 100x for cacheable requests | None (cache cost) | None | Low |
-| Model cascade | 4-5x average cost | None | None | Medium |
-| Precomputation (offline) | Infinite (serving = cache lookup) | None (storage cost) | None | Medium |
+| Prediction caching | Bounded by hit rate; a miss costs full inference | None (cache cost) | None | Low |
+| Model cascade | ~3.5x average cost at an 80/20 split (see §5) | None | None | Medium |
+| Precomputation (offline) | Serving becomes a cache lookup | None (storage cost) | Staleness between batch runs | Medium |
 
 ### Hardware Selection
 
@@ -62,10 +66,15 @@ Key insight: a 4x reduction in model size via quantization produces a 3x speedup
 |----------|---------|-----------|------|
 | CPU (general) | Small models (<10M params), interpretable models (GBT) | Low | Low |
 | CPU (optimized: Intel Xeon + AVX-512) | LightGBM, ONNX optimized small models | Medium | Low-Medium |
-| GPU (NVIDIA T4) | Medium DNN inference, cost-efficient | High | Medium |
-| GPU (NVIDIA A10G) | Large DNN, transformer inference | Very High | Medium-High |
-| GPU (NVIDIA A100) | Very large models, high-throughput batch | Highest | High |
+| GPU, entry inference (NVIDIA T4 — AWS g4dn; NVIDIA L4 — AWS g6) | Medium DNN inference, cost-efficient | High | Medium |
+| GPU, mid inference (NVIDIA A10G — AWS g5; NVIDIA L40S — AWS g6e) | Large DNN, transformer inference | Very High | Medium-High |
+| GPU, training-class (NVIDIA A100 — AWS p4d; H100 — p5; H200 — p5e; B200 — p6) | Very large models, high-throughput batch | Highest | High |
 | Custom ASIC (Google TPU, AWS Inferentia) | Transformer-heavy workloads, high volume | Very High | Low at scale |
+
+Generations matter for what optimizations are even available: INT4 tensor-core math exists
+on Turing and Ampere but not on Hopper or Blackwell, which trade it for FP8 (and FP4 on
+Blackwell). Check the target device's supported precisions before planning a quantization
+strategy around them.
 
 ---
 
@@ -88,7 +97,7 @@ flowchart TD
     feat --> inf["Model inference\nLightGBM 12ms\n+ DNN embed 18ms"]
     inf --> post["Post-processing\nrules 3ms · serialize 2ms"]
     post -->|"network 9ms"| resp([Response])
-    resp --> total["Total P99 = 65ms\nbudget 80ms → 35ms headroom"]
+    resp --> total["Total P99 = 61ms\nbudget 100ms → 39ms headroom"]
 
     class client,resp io
     class gw req
@@ -98,7 +107,7 @@ flowchart TD
     class total lossN
 ```
 
-Total latency is the sum of stage latencies, so per Amdahl's Law you optimize the largest stage first — here model inference (30ms of 65ms). Each stage must meet its own P99 budget; none can borrow slack from another at the tail.
+Total latency is the sum of stage latencies (8 + 2 + 7 + 30 + 5 + 9 = 61ms), so per Amdahl's Law you optimize the largest stage first — here model inference (30ms of 61ms). Each stage must meet its own P99 budget; none can borrow slack from another at the tail.
 
 **What this actually says.** "Latency adds up, but a tail does not — fan a request out across enough backends and the one-in-a-hundred slow call becomes the ordinary case."
 
@@ -325,7 +334,9 @@ class DynamicBatchingServer:
         Request is batched with other concurrent requests.
         """
         if self._loop is None:
-            self._loop = asyncio.get_event_loop()
+            # get_running_loop(), not get_event_loop(): the latter is deprecated
+            # and, from Python 3.12 on, raises when there is no current loop.
+            self._loop = asyncio.get_running_loop()
 
         future: asyncio.Future = self._loop.create_future()
         pending = PendingRequest(
@@ -733,9 +744,11 @@ from dataclasses import dataclass
 
 @dataclass
 class InfrastructureCostModel:
-    # Hardware costs (hourly)
-    cpu_cost_per_hour: float       # e.g. $0.05/hr for 4-core server
-    gpu_cost_per_hour: float       # e.g. $0.80/hr for T4 GPU
+    # Hardware costs (hourly). Anchor these to a real rate card, not to memory:
+    # AWS us-east-1 on-demand, checked 2026-07: c6i.xlarge (4 vCPU) $0.17/hr,
+    # g4dn.xlarge (1x T4, 4 vCPU) $0.526/hr.
+    cpu_cost_per_hour: float
+    gpu_cost_per_hour: float
 
     # Throughput at 70% utilization
     cpu_throughput_qps: int        # requests per second on CPU
@@ -774,15 +787,19 @@ def compute_break_even(model: InfrastructureCostModel) -> dict[str, float]:
     }
 
 
-# Example: LightGBM (CPU) vs DNN (GPU) for recommendation
+# Example: LightGBM (CPU) vs DNN (GPU) for recommendation.
+# Throughputs are placeholders — benchmark your own model; only the rates are real.
 result = compute_break_even(InfrastructureCostModel(
-    cpu_cost_per_hour=0.10,
-    gpu_cost_per_hour=0.80,
-    cpu_throughput_qps=2_000,    # LightGBM on 4-core CPU
-    gpu_throughput_qps=20_000,   # DNN on T4 GPU with batching
-    gpu_revenue_lift_per_request=0.005,  # $0.005 additional revenue from better DNN
+    cpu_cost_per_hour=0.17,      # c6i.xlarge, 4 vCPU
+    gpu_cost_per_hour=0.526,     # g4dn.xlarge, 1x T4
+    cpu_throughput_qps=2_000,    # LightGBM on 4 vCPU (measure this)
+    gpu_throughput_qps=20_000,   # DNN on T4 with batching (measure this)
+    gpu_revenue_lift_per_request=0.00005,  # e.g. a 1% lift on a $5 CPM impression
 ))
-# Output: GPU serving costs 4x more, but revenue lift makes it net positive
+# Output: at FULL load the GPU is ~3.2x cheaper per prediction ($0.0073 vs $0.0236
+# per 1M) despite costing 3.1x more per hour, because it serves 10x more. The
+# revenue term ($50 per 1M) then dwarfs both serving costs -- the usual shape for a
+# revenue-generating model, and the reason quality, not cost, decides these calls.
 ```
 
 **What it means.** "Cost per prediction is rent divided by output — and an idle GPU pays exactly the same rent as a busy one."
@@ -800,24 +817,24 @@ Every term in `compute_break_even` reduces to that one division. The subtlety is
 **Walk one example.** Take the two options from the code above at their full rated throughput:
 
 ```
-                    $/hr     QPS      predictions/hr     cost per 1M predictions
-    CPU (4-core)    0.10    2,000       7,200,000              $0.0139
-    GPU (T4)        0.80   20,000      72,000,000              $0.0111
+                        $/hr     QPS      predictions/hr     cost per 1M predictions
+    CPU (c6i.xlarge)    0.170    2,000       7,200,000              $0.0236
+    GPU (g4dn.xlarge)   0.526   20,000      72,000,000              $0.0073
 
-  8x the rent for 10x the output, so the GPU wins -- at full load.
+  3.1x the rent for 10x the output, so the GPU wins -- at full load.
 ```
 
 Now send both exactly the same real traffic, 2,000 QPS, and the conclusion inverts:
 
 ```
-    CPU : 0.10 / 7,200,000  = $0.0139 per 1M      (100% utilized)
-    GPU : 0.80 / 7,200,000  = $0.1111 per 1M      ( 10% utilized)
+    CPU : 0.170 / 7,200,000  = $0.0236 per 1M      (100% utilized)
+    GPU : 0.526 / 7,200,000  = $0.0731 per 1M      ( 10% utilized)
 
-  The GPU is now 8x MORE expensive per prediction -- exactly its rent ratio.
+  The GPU is now 3.1x MORE expensive per prediction -- exactly its rent ratio.
   No hardware changed. Only the utilization did.
 ```
 
-**This is the whole reason "GPU is cheaper at scale" is a conditional, not a fact.** At 10% utilization you are paying for 18 idle GPU-seconds out of every 20, and the cost-per-prediction ratio degrades to the raw rent ratio (8x) because the throughput advantage never gets exercised. It also explains why batching and cost are the same conversation: batching is what converts rated throughput into sustained throughput, and sustained throughput is the denominator.
+**This is the whole reason "GPU is cheaper at scale" is a conditional, not a fact.** At 10% utilization you are paying for 18 idle GPU-seconds out of every 20, and the cost-per-prediction ratio degrades to the raw rent ratio (3.1x) because the throughput advantage never gets exercised. It also explains why batching and cost are the same conversation: batching is what converts rated throughput into sustained throughput, and sustained throughput is the denominator.
 
 **Sizing the fleet from the same number.** Once cost per prediction is a division, replica count is too:
 
@@ -834,15 +851,15 @@ The 5-replica answer is a floor, never a plan: it leaves nothing for a rolling d
 
 ## 7. Real-World Examples
 
-**Netflix recommendation serving** uses a combination of precomputation and online inference. For their homepage rows, candidate generation is done offline (precomputed for all users daily), and the final ranking is done online at request time using a lightweight model. The online ranking model is optimized for CPU inference using ONNX export, achieving sub-10ms P99 latency.
+**Netflix personalization** splits work across offline, nearline, and online layers: expensive computation (candidate generation, model training) runs offline and lands in a fast store, a nearline layer reacts to events between the two, and only the cheapest, most context-dependent work — final ranking and filtering — happens on the request path. That split, described in Netflix's "System Architectures for Personalization and Recommendation" (Netflix TechBlog, March 2013), is the canonical statement of "precompute what you can, serve what you must." Netflix has not published a per-stage P99 number for it.
 
-**LinkedIn feed ranking** uses dynamic batching on their GPU serving fleet. Incoming ranking requests are batched with a max_batch_size=64 and max_wait=2ms. This achieves 15x higher GPU throughput compared to individual inference, enabling 3x more expensive models without latency regression.
+**LinkedIn feed ranking** serves a billion-parameter-class sequential recommender under "a few hundred milliseconds latency and tens of thousands of QPS" (Hertel et al., *An Industrial-Scale Sequential Recommender for LinkedIn Feed Ranking*, arXiv:2602.12354, 2026). Two of their optimizations are worth copying. **Shared-context batching**: rather than one forward pass per candidate, all N candidates for a member (typically N = 512) are scored in a single pass, with a custom attention mask that lets candidate tokens attend to the shared history but not to each other — the paper reports an ~80x speedup on the transformer forward pass at ~500 candidates and history length 1000. **A custom Flash-Attention kernel** for that mask pattern gives a further ~2x over masked PyTorch SDPA. They also report that the biggest wins were not on the GPU at all: member-history parsing went 450ms -> 2ms and sparse-to-dense feature conversion 254ms -> 5ms per feature, on CPU.
 
-**Stripe fraud detection** uses a model cascade: a gradient-boosted tree scores every transaction in <5ms on CPU. Transactions with scores between 0.1 and 0.9 (uncertain) are routed to a graph neural network that includes cross-user signals. Only 18% of transactions reach the expensive model, reducing GPU cost by 5x while maintaining detection quality.
+**Stripe Radar** assesses "more than 1,000 characteristics of a potential transaction" and returns a decision "in less than 100 milliseconds", incorrectly blocking about 0.1% of legitimate payments (Stripe, *How we built it: Stripe Radar*). Stripe describes an architectural evolution from logistic regression to a Wide-and-Deep XGBoost-plus-DNN hybrid and then, in mid-2022, to a single DNN-only scoring model — notably **not** a confidence-routed cascade. It is a useful counterexample: when the entire budget is 100ms and the model already fits inside it, a cascade adds routing complexity without buying anything.
 
-**Uber ETA prediction** uses request batching combined with quantization. Their DNN model is quantized to INT8, reducing model size from 800MB to 200MB and improving throughput by 3.2x. They use Triton Inference Server with dynamic batching (max_batch=128, max_wait=10ms) for their fleet of T4 GPUs.
+**Uber DeepETA** is a case of designing the architecture around the serving budget rather than compressing after the fact. Uber states the model "must return an ETA within a few milliseconds at most", so DeepETA uses a *linear* transformer (with K = 40 features and d = 8, the paper contrasts K²d = 12,800 against Kd² = 2,560) and replaces geospatial computation with quantize-then-hash-lookup embeddings that are O(1). It has hundreds of millions of parameters, but "any one prediction touches only a tiny fraction of them, roughly 0.25%" (Uber Engineering, *DeepETA: How Uber Predicts Arrival Times Using Deep Learning*). It is served through Michelangelo, whose 2.0 online prediction service added NVIDIA Triton as a serving engine for latency-sensitive projects. Uber has not published quantization or batching parameters for it.
 
-**Spotify song recommendation** precomputes embedding similarity scores for all (user, song) pairs in a user's library nightly, storing them in a key-value store. At serving time, the "recommended songs" endpoint is a simple Redis lookup with sub-5ms P99, costing effectively nothing in inference compute.
+**Precomputation as the limit case**: where the candidate set per user is small and stable, the whole model can be run offline and the online endpoint reduced to a key-value lookup, which removes inference from the request path entirely. The cost moves to storage and to staleness — the served score is only as fresh as the last batch run, which is why a model deploy must trigger a recompute (see the precomputation pitfall in §10).
 
 ---
 
@@ -854,9 +871,14 @@ The 5-replica answer is a floor, never a plan: it leaves nothing for a rolling d
 |-----------|-----------|----------------|-------------|-----------------|
 | FP32 (baseline) | 1x | 1x | 0% | All |
 | FP16 | 0.5x | 1.5-2x | <0.1% | GPU with FP16 (V100+) |
-| INT8 | 0.25x | 2-4x | 0.5-1% | CPU AVX-512 or GPU Tensor Cores |
-| INT4 | 0.125x | 3-6x | 1-3% | Recent GPUs (A100, H100) |
+| INT8 | 0.25x | 2-4x | 0.5-1% | CPU AVX-512 VNNI / AMX, or NVIDIA Tensor Cores (Turing+) |
+| INT4 | 0.125x | Memory-bound wins only | 1-3% | INT4 tensor cores on Turing/Ampere only; Hopper and Blackwell dropped INT4 for FP8/FP4, so INT4 there is weight-only storage with dequant-to-FP16 math |
 | Binary (1-bit) | 0.03x | 10x+ | 5-20% | Specialized hardware |
+
+The INT4 row is the one people get wrong. Weight-only INT4 (GPTQ, AWQ) still helps on
+Hopper and Blackwell because it shrinks the weight bytes a memory-bound decode step has to
+read — but it is not an INT4 *math* speedup there, because those architectures have no
+INT4 tensor-core path. Do not budget an INT4 compute multiplier on an H100.
 
 ### Caching: Hit Rate vs Staleness
 
@@ -923,17 +945,17 @@ The 5-replica answer is a floor, never a plan: it leaves nothing for a rolling d
 
 | Category | Tool | Notes |
 |----------|------|-------|
-| Model Serving | Triton Inference Server | NVIDIA; supports ONNX, TF, PyTorch; dynamic batching built-in |
+| Model Serving | Dynamo-Triton (formerly Triton Inference Server; renamed March 2025) | NVIDIA; supports ONNX, TF, PyTorch; dynamic batching built-in |
 | Model Serving | TorchServe | PyTorch native; dynamic batching; model versioning |
 | Model Serving | TF Serving | TensorFlow native; batching; gRPC + REST |
 | Model Serving | BentoML | Framework-agnostic; Kubernetes-friendly |
 | Model Serving | Ray Serve | Python-first; distributed; handles preprocessing |
 | Model Optimization | ONNX | Cross-framework model export format |
 | Model Optimization | ONNX Runtime | 1.5-2x CPU speedup via graph optimization |
-| Model Optimization | TensorRT | NVIDIA; FP16/INT8; 2-8x GPU speedup |
+| Model Optimization | TensorRT | NVIDIA; FP16/INT8/FP8. TensorRT 11 removed implicit quantization (`IInt8Calibrator`, `--int8`/`--calib`) — quantize offline with NVIDIA ModelOpt, which inserts Q/DQ nodes, then build a strongly-typed engine |
 | Model Optimization | Intel Neural Compressor | INT8/INT4 quantization; CPU-focused |
 | ANN Search | FAISS | Meta; CPU + GPU; IVF, HNSW indexing |
-| ANN Search | ScaNN | Google; highest throughput for large datasets |
+| ANN Search | ScaNN | Google; competitive throughput at high recall on large datasets |
 | Caching | Redis | Online feature and prediction caching |
 | Caching | Memcached | Simpler than Redis; prediction-only caching |
 | Profiling | py-spy | Python profiling without code changes |
@@ -947,7 +969,7 @@ The 5-replica answer is a floor, never a plan: it leaves nothing for a rolling d
 ## 12. Interview Questions with Answers
 
 **Q: How do you decompose a P99 latency budget for an ML serving system?**
-Start by measuring the actual P99 end-to-end in production, then attribute it to each stage: network (client to server), API gateway overhead, feature fetch (Redis), model inference, post-processing, response serialization, and return network. Use distributed tracing (OpenTelemetry, Jaeger) or stage-level metrics to get per-stage P99. Allocate budget proportionally to each stage's flexibility — model inference is most flexible (optimization levers include quantization, distillation, cascade), feature fetch is moderately flexible (Redis batching, connection pooling), and network is mostly fixed. A typical budget for P99 = 100ms: network (20ms), feature fetch (15ms), model inference (40ms), post-processing (10ms), overhead (15ms).
+Measure the actual P99 end-to-end in production first, then attribute it stage by stage before allocating any budget. The stages to split it across are: network (client to server), API gateway overhead, feature fetch (Redis), model inference, post-processing, response serialization, and return network. Use distributed tracing (OpenTelemetry, Jaeger) or stage-level metrics to get per-stage P99. Allocate budget proportionally to each stage's flexibility — model inference is most flexible (optimization levers include quantization, distillation, cascade), feature fetch is moderately flexible (Redis batching, connection pooling), and network is mostly fixed. A typical budget for P99 = 100ms: network (20ms), feature fetch (15ms), model inference (40ms), post-processing (10ms), overhead (15ms).
 
 **Q: Why is P99 tail latency, not average latency, the metric that matters for ML serving?**
 P99 is what matters because one user request usually fans out into many parallel model calls, and the slowest of them determines the user-perceived latency. With 100 parallel calls, the request finishes at the max of 100 draws, so a 1-in-100 tail event becomes near-certain for every request — an effect the average completely hides. A system with a great mean (20ms) but a fat P99 (300ms) will feel slow to most users under fan-out. Always set SLAs and optimize against P99/P99.9, and provision capacity for the tail rather than the mean.
@@ -971,19 +993,19 @@ Compute the cost per million requests for each option, then factor in quality-dr
 Prediction caching stores model outputs in a fast key-value store (Redis) and serves cached results for repeated queries without running inference. Useful when the same entity appears frequently (high cache hit rate) and the prediction does not change rapidly. Risks: (1) staleness — cached predictions may reflect outdated feature values; mitigate with appropriate TTL matched to feature update frequency; (2) cache poisoning — if the cache key does not include a feature hash, changes in input features will serve stale predictions; mitigate by including a hash of key features in the cache key; (3) model version mismatch — cached predictions from the old model version may be served after a model update; mitigate by including the model version in the cache key. The hit rate determines whether caching is worthwhile; if < 20%, the overhead exceeds the benefit.
 
 **Q: How does ONNX export improve model serving performance?**
-ONNX (Open Neural Network Exchange) is a standardized model format that allows models trained in PyTorch, TensorFlow, or scikit-learn to be exported to a common format and then run using optimized inference engines like ONNX Runtime or TensorRT. ONNX Runtime applies graph-level optimizations: operator fusion (combining multiple operations into one kernel), constant folding (precomputing constant expressions), and hardware-specific kernel selection (using AVX-512 on x86 CPUs, CUDA kernels on GPUs). Typical speedups: 1.3-2x on CPU for most models, 2-5x for specific architectures. The key advantage is framework-independence — a model trained in PyTorch can be served via a C++-based ONNX Runtime without the Python overhead.
+ONNX is a standardized model format that lets a model trained in one framework run under an optimized inference engine such as ONNX Runtime or TensorRT. Models from PyTorch, TensorFlow, or scikit-learn all export to the same graph representation. ONNX Runtime applies graph-level optimizations: operator fusion (combining multiple operations into one kernel), constant folding (precomputing constant expressions), and hardware-specific kernel selection (using AVX-512 on x86 CPUs, CUDA kernels on GPUs). Typical speedups: 1.3-2x on CPU for most models, 2-5x for specific architectures. The key advantage is framework-independence — a model trained in PyTorch can be served via a C++-based ONNX Runtime without the Python overhead.
 
 **Q: How do you reduce feature fetch latency from a Redis-based feature store?**
-Several techniques: (1) pipeline multiple GET commands in a single Redis round-trip — instead of N serial GETs, send all N as a pipeline batch; reduces N-1 round-trip overheads; (2) connection pooling — maintain a pool of persistent connections to Redis; eliminates connection establishment cost per request (saves 5-20ms); (3) local cache (L1 cache) — keep the most frequently accessed features in an in-process dictionary with a short TTL (e.g., 5 seconds); eliminates Redis network overhead entirely for hot features; (4) data locality — collocate the serving server and Redis in the same availability zone or rack; reduces network RTT from 2ms to 0.2ms; (5) Hashing to the right shard — ensure entity keys are distributed evenly across Redis shards to avoid hot-shard overload.
+Collapse round-trips first, then remove them: pipelining, pooling, and a local cache attack the fetch in that order of payoff. In detail: (1) pipeline multiple GET commands into a single Redis round-trip — instead of N serial GETs, send all N as one pipeline batch, removing N-1 round-trip overheads, which is by far the largest single win; (2) connection pooling — maintain persistent connections so no request pays TCP (and, with TLS enabled, handshake) setup, worth roughly a millisecond per avoided handshake in-region and far more if connections are being re-established under load; (3) local cache (L1 cache) — keep the hottest features in an in-process dictionary with a short TTL (e.g., 5 seconds), which removes the network hop entirely for those keys; (4) data locality — collocate the serving process and Redis in the same availability zone, since a same-AZ round trip is a fraction of a millisecond while a cross-AZ one is typically sub-millisecond to low single-digit milliseconds, and a cross-region one is tens; (5) shard evenly — hash entity keys so load spreads across Redis shards rather than piling onto a hot shard.
 
 **Q: What is knowledge distillation and when is it appropriate for reducing serving cost?**
 Knowledge distillation trains a small "student" model to mimic the output distribution of a large "teacher" model, rather than training the student directly on hard labels. The student learns from the teacher's soft probabilities (logits), which contain more information than one-hot labels. Result: a 10x smaller student model often achieves 90-95% of the teacher's quality. Use distillation when: (1) serving cost of the teacher model is prohibitive for the required QPS; (2) INT8 quantization is insufficient (too much quality loss); (3) you have sufficient compute for a one-time distillation training run. Distillation is more expensive to implement than quantization but produces a genuinely smaller, faster model rather than a compressed version of the same architecture.
 
 **Q: How do you design a serving system that handles traffic spikes (10x normal QPS)?**
-Multiple layers: (1) horizontal autoscaling — model servers scale out based on CPU/GPU utilization or QPS; autoscaling lag is 60-120 seconds (K8s HPA); pre-provision capacity for known peaks (e.g., Black Friday); (2) prediction caching — cached predictions require no model inference; during traffic spikes, the cache hit rate effectively increases the system's capacity; (3) request queuing — a bounded queue in front of the model server absorbs burst; reject requests that exceed queue capacity with a 429 response (fail fast); (4) model cascade — route a higher fraction to the cheap Tier 1 model during traffic spikes by relaxing the confidence thresholds; reduces per-request compute cost; (5) circuit breaker — if model server latency exceeds 2x the SLA, fall back to a simpler model or a cached popular-items list.
+Layer four defences, because no single one absorbs a 10x spike: autoscaling, caching, queuing with load shedding, and cheap-model degradation. In detail: (1) horizontal autoscaling — model servers scale out on CPU/GPU utilization or QPS, but treat it as the slowest lever: the Kubernetes HPA control loop re-evaluates only every 15 seconds by default, scale-down is further damped by a 5-minute stabilization window, and the real lag is pod scheduling plus image pull plus model load on top of that — so pre-provision for known peaks (e.g., Black Friday) rather than trusting the autoscaler to catch them; (2) prediction caching — cached predictions require no model inference; during traffic spikes, the cache hit rate effectively increases the system's capacity; (3) request queuing — a bounded queue in front of the model server absorbs burst; reject requests that exceed queue capacity with a 429 response (fail fast); (4) model cascade — route a higher fraction to the cheap Tier 1 model during traffic spikes by relaxing the confidence thresholds; reduces per-request compute cost; (5) circuit breaker — if model server latency exceeds 2x the SLA, fall back to a simpler model or a cached popular-items list.
 
-**Q: What is speculative decoding and how does it improve LLM inference throughput?**
-Speculative decoding improves autoregressive LLM inference (which generates one token at a time) by using a smaller, faster draft model to generate several candidate tokens, then using the large target model to verify them in parallel. The target model accepts or rejects the draft tokens; accepted tokens are served without additional target model inference. This achieves the same output quality as the target model (because rejections revert to target model sampling) with 2-4x higher throughput, because each target model forward pass verifies multiple tokens instead of one. The draft model must share the vocabulary and produce plausible candidates — typically, a 7B parameter draft model is paired with a 70B target model. Speculative decoding only benefits throughput when the target model is the bottleneck; for batch sizes > 8, regular batching is more efficient.
+**Q: What is speculative decoding and how does it speed up LLM inference?**
+Speculative decoding uses a small draft model to propose several tokens at once, which the large target model then verifies in a single parallel forward pass. This turns a strictly sequential decode — one target forward pass per token — into one target pass per accepted *run* of tokens. The target model accepts or rejects each draft token, and a rejection falls back to sampling from the target, which is what makes the scheme distribution-preserving: the output is drawn from the same distribution as unaccelerated target decoding. Leviathan, Kalman and Matias (*Fast Inference from Transformers via Speculative Decoding*, arXiv:2211.17192) report 2x-3x acceleration on T5-XXL with identical outputs; treat that as a setup-specific figure, since the realized speedup is governed by the draft model's acceptance rate on your traffic. The draft model must share the target's vocabulary, and it must be cheap enough that a rejected draft is not wasted work. The win is a latency win at small batch: as batch size grows the target model becomes compute-bound anyway, and the speculative verification overhead can reduce total throughput rather than increase it.
 
 **Q: How do you profile a slow ML serving endpoint in production?**
 Step 1: add distributed tracing (OpenTelemetry spans) to every network call and model inference call; look at the trace waterfall to identify which stage contributes most to P99. Step 2: emit P50/P95/P99 latency histograms per stage to Prometheus; plot over time to identify regressions. Step 3: use py-spy (sampling profiler, no code changes required) to profile CPU time in the Python serving code; identify Python bottlenecks (JSON serialization, numpy operations, dictionary lookups). Step 4: for GPU bottlenecks, use NVIDIA Nsight or torch.profiler to identify kernel-level bottlenecks (memory bandwidth, compute-bound kernels). Step 5: correlate spikes with infrastructure metrics (Redis memory, CPU utilization, network bandwidth) to identify resource contention. Fix the highest-P99-contributing stage first; don't optimize based on P50.
@@ -1017,7 +1039,7 @@ Profile the entire request pipeline before optimizing any single component. Buil
 
 Set max_wait_ms for dynamic batching to no more than 20% of the total P99 budget. For a 100ms P99 budget, max_wait = 20ms. Test latency under the expected QPS profile, not just peak QPS.
 
-Apply INT8 quantization to all DNN models deployed on GPU. The quality loss is typically < 1% and the throughput improvement is 2-3x. Use quantization-aware training if post-training quantization causes unacceptable quality loss.
+Try INT8 quantization on any DNN served on hardware with INT8 tensor cores (NVIDIA Turing onward) — it is the cheapest large win available, commonly 2-3x throughput for under 1% quality loss. Confirm both numbers on your own model rather than assuming them, and use quantization-aware training if post-training quantization costs more quality than you can spend.
 
 Include the model version and a hash of key features in every prediction cache key. Never cache predictions with a key that does not include the model version — a model update will serve stale predictions until the cache expires.
 
@@ -1033,7 +1055,7 @@ Test the fallback path explicitly. A circuit breaker that falls back to a broken
 
 ### Reducing Inference Latency for a Real-Time Ad Ranking System
 
-**Problem**: an ad auction system must rank 200 candidate ads per user in < 15ms P99 to fit within the overall page load budget. The current DNN-based ranking model has P99 = 65ms, well over budget.
+**Problem**: an ad auction system must rank 200 candidate ads per user in < 15ms P99 to fit within the overall page load budget. The current DNN-based ranking model has P99 = 62ms, well over budget.
 
 **Profiling results** (distributed tracing over 1 week):
 - Feature fetch (Redis pipeline): 8ms P99 — within budget
@@ -1049,9 +1071,24 @@ Model was being reloaded from disk on every request. Fix: load model into GPU me
 Enable Triton batching: max_batch_size=64, max_wait=3ms. Serving 200 candidates per user means a single request is already a batch (200 forward passes). No benefit here — batching helps when single-request processing is underutilizing GPU. Instead: serve multiple concurrent users in the same GPU batch. At 1,000 QPS, 3ms window collects 3 requests * 200 candidates = 600 forward passes. GPU utilization increases from 15% to 55%. Throughput improvement allows smaller GPU fleet. Latency reduction: 38ms → 22ms P99 (GPU now fully utilized, no queuing). New P99: 34ms.
 
 **Optimization 3 — INT8 quantization (1 week)**:
-Apply TensorRT INT8 quantization with calibration dataset of 10,000 ad auctions. Quality loss: CTR AUC 0.832 → 0.829 (0.3% loss, within 0.5% tolerance). Throughput improvement: 2.8x. Inference latency: 22ms → 8ms P99. New P99: 20ms — within 15ms budget? Not yet.
+Quantize to INT8 with a calibration dataset of 10,000 ad auctions. On TensorRT 11 this is explicit quantization: run calibration offline with NVIDIA ModelOpt, which inserts Q/DQ nodes into the graph, then build a strongly-typed engine — the old implicit path (`IInt8Calibrator`, `trtexec --int8 --calib`) was removed in TensorRT 11. Quality loss: CTR AUC 0.832 → 0.829 (0.003 absolute, within the 0.005 tolerance). Throughput improvement: 2.8x. Inference latency: 22ms → 8ms P99. New P99: 20ms — still over the 15ms budget.
 
 **Optimization 4 — Prediction caching for repeated ad-user pairs (3 days)**:
-Analysis shows 35% of ad-user pairs appear multiple times within 60 seconds (same user browsing multiple pages). Cache predictions with 60-second TTL, using cache key = SHA256(user_id + ad_id + model_version). Cache hit rate: 32%. Effective QPS reduction: 32%. Inference latency at reduced load: 8ms → 6ms P99. New P99 (including cache-served requests): 0.32 * 1ms + 0.68 * (8ms feature + 6ms inference + 4ms post) = 12.6ms P99.
+Analysis shows 35% of ad-user pairs appear multiple times within 60 seconds (same user browsing multiple pages). Cache predictions with 60-second TTL, using cache key = SHA256(user_id + ad_id + model_version). Cache hit rate: 32%. Effective QPS reduction: 32%, and inference latency at the reduced load improves 8ms → 6ms P99.
 
-**Final result**: P99 reduced from 65ms to 12.6ms (80% reduction). Cost reduced by 45% (smaller GPU fleet from quantization + batching efficiency + caching). CTR AUC loss: 0.3% (within tolerance). Total engineering time: 3 weeks.
+**Read that last number carefully, because it is the trap.** The tempting summary is a
+blended figure: `0.32 * 1ms + 0.68 * (8ms feature + 6ms inference + 4ms post) = 12.6ms`.
+That is a **mean**, not a P99, and the two are not interchangeable. With a 32% hit rate,
+68% of requests still take the full 18ms miss path — so the 99th percentile is set entirely
+by the miss path and lands at ~18ms. Caching moved the mean a long way and the tail hardly
+at all. A percentile can never be averaged across a mixture; you can only average the
+latencies themselves.
+
+**Final result**: mean latency 12.6ms, P99 ~18ms — down from 62ms P99, a 71% reduction, but
+still short of the 15ms P99 target. Closing the last 3ms means attacking the *miss* path
+(the 8ms feature fetch is now the largest term, larger than inference), not raising the hit
+rate further. Cost fell materially from the smaller GPU fleet that quantization, batching,
+and a 32% QPS reduction allow. CTR AUC loss: 0.003 absolute (within tolerance). Total
+engineering time: 3 weeks. The lesson worth keeping: three of the four optimizations moved
+the tail, and the fourth — the one with the most impressive-looking headline number — moved
+only the mean.

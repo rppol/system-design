@@ -91,13 +91,13 @@ GPU inference (15ms) plus the three 5ms stages dominate; the components sum to 3
 
 ## Key Design Decisions
 
-**EfficientNet-B3 over ResNet-50**: EfficientNet-B3 achieves 82.8% ImageNet top-1 accuracy vs ResNet-50's 76.0%, with fewer parameters (12M vs 25M) and lower inference latency (25ms vs 30ms on CPU). The compound scaling (jointly scale depth, width, resolution) makes it more efficient for fine-grained classification like product categories.
+**EfficientNet-B3 over ResNet-50**: with torchvision's `IMAGENET1K_V1` weights, EfficientNet-B3 reports **82.008% ImageNet top-1 / 96.054% top-5** against ResNet-50's **76.130% top-1**, at 12.2M parameters vs 25.6M. The compound scaling (jointly scale depth, width, resolution) makes it more efficient for fine-grained classification like product categories. **Two caveats that bite in practice.** (1) That 82.0% is measured with the weights' own preset transform — resize 320, centre-crop **300** — not the 224 crop used elsewhere in this pipeline; running B3 at 224 gives up accuracy, so either adopt the 300px preset or re-measure your own baseline rather than inheriting the published number. (2) Fewer parameters and fewer FLOPs do **not** automatically mean lower wall-clock latency: EfficientNet's depthwise-separable convolutions are memory-bandwidth bound and frequently benchmark *slower* than ResNet-50 on the same hardware. Measure latency on your target device; do not infer it from the parameter count.
 
 **Two-phase fine-tuning**: In phase 1, only the classifier head trains (backbone frozen). This prevents catastrophic forgetting of ImageNet features and establishes a good initialization for the head in 5 epochs. Phase 2 unfreezes all layers with a much lower LR (1e-5) to gently adapt the backbone. Skipping phase 1 leads to 2-3% accuracy drop.
 
 **Dynamic batching in TorchServe**: At 100K QPS with 20 GPU nodes, each node sees 5K RPS. Without batching, GPU utilization is <10% (each inference uses only a fraction of GPU compute). Dynamic batching accumulates requests for up to 5ms and processes them together (batch 64). GPU utilization rises from 10% to 80%, reducing cost 4x. The 5ms batching delay is acceptable within the 50ms budget.
 
-**MD5 hash caching**: Identical product images are re-submitted frequently (catalog exports, seller re-uploads). MD5 hash of the raw image bytes as cache key catches exact duplicates. Redis with 7-day TTL, ~40% cache hit rate measured in production — reduces GPU load by 40%.
+**MD5 hash caching**: Identical product images are re-submitted frequently (catalog exports, seller re-uploads). A content hash of the raw image bytes as cache key catches exact duplicates. Redis with 7-day TTL, and a ~40% hit rate assumed throughout this study — reduces GPU load by 40%. (Prefer SHA-256 over MD5 for the key; MD5 collisions are constructible by an attacker who controls the uploaded bytes. See the cache-key question in Additional Interview Questions.)
 
 **ONNX export for cross-platform serving**: PyTorch model is exported to ONNX once and served via TensorRT (NVIDIA GPUs, peak throughput), ONNX Runtime (CPU fallback, new region without GPU budget), and CoreML (edge devices via conversion). Single training produces artifacts for all platforms.
 
@@ -283,9 +283,11 @@ def two_phase_finetune(
         {"params": model.features.parameters(), "lr": 1e-5},
         {"params": model.classifier.parameters(), "lr": 1e-4},
     ])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_p2, T_max=20 * len(train_loader)
-    )
+    # T_max counts SCHEDULER STEPS, not samples. scheduler.step() is called once
+    # per epoch below, so T_max must be the epoch count (20). Setting it to
+    # 20 * len(train_loader) makes the cosine complete ~len(train_loader)x too
+    # slowly: the LR barely moves across the whole run and the schedule is inert.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_p2, T_max=20)
 
     print("Phase 2: full fine-tuning (20 epochs)")
     best_val_acc = 0.0
@@ -326,6 +328,7 @@ import torch.nn as nn
 import onnx
 import onnxruntime as ort
 import numpy as np
+import time
 
 
 def export_to_onnx(
@@ -537,7 +540,7 @@ class ImageDriftDetector:
 ## Interview Discussion Points
 
 **Q: How do you handle the 100K QPS requirement with <50ms P99?**
-Three mechanisms work together: (1) Redis caching with MD5 key deduplicates ~40% of requests, reducing effective QPS to 60K. (2) Dynamic batching in TorchServe accumulates requests for 5ms and processes as a batch of 64, increasing GPU utilization from 10% to 80%. With 20 GPU nodes each handling 3K effective QPS, total capacity is 60K QPS with headroom. (3) Horizontal auto-scaling (K8s HPA on GPU utilization metric): scale from 20 to 40 nodes in 3 minutes if load spikes. The 50ms budget breaks down as: network 5ms + preprocessing 5ms + Redis lookup 1ms + batching wait 5ms + GPU inference 15ms + response serialization 2ms = 33ms P50, with 17ms tail latency headroom.
+Three mechanisms work together: (1) Redis caching with MD5 key deduplicates ~40% of requests, reducing effective QPS to 60K. (2) Dynamic batching in TorchServe accumulates requests for 5ms and processes as a batch of 64, increasing GPU utilization from 10% to 80%. With 20 GPU nodes carrying 3K effective QPS each, the fleet absorbs the 60K post-cache load at roughly 37% of its assumed per-node ceiling. (3) Horizontal auto-scaling (K8s HPA on GPU utilization metric): scale from 20 to 40 nodes in 3 minutes if load spikes. The 50ms budget breaks down as: network 5ms + preprocessing 5ms + Redis lookup 1ms + batching wait 5ms + GPU inference 15ms + response serialization 2ms = 33ms P50, with 17ms tail latency headroom.
 
 **Q: How do you detect and respond to model drift in production?**
 Two-tier monitoring: (1) Pixel-level drift — track per-channel mean/std of incoming images hourly. KS test against the baseline distribution (collected during model launch). PSI > 0.2 or p < 0.05 triggers a Slack alert and automatic shadow deployment of a candidate retrained model. (2) Quality drift — 100 images/day are sampled and human-labeled by QA. If rolling 7-day accuracy drops below 92%, trigger emergency retraining. Confidence distribution monitoring provides an early warning signal: if the fraction of predictions with confidence <0.5 doubles, this indicates OOD (out-of-distribution) inputs before ground truth labels are even available.
@@ -549,6 +552,8 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 
 ## Failure Scenarios and Recovery
 
+*The three incidents below are illustrative composites of recurring failure patterns, not accounts of specific public incidents. The mechanisms and remediations are real; the QPS spikes, accuracy deltas and time-to-detect figures are representative and should not be quoted as measured public record.*
+
 ### Failure 1: TorchServe OOM Under Burst Traffic
 
 **What failed:** A major promotional event drove 250K QPS (2.5x the designed 100K QPS) over a 20-minute window. K8s HPA was configured to scale on CPU utilization, but GPU nodes take 6-8 minutes to provision and warm up (download model artifact from S3, initialize TorchServe workers). During the scale-out window, existing 20 GPU nodes became memory-saturated — dynamic batching accumulated requests faster than GPU could process them. TorchServe batch queue hit maximum (10K pending requests), triggering request rejection (HTTP 503). 35% of classification requests returned errors for 12 minutes.
@@ -556,7 +561,7 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 **Detection:** HTTP 503 rate alert fired at 2% error rate (threshold). GPU memory utilization alerts were already firing at 95% for 8 minutes before the scale-out completed. Time-to-detect: 2 minutes (HTTP error alert).
 
 **Recovery steps:**
-1. Increased K8s HPA max replicas from 20 to 40 nodes, and lowered scale-up threshold from 70% GPU utilization to 50%.
+1. Repointed the HPA metric from CPU utilization to GPU utilization (CPU is a poor proxy on an inference node — the GPU saturates while CPU looks idle), raised max replicas from 20 to 40, and set the scale-up threshold at 50% GPU utilization.
 2. Added predictive scaling: integration with promotions calendar API — when a promotion starts, pre-scale to 30 nodes 15 minutes beforehand.
 3. Increased Redis cache TTL from 7 days to 14 days during promotional windows to increase cache hit rate from 40% to 55%, reducing effective QPS by an additional 15%.
 4. Added request shedding in API gateway: if TorchServe queue > 5K, return cached predictions from lower-confidence fallback (Redis nearest-neighbor lookup) rather than HTTP 503.
@@ -567,7 +572,9 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 
 ### Failure 2: Model Export Produces Different Predictions Than PyTorch Original
 
-**What failed:** After exporting EfficientNet-B3 to ONNX (opset 17), a systematic accuracy regression was discovered: top-1 accuracy on the validation set dropped from 95.2% to 93.8% (1.4 percentage points). Investigation found the issue in the BatchNorm layers: ONNX export with `do_constant_folding=True` fused BatchNorm statistics into the preceding Conv2D weights. However, the export captured training-mode statistics (with per-batch mean/std) rather than eval-mode running statistics. The model was exported without calling `model.eval()` first.
+**What failed:** After exporting EfficientNet-B3 to ONNX (opset 17), a systematic accuracy regression was discovered: top-1 accuracy on the validation set dropped from 95.2% to 93.8% (1.4 percentage points). Root cause: the model was still in training mode when `torch.onnx.export` was called, so BatchNorm exported with per-batch statistics rather than the eval-mode running statistics, and dropout was baked in live. `do_constant_folding=True` then fused those wrong BatchNorm constants into the preceding Conv2D weights, making the damage invisible in the graph.
+
+**Why the version matters here.** The legacy TorchScript exporter took a `training` argument that defaulted to `TrainingMode.EVAL` and forced eval mode for you, so this bug could not fire with default arguments. That argument is now **deprecated** — the docs say to "set the training mode of the model before exporting" — and since **PyTorch 2.9 `dynamo=True` is the export default**, which traces the module in whatever mode it is actually in. The safety net was removed; calling `model.eval()` yourself is now load-bearing.
 
 **Detection:** Post-export validation script compared ONNX output vs PyTorch output on 1,000 validation images. Mean absolute error between logits was 0.23 (should be < 0.001 for exact match). Time-to-detect: 30 minutes (post-export validation caught it before deployment).
 
@@ -582,7 +589,7 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 
 ### Failure 3: Data Augmentation Causing Training-Production Mismatch
 
-**What failed:** Training augmentation included `RandomHorizontalFlip()` with p=0.5. For 45 product categories (apparel, shoes, watches), the orientation carries meaning: a left-hand watch is a different product class from a right-hand watch. The model learned that left-oriented vs right-oriented products have equal probability of any label, degrading accuracy on watch/jewelry categories from 97% to 82%. Production sellers complained that their premium watches were being miscategorized.
+**What failed:** Training augmentation included `RandomHorizontalFlip()` with p=0.5. For 45 product categories the image is not left-right symmetric and the asymmetry is the discriminating signal: left- vs right-footed shoe listings, mirrored brand wordmarks and dial text on watches, and clothing whose button/zip side differs by category. Flipping teaches the model that a mirrored logo or a mirrored dial is the same image, destroying exactly the cue those categories depend on. Accuracy on watch/jewelry categories fell from 97% to 82%. Production sellers complained that their premium watches were being miscategorized.
 
 **Detection:** Per-category accuracy monitoring showed watch category accuracy drop 15 percentage points in the weekly accuracy report. QA team's 100-image daily sample caught 8 watch miscategorizations in one day. Time-to-detect: 3 weeks after the augmentation was added.
 
@@ -604,15 +611,19 @@ Year 0 (current):
   Daily upload: 1M images × ~500KB average = 500GB/day to S3
   Preprocessed (224×224 JPG, 40KB avg): 1M × 40KB = 40GB/day
   Annotation labels (PostgreSQL): 1M × 200 bytes = 200MB/day
-  Training dataset (10M historical + 1M/day): grows to 11M images/year
+  Training dataset: 10M LABELED images. Note the trap — uploads are 1M/day
+    (365M/year) but only the ~1% that carry a confirmed human/seller category
+    label enter training, so the training set grows ~3.7M/year, not 365M/year
   S3 storage (raw, 2yr retention): 500GB × 730 = 365TB
   S3 storage (preprocessed, 1yr): 40GB × 365 = 14.6TB
-  ONNX model artifact: 47MB (EfficientNet-B3 quantized), negligible
+  ONNX model artifact: ~47MB at FP32 (12.2M params × 4 bytes); INT8 TensorRT
+    engine is ~4x smaller. Either way, negligible
 
 Year 1 (30% upload growth):
   1.3M images/day, 650GB/day raw, 52GB/day preprocessed
-  Training dataset: 14.8M images
-  Weekly retraining time: 28 hours on 8× A100 (vs 25 hours today)
+  Labeled intake: 1.3M/day × 365 × 1% = 4.7M → training dataset ~14.8M images
+  Weekly retraining time: ~8 hours on 8× A100 (5.5 hours today, scaled by the
+    1.48x larger dataset)
 
 Year 3 (3x growth):
   3M images/day, 1.5TB/day raw
@@ -630,20 +641,22 @@ Weekly Full Retrain:
   Phase 1 (frozen backbone): 5 epochs × ~4min/epoch = 20 minutes
   Phase 2 (full model): 20 epochs × ~15min/epoch = 5 hours
   Total: ~5.5 hours per weekly retrain
-  Cost: p4d.24xlarge ($32.77/hr) × 5.5hr = $180/run = $720/month
+  Cost: p4d.24xlarge ($21.96/hr on-demand, us-east-1) × 5.5hr = $121/run
+        = ~$483/month (4 retrains)
 
-Nightly Fine-Tune (incremental, 1M new images):
-  1 epoch fine-tune on new images + 500K replayed historical
-  Hardware: 4× A100 (p4d.24xlarge)
+Nightly Fine-Tune (incremental, ~10K newly labeled images):
+  1 epoch fine-tune on new labeled images + 500K replayed historical
+  Hardware: p4d.24xlarge (8× A100 — the instance is not divisible, so you pay
+    for all 8 even when the job only saturates 4)
   Duration: 45 minutes
-  Cost: $32.77/hr × 0.75hr = $24.58/run × 30 = $737/month
+  Cost: $21.96/hr × 0.75hr = $16.47/run × 30 = ~$494/month
 
 ONNX Export + TensorRT Calibration (after each retrain):
   INT8 calibration requires 1,000 calibration images
   TensorRT build: 30 minutes on 1 GPU
   Cost: negligible
 
-Total monthly training cost: ~$1,457
+Total monthly training cost: ~$977
 ```
 
 ### Serving Infrastructure
@@ -651,8 +664,13 @@ Total monthly training cost: ~$1,457
 ```
 TorchServe GPU Cluster (100K QPS, <50ms P99):
   Effective QPS after 40% cache hit: 60K QPS
-  Each GPU (A10G): 8,000 images/sec with batch_size=64
-  Nodes needed: 60K / 8K = 7.5 → 20 nodes (with 2.5x headroom)
+  Each GPU (A10G): ASSUME 8,000 images/sec at batch_size=64 with a TensorRT
+    INT8 engine. This is a planning assumption, not a published benchmark —
+    EfficientNet's depthwise convolutions are bandwidth-bound and real
+    throughput varies several-fold with resolution, batch size and TensorRT
+    version. Benchmark your own engine before committing to a node count;
+    every number below is linear in this figure.
+  Nodes needed: 60K / 8K = 7.5 → 20 nodes (2.7x headroom)
   K8s HPA: scale from 20 to 40 nodes (max) on GPU utilization > 50%
   Cost: 20× g5.xlarge (A10G) at $1.006/hr = ~$14,500/month (peak)
   Avg utilization ~60%: effective ~$8,700/month
@@ -671,9 +689,11 @@ FastAPI API Gateway:
 Ray Preprocessing Cluster:
   500 workers for image validation + resize
   20× c5.4xlarge (16 vCPU): 25 workers/node
-  Cost: 20 × $0.68/hr = ~$4,900/month
+  Cost: 20 × $0.68/hr = $13.60/hr = ~$9,900/month
+    (this is the item most worth autoscaling — 1M uploads/day does not need
+     500 workers resident 24/7; scaling to the upload diurnal roughly halves it)
 
-Total monthly serving infrastructure: ~$14,915
+Total monthly serving infrastructure: ~$19,900
 ```
 
 ---
@@ -683,9 +703,12 @@ Total monthly serving infrastructure: ~$14,915
 **War Story 1 — Mixed Precision NaN Explosion With FP16:**
 
 ```python
-# BROKEN: Using FP16 (float16) with BF16-only A100s without loss scaling
-# FP16 has max value 65504; gradients > 65504 become inf/nan
-# EfficientNet early training has large gradient norms
+# BROKEN: FP16 autocast without a GradScaler.
+# (A100 supports FP16 tensor cores perfectly well — it is NOT "BF16-only".
+#  The bug is the missing loss scaling, not the hardware.)
+# FP16 max representable value is 65504; gradients above it saturate to inf,
+# and small gradients underflow to 0. BF16 has FP32's exponent range, so it
+# tolerates both without scaling — which is why it is the easier default.
 
 import torch
 import torch.nn as nn
@@ -769,6 +792,7 @@ def train_epoch_correct_bf16(
 
 # Additionally: add a health-check to verify actual P99 after config change
 
+import asyncio
 import time
 import statistics
 import httpx
@@ -895,7 +919,7 @@ Statistical threshold: 95% confidence on seller correction rate (primary)
 ## Additional Interview Questions
 
 **Q: How does TensorRT INT8 quantization differ from FP16, and when should you use each?**
-FP16 (half-precision) reduces the bit-width of weights and activations from 32 to 16 bits, preserving floating-point representation with reduced precision. It requires no calibration and typically achieves accuracy within 0.1% of FP32 while providing 2x memory reduction and 1.5-2x speedup. INT8 quantization maps weights and activations to 8-bit integers, requiring a calibration step: pass 1,000+ representative images through the model and record the distribution of activations. TensorRT clips activations to an INT8-representable range calibrated to this distribution. INT8 provides 4x memory reduction vs FP32 and 2-3x speedup vs FP16, but accuracy can drop 0.5-2% if calibration data is unrepresentative. Use FP16 when accuracy loss is unacceptable and memory is sufficient; use INT8 when serving budget is constrained and calibration data is reliable.
+FP16 (half-precision) reduces the bit-width of weights and activations from 32 to 16 bits, preserving floating-point representation with reduced precision. It requires no calibration and typically achieves accuracy within 0.1% of FP32 while providing 2x memory reduction and 1.5-2x speedup. INT8 quantization maps weights and activations to 8-bit integers, requiring a calibration step: pass 1,000+ representative images through the model and record the distribution of activations. TensorRT clips activations to an INT8-representable range calibrated to this distribution. INT8 provides 4x memory reduction vs FP32; on NVIDIA tensor cores the INT8 peak is 2x the FP16 peak (on an A10G, 250 TOPS vs 125 TFLOPS), so ~2x is the ceiling and real-world gains are usually less because bandwidth-bound layers do not scale with arithmetic throughput. Accuracy can drop 0.5-2% if calibration data is unrepresentative. Use FP16 when accuracy loss is unacceptable and memory is sufficient; use INT8 when serving budget is constrained and calibration data is reliable.
 
 **Q: How would you design the pipeline to support multi-label classification (a product image can belong to multiple categories)?**
 Replace the single-class CrossEntropyLoss with BCEWithLogitsLoss (binary cross-entropy applied independently to each class). The model output layer changes from softmax (probability over mutually exclusive classes) to sigmoid applied to each class logit (independent probability per class). At inference, a threshold (typically 0.5) is applied per class, and all classes above the threshold are returned. Training data construction changes: instead of a single category label, each image has a binary vector of length 1,000 indicating which categories apply. Evaluation metrics change from top-1/top-5 accuracy to per-class precision/recall, mean average precision (mAP), and F1 per category. The key challenge is negative label noise: if an image is labeled "Men's Jeans," the model should not be penalized for predicting "Denim" even if that label was not provided.
@@ -904,7 +928,7 @@ Replace the single-class CrossEntropyLoss with BCEWithLogitsLoss (binary cross-e
 A product catalog typically has a power-law distribution: top 50 categories (electronics, apparel basics) have millions of examples; bottom 500 have hundreds. Three approaches: (1) Weighted sampling: during training, sample each category at a rate proportional to sqrt(category_count) rather than linearly — this gives rare categories proportionally more representation without completely ignoring popular ones. (2) Class-weighted loss: apply inverse-frequency weights to the CrossEntropyLoss. For a category with 100 images vs 100,000 images, the loss weight is 1000x higher. (3) Few-shot head for rare categories: categories with fewer than 100 examples use prototypical network (mean embedding) rather than a trained classifier head, and their head graduates to a trained head once 500 examples are accumulated. Evaluation must use per-category macro-averaged accuracy, not overall accuracy, to detect degradation in rare categories.
 
 **Q: What are the risks of using the MD5 hash of raw image bytes as a cache key?**
-MD5 collisions are theoretically possible (two different images producing the same MD5 hash), but with 128-bit output, the probability is vanishingly small for practical purposes (birthday bound: need ~2^64 images to expect a collision). More realistic risks: (1) Re-uploaded images with different metadata but same content — MD5 is correct to return the cached result since the image content is identical. (2) Pixel-identical images with different EXIF metadata — raw bytes differ, MD5 differs, cache miss even though visual content is the same. To catch near-duplicates, replace or supplement MD5 with a perceptual hash (pHash, average hash): compute DCT of the image and compare binary hash. pHash catches resized, JPEG-recompressed, and EXIF-stripped duplicates that MD5 misses. Production: use MD5 as L1 cache (exact duplicate, 40% hit rate) and pHash as L2 cache (near-duplicate, additional 15% hit rate), combining for 55% effective cache hit rate.
+The serious risk is that MD5 is broken, not that it is short. The birthday bound of ~2^64 only applies to *accidental* collisions; MD5's collision resistance has been defeated since 2004, and chosen-prefix collisions have been practical since 2019 at roughly 2^39 work. On a platform where any seller can upload arbitrary bytes, an attacker can deliberately craft two different images sharing an MD5 and poison the cache, so the second image is served the first one's category. Use SHA-256 for any content-addressed key on attacker-supplied data — it is not the bottleneck at 100K QPS. Beyond that, the benign risks: (1) Re-uploaded images with different metadata but same content — MD5 is correct to return the cached result since the image content is identical. (2) Pixel-identical images with different EXIF metadata — raw bytes differ, MD5 differs, cache miss even though visual content is the same. To catch near-duplicates, replace or supplement MD5 with a perceptual hash (pHash, average hash): compute DCT of the image and compare binary hash. pHash catches resized, JPEG-recompressed, and EXIF-stripped duplicates that MD5 misses. Production: use MD5 as L1 cache (exact duplicate, 40% hit rate) and pHash as L2 cache (near-duplicate, additional 15% hit rate), combining for 55% effective cache hit rate.
 
 **Q: How do you ensure reproducibility of model training across weekly retrains?**
 Reproducibility means: given the same training data and hyperparameters, training produces a model with accuracy within 0.1% of the previous run. Challenges: (1) GPU non-determinism — CUDA operations like atomicAdd in parallel reduce are non-deterministic by default. Enable `torch.use_deterministic_algorithms(True)` and set `CUBLAS_WORKSPACE_CONFIG=:4096:8` environment variable. (2) Data loader ordering — pin random seed for DataLoader worker processes (`worker_init_fn` that seeds each worker with a fixed seed derived from epoch number). (3) Data versioning — use DVC to version the exact training dataset; the training run records the DVC commit hash. (4) Framework version pinning — Docker image pins exact versions of PyTorch, CUDA, cuDNN, torchvision; any update requires explicit approval and a regression test. (5) Checkpoint-based reproducibility: save full training state (model, optimizer, scheduler, epoch, random state) every 5 epochs; resume from checkpoint is deterministic.

@@ -38,24 +38,24 @@ Why this system exists: Marketing teams allocate budgets across channels (paid s
 **Traffic volume:**
 - 5M daily active users (DAU); 2% daily conversion rate = 100k conversions/day.
 - Average path length: 4.3 touchpoints per converter; 12% of paths have > 10 touchpoints.
-- Non-converting paths: 10× converters = 1M users per day with touchpoints but no conversion.
-- Daily event volume: (5M + 1M) × 4.3 ≈ 26M touch events/day.
+- Non-converting paths with touchpoints: 10× converters = 1M users per day (a subset of the 5M DAU, not additional to it).
+- Daily event volume: all 5M DAU emit trackable events at ~4.3 events each ≈ 21.5M touch events/day; only the 1.1M users with marketing touchpoints (100k converters + 1M non-converters) become attribution paths.
 
 **Storage:**
 - Touch event: user_id, timestamp, channel, campaign, creative, session_id, device, cost = ~200 bytes.
-- 26M events/day × 200 bytes = 5.2 GB/day → 1.9 TB/year.
-- 13-month retention: ~2 TB (compressed Parquet in S3 ~600 GB).
+- 21.5M events/day × 200 bytes = 4.3 GB/day → 1.57 TB/year.
+- 13-month retention: ~1.7 TB (compressed Parquet in S3 ~510 GB).
 
 **Computation:**
 - Markov chain transition matrix: O(C²) where C = distinct channel states. With 50 channels: 2,500 transitions; instantaneous.
-- Shapley values: exponential in number of channels (2^50 is infeasible). Use truncated Monte Carlo approximation: 1,000 permutation samples × 100k conversion paths = 100M operations/day; ~10 minutes on 4 cores.
+- Shapley values: exponential in number of channels (2^50 is infeasible). Use truncated Monte Carlo approximation: 1,000 permutations × 50 channels × 1.1M paths ≈ 55B characteristic-function operations/day; ~45 minutes on 4 cores (see §10).
 - Daily batch: process 1.1M paths (100k converters + 1M non-converters for path completion probability) in 25 minutes on Spark (10 executors).
 
-**Infrastructure cost:**
-- Spark cluster (10 × m5.xlarge, 2 hr/day): $5/day = $150/month.
-- S3 storage: $14/month.
-- Attribution API (2 × t3.medium for BI tool queries): $30/month.
-- Total: ~$194/month.
+**Infrastructure cost** (us-east-1 on-demand, 730 hr/month):
+- Spark cluster (10 × m5.xlarge at $0.192/hr + $0.048/hr EMR uplift, 2 hr/day): $4.80/day ≈ $145/month.
+- S3 storage (510 GB at $0.023/GB-month): $12/month.
+- Attribution API (2 × t3.medium at $0.0416/hr for BI tool queries): $61/month.
+- Total: ~$218/month.
 
 ---
 
@@ -158,7 +158,7 @@ def build_conversion_paths(
 
         # Deduplicate: same channel within 1-hour window → keep first
         path_events = path_events.copy()
-        path_events["hour_bucket"] = path_events["timestamp"].dt.floor("1H")
+        path_events["hour_bucket"] = path_events["timestamp"].dt.floor("1h")
         path_events = path_events.drop_duplicates(subset=["channel", "hour_bucket"])
 
         touches = [
@@ -343,6 +343,7 @@ def _compute_conversion_rate(
 ```python
 # WRONG: exponential in number of channels — 2^50 subsets is computationally infeasible
 from itertools import combinations
+from math import factorial
 
 def shapley_exact(channels, conversion_fn):
     n = len(channels)
@@ -351,9 +352,11 @@ def shapley_exact(channels, conversion_fn):
         others = [c for c in channels if c != channel]
         value = 0.0
         for k in range(len(others) + 1):
+            # Correct Shapley coefficient for a coalition S of size k:
+            #   |S|! (n - |S| - 1)! / n!
+            weight = factorial(k) * factorial(n - k - 1) / factorial(n)
             for subset in combinations(others, k):  # BUG: 2^50 iterations for 50 channels
                 marginal = conversion_fn(set(subset) | {channel}) - conversion_fn(set(subset))
-                weight = 1.0 / (n * len(others) + 1)
                 value += weight * marginal
         shapley[channel] = value
     return shapley  # never returns for > 20 channels
@@ -419,6 +422,7 @@ Attribution models are inherently observational. The ground truth requires a geo
 
 ```python
 from scipy.stats import ttest_ind
+import numpy as np
 import pandas as pd
 
 def run_geo_holdout_validation(
@@ -441,8 +445,10 @@ def run_geo_holdout_validation(
     pre_control = _get_conversion_rate(control_geos, days=-pre_period_days)
     post_control = _get_conversion_rate(control_geos, days=test_period_days)
 
-    # Difference-in-differences estimate
-    did = (post_holdout - pre_holdout) - (post_control - pre_control)
+    # Difference-in-differences estimate (per-geo arrays → scalar effect)
+    did = float(
+        np.mean(post_holdout - pre_holdout) - np.mean(post_control - pre_control)
+    )
 
     # Statistical significance
     _, p_value = ttest_ind(post_holdout, post_control)
@@ -450,14 +456,15 @@ def run_geo_holdout_validation(
     return {
         "channel": channel_to_test,
         "true_incrementality": did,
-        "p_value": p_value,
+        "p_value": float(p_value),
         "confidence": "high" if p_value < 0.05 else "low",
     }
 
 
-def _get_conversion_rate(geos: list[str], days: int) -> list[float]:
-    # Placeholder: in practice, query the analytics database
-    return [0.02 + 0.001 * hash(g) % 10 for g in geos]
+def _get_conversion_rate(geos: list[str], days: int) -> np.ndarray:
+    # Placeholder: in practice, query the analytics database.
+    # Must return an array (not a list) so the DiD subtraction is element-wise.
+    return np.array([0.02 + 0.001 * (hash(g) % 10) for g in geos])
 ```
 
 ---
@@ -466,13 +473,17 @@ def _get_conversion_rate(geos: list[str], days: int) -> list[float]:
 
 **Decision 1: Markov chain vs Shapley vs data-driven regression**
 
+Accuracy-vs-holdout figures below are illustrative of the ordering seen in practice, not published
+benchmarks — the gap depends entirely on your channel mix and holdout design, so measure it on your
+own geo tests before quoting a number to stakeholders.
+
 | Model | Accuracy vs geo holdout | Interpretability | Compute cost | Channel interaction handling |
 |-------|------------------------|-----------------|-------------|------------------------------|
 | Last-touch | Poor (overattributes bottom-funnel) | High | Negligible | None |
 | Linear | Poor (equal credit is rarely correct) | High | Negligible | None |
-| Markov chain | Good (within 8% of holdout on average) | Medium | Low (minutes) | Partial (transition probabilities) |
-| Shapley (Monte Carlo) | Good (within 6% of holdout) | Low | Medium (hours for >30M paths) | Full (any coalition interaction) |
-| LSTM conversion prediction | Best (5% error) | Very low | High | Full |
+| Markov chain | Good (typically within ~10% of holdout) | Medium | Low (minutes) | Partial (transition probabilities) |
+| Shapley (Monte Carlo) | Good (usually slightly closer than Markov) | Low | Medium (hours for >30M paths) | Full (any coalition interaction) |
+| LSTM conversion prediction | Best on paper | Very low | High | Full |
 
 Use Markov chain as the primary production model (fast, stable, reasonably accurate). Use Shapley for quarterly strategic allocation decisions where computation budget is available. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
 
@@ -500,15 +511,15 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 
 ## 6. Real-World Implementations
 
-**Google (Data-Driven Attribution / DDA):** Google's DDA product uses a proprietary Shapley-style algorithm on conversion paths within Google's ad ecosystem. Key engineering decision: because Google observes clicks and conversions server-side (no cross-publisher coordination needed), their model has high-quality path data. Limitation: it only attributes credit within Google channels — external channels (Meta, email) are invisible to Google's model, causing Google to systematically overvalue its own channels.
+**Google (Data-Driven Attribution / DDA):** Google documents DDA as "an algorithm based on a concept from cooperative game theory called the Shapley Value," fitted on path data from both converting and non-converting users. Key engineering advantage: because Google observes clicks and conversions inside its own ad ecosystem, its path data is unusually complete. Limitation: it only attributes credit within Google-observable channels — external channels (Meta, email) are invisible to the model, so Google's view systematically overvalues Google's own channels. See [Google Analytics Help: MCF Data-Driven Attribution methodology](https://support.google.com/analytics/answer/3191594).
 
-**Meta (Robyn):** Meta open-sourced Robyn in 2022, a media mix modeling library for R that complements path-level attribution. Key insight from Meta's engineering: path-level attribution overattributes retargeting (which targets users who were already likely to convert) because it cannot observe the counterfactual. Robyn combines MMM (top-down spend-to-revenue regression) with saturation curves (diminishing returns) to provide budget-level attribution without path-level selection bias.
+**Meta (Robyn):** Meta Marketing Science open-sourced Robyn (public on GitHub since 2020, `facebookexperimental/Robyn`), a media mix modeling package for R that complements path-level attribution. Robyn fits ridge regression on aggregate spend with adstock and saturation (Hill) curves and calibrates against experiments, providing budget-level attribution without path-level selection bias — which matters because path-level attribution overattributes retargeting (it targets users already likely to convert and cannot observe the counterfactual).
 
-**Airbnb:** Airbnb's attribution engineering blog (2019) described their transition from last-touch to a Markov model. Key challenge: Airbnb's booking consideration cycle is highly variable (minutes for weekend trips, months for international vacations). They solved this with category-specific lookback windows (7 days for staycations, 90 days for international). They also built a channel-interaction feature: paths that include both branded paid search and unbranded paid search are detected and the unbranded credit is adjusted downward.
+**Airbnb:** Airbnb's marketing engineering posts (2019) describe moving off a SQL-based last-touch attribution model to a Java UDF framework, specifically so that individual attribution rules could be unit-tested and so that more complex rule-based or model-based attribution could be layered on later. The harder problem they call out is calibration: Airbnb's booking consideration cycle is highly variable (minutes for a weekend trip, months for an international vacation), so they use experiments to calibrate the multi-touch model rather than trusting the model's fractions directly. See [Growing Our Host Community with Online Marketing](https://medium.com/airbnb-engineering/growing-our-host-community-with-online-marketing-9b2302299324).
 
-**Netflix:** Netflix uses attribution primarily for subscriber acquisition. Their critical design decision: distinguish between content-marketing attribution (a documentary drives subscriptions) and paid channel attribution (display ads). Content attribution requires matching content-exposed users to subscriber conversion events, which has different latency characteristics (a documentary watched on Monday may drive a subscription purchase on Saturday). They extended lookback windows to 14 days for content-attribution specifically.
+**Subscription services (illustrative pattern):** For subscriber acquisition, a useful design split is content-marketing attribution (a title drives a signup) versus paid channel attribution (display ads). Content attribution has to match content-exposed users to subscription events with a much looser time coupling — a title watched on Monday may drive a signup the following weekend — so it needs its own lookback window rather than the paid-channel default. Treat the specific window as a parameter to fit against holdout tests, not a constant to copy.
 
-**Wayfair:** Wayfair's ML team (2020 paper) described the challenge of attribution for high-consideration purchases: a customer browsed furniture for 45 days across 23 sessions and 6 channels before buying. Their Shapley implementation uses path-position-adjusted marginal contributions: the first-position channel gets a 1.2× weight on its Shapley value (awareness premium), the last-position channel gets a 0.8× discount (conversion premium already captured). This "position-adjusted Shapley" showed 12% better accuracy on geo holdout tests vs standard Shapley.
+**Position-adjusted Shapley (academic):** For high-consideration purchases (a furniture buyer may browse for weeks across many sessions and channels before buying), plain Shapley ignores where in the journey a channel appeared. Singal, Besbes, Desir, Goyal and Iyengar ("Shapley Meets Uniform: An Axiomatic Framework for Attribution in Online Advertising," WWW 2019) formalize this: under a Markovian journey model where ad actions have different impact at different funnel stages, the counterfactual-adjusted Shapley value reduces to an efficiently computable "unique-uniform" scheme — a correction to plain uniform attribution rather than a full 2^n coalition sweep.
 
 ---
 
@@ -516,7 +527,7 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 
 | Tool | Use case | Advantage | Limitation |
 |------|----------|-----------|------------|
-| `ChannelAttribution` (R) | Markov chain attribution | Fast C++ backend, handles path deduplication | R ecosystem; no Python native version |
+| `ChannelAttribution` (R and Python) | Markov chain attribution | Fast C++ backend, handles path deduplication; shipped on both CRAN and PyPI (`pip install ChannelAttribution`) | Markov and rule-based heuristics only — no Shapley or incrementality estimation |
 | `pymc-marketing` (Python) | Bayesian MMM + attribution | Uncertainty quantification, calibration via holdout | Slow MCMC for large datasets |
 | Google Ads DDA | In-platform attribution | No engineering overhead; uses Google data | Black box; Google-only channels |
 | dbt + BigQuery | Path construction, aggregations | SQL-native; easy to audit; BI tool integration | Not suitable for Shapley computation (need Python UDFs) |
@@ -538,7 +549,7 @@ Including ad impressions (view-through) in paths dramatically inflates display/v
 - Track PSI on path-length distribution and channel-mix distribution. See [drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md).
 
 ### Incident Runbooks
-1. **Attribution for a channel drops to zero:** Symptom: a channel shows 0 attributed conversions for 2+ days. Diagnosis: UTM parameter stripping (common after iOS 14.5 policy changes), pixel fire failure, or identity resolution outage. Mitigation: fall back to last-touch attribution for that channel; notify paid media team to pause bid optimization. Resolution: audit pixel firing logs.
+1. **Attribution for a channel drops to zero:** Symptom: a channel shows 0 attributed conversions for 2+ days. Diagnosis: click-ID stripping (iOS 17 / macOS Sonoma Link Tracking Protection removes `fbclid`, `gclid` and similar user-identifying parameters from links opened in Mail, Messages and Safari Private Browsing — note it does *not* strip generic `utm_*` tags), UTM tags lost across a redirect chain, pixel fire failure, or identity resolution outage. Mitigation: fall back to last-touch attribution for that channel; notify paid media team to pause bid optimization. Resolution: audit pixel firing logs.
 2. **Attribution fractions sum > 1:** Symptom: total attributed revenue exceeds actual revenue by >5%. Diagnosis: view-through window misconfiguration counting the same conversion multiple times across devices. Resolution: add deduplication on conversion_id in path construction.
 3. **Holdout incrementality test shows large divergence from model:** Symptom: Markov assigns channel X 25% credit but geo holdout shows 8% true incrementality. Diagnosis: channel X touchpoints are concentrated late in funnel (retargeting bias — reaching users who would convert anyway). Resolution: apply counterfactual regularization: downweight channels where P(conversion | path without this channel) is already high.
 4. **Staleness from identity resolution failures:** Symptom: cross-device stitch rate drops from 45% to 20%. Diagnosis: browser cookie deprecation or login rate decline. Mitigation: increase reliance on email-based deterministic stitching; re-calibrate probabilistic graph.
@@ -559,7 +570,7 @@ xychart-beta
 
 Last-touch hands retargeting 42% of conversions and Markov 18%, but the geo-holdout measures only 9% true incrementality — the bottom-funnel over-attribution that drove the $4M reallocation in the war story above.
 
-**Pitfall 2: Tracking loss after iOS 14.5.** Apple's App Tracking Transparency (ATT) framework in 2021 caused mobile attribution rates to drop 40–60% for apps without first-party login. A gaming company's attribution system reported a 35% decrease in conversions from paid social overnight — in reality, conversions were flat, but the tracking coverage changed. They failed to adjust their Markov model for the changed path coverage, causing systematic under-attribution of iOS channels for 3 months before the root cause was identified.
+**Pitfall 2: Tracking loss after iOS 14.5.** Apple's App Tracking Transparency (ATT) framework, enforced from iOS 14.5 in April 2021, requires an explicit opt-in prompt before an app may access the IDFA; most users decline, so apps without a first-party login lost the majority of their deterministic cross-app attribution signal. A gaming company's attribution system reported a 35% decrease in conversions from paid social overnight — in reality, conversions were flat, but the tracking coverage changed. They failed to adjust their Markov model for the changed path coverage, causing systematic under-attribution of iOS channels for 3 months before the root cause was identified.
 
 **Pitfall 3: Confusing correlation with causation in path models.** An e-commerce company's Markov model showed email as having high attribution. Further investigation revealed that email was nearly always the last touchpoint before high-LTV customer purchases — but only because the company sent order confirmation emails, which appeared in the path as a "touchpoint." The company was crediting their own order confirmation emails with causing conversions. Fix: exclude post-purchase communications from path construction.
 
@@ -591,7 +602,7 @@ Optimization options:
 **Scaling to 10× path volume (11M paths/day):**
 - Markov: linear scale, still completes in < 30 seconds.
 - Shapley: 10× more paths → 10× slower → move to Spark-distributed Shapley or reduce n_samples to 200.
-- Storage: 52 GB/day → 19 TB/year. Migrate older data to Glacier after 90 days.
+- Storage: 43 GB/day → 15.7 TB/year. Migrate older data to Glacier after 90 days.
 - Spark cluster for path construction: scale from 10 to 30 m5.xlarge executors.
 
 ---

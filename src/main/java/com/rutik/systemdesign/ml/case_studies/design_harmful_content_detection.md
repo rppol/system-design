@@ -44,8 +44,10 @@ Cross-read: this study reuses primitives from [imbalanced_data_and_leakage_traps
 - Prevalence of violating content: assume ~0.5% overall, but wildly policy-dependent (spam ~1–3%; terrorism/CSAM orders of magnitude rarer). At 0.5% of 5B = **25M violating items/day** to catch — and, crucially, ~4.975B benign items/day that a careless system will false-positive on.
 
 **The false-positive arithmetic (the key estimation the interviewer wants):**
-- Suppose a classifier at 99% precision / 90% recall on a policy with 0.5% prevalence.
-- Daily benign = 4.975B. A **1% false-positive rate** on benign = **49.75M wrongful flags/day** — dwarfing the 25M true violators. This is the base-rate trap: at low prevalence, even a "great" FPR floods review and over-removes. It is why thresholds are set per policy against a review budget, not to maximize F1.
+- Daily benign = 4.975B, daily violating = 25M. Suppose a classifier with 90% recall and a **1% false-positive rate** on benign content — a rate that sounds excellent in isolation.
+- That is **49.75M wrongful flags/day**, dwarfing the 22.5M true positives it catches. This is the base-rate trap: at low prevalence even a "great" FPR floods review and over-removes.
+- Note the two are not interchangeable. That same 1% FPR yields precision of 22.5M / (22.5M + 49.75M) = **31%**, not 99%. Confusing 1 − precision with the false-positive rate is the single most common error in this estimation; at 0.5% prevalence, hitting 99% precision requires an FPR near 0.005%, roughly 200x tighter.
+- This is why thresholds are set per policy against a review budget, not to maximize F1.
 
 **Human-review capacity (the binding constraint):**
 - Say 20,000 reviewers, ~500 decisions/reviewer/day = **10M human decisions/day**.
@@ -381,11 +383,11 @@ Human labels are noisy and policies are subjective (inter-annotator agreement on
 
 ## 6. Real-World Implementations
 
-**Meta (Integrity / "Community Standards Enforcement").** Publishes quarterly prevalence and proactive-detection-rate metrics per policy area — a public artifact of the per-policy operating-point philosophy (proactive detection >99% for some areas, far lower for nuanced ones). Uses cross-lingual multimodal classifiers and a large human-review workforce; pioneered "few-shot learner" (Whole Post Integrity Embeddings) approaches to generalize to new violation types with little labeled data. Reports enforcement, appeals, and restoration counts — the appeal/reversal loop in production.
+**Meta (Integrity / "Community Standards Enforcement").** Publishes quarterly prevalence and proactive-detection-rate metrics per policy area — a public artifact of the per-policy operating-point philosophy (proactive detection >99% for some areas, far lower for nuanced ones). Uses cross-lingual multimodal classifiers and a large human-review workforce. Two distinct systems are worth keeping straight: **WPIE (Whole Post Integrity Embeddings)** is the earlier BERT/XLM-based service that produces a single holistic representation of a whole post (text, caption, image, URL together); **Few-Shot Learner (FSL, announced December 2021)** is a later multimodal, multilingual zero/few-shot model that consumes a pooled WPIE embedding as one input and adapts to new or evolving violation types in weeks rather than months without full fine-tuning. FSL builds on WPIE; they are not the same thing. Reports enforcement, appeals, and restoration counts — the appeal/reversal loop in production.
 
 **YouTube.** Combines automated flagging with human review; publishes a Community Guidelines enforcement report showing that the majority of removals are first flagged by automated systems, then a large fraction removed before any views — the proactive-scan design. Uses hash-matching (Content ID's cousin for known-bad) and classifier cascades.
 
-**Google / NCMEC / PhotoDNA.** Child-safety detection relies on perceptual-hash matching (PhotoDNA, developed with Microsoft) against known-CSAM hash databases, with mandated reporting to NCMEC. This is the archetypal Stage-0 hash matcher: near-zero false positive, immediate action, legal obligation — never a soft classifier acting alone.
+**PhotoDNA / NCMEC.** Child-safety detection relies on perceptual-hash matching against known-CSAM hash databases, with mandated reporting to NCMEC. PhotoDNA was developed by Microsoft in 2009 with Hany Farid of Dartmouth, donated to NCMEC, and is provided free to platforms and law enforcement; it converts an image to greyscale, grids it, and applies DCT-based processing to produce a robust hash. This is the archetypal Stage-0 hash matcher: near-zero false positive, immediate action, legal obligation — never a soft classifier acting alone.
 
 **GIFCT (Global Internet Forum to Counter Terrorism).** A shared hash database of known terrorist content across platforms — an industry-level version of the known-bad hash store, showing that Stage 0 can be a cross-company shared primitive.
 
@@ -432,6 +434,8 @@ Human labels are noisy and policies are subjective (inter-annotator agreement on
 ---
 
 ## 9. Common Pitfalls & War Stories
+
+*These are illustrative composites of recurring failure patterns, not accounts of specific public incidents. The mechanisms are real; the quoted precision figures, agreement scores and recall estimates are representative and should not be quoted as measured public record. The one exception is Pitfall 3, whose identity-term bias effect is documented publicly for early toxicity models (Jigsaw/Perspective).*
 
 **Pitfall 1: Chasing accuracy / a global threshold at low prevalence.** A team reported "99.5% accuracy" on a hate-speech model. At 0.5% prevalence, a model that labels *everything benign* scores 99.5% accuracy while catching zero violations. When shipped with a single global 0.5 threshold, it simultaneously missed nuanced hate speech and false-positived on reclaimed-slur and counter-speech posts, triggering an over-removal backlash. Fix: PR-AUC per policy, prevalence audits, and per-policy cost-and-capacity thresholds (§4.2). Accuracy is banned from the dashboard.
 
@@ -486,7 +490,7 @@ Because violating content is rare — often 0.01–1% prevalence — so a model 
 Because policies differ in prevalence, cost asymmetry, and legal regime. Child-safety and terrorism have catastrophic, legally-mandated miss costs and run at maximum recall with hash-matching and human verification (auto-action forbidden); spam is high-volume and low-harm, so high-precision auto-action is appropriate; hate speech is nuanced and context-dependent, so over-removal is itself a harm. A single global threshold is optimal for none of them — you set per-policy operating points against per-policy cost matrices and a shared review budget.
 
 **Q: You have a classifier at 99% precision and 90% recall. Is that good enough to auto-remove?**
-It depends entirely on prevalence and policy. At 0.5% prevalence over 5B items, ~4.975B are benign; even a 1% false-positive rate is ~50M wrongful removals/day, dwarfing the ~25M true violators — the base-rate trap. For spam that might be acceptable with appeals; for hate speech it is a censorship disaster; for child-safety you would never auto-remove on a soft classifier regardless. "Good enough" is a function of prevalence, the cost matrix, whether humans verify, and the review budget — not the headline precision/recall.
+It depends entirely on prevalence and policy. First check the arithmetic: at 0.5% prevalence over 5B items, ~4.975B are benign, so 99% precision at 90% recall implies only ~227k false positives/day and a false-positive rate near 0.005% — that is a much stronger claim than it sounds, and it is worth confirming the number is really precision and not 1 minus the FPR. Slip to a 1% FPR and you get ~50M wrongful removals/day against ~22.5M true catches, which is 31% precision, not 99% — the base-rate trap. For spam the 99% operating point might be acceptable with appeals; for hate speech, over-removal at that volume is a censorship disaster; for child-safety you would never auto-remove on a soft classifier regardless. "Good enough" is a function of prevalence, the cost matrix, whether humans verify, and the review budget — not the headline precision/recall.
 
 **Q: How do you decide what goes to a human vs gets auto-actioned?**
 Route by model confidence *and* policy severity against a fixed review budget. High-confidence, high-precision, auto-action-allowed cases (e.g., confident spam) are actioned automatically; uncertain or high-stakes cases (near the decision boundary, or any child-safety/terrorism signal) go to a prioritized human queue. Because human capacity is fixed and tiny relative to volume (~0.2%), you order the queue by expected harm prevented — P(violating) × severity × predicted reach, with an uncertainty bonus for items that also teach the model most.

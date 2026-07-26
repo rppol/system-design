@@ -19,7 +19,7 @@
 - Latency: P95 < 150ms end-to-end for single-hop questions; P95 < 400ms for multi-hop
 - Throughput: 1,000 questions/minute peak
 - Answer recall@100 (retriever): ≥ 85% (the correct passage is in the top 100 retrieved)
-- Exact Match (EM) on SQuAD 2.0 benchmark: ≥ 82%; F1 ≥ 88%
+- Exact Match (EM) on SQuAD 2.0 dev: ≥ 80%; F1 ≥ 83% (the public `deepset/bert-large-uncased-whole-word-masking-squad2` card reports EM 80.9 / F1 83.9, so this is the ceiling for an off-the-shelf BERT-large reader, not a stretch target)
 - Availability: 99.9% SLA; retrieval index refresh within 15 minutes of document ingest
 
 **Out of scope:**
@@ -34,18 +34,18 @@
 **Document corpus:**
 - 10M documents, average 800 tokens per document (400–1,200 range)
 - Passage chunking at 100 tokens with 20-token overlap → avg 10 passages/document → 100M passages
-- DPR passage embeddings: 100M × 768 dimensions × 4 bytes = 307 GB raw; after FAISS IVF compression → ~60 GB on disk, 80 GB in RAM
+- DPR passage embeddings: 100M × 768 dimensions × 4 bytes = 307 GB raw. IVF-Flat does **not** compress (FAISS: "…,Flat" stores vectors at original size), so to fit in commodity RAM the index must use a quantizer — IVF + PQ at 64 bytes/vector gives 100M × 64 B = 6.4 GB, and scalar-quantized int8 gives 100M × 768 B = 77 GB. This design uses SQ8: ~80 GB in RAM per replica.
 
 **Traffic:**
-- 1,000 QPS peak, 300 QPS average
-- Retrieval (FAISS ANN): < 10ms for 100M passages with IVF1024 index
-- Reader (BERT-large): 120ms for 100 passages × 512 tokens each in batch = dominant latency
+- 16.7 questions/sec peak (1,000 questions/minute, per §1), ~5/sec average
+- Retrieval (FAISS ANN): ~8ms for 100M passages with an IVF1024 index
+- Reader (BERT-large): ~120ms for the top-20 passages × 512 tokens each in one batch = dominant latency
 
 **Compute sizing:**
-- Reader model (BERT-large extractive): 100 passages in one forward pass → 120ms on A100
-- 1,000 QPS sustained: 1,000 × 0.12s = requires 120 concurrent forward passes → 4 A100 replicas (30 passages/replica concurrently)
+- Reader model (BERT-large extractive): 20 passages in one forward pass → ~120ms on A100
+- 16.7 questions/sec sustained: 16.7 × 0.12s = 2.0 concurrent forward passes → 2 A100s; 4 A100 replicas with 2× headroom
 - DPR query encoder: 768-dim in 5ms on CPU; runs per-question
-- FAISS retrieval: 3ms on 80GB RAM index with 16 CPU threads
+- FAISS retrieval: ~8ms on the 80 GB RAM index with 16 CPU threads
 
 **Storage:**
 - Passage store: 100M × avg 100 words × 5 bytes = ~50 GB (Postgres text)
@@ -195,6 +195,7 @@ The reader takes a question and a passage concatenated as `[CLS] question [SEP] 
 
 ```python
 import numpy as np
+import torch
 from transformers import BertForQuestionAnswering, BertTokenizerFast
 from dataclasses import dataclass
 
@@ -237,9 +238,13 @@ class ExtractiveReader:
             return_offsets_mapping=True,
         )
 
+        # token_type_ids MUST be passed: BERT QA models are trained on a two-segment
+        # input, and omitting them makes the model treat the passage as segment 0
+        # (same segment as the question), which measurably degrades span accuracy.
         outputs = self.model(
             input_ids=encodings["input_ids"],
             attention_mask=encodings["attention_mask"],
+            token_type_ids=encodings["token_type_ids"],
         )
         start_logits = outputs.start_logits  # (num_passages, seq_len)
         end_logits = outputs.end_logits       # (num_passages, seq_len)
@@ -320,7 +325,9 @@ for start in range(passage_start, passage_end):
 
 ### 4.3 Hybrid Retrieval (Dense + Sparse + RRF)
 
-Pure DPR retrieval achieves ~78% recall@100 on NaturalQuestions. Adding BM25 (Elasticsearch) and merging with RRF raises recall to ~88%, because dense embeddings miss exact lexical matches (product names, serial numbers, rare named entities).
+Get the published baselines right before designing around them. On Natural Questions, the DPR paper (Karpukhin et al. 2020, Table 2) reports BM25 at 59.1% top-20 / 73.7% top-100 and DPR at 78.4% top-20 / 85.4% top-100 — so 78% is DPR's **top-20**, not its recall@100. Note also that the paper's own BM25+DPR hybrid scored *lower* than DPR alone on NQ (76.6 / 83.8), so hybrid retrieval is not a free win on an open-domain Wikipedia corpus.
+
+Hybrid still earns its place here for a different reason: an enterprise corpus is full of exact lexical tokens (product SKUs, error codes, internal acronyms, serial numbers) that a Wikipedia-trained dense encoder embeds poorly, and BM25 matches them exactly. Treat the ~88% recall@100 in the requirements as this system's measured target on its own corpus, not as a number inherited from the DPR paper.
 
 ```python
 from elasticsearch import Elasticsearch
@@ -497,34 +504,36 @@ class MultiHopQAEngine:
 
 | Decision | Choice | Alternatives | Rationale |
 |---|---|---|---|
-| Reader model | BERT-large (340M) | BERT-base, RoBERTa, T5 | BERT-large achieves 87.5 F1 on SQuAD 2.0 vs 83.1 for BERT-base; T5 is abstractive (useful but slower and harder to trace) |
-| Retrieval | DPR + BM25 hybrid (RRF) | BM25 only, DPR only, ColBERT | DPR alone misses rare entities (recall 78%); BM25 alone misses paraphrase matches (recall 74%); hybrid = 88%; ColBERT is more powerful but requires 50× more disk |
+| Reader model | BERT-large (340M) | BERT-base, RoBERTa, T5 | The public `deepset/bert-large-uncased-whole-word-masking-squad2` card reports EM 80.9 / F1 83.9 on SQuAD 2.0 dev, several points above a comparably-trained BERT-base; T5 is abstractive (useful but slower and harder to trace) |
+| Retrieval | DPR + BM25 hybrid (RRF) | BM25 only, DPR only, ColBERT | On NQ (DPR paper, Table 2) BM25 recall@100 = 73.7%, DPR = 85.4%; on an enterprise corpus DPR misses exact SKU/error-code tokens, which is what BM25 recovers — target 88% recall@100 here and verify it on your own labels. ColBERT is stronger but stores one vector per token, so its index is far larger than a single-vector index |
 | No-answer handling | SQuAD 2.0 null score threshold | Separate classifier | Null score from SQuAD 2.0 training is calibrated for span extraction; separate classifier adds inference cost |
-| Multi-hop strategy | Sequential 2-round retrieval | Iterative graph retrieval, reasoning chains | 2-round covers 90% of multi-hop questions; graph retrieval (IDRQA) improves recall by 6% but adds 3× latency |
-| Passage granularity | 100-token chunks with 20-token overlap | 256-token, sentence-level | 100-token chunks maximize answer recall (short passages = fewer irrelevant tokens); 256-token = faster retrieval but 8% lower recall on SQuAD |
+| Multi-hop strategy | Sequential 2-round retrieval | Iterative graph retrieval, reasoning chains | 2-round covers the bridge-entity questions that dominate HotpotQA-style traffic; graph/iterative retrieval improves recall further but multiplies latency by the number of rounds |
+| Passage granularity | 100-token chunks with 20-token overlap | 256-token, sentence-level | Shorter chunks raise answer recall (fewer irrelevant tokens per passage) at the cost of splitting context; 100/20 is DPR's own convention. Re-measure on your corpus — the optimum is document-structure dependent |
 
 **Comparison: extractive vs abstractive vs hybrid**
 
-| Approach | EM on SQuAD 2.0 | Latency | Traceability | Hallucination risk |
+Latencies below are measured on this system's own hardware; the accuracy column is indicative of the class of approach, not a benchmark leaderboard (only the extractive row maps to a published SQuAD 2.0 number).
+
+| Approach | Answer quality | Latency | Traceability | Hallucination risk |
 |---|---|---|---|---|
-| Extractive (BERT span) | 82% | 120ms | Full (exact quote) | Zero |
-| Abstractive (T5-large) | 78% (fluency metric) | 350ms | Partial | Moderate (paraphrase errors) |
-| Hybrid (extract + T5 paraphrase) | 83% | 480ms | Partial | Low |
-| RAG (generate with context) | 85% (ROUGE) | 600ms+ | Partial | Moderate |
+| Extractive (BERT-large span) | EM 80.9 / F1 83.9 on SQuAD 2.0 dev (published) | 120ms | Full (exact quote) | Zero — the answer is a substring of the source |
+| Abstractive (T5-large) | Lower EM, higher fluency; EM understates it because paraphrases fail exact match | 350ms | Partial | Moderate (paraphrase errors) |
+| Hybrid (extract + T5 paraphrase) | Extractive EM with fluent surface form | 480ms | Partial | Low |
+| RAG (generate with retrieved context) | Best on multi-passage synthesis; not comparable on EM | 600ms+ | Partial | Moderate |
 
 ---
 
 ## 6. Real-World Implementations
 
-**Google's REALM and DPR (Facebook AI):** DPR (Karpukhin et al. 2020) established the dense retriever + reader paradigm and achieved state-of-the-art recall@100 of 79.4% on NaturalQuestions. Google's REALM pre-trains the retriever and language model jointly, allowing the retriever to be updated during LM training. REALM achieves 40.4% EM on Open-NQ vs 41.5% for DPR+BERT reader, but with better generalization to unseen domains.
+**DPR (Facebook AI) and REALM (Google Research):** DPR (Karpukhin et al. 2020) established the dense retriever + reader paradigm. Its published Natural Questions numbers are 78.4% top-20 / 85.4% top-100 retrieval accuracy for the single-dataset model (79.4% top-20 / 86.0% top-100 for the multi-dataset model), and 41.5% end-to-end EM. REALM (Guu et al. 2020) pre-trains the retriever and language model jointly, so the retriever is updated by the LM's own training signal; it reports 40.4% EM on Open-NQ — slightly below DPR's 41.5%, but with a retriever that is learned rather than supervised on relevance labels.
 
-**Microsoft Azure AI Search QA:** Azure Cognitive Search provides a QA capability ("semantic answers") that uses a BERT-based extractive reader over retrieved passages. Uses BM25 + semantic ranking (a cross-encoder) for retrieval, then BERT-large for span extraction. Deployed as a managed service with response time < 300ms P95. The semantic ranker was trained on Bing click data — 2B query-document relevance pairs — making it significantly stronger than a standard DPR.
+**Microsoft Azure AI Search:** Azure AI Search offers semantic ranking (a cross-encoder re-ranker applied over BM25 results) plus "semantic answers", a span extracted from the top-ranked passages. Architecturally this is the same BM25 → cross-encoder → span-extractor chain as the design here, packaged as a managed service. Microsoft describes the semantic ranker as built on Bing search technology; treat any specific training-corpus size as unpublished.
 
-**IBM Watson QA (IBM Project Debater):** Watson Discovery's QA pipeline uses a hierarchical system: passage retrieval from a knowledge base → cross-encoder reranking → BERT extractive reader → evidence aggregation across passages. IBM Research published that their hybrid retrieval (dense + sparse) improves recall by 9% vs BM25-only on enterprise document corpora, primarily because employee questions use internal jargon absent from BM25 vocabulary.
+**Enterprise knowledge-base QA (general pattern):** Enterprise QA pipelines converge on passage retrieval → cross-encoder reranking → extractive reader → evidence aggregation across passages. The recurring finding is that hybrid retrieval helps more inside a company than it does on Wikipedia benchmarks, because employee questions are dense with internal jargon, ticket ids, and product codenames that a general-domain dense encoder has never seen. Measure the sparse-vs-dense split on your own query log; published gains from other corpora do not transfer.
 
-**Alexa (Amazon QA for voice):** Amazon's Alexa uses a retrieval-augmented QA system for factoid questions. Key constraint: answer must be speakable (2–15 words). They post-process extractive answers with length filters and sentence boundary detection. Multi-hop QA is handled with entity linking (Amazon Product Graph) — bridge entities are resolved through the knowledge graph rather than second-round retrieval, reducing latency from 400ms to 180ms for multi-hop questions.
+**Voice assistants (speakability constraint):** Voice QA adds a constraint text QA does not have: the answer must be speakable, which in practice means a short noun phrase or clause rather than a sentence fragment mid-clause. Extractive spans are post-processed with length filters and sentence-boundary detection. Where a knowledge graph already exists, resolving a bridge entity by graph lookup is far cheaper than a second retrieval round — that is the main latency lever for multi-hop voice queries.
 
-**Elasticsearch ELSER (Learned Sparse Embeddings):** Elastic introduced ELSER — a transformer-based sparse encoder that produces expanded token weights rather than dense vectors. Unlike BM25 (exact term match) and DPR (opaque dense match), ELSER produces interpretable sparse vectors compatible with the inverted index. On BEIR benchmark, ELSER outperforms BM25 on 11/17 datasets and outperforms DPR on 13/17 datasets, while storing vectors in the existing Elasticsearch index (no separate FAISS cluster required).
+**Elasticsearch ELSER (Learned Sparse Embeddings):** Elastic's ELSER is a transformer-based sparse encoder that produces expanded token weights rather than dense vectors. Unlike BM25 (exact term match) and DPR (opaque dense match), ELSER produces interpretable sparse vectors compatible with the inverted index, so no separate FAISS cluster is required. Elastic's published BEIR benchmark for ELSER v2 versus BM25 is **10 wins, 1 draw, 1 loss with an average NDCG@10 improvement of 18%**; ELSER wins most clearly on nfcorpus, arguana and scifact.
 
 ---
 
@@ -628,7 +637,7 @@ Key metrics:
 A startup's first extractive QA model predicted start and end token positions independently (two separate softmax heads). The model learned to predict the start of the answer and the end of the answer, but since they were independent, the predicted end was sometimes before the start (argmax(end_logits)=30, argmax(start_logits)=45). This produced inverted spans like "Corporation The" instead of "The Corporation." Fix: enumerate valid (start, end) pairs where end ≥ start and both lie within the passage token range. Impact: 12% of answers corrupted before fix; discovered in QA during user testing before launch.
 
 **Pitfall 2 — SQuAD 1.1 model always answers even when no answer exists**
-A legal document QA system used a model fine-tuned on SQuAD 1.1 (all questions have answers). When users asked about topics not in the corpus, the model confidently hallucinated spans from unrelated passages. The no-answer rate was 0% — every question got an answer. Fix: switch to a SQuAD 2.0 fine-tuned model with null score thresholding; tune the threshold on a dev set containing 30% unanswerable questions. Impact: 18% of questions were unanswerable; all 18% previously returned wrong answers with high apparent confidence. Affected trust in the product — required public apology to enterprise customers.
+A legal document QA system used a model fine-tuned on SQuAD 1.1 (all questions have answers). When users asked about topics not in the corpus, the model confidently hallucinated spans from unrelated passages. The no-answer rate was 0% — every question got an answer. Fix: switch to a SQuAD 2.0 fine-tuned model with null score thresholding; tune the threshold on a dev set containing 30% unanswerable questions. Impact: 18% of questions were unanswerable; all 18% previously returned wrong answers with high apparent confidence, which is the worst possible failure shape for a legal tool. (Anonymized composite; the mechanism is the point, the percentages are illustrative.)
 
 **Pitfall 3 — FAISS index rebuild during traffic**
 An online shopping QA service rebuilt its FAISS index weekly (new product descriptions added). The rebuild took 45 minutes on a single node, during which the index was unavailable. Traffic fell back to BM25-only, which had 12% lower recall for synonym-heavy queries ("sofa" vs "couch"). Fix: dual-index deployment — new index built in the background on a separate machine; hot-swap via blue-green deployment. Index rebuild triggered no customer-visible downtime after fix. Impact: 4 Mondays of degraded search recall before fix; NPS dropped 8 points on Mondays.
@@ -653,29 +662,35 @@ A production QA service updated the DPR question encoder checkpoint (fine-tuned 
 
 **Throughput formula:**
 ```
-For BERT-large on A100 (312 TFLOPS BF16):
-  Input size: 20 passages × 512 tokens = 10,240 total tokens
+For BERT-large on A100 (312 TFLOPS dense BF16 — 624 is the with-sparsity figure):
+  Input size: 20 passages x 512 tokens = 10,240 total tokens
   Forward pass time: ~120ms (measured, batch of 20 passages)
   Throughput per GPU: 1,000ms / 120ms = 8.3 questions/sec/GPU
 
 Target: 1,000 questions/min = 16.7 questions/sec
 Required GPUs: ceil(16.7 / 8.3) = 2 A100s
-With 2× headroom: 4 A100 replicas
-Monthly cost: 4 × $3.20/hr × 730hr = $9,344/month
+With 2x headroom: 4 A100 replicas
+Monthly cost: an 8x A100-40GB p4d.24xlarge is $21.96/hr on-demand in us-east-1
+  = ~$2.75 per A100-hour, so 4 A100s x $2.75 x 730 = ~$8,020/month
+  (renting whole p4d nodes, half a node x $21.96 x 730 = ~$8,015/month)
 
 FAISS retrieval (CPU, 100M passages, IVF1024, nprobe=64):
-  Latency: 8ms per query
-  Throughput: 16 CPU threads handle 1,000 QPS easily
-  Memory: 80 GB RAM for index → $0.012/GB/hr → $702/month
+  Latency: ~8ms per query
+  Throughput: 16 CPU threads absorb 16.7 questions/sec with large margin
+  Memory: 80 GB RAM index -> an r5.4xlarge (128 GiB) at $1.008/hr = ~$736/month
 ```
 
-**Scaling for 10× traffic (10,000 QPS):**
+**Scaling for 10× traffic (10,000 questions/min):**
 ```
-10,000 queries/min = 167 queries/sec
-Reader GPUs: ceil(167 / 8.3) × 2 (safety) = 40 A100s → $93,440/month
+10,000 questions/min = 167 questions/sec
+Reader GPUs: ceil(167 / 8.3) = 21, x2 (safety) = 42 A100s
+  -> 42 x $2.75/hr x 730 = ~$84,300/month
 FAISS: 3 replicas for HA, no throughput bottleneck
-Optimization: reduce to 10 passages per reader (not 20) saves 50% GPU cost
-  10-passage reader: 60ms; throughput 16.7/sec/GPU → 20 A100s → $46,720/month
+Optimization: send 10 passages to the reader instead of 20
+  10-passage reader: ~60ms; throughput 16.7 questions/sec/GPU
+  -> ceil(167/16.7) = 10, x2 safety = 20 A100s -> ~$40,150/month
+This halves GPU spend, and is only safe if recall@10 after reranking is
+still high enough — verify on the golden set before cutting reader input.
 ```
 
 ---
@@ -686,16 +701,16 @@ Optimization: reduce to 10 passages per reader (not 20) saves 50% GPU cost
 Extractive QA (e.g., SQuAD) provides a single passage and asks the model to find the answer span within it — it is purely a span prediction task. Open-domain QA (e.g., NaturalQuestions, TriviaQA) provides only the question; the model must retrieve relevant passages from a million-document corpus before extracting the answer. The dominant failure mode shifts: for extractive QA, it is span precision; for open-domain QA, it is retrieval recall — if the right passage is not in the top-100 retrieved, no reader can fix it.
 
 **Q: Why is retrieval recall more important than reader precision in open-domain QA?**
-The overall EM of the system is bounded by retrieval recall: if the correct passage is missing from the top-100, EM = 0 for that question regardless of reader quality. A strong reader (BERT-large, 87% F1) applied to a weak retriever (recall@100 = 70%) produces worse end-to-end EM than a weaker reader applied to a strong retriever. In practice, improving retrieval recall by 5% (e.g., 80% → 85%) raises overall EM by 3–4%, while improving reader F1 by 5% raises EM by only 1–2% because many easy questions are already answered correctly.
+The overall EM of the system is bounded by retrieval recall: if the correct passage is missing from the top-100, EM = 0 for that question regardless of reader quality. A strong reader (BERT-large, ~84 F1 on SQuAD 2.0) applied to a weak retriever (recall@100 = 70%) produces worse end-to-end EM than a weaker reader applied to a strong retriever. In practice, improving retrieval recall by 5% (e.g., 80% → 85%) raises overall EM by 3–4%, while improving reader F1 by 5% raises EM by only 1–2% because many easy questions are already answered correctly.
 
 **Q: How does DPR differ from BM25 and when does each excel?**
-BM25 is a sparse, lexical model — it scores passages by term frequency and inverse document frequency. It excels on questions where the answer passage contains the same words as the question (named entities, product names, serial numbers). DPR is a dense, semantic model — it embeds question and passage into a shared vector space and retrieves by cosine similarity. It excels on paraphrase matches ("how does aspirin work?" matches a passage about "acetylsalicylic acid mechanism"). Hybrid RRF combines both: recall improves from ~78% (DPR alone) or ~74% (BM25 alone) to ~88% (hybrid).
+BM25 is a sparse, lexical model — it scores passages by term frequency and inverse document frequency. It excels on questions where the answer passage contains the same words as the question (named entities, product names, serial numbers). DPR is a dense, semantic model — it embeds question and passage into a shared vector space and retrieves by cosine similarity. It excels on paraphrase matches ("how does aspirin work?" matches a passage about "acetylsalicylic acid mechanism"). On Natural Questions the published recall@100 figures are 85.4% for DPR and 73.7% for BM25 (Karpukhin et al. 2020); the same paper's hybrid was slightly worse than DPR alone there, so do not assume hybrid always wins. Hybrid pays off on corpora full of exact lexical tokens — SKUs, error codes, internal acronyms — which is the enterprise case this system targets.
 
 **Q: What is the null-score threshold in SQuAD 2.0 models and how do you tune it?**
-SQuAD 2.0 includes ~50% unanswerable questions. Models trained on it output a "null score" = start_logit[CLS] + end_logit[CLS], representing the score of "no answer." A passage's answer score minus its null score is the "score differential." If the differential < threshold τ, the model returns no answer. Tune τ on a validation set of known answerable and unanswerable questions by optimizing F1 (which penalizes both false positives and false negatives). Typical τ = -2.0 on general-domain QA; recalibrate for each new domain because confidence distributions shift.
+SQuAD 2.0's dev set (11,873 questions) is roughly half unanswerable, so a model trained on it learns to abstain. Models trained on it output a "null score" = start_logit[CLS] + end_logit[CLS], representing the score of "no answer." A passage's answer score minus its null score is the "score differential." If the differential < threshold τ, the model returns no answer. Tune τ on a validation set of known answerable and unanswerable questions by optimizing F1 (which penalizes both false positives and false negatives). Typical τ = -2.0 on general-domain QA; recalibrate for each new domain because confidence distributions shift.
 
 **Q: How does multi-hop QA work and what are its failure modes?**
-Multi-hop QA requires evidence from two documents: e.g., "Who founded the company that built GPT-4?" requires knowing (1) OpenAI built GPT-4 and (2) Sam Altman and Greg Brockman founded OpenAI. The pipeline retrieves for the original question, extracts a bridge entity from the top answer, then constructs a second query ("who founded OpenAI?"). Failure modes: (1) bridge entity extraction error — if round 1 returns the wrong entity, round 2 retrieves for the wrong thing; (2) question reformulation error — poor reformulation degrades retrieval for round 2; (3) error propagation — overall EM = product of per-hop EM (0.85 × 0.85 = 0.72).
+Multi-hop QA requires evidence from two documents: e.g., "Who founded the company that acquired DeepMind?" requires knowing (1) Google acquired DeepMind and (2) Larry Page and Sergey Brin founded Google. The pipeline retrieves for the original question, extracts a bridge entity from the top answer, then constructs a second query ("who founded Google?"). Failure modes: (1) bridge entity extraction error — if round 1 returns the wrong entity, round 2 retrieves for the wrong thing; (2) question reformulation error — poor reformulation degrades retrieval for round 2; (3) error propagation — overall EM = product of per-hop EM (0.85 × 0.85 = 0.72).
 
 **Q: How would you handle the long-tail of unanswerable questions without hurting answerability on known topics?**
 Calibrate a domain-specific null score threshold (not the generic -2.0 from SQuAD 2.0 training). Build a dev set of 300 unanswerable + 700 answerable questions in the target domain. Plot precision-recall curve for answering vs. threshold τ; choose τ that maximizes F1 on the dev set. Additionally, use confidence calibration ([../cross_cutting/model_calibration_and_thresholding.md](cross_cutting/model_calibration_and_thresholding.md)) to ensure the model's reported confidence is a reliable probability — a confidence of 0.9 should correspond to 90% accuracy on held-out examples.
@@ -710,4 +725,4 @@ Shorter chunks (50–100 tokens) improve retrieval precision (less noise per pas
 Conversational QA (CoQA, QuAC) requires tracking conversation context. The standard approach: concatenate the last 3 question-answer pairs as additional context before the current question (history-in-question rewriting). The reader input becomes: `[CLS] conversation_history + question [SEP] passage [SEP]`. Key challenge: coreference ("it", "he", "the company" from previous turns). Practical fix: fine-tune the query encoder on CoQA-style pairs and use entity linking to resolve references. Conversation context adds ~30 tokens per turn, so a 3-turn history adds < 90 tokens to the 512-token budget.
 
 **Q: When would you replace extractive QA with a generative LLM?**
-Extractive QA is preferable when: (1) exact traceability is required (legal, medical — you need the exact source quote); (2) latency < 150ms is required (BERT-large reader is faster than a large generative LLM); (3) hallucination risk must be zero (span extraction cannot fabricate content beyond the source). Switch to generative (RAG with GPT-4 or Claude) when: (1) the answer requires synthesizing information from multiple passages; (2) the answer needs fluent natural language rather than a quoted span; (3) the corpus is small enough that retrieval is not the bottleneck. Hybrid: use extractive QA as a confidence-gated first pass, fall back to generative only when extractive confidence < 0.6.
+Extractive QA is preferable when: (1) exact traceability is required (legal, medical — you need the exact source quote); (2) latency < 150ms is required (BERT-large reader is faster than a large generative LLM); (3) hallucination risk must be zero (span extraction cannot fabricate content beyond the source). Switch to generative (RAG over a current frontier LLM) when: (1) the answer requires synthesizing information from multiple passages; (2) the answer needs fluent natural language rather than a quoted span; (3) the corpus is small enough that retrieval is not the bottleneck. Hybrid: use extractive QA as a confidence-gated first pass, fall back to generative only when extractive confidence < 0.6.

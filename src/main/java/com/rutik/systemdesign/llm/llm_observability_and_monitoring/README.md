@@ -332,8 +332,8 @@ OpenTelemetry (OTel) is the standard for distributed tracing. LLM observability 
 from opentelemetry import trace
 
 # Attribute names below follow the OpenTelemetry GenAI semantic conventions.
-# They are still marked Development/experimental, so pin the convention version
-# you emit and use OTEL_SEMCONV_STABILITY_OPT_IN when migrating.
+# Pin the convention version you emit so dashboards and stored queries keep
+# matching the attribute keys your spans actually carry.
 tracer = trace.get_tracer("llm-app")
 
 def call_llm(prompt, model="gpt-4o", temperature=0.1):
@@ -577,16 +577,16 @@ enough that a fraction still adds up; for rare events, the fraction *is* the who
 LangChain's observability and evaluation platform. Captures full trace trees for chains and agents, including every LLM call, retrieval, and tool invocation. Key features: visual trace debugging, human feedback collection, dataset curation from production traces, online evaluation with custom evaluators, prompt versioning and A/B comparison. Pricing (July 2026): a free Developer tier, then a Plus tier at $39/seat/month with an included trace allowance and usage-based overage per 1K traces. Limitation: tightly coupled to LangChain ecosystem -- instrumenting non-LangChain code requires manual span creation.
 
 ### Langfuse
-Open-source LLM observability platform. Deploys self-hosted or as a managed service. Captures traces with nested spans, tracks cost per trace, supports prompt management with versioning, and provides evaluation pipelines (both model-based and human). Integrates via Python/JS SDKs or OpenTelemetry. Key differentiator: open-source with full data ownership. Supports LangChain, LlamaIndex, OpenAI SDK, and custom frameworks via decorator-based instrumentation. Self-hosted cost: roughly a couple hundred dollars a month on AWS for moderate traffic (50K traces/day). ClickHouse acquired Langfuse in January 2026; the project remains open source and self-hostable and Langfuse Cloud continues to operate.
+Open-source LLM observability platform. Deploys self-hosted or as a managed service. Captures traces with nested spans, tracks cost per trace, supports prompt management with versioning, and provides evaluation pipelines (both model-based and human). Integrates via Python/JS SDKs or OpenTelemetry. Key differentiator: open-source with full data ownership. Supports LangChain, LlamaIndex, OpenAI SDK, and custom frameworks via decorator-based instrumentation. Self-hosted cost: roughly a couple hundred dollars a month on AWS for moderate traffic (50K traces/day). Owned by ClickHouse since January 2026; open source, self-hostable, with Langfuse Cloud as the managed option.
 
-### Helicone
-API proxy model -- sits between your application and the LLM provider as a transparent proxy. No SDK changes required; just change the base URL. Logs every request with token counts, latency, cost, and caching status. Built-in request caching, rate limiting, and cost alerts. Limitation: the proxy model adds a few milliseconds of latency per request and cannot capture internal application spans (retrieval, reranking) since it only sees the final LLM call. Status note: Mintlify acquired Helicone in March 2026 and the standalone product moved to maintenance mode (security and bug fixes only) -- treat it as a pattern to study rather than a platform to adopt for new work.
+### The proxy pattern (LiteLLM, Portkey)
+An alternative integration shape: a transparent proxy sits between your application and the LLM provider, so instrumentation needs no SDK changes -- just point `base_url` at the gateway. It logs every request with token counts, latency, cost, and cache status, and adds request caching, rate limiting, and cost alerts at the same choke point. Limitation inherent to the pattern: the proxy adds a few milliseconds per request and cannot capture internal application spans (retrieval, reranking) because it only ever sees the final LLM call -- pair it with SDK-level tracing if you need the full pipeline. LiteLLM and Portkey are the live options here; Helicone popularized the pattern but went into maintenance mode after its March 2026 acquisition.
 
 ### Arize Phoenix
 Open-source tool focused on embedding-level observability. Computes embedding drift between reference (training/validation) and production datasets. Visualizes clusters using UMAP projections. Supports LLM trace capture and evaluation workflows. Key strength: identifying when input distributions shift -- for example, detecting that production queries have drifted into a topic cluster the system handles poorly. Self-hostable, integrates with OpenTelemetry.
 
 ### W&B Weave (Weights & Biases)
-The LLM/agent arm of the W&B platform, and the successor to the earlier "W&B Prompts" feature. Tracks prompt objects and versions, logs LLM completions with full metadata, and supports evaluation scoring. Strongest for teams already using W&B for ML experiment tracking. Provides chain/agent trace visualization. Pricing is metered rather than purely per-seat -- storage plus Weave trace ingestion on top of a Free/Pro/Enterprise tier split.
+The LLM/agent arm of the W&B platform. Tracks prompt objects and versions, logs LLM completions with full metadata, and supports evaluation scoring. Strongest for teams already using W&B for ML experiment tracking. Provides chain/agent trace visualization. Pricing is metered rather than purely per-seat -- storage plus Weave trace ingestion on top of a Free/Pro/Enterprise tier split.
 
 ### Datadog LLM / Agent Observability
 Enterprise APM vendor's LLM offering (now surfaced as "Agent Observability"). Auto-instruments popular LLM SDKs and frameworks -- OpenAI, Amazon Bedrock, Google Vertex AI and others -- for Python, Node.js, and Java, with no code changes. Correlates LLM traces with infrastructure metrics (CPU, GPU, memory) in a single pane. Supports LLM-as-judge evaluations and token cost tracking. Key strength: enterprises already on Datadog get LLM observability without a new vendor. Key weakness: cost -- Datadog log ingestion is billed per GB (list price $0.10/GB), which makes high-volume prompt/response logging expensive.
@@ -684,9 +684,9 @@ Enterprise APM vendor's LLM offering (now surfaced as "Agent Observability"). Au
 
 | Tool | Type | Key Feature | Open Source | Pricing Model |
 |------|------|-------------|-------------|---------------|
-| **Langfuse** | Full platform | Traces, cost, prompts, evals | Yes | Free self-hosted; cloud free tier + usage tiers (ClickHouse-owned since Jan 2026) |
+| **Langfuse** | Full platform | Traces, cost, prompts, evals | Yes | Free self-hosted; cloud free tier + usage tiers |
 | **Arize Phoenix** | Evaluation + drift | Embedding drift, UMAP viz, evals | Yes | Free self-hosted |
-| **Helicone** | API proxy | Zero-code integration, caching | Partially | Maintenance mode only since the Mar 2026 Mintlify acquisition -- not a choice for new builds |
+| **LiteLLM** | API proxy / gateway | Zero-code integration, caching, multi-provider routing | Yes | Free self-hosted; paid enterprise tier |
 | **LangSmith** | Full platform | LangChain native, datasets, evals | No | Free Developer tier; Plus from $39/seat/mo plus per-1K-trace usage |
 | **W&B Weave** | Eval + tracking | Prompt versioning, experiment tracking | Partially | Free tier; Pro subscription plus metered trace ingestion and storage |
 | **OpenLLMetry** | OTel instrumentation | Auto-instruments 20+ LLM libraries | Yes | Free (instrumentation only) |
@@ -904,13 +904,14 @@ def generate_text(prompt: str) -> str:
 # FIX: enforce all LLM calls through a platform gateway with mandatory tracing
 # platform/llm_gateway.py
 from functools import wraps
-from langfuse import get_client, observe
+from langfuse import get_client, observe, propagate_attributes
 
-# Langfuse Python SDK v3 is OpenTelemetry-based: get_client() reads
-# LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from the environment, and @observe
-# creates a span that nests under whatever span is already current. The v2
-# client API (langfuse.trace(...) / trace.generation(...)) was removed in v3, and
-# v4 renames several helpers again -- pin the SDK major version you code against.
+# Langfuse Python SDK v4 is OpenTelemetry-based: get_client() reads
+# LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from the environment, @observe creates
+# a span that nests under whatever span is already current, and
+# propagate_attributes() stamps trace-level metadata onto the active span AND
+# every child span opened inside the context -- which is what makes the
+# aggregation queries below (cost by service, cost by feature) complete.
 langfuse = get_client()
 
 def traced_completion(service_name: str, feature_name: str):
@@ -919,11 +920,11 @@ def traced_completion(service_name: str, feature_name: str):
         @observe(as_type="generation")
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            langfuse.update_current_trace(
-                name=f"{service_name}/{feature_name}",
+            with propagate_attributes(
+                trace_name=f"{service_name}/{feature_name}",
                 metadata={"service": service_name, "feature": feature_name},
-            )
-            return fn(*args, **kwargs)
+            ):
+                return fn(*args, **kwargs)
         return wrapper
     return decorator
 

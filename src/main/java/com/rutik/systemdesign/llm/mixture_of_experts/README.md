@@ -687,7 +687,7 @@ The auxiliary loss enforces load balance on training data distribution. At infer
 
 **SafeTensors** — HuggingFace format for Mixtral weights. 93.4GB bfloat16 for Mixtral 8x7B.
 
-**AWQ / GPTQ** — Post-training quantization for expert weights. INT4 quantization reduces Mixtral from ~93GB to ~23GB of weights (46.7B x 0.5 bytes) plus group scales, enabling 2x A100 serving instead of 4x. Note that both original implementations are now unmaintained: AutoAWQ is officially deprecated (last release 0.2.9) and folded into vLLM's `llm-compressor`, and AutoGPTQ has been superseded by GPTQModel.
+**AWQ / GPTQ** — Post-training quantization for expert weights. Produce the checkpoints with `llm-compressor` (the vLLM project's compression library, which implements both AWQ and GPTQ) or GPTQModel; vLLM and TensorRT-LLM load the resulting quantized weights directly. INT4 quantization reduces Mixtral from ~93GB to ~23GB of weights (46.7B x 0.5 bytes) plus group scales, enabling 2x A100 serving instead of 4x.
 
 ### Monitoring
 

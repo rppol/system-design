@@ -303,7 +303,7 @@ Agents specialized for software engineering tasks: writing, executing, debugging
 LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, and Semantic Kernel provide reusable abstractions for agent loops, tool management, memory, and multi-agent coordination. Framework choice matters: LangGraph for complex stateful workflows; LlamaIndex for data-heavy RAG agents; CrewAI for quick role-based crews. See [Agentic Frameworks](../agentic_frameworks/README.md) for framework comparison and when to build custom.
 
 Key framework references for agent patterns:
-- **LangChain LCEL tool-calling agents**: [langchain_and_lcel.md](../agentic_frameworks/langchain_and_lcel.md) — LCEL tool-calling agent via `create_tool_calling_agent`, LCEL vs legacy AgentExecutor, prompt caching for long system prompts, streaming structured outputs.
+- **LangChain LCEL and agents**: [langchain_and_lcel.md](../agentic_frameworks/langchain_and_lcel.md) — Runnable composition with `|`, the `create_agent` harness and its middleware hooks, prompt caching for long system prompts, streaming structured outputs.
 - **LangGraph stateful agents**: [langgraph.md](../agentic_frameworks/langgraph.md) — StateGraph, human-in-the-loop with `interrupt()`, multi-agent supervisor pattern, subgraph composition, custom reducers, checkpoint strategy by scale.
 
 ---
@@ -569,12 +569,12 @@ System Prompt Structure for Agents:
 - Can refactor multi-file projects, run tests, debug errors autonomously
 - Human-in-the-loop: asks permission for destructive operations
 
-### OpenAI Assistants API (deprecated — superseded by the Responses API)
-- Managed agent infrastructure: threads, tools, file storage
-- Built-in tools: code_interpreter (Python sandbox), file_search (RAG)
-- Custom function calling
-- Persistent threads: conversation history managed server-side
-- **Deprecated**: OpenAI reached feature parity in the Responses API and set the Assistants API shutdown for **26 August 2026**. Build new agents on the Responses API; migrate existing ones before that date.
+### OpenAI Responses API
+- Managed agent infrastructure: hosted tool execution, file storage, server-side conversation state
+- Built-in tools: `code_interpreter` (Python sandbox), `file_search` (RAG over uploaded files), `web_search`, `mcp` (remote MCP servers), `tool_search` (loads tool definitions lazily; `gpt-5.4` and later)
+- Custom function calling via `{"type": "function", ...}` tool entries
+- Conversation state: chain turns with `previous_response_id`, or attach a durable `conversation` object; `store: true` retains responses for 30 days
+- Note that even with `previous_response_id`, every earlier input token in the chain is re-billed as input on each turn
 
 ### Devin (Cognition AI)
 - Full autonomous software engineering agent
@@ -628,7 +628,7 @@ System Prompt Structure for Agents:
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **OpenAI Responses API** | Managed agent infra | Successor to the Assistants API (which shuts down 2026-08-26); MCP, computer use, hosted tools |
+| **OpenAI Responses API** | Managed agent infra | Hosted tools (web/file search, code interpreter), remote MCP, computer use, server-side conversation state |
 | **Anthropic API** | Tool use + Claude | Strong instruction following; current models are Opus 5 / Opus 4.7-4.8 / Sonnet 4.6 / Haiku 4.5 |
 | **LangGraph** | Stateful agent graphs | Complex multi-agent flows |
 | **LlamaIndex Agents** | RAG-focused agents | Data agents, query planning |
@@ -682,11 +682,11 @@ A: Three-layer strategy: (1) Input validation — validate tool result schema be
 **Q: What metrics do you track for a production agent in steady state?**
 A: Core: (1) task success rate — binary or LLM-scored; alert if drops >5% (rolling 7-day); (2) cost per task — $/task; alert if exceeds budget threshold; (3) P95 latency — wall time; alert on SLA breach; (4) step count per task — rising count indicates quality degradation or inefficiency; (5) tool error rate — fraction of tool calls returning errors. Supporting: human escalation rate (for HITL agents), token usage per step, retry rate. Set alert thresholds during a 2-week baseline period then alert on >2 standard deviation shifts. LLM judge on 5% of production traces gives qualitative quality signal without evaluating every call.
 
-**Q: When should you use LangChain LCEL for an agent versus LangGraph?**
-A: Historically you used LCEL (`create_tool_calling_agent` + `AgentExecutor`) when the agent loop was simple: one LLM + a fixed set of tools + no persistent state across sessions. As of LangChain v1 that split no longer exists — `create_agent` is the standard agent constructor and is itself built on LangGraph, while the legacy chain/agent implementations moved to the `langchain-classic` package. LCEL agents terminate after each invocation; state must be passed in fresh each time. Reach past `create_agent` to raw LangGraph when: (1) the agent needs to persist state across multiple user turns (checkpointing); (2) the workflow has loops that depend on runtime conditions (tool retry, iterative refinement); (3) human-in-the-loop approval is required at specific steps; (4) multi-agent coordination with explicit routing between specialized agents; (5) you need to stream intermediate state transitions to a UI. Rule of thumb: if you can model the agent as `while True: call_llm(); if done: break`, use LCEL. If you need `if human_approved: continue`, persistent thread state, or parallel sub-agents, use LangGraph.
+**Q: When should you use LangChain's `create_agent` versus writing the graph in LangGraph directly?**
+A: Use `create_agent` when the agent is a model plus a tool loop, and drop to a hand-written LangGraph graph when the control flow itself is the product. `create_agent` (from `langchain.agents`) is the standard agent constructor: it compiles a LangGraph `StateGraph` for you and accepts `model`, `tools`, `system_prompt`, `response_format`, `checkpointer`, `store`, and a `middleware` list. Middleware covers most of what used to require a custom graph — `SummarizationMiddleware` for context compaction, `HumanInTheLoopMiddleware` for approval gates, `ModelFallbackMiddleware` and `ToolRetryMiddleware` for resilience, plus `before_model` / `after_model` / `wrap_tool_call` hooks for anything bespoke. Write the graph yourself when: (1) the workflow is not a loop at all but a DAG of distinct stages; (2) you need branching that depends on domain state rather than on whether the model emitted a tool call; (3) multi-agent coordination with explicit routing between specialized subgraphs; (4) you want to stream custom intermediate state transitions to a UI; (5) you need node-level retry, caching, or interrupt policies that differ per node. Rule of thumb: if you can model the agent as `while True: call_llm(); if done: break`, `create_agent` plus middleware is enough.
 
-**Q: How does LCEL's AgentExecutor compare to creating an agent loop in LangGraph?**
-A: `AgentExecutor` is LCEL's high-level agent runner that handles the Thought-Action-Observation loop for you: it automatically calls tools, injects results back into messages, and loops until the model produces a final answer or `max_iterations` is reached. LangGraph's equivalent is a `StateGraph` with an agent node and a tool node connected by a conditional edge. Key differences: AgentExecutor is simpler to set up (5 lines vs 30 lines for LangGraph) but has hard-to-customize loop logic; LangGraph exposes every step as a node you can modify, add logging, or interrupt. For production agents where you need visibility into each loop iteration, LangGraph's explicit graph is superior. `AgentExecutor` is legacy: LangChain v1 removed it from the main `langchain` package into `langchain-classic` and made `create_agent` — a LangGraph-backed harness with middleware hooks — the standard way to build an agent.
+**Q: How does `create_agent` compare to hand-building the agent loop in LangGraph?**
+A: `create_agent` returns a compiled LangGraph `StateGraph` in one call; hand-building produces the same shape of graph with every node under your control. The generated graph is an agent node and a tool node joined by a conditional edge: the model is called with the message list, and if the returned `AIMessage` carries `tool_calls` the tool node executes them and appends `ToolMessage` results before looping back. Key differences: `create_agent` is 5 lines against roughly 30 for the equivalent explicit graph, and its loop is customized through middleware rather than by editing nodes; a hand-written graph exposes every step as a node you can instrument, cache, or interrupt individually. Because `create_agent` returns a normal compiled graph, you can also treat it as a subgraph node inside a larger LangGraph workflow — the two are not an either/or choice.
 
 **Q: How do you make side-effectful tools safe when the agent retries or the loop replays a step?**
 A: Make every mutating tool idempotent from the agent's perspective, because retries are guaranteed: the LLM re-issues calls after timeouts, malformed observations, or loop restarts, and "send_email" executed twice is a real incident, not a hypothetical. The standard mechanics: require an idempotency key per logical action (derived from the step ID or a hash of the tool arguments) so the tool backend deduplicates repeat executions; separate read tools from write tools and let only reads auto-retry; and gate irreversible writes (payments, deletions, external messages) behind a confirm step — either human-in-the-loop or a two-phase propose-then-commit tool pair, so the model must first return a plan artifact and only a validated commit call executes it. Log every tool execution with its key so replays are detectable in traces. The interview trap is answering with "lower the temperature so it retries less" — retry safety is a systems property of the tool layer, never a sampling setting.

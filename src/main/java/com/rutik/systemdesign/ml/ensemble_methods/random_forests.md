@@ -61,8 +61,8 @@ That leftover third is not waste, it is a free validation set. Every tree can be
 
 At every node, m features are randomly sampled from all p features. Only these m features are candidates for splitting. sklearn defaults:
 
-- Classification: m = sqrt(p) — empirically shown by Breiman (2001)
-- Regression: m = p/3 — Breiman's recommendation; sklearn uses max_features=1.0 by default (changed in 1.1; before it was "auto" = sqrt)
+- Classification: m = sqrt(p) — empirically shown by Breiman (2001); this IS sklearn's default (`max_features="sqrt"`; the old alias `"auto"` meant the same sqrt(p) for classifiers and was renamed in 1.1, then removed)
+- Regression: m = p/3 is **Breiman's** recommendation and R `randomForest`'s default, but **not** sklearn's. `RandomForestRegressor` defaults to `max_features=1.0` — every feature offered at every node, i.e. plain bagged trees. (In sklearn < 1.1 the default was spelled `"auto"`, which for the regressor also meant *all* n_features, so the rename in 1.1 changed the name, not the behaviour.) If you want p/3, pass it explicitly.
 
 Setting max_features=1.0 gives bagging of full trees (no extra randomisation); decreasing it increases diversity at the cost of individual tree accuracy.
 
@@ -82,26 +82,27 @@ This is the lever that sets `ρ` in the variance formula below. Bootstrap alone 
 **Push the p = 40 dataset through it.** These are the 40 features used by the fitting code in Section 6:
 
 ```
-  p = 40, classification default m = sqrt(40) = 6.325 -> 6 candidates per node
+  p = 40, classification default m = int(sqrt(40)) = int(6.325) = 6 candidates per node
+  (sklearn floors it: max_features = max(1, int(sqrt(n_features))))
 
   P(the single strongest feature is offered at the root)
-      = m / p = 6.325 / 40 = 0.1581
+      = m / p = 6 / 40 = 0.1500
 
-  So only ~16% of trees can split on the best feature first. The other ~84%
+  So only 15% of trees can split on the best feature first. The other 85%
   are forced to build their root on a substitute.
 
-  P(offered at least once along a path of d nodes) = 1 - (1 - 0.1581)^d
-      d =  1   ->  0.1581
-      d =  5   ->  0.5771
-      d = 10   ->  0.8211
-      d = 20   ->  0.9680
+  P(offered at least once along a path of d nodes) = 1 - (1 - 0.15)^d
+      d =  1   ->  0.1500
+      d =  5   ->  0.5563
+      d = 10   ->  0.8031
+      d = 20   ->  0.9612
 
   Contrast max_features = 1.0 (plain bagging of trees):
       m / p = 40 / 40 = 1.0  ->  EVERY tree splits on the strongest feature
       at the root. Every tree starts identically, so rho stays high.
 ```
 
-The squeeze gets tighter as `p` grows, which is the point: `sqrt(p)/p = 1/sqrt(p)`, so wider data is randomised harder.
+The squeeze gets tighter as `p` grows, which is the point: `sqrt(p)/p = 1/sqrt(p)`, so wider data is randomised harder. (The block below uses the unrounded `sqrt(p)` to show the scaling law cleanly; sklearn floors each value to an integer.)
 
 ```
   p =   40   ->  m = 6.325    ->  m/p = 0.1581   (15.81% of columns per node)
@@ -491,7 +492,10 @@ rf = RandomForestClassifier(
 )
 
 rf.fit(X, y)
-print(f"OOB AUC: {rf.oob_score_:.4f}")
+# NOTE: with oob_score=True, oob_score_ is ACCURACY for a classifier (R^2 for a
+# regressor), not AUC. sklearn also accepts a callable metric(y_true, y_pred):
+#   RandomForestClassifier(oob_score=roc_auc_score, ...)  -> oob_score_ is now AUC
+print(f"OOB accuracy: {rf.oob_score_:.4f}")
 # OOB ~= 3-fold CV error, computed for free during training
 ```
 
@@ -789,7 +793,7 @@ Trees    OOB Error    Marginal Improvement
 
 ### Pitfall 1: n_estimators=100 in Production
 
-The sklearn default is 100 trees. For most real datasets, OOB error has NOT stabilised at 100 trees — it is still decreasing. A team at a fintech company deployed a random forest with 100 trees because "it looked fine in development" on a fast laptop. The OOB score was 0.891. After increasing to 500 trees, the OOB stabilised at 0.897. The difference on 2 million daily predictions meant ~1200 more correctly classified fraud cases per day.
+The sklearn default is 100 trees. For most real datasets, OOB error has NOT stabilised at 100 trees — it is still decreasing. Illustrative scenario (not a published incident): a team ships a 100-tree forest because "it looked fine in development", OOB accuracy 0.891; raising it to 500 trees stabilises OOB at 0.897. On 2 million daily predictions that 0.006 accuracy gain is ~12,000 additional correct decisions per day, and if fraud is ~10% of the flagged volume, on the order of 1,000 extra fraud cases caught — for nothing but CPU time.
 
 ```python
 # BROKEN: OOB not stabilised
@@ -923,7 +927,7 @@ Fully grown decision trees are classic high-variance, low-bias models — they m
 With class_weight="balanced", class weights are computed once from the full training set as N/(n_classes * class_count) and applied uniformly to all trees. With class_weight="balanced_subsample", class weights are recomputed for each tree's bootstrap sample — since bootstrap samples have random class proportions (especially for rare classes), each tree adapts its weights to its own sample distribution. In practice "balanced_subsample" produces better results for severe class imbalance because it accounts for the variation in class representation across bootstrap samples; "balanced" uses the same weights everywhere. The difference is most pronounced when positive rate < 5%.
 
 **Q: How would you use Random Forest for a regression problem, and what changes from classification?**
-For regression, use RandomForestRegressor. Key differences: (1) Default max_features changes from "sqrt" to 1.0 in sklearn ≥ 1.1 (previous default was "auto" = n_features/3); set max_features=n_features//3 explicitly for Breiman's recommendation; (2) Aggregation is mean instead of majority vote; (3) OOB score reports R^2 instead of accuracy; (4) class_weight is not applicable; (5) Feature importance via MDI uses variance reduction instead of Gini impurity. Permutation importance is especially valuable for regression because the metric (R^2, RMSE) is directly interpretable. The bias-variance analysis is identical: averaging reduces variance, bias is unchanged.
+For regression, use RandomForestRegressor. Key differences: (1) The default max_features is 1.0 — all features at every node, i.e. plain bagged trees — whereas the classifier defaults to "sqrt". Before sklearn 1.1 the regressor's default was spelled "auto", which also resolved to *all* n_features, so the 1.1 change was a rename, not a behaviour change; "auto" never meant n_features/3 in sklearn. If you want Breiman's p/3 rule (R `randomForest`'s default) you must pass `max_features=1/3` or `n_features//3` yourself, and on wide feature sets that single change is usually the biggest accuracy win available; (2) Aggregation is mean instead of majority vote; (3) OOB score reports R^2 instead of accuracy; (4) class_weight is not applicable; (5) Feature importance via MDI uses variance reduction instead of Gini impurity. Permutation importance is especially valuable for regression because the metric (R^2, RMSE) is directly interpretable. The bias-variance analysis is identical: averaging reduces variance, bias is unchanged.
 
 **Q: How do you diagnose whether your Random Forest is underfitting or overfitting?**
 Compare training error and OOB error. If training error is near zero and OOB error is high: overfitting per tree — try max_depth, min_samples_leaf, smaller max_features. If both training error and OOB error are high: high bias — the trees are too shallow or the features are not predictive. If OOB error is much higher than CV error on a separate test set: OOB estimate is noisy (likely small dataset or too few trees — increase n_estimators). If training error > 0 with fully grown trees: there is noise in labels or duplicate rows with conflicting labels. Monitor OOB error stability over n_estimators as the primary diagnostic.
@@ -970,10 +974,12 @@ max_samples sets the number (or fraction) of rows drawn for each bootstrap sampl
 **Step 1 — Baseline**
 
 ```python
+from sklearn.metrics import roc_auc_score
+
 rf_base = RandomForestClassifier(
     n_estimators=500,
     max_features="sqrt",
-    oob_score=True,
+    oob_score=roc_auc_score,   # callable => oob_score_ is AUC, not the default accuracy
     n_jobs=-1,
     random_state=42,
     class_weight="balanced_subsample",
@@ -1013,7 +1019,7 @@ rf_final = RandomForestClassifier(
     n_estimators=500,
     max_features="sqrt",
     min_samples_leaf=5,    # slight regularisation with fewer features
-    oob_score=True,
+    oob_score=roc_auc_score,   # keep the same OOB metric as the baseline above
     n_jobs=-1,
     random_state=42,
     class_weight="balanced_subsample",

@@ -51,7 +51,7 @@ Key insight: the test set must remain completely unseen until final evaluation. 
 | Stratified K-Fold    | Imbalanced classes, classification              | None         |
 | TimeSeriesSplit      | Temporal data (financial, sensor, clickstream)  | None         |
 | Group K-Fold         | Groups must not span folds (patients, users)    | None         |
-| Leave-One-Out (LOO)  | Very small n (< 100), expensive to compute      | None         |
+| Leave-One-Out (LOO)  | Very small n (< 200), expensive to compute      | None         |
 | Purged K-Fold        | Finance: embargo period between train and val   | None         |
 | Repeated K-Fold      | Reduce variance in CV estimate                  | None         |
 
@@ -252,9 +252,16 @@ Nested CV separates tuning from evaluation: the inner loop picks hyperparameters
 ```
 Time:  t1 --- t2 --- t3 --- t4 --- t5 --- t6 --- t7 --- t8
 
-Split 1:  [Train: t1-t4]           [Val: t5-t6]
-Split 2:  [Train: t1-t6]           [Val: t7]
-Split 3:  [Train: t1-t7]           [Val: t8]
+TimeSeriesSplit(n_splits=3) on 8 rows -> test_size = 8 // (3+1) = 2:
+
+Split 1:  [Train: t1-t2]           [Val: t3-t4]
+Split 2:  [Train: t1-t4]           [Val: t5-t6]
+Split 3:  [Train: t1-t6]           [Val: t7-t8]
+          train grows, validation stays a fixed-size block just after it
+
+With gap=1 (gap counts SAMPLES, not days/seconds):
+
+Split 3:  [Train: t1-t5]  [skip t6]  [Val: t7-t8]
 
 NEVER: [Train: t1, t3, t5, t7]  [Val: t2, t4, t6, t8]  <-- future data in train
 ```
@@ -285,17 +292,17 @@ xychart-beta
 
 Precision starts near 1.0 and decays toward the positive prevalence (the flat line at 0.05). The model curve staying high as recall grows is exactly what a large AUC-PR measures — the reason AUC-PR is preferred over AUC-ROC below 5% positives.
 
-**What this actually says.** "AUC-ROC is the probability that, if you pick one random positive and one random negative, the model scores the positive higher. AUC-PR is the probability that something the model flagged is actually positive, averaged across every recall level you might operate at."
+**What this actually says.** "AUC-ROC is the probability that, if you pick one random positive and one random negative, the model scores the positive higher. AUC-PR is the fraction of what the model flags that is actually positive, averaged across every recall level you might operate at."
 
-That first sentence is the definition worth memorizing — `P(score(pos) > score(neg))` in the metrics table is literally a probability about a ranking contest, not an abstract area. It also explains both numbers' baselines: coin-flip ranking wins half its contests, so random AUC-ROC = 0.50, while a random flagger is right at the base rate, so random AUC-PR = prevalence.
+That first sentence is the definition worth memorizing — `P(score(pos) > score(neg))` in the metrics table is literally a probability about a ranking contest, not an abstract area (with tied scores contributing 0.5 each). AUC-PR is *not* a probability: it is a recall-weighted mean of precisions. It also explains both numbers' baselines: coin-flip ranking wins half its contests, so random AUC-ROC = 0.50, while a random flagger is right at the base rate, so random AUC-PR = prevalence.
 
 | Symbol | What it is |
 |--------|------------|
 | `TPR` (recall) | `TP / (TP + FN)`. Of the real positives, the fraction caught. ROC's y-axis |
 | `FPR` | `FP / (FP + TN)`. Of the real negatives, the fraction falsely flagged. ROC's x-axis |
 | `precision` | `TP / (TP + FP)`. Of what was flagged, the fraction that was right. PR's y-axis |
-| `AUC-ROC` | Area under TPR-vs-FPR. Equals `P(score of a random positive > score of a random negative)` |
-| `AUC-PR` | Area under precision-vs-recall (sklearn's `average_precision_score`) |
+| `AUC-ROC` | Area under TPR-vs-FPR. Equals `P(pos > neg) + 0.5 * P(pos = neg)` — ties split the credit |
+| `AUC-PR` | Summarizes precision-vs-recall. sklearn's `average_precision_score` = `sum (R_n - R_{n-1}) * P_n`, a step-wise weighted mean of precisions — not the trapezoidal area `auc(recall, precision)`, which interpolates optimistically |
 | baseline `0.5` | A coin flip wins half its ranking contests, so random AUC-ROC is always 0.50 |
 | baseline `prevalence` | Random flagging is right at the base rate, so random AUC-PR is the positive rate |
 
@@ -437,12 +444,20 @@ A reliability diagram is nothing more than that check drawn as a plot — bucket
   Brier = sum over bins of n_b * [ o_b*(1 - p_b)^2 + (1 - o_b)*p_b^2 ] / N
         = 0.1826
 
-  Brier this model would score if perfectly calibrated (o_b = p_b) = 0.1632
+  Murphy decomposition:  Brier = reliability - resolution + uncertainty
+    reliability  = sum n_b*(p_b - o_b)^2 / N                      = 0.0083
+    base rate    = sum n_b*o_b / N = 2849 / 10000                 = 0.2849
+    uncertainty  = base*(1 - base) = 0.2849 * 0.7151              = 0.2038
+    resolution   = sum n_b*(o_b - base)^2 / N                     = 0.0295
+    check: 0.0083 - 0.0295 + 0.2038 = 0.1826                      <- matches
+
+  Brier of the SAME model after perfect recalibration (predict o_b in bin b)
+    = sum n_b * o_b*(1 - o_b) / N = 0.1743   <- Brier minus the reliability term
 ```
 
 Read the 0.5 row against Pitfall 4: marketing set the retention-offer threshold at 0.5, and of the 1,800 customers the model scored there, only 43% actually churned. Read the 0.9 row for the worst damage: the model claims 90% certainty and reality delivers 60%, a 0.30 gap — but that bin holds only 500 rows, so it contributes 0.015 of the 0.0571 ECE, less than the 0.7 bin's 0.018. The size weighting is the point: a spectacular miscalibration on 5% of traffic is a smaller business problem than a moderate one on 12%.
 
-**Why Brier and ECE are not redundant.** Brier is a *proper scoring rule* — it scores both ranking and calibration at once, so it drops if you either separate the classes better or state your confidence more honestly. That makes it a good single-number monitor but a bad diagnostic: the 0.1826 above is only 0.0194 above the 0.1632 floor that perfect calibration would give this model, so most of the Brier score is just the difficulty of the problem, not the dishonesty. ECE isolates the dishonesty alone. Track Brier to know if the model got worse; read the reliability diagram and ECE to know *why*. And note the insurance example in Section 7 has the same shape — Brier 0.18 at AUC-ROC 0.87, fixed to 0.12 by Platt scaling on a 10,000-row held-out set *without changing AUC at all*, because calibration is a monotonic rescaling of the scores and monotonic rescaling cannot change any ranking.
+**Why Brier and ECE are not redundant.** Brier is a *proper scoring rule* — it scores both ranking and calibration at once, so it drops if you either separate the classes better or state your confidence more honestly. That makes it a good single-number monitor but a bad diagnostic: of the 0.1826 above, only the 0.0083 reliability term is miscalibration; recalibrating this model perfectly would still leave 0.1743, which is the problem's own difficulty (uncertainty minus resolution). ECE isolates the dishonesty alone. Track Brier to know if the model got worse; read the reliability diagram and ECE to know *why*. And note the insurance example in Section 7 has the same shape — Brier 0.18 at AUC-ROC 0.87, fixed to 0.12 by Platt scaling on a 10,000-row held-out set *without changing AUC*, because Platt scaling is a **strictly** monotonic sigmoid and strict monotonicity cannot change any ranking. Isotonic regression is only *non-decreasing*: its flat steps map distinct scores onto the same value, and those new ties can move AUC slightly (sklearn's calibration guide says so explicitly), so use `method="sigmoid"` when AUC must be preserved exactly.
 
 ---
 
@@ -613,9 +628,13 @@ def calibrate_model(
     corresponds to 70% actual positive rate.
 
     method="sigmoid"  (Platt scaling): few calibration samples (< 1,000), fast.
-    method="isotonic": more samples (> 1,000), flexible non-parametric fit —
-      still monotonic (isotonic regression can only be non-decreasing), so it
-      never changes the score ordering, and therefore never changes AUC.
+      Strictly monotonic, so it preserves the ranking and leaves AUC unchanged.
+    method="isotonic": more samples (> 1,000), flexible non-parametric fit.
+      Only NON-decreasing, not strictly increasing: its flat steps collapse
+      distinct scores into ties, and those ties can change AUC slightly. Pick
+      "sigmoid" if AUC must be preserved exactly (sklearn calibration guide).
+    method="temperature": temperature scaling, added in recent sklearn; single
+      parameter, natively multiclass. Also strictly monotonic.
 
     Brier score: mean squared error of probabilities. Lower = better calibrated.
     Expected calibration error (ECE): average abs difference between confidence
@@ -783,18 +802,18 @@ def compare_models_mcnemar(
 
 | Strategy          | Data assumption | Fold independence | Cost |
 |-------------------|-----------------|-------------------|------|
-| K-Fold            | IID             | Moderate          | n_splits * 1 fit |
-| Stratified K-Fold | IID, imbalanced | Moderate          | n_splits * 1 fit |
-| TimeSeriesSplit   | Temporal        | High              | n_splits * 1 fit, growing train size |
-| Repeated Stratified| IID, low n     | Highest           | n_splits * n_repeats fits |
-| LOO               | Small n         | High              | n fits |
+| K-Fold            | IID             | Moderate — train sets share `(k-2)/(k-1)` of the rows | n_splits * 1 fit |
+| Stratified K-Fold | IID, imbalanced | Moderate — same overlap as K-Fold | n_splits * 1 fit |
+| TimeSeriesSplit   | Temporal        | Low — train sets are nested and strictly growing | n_splits * 1 fit, growing train size |
+| Repeated Stratified| IID, low n     | Low — the same rows are reused in every repeat | n_splits * n_repeats fits |
+| LOO               | Small n         | Lowest — consecutive train sets differ by one row | n fits |
 
 ### Tuning Strategy Comparison
 
 | Method             | Trials needed to find good params | Handles conditional params | Parallelizable |
 |--------------------|-----------------------------------|----------------------------|----------------|
 | GridSearchCV       | Exponential in param count        | No                         | Yes            |
-| RandomizedSearchCV | 60 trials -> 95% chance of landing in the top-5% region (Bergstra & Bengio 2012) | No | Yes |
+| RandomizedSearchCV | 60 trials -> `1 - 0.95^60` = 95.4% chance of landing in a region worth 5% of the space. This is a plain binomial fact, NOT a result stated in Bergstra & Bengio 2012 — that paper's simulation used a 1%-volume target, `1 - 0.99^T` | No | Yes |
 | Optuna TPE         | 50–200 for most problems          | Yes                        | Yes (async)    |
 
 ---
@@ -831,7 +850,7 @@ Fraud detection dataset with 0.5% fraud rate. Classifier that always predicts "n
 A churn prediction model output P(churn) = 0.8 for many customers. Marketing set the retention offer threshold at 0.5 (above = offer). Post-launch: only 43% of flagged customers actually churned (actual rate should have been ~80% per the model). Brier score analysis showed severe overconfidence. Fix: fit Platt scaling or isotonic calibration on a held-out validation set.
 
 **Pitfall 5: Random split on time-series data.**
-A demand forecasting model for a retail chain used random 20% test split. Test AUC 0.86. After deployment, live MAE was 3x higher than test MAE. Random split selected test rows from all months; training data included December rows when the model predicted November. TimeSeriesSplit on the same data gave a test MAE matching production within 8%.
+A demand forecasting model for a retail chain used a random 20% test split. Test R^2 was 0.86 (AUC is undefined here — this is a regression target, and quoting a classification metric for it is its own red flag). After deployment, live MAE was 3x higher than test MAE. Random split selected test rows from all months; training data included December rows when the model predicted November. TimeSeriesSplit on the same data gave a test MAE matching production within 8%.
 
 **Pitfall 6: Misinterpreting MAPE with near-zero actuals.**
 MAPE = |actual - predicted| / |actual|. When actual sales = 1 unit (common for long-tail SKUs), a prediction of 2 gives MAPE = 100%. A prediction of 1.1 gives MAPE = 10%. MAPE becomes numerically unstable and misleading. Fix: use MASE (mean absolute scaled error) or RMSSE for intermittent demand data.
@@ -885,10 +904,10 @@ Use TimeSeriesSplit whenever rows are temporally dependent — financial data, t
 TPE (Tree-structured Parzen Estimator) maintains two models: `l(x)` (distribution of hyperparameter configurations associated with good results) and `g(x)` (associated with poor results). It samples the next candidate from the ratio `l(x)/g(x)`, meaning it prioritizes regions that historically produce good results while maintaining some exploration. After 50–100 trials, TPE focuses search in the most promising parameter regions, whereas random search samples uniformly throughout. Published benchmarks commonly show TPE reaching a comparable score in noticeably fewer trials than random search, but the margin is problem-dependent and random search remains a strong baseline on low-dimensional spaces — quote a speedup only if you measured it on your own task.
 
 **Q: What is the Brier score and how does it relate to calibration?**
-The Brier score is the mean squared error of probability predictions: `mean((y_true - y_prob)^2)`. Range: 0 (perfect) to 1 (worst). A perfectly calibrated model does not guarantee a low Brier score — discrimination (ranking ability) also contributes. The Brier score decomposes into calibration + resolution + uncertainty. It is the most common scalar summary of probability prediction quality. Reduce Brier score by: (1) improving model AUC (better discrimination), (2) calibrating probabilities (better calibration).
+The Brier score is the mean squared error of probability predictions: `mean((y_true - y_prob)^2)`. Range for binary targets: 0 (perfect) to 1 (worst), with 0.25 for a model that always says 0.5. A perfectly calibrated model does not guarantee a low Brier score — discrimination (ranking ability) also contributes. Murphy's decomposition is `Brier = reliability - resolution + uncertainty`: reliability is the size-weighted squared calibration gap (lower is better), resolution rewards spreading predictions away from the base rate (it is *subtracted*, so higher is better), and uncertainty `= base_rate * (1 - base_rate)` is fixed by the data and cannot be improved. Note the sign — "calibration + resolution + uncertainty" is the common misstatement. Reduce Brier score by: (1) improving discrimination, which raises resolution, (2) calibrating probabilities, which shrinks reliability.
 
 **Q: When is it appropriate to use the paired t-test for model comparison?**
-The paired t-test on CV fold scores is appropriate when you have multiple evaluation folds on the same data (each fold gives one observation per model) and you want to test whether mean CV performance differs. "Paired" accounts for fold-level correlation — fold 3 tends to be hard for all models, so comparing models on the same folds is more efficient than unpaired. Limitation: CV fold scores are not truly independent (training sets overlap), so p-values are anti-conservative (reject H0 too easily). Treat results as directional evidence; require p < 0.01 rather than p < 0.05 for higher confidence.
+The paired t-test on CV fold scores is appropriate when you have multiple evaluation folds on the same data (each fold gives one observation per model) and you want to test whether mean CV performance differs. "Paired" accounts for fold-level correlation — fold 3 tends to be hard for all models, so comparing models on the same folds is more efficient than unpaired. Its assumptions are that the per-fold differences are independent and roughly normal; the independence assumption is **violated by construction**, because k-fold training sets share `(k-2)/(k-1)` of their rows, so the test underestimates the variance of the mean difference and is anti-conservative (rejects H0 too easily). The principled fix is Nadeau & Bengio's corrected resampled t-test, which inflates the variance estimate by `(1/k + n_test/n_train)` instead of `1/k`; scikit-learn documents this correction in its statistical-comparison guide. Failing that, treat results as directional evidence and require p < 0.01 rather than p < 0.05.
 
 **Q: What is McNemar's test and when do you use it instead of the t-test?**
 McNemar's test compares two classifiers on a fixed held-out test set based on the discordant pairs: cases where model A is correct and B is wrong (b), versus B correct and A wrong (c). The test statistic is `(b - c)^2 / (b + c)` following chi-squared. Use McNemar's when you have a single test set (not CV) and binary classification predictions. It is more appropriate than the t-test in this setting because it directly measures disagreement between classifiers rather than continuous score differences.
@@ -897,7 +916,7 @@ McNemar's test compares two classifiers on a fixed held-out test set based on th
 If you use the test set to compare 20 models and report the best, you have introduced selection bias. The reported metric is the maximum of 20 noisy estimates rather than an unbiased estimate of the winner's true performance — it overestimates true performance by an amount proportional to the number of models compared and the noise in the estimate. Fix: use cross-validation on the training set for all model comparison decisions; reserve the test set for a single final evaluation after all decisions are made.
 
 **Q: How do you choose the number of folds k in k-fold cross-validation?**
-Standard choice is k=5 or k=10. Higher k (10) gives a lower-bias estimate (each validation fold is smaller, training set is larger and closer to full data size) but higher variance (more folds, each noisier). Lower k (5) is faster and still gives reasonable estimates for n > 1,000. For small n (< 500), use LOO-CV (which is exactly k = n). For very large n (> 1M), k=3 is often sufficient — the estimate variance is dominated by the model's own noise, not fold size. Time-series splits: k = number of years or quarters depending on forecast horizon.
+Standard choice is k=5 or k=10. Higher k (10) gives a lower-bias estimate (each validation fold is smaller, training set is larger and closer to full data size) but higher variance (more folds, each noisier). Lower k (5) is faster and still gives reasonable estimates for n > 1,000. For small n (< 200), use LOO-CV (which is exactly k = n). For very large n (> 1M), k=3 is often sufficient — the estimate variance is dominated by the model's own noise, not fold size. Time-series splits: k = number of years or quarters depending on forecast horizon.
 
 **Q: What is MAPE and what are its limitations for regression evaluation?**
 MAPE (Mean Absolute Percentage Error) = `mean(|actual - predicted| / |actual|) * 100`. Limitations: (1) undefined when actual = 0 (division by zero), (2) asymmetric — over-prediction and under-prediction of the same magnitude give different errors, (3) heavy penalty for small actuals (predicting 2 when actual is 1 gives 100% error). Better alternatives: sMAPE (symmetric MAPE), MASE (mean absolute scaled error, relative to naïve forecast), RMSSE. Use MAPE only when actuals are reliably > 0 and interpretability in percentage terms is required.
@@ -1066,7 +1085,9 @@ final_score = average_precision_score(y_holdout, final_model.predict_proba(X_hol
 ```python
 # BROKEN: choosing threshold at 0.5 (default) maximizes accuracy but not business value
 # Fraud detection: FN (missed fraud) costs $200; FP (false alarm) costs $2 (review cost)
-# At threshold=0.5: precision=0.78, recall=0.71, revenue loss from FN = 29% × $200 = $58
+# Daily volume: 155 true frauds. At threshold=0.5 the confusion matrix is
+#   TP=110, FN=45, FP=120  ->  recall = 110/155 = 0.71, precision = 110/230 = 0.48
+#   expected loss per true fraud = (1 - recall) × $200 = 0.29 × $200 = $58
 from sklearn.metrics import roc_auc_score
 auc = roc_auc_score(y_true, y_scores)   # 0.987 — looks great!
 # But business metric: daily cost = FP_count × $2 + FN_count × $200
@@ -1081,7 +1102,8 @@ def business_cost(y_true, y_pred, fp_cost=2.0, fn_cost=200.0):
 thresholds = np.linspace(0.01, 0.99, 99)
 costs = [business_cost(y_true, (y_scores >= t).astype(int)) for t in thresholds]
 best_threshold = thresholds[np.argmin(costs)]   # 0.17 — much lower threshold
-# At threshold=0.17, daily cost: 380 × $2 + 8 × $200 = $760 + $1,600 = $2,360 (74% reduction)
+# At threshold=0.17: TP=147, FN=8, FP=380 -> recall 0.95, precision 147/527 = 0.28
+# Daily cost: 380 × $2 + 8 × $200 = $760 + $1,600 = $2,360 (74% reduction from $9,240)
 ```
 
 **Why is stratified k-fold cross-validation essential for imbalanced datasets?** Random k-fold splits can create folds with 0 positive examples (especially with 1:1000 class imbalance). A fold with no positives cannot compute AUC-ROC and produces division-by-zero errors in precision/recall. Stratified k-fold maintains the positive class ratio in each fold, guaranteeing that every fold contains positive examples proportional to the overall rate. Use `StratifiedKFold(n_splits=5)` as the default for any binary or multi-class classification task.

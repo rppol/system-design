@@ -263,15 +263,22 @@ import numpy as np
 from scipy import stats as scipy_stats
 
 def estimate_pickup_wait(
-    supply_in_zone: int,         # number of available drivers within 2km
-    demand_rate: float,          # requests per minute in the zone
-    driver_distance_m: float,    # distance of nearest available driver
-    zone_congestion: float,      # current speed / historical speed ratio
+    supply_in_zone: int,              # number of available drivers within 2km
+    demand_rate: float,               # requests per minute in the zone
+    driver_distance_m: float,         # distance of nearest available driver
+    zone_congestion: float,           # current speed / historical speed ratio
+    driver_arrival_rate_per_min: float = 0.5,  # drivers becoming free per minute
 ) -> dict[str, float]:
     """
     Simple queuing-based pickup wait estimate.
     Driver arrival time = distance / (historical speed × congestion_factor)
-    For no available drivers: queue wait based on Poisson arrival rate.
+    For no available drivers: M/M/1-style wait on the driver arrival process.
+
+    NOTE the trap in the empty-zone branch: the arrival rate must come from an
+    independent estimate of how fast drivers free up in this zone. Deriving it
+    from `supply_in_zone` is circular — that value is 0 in exactly this branch,
+    so any ratio built from it collapses to whatever floor you clamp with, and
+    the "queue model" silently degenerates into a constant.
     """
     if supply_in_zone > 0:
         avg_speed_kmh = 25.0 * zone_congestion     # urban average speed in km/h
@@ -282,13 +289,10 @@ def estimate_pickup_wait(
             "source": "nearest_driver",
         }
     else:
-        # Poisson arrival model: wait for next driver dispatch
-        # Lambda = supply arrival rate in drivers/minute
-        if demand_rate > 0:
-            supply_arrival_rate = max(0.5, supply_in_zone / (demand_rate + 1e-9))
-            expected_wait_s = (1.0 / supply_arrival_rate) * 60
-        else:
-            expected_wait_s = 300.0   # 5 minutes default when no data
+        # Effective service rate = driver arrivals net of competing demand.
+        net_rate = max(driver_arrival_rate_per_min - demand_rate, 0.05)
+        expected_wait_s = (1.0 / net_rate) * 60
+        expected_wait_s = min(expected_wait_s, 900.0)  # cap displayed wait at 15 min
         return {
             "pickup_p50_s": expected_wait_s,
             "pickup_p90_s": expected_wait_s * 1.8,
@@ -301,7 +305,7 @@ def estimate_pickup_wait(
 ## 5. Design Decisions & Tradeoffs
 
 **Decision 1: LightGBM over deep learning (GNN/Transformer) for segment-level ETA.**
-Alternatives considered: (a) graph neural network over road graph — more accurate for long-horizon route planning (handles multi-hop dependencies); GNN AUC on 10+ minute trips: MAE 75s vs GBDT 92s; (b) GBDT on segment features — simpler, faster to serve (3ms vs 45ms for GNN on CPU), easier to debug; (c) simple linear model on historical average — MAE 140s, insufficient. Decision: GBDT for the segment-level predictor; MAE 92s vs 75s for GNN is acceptable given the 3x latency advantage. GNN is reserved for future work when the serving infrastructure supports GPU inference within the 50ms budget. See [Algorithm Selection](../../model_selection_and_algorithm_choice/README.md).
+Alternatives considered: (a) graph neural network over road graph — more accurate for long-horizon route planning (handles multi-hop dependencies); on 10+ minute trips it reaches MAE 75s vs GBDT's 92s; (b) GBDT on segment features — simpler, faster to serve (3ms vs 45ms for GNN on CPU), easier to debug; (c) simple linear model on historical average — MAE 140s, insufficient. Decision: GBDT for the segment-level predictor; MAE 92s vs 75s for GNN is acceptable given the roughly 15x CPU-latency advantage (3ms vs 45ms; 7.5x once the p50+p90 pair is served at 6ms). GNN is reserved for future work when the serving infrastructure supports GPU inference within the 50ms budget. See [Algorithm Selection](../../model_selection_and_algorithm_choice/README.md).
 
 **Decision 2: Quantile regression (p50 + p90) over mean regression.**
 Mean regression produces a single ETA estimate optimized for symmetric loss. Riders are not symmetric — being late by 5 minutes is worse than being early by 5 minutes (riders wait, drivers feel pressure). p90 predictions are used for driver commitments: if the driver is given p90 as their "committed ETA" and 90% of trips complete within this time, the driver is considered on-time 90% of the time. This decouples rider-facing display (p50 = shorter, more attractive ETA) from driver-facing commitment (p90 = achievable in 9/10 trips). The cost: two models instead of one, slightly higher training time.
@@ -333,19 +337,19 @@ xychart-beta
     bar [140, 110, 92, 92, 75]
 ```
 
-*The GNN is the accuracy leader at 75s MAE but costs 45ms CPU inference — over the 50ms model budget without GPUs. LightGBM (92s) clears the 95s SLO at 3–6ms, so it serves p50/p90 today while the GNN stays a research track for long-trip accuracy.*
+*The GNN is the accuracy leader at 75s MAE but costs 45ms of the 50ms CPU inference budget on its own, leaving nothing for feature assembly or the p90 head. LightGBM (92s) clears the 95s SLO at 3–6ms, so it serves p50/p90 today while the GNN stays a research track for long-trip accuracy.*
 
 ---
 
 ## 6. Real-World Implementations
 
-**Uber:** published "DeepETA" (2022) — a Transformer-based ETA model that takes route waypoints, real-time traffic, and contextual signals. Key insight: they still use LightGBM as a pre-processing step to generate segment-level speed estimates, feeding these into the Transformer as features. The Transformer handles long-range spatial dependencies (traffic on segment A affects segments B, C, D downstream). This hybrid architecture demonstrates that even at Uber's scale, GBDT serves as a critical building block within a DL system.
+**Uber:** published "DeepETA" (2022) — and the important structural point is that it is a **residual/post-processing model, not an end-to-end ETA predictor**. A conventional routing engine produces a base ETA from map data and traffic; DeepETA predicts the *residual* between that base ETA and the real-world observed outcome. Architecture: a linear Transformer encoder over discretized-and-embedded features (both categorical and continuous inputs are bucketized before embedding), a fully-connected decoder with segment-specific bias adjustment, and an asymmetric Huber loss so over- and under-prediction are penalized differently. Notably, the model DeepETA replaced was a gradient-boosted decision tree ensemble — one of the largest XGBoost ensembles in production anywhere — which stopped scaling. Uber's post does not describe LightGBM as a preprocessing stage feeding the Transformer; the base ETA comes from the routing engine.
 
-**Lyft:** uses a "gradient boosted tree plus residual network" approach: GBDT predicts base ETA from static segment features; a neural network residual model corrects for real-time deviations. This architecture lets the GBDT handle the bulk of the prediction (trained on large historical data) while the neural network handles the real-time signal (trained on recent data with continuous updates). Serving latency is dominated by the GBDT (fast) with the residual network adding only 8ms on GPU.
+**Lyft:** has published on building a **custom gradient-boosted-tree package** for travel-time estimation, with time plus start/end location as the primary features and space-partitioning schemes (geohashes, S2 cells) used to turn raw coordinates into model-usable cluster IDs. Beyond that, Lyft's ETA stack is not publicly documented in detail — treat any specific claim about a residual neural network on top of the GBDT, or its per-request latency, as unsourced.
 
 **Google Maps:** uses a combination of historical segment traversal times (computed from billions of Android/Maps GPS traces), real-time incident reports, and a DeepMind-developed machine learning system. The ML component predicts how historical patterns will deviate from a baseline given current traffic conditions. Key feature: traffic "state" modeling — rather than treating each segment independently, they model the joint state of a highway corridor (upstream congestion predicts downstream congestion). This is where GNN-style approaches have advantages.
 
-**DiDi (China):** operates in extremely dense urban environments where traffic patterns differ significantly from Western cities (motorcycle lanes, pedestrian crossings, informal road usage). DiDi trains city-specific models rather than global ones due to the extreme heterogeneity. They use ensemble of GBDT (for tabular features) + CNN (for a grid-based spatial representation of traffic density) to capture both feature-level and spatial patterns. Trip duration MAPE in dense urban areas: 11% with ensemble vs 18% with GBDT alone.
+**DiDi (China):** published the **WDR (Wide-Deep-Recurrent)** model — Wang, Fu & Ye, *Learning to Estimate the Travel Time*, KDD 2018. It formulates ETA as a spatio-temporal regression over floating-car data and jointly trains three components: a wide linear model (memorizes feature crosses), a deep network (generalizes over sparse categorical features), and a recurrent model that consumes the route's ordered link sequence. The recurrent branch is what handles the ordered-segment structure a flat GBDT cannot. WDR remains the backbone of DiDi's travel-time estimation, with the recurrent module later upgraded to a Transformer. Public reporting does not include per-city MAPE figures for a GBDT+CNN ensemble; do not quote one.
 
 ---
 
@@ -410,8 +414,10 @@ Resolution: debug challenger training; check if training data window included an
 
 ## 9. Common Pitfalls & War Stories
 
+*These are illustrative composites of recurring failure patterns, not accounts of specific public incidents. The mechanisms are real and common; the company descriptions, dates and impact figures are representative and should not be quoted as measured public record.*
+
 **Pitfall 1 — Symmetric loss producing systematically late arrivals, early-stage ride-hailing startup (2017).**
-ETA model trained with RMSE (symmetric loss) optimized average accuracy but produced p50 predictions at the wrong level. 52% of trips arrived later than predicted (the model was biased toward the mean, which was pulled higher by outlier-long trips). Riders complained about "ETA lies." The model was technically accurate (low RMSE) but behaviorally wrong (more trips were late than early). Resolution: switch to quantile regression at α=0.45 for display (conservative p45, slightly early-biased); MAE increased by 8s but rider satisfaction (measured by post-trip rating) increased 0.4 stars.
+ETA model trained with RMSE (symmetric loss) optimized average accuracy but produced p50 predictions at the wrong level. 52% of trips arrived later than predicted (the model was biased toward the mean, which was pulled higher by outlier-long trips). Riders complained about "ETA lies." The model was technically accurate (low RMSE) but behaviorally wrong (more trips were late than early). Resolution: switch to quantile regression and push the display quantile *above* the median — α=0.55, not below it. Predicting p45 would make 55% of trips run longer than displayed, which is the failure being fixed; predicting p55 means the rider arrives earlier than promised more often than later. MAE rises slightly (a displayed quantile above the median is by construction not the MAE-optimal point) in exchange for the arrival-surprise asymmetry the business actually cares about.
 
 **Pitfall 2 — Training-serving skew from real-time features, Uber-scale platform (2019).**
 ETA model trained on logged feature values from historical trips, but a feature (congestion_ratio = current_speed / historical_p50_speed) was computed differently at training time (using the full day's historical data as "historical_p50") vs serving time (using a 30-day rolling average). The values were correlated but systematically different: training-time congestion_ratio was biased toward 1.0 (the day's average is always 1 by definition); serving-time congestion_ratio could be 0.3 (current speed far below 30-day historical). Model trained on feature range 0.8-1.2; served with feature range 0.2-2.0 → severe extrapolation error. See [Feature Store](./cross_cutting/feature_store_and_point_in_time_correctness.md).
@@ -465,14 +471,14 @@ p99 includes Redis wait and queueing, so using it inflates the fleet ~5x):
 | S3 storage (training data, logs) | 500GB/day compressed, 2-year retention ≈ 365 TB at $0.023/GB-mo | ~$8k |
 | **Total** | | **~$95k/month** |
 
-At 10M rides/day × $0.50 avg revenue contribution from accurate ETA (reduced cancellations, better driver utilization): $5M/day, ~$152M/month. Model cost is ~0.06% of attributable revenue — the interesting consequence is that accuracy, not infrastructure cost, is the only lever worth optimizing here.
+To size the cost against value, assume (illustrative — substitute your own marketplace's measured figure) that accurate ETA contributes $0.50 per ride through reduced cancellations and better driver utilization. At 10M rides/day that is $5M/day, ~$152M/month, making model infrastructure ~0.06% of attributable revenue. The conclusion is robust to being off by an order of magnitude on that $0.50: accuracy, not infrastructure cost, is the lever worth optimizing here.
 
 ---
 
 ## 11. Interview Discussion Points
 
 **Q: Why use GBDT instead of a graph neural network for ETA, given roads are inherently a graph?**
-GNN captures multi-hop spatial dependencies — congestion propagating from segment A to segments B and C downstream. For short trips (< 15 minutes), this long-range dependency is less important — local segment speed is the primary predictor. For long trips, GNN provides 15-20pp MAE improvement. The tradeoff: GNN inference at 45ms on CPU exceeds the 50ms model inference budget; requiring GPU for serving increases cost by 5x. Decision: GBDT for p50 serving (correct 90%+ of trips), with a GNN research track for long-trip accuracy improvement once GPU serving infra is ready. See [Algorithm Selection](../../model_selection_and_algorithm_choice/README.md).
+GNN captures multi-hop spatial dependencies — congestion propagating from segment A to segments B and C downstream. For short trips (< 15 minutes), this long-range dependency is less important — local segment speed is the primary predictor. For long trips, the GNN cuts MAE by roughly 15-20% in relative terms (92s to 75s) — note that is a percentage of the error, not percentage points of anything. The tradeoff: GNN inference at 45ms on CPU consumes almost the entire 50ms model-inference budget, leaving no room for feature assembly or the second quantile head; requiring GPU for serving increases cost by 5x. Decision: GBDT for p50 serving (correct 90%+ of trips), with a GNN research track for long-trip accuracy improvement once GPU serving infra is ready. See [Algorithm Selection](../../model_selection_and_algorithm_choice/README.md).
 
 **Q: What is quantile regression and why is it better than mean regression for ETA?**
 Mean regression (MSE/RMSE loss) minimizes the expected squared error — it predicts the conditional mean ETA. The conditional mean is sensitive to outlier-long trips (stuck in traffic, accident) and produces predictions that are late more often than early (because the mean is pulled above the median by right-skewed distributions). Quantile regression minimizes the pinball loss for a specific quantile α: for α=0.5, it predicts the median (half of trips arrive earlier, half later); for α=0.9, it predicts the value below which 90% of trips complete. The asymmetric loss for α=0.9 penalizes underestimates 9x more than overestimates, producing conservative estimates. The benefit: p50 displays feel accurate (riders are early as often as late); p90 driver commitments are achievable 90% of the time (drivers feel fairly evaluated).
@@ -496,7 +502,7 @@ This is a user-level A/B experiment. OEC: trip completion rate (proxy for "ETA w
 ETA errors are higher in: (a) data-sparse areas (low GPS probe density → historical speed estimates are noisy); (b) complex road networks (highway interchanges, areas with many turns vs straight segments); (c) high-variance areas (traffic patterns are bimodal — very fast at off-peak, very slow at peak, with high uncertainty at transitions). Fix: (a) sparse areas — accept higher uncertainty, widen p90 band proportionally to probe data confidence; (b) complex networks — add turn penalty features and intersection delay estimates; (c) high-variance — the quantile model naturally captures this by outputting a wider (p90 - p50) band in high-variance areas. Report MAE separately by geo-cluster and maintain per-cluster SLOs. Set explicit SLA exceptions for extreme geographies (airport access roads during travel peaks) with documented wider tolerance. See [Responsible AI](./cross_cutting/responsible_ai_fairness_and_explainability.md) for the equity dimension of geographic ETA disparity.
 
 **Q: What is the relationship between ETA accuracy and marketplace efficiency?**
-ETA accuracy affects marketplace efficiency in three ways: (1) cancellation rate — when ETA display is significantly longer than actual (conservative model), riders cancel and re-request, wasting driver time and reducing system throughput; (2) driver supply positioning — the dispatch system uses ETA to determine which driver is "closest" to a rider; inaccurate ETA causes suboptimal matching, reducing the fraction of riders matched to the nearest driver; (3) dynamic pricing — surge pricing is triggered when demand significantly exceeds supply; if ETA is overestimated (long perceived wait), demand is artificially suppressed (fewer ride requests), causing unnecessary surge. Improving ETA accuracy from MAE=140s (historical average) to MAE=92s (GBDT) reduced unnecessary cancellation rate by 8% and improved driver utilization by 5% in a controlled experiment.
+ETA accuracy affects marketplace efficiency in three ways: (1) cancellation rate — when ETA display is significantly longer than actual (conservative model), riders cancel and re-request, wasting driver time and reducing system throughput; (2) driver supply positioning — the dispatch system uses ETA to determine which driver is "closest" to a rider; inaccurate ETA causes suboptimal matching, reducing the fraction of riders matched to the nearest driver; (3) dynamic pricing — surge pricing is triggered when demand significantly exceeds supply; if ETA is overestimated (long perceived wait), demand is artificially suppressed (fewer ride requests), causing unnecessary surge. The direction is well established, but be careful about quoting a magnitude: no public, verifiable figure ties a specific MAE improvement to a specific cancellation-rate or utilization delta, so any "MAE 140s to 92s buys X% fewer cancellations" number you cite has to come from your own holdout experiment, not from the literature.
 
 **Q: How do you handle the tail latency problem for ETA on complex multi-segment routes?**
-Long routes (50+ road segments) have higher LightGBM inference time (more features to evaluate per tree). At 200 segments, p99 latency can reach 80ms for the model inference alone. Solutions: (1) coarse-grained routing for long trips — aggregate 200 segments into 20 "super-segments" at the cost of some granularity; model evaluates 20 features instead of 200; latency reduced by 10x; (2) pre-computation — for the top-1000 most common routes, pre-compute ETA at 5-minute intervals and serve from cache; lookup is <1ms; (3) segment count cap — cap at 50 segments for the fine-grained model; use the linear/historical model for the remaining segments; combine. In practice, 95% of routes have < 40 segments; the tail latency problem affects < 5% of requests and can be handled by capping segment count with minimal accuracy loss.
+Long routes cost more because the model is scored once per segment, not because any tree gets wider. The feature vector is a fixed ~60 columns regardless of route length, so the cost is N inferences plus N Redis lookups, linear in segment count. At 200 segments, p99 for the model work alone can reach 80ms. Solutions: (1) coarse-grained routing for long trips — aggregate 200 segments into 20 "super-segments" at the cost of some granularity; that is 20 scored rows instead of 200, a 10x cut in both inference calls and feature reads; (2) pre-computation — for the top-1000 most common routes, pre-compute ETA at 5-minute intervals and serve from cache; lookup is <1ms; (3) segment count cap — cap at 50 segments for the fine-grained model; use the linear/historical model for the remaining segments; combine. In practice, 95% of routes have < 40 segments; the tail latency problem affects < 5% of requests and can be handled by capping segment count with minimal accuracy loss.

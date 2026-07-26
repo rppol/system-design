@@ -6,7 +6,7 @@ Model compression reduces the size, memory footprint, and compute requirements o
 
 The four primary compression families are quantization, pruning, knowledge distillation, and low-rank factorization. They are often combined: a model may be distilled first (student is 10x smaller), then quantized (INT8 for 4x size reduction), then pruned (20% sparsity for additional throughput gains).
 
-Practical impact: a 70% size reduction with less than 1% accuracy drop is achievable for most production CNN and tabular models using PTQ + structured pruning alone. For NLP models, QAT or distillation may be needed to recover accuracy.
+Practical impact: for well-behaved CNN and tabular models, INT8 PTQ with per-channel weight scales plus modest structured pruning commonly reaches a ~70% size reduction for roughly a point of accuracy or less. That is a rule of thumb, not a guarantee — depthwise-separable architectures are the standard counterexample (see the MobileNet numbers in Section 4), and for those, QAT or distillation is needed to recover accuracy.
 
 ---
 
@@ -18,7 +18,7 @@ One-line analogy: Compression is the art of saying the same thing with fewer wor
 
 Why it matters: A 175B parameter GPT-3 model in FP32 requires 700GB of memory. INT8 quantization reduces this to 175GB. QAT-trained INT4 reduces it further to ~87GB, enabling deployment on a cluster that would otherwise be infeasible.
 
-Key insight: Most neural network weights are redundant — studies show 50–90% of weights can be zeroed with under 1% accuracy loss on image classification tasks.
+Key insight: Most neural network weights are redundant. Han et al.'s Deep Compression line of work showed AlexNet and VGG-16 pruned roughly 9x and 13x (near 90% of weights zeroed) with no loss of ImageNet accuracy, and the 50–90% band has held up broadly for over-parameterized image classifiers. It does not transfer automatically to compact or already-efficient architectures, where the same sparsity is far more damaging.
 
 ---
 
@@ -42,15 +42,15 @@ Key insight: Most neural network weights are redundant — studies show 50–90%
 - Quantize weights and activations to INT8 (or INT4) after training completes
 - No retraining required; works on any frozen model
 - Calibration set: 100–1,000 representative samples to compute activation min/max ranges
-- Accuracy drop: < 1% for most CNNs and tabular models; larger drops for small models or activation-sensitive architectures (transformers at INT4 without care)
+- Accuracy drop: around a point or less for most residual CNNs and tabular models *with per-channel weight scales*; much larger for depthwise-separable and activation-sensitive architectures (per-tensor INT8 PTQ collapses MobileNet-v1/v2 to ~0.1% top-1 in Krishnamoorthi's whitepaper, arXiv 1806.08342 Table 4)
 - Dynamic quantization: quantize weights only; activations remain FP32 at runtime (simpler, good for RNNs/LSTMs)
 - Static quantization: calibrate activation ranges offline; fixed quantization applied at runtime (better throughput)
 
 ### Quantization-Aware Training (QAT)
 - Insert "fake quantization" nodes during forward pass: simulate INT8 rounding effects while keeping FP32 weights for gradient updates
 - Backward pass uses straight-through estimator to pass gradients through non-differentiable rounding
-- Recovers accuracy when PTQ drops > 1% (e.g., MobileNetV2 on ImageNet: PTQ drops 1.8%, QAT recovers to 0.3% below FP32)
-- Requires retraining for 5–10% of original training steps (fine-tuning mode is sufficient for most models)
+- Recovers accuracy when PTQ drops too far. Krishnamoorthi (arXiv 1806.08342) on ImageNet, MobileNet-v2 float top-1 71.9%: 8-bit per-channel PTQ 69.7–69.8% (down ~2.2 points), 8-bit QAT 70.9–71.1% (down ~0.8–1.0 points). MobileNet-v1 is the same story: float 70.9%, per-channel asymmetric PTQ 70.4%, QAT 70.0–70.7%
+- Typically fine-tuned for a small fraction of the original training budget rather than retrained from scratch; treat the exact step count as a tuning parameter, not a fixed rule
 
 ### Weight Pruning
 - Magnitude-based (unstructured): zero out weights with |w| below threshold; achieves 50–90% sparsity; requires sparse inference kernels
@@ -63,7 +63,7 @@ Key insight: Most neural network weights are redundant — studies show 50–90%
 - Loss function: `L = alpha * CE(student_logits, hard_labels) + (1 - alpha) * T^2 * KL(softmax(student_logits/T), softmax(teacher_logits/T))`
 - T = 3–5 (temperature), alpha = 0.1–0.5 (hard label weight)
 - Intermediate distillation (FitNets): align student's intermediate features to teacher's via auxiliary regression losses
-- BERT distillation (DistilBERT): 40% smaller, 60% faster, retains 97% of BERT performance on GLUE
+- BERT distillation (DistilBERT, Sanh et al. 2019, arXiv 1910.01108): the paper's exact claim is "reduce the size of a BERT model by 40%, while retaining 97% of its language understanding capabilities and being 60% faster" — a 6-layer student distilled from 12-layer BERT-base, with the 97% measured as the GLUE macro-score ratio and the 60% measured on inference time
 
 **What this actually says.** "Train the student on two exams at once: the ground-truth answer key (cross-entropy), and the teacher's full opinion about every wrong answer too (KL) — and turn the volume up on that second signal so it does not vanish."
 
@@ -144,7 +144,7 @@ Above `r = 512` you are storing more numbers *and* running two matrix multiplies
 ### TensorRT Optimization
 - NVIDIA's inference optimizer: layer fusion, kernel auto-tuning, precision calibration (FP32 → FP16 → INT8)
 - Engine serialization: compile once, load at serving time (no JIT overhead)
-- Benchmark: ResNet-50 ImageNet — PyTorch FP32: 7ms; TensorRT FP16: 1.5ms; TensorRT INT8: 0.9ms (7.7x)
+- Order-of-magnitude expectation, not a benchmark: on the same NVIDIA GPU, FP16 typically lands in the 1.5–2x range over FP32 and INT8 adds a further ~1.5–2x on top, so 2–4x end to end. Actual numbers depend entirely on GPU generation, batch size, and how much of the graph TensorRT can fuse — always measure on your own hardware rather than quoting a figure from a module like this one
 
 ---
 
@@ -165,7 +165,7 @@ flowchart TD
     fp32(["Trained FP32 Model"]) --> calib["Calibration Pass\n100-1000 representative samples"]
     calib --> stats["Record activation min/max\ncompute scale + zero_point"]
     stats --> quant["Quantized INT8 Model\nweights INT8, scales stored FP32"]
-    quant --> out(["4x smaller, ~3x faster CPU\nunder 1% accuracy drop"])
+    quant --> out(["4x smaller, 2-4x faster on\nVNNI/NEON CPUs"])
 
     class fp32 base
     class calib req
@@ -191,11 +191,11 @@ flowchart TD
     model(["Trained FP32 Model"]) --> choice{"PTQ accuracy\ndrop acceptable?"}
 
     choice -->|"yes, PTQ"| ptqCal["Calibrate on\n100-1000 samples"]
-    ptqCal --> ptqOut(["INT8 model\nno retraining, drop 1-3%"])
+    ptqCal --> ptqOut(["INT8 model, no retraining\nresidual CNN under 1pp\ndepthwise-sep can collapse"])
 
     choice -->|"no, QAT"| qatFake["Insert fake-quant nodes\nsimulate INT8 in forward"]
     qatFake --> qatTrain["Fine-tune 5-10% of steps\nstraight-through estimator"]
-    qatTrain --> qatOut(["INT8 model\ndrop under 0.3%"])
+    qatTrain --> qatOut(["INT8 model\nMobileNet-v2: 0.8-1.0pp"])
 
     class model base
     class choice mathOp
@@ -284,6 +284,16 @@ xychart-beta
 
 ### PyTorch Dynamic Quantization (PTQ)
 
+**API status (checked July 2026).** Eager-mode quantization lives at
+`torch.ao.quantization`; the pre-1.13 `torch.quantization` alias still forwards to it but
+is legacy. PyTorch's own docs now say quantization development has been centralized in
+the separate **torchao** package, and that eager mode (`torch.ao.quantization.quantize`,
+`quantize_dynamic`) and FX graph mode should migrate to `torchao.quantization.quantize_`
+and the pt2e API respectively — with `torch.ao.quantization` slated for deletion "in 2.10
+if there are no blockers, or the earliest PyTorch version until all the blockers are
+cleared." It is still present and public as of the current release, so the eager-mode code
+below runs, but treat it as a maintenance path and reach for torchao on new work.
+
 ```python
 import torch
 import torch.nn as nn
@@ -302,7 +312,7 @@ class LSTMClassifier(nn.Module):
 
 def apply_dynamic_quantization(model: nn.Module) -> nn.Module:
     """Dynamic PTQ: quantize weights only; activations remain FP32."""
-    quantized_model = torch.quantization.quantize_dynamic(
+    quantized_model = torch.ao.quantization.quantize_dynamic(
         model,
         qconfig_spec={nn.LSTM, nn.Linear},  # layers to quantize
         dtype=torch.qint8,
@@ -331,7 +341,7 @@ def compare_model_sizes(fp32_model: nn.Module, int8_model: nn.Module) -> None:
 ### PyTorch Static Quantization with Calibration
 
 ```python
-import torch.quantization as tq
+import torch.ao.quantization as tq
 
 class QuantizableResidual(nn.Module):
     def __init__(self, dim: int) -> None:
@@ -353,7 +363,10 @@ def static_quantize(
     calibration_loader: torch.utils.data.DataLoader,
 ) -> nn.Module:
     model.eval()
-    model.qconfig = tq.get_default_qconfig("fbgemm")  # CPU x86
+    # "x86" is the default backend and the current recommendation for x86 CPUs; it
+    # dispatches across fbgemm/onednn kernels. "fbgemm" is still accepted, and "qnnpack"
+    # targets ARM. Supported values: fbgemm | x86 | qnnpack | onednn.
+    model.qconfig = tq.get_default_qconfig("x86")
     tq.prepare(model, inplace=True)
 
     # Calibration pass — no gradient needed
@@ -559,7 +572,14 @@ def apply_structured_pruning(
     model: nn.Module,
     pruning_ratio: float = 0.3,
 ) -> nn.Module:
-    """Remove 30% of convolutional filters by L1 norm (structured)."""
+    """Zero the lowest-L1-norm 30% of output filters, structured along dim 0.
+
+    Important: ``torch.nn.utils.prune`` applies a MASK. After ``prune.remove`` the
+    weights are permanently zero but the tensor keeps its original shape, so the
+    model is not smaller on disk and not faster. To realize the structured-pruning
+    win you must physically rebuild the layers at the reduced channel count (or use
+    a library that does the surgery for you, e.g. torch-pruning).
+    """
     for name, module in model.named_modules():
         if isinstance(module, nn.Conv2d):
             prune.ln_structured(
@@ -633,7 +653,7 @@ That asymmetry is the single most misunderstood point in pruning. "80% sparse" s
 
 Switching to INT16 column indices (viable when no row exceeds 65,535 columns) brings it to `20.48 + 10.24 = 30.72 MB`, a `3.33x` ratio — better, still not 5x.
 
-**And bytes are not the same question as speed.** The size table above says nothing about latency. A dense GEMM kernel on the 80%-sparse tensor runs at exactly the same speed as on the unpruned one, because it still multiplies every element including the zeros. Realizing a speedup requires either sparse kernels (cuSPARSE, which typically need `s > 0.9` to beat dense) or hardware structured sparsity (NVIDIA Ampere 2:4, which caps you at exactly `s = 0.5` and delivers up to 2x). This is precisely why Section 9 warns against unstructured pruning below 50% sparsity — you pay the index overhead in size and get nothing back in throughput.
+**And bytes are not the same question as speed.** The size table above says nothing about latency. A dense GEMM kernel on the 80%-sparse tensor runs at exactly the same speed as on the unpruned one, because it still multiplies every element including the zeros. Realizing a speedup requires either sparse kernels or hardware structured sparsity, and the bar for the former is much higher than usually assumed. General-purpose `cuSPARSE` SpMM is built for scientific matrices at >99% sparsity and does not beat dense cuBLAS anywhere near the 50–90% range that pruning produces; DL-specific sparse kernels (SparseRT, and tensor-core SpMM work such as SMaT) have pushed the crossover down into the ~78–90% band, but they are research-grade and kernel-specific. Hardware structured sparsity is the reliable path: NVIDIA's 2:4 semi-structured sparsity (Sparse Tensor Cores, Ampere and later) caps you at exactly `s = 0.5` and is quoted at up to 2x math throughput — with measured end-to-end inference gains typically well below that, in the ~1.3x range. This is precisely why Section 9 warns against unstructured pruning below 50% sparsity — you pay the index overhead in size and get nothing back in throughput.
 
 ### Counting Parameters and FLOPs, Layer by Layer
 
@@ -663,30 +683,38 @@ That single `x H_out x W_out` factor is the reason parameter count and FLOP coun
 | FLOPs | Floating-point operations, conventionally `2 x MACs`. Watch for papers that quote MACs and call them FLOPs |
 | bias | One extra parameter per output channel. Usually negligible, and absent entirely when the layer is followed by batch norm |
 
-**Walk one example.** The first and last layers of ResNet-50 (25.6M params, 4.1 GFLOPs total):
+**Mind the units before you divide.** The number everyone quotes for ResNet-50 is "4.1
+GFLOPs" — torchvision's model table lists `GFLOPS 4.09` for `ResNet50_Weights` and He et
+al. report `3.8x10^9` in the ResNet paper. **Both of those are MAC counts**, not FLOPs
+under the `2 x MACs` convention. Divide a `2 x MACs` numerator by that denominator and
+every per-layer share you compute comes out twice too large. The worked example below
+therefore keeps everything in MACs.
+
+**Walk one example.** The first and last layers of ResNet-50 (25,557,032 params, 4.09
+GMACs total, 224x224 input):
 
 ```
-  conv1: 7x7, C_in=3, C_out=64, output 112 x 112
+  conv1: 7x7, C_in=3, C_out=64, stride 2, output 112 x 112 (no bias -- BN follows)
     params = 7 x 7 x 3 x 64                        =       9,408
-    MACs   = 9,408 x 112 x 112                     = 118,013,952
-    FLOPs  = 2 x 118,013,952                       =    0.236 GFLOPs
+    MACs   = 9,408 x 112 x 112                     = 118,013,952   (0.118 GMACs)
+    FLOPs  = 2 x 118,013,952                       =   0.236 GFLOPs
 
   fc: Linear(2048, 1000)
     params = 2048 x 1000 + 1000                    =   2,049,000
-    MACs   = 2048 x 1000                           =   2,048,000
-    FLOPs  = 2 x 2,048,000                         =    0.004 GFLOPs
+    MACs   = 2048 x 1000                           =   2,048,000   (0.002 GMACs)
+    FLOPs  = 2 x 2,048,000                         =   0.004 GFLOPs
 
-  Share of the whole network:
+  Share of the whole network (MACs over MACs, 4.09 GMACs total):
 
-    layer     params        % of params      FLOPs         % of FLOPs
+    layer     params        % of params      MACs          % of MACs
     ------------------------------------------------------------------
-    conv1        9,408          0.04%        0.236 G          5.76%
-    fc       2,049,000          8.00%        0.004 G          0.10%
+    conv1        9,408          0.04%        0.118 G          2.89%
+    fc       2,049,000          8.02%        0.002 G          0.05%
 
     fc holds 218x more parameters than conv1 -- and does 58x less work.
 ```
 
-**Why that inversion decides your compression strategy.** If the constraint is model size, the `fc` layer is the obvious target: it is 8% of the parameters for a tenth of a percent of the compute, so factorizing or pruning it is nearly free in latency terms — this is exactly why the classic "compress the classifier head" trick works and why VGG (with 100M+ parameters in its FC layers) was so much more compressible than ResNet. If the constraint is latency, `fc` is irrelevant and you must attack the early high-resolution convolutions, where `H_out x W_out` is `112 x 112` and every weight is reused 12,544 times. Quantization happens to help both at once — fewer bytes per weight and cheaper arithmetic — which is why it is almost always the first technique to reach for.
+**Why that inversion decides your compression strategy.** If the constraint is model size, the `fc` layer is the obvious target: it is 8% of the parameters for a twentieth of a percent of the compute, so factorizing or pruning it is nearly free in latency terms — this is exactly why the classic "compress the classifier head" trick works and why VGG (with 100M+ parameters in its FC layers) was so much more compressible than ResNet. If the constraint is latency, `fc` is irrelevant and you must attack the early high-resolution convolutions, where `H_out x W_out` is `112 x 112` and every weight is reused 12,544 times. Quantization happens to help both at once — fewer bytes per weight and cheaper arithmetic — which is why it is almost always the first technique to reach for.
 
 ---
 
@@ -694,25 +722,31 @@ That single `x H_out x W_out` factor is the reason parameter count and FLOP coun
 
 **DistilBERT (Hugging Face)**: Knowledge distillation from BERT-base to a 6-layer student. Result: 40% fewer parameters, 60% faster inference, retains 97% of BERT's GLUE benchmark performance. Used in production NLP pipelines where BERT latency is unacceptable.
 
-**MobileNet family**: Depthwise separable convolutions (a form of structured factorization) reduce computation by 8–9x vs standard convolutions with less than 1% accuracy drop on ImageNet. Widely used for on-device inference (iOS, Android).
+**MobileNet family**: Depthwise separable convolutions (a form of structured factorization) "uses between 8 to 9 times less computation than standard convolutions" (Howard et al. 2017, arXiv 1704.04861). Their own ablation (Table 4) puts the cost precisely: Conv MobileNet 71.7% ImageNet top-1 at 4,866M mult-adds and 29.3M params, vs depthwise-separable MobileNet 70.6% at 569M mult-adds and 4.2M params — 8.5x fewer mult-adds for **1.1 points** of top-1, not "under 1%". Widely used for on-device inference (iOS, Android).
 
-**GPT-3 INT8 via LLM.int8() (bitsandbytes)**: Mixed-precision quantization — keep outlier dimensions in FP16, quantize others to INT8. Enables 175B model on 4x A100 80GB instead of 8x, with < 1% accuracy degradation on most tasks.
+**LLM.int8() (Dettmers et al. 2022, arXiv 2208.07339; shipped in bitsandbytes)**: Mixed-precision quantization — keep outlier dimensions in FP16, quantize the rest to INT8. The paper's claim is inference "with up to 175B parameters without any performance degradation," evaluated on **OPT-175B and BLOOM-176B** (not GPT-3, whose weights are closed), and it halves the memory needed for inference — roughly 350 GB of FP16 weights down to ~175 GB. Note "no degradation" is on the benchmarks the paper reports; validate on your own task.
 
-**TensorRT at NVIDIA**: Production ResNet-50 serving at 1.5ms FP16 vs 7ms PyTorch CPU FP32. Used in autonomous vehicle perception pipelines where inference must complete within a 10ms control loop budget.
+**TensorRT at NVIDIA**: layer fusion plus FP16/INT8 execution is the standard serving path for CNN perception stacks with hard per-frame deadlines (autonomous driving, industrial vision). The size win is mechanical (FP16 halves the engine, INT8 quarters it); the latency win is not — it depends on GPU generation, batch size, and fusion coverage, so it must be measured per deployment rather than quoted.
 
 ---
 
 ## 8. Tradeoffs
 
+Accuracy-drop figures below are ranges observed across published results, not guarantees;
+the drop is always model-, task-, and calibration-dependent, and the same technique can
+be lossless on a residual CNN and catastrophic on a depthwise-separable one.
+
 | Method | Size Reduction | Accuracy Drop | Retraining Needed | Hardware Req |
 |--------|---------------|---------------|-------------------|-------------|
-| PTQ INT8 | ~4x | < 1% (CNN/tabular) | No | Standard CPU/GPU |
-| PTQ INT4 | ~8x | 1–5% (model-dependent) | No | Specialized (GPTQ) |
-| QAT INT8 | ~4x | < 0.3% | Yes (5–10% of training) | Standard |
-| Structured pruning 30% | ~1.4x | < 0.5% after fine-tune | Yes (brief) | Any |
-| Unstructured pruning 80% | ~5x (with sparse) | < 1% | Yes | Sparse hardware |
-| Knowledge distillation | 5–20x | 1–5% vs teacher | Yes (full student train) | Any |
-| Low-rank factorization | 2–10x | 0.5–2% | Yes (fine-tune) | Any |
+| PTQ INT8, per-channel | ~4x | ~0–1pp on residual CNNs; ~2pp on MobileNet-v2 | No | Standard CPU/GPU |
+| PTQ INT8, per-tensor | ~4x | ~0–1pp on residual CNNs; **near-total collapse** on MobileNet-v1/v2 | No | Standard CPU/GPU |
+| PTQ INT4 weight-only (GPTQ/AWQ) | ~4x vs FP16 | "negligible" at 175B scale per GPTQ; grows sharply as the model gets smaller | No (calibration only) | Needs a matching INT4 kernel |
+| QAT INT8 | ~4x | ~0.8–1pp on MobileNet-v2; often under 0.5pp elsewhere | Yes (fine-tune) | Standard |
+| Structured pruning 30% | ~1.4x | recoverable to well under 1pp with fine-tune | Yes (brief) | Any |
+| Unstructured pruning 80% | ~2.5x on disk with INT32 indices (**not** 5x) | ~1pp achievable | Yes | Needs specialist sparse kernels for any speedup |
+| N:M (2:4) sparsity | 2x on the weight tensor | small with retraining | Yes | Ampere+ Sparse Tensor Cores |
+| Knowledge distillation | 1.7x (DistilBERT) to ~10x | ~3% of GLUE score at DistilBERT's ratio; more as the gap widens | Yes (full student train) | Any |
+| Low-rank factorization | 2–10x (rank-dependent) | model-dependent; recoverable by fine-tune | Yes (fine-tune) | Any |
 
 | Concern | PTQ | QAT |
 |---------|-----|-----|
@@ -747,11 +781,15 @@ That single `x H_out x W_out` factor is the reason parameter count and FLOP coun
 
 **Do NOT use unstructured pruning when:**
 - Target hardware does not support sparse matrix operations (most production CPUs/GPUs without specific libraries)
-- Sparsity ratio is below 50% — below this, dense computation is equally fast
+- You want speed. At any sparsity a dense GEMM kernel runs at dense speed, and the crossover where a sparse kernel wins is far higher than usually assumed — general-purpose cuSPARSE is aimed at >99% sparsity, and even DL-specific research kernels only get down to roughly 78–90%. Below that, unstructured pruning buys you nothing but index overhead. If you need a hardware-backed speedup, use 2:4 semi-structured sparsity (Ampere+) or structured pruning instead
 
 ---
 
 ## 10. Common Pitfalls
+
+*The four war stories below are anonymized composites illustrating recurring failure
+modes. The failure mechanisms and the fixes are real and general; the specific accuracy
+figures are illustrative, not measurements from a published incident.*
 
 **War story 1: Unrepresentative calibration data causes INT8 collapse.** A team calibrated an image classification model on 100 samples from their development set, which happened to be all daytime outdoor images. The model served nighttime images in production. Activation ranges computed during calibration did not cover dark pixel distributions, causing INT8 to saturate and clip. Accuracy dropped from 91% to 67%. Fix: calibration data must be statistically representative of production inputs; use at least 500–1,000 samples spanning all known input distributions.
 
@@ -778,35 +816,36 @@ model.load_state_dict(torch.load("model_int8.pt"))
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| torch.quantization | PTQ/QAT | PyTorch native; fbgemm (CPU x86), qnnpack (ARM) |
-| bitsandbytes | LLM quantization | LLM.int8(), NF4 (QLoRA), GPU-focused |
-| GPTQ | LLM PTQ | Weight-only INT4 quantization; OBD-based |
-| AWQ | LLM PTQ | Activation-aware weight quantization; better than GPTQ on many models |
+| torchao | PTQ/QAT | PyTorch's current quantization home; `quantize_` (eager) and pt2e APIs |
+| torch.ao.quantization | PTQ/QAT (legacy) | Eager + FX graph mode; backends `x86` (default), `fbgemm`, `onednn`, `qnnpack` (ARM). PyTorch docs direct new work to torchao |
+| bitsandbytes | LLM quantization | LLM.int8() mixed INT8/FP16, and **NF4/FP4** 4-bit (NF4 is what QLoRA uses — it is a normal-float type, not INT4); GPU-focused |
+| GPTQ / GPTQModel | LLM PTQ | Weight-only 3/4-bit; approximate second-order (Hessian) error compensation, from the OBS/OBQ line. `auto-gptq` is no longer developed — GPTQModel is the maintained backend for `transformers`' `GPTQConfig` |
+| AWQ | LLM PTQ | Activation-aware weight quantization; protects ~1% salient channels, no backprop/reconstruction. Reported to beat GPTQ on many models — verify per model |
 | TensorRT | NVIDIA optimization | FP16/INT8, layer fusion, engine serialization |
 | OpenVINO | Intel optimization | INT8 PTQ for Intel CPUs, VPUs, iGPUs |
 | ONNX Runtime | Cross-platform | Quantization APIs for ONNX graphs |
-| Optimum (HuggingFace) | NLP compression | QAT, pruning, distillation for Transformers |
-| torch.nn.utils.prune | Pruning | Magnitude-based, structured, iterative |
-| Distiller (Intel) | Pruning/distillation | Research-grade compression framework |
+| Optimum (HuggingFace) | Transformer compression | Umbrella over backend-specific subpackages (optimum-onnxruntime, optimum-intel, optimum-quanto); quantization and graph optimization, with QAT/pruning/distillation coming via the Intel backend |
+| torch.nn.utils.prune | Pruning | Magnitude-based, structured, iterative. **Masks weights to zero; it does not shrink tensors**, so on its own it buys no speed |
+| Intel Neural Compressor | Quantization/pruning/distillation | Successor to Intel's Distiller, whose repository (`IntelLabs/distiller`) is gone — only third-party forks remain, so do not start new work on it |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between PTQ and QAT, and how do you choose between them?**
-PTQ (Post-Training Quantization) quantizes a frozen model without retraining using a calibration set to determine activation ranges; it is fast to apply but can drop accuracy 1–3% for sensitive models. QAT (Quantization-Aware Training) simulates quantization during training using fake quantization nodes, allowing the model to adapt its weights to the quantization error; it typically keeps accuracy within 0.3% of FP32. Choose PTQ when no training pipeline is available or when accuracy drop is acceptable; choose QAT when PTQ accuracy loss exceeds your budget (typically > 1%).
+PTQ quantizes a frozen model without retraining, using a calibration set to fix activation ranges; QAT simulates the rounding during training so the weights adapt to it. PTQ is fast to apply but the loss is architecture-dependent — near-free on residual CNNs, roughly 2 points of top-1 on MobileNet-v2 with per-channel 8-bit, and a near-total collapse on MobileNet with per-tensor 8-bit (Krishnamoorthi, arXiv 1806.08342). QAT buys most of that back: 70.9–71.1% vs the 71.9% float baseline on the same MobileNet-v2. Choose PTQ when no training pipeline is available or the measured drop is acceptable; choose QAT when it is not.
 
 **Q: How does INT8 quantization achieve ~4x size reduction and ~3x speedup?**
-FP32 uses 4 bytes per weight; INT8 uses 1 byte — a 4x reduction in model file size and memory bandwidth. Speedup comes from two sources: (1) INT8 SIMD instructions (VNNI on Intel Cascade Lake, NEON on ARM) pack 4 INT8 multiply-accumulates into a single instruction that would otherwise take 4 FP32 operations; (2) smaller tensors fit better in CPU cache, reducing memory latency. The 3x figure is typical for CPU inference; GPU speedups vary (1.5–4x) depending on tensor core support.
+FP32 uses 4 bytes per weight; INT8 uses 1 byte — a 4x reduction in model file size and memory bandwidth. Speedup comes from two sources: (1) INT8 SIMD instructions — AVX-512 VNNI's `VPDPBUSD` (Cascade Lake onward) fuses what previously took three instructions (`VPMADDUBSW` + `VPMADDWD` + `VPADDD`) into one, doing four INT8 multiply-accumulates per 32-bit lane, and ARM's `SDOT`/`UDOT` do the same on NEON; (2) smaller tensors fit better in CPU cache, reducing memory stalls. Treat 2–4x as the realistic CPU band rather than a fixed 3x; GPU gains depend on whether INT8 tensor-core paths are actually dispatched.
 
 **Q: Explain the knowledge distillation loss function and the role of temperature.**
 The distillation loss combines a hard label term (cross-entropy between student logits and ground truth) and a soft label term (KL divergence between student and teacher softened distributions). Temperature T divides logits before softmax, flattening the probability distribution. Higher T (3–5) makes the teacher's "dark knowledge" — small probabilities assigned to wrong classes — more visible and informative. The T^2 factor rescales the KL term to match the gradient magnitude of the CE term, balancing the two losses. Without T^2, the soft label term would be negligible.
 
 **Q: What is the Lottery Ticket Hypothesis and how does it influence pruning strategy?**
-The Lottery Ticket Hypothesis (Frankle & Carlin, 2019) states that a randomly initialized dense network contains a sparse subnetwork (the "winning ticket") that, when trained in isolation from the same initialization, reaches comparable accuracy to the full network in the same number of steps. Practically, this means iterative pruning (prune → retrain → prune) with weight rewinding to the original initialization consistently outperforms one-shot pruning. The hypothesis explains why pruned fine-tuned models underperform: fine-tuning does not recover the winning ticket's initialization.
+It claims a randomly initialized dense network already contains a sparse subnetwork — the "winning ticket" — that trains in isolation to comparable accuracy. Frankle & Carbin (ICLR 2019, arXiv 1803.03635) state that such subnetworks, "when trained in isolation, reach test accuracy comparable to the original network in a similar number of iterations," and the ticket must be trained from *the same initialization* it had in the dense network. The practical influence is that it made iterative magnitude pruning with rewinding the default recipe over one-shot pruning. Be careful with the strong reading: follow-up work found the original weight-rewinding result does not hold cleanly at scale, and Renda et al.'s learning-rate rewinding matches or beats fine-tuning without needing the original init, so treat LTH as a motivating hypothesis rather than a settled explanation of why pruned models underperform.
 
 **Q: Why is structured pruning preferred over unstructured pruning in production?**
-Unstructured pruning zeros individual weights, creating sparse matrices. Standard CPU and GPU matrix multiplication kernels are optimized for dense computation; sparse matrices do not accelerate unless the sparsity exceeds ~80% and specialized sparse BLAS libraries (cuSPARSE, FBGEMM sparse) are used. Structured pruning removes entire filters, heads, or layers, producing a smaller dense model that runs on any hardware with immediate latency and throughput gains proportional to the removed computation.
+Because unstructured pruning gives you zeros, not speed, while structured pruning gives you a genuinely smaller dense model. Standard dense GEMM kernels multiply every element including the zeros, so a scattered-sparse tensor runs at exactly dense speed. Sparse kernels can help, but the crossover is high: general-purpose cuSPARSE SpMM targets >99% sparsity and loses to dense cuBLAS across the entire 50–90% band that pruning produces, and even DL-specific research kernels only push the crossover down to roughly 78–90%. Structured pruning removes entire filters, heads, or layers, producing a smaller dense model that runs on any hardware with gains proportional to the removed computation — the reliable middle ground is NVIDIA's 2:4 semi-structured sparsity on Ampere-and-later Sparse Tensor Cores, which is fixed at 50% sparsity and quoted at up to 2x math throughput.
 
 **Q: How does low-rank factorization reduce parameters without retraining?**
 A weight matrix W of shape (n, m) has n*m parameters. Replacing it with the product AB where A is (n, r) and B is (r, m) and r << min(n, m) reduces parameters to r*(n+m). For a 1024x1024 linear layer with rank r=64: 1,048,576 → 131,072 (87% reduction). The factorization is initialized via truncated SVD of the original W (keeping top-r singular values), which minimizes the reconstruction error ||W - AB||_F. Brief fine-tuning then recovers accuracy lost from the approximation.
@@ -815,7 +854,7 @@ A weight matrix W of shape (n, m) has n*m parameters. Replacing it with the prod
 Mixed-precision quantization applies different bit-widths to different layers based on sensitivity. Layers close to the input/output or with large activation variance are kept in FP16 or FP32; less sensitive layers are quantized to INT8 or INT4. LLM.int8() specifically identifies "outlier" dimensions in transformer attention that cause INT8 saturation and keeps those in FP16 while quantizing the rest to INT8. It is necessary for large language models where uniform INT8 causes significant accuracy degradation due to activation outliers in attention layers.
 
 **Q: How do you validate that a compressed model is production-safe before deploying?**
-Run a three-part evaluation: (1) accuracy gate — compressed model must exceed a minimum threshold (e.g., baseline - 1%) on a held-out test set; (2) latency benchmark — measure P50/P99 on representative batch sizes and input shapes; (3) output distribution comparison — plot prediction score histograms for compressed vs original model on a sample of production-like inputs; large divergence indicates a quantization issue even when aggregate accuracy looks fine. Additionally, run integration tests with actual serving infrastructure (not just local benchmarks) as ONNX conversion bugs sometimes appear only in the deployed runtime.
+Gate it on three things: a held-out accuracy threshold, a latency benchmark, and a distribution comparison against the original model. The accuracy gate means the compressed model must clear an explicit floor (e.g. baseline minus one point) on data it never saw during calibration. The latency benchmark means P50/P99 at representative batch sizes and input shapes, not a single-sample microbenchmark. The distribution comparison means plotting prediction-score histograms for compressed vs original on production-like inputs — large divergence signals a quantization problem even when aggregate accuracy looks fine. Finally, run the checks through the real serving stack rather than locally; ONNX conversion and engine-compilation bugs often surface only in the deployed runtime.
 
 **Q: What is calibration in the context of PTQ, and what happens if it is done incorrectly?**
 Calibration is the process of running the model on a representative dataset (100–1,000 samples) to collect statistics (min, max, or percentile distributions) on activation values at each layer. These statistics determine the quantization scale and zero-point that map the FP32 range to INT8. If calibration data is unrepresentative (e.g., only daytime images when production includes nighttime), the computed ranges will clip or saturate production inputs, causing severe accuracy degradation. Best practice: use stratified samples covering all known production input distributions.
@@ -823,8 +862,8 @@ Calibration is the process of running the model on a representative dataset (100
 **Q: How does QAT use the straight-through estimator?**
 QAT inserts fake quantization nodes: during the forward pass, activations and weights are rounded to the nearest INT8 value (simulating quantization), then the computation continues in FP32. The rounding operation is non-differentiable (gradient is zero almost everywhere). The straight-through estimator replaces the true gradient of the rounding function with 1 (pass the upstream gradient through unchanged) when the pre-rounded value is within the quantization range, and 0 otherwise. This allows standard backpropagation to update weights despite the non-differentiable rounding.
 
-**Q: Give concrete size and latency numbers for a compressed ResNet-50.**
-ResNet-50 FP32: ~98 MB model file, ~7ms inference on Intel Xeon CPU. After INT8 PTQ: ~25 MB (~4x smaller), ~2.5ms CPU inference (~2.8x faster). After TensorRT FP16 on V100 GPU: ~49 MB, ~1.5ms. After TensorRT INT8 on V100: ~25 MB, ~0.9ms (7.7x vs FP32 CPU). DistilResNet via knowledge distillation (18 layers vs 50): ~45 MB FP32, ~3.5ms CPU, with ~1.5% ImageNet top-1 accuracy drop vs full ResNet-50.
+**Q: How do you reason about size and latency for a compressed ResNet-50?**
+Derive the sizes from the parameter count and quote latency only from your own measurements. ResNet-50 is 25,557,032 parameters, so FP32 weights are 25.56M x 4 = 102.4 MB (97.6 MiB), FP16 51.2 MB, INT8 25.6 MB — those numbers are arithmetic and always hold. Swapping the backbone for ResNet-18 (11.7M params) gives ~46.8 MB FP32, at roughly 6 points of ImageNet top-1 below ResNet-50 unless distillation claws some back. Latency is the part you cannot derive: it depends on CPU model and thread count, GPU generation, batch size, and whether the runtime actually dispatches INT8 kernels, so any single millisecond figure quoted without that context is meaningless. The defensible expectation is 2–4x from INT8 on a VNNI/NEON CPU and a further 2–4x from moving to a TensorRT GPU engine, both to be confirmed on the target hardware.
 
 **Q: You quantized to INT8 but inference is not any faster — why?**
 Because your model is memory-bandwidth-bound rather than compute-bound, or the runtime lacks INT8 kernels for your ops. Quantization guarantees a ~4x smaller model, but speedup only materializes when the hardware has INT8 SIMD paths (Intel VNNI, ARM NEON, GPU INT8 tensor cores) and the engine actually dispatches to them. If ops fall back to FP32 or dequantize on the fly, you pay conversion overhead with no speed benefit. Verify the backend (fbgemm/qnnpack/TensorRT) reports genuine INT8 execution, not a silent FP32 fallback.
@@ -853,35 +892,49 @@ Yes — the teacher's soft predictions serve as the training signal, so unlabele
 
 - Always benchmark PTQ before attempting QAT; PTQ is sufficient for most CNNs and tabular models and requires no retraining
 - Calibration set must represent production input distribution; use at least 500 samples; verify with summary statistics (mean, std, percentiles)
-- For INT8 quantization on x86, use the `fbgemm` backend; for ARM (mobile), use `qnnpack`
+- For INT8 quantization on x86 use the `x86` backend (the current default in `get_default_qconfig`, dispatching across fbgemm/onednn kernels); for ARM (mobile), use `qnnpack`. Prefer **per-channel** weight scales — per-tensor is what turns MobileNet-class PTQ from a one-point loss into a collapse
 - After structured pruning, always fine-tune for at least 1 epoch at a reduced learning rate (10x lower than original) before evaluating accuracy
 - Distillation works best when the teacher and student share the same architecture family (both transformers, both CNNs); cross-architecture distillation requires intermediate feature alignment
 - Use TensorRT for NVIDIA GPU production deployments; rebuild the engine after any model change (engines are not portable across GPU generations)
 - Validate compressed models with the exact same serving stack as production; ONNX conversion and TRT engine compilation can introduce numerical differences
 - Track model compression metadata in your model registry: compression method, compression ratio, accuracy delta, calibration dataset hash
-- For LLMs, prefer AWQ over GPTQ for weight-only INT4 quantization — AWQ typically achieves better perplexity by accounting for activation magnitudes during weight quantization
+- For LLMs, try AWQ alongside GPTQ for weight-only 4-bit: AWQ protects roughly the 1% of weight channels tied to the largest activations and needs no backprop or reconstruction, and its authors report it outperforming GPTQ across their evaluations — but the ordering is model-dependent, so benchmark both on your own task rather than assuming a winner
+- Do not confuse the 4-bit formats: bitsandbytes/QLoRA use **NF4** (a normal-float type) or FP4, not INT4; GPTQ and AWQ produce integer 4-bit weights. They are different numeric formats with different kernels
 
 ---
 
 ## 14. Case Study
 
-**Scenario: Compressing a 13B model for edge deployment.** A 13B model in fp16 needs 26GB and cannot run on a laptop. The team applies 4-bit GPTQ quantization (26GB -> 6.5GB, 4x smaller, +15% throughput) and AWQ for better accuracy retention, then distills the 13B teacher into a 3B student. The 3B student at 4-bit fits in ~1.6GB and runs on a MacBook M2.
+**Scenario: Compressing a 13B model for edge deployment.** *This is an illustrative worked
+example. The memory figures are arithmetic and hold exactly; the perplexity, throughput and
+MMLU-retention numbers are made-up placeholders standing in for measurements you would take
+on your own model and eval set — do not quote them.* A 13B model in fp16 needs 26 GB and
+cannot run on a laptop. The team applies 4-bit weight-only quantization (GPTQ, then AWQ for
+comparison), then distills the 13B teacher into a 3B student.
 
 ```
 13B fp16 (26 GB)
    |
-   +-- GPTQ 4-bit  -> 6.5 GB, +15% throughput, ppl 7.2 -> 7.5
-   +-- AWQ 4-bit   -> 6.5 GB, ppl 7.2 -> 7.3 (activation-aware, better)
+   +-- GPTQ 4-bit  -> ~6.5 GB weights   [ppl / throughput deltas: measure]
+   +-- AWQ  4-bit  -> ~6.5 GB weights   [activation-aware; often better, verify]
    |
    distillation (13B teacher -> 3B student)
-   |     student keeps 94% of teacher MMLU
+   |
    v
- 3B fp16 (6 GB)  --4-bit-->  1.6 GB  -> runs on MacBook M2
+ 3B fp16 (6 GB)  --4-bit-->  ~1.6 GB  -> fits in a laptop's unified memory
 ```
 
-GPTQ degrades perplexity from 7.2 to 7.5 (acceptable); AWQ to 7.3 by protecting salient weights. Distillation produces a 3B student retaining 94% of the teacher's MMLU score; quantizing that student to 4-bit yields a 1.6GB model that runs locally with Flash-Attention-2 for memory-efficient attention.
+Only the byte counts are load-bearing here: 13e9 x 2 = 26 GB at fp16, 13e9 x 0.5 = 6.5 GB
+at 4 bits (before per-group scales and zero-points, which add a few percent), and 3e9 x 0.5
+= 1.5–1.6 GB for the distilled student. Whether GPTQ or AWQ wins on perplexity, and by how
+much, is model- and calibration-specific — AWQ's authors report it ahead of GPTQ, but that
+is a claim to re-test, not to inherit. **Note on attention kernels:** FlashAttention-2 and
+-3 are CUDA-only and require Ampere/Ada/Hopper (FA3 is Hopper-specific); they do not run on
+Apple Silicon. On a Mac the equivalent memory-efficient attention comes from a Metal
+backend such as llama.cpp or MLX, not from FlashAttention.
 
-**4-bit GPTQ quantization:**
+**4-bit GPTQ quantization** (`GPTQConfig` needs a GPTQ backend installed — use
+`gptqmodel`; `auto-gptq` is no longer developed and is not the supported backend):
 
 ```python
 from transformers import AutoModelForCausalLM, GPTQConfig, AutoTokenizer
@@ -961,16 +1014,18 @@ w_q = round_to_nearest(w, bits=4)
 
 # FIX: activation-aware quantization (AWQ) scales salient weight channels
 # before quantizing, preserving the ones that drive large activations.
-# ppl 7.2 -> 7.3 with AWQ vs 7.5 with naive GPTQ-style rounding
+# AWQ's authors report that protecting only ~1% of salient weights greatly
+# reduces quantization error (arXiv 2306.00978). Measure the perplexity delta
+# on your own model -- it is not a fixed number.
 ```
 
 **Interview Q&A:**
 
-**What is the difference between GPTQ and AWQ?** Both are post-training 4-bit weight quantization. GPTQ minimizes per-layer reconstruction error using second-order (Hessian) information, quantizing weights to best preserve each layer's output. AWQ observes that a small fraction of weight channels (those multiplying large activations) matter most and scales them before quantizing, protecting salient weights. AWQ often retains slightly more accuracy and is calibration-light.
+**What is the difference between GPTQ and AWQ?** Both are post-training 4-bit weight quantization. GPTQ minimizes per-layer reconstruction error using second-order (Hessian) information, quantizing weights to best preserve each layer's output. AWQ observes that a small fraction of weight channels (those multiplying large activations) matter most and scales them before quantizing, protecting salient weights. AWQ needs no backpropagation or reconstruction — it only collects offline activation statistics — which its authors argue helps it generalize beyond the calibration domain. Which one wins on a given model is an empirical question; benchmark both.
 
-**Why does 4-bit quantization give roughly 4x memory reduction and a throughput gain?** Storing weights in 4 bits instead of 16 cuts weight memory ~4x, so a memory-bandwidth-bound LLM moves far fewer bytes per token, raising throughput. The gain is bandwidth-driven; arithmetic is still done in higher precision after dequantization, so the speedup is less than 4x but real (here +15%).
+**Why does 4-bit quantization give roughly 4x memory reduction and a throughput gain?** Storing weights in 4 bits instead of 16 cuts weight memory ~4x, so a memory-bandwidth-bound LLM moves far fewer bytes per token, raising throughput. The gain is bandwidth-driven; arithmetic is still done in higher precision after dequantization, so the speedup is well short of 4x but real. How real depends entirely on the kernel: the GPTQ paper reports end-to-end inference speedups over FP16 of around 3.25x on A100 and 4.5x on A6000 with its own kernels at 175B scale, while a naive dequantize-then-GEMM path can be barely faster than FP16 or even slower.
 
-**How does knowledge distillation transfer capability to a smaller model?** The student trains to match the teacher's full softened output distribution (the "dark knowledge" in the relative probabilities of wrong answers), not just the hard label. This richer signal lets a 3B student capture much of a 13B teacher's behavior, here 94% of MMLU, far better than training the 3B from scratch on the same data.
+**How does knowledge distillation transfer capability to a smaller model?** The student trains to match the teacher's full softened output distribution (the "dark knowledge" in the relative probabilities of wrong answers), not just the hard label. This richer signal lets a small student capture much of a larger teacher's behavior — the published anchor is DistilBERT, which retains 97% of BERT-base's GLUE score at 40% fewer parameters. How much a 3B student retains from a 13B teacher is model- and data-specific and has to be measured, not assumed.
 
 **Why keep embeddings and the LM head in higher precision?** These layers map between the vocabulary and the hidden space and are disproportionately sensitive to quantization error; small errors there propagate across every token. Leaving them in fp16 while 4-bit quantizing the transformer blocks recovers most of the lost accuracy at negligible extra memory.
 
@@ -982,26 +1037,29 @@ w_q = round_to_nearest(w, bits=4)
 
 ```python
 # BROKEN: calibrating GPTQ with only 32 samples — layer Hessian estimate is noisy
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+# (note: `auto_gptq` is no longer developed; GPTQModel is the maintained package
+#  and the backend `transformers`' GPTQConfig now expects)
+from gptqmodel import GPTQModel, QuantizeConfig
 
-config = BaseQuantizeConfig(bits=4, group_size=128, desc_act=True)
+config = QuantizeConfig(bits=4, group_size=128, desc_act=True)
 model.quantize(calibration_data[:32])  # 32 samples → Hessian has high variance
 
-# FIX: use 128-512 diverse calibration samples (mixed domains, varied lengths)
-model.quantize(calibration_data[:256])  # perplexity drops from 8.4 → 6.9
+# FIX: use 128-512 diverse calibration samples (mixed domains, varied lengths).
+# The perplexity you recover is model-specific — measure it, do not assume a number.
+model.quantize(calibration_data[:256])
 ```
 
 **Why does INT4 quantization hurt attention heads more than FFN layers?** Attention projection weights are applied to token representations that vary widely in magnitude across heads. Symmetric INT4 quantization uses a single scale per group, losing the tail of the distribution where outlier activations live — directly degrading attention score quality. FFN weights are applied to more uniform activations, so quantization error matters less. Mitigation: use per-channel (not per-tensor) scales for QKV projections, or apply outlier-aware quantization (AWQ channels the quantization budget to sensitive weights).
 
 **How do you verify that a quantized model is numerically equivalent enough for production?** Run the same 1,000 held-out prompts through both FP16 and INT4 models. Compute: (1) cosine similarity of output logit distributions (target > 0.99); (2) top-1 token agreement rate (target > 95%); (3) task-specific metric delta (MMLU accuracy drop < 1pp). Never deploy based on perplexity alone — perplexity can improve on the calibration domain while degrading on production queries.
 
-**How does knowledge distillation differ from quantization for reducing model size?** Quantization reduces the bit-width of weights and activations (FP32 → INT8 → INT4), preserving the original model architecture. Knowledge distillation trains a smaller student model to mimic the larger teacher's output distribution (soft labels), resulting in a fundamentally different model with fewer parameters. They are complementary: distill a 70B model to a 7B student, then quantize the 7B student to INT4 — achieving a 4× size reduction from distillation × 8× from INT4 = 32× total compression. Distillation preserves more accuracy for large compression ratios; quantization is faster to apply (hours vs. days of distillation training).
+**How does knowledge distillation differ from quantization for reducing model size?** Quantization reduces the bit-width of weights and activations (FP32 → INT8 → INT4), preserving the original model architecture. Knowledge distillation trains a smaller student model to mimic the larger teacher's output distribution (soft labels), resulting in a fundamentally different model with fewer parameters. They are complementary and the ratios multiply: distilling 70B down to a 7B student is 10x on parameter count, and quantizing that student from FP16 to 4-bit is a further 4x on bytes-per-weight, so 140 GB of FP16 weights becomes about 3.5 GB — 40x in total. Watch the baseline when you multiply: 4-bit is 4x smaller than FP16 but 8x smaller than FP32, and quoting the wrong one doubles your claimed compression. Quantization is also far cheaper to apply (hours, versus days of student training).
 
 **What is structured vs. unstructured pruning and why does hardware matter for the choice?** Unstructured pruning sets individual weights to zero based on magnitude (l1/l2 norm < threshold). The resulting sparse weight tensors require specialized sparse matrix operations to see inference speedups — standard dense GPU kernels run at the same speed on sparse matrices. Structured pruning removes entire neurons, attention heads, or layers, producing a smaller dense model that runs faster on standard hardware without sparse kernel support. For production GPU serving without custom CUDA kernels, prefer structured pruning (remove heads/layers) or quantization over unstructured sparsity.
 
-**When should you use dynamic quantization vs. static quantization vs. QAT?** Dynamic quantization quantizes weights statically but activations dynamically at runtime — easiest to apply (one `torch.quantization.quantize_dynamic()` call), no calibration needed, 2-4× CPU speedup for LSTM/Transformer inference. Static quantization quantizes both weights and activations using a calibration dataset to determine activation ranges — requires representative calibration data, higher speedup than dynamic. Quantization-aware training (QAT) inserts fake quantization nodes during training, fine-tuning the model to be robust to quantization error — best accuracy recovery for aggressive quantization (INT4, INT2), but requires full training infrastructure. Use dynamic for NLP models on CPU; static for vision models; QAT when dynamic/static accuracy loss is unacceptable.
+**When should you use dynamic quantization vs. static quantization vs. QAT?** Dynamic quantization quantizes weights statically but activations dynamically at runtime — easiest to apply (one `torch.ao.quantization.quantize_dynamic()` call), no calibration needed, 2-4× CPU speedup for LSTM/Transformer inference. Static quantization quantizes both weights and activations using a calibration dataset to determine activation ranges — requires representative calibration data, higher speedup than dynamic. Quantization-aware training (QAT) inserts fake quantization nodes during training, fine-tuning the model to be robust to quantization error — best accuracy recovery for aggressive quantization (INT4, INT2), but requires full training infrastructure. Use dynamic for NLP models on CPU; static for vision models; QAT when dynamic/static accuracy loss is unacceptable.
 
-**What is Flash Attention and why does it improve both speed and memory for transformers?** Flash Attention rewrites the attention computation to avoid materializing the full N×N attention matrix in GPU HBM (high-bandwidth memory). Instead, it tiles the computation in SRAM (fast on-chip cache) and fuses the softmax + matmul into a single kernel pass. For a 4k-token sequence, the attention matrix is 4k×4k × 2 bytes = 32MB — moving it to/from HBM is the bottleneck, not compute. Flash Attention reduces memory complexity from O(N²) to O(N) and achieves 2-4× wall-clock speedup for long sequences. It is now the standard in all major LLM inference frameworks (vLLM, TGI, llama.cpp).
+**What is Flash Attention and why does it improve both speed and memory for transformers?** Flash Attention rewrites the attention computation to avoid materializing the full N×N attention matrix in GPU HBM (high-bandwidth memory). Instead, it tiles the computation in SRAM (fast on-chip cache) and fuses the softmax + matmul into a single kernel pass. For a 4k-token sequence, one attention matrix is 4k×4k × 2 bytes = 32MiB — and that is per head per batch element, so the traffic multiplies fast; moving it to/from HBM is the bottleneck, not compute. Flash Attention reduces attention's memory footprint from O(N²) to O(N) and delivers a multi-fold wall-clock speedup that grows with sequence length. The official implementation is CUDA-only: FlashAttention-2 requires Ampere, Ada or Hopper GPUs (Turing has a separate limited build) and FlashAttention-3 targets Hopper specifically — there is no Apple Silicon or CPU build, so Metal backends like llama.cpp and MLX use their own fused-attention kernels instead.
 
 ---
 

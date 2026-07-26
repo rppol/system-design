@@ -13,7 +13,7 @@ Cryptography is the science of securing information by transforming it into an u
 - **Authenticity** — data genuinely comes from the claimed sender (digital signatures, HMAC)
 - **Non-repudiation** — the sender cannot later deny having sent the data (digital signatures)
 
-Modern software systems depend on cryptographic primitives at every layer: TLS securing HTTP traffic, bcrypt protecting stored passwords, HMAC authenticating API requests, and RSA/ECDSA signing JWTs and software releases. Understanding which primitive to use — and critically, which to avoid — separates engineers who build secure systems from those who build systems with subtle, catastrophic vulnerabilities.
+Modern software systems depend on cryptographic primitives at every layer: TLS 1.3 securing HTTP traffic, Argon2id protecting stored passwords, HMAC authenticating API requests, and Ed25519/ECDSA signing JWTs and software releases. Understanding which primitive to use — and critically, which to avoid — separates engineers who build secure systems from those who build systems with subtle, catastrophic vulnerabilities.
 
 **Scope of this module**: hash functions, symmetric encryption (AES-GCM), asymmetric encryption (RSA concepts), HMAC, Diffie-Hellman key exchange, salting and password hashing, digital signatures. The goal is interview-level depth plus the ability to implement correct primitives using Python's standard library.
 
@@ -27,9 +27,9 @@ Modern software systems depend on cryptographic primitives at every layer: TLS s
 Public key = a padlock you hand out freely. Anyone can snap it shut (encrypt). Only you hold the key (private key) that opens it (decrypt). For digital signatures, it is reversed: you seal the envelope with your private key, and anyone with your public key can verify the seal is yours — but no one else can forge it.
 
 **Why it matters:**
-- 2022 Uber breach involved stolen credentials because passwords were stored with weak hashing — a cryptographic failure that exposed 57 million records
-- The 2011 LinkedIn breach stored passwords with unsalted SHA-1; attackers cracked 90% within days
-- OWASP ranks "Cryptographic Failures" as A02:2021 — the second most critical web application vulnerability class
+- The 2013 Adobe breach exposed 153 million accounts whose passwords were *encrypted* with 3DES in ECB mode rather than hashed, so identical passwords produced identical ciphertext and the plaintext password hints stored beside them finished the job
+- The 2012 LinkedIn breach stored passwords with unsalted SHA-1; attackers cracked 90% within days
+- OWASP ranks "Cryptographic Failures" as A04:2025 — the fourth most critical web application risk class
 - Every TLS connection, every password verification, every signed JWT, every encrypted S3 bucket relies on the primitives covered here
 
 **Key insight:** Cryptography does not eliminate risk; it transforms risk. A system using AES-256-GCM correctly is only as secure as its key management. The most common real-world cryptographic failures are not mathematical breaks — they are implementation mistakes: missing authentication, reused IVs, weak key derivation, and timing-vulnerable comparisons.
@@ -57,7 +57,7 @@ Symmetric encryption is fast and secure but requires both parties to share a sec
 Encryption alone provides confidentiality but not integrity. An attacker may not be able to read your ciphertext, but they might be able to flip bits in a predictable way (bit-flipping attacks on CBC mode). Authenticated Encryption with Associated Data (AEAD) — exemplified by AES-GCM — combines encryption with an authentication tag so any tampering is detected.
 
 ### The Cost Factor Principle for Password Hashing
-General-purpose hash functions (SHA-256) execute in microseconds, allowing billions of guesses per second on GPU hardware. Password hash functions (bcrypt, scrypt, Argon2) are intentionally slow — bcrypt at cost factor 12 takes approximately 200–300 ms per hash — making brute-force attacks economically prohibitive.
+General-purpose hash functions (SHA-256) execute in microseconds, allowing billions of guesses per second on GPU hardware. Password hash functions (Argon2id, scrypt, bcrypt) are intentionally slow, and the modern ones are also **memory-hard** so a GPU cannot amortize the cost across thousands of cores. Argon2id at OWASP's floor of m=19456 (19 MiB), t=2, p=1 forces every guess to allocate 19 MiB; bcrypt at cost 12 takes approximately 200–300 ms per hash. Either makes brute-force attacks economically prohibitive.
 
 ---
 
@@ -67,8 +67,8 @@ General-purpose hash functions (SHA-256) execute in microseconds, allowing billi
 
 | Function | Output Size | Status | Use Case |
 |----------|------------|--------|----------|
-| MD5 | 128 bits (16 bytes) | BROKEN — collision attacks exist | Legacy checksums only |
-| SHA-1 | 160 bits (20 bytes) | BROKEN — collision demonstrated 2017 | Avoid for security |
+| MD5 | 128 bits (16 bytes) | BROKEN — collisions in seconds on a laptop | Non-security checksums only |
+| SHA-1 | 160 bits (20 bytes) | BROKEN — SHAttered collision 2017, chosen-prefix 2019 | Never; NIST disallows it after 2030 |
 | SHA-256 | 256 bits (32 bytes) | Secure | Integrity, signatures, HMAC |
 | SHA-384 | 384 bits (48 bytes) | Secure | Higher security margin |
 | SHA-512 | 512 bits (64 bytes) | Secure | When 256 bits is insufficient |
@@ -262,7 +262,16 @@ stored = bcrypt_hash(salt + password)  # bcrypt embeds salt in output
 - With salt: the attacker must compute H(salt + "password123") separately for each row; precomputation is impossible
 - bcrypt, scrypt, Argon2 all include automatic salting and are intentionally slow
 
-**PBKDF2** (Password-Based Key Derivation Function 2): applies a hash function (HMAC-SHA256) repeatedly for a configurable number of iterations. NIST SP 800-132 (2023) recommends minimum 600,000 iterations for PBKDF2-HMAC-SHA256. Available in Python's `hashlib.pbkdf2_hmac`.
+**Current parameters (OWASP Password Storage Cheat Sheet).** Pick the first one your platform supports:
+
+| Algorithm | Parameters | Notes |
+|-----------|-----------|-------|
+| **Argon2id** | m=19456 (19 MiB), t=2, p=1 | The default choice. Equivalent settings: m=47104/t=1/p=1 or m=12288/t=3/p=1 |
+| scrypt | N=2^17 (128 MiB), r=8, p=1 | Use when Argon2id is unavailable |
+| bcrypt | cost >= 10, as high as your verification latency allows | Truncates input at **72 bytes** — pre-hash longer passwords with SHA-256 before feeding bcrypt |
+| PBKDF2-HMAC-SHA256 | 600,000 iterations | FIPS-140 compliant fallback; PBKDF2-HMAC-SHA512 needs 220,000 |
+
+**PBKDF2** (Password-Based Key Derivation Function 2) applies HMAC-SHA256 repeatedly for a configurable iteration count and is the only one of the four in Python's standard library (`hashlib.pbkdf2_hmac`). It is not memory-hard, so it is the weakest of the four against GPU and ASIC attackers — reach for it when a FIPS boundary or a no-dependencies constraint rules out Argon2id.
 
 ### 4.7 Digital Signatures
 
@@ -277,7 +286,23 @@ Properties:
 - Signature covers the hash of the message, not the message itself (practical for large messages)
 - Non-repudiation: the signer cannot deny signing (unlike HMAC, where any party with the shared key could have generated it)
 
-Common algorithms: RSA-PSS (RSA with probabilistic padding), ECDSA (elliptic curve), Ed25519 (modern, fast, deterministic).
+Common algorithms: Ed25519 (the default for new systems — fast, deterministic, hard to mis-implement), ECDSA (elliptic curve, required where a NIST curve is mandated), RSA-PSS (RSA with probabilistic padding, for RSA estates).
+
+### 4.8 Post-Quantum Cryptography
+
+Every asymmetric primitive above — RSA, ECDH, ECDSA, Ed25519 — falls to Shor's algorithm on a sufficiently large quantum computer. Symmetric primitives do not: Grover's algorithm only square-roots the search, so AES-256 keeps a 128-bit margin and SHA-384/SHA-512 keep theirs. The exposure is therefore entirely in key exchange and signatures, and "harvest now, decrypt later" makes it a *present* risk for anything that must stay confidential past the 2030s.
+
+NIST published the first post-quantum standards in **August 2024**:
+
+| Standard | Algorithm | Based on | Replaces |
+|----------|-----------|----------|----------|
+| **FIPS 203** | ML-KEM (Kyber) | Module lattices | RSA / ECDH key exchange |
+| **FIPS 204** | ML-DSA (Dilithium) | Module lattices | RSA / ECDSA signatures |
+| **FIPS 205** | SLH-DSA (SPHINCS+) | Hash functions only | Signatures where lattice hardness is too new an assumption |
+
+The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. TLS 1.3 does this today with the `X25519MLKEM768` group, shipped by default in Chrome and Firefox — an X25519 ECDH combined with ML-KEM-768. Signatures are migrating more slowly because certificate chains carry every signature in the path and ML-DSA signatures are roughly 2.4 KB against Ed25519's 64 bytes.
+
+Practical guidance: use AES-256 (not AES-128) and SHA-384 or better for anything with a long confidentiality horizon, prefer a hybrid TLS group where your stack offers one, and inventory where long-lived RSA/ECDSA keys are baked into firmware or root certificates — those are the migrations with multi-year lead times.
 
 ---
 

@@ -591,7 +591,7 @@ Analyst Question
 │      |                                                     │
 │  Observation: {"rows": [...], "row_count": 847, ...}       │
 │      |                                                     │
-│  Thought: "Enterprise segment shows 18% churn vs 6% SMB.  │
+│  Thought: "Enterprise segment shows 18% churn vs 6% SMB.   │
 │            I need to drill into Enterprise cancellation    │
 │            reasons next."                                  │
 │      |                                                     │

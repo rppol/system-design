@@ -561,13 +561,13 @@ Cascade (cheap model fails):    150ms + routing + 400ms = ~570ms  --> exceeds SL
 
 ## 7. Real-World Examples
 
+### Amazon Bedrock Intelligent Prompt Routing
+
+A managed router behind a single serverless Bedrock endpoint. For each request it predicts the response quality each candidate model would produce and sends the request to the cheaper model whenever the prediction says that model is adequate. The design constraint worth internalizing: a router pairs exactly **two models from one family** (Anthropic Claude, Meta Llama, or Amazon Nova) — it is a within-family tier selector, not a cross-provider router, so it removes the work of building and retraining a classifier but gives you no cross-provider failover. AWS positions it as cutting cost by up to 30% without an accuracy loss; treat that as a vendor figure and measure it on your own traffic.
+
 ### Martian
 
-Martian built a commercial model router: customers send queries to Martian's API and it selects a model from a cross-provider portfolio. Its own published numbers, from the launch post, are the ones worth quoting: on `openai/evals` the router "outperforms GPT-4 (getting performance at least as good, at a lower cost) on 91.8% of tasks", producing "a 20% reduction in cost — when we optimize purely for performance", with up to "a 97% reduction in cost" on individual tasks. Note the shape of that result: the average saving is modest and the headline saving is a best case, which is the same pattern the RouteLLM benchmarks show. As of July 2026 the company's public site presents interpretability research rather than the router as its focus, so treat the router as a historical data point rather than a shortlist item.
-
-### Unify AI (historical)
-
-Unify offered a unified API across many models and providers with a routing layer that optimized on user-defined objectives (minimize cost, minimize latency, maximize quality) and supported custom quality thresholds per endpoint. As of July 2026, unify.ai markets an autonomous AI-agent platform rather than a model router. The design is still worth studying — objective-driven routing with per-endpoint quality floors — but it is no longer a product you can buy.
+Martian published the clearest public numbers on cross-provider routing: on `openai/evals` its router "outperforms GPT-4 (getting performance at least as good, at a lower cost) on 91.8% of tasks", producing "a 20% reduction in cost — when we optimize purely for performance", with up to "a 97% reduction in cost" on individual tasks. Note the shape of that result: the average saving is modest and the headline saving is a best case, which is the same pattern the RouteLLM benchmarks show. The company's public work has since moved to interpretability research, so these are benchmark figures to reason from rather than a product to shortlist.
 
 ### OpenRouter
 
@@ -815,8 +815,7 @@ A team's rule-based router sent all short queries (<500 tokens) to the cheap mod
 | RouteLLM | Open-source | Preference-trained strong/weak routers + benchmarks | Free (self-hosted) | Research-grade binary routing |
 | Portkey | Managed SaaS | Gateway, routing, observability | Subscription tiers priced by logs/month (free tier 10k logs) | Observability + routing combo |
 | Custom DistilBERT | DIY | Full control, lowest latency | Engineering time | High-volume, latency-sensitive |
-| Amazon Bedrock Intelligent Prompt Routing | Managed | Predicts per-request response quality and routes between two models *within one family* (Anthropic or Meta defaults) | Per-token | AWS-native deployments |
-| Martian, Unify AI | — | Historical: both marketed cross-provider routers; see Section 7 for their current status | — | Reference designs only |
+| Amazon Bedrock Intelligent Prompt Routing | Managed | Predicts per-request response quality and routes between two models *within one family* (Claude, Llama or Nova) | Per-token | AWS-native deployments |
 
 ### Supporting Infrastructure
 

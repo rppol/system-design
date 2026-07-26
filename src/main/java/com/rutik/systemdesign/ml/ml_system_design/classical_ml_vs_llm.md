@@ -193,7 +193,7 @@ The mechanics also include a *capability* gate that cost cannot override: if you
 
 ## 7. Real-World Examples
 
-- **Tabular CTR / fraud (Meta, Stripe, banks):** GBDT / DLRM / logistic at µs latency and micro-cent cost. An LLM here is strictly worse on accuracy, latency, and cost — structured numeric features are classical ML's home turf.
+- **Tabular CTR / fraud (Meta, Stripe, banks):** GBDT, DLRM and logistic models at µs-to-ms latency and micro-cent cost. Stripe Radar is a useful data point on where the line actually sits: it scores every transaction inside the authorization path under a ~100ms end-to-end budget, and moved from a Wide-and-Deep (XGBoost + DNN) architecture to a pure DNN in mid-2022 — still a trained, task-specific model, not a prompted LLM. An LLM here is worse on accuracy, latency, and cost; structured numeric features are classical ML's home turf.
 - **Customer-support triage (many SaaS):** started as a hand-labeled intent classifier; teams increasingly bootstrap with an LLM (zero-shot) to cover the long tail, then distill high-volume intents into a small classifier to hit latency/cost.
 - **Document extraction (fintech/legal):** LLMs handle messy, heterogeneous documents the long tail of which was never worth labeling for a classical NER model; high-volume, stable document types get a fine-tuned encoder.
 - **Semantic search (everywhere):** embeddings (a classical-ML primitive) power retrieval; an LLM reranks or synthesizes answers — a hybrid where each paradigm does what it is cheap at.
@@ -262,7 +262,7 @@ Distillation uses a large model (the LLM teacher) to train a small task-specific
 Because regulated decisions (credit, hiring, healthcare) require an auditable, monotonic, explainable rationale that a black-box LLM cannot provide. Laws like ECOA/FCRA demand specific adverse-action reasons, which a scorecard or monotonic GBDT gives and an LLM's free-text rationale does not. Interpretability and compliance can veto the higher-accuracy model. Accuracy is not the only acceptance criterion.
 
 **Q: When is a hybrid of classical ML and an LLM the right answer?**
-When different parts of the pipeline have different cost/quality profiles — for example, cheap classical filters handle the high-volume common case and an LLM handles the nuanced long tail or the natural-language surface. Semantic search (embeddings retrieve, LLM reranks/synthesizes) and moderation (classical filters plus LLM guardrails) are canonical hybrids. Use each paradigm where it is cheap and strong. Hybrids are usually the real production design.
+When different parts of the pipeline have different cost and quality profiles. Cheap classical filters then handle the high-volume common case, and an LLM handles the nuanced long tail or the natural-language surface. Semantic search (embeddings retrieve, LLM reranks/synthesizes) and moderation (classical filters plus LLM guardrails) are canonical hybrids. Use each paradigm where it is cheap and strong. Hybrids are usually the real production design.
 
 **Q: How do you actually compute the break-even point between an LLM and a trained model?**
 Set the classical build cost equal to the annual marginal savings: break-even daily volume = build_cost / (per_call_savings × 365). With an LLM at ~$0.002/call, a GBDT at micro-cents, and a ~$40k build, break-even is only a few tens of thousands of calls/day. Above that, the trained model is cheaper within a year — and also meets latency SLOs the LLM misses. Make this calculation explicit in a design.

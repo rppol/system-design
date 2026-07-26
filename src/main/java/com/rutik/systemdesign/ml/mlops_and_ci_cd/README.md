@@ -11,8 +11,8 @@ A software pipeline produces a binary artifact that either works or fails. An ML
 Key components:
 - **Data versioning** — DVC, git-lfs; track which data snapshot produced which model
 - **Experiment tracking** — MLflow Tracking, Weights & Biases; log hyperparameters, metrics, artifacts per run
-- **Model registry** — MLflow Model Registry, Vertex AI Model Registry; manage model lifecycle stages
-- **Pipeline orchestration** — Kubeflow Pipelines, Vertex AI Pipelines, Airflow; reproducible, containerized ML workflows
+- **Model registry** — MLflow Model Registry, Agent Platform Model Registry (Google renamed Vertex AI to Agent Platform in May 2026); manage the model lifecycle
+- **Pipeline orchestration** — Kubeflow Pipelines, Agent Platform Pipelines (formerly Vertex AI Pipelines), Airflow; reproducible, containerized ML workflows
 - **CI/CD for ML** — automated code, data, and model quality gates before any model reaches production
 - **Monitoring and feedback** — drift detection, performance degradation alerts, retraining triggers
 
@@ -24,7 +24,7 @@ One-line analogy: MLOps is the assembly line for machine learning — it ensures
 
 Mental model: think of a model as a firmware binary. Firmware engineers version every build, run hardware-in-the-loop tests, do staged rollouts to device cohorts, and maintain rollback capability. ML teams without MLOps are shipping firmware from a USB stick with a sticky note that says "v2 final FINAL".
 
-Why it matters: Gartner estimated in 2022 that 85% of ML projects fail to reach production. The primary killers are reproducibility failures, silent data quality issues, and the inability to monitor model health post-deployment. MLOps directly addresses all three.
+Why it matters: the widely repeated "85% of ML projects never reach production" figure is a misquotation — Gartner's 2018 prediction was that through 2022, 85% of AI projects would deliver *erroneous outcomes* from biased data, algorithms, or teams, not that 85% would fail to ship — so treat any such headline number as unsourced. What is well documented is the failure mechanism: reproducibility gaps, silent data quality issues, and the inability to monitor model health post-deployment. MLOps directly addresses all three.
 
 Key insight: the model is not the deliverable. The deliverable is the pipeline that continuously produces, validates, and serves high-quality models.
 
@@ -104,15 +104,15 @@ flowchart TD
 
     commit([Code commit / PR]) --> codeTests["CI: code tests\nunit · lint · type"]
     codeTests -->|"pass"| dataTests["CI: data tests\nGreat Expectations · skew"]
-    dataTests -->|"pass"| trainStep["Training step\nKubeflow / Vertex AI"]
+    dataTests -->|"pass"| trainStep["Training step\nKubeflow / Agent Platform"]
     trainStep --> gate{"Validation gate\nAUC · P99 · fairness"}
     gate -->|"fail"| reject["Reject + notify\npipeline fails"]
-    gate -->|"pass"| registry["Model registry\nNone → Staging"]
+    gate -->|"pass"| registry["Model registry\nalias @challenger"]
     registry --> canary["Canary deploy\n5% traffic"]
     canary --> check{"Metrics stable?"}
-    check -->|"regression"| rollback["Auto rollback\nto prev Production"]
+    check -->|"regression"| rollback["Auto rollback\n@champion unchanged"]
     check -->|"stable"| promote["Ramp 25 → 50 → 100%"]
-    promote --> prod["Production\nprev → Archived"]
+    promote --> prod["Production\n@champion reassigned"]
     prod --> monitor["Monitoring\nPSI · perf · SLO"]
     monitor -.->|"drift / degradation"| trainStep
 
@@ -156,19 +156,19 @@ CI reads the same feature keys from both stores and fails the build if any featu
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Staging
-    Staging --> Canary5: promote to Production
+    [*] --> Challenger
+    Challenger --> Canary5: start rollout
     Canary5 --> Canary25: stable (30m soak)
     Canary25 --> Canary50: stable
     Canary50 --> Full100: stable
-    Full100 --> [*]: rollout complete
+    Full100 --> [*]: champion reassigned
     Canary5 --> RolledBack: regression over 2%
     Canary25 --> RolledBack: regression over 2%
     Canary50 --> RolledBack: regression over 2%
-    RolledBack --> Staging: revert to prev Production
+    RolledBack --> Challenger: champion never moved
 ```
 
-Traffic advances 5 → 25 → 50 → 100% only after each stage soaks cleanly; any stage that regresses more than 2% versus the production baseline jumps straight to RolledBack, which reverts serving to the previous Production model and demotes the candidate back to Staging.
+Traffic advances 5 → 25 → 50 → 100% only after each stage soaks cleanly; any stage that regresses more than 2% versus the incumbent baseline jumps straight to RolledBack. Note what rollback actually *is* here: the `@champion` alias never moved during the canary, so reverting means draining canary traffic to 0% — there is no registry state to undo, which is why this shape is safe to automate.
 
 ### Retraining Trigger Sources
 
@@ -239,16 +239,17 @@ def log_model(
         mlflow.log_metrics(metrics)
 
         # Infer input/output schema from actual data — this schema is
-        # validated at serving time; mismatches raise a ModelSignatureException
+        # enforced at serving time; mismatches raise an MlflowException
         signature = infer_signature(
             model_input=X_train,
             model_output=model.predict(X_train),
         )
 
-        # Log model artifact with signature and sample input for validation
+        # Log model artifact with signature and sample input for validation.
+        # `name=` replaced the deprecated `artifact_path=` in MLflow 3.
         mlflow.sklearn.log_model(
             sk_model=model,
-            artifact_path="model",
+            name="model",
             signature=signature,
             input_example=X_test.head(5),
             registered_model_name=registered_model_name,
@@ -282,6 +283,7 @@ def _get_git_sha() -> str:
 from dataclasses import dataclass
 
 import mlflow
+from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
 
@@ -293,14 +295,18 @@ class ValidationGate:
     max_auc_regression_vs_production: float = 0.02  # must not drop more than 2%
 
 
-def promote_to_staging(
+def promote_to_challenger(
     run_id: str,
     model_name: str,
     gate: ValidationGate,
 ) -> bool:
     """
-    Promote a model version to Staging in MLflow Model Registry
-    only if all validation gates pass.
+    Register a model version and tag it with the `@challenger` alias in the
+    MLflow Model Registry only if all validation gates pass.
+
+    Aliases replace the old None/Staging/Production/Archived stages, which
+    MLflow deprecated in 2.9.0; `transition_model_version_stage` still runs
+    but emits a deprecation warning and is slated for removal.
 
     Returns True if promoted, False if rejected.
     """
@@ -337,19 +343,18 @@ def promote_to_staging(
         print(f"GATE FAIL: demographic parity diff {dem_parity:.4f} too high")
         return False
 
-    # All gates passed — register and move to Staging
+    # All gates passed — register and label the version @challenger
     model_version = client.create_model_version(
         name=model_name,
         source=f"runs:/{run_id}/model",
         run_id=run_id,
     )
-    client.transition_model_version_stage(
+    client.set_registered_model_alias(
         name=model_name,
+        alias="challenger",
         version=model_version.version,
-        stage="Staging",
-        archive_existing_versions=False,
     )
-    print(f"PROMOTED: {model_name} v{model_version.version} -> Staging")
+    print(f"PROMOTED: {model_name} v{model_version.version} -> @challenger")
     return True
 
 
@@ -358,10 +363,12 @@ def _get_production_metric(
     model_name: str,
     metric_key: str,
 ) -> float | None:
-    prod_versions = client.get_latest_versions(model_name, stages=["Production"])
-    if not prod_versions:
-        return None
-    run = client.get_run(prod_versions[0].run_id)
+    """Metric of the live model, resolved via the `@champion` alias."""
+    try:
+        champion = client.get_model_version_by_alias(model_name, "champion")
+    except MlflowException:
+        return None  # no champion yet — first model for this name
+    run = client.get_run(champion.run_id)
     return run.data.metrics.get(metric_key)
 ```
 
@@ -434,7 +441,7 @@ def validate_and_register(
     with open(model.path, "rb") as f:
         clf = pickle.load(f)
 
-    mlflow.sklearn.log_model(clf, artifact_path="model", registered_model_name=model_name)
+    mlflow.sklearn.log_model(clf, name="model", registered_model_name=model_name)
     return "pass"
 
 
@@ -478,11 +485,13 @@ jobs:
   code-quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install dependencies
+        # requirements-dev.txt must pin pytest-cov — `--cov` is a plugin flag,
+        # not core pytest, and a missing plugin fails the step with "unrecognized arguments"
         run: pip install -r requirements-dev.txt
       - name: Lint
         run: ruff check src/
@@ -495,8 +504,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: code-quality
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install dependencies
@@ -510,8 +519,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: data-validation
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install ML dependencies
@@ -529,7 +538,7 @@ jobs:
         run: pytest tests/integration/ -v -k "serving"
       - name: Push to registry if on main
         if: github.ref == 'refs/heads/main'
-        run: python scripts/register_model.py --stage Staging
+        run: python scripts/register_model.py --alias challenger
 ```
 
 ### Canary Traffic Split Logic
@@ -635,13 +644,13 @@ Three checks fire before any user population is fully committed, and the first o
 
 ## 7. Real-World Examples
 
-**Netflix** uses a multi-stage ML platform where every model version is registered in their internal registry with a lineage manifest (dataset snapshot, code SHA, training job ID). Canary deployments on recommendation models use engagement rate as the primary rollback metric, with automatic rollback if engagement drops more than 1% relative within 24 hours.
+**Netflix** open-sourced its automated canary analysis service, Kayenta, with Google in 2018; it is the canary judge inside Spinnaker. The mechanism is a paired comparison, not a raw before/after: Spinnaker stands up a *baseline* cluster running the current version alongside the *canary* cluster running the new one, sends each an equal slice of traffic, and Kayenta compares their metric time series with a Mann-Whitney U test (non-parametric, so it assumes no particular distribution) inside a tolerance band of +/- 0.25 x the estimate. Each metric group scores `pass_count / total_count * 100`; the weighted summary score is compared to `passThreshold` and `marginalThreshold`, and a score below the marginal threshold — or any single metric marked `critical: true` degrading, which zeroes the score outright — aborts the rollout and routes all traffic back to the production cluster. Netflix has not published the specific rollback thresholds it uses for recommendation models.
 
-**Uber Michelangelo** pioneered the feature store concept to guarantee offline-online consistency. Features computed in the batch pipeline for training are served from the same feature store at inference, eliminating an entire class of training-serving skew bugs.
+**Uber Michelangelo** pioneered the feature store concept — productized as Michelangelo Palette — to guarantee offline-online consistency: Hive/Spark for the offline store, Cassandra for the online store, and a shared Transformer framework that executes the *same* transformation logic in both batch training and online serving. That shared execution path, not merely a shared table, is what eliminates the training-serving skew class of bugs.
 
-**Airbnb** runs Great Expectations checks as a mandatory CI step for any dataset used in a production model. Schema changes to upstream tables break the CI pipeline before the model is ever retrained on corrupted data.
+**Airbnb** does not use Great Expectations; it built its own data quality stack. The Midas certification process requires that a Data Engineer build automated checks — basic sanity checks, definitional testing, and anomaly detection on new data — into the pipeline itself before data can be certified, and Airbnb's Wall framework expresses those checks as YAML configs run by an Airflow helper, with blocking and non-blocking modes so a minor violation warns while a critical one halts the pipeline. The transferable lesson is the same: schema and distribution checks must gate the pipeline, not just annotate it.
 
-**Google Cloud Vertex AI Pipelines** is built on Kubeflow and integrates with Cloud Build for CI. Teams define pipelines as Python DAGs, store them in Artifact Registry, and trigger them from Cloud Build on any push to the training data bucket.
+**Google Cloud Agent Platform Pipelines** (renamed from Vertex AI Pipelines when Google folded Vertex AI into the Gemini Enterprise Agent Platform in May 2026 — the rename is a product/branding change, so existing pipeline definitions are unaffected) runs KFP-authored pipelines as a managed service and integrates with Cloud Build for CI. Teams define pipelines as Python DAGs, store the compiled templates in Artifact Registry, and trigger them from Cloud Build.
 
 ---
 
@@ -650,7 +659,7 @@ Three checks fire before any user population is fully committed, and the first o
 | Approach | Benefit | Cost |
 |---|---|---|
 | Kubeflow Pipelines (self-managed) | Full control, portable across clouds | High setup and ops overhead; requires Kubernetes expertise |
-| Vertex AI Pipelines (managed) | Zero infrastructure management, GCP-native | Vendor lock-in; cost increases at scale |
+| Agent Platform Pipelines (managed, ex-Vertex AI) | Zero infrastructure management, GCP-native | Vendor lock-in; cost increases at scale |
 | MLflow Model Registry | Open source, integrates with any cloud | No built-in canary orchestration; manual promotion workflow |
 | Canary deployment | Gradual risk; automatic rollback | Requires traffic routing infra (Istio, Nginx); doubles serving cost during split |
 | Blue/green deployment | Instant rollback; zero downtime | Doubles infra cost continuously; expensive for GPU serving |
@@ -699,7 +708,7 @@ Fix: Great Expectations suite runs in CI on every data pipeline change. Schema c
 
 A production model failed a canary: AUC regressed 4%. The runbook said "execute `scripts/rollback.py`". When the on-call engineer ran it during the incident, the script failed because it read the previous model version from an environment variable (`PREV_MODEL_VERSION`) that had been overwritten during the canary promotion step. The rollback script had never been tested end-to-end in the staging environment. The team spent 2 hours manually reconstructing the previous serving config from logs.
 
-Fix: rollback drills are scheduled monthly. The CI pipeline includes a rollback dry-run step that promotes a new model version to Staging, then immediately runs the rollback script and verifies that the serving config reverts to the pre-promotion state. Rollback is automated via the model registry: transitioning the previous Production version back to Production is a single API call.
+Fix: rollback drills are scheduled monthly. The CI pipeline includes a rollback dry-run step that labels a new model version `@challenger`, then immediately runs the rollback script and verifies that the serving config reverts to the pre-promotion state. Rollback is automated via the model registry: repointing the `@champion` alias at the previous version is a single API call, and because an alias is a pointer rather than a state machine, it needs no knowledge of which version was live before.
 
 ### War Story 4: Training-Serving Skew — 15% Precision Drop
 
@@ -717,13 +726,13 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - Neptune.ai — SaaS alternative; strong metadata management
 
 **Model Registry:**
-- MLflow Model Registry — open source; stages: None, Staging, Production, Archived; model signatures; REST API
-- Vertex AI Model Registry — GCP-managed; integrates with Vertex AI Endpoints
-- AWS SageMaker Model Registry — AWS-managed; integrates with SageMaker Endpoints
+- MLflow Model Registry — open source; **aliases** (`@champion`, `@challenger`) plus tags are the current lifecycle mechanism. The old None/Staging/Production/Archived *stages* were deprecated in MLflow 2.9.0 and are slated for removal; `transition_model_version_stage` and `get_latest_versions(stages=...)` still work in 3.x but emit deprecation warnings. Also provides model signatures and a REST API
+- Agent Platform Model Registry (renamed from Vertex AI Model Registry, May 2026) — GCP-managed; integrates with Agent Platform Endpoints
+- Amazon SageMaker Model Registry — AWS-managed; Model Groups + Model Package versions with an approval status; integrates with SageMaker Endpoints
 
 **Pipeline Orchestration:**
-- Kubeflow Pipelines (KFP v2) — Kubernetes-native; KFP SDK for Python DAG definition; portable
-- Vertex AI Pipelines — managed KFP on GCP; Cloud Build integration; no infra management
+- Kubeflow Pipelines (KFP v2, SDK 2.x) — Kubernetes-native; KFP SDK for Python DAG definition; portable
+- Agent Platform Pipelines (ex-Vertex AI Pipelines) — managed KFP on GCP; Cloud Build integration; no infra management
 - Apache Airflow — general-purpose; widely used; less ML-native than KFP
 - Prefect / Dagster — modern workflow orchestrators; good Python-native experience
 
@@ -732,7 +741,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - Delta Lake / Iceberg — ACID-compliant table formats; time-travel queries for dataset versioning
 
 **Data Quality:**
-- Great Expectations — schema + distribution expectations; CLI and Python API; integrates into Airflow and CI
+- Great Expectations (GX Core 1.x) — schema + distribution expectations; Python API only, since GX 1.0 dropped the `great_expectations` CLI entirely; integrates into Airflow and CI
 - Deepchecks — ML-specific checks including train-test drift, model performance degradation
 - Evidently AI — drift reports, data quality reports; integrates with MLflow
 
@@ -756,7 +765,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 **Feature Stores:**
 - Feast — open source; offline (Parquet/BigQuery) + online (Redis/DynamoDB) stores
 - Tecton — SaaS feature platform; strong consistency guarantees
-- Vertex AI Feature Store — GCP-managed; integrates with BigQuery and Vertex AI Pipelines
+- Agent Platform Feature Store (ex-Vertex AI Feature Store) — GCP-managed; feature data is registered from a BigQuery source and exposed through online store / feature view instances
 
 ---
 
@@ -768,11 +777,11 @@ A DevOps pipeline tests code correctness and deploys a deterministic binary arti
 **Q: What is training-serving skew and how do you detect it in CI?**
 Training-serving skew occurs when features presented to the model at serving time differ from what the model saw during training. This typically happens because preprocessing steps (scaling, encoding, imputation) are applied during training but omitted or applied differently at serving. Detection in CI: write an integration test that sends known raw input vectors to the deployed model server and asserts that predictions match expected outputs computed offline with the full training pipeline. Also compare mean and standard deviation of each feature between the offline feature store and online serving queries; flag any feature with >5% relative difference.
 
-**Q: Explain MLflow Model Registry stages and how you automate promotion.**
-MLflow Model Registry has four stages: None (newly registered), Staging (validated, awaiting production), Production (serving live traffic), Archived (retired). Automation: the CI pipeline trains a model, logs it to MLflow, calls `create_model_version()` to register it at stage None, then runs validation gates (AUC >= baseline, latency SLA, fairness checks). If all gates pass, the pipeline calls `transition_model_version_stage(stage="Staging")`. A separate deployment job, triggered by a merge to main or a manual approval, transitions from Staging to Production and archives the previous Production version.
+**Q: Explain how MLflow Model Registry tracks a model's lifecycle and how you automate promotion.**
+Current MLflow uses mutable **aliases** such as `@champion` and `@challenger` plus key-value tags, not the old four stages. The None/Staging/Production/Archived stages were deprecated in MLflow 2.9.0; `transition_model_version_stage` and `get_latest_versions(stages=...)` still function in 3.x but emit deprecation warnings and are slated for removal, so new pipelines should not build on them. Automation: CI trains a model, logs it, calls `create_model_version()`, then runs validation gates (AUC >= baseline, latency SLA, fairness checks); if all pass it calls `set_registered_model_alias(name, "challenger", version)`. A separate deployment job, triggered by a merge to main or manual approval, repoints `@champion` to that version — a single atomic alias move, which is also what makes rollback one API call back to the prior version.
 
 **Q: How do you implement automatic rollback in a canary deployment for an ML model?**
-The canary controller polls a real-time metric (AUC from an online evaluation service, or a business proxy metric like conversion rate) every N minutes. If the metric regresses beyond a defined threshold (e.g., AUC drops > 2% from the production baseline), the controller calls the serving infrastructure API to set canary traffic weight to 0% and production weight to 100%. Simultaneously, it transitions the canary model version back to Staging in the model registry and sends an alert. The critical requirement is that rollback must be atomic from the user's perspective: Istio VirtualService or Nginx upstream weight changes propagate in under 5 seconds.
+The canary controller polls a real-time metric (AUC from an online evaluation service, or a business proxy metric like conversion rate) every N minutes. If the metric regresses beyond a defined threshold (e.g., AUC drops > 2% from the production baseline), the controller calls the serving infrastructure API to set canary traffic weight to 0% and production weight to 100% — in Istio that is a patch to `spec.http[].route[].weight`, where the weight lives on each route destination, not on the HTTPRoute itself. Simultaneously it drops the `@challenger` alias from the candidate version, leaving `@champion` untouched, and sends an alert. The critical requirement is that rollback be atomic from the user's perspective: the weight change must reach every proxy before the next request wave, and the controller must verify the new split took effect rather than assume the API call succeeded.
 
 **Q: What is Population Stability Index (PSI) and when do you trigger retraining based on it?**
 PSI measures how much the distribution of a feature has shifted between a reference period (training data) and a current period (recent production traffic). PSI = sum over bins of (actual_fraction - expected_fraction) * ln(actual_fraction / expected_fraction). PSI < 0.1: no significant shift; 0.1–0.2: moderate shift, monitor; > 0.2: significant shift, trigger retraining. A common production setup computes PSI daily on the top 20 features and triggers a retraining pipeline when PSI > 0.2 on any of the top 5 features by feature importance.
@@ -793,7 +802,7 @@ In shadow mode, the new model receives a copy of all live requests and produces 
 An S3 path is mutable — the same path can point to different data at different times (overwrite, append, schema evolution). Dataset versioning requires an immutable reference: a git commit SHA of a DVC `.dvc` file (which records the S3 URI + SHA256 of the data), or an Iceberg/Delta Lake table snapshot ID (a monotonically increasing integer that points to an immutable manifest). The MLflow run record stores this immutable reference, so any model can be traced back to the exact byte-for-byte dataset used to train it, enabling full reproducibility and regulatory audit trails.
 
 **Q: What is a model signature in MLflow and why does it matter for CI?**
-A model signature in MLflow specifies the expected schema (column names, dtypes, value ranges) for model inputs and outputs. It is inferred from actual training data using `infer_signature(X_train, model.predict(X_train))` and stored as JSON alongside the model artifact. At serving time, MLflow's pyfunc wrapper validates every request against the signature and raises a `ModelSignatureException` if the schema does not match — before the model ever runs inference. In CI, the integration test sends a malformed request to catch any serving code that bypasses signature validation. This provides the serving-layer equivalent of an API contract test.
+A model signature in MLflow declares the expected column names and dtypes (and tensor shapes) for model inputs and outputs. It is a type contract, not a value-range constraint, so an in-range check still has to be a separate data test. It is inferred from actual training data using `infer_signature(X_train, model.predict(X_train))` and stored as JSON alongside the model artifact. At serving time MLflow's pyfunc wrapper enforces the signature on every request before inference: missing columns or uncastable types raise an `MlflowException` (MLflow has no `ModelSignatureException`), while extra columns are ignored and safe type conversions are performed silently. In CI, the integration test sends a malformed request to catch any serving code that bypasses signature enforcement. This provides the serving-layer equivalent of an API contract test.
 
 **Q: Why must preprocessing artifacts like scalers and encoders be bundled with the model, not stored separately?**
 A separately stored scaler can be forgotten or applied differently at serving time, feeding the model raw features and silently degrading predictions with no error. Bundle preprocessing and the estimator into one artifact (an sklearn `Pipeline`) and log it as a single unit, so `load_model` always returns the complete transform-plus-predict path. This eliminates an entire class of training-serving skew that produces plausible-but-wrong outputs rather than crashes.
@@ -840,7 +849,7 @@ Put automated data-validation gates before training so bad data fails the pipeli
 
 ## 14. Case Study
 
-**Scenario:** A ride-sharing company (12M daily rides, 4M active drivers) runs a surge pricing model that updates every 5 minutes. The current manual promotion process takes 3 days from "model passes offline eval" to "model in production", causing 4-6 stale model incidents per quarter where drift degrades pricing accuracy. The goal: implement a CI/CD pipeline with MLflow Registry + GitHub Actions that promotes models automatically when AUC-ROC >= 0.92 and MAPE <= 8% on a rolling 7-day holdout, with promotion-to-serving in under 45 minutes and automatic rollback if production error rate exceeds 2x baseline within 30 minutes.
+**Scenario (illustrative — a composite, not a published company case):** A ride-sharing company (12M daily rides, 4M active drivers) runs a surge pricing model that updates every 5 minutes. The current manual promotion process takes 3 days from "model passes offline eval" to "model in production", causing 4-6 stale model incidents per quarter where drift degrades pricing accuracy. The goal: implement a CI/CD pipeline with MLflow Registry + GitHub Actions that promotes models automatically when AUC-ROC >= 0.92 and MAPE <= 8% on a rolling 7-day holdout, with promotion-to-serving in under 45 minutes and automatic rollback if production error rate exceeds 2x baseline within 30 minutes.
 
 **Architecture:**
 ```mermaid
@@ -854,13 +863,13 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     dataPipeline["Data Pipeline<br/>hourly Spark job<br/>Feature refresh: supply - demand -<br/>weather - events - elasticity"]
-    mlflowTrack["MLflow Experiment Tracking<br/>Train XGBoost / LightGBM<br/>Params - metrics - schema logged<br/>Registry: Staging gate"]
+    mlflowTrack["MLflow Experiment Tracking<br/>Train XGBoost / LightGBM<br/>Params - metrics - schema logged<br/>Registry: alias @challenger"]
     ciCheckout["1. Checkout code + artifact<br/>GitHub Actions - on tag push"]
     ciGate{"2. Offline validation gate<br/>AUC-ROC >= 0.92 - MAPE <= 8%<br/>PSI <= 0.15 - schema check"}
     ciIntegration["3. Integration test<br/>shadow traffic, 15 min"]
-    ciPromote["4. MLflow transition<br/>Staging to Production"]
+    ciPromote["4. MLflow alias move<br/>@challenger to @champion"]
     k8sDeploy@{ icon: "logos:kubernetes", form: "square", label: "5. Deploy to K8s<br/>rolling update, 10% canary", pos: "b", h: 44 }
-    modelServing["Model Serving<br/>FastAPI + TorchServe, 400 RPS<br/>Blue-green, 10%/90% canary split"]
+    modelServing["Model Serving<br/>FastAPI + TorchServe, 400 RPS<br/>Istio weighted split 10/90"]
     prometheus@{ icon: "logos:prometheus", form: "square", label: "Prometheus metrics<br/>rate - errors - p99", pos: "b", h: 44 }
     rollbackMon["Automated Rollback Monitor<br/>canary error_rate vs baseline<br/>rollback if ratio over 2.0 in 30min"]
 
@@ -894,12 +903,14 @@ PROMOTION_THRESHOLDS: dict[str, float] = {
     "psi_score": 0.15,
 }
 
+SURGE_THRESHOLD = 1.2   # multiplier at or above which a ride counts as "surging"
+
 def train_and_log_model(
     X_train: pd.DataFrame,
-    y_train: pd.Series,
+    y_train: pd.Series,               # continuous surge multiplier, >= 1.0
     X_val: pd.DataFrame,
     y_val: pd.Series,
-    params: dict,
+    params: dict,                     # LightGBM regression objective
     feature_schema: dict[str, str],   # col -> dtype mapping
 ) -> str:
     mlflow.set_experiment(EXPERIMENT_NAME)
@@ -918,22 +929,34 @@ def train_and_log_model(
             callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
         )
 
-        val_probs = model.predict(X_val)
-        auc_roc = roc_auc_score(y_val, val_probs)
-        mape = mean_absolute_percentage_error(y_val, val_probs.clip(1e-6, 1))
+        val_preds = model.predict(X_val)          # predicted surge multiplier
+        # The two gates ask different questions of the same regression output.
+        # MAPE = "is the magnitude right?" on the continuous target.
+        # AUC-ROC = "does it rank surge events correctly?" against a binarised
+        # label. Feeding the 0/1 label to MAPE instead would divide by ~0 and
+        # return a meaningless ~1e15, so the gate could never pass.
+        mape = mean_absolute_percentage_error(y_val, val_preds)
+        auc_roc = roc_auc_score((y_val >= SURGE_THRESHOLD).astype(int), val_preds)
 
         mlflow.log_metric("val_auc_roc", auc_roc)
         mlflow.log_metric("val_mape", mape)
-        mlflow.lightgbm.log_model(model, "model")
+        mlflow.lightgbm.log_model(model, name="model")   # `artifact_path` is deprecated
 
-        # Register model in Staging
+        # Register the version and label it @challenger (aliases replaced the
+        # deprecated None/Staging/Production/Archived stages in MLflow 2.9.0)
         model_uri = f"runs:/{run.info.run_id}/model"
-        mlflow.register_model(model_uri, MODEL_NAME)
+        mv = mlflow.register_model(model_uri, MODEL_NAME)
+        MlflowClient().set_registered_model_alias(MODEL_NAME, "challenger", mv.version)
         print(f"Run {run.info.run_id}: AUC-ROC={auc_roc:.4f}, MAPE={mape:.4f}")
         return run.info.run_id
 ```
 
 ```python
+import json
+
+import mlflow.artifacts
+
+
 def compute_psi(
     baseline_scores: np.ndarray,
     candidate_scores: np.ndarray,
@@ -963,14 +986,19 @@ def validate_model_for_promotion(
     model_uri = f"runs:/{run_id}/model"
     model = mlflow.lightgbm.load_model(model_uri)
 
-    # Schema compatibility check
-    candidate_schema: dict = client.download_artifacts(run_id, "feature_schema.json")
-    schema_ok = (set(candidate_schema.keys()) == set(feature_schema_production.keys()))
+    # Schema compatibility check. download_artifacts returns a LOCAL PATH (str),
+    # not the parsed artifact — calling .keys() on it raises AttributeError.
+    schema_path = mlflow.artifacts.download_artifacts(
+        run_id=run_id, artifact_path="feature_schema.json"
+    )
+    with open(schema_path) as f:
+        candidate_schema: dict[str, str] = json.load(f)
+    schema_ok = (candidate_schema == feature_schema_production)   # names AND dtypes
 
-    candidate_probs = model.predict(X_holdout)
-    auc_roc = roc_auc_score(y_holdout, candidate_probs)
-    mape = mean_absolute_percentage_error(y_holdout, candidate_probs.clip(1e-6, 1))
-    psi = compute_psi(production_scores, candidate_probs)
+    candidate_preds = model.predict(X_holdout)
+    auc_roc = roc_auc_score((y_holdout >= SURGE_THRESHOLD).astype(int), candidate_preds)
+    mape = mean_absolute_percentage_error(y_holdout, candidate_preds)
+    psi = compute_psi(production_scores, candidate_preds)
 
     results = {
         "auc_roc": auc_roc,
@@ -1034,9 +1062,25 @@ Push the same shape further and the gate starts biting:
 **Why the extreme bins dominate.** Bin 1 alone contributes `0.02043`, over half the total `0.0378`, even though bins 8-10 each moved by a larger absolute `+0.02`. The log-ratio is what does it: losing 40% of a bin's mass (`0.10 -> 0.06`) is a bigger proportional move than gaining 20% (`0.10 -> 0.12`), so PSI is most sensitive to bins that empty out. That is deliberate — a score band the model has stopped producing at all is exactly the failure that breaks downstream thresholds calibrated on the old distribution.
 
 ```python
+import json
 import subprocess
 import time
 import requests
+
+def set_traffic_split(canary_pct: int, host: str = "surge-pricing") -> None:
+    """
+    Istio puts `weight` on each route DESTINATION, i.e. spec.http[].route[].weight —
+    NOT on the HTTPRoute itself. A patch shaped {"http":[{"weight":10},...]} is
+    silently invalid and leaves the split unchanged.
+    """
+    patch = {"spec": {"http": [{"route": [
+        {"destination": {"host": host, "subset": "canary"}, "weight": canary_pct},
+        {"destination": {"host": host, "subset": "stable"}, "weight": 100 - canary_pct},
+    ]}]}}
+    subprocess.run([
+        "kubectl", "patch", "virtualservice", "surge-pricing-vs",
+        "--type", "merge", "--patch", json.dumps(patch),
+    ], check=True)
 
 def promote_and_deploy(
     client: MlflowClient,
@@ -1046,15 +1090,10 @@ def promote_and_deploy(
     canary_monitor_minutes: int = 30,
     error_rate_multiplier_threshold: float = 2.0,
 ) -> bool:
-    # Transition to Production in MLflow Registry
-    versions = client.search_model_versions(f"name='{model_name}'")
-    staging_version = next(
-        v for v in versions if v.run_id == run_id and v.current_stage == "Staging"
-    )
-    client.transition_model_version_stage(
-        name=model_name, version=staging_version.version, stage="Production"
-    )
-    print(f"Model version {staging_version.version} promoted to Production")
+    # The candidate carries @challenger; @champion stays on the live model for the
+    # whole canary, so rollback is "do nothing to the registry" rather than "undo".
+    candidate = client.get_model_version_by_alias(model_name, "challenger")
+    assert candidate.run_id == run_id, "challenger alias does not point at this run"
 
     # Deploy canary via kubectl
     subprocess.run([
@@ -1062,10 +1101,7 @@ def promote_and_deploy(
         "deployment/surge-pricing-canary",
         f"model-server=registry/surge-model:{run_id}",
     ], check=True)
-    subprocess.run([
-        "kubectl", "patch", "virtualservice", "surge-pricing-vs",
-        "--patch", f'{{"spec":{{"http":[{{"weight":{int(canary_weight*100)}}},{{"weight":{int((1-canary_weight)*100)}}}]}}}}'
-    ], check=True)
+    set_traffic_split(int(canary_weight * 100))
 
     # Monitor canary error rate for 30 minutes
     baseline_error_rate = get_prometheus_metric("surge_pricing_error_rate{canary='false'}")
@@ -1075,17 +1111,15 @@ def promote_and_deploy(
         canary_error_rate = get_prometheus_metric("surge_pricing_error_rate{canary='true'}")
         if canary_error_rate > baseline_error_rate * error_rate_multiplier_threshold:
             print(f"Canary error rate {canary_error_rate:.4f} > {baseline_error_rate * 2:.4f}; rolling back")
+            set_traffic_split(0)   # drain traffic FIRST, then touch the workload
             subprocess.run(["kubectl", "rollout", "undo", "deployment/surge-pricing-canary"], check=True)
-            client.transition_model_version_stage(
-                name=model_name, version=staging_version.version, stage="Archived"
-            )
+            client.delete_registered_model_alias(model_name, "challenger")
             return False
 
-    # Promote canary to 100%
-    subprocess.run([
-        "kubectl", "patch", "virtualservice", "surge-pricing-vs",
-        "--patch", '{"spec":{"http":[{"weight":100},{"weight":0}]}}'
-    ], check=True)
+    # Clean window: cut over to 100% and move @champion to the new version
+    set_traffic_split(100)
+    client.set_registered_model_alias(model_name, "champion", candidate.version)
+    client.delete_registered_model_alias(model_name, "challenger")
     return True
 
 def get_prometheus_metric(query: str) -> float:
@@ -1102,7 +1136,7 @@ def get_prometheus_metric(query: str) -> float:
 **Pitfall 1 - Using validation set AUC as the promotion gate without holdout temporal split:**
 ```python
 # BROKEN: validation set overlaps temporally with training window
-# XGBoost optimised on val; AUC on val is inflated by hyperparameter tuning
+# LightGBM optimised on val; AUC on val is inflated by hyperparameter tuning
 train_df = df[df["date"] < "2025-01-01"]
 val_df = df[(df["date"] >= "2024-12-01") & (df["date"] < "2025-01-01")]  # in training window
 # AUC on this val = 0.944 -> passes gate; true 7-day forward holdout AUC = 0.906 -> fails
@@ -1117,7 +1151,7 @@ holdout_df = df[(df["date"] >= "2025-01-01") & (df["date"] < "2025-01-08")]  # f
 ```python
 # BROKEN: register model without logging feature schema;
 # new model trained with "driver_supply" as float64, production serves int32 -> score drift
-mlflow.lightgbm.log_model(model, "model")   # no schema logged
+mlflow.lightgbm.log_model(model, name="model")   # no schema logged
 # Production serving converts features to training dtype -> wrong predictions for int features
 
 # FIX: log feature schema as artifact; validate compatibility before promotion
@@ -1129,12 +1163,11 @@ mlflow.log_dict(feature_schema, "feature_schema.json")
 **Pitfall 3 - Promoting directly to 100% traffic without canary causes widespread incidents:**
 ```python
 # BROKEN: immediate full traffic switch on promotion
-kubectl set image deployment/surge-pricing model-server=registry/surge-model:v2
+# $ kubectl set image deployment/surge-pricing model-server=registry/surge-model:v2
 # If model has latency regression (p99: 12ms -> 180ms), 100% of users affected immediately
 
 # FIX: 10% canary for 30 minutes with automated rollback on error spike
-subprocess.run(["kubectl", "patch", "virtualservice", "surge-pricing-vs",
-    "--patch", '{"spec":{"http":[{"weight":10},{"weight":90}]}}'])
+set_traffic_split(10)   # weight sits on spec.http[].route[], see helper above
 # Monitor p99 latency and error_rate; auto-rollback if degraded
 # Only then ramp to 100% after 30-minute clean window
 ```
@@ -1228,13 +1261,13 @@ That 6 days versus 72 minutes is the actual explanation for `4-6 stale model inc
 
 **Interview discussion points:**
 
-**What is the difference between a Staging and Production stage in MLflow Model Registry?** MLflow Registry stages (None -> Staging -> Production -> Archived) are metadata labels on model versions, not deployment states. Staging means "passed offline eval, candidate for deployment." Production means "approved for serving." The CI pipeline enforces that only models passing the validation gate (AUC-ROC, MAPE, PSI, schema checks) transition from Staging to Production. The registry provides a single source of truth for which model version should be served, decoupling the decision to promote from the mechanics of deployment.
+**What is the difference between the `@challenger` and `@champion` aliases in MLflow Model Registry?** Both are mutable named pointers to a model version — metadata labels, not deployment states. `@challenger` means "passed offline eval, candidate for deployment"; `@champion` means "the version serving live traffic." The CI pipeline enforces that only models passing the validation gate (AUC-ROC, MAPE, PSI, schema checks) get `@challenger`, and only a clean canary window moves `@champion`. Aliases replaced the old None/Staging/Production/Archived stages, which MLflow deprecated in 2.9.0 precisely because a fixed four-stage ladder could not express workflows like champion/challenger or per-region champions. The registry remains a single source of truth for which version should be served, decoupling the promotion decision from the mechanics of deployment.
 
-**Why is PSI used as a promotion gate criterion alongside AUC-ROC?** PSI measures how much the new model's score distribution differs from the production model's score distribution. A new model can achieve high AUC-ROC on the validation holdout while generating completely different score distributions in production, causing downstream systems (fraud score thresholds, pricing bands) calibrated to the old distribution to behave incorrectly. PSI > 0.2 on the score distribution flags this structural mismatch before deployment, preventing silent system breakage that AUC-ROC alone would not detect.
+**Why is PSI used as a promotion gate criterion alongside AUC-ROC?** PSI measures how much the new model's score distribution differs from the production model's score distribution. A new model can achieve high AUC-ROC on the validation holdout while generating completely different score distributions in production, causing downstream systems (fraud score thresholds, pricing bands) calibrated to the old distribution to behave incorrectly. This pipeline's PSI > 0.15 score-distribution gate (deliberately stricter than the 0.2 threshold conventionally used to trigger *retraining*) flags that structural mismatch before deployment, preventing silent system breakage that AUC-ROC alone would not detect.
 
 **How does the 10% canary deployment protect against latency regressions that offline eval misses?** Offline eval computes metrics on a static dataset using single-process prediction; it does not reflect production conditions: concurrent requests, JVM warm-up, serialisation overhead, and network latency to feature stores. A model that scores in 4ms in batch evaluation may have p99 latency of 180ms under 400 RPS concurrent load due to memory pressure or I/O serialisation. The 10% canary exposes the new model to real production traffic and load patterns, with Prometheus scraping p99 latency and error rate every 15 seconds. If p99 exceeds 2x baseline during the 30-minute window, the rollback fires before the majority of users are affected.
 
-**What is the risk of using early stopping patience of 50 rounds in LightGBM training and how does it interact with MLflow logging?** Early stopping halts training when validation metric does not improve for 50 consecutive rounds. If the learning rate is too high (e.g., 0.1), the model converges in 80 rounds and early stopping fires at round 130, logging a model that appears well-trained but is actually underfit. MLflow logs the model at the best checkpoint (round 80) automatically when `mlflow.lightgbm.autolog()` is enabled, but the logged `num_boost_round` param is 1000 (the max), misleading for reproducibility. The fix is to log `model.best_iteration` explicitly: `mlflow.log_metric("best_iteration", model.best_iteration)`.
+**What is the risk of using early stopping patience of 50 rounds in LightGBM training and how does it interact with MLflow logging?** Early stopping halts training when the validation metric fails to improve for 50 consecutive rounds. The risk is that patience is a *noise* budget, not a convergence budget: on a small or noisy validation set the metric can plateau for 50 rounds and then resume improving, so a patience that is too short stops the model short of its real optimum (genuine underfit), while a patience that is too long on a set you also tune on inflates `best_iteration` toward that set. Two logging traps follow. First, `lgb.train` returns the *full* booster — all 130 trees if it stopped at 130 — and only `Booster.predict` defaults to `num_iteration = best_iteration`; anything that reloads the artifact and passes an explicit `num_iteration` silently gets a different, over-boosted model. Second, `mlflow.lightgbm.autolog()` records the `num_boost_round` you passed (1000, the ceiling), not the round actually used, so the run is not reproducible from its own params. The fix is to log the real stopping point explicitly: `mlflow.log_metric("best_iteration", model.best_iteration)`.
 
 **How do you handle feature store schema drift between model training and serving?** At training time, each feature's name and dtype is serialised to a JSON artifact in MLflow alongside the model. At serving time, the prediction handler loads this schema and validates incoming feature vectors against it before prediction. If a feature has been renamed (e.g., "demand_index_v2" -> "demand_index_v3") or its dtype changed (float32 -> int32), the schema check fails at deployment time rather than silently producing wrong predictions. The schema artifact is versioned with each model version in the registry, ensuring schema and model are always co-located and auditable.
 

@@ -235,14 +235,14 @@ class NaiveMatterRetriever:
 
     def retrieve(self, query_embedding: list[float], matter_id: str, top_k: int = 10):
         # CATASTROPHIC: if matter_id filter is absent or malformed, ALL matters leak
-        return self._client.search(
+        return self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=Filter(
                 must=[FieldCondition(key="matter_id", match=MatchValue(value=matter_id))]
             ),
             limit=top_k,
-        )
+        ).points
         # One missing must=[...] and every firm's documents are accessible.
         # One Qdrant filter bug and matter isolation silently breaks.
 ```
@@ -335,8 +335,7 @@ class MatterVectorStore:
         in contexts where they should not be surfaced (e.g., e-discovery production).
         """
         name = self._collection_name(firm_id, matter_id)
-        # qdrant-client deprecated `search()` in favour of `query_points()` in 1.10;
-        # `query_points` returns a response object whose `.points` holds the hits.
+        # `query_points()` returns a response object whose `.points` holds the hits.
         results = self._client.query_points(
             collection_name=name,
             query=query_embedding,
@@ -855,7 +854,7 @@ Trace: legal_ai_request (trace_id: abc123)
   +-- Span: matter_context_enforcer   (1 ms)   isolation_check=pass, collection=firm_X_matter_Y
   +-- Span: retrieval.matter_scoped   (12 ms)  top_k=10, top_score=0.89, privileged_excluded=2
   +-- Span: llm.generate             (4,200 ms)
-  |     gen_ai.system=openai, gen_ai.request.model=gpt-5.4
+  |     gen_ai.provider.name=openai, gen_ai.request.model=gpt-5.4
   |     gen_ai.usage.input_tokens=4312, gen_ai.usage.output_tokens=487
   |     legal.jurisdiction=US_FEDERAL, legal.query_type=research
   +-- Span: citation_verifier         (280 ms)

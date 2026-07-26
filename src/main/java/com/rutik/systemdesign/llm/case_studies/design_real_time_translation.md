@@ -150,12 +150,12 @@ User A (French)                              User B (Japanese)
   ┌────────────────────────────────────────────────┐
   │  Decision logic:                               │
   │  IF (src, tgt) in top_20_pairs:                │
-  │    → NMT Model Pool (NLLB-3.3B / mBART-50)    │
+  │    → NMT Model Pool (NLLB-3.3B / mBART-50)     │
   │  ELIF (src, tgt) in supported_llm_pairs:       │
   │    → LLM Translation (GPT-4o-mini / Claude)    │
   │  ELSE:                                         │
   │    → Pivot translation via English             │
-  │       src → English (NMT) → tgt (NMT or LLM)  │
+  │       src → English (NMT) → tgt (NMT or LLM)   │
   └────────────────────────────────────────────────┘
        |                          |
        v                          v
@@ -170,9 +170,9 @@ User A (French)                              User B (Japanese)
   ┌──────────────────────────────────────────────┐
   │  1. Entity restoration (reinsert preserved   │
   │     URLs, emails, numbers, code)             │
-  │  2. Glossary enforcement (replace terms       │
+  │  2. Glossary enforcement (replace terms      │
   │     that deviate from glossary)              │
-  │  3. Formatting normalization (punctuation,    │
+  │  3. Formatting normalization (punctuation,   │
   │     capitalization, whitespace)              │
   │  4. Script validation (output matches        │
   │     target language script)                  │

@@ -310,8 +310,8 @@ class SafetyScorer:
     CRITICAL: judge model must be from a DIFFERENT provider than the target model.
     """
     LLAMA_GUARD_ENDPOINT = "https://api.together.xyz/v1/chat/completions"
-    # Llama Guard 4 (12B, April 2025) supersedes Llama Guard 3-8B and 3-11B-vision;
-    # confirm the exact model id with your inference provider before wiring it up.
+    # Llama Guard 4: 12B, natively multimodal, hazard categories S1-S14.
+    # Confirm the exact model id with your inference provider before wiring it up.
     LLAMA_GUARD_MODEL = "meta-llama/Llama-Guard-4-12B"
     JUDGE_MODEL = "gpt-5.4"             # pin a dated snapshot — never a floating alias
     JUDGE_SYSTEM = (
@@ -569,8 +569,8 @@ Fix: maintain an explicit role-play jailbreak category with 50+ examples coverin
 types and verify Llama Guard calibration on nested fictional framing quarterly.
 
 **Pitfall 3 — classifier false negatives on code-embedded harm (ongoing)**: the Llama Guard family
-is trained predominantly on natural-language harm. Llama Guard 3 and 4 do add an explicit
-`S14: Code Interpreter Abuse` category, which narrows but does not close this gap. When a model outputs Python that prints harmful instructions on
+is trained predominantly on natural-language harm. Llama Guard 4's explicit
+`S14: Code Interpreter Abuse` category narrows but does not close this gap. When a model outputs Python that prints harmful instructions on
 execution, Llama Guard frequently marks it "safe" because code tokens do not match its distribution.
 Measure this gap on your own corpus rather than trusting a quoted miss rate — published
 false-negative figures for this category are not from a source you can cite. Fix: add a dedicated
@@ -590,9 +590,7 @@ training candidates and the red team dataset before every training job.
 
 | Tool | Category | Attack coverage | Cost | Notes |
 |---|---|---|---|---|
-| Llama Guard 4 (Meta, Apr 2025) | Classifier | 14 hazard categories S1-S14, incl. S14 Code Interpreter Abuse | provider-dependent | 12B, natively multimodal (text + multiple images); consolidates Llama Guard 3-8B and 3-11B-vision — this is the current one |
-| Llama Guard 2 (Meta, 2024) | Classifier | 11 MLCommons harm categories | ~$0.0002/call | 8B, fast; superseded; weak on code/roleplay |
-| Llama Guard 3 (Meta, 2024) | Classifier | S1-S14 + multilingual; separate 11B vision variant | ~$0.0003/call | Superseded by Llama Guard 4 |
+| Llama Guard 4 (Meta) | Classifier | 14 hazard categories S1-S14, incl. S14 Code Interpreter Abuse | provider-dependent | 12B, natively multimodal (text + multiple images); one model covers text and vision |
 | HarmBench (UCSD/CMU, 2024) | Benchmark | 510 behaviors, 7 semantic categories | Free | Standardized ASR comparison |
 | Microsoft PyRIT (2024) | Framework | Jailbreaks, crescendo, PAIR | Open source | Azure AI Content Safety integration |
 | garak (2023+) | Scanner | 100+ probes, 20+ categories | Open source | Plugin architecture; continuous updates |

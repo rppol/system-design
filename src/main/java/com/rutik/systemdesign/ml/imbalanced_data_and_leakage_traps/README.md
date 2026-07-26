@@ -25,7 +25,8 @@ production, when it is expensive.
 
 This module covers: resampling (over/undersampling, SMOTE, ADASYN, Tomek
 links, NearMiss), class weights and cost-sensitive learning, focal loss,
-threshold moving, PR-AUC vs ROC-AUC, why resampling breaks calibration, and
+threshold moving, PR-AUC vs ROC-AUC, why resampling and class weighting both
+break calibration, and
 the full leakage taxonomy (target, temporal, group, preprocessing, leaky CV,
 duplicate) with detection and prevention techniques for each.
 
@@ -76,8 +77,9 @@ this module.
    the evaluation metric both need to be imbalance-aware.
 2. **Resampling changes what the model sees; reweighting changes how much
    each row counts.** Class weights and cost-sensitive loss keep every real
-   row and its natural probability meaning intact; oversampling and
-   undersampling change either the row count or manufacture synthetic rows.
+   row and its features intact — though both still shift the probabilities
+   the model outputs; oversampling and undersampling change either the row
+   count or manufacture synthetic rows.
 3. **Leakage is any information available at training/evaluation time that
    would not be available at real prediction time.** This single definition
    unifies target, temporal, group, preprocessing, and duplicate leakage —
@@ -103,17 +105,17 @@ this module.
 
 | Strategy | Mechanism | Changes row count? | Changes calibration? |
 |---|---|---|---|
-| Random oversampling | Duplicate minority rows with replacement | Grows | No (real, duplicated points) |
-| Random undersampling | Drop majority rows at random | Shrinks | No |
-| SMOTE | Interpolate between a minority row and one of its k=5 neighbors | Grows | No (synthetic points) |
-| ADASYN | Like SMOTE, biased toward harder, boundary-adjacent minority points | Grows | No |
-| Borderline-SMOTE | SMOTE restricted to minority points "in danger" near the boundary | Grows | No |
-| Tomek links | Remove the majority side of cross-class nearest-neighbor pairs | Shrinks slightly | No |
-| NearMiss (v1/v2/v3) | Keep majority points closest to, or bracketing, minority points | Shrinks | No |
-| Class weights | Multiply each class's loss contribution by an inverse-frequency factor | Unchanged | Yes — loss only |
-| Cost-sensitive learning | Same idea generalized to an arbitrary FP/FN cost matrix | Unchanged | Yes — loss only |
-| Focal loss | Down-weight easy, well-classified examples via `(1-p_t)^gamma` | Unchanged | Yes — loss only |
-| Threshold moving | Leave model and loss untouched; move the cutoff on `predict_proba` | Unchanged | No — post-hoc only |
+| Random oversampling | Duplicate minority rows with replacement | Grows | Yes — the trained prior shifts |
+| Random undersampling | Drop majority rows at random | Shrinks | Yes — the trained prior shifts |
+| SMOTE | Interpolate between a minority row and one of its k=5 neighbors | Grows | Yes — the trained prior shifts |
+| ADASYN | Like SMOTE, biased toward harder, boundary-adjacent minority points | Grows | Yes — the trained prior shifts |
+| Borderline-SMOTE | SMOTE restricted to minority points "in danger" near the boundary | Grows | Yes — the trained prior shifts |
+| Tomek links | Remove the majority side of cross-class nearest-neighbor pairs | Shrinks slightly | Slightly — few rows removed |
+| NearMiss (v1/v2/v3) | Keep majority points closest to, or bracketing, minority points | Shrinks | Yes — large prior shift |
+| Class weights | Multiply each class's loss contribution by an inverse-frequency factor | Unchanged | Yes — same prior shift, via the loss |
+| Cost-sensitive learning | Same idea generalized to an arbitrary FP/FN cost matrix | Unchanged | Yes — same prior shift, via the loss |
+| Focal loss | Down-weight easy, well-classified examples via `(1-p_t)^gamma` | Unchanged | Yes — reweighted loss, shifted output |
+| Threshold moving | Leave model and loss untouched; move the cutoff on `predict_proba` | Unchanged | No — probabilities untouched |
 
 ### 4.2 Data-Leakage Taxonomy
 
@@ -570,7 +572,7 @@ def focal_loss(
 ```
      p_t     -log(p_t)     m = (1 - p_t)^2      m x -log(p_t)     fraction kept
     0.99      0.0101           0.0001             0.0000010            0.01%
-    0.90      0.1054           0.0100             0.0010541            1.00%
+    0.90      0.1054           0.0100             0.0010536            1.00%
     0.50      0.6931           0.2500             0.1732868           25.00%
     0.30      1.2040           0.4900             0.5899467           49.00%
 ```
@@ -581,7 +583,7 @@ Now push a realistic imbalanced batch through it:
 One batch: 9,900 easy negatives at p_t = 0.90, plus 100 hard positives at p_t = 0.30
 
   plain cross-entropy
-      easy negatives:  9,900 x 0.1054                = 1,043.10
+      easy negatives:  9,900 x 0.1054                = 1,043.07
       hard positives:    100 x 1.2040                =   120.40
       -> the easy negatives carry 8.66x the loss mass of the positives.
          The gradient is majority-dominated even though every negative
@@ -669,8 +671,10 @@ def compare_auc_under_imbalance(y_true: np.ndarray, y_prob: np.ndarray) -> dict[
     rate denominator is ~999x the positive count, so even a model that ranks
     many negatives above true positives can still post ROC-AUC 0.97. PR-AUC's
     baseline equals the prevalence itself (0.001 here), so it collapses to
-    reflect the same weak minority-class ranking (e.g. PR-AUC 0.42) -- a 0.55
-    gap between the two metrics that ROC-AUC alone hides completely.
+    reflect the same weak minority-class ranking (e.g. PR-AUC 0.12) -- a 0.85
+    gap between the two metrics that ROC-AUC alone hides completely. Read
+    PR-AUC only against that baseline: 0.12 at 0.1% prevalence is 120x chance
+    but still means most of the alert queue is noise.
     """
     roc_auc = roc_auc_score(y_true, y_prob)
     pr_auc = average_precision_score(y_true, y_prob)
@@ -726,7 +730,9 @@ Read the middle row on its own. Going from 30 to 60 caught frauds cost
 Same 300 rows. ROC barely notices them because it divides by 9,900;
 precision is crushed because it divides by 400.
 
-Trapezoid area under each curve, using those four points plus the origin:
+Trapezoid area under each curve. ROC adds the origin (0, 0) as a fifth
+point; a PR curve never passes through the origin, so it is anchored at
+recall 0 with precision held at its first value, 0.4286:
 
     ROC-AUC = 0.8981        <- reads as "a strong model"
     PR-AUC  = 0.2470        <- reads as "the alert queue is mostly noise"
@@ -743,15 +749,30 @@ ROC-AUC numbers are comparable across datasets and PR-AUC numbers are not — a
 PR-AUC of `0.25` is excellent at 1% prevalence and terrible at 40%, so always
 report the prevalence beside it.
 
-### 6.6 Why Resampling Distorts Calibration
+### 6.6 Why Resampling — and Class Weighting — Distort Calibration
 
 Resampling changes the class prior the model sees during training (e.g. from
 0.1% to 50%), and `predict_proba` reflects whatever prior it was trained on
 — not the true prior at serving time. A model trained on a SMOTE-balanced
 50/50 training set effectively learns "in a world where positives are half
 the population," so a real customer with a true 2% churn probability might
-be scored at 0.50. Class weights avoid this entirely because they reweight
-the *loss*, not the data distribution the model actually observes.
+be scored at 0.50.
+
+**Class weights do not escape this**, which is the single most repeated
+myth in this topic. At the optimum, weighting the loss by `w_1 : w_0` yields
+the posterior of a population whose prior has been rescaled by that same
+ratio — mathematically the same destination as resampling to it. King & Zeng
+(2001) make the duality explicit: prior correction and weighting are two
+solutions to *one* prior mismatch, with restoring weights `w_1 = tau/y_bar`
+and `w_0 = (1 - tau)/(1 - y_bar)` — the exact inverse of the balancing
+weights `class_weight="balanced"` applies. So `balanced` shifts a logistic
+intercept by roughly `log(n_negative / n_positive)` and inflates
+`predict_proba` exactly as a 1:1 resample would — at the 1% prevalence used
+below, that is the same `log(99) = 4.5951` as the 1:1 row of the correction
+table. What class weights genuinely avoid is the *data* cost: no synthetic
+rows, no discarded rows. **Threshold moving is the only imbalance fix that
+leaves the probabilities themselves untouched**, because it never retrains
+anything.
 
 ```python
 from __future__ import annotations
@@ -767,7 +788,10 @@ def prior_corrected_intercept(
     """
     King & Zeng (2001) rare-events logistic correction: subtract the log of
     the ratio between the true population odds and the resampled-sample odds
-    from the trained intercept. Exact for logistic regression only (linear
+    from the trained intercept. Applies verbatim to a class-weighted fit --
+    pass the weighted prevalence as y_bar (0.5 for class_weight="balanced"),
+    since weighting lands on the same rescaled prior as resampling would.
+    Exact for logistic regression only (linear
     in log-odds); tree ensembles and neural nets need empirical recalibration
     (Platt scaling / isotonic regression, see the Model Evaluation & Selection
     module) fit on a held-out sample drawn from the true, un-resampled data.
@@ -1076,10 +1100,12 @@ routinely saw their local CV diverge from the private leaderboard, while
 time-ordered validation schemes tracked it far more closely — a canonical,
 widely discussed temporal-leakage lesson from that competition.
 
-**Home Credit Default Risk (Kaggle):** several derived features were
-populated by internal processes that only ran after a loan's outcome was
-already known. Models trained with those features posted excellent offline
-recall, then had to be disqualified or reworked once the leakage was traced.
+**Consumer-lending default risk (illustrative):** bureau and servicing
+tables routinely carry fields written by internal processes that only run
+*after* a loan's outcome is known — a collections flag, a write-off code, a
+final payment status. Joining them onto an application-time training table
+is target leakage, and it is the standard reason a credit model's offline
+recall cannot be reproduced at underwriting time.
 
 **Subscription churn:** a `cancellation_reason` or `final_invoice_amount`
 field, populated only after a customer has already churned, is classic
@@ -1095,8 +1121,9 @@ time.
 the same base sentence landing on both sides of a random split — duplicate
 leakage that specifically defeats the claim that a test set is "held out."
 
-**Manufacturing defect detection:** typical defect rates of 1:2,000 to
-1:10,000 on production lines. Class weights, SMOTE, and threshold moving are
+**Manufacturing defect detection:** defect rates on a mature production line
+are routinely rarer than 1 in 1,000 parts. Class weights, SMOTE, and
+threshold moving are
 all standard tools here, and PR-AUC — not accuracy, and often not even
 ROC-AUC — is the metric quality engineers actually track week over week.
 
@@ -1108,20 +1135,20 @@ ROC-AUC — is the metric quality engineers actually track week over week.
 
 | Strategy | Preserves calibration | Data cost | Risk |
 |---|---|---|---|
-| Class weights | Yes | None (no rows added or removed) | Some solvers/frameworks ignore weights unless explicitly wired |
+| Class weights | No — same prior shift as resampling | None (no rows added or removed) | Some solvers/frameworks ignore weights unless explicitly wired |
 | Threshold moving | Yes | None | Needs a validation set with trustworthy probability scores |
 | Random oversampling | No | Duplicates memory footprint | Overfits duplicated rows |
 | SMOTE / ADASYN | No | Grows dataset with synthetic rows | Synthetic points can bridge into majority territory in noisy/high-dim data |
 | Random undersampling | No | Shrinks dataset, discards data | Loses majority-class signal; risky at small n |
 | Tomek links / NearMiss | No | Shrinks dataset | Cleans only boundary noise (Tomek), or needs careful version choice (NearMiss) |
-| Focal loss | Approximately | None | Two extra hyperparameters (gamma, alpha) to tune |
+| Focal loss | No — output is not the true posterior | None | Two extra hyperparameters (gamma, alpha) to tune |
 
 ### 8.2 ROC-AUC vs PR-AUC Under Imbalance
 
 | Property | ROC-AUC | PR-AUC |
 |---|---|---|
 | Random-baseline value | Always 0.5 | Equals positive prevalence (e.g. 0.001 at 1:1000) |
-| Sensitive to true-negative count | No (uses a rate, not a count) | Yes — precision's denominator includes false positives directly |
+| Sensitive to negative-class size (prevalence) | No (uses a rate, not a count) | Yes — more negatives means more false positives in precision's denominator |
 | Behavior under severe imbalance | Can stay high (0.90+) despite weak minority-class ranking | Drops to reflect true minority-class ranking quality |
 | Best use | Balanced to moderately imbalanced (>5% positive) | Highly imbalanced (<5% positive), rare-event detection |
 
@@ -1140,9 +1167,11 @@ ROC-AUC — is the metric quality engineers actually track week over week.
 ## 9. When to Use / When NOT to Use
 
 **Use class weights or cost-sensitive learning first.** They are free of
-data-size cost and calibration distortion, and nearly every production
-library (`scikit-learn`, XGBoost, LightGBM, PyTorch) supports them natively
-— try this before any resampling.
+data-size cost — no synthetic rows, no discarded rows — and nearly every
+production library (`scikit-learn`, XGBoost, LightGBM, PyTorch) supports
+them natively, so try this before any resampling. They do still shift the
+learned prior (Section 6.6), so recalibrate if the probability itself is
+consumed downstream.
 
 **Use threshold moving whenever a probability-producing model already
 exists.** It requires no retraining, preserves calibration exactly, and lets
@@ -1158,7 +1187,9 @@ models needing more effective training signal), and you have at least
 downstream decision that depends on calibration — insurance pricing, credit
 risk, auction bidding — because both over- and under-sampling change the
 class prior the model learns and bias `predict_proba` away from the true
-population rate.
+population rate. Class weights are not the escape hatch here: they land on
+the same rescaled prior. For priced probabilities, train on the natural
+distribution, or recalibrate on un-resampled held-out data.
 
 **Use PR-AUC as the headline metric when:** positive prevalence drops below
 roughly 5%; keep reporting ROC-AUC alongside it, since stakeholders and
@@ -1247,8 +1278,9 @@ calibrated probability.** A credit model trained on a SMOTE-balanced 50/50
 set was used directly for pricing; its raw output averaged 0.50 for accounts
 whose true observed default rate was 2% — a 25x miscalibration purely from
 the training-time prior shift described in Section 6.6. Fix: recalibrate on
-a held-out sample from the true, un-resampled distribution, or prefer class
-weights when priced probabilities matter.
+a held-out sample from the true, un-resampled distribution — and note that
+switching to class weights would not have fixed it, since balanced weights
+land on the same rescaled prior.
 
 ---
 
@@ -1307,16 +1339,18 @@ before trusting the model.
 **Why is PR-AUC considered more honest than ROC-AUC when positives are rare?**
 PR-AUC is more honest under severe imbalance because its baseline equals the
 positive prevalence instead of a fixed 0.5. At a 1:1000 positive ratio a
-mediocre model can post ROC-AUC 0.97 while its PR-AUC is only 0.42, because
-ROC-AUC's false-positive-rate denominator is so large that hundreds of false
-positives barely move it. Report PR-AUC alongside ROC-AUC any time positive
-prevalence drops below about 5%.
+model whose alert queue is mostly noise can still post ROC-AUC 0.97 while
+its PR-AUC is only 0.12, because ROC-AUC's false-positive-rate denominator
+is so large that hundreds of false positives barely move it. Report PR-AUC
+alongside ROC-AUC — and always beside the prevalence, since PR-AUC is only
+readable relative to that baseline — any time positive prevalence drops
+below about 5%.
 
 **Why can temporal leakage make an offline model look great and then fail after deployment?**
 Temporal leakage lets rows from the future train a model that is supposed to
 predict the past, inflating any score computed from a random split. One
-retail forecasting team saw CV AUC of 0.86 collapse to a live MAE three
-times higher after deployment, purely from this mismatch; switching to
+retail team's random-split CV AUC of 0.86 came back as 0.68 on the first
+month of live traffic, purely from this mismatch; switching to
 `TimeSeriesSplit` reproduced the real number offline. Always train on the
 past and validate on a strictly later period, with a purge gap for
 rolling-window features.
@@ -1326,9 +1360,10 @@ Resampling changes the class prior seen during training, and `predict_proba`
 reflects whatever prior the model was trained on, not the true population
 prior at serving time. A model trained on a SMOTE-balanced 50/50 set
 effectively learns "positives are half the population," so a customer with a
-true 2% churn probability might be scored at 0.50. If you must resample,
-refit Platt scaling or isotonic regression on a held-out, un-resampled
-sample afterward.
+true 2% churn probability might be scored at 0.50. Class weights do the same
+thing through the loss rather than the data, so they are not a way around
+it; with either, refit Platt scaling or isotonic regression on a held-out,
+un-resampled sample afterward.
 
 **What is wrong with using plain random K-Fold when rows share a group, like the same user or patient?**
 Plain K-Fold can split one entity's rows across train and validation,
@@ -1391,7 +1426,9 @@ inverse-frequency factor, without touching the data itself. scikit-learn's
 `class_weight="balanced"` sets `w_c = n_samples / (n_classes * n_samples_c)`,
 so at a 1:1000 imbalance the positive class's weight is roughly 1000x the
 negative class's. Because every row and feature is unchanged, class weights
-are usually the cheapest, most calibration-friendly technique to try first.
+are usually the cheapest technique to try first — but the weighted optimum
+is the posterior of a rebalanced population, so recalibrate before reading
+the output as a probability.
 
 **How does focal loss down-weight easy examples, and what does gamma control?**
 Focal loss multiplies the cross-entropy term by `(1 - p_t)^gamma`, which
@@ -1424,9 +1461,11 @@ the cheapest imbalance fix available and never distorts calibration.
 Avoid resampling whenever the model's raw probability feeds a pricing or
 risk-scoring decision, since it biases `predict_proba` away from the true
 population rate. It is also often unnecessary with any model that natively
-supports `class_weight` or `scale_pos_weight`, and risky with very small
+supports `class_weight` or `scale_pos_weight` — though those shift the prior
+too, so a priced model still needs recalibration — and risky with very small
 minority classes where SMOTE has too few neighbors to interpolate
-meaningfully. Default to class weights and threshold moving first.
+meaningfully. Default to threshold moving, then class weights, before
+touching the data itself.
 
 **How does leakage show up specifically in time-series feature engineering, like rolling or lag features?**
 Rolling and lag features leak when they are computed over the full timeline
@@ -1467,13 +1506,15 @@ of one-class and reconstruction-based approaches at this regime.
 2. Choose PR-AUC as the primary metric once positive prevalence drops below
    roughly 5–10%; keep ROC-AUC as a secondary, familiar reference.
 3. Try class weights or cost-sensitive learning before any resampling — it
-   is cheaper, requires no synthetic data, and does not distort calibration.
+   is cheaper and requires no synthetic data, but recalibrate before reading
+   the output as a probability: weighting shifts the prior just as
+   resampling does.
 4. If you must resample, do it inside each CV fold via an
    `imblearn.pipeline.Pipeline`, never once on the full dataset before the
    split.
 5. Recalibrate probabilities (Platt scaling or isotonic regression) after
-   resampling whenever the raw score is used as a probability, not just a
-   ranking.
+   resampling *or* class weighting whenever the raw score is used as a
+   probability, not just a ranking.
 6. Use `GroupKFold`/`StratifiedGroupKFold` whenever rows share an entity ID
    — the same user, patient, or device.
 7. Use `TimeSeriesSplit` with a purge/embargo gap for any temporally ordered
@@ -1547,16 +1588,29 @@ def build_fraud_pipeline(random_state: int = 42) -> ImbPipeline:
 
 
 def evaluate_time_ordered(
-    X: np.ndarray, y: np.ndarray, n_splits: int = 5, embargo_hours: int = 24,
+    X: np.ndarray,
+    y: np.ndarray,
+    timestamps: np.ndarray,
+    n_splits: int = 5,
+    embargo_hours: int = 24,
 ) -> list[dict[str, float]]:
     """
-    TimeSeriesSplit trains on earlier transactions, validates on later ones;
-    embargo_hours purges rows immediately after each training window so no
+    TimeSeriesSplit trains on earlier transactions, validates on later ones.
+    Its own `gap` argument counts ROWS, not time, so the embargo is applied
+    here against real timestamps instead: every training row within
+    embargo_hours of the validation window's start is dropped, so no
     rolling-window feature straddles the train/validation boundary.
+    `timestamps` is a datetime64 array in the same row order as X, sorted
+    ascending (TimeSeriesSplit assumes the rows are already time-ordered).
     """
     results = []
+    embargo = np.timedelta64(embargo_hours, "h")
     tscv = TimeSeriesSplit(n_splits=n_splits)
     for train_idx, val_idx in tscv.split(X):
+        cutoff = timestamps[val_idx].min() - embargo
+        train_idx = train_idx[timestamps[train_idx] < cutoff]
+        if len(train_idx) == 0 or len(np.unique(y[train_idx])) < 2:
+            continue                     # embargo emptied the fold -- skip it
         pipe = build_fraud_pipeline()
         pipe.fit(X[train_idx], y[train_idx])
         p = pipe.predict_proba(X[val_idx])[:, 1]

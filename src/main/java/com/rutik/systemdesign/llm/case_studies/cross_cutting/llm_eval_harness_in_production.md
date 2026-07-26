@@ -144,10 +144,10 @@ flowchart LR
   │  sha256:   "a3f9...c81d"                       │
   │  created:  2025-03-14T10:00:00Z                │
   │  total:    500 examples                        │
-  │  splits:                                        │
+  │  splits:                                       │
   │    train:  400 examples (80%)                  │
   │    eval:   100 examples (20%)                  │
-  │  composition (of all 500, held in both splits): │
+  │  composition (of all 500, held in both splits):│
   │    routine:     60%  (300 examples)            │
   │    adversarial: 20%  (100 examples)            │
   │    edge_cases:  20%  (100 examples)            │
