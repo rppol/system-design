@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-AutoML automates the parts of the ML pipeline that a human normally hand-crafts: feature engineering, model/pipeline selection, hyperparameter optimization (HPO), and ensembling. The promise is that a non-expert (or a busy expert) hands over `(X, y)` and a time budget, and the system returns a deployable model that rivals a carefully tuned baseline. Frameworks span the maturity curve: Auto-sklearn (meta-learning + Bayesian search over sklearn pipelines), TPOT (genetic programming over pipelines), H2O AutoML (grid + stacked ensembles), AutoGluon (portfolio stacking), and managed services (Google Vertex AI / Cloud AutoML, Azure AutoML).
+AutoML automates the parts of the ML pipeline that a human normally hand-crafts: feature engineering, model/pipeline selection, hyperparameter optimization (HPO), and ensembling. The promise is that a non-expert (or a busy expert) hands over `(X, y)` and a time budget, and the system returns a deployable model that rivals a carefully tuned baseline. Frameworks span the maturity curve: Auto-sklearn (meta-learning + Bayesian search over sklearn pipelines — but see §11, it is no longer maintained), TPOT (genetic programming over pipelines), H2O AutoML (grid + stacked ensembles), AutoGluon (portfolio stacking), and managed services (Google Vertex AI AutoML, Azure AutoML).
 
 Neural Architecture Search (NAS) is the deep-learning-specific corner of AutoML: instead of tuning scalar hyperparameters of a fixed network, NAS *designs the network topology itself* — how many layers, which operations on each edge, how blocks connect. NAS is defined by three orthogonal axes: the **search space** (what architectures are reachable), the **search strategy** (how you explore it — RL, evolution, or gradient), and the **performance estimation strategy** (how you score a candidate cheaply — full training, weight-sharing supernet, or a proxy).
 
@@ -57,7 +57,7 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 | TPOT | genetic programming over pipelines | pipeline is the output | tabular, interpretable pipeline export |
 | H2O AutoML | random grid + Bayesian | stacked ensembles (super learner) | tabular, enterprise/Java |
 | AutoGluon | fixed portfolio, minimal HPO | multi-layer stacking + bagging | tabular/vision/text, fast strong baseline |
-| Google Vertex / Cloud AutoML | proprietary NAS + HPO | managed | no-infra teams, vision/tabular/NLP |
+| Google Vertex AI AutoML | proprietary search + HPO | managed | no-infra teams; tabular and image only since the Text/Video AutoML shutdowns in 2025 |
 
 ### 4.3 Multi-fidelity HPO family (the resource-allocation lineage)
 
@@ -574,14 +574,14 @@ Running an AutoML search without `per_run_time_limit` lets one pathological pipe
 
 | Tool | Role | Notes |
 |------|------|-------|
-| Auto-sklearn | tabular AutoML | meta-learning warm-start + SMAC Bayesian + ensemble |
-| AutoGluon | tabular/vision/text AutoML | portfolio stacking, `presets="best_quality"` |
-| TPOT | tabular AutoML | genetic programming; exports a sklearn pipeline |
+| Auto-sklearn | tabular AutoML | meta-learning warm-start + SMAC Bayesian + ensemble. **Effectively unmaintained** — last release 0.15.0, Feb 2023; will not install against current sklearn |
+| AutoGluon | tabular/vision/text AutoML | portfolio stacking, `presets="best_quality"`; actively released (1.5.x line) |
+| TPOT | tabular AutoML | genetic programming; exports a sklearn pipeline. Rewritten from scratch — TPOT2 was merged back in as TPOT v1.x, and the API changed, so pre-1.0 snippets do not carry over |
 | H2O AutoML | tabular AutoML | stacked ensembles, Java/enterprise |
-| Google Vertex AI / Cloud AutoML | managed AutoML + NAS | no-infra, vision/tabular/NLP |
+| Google Vertex AI AutoML | managed AutoML | tabular and image only. The standalone "Cloud AutoML" products were shut down in 2024; Vertex AI AutoML **Text** shut down 2025-06-15 and AutoML **Video** 2025-07-31, both redirected to Gemini tuning |
 | Ray Tune | distributed HPO | `ASHAScheduler`, `HyperBandScheduler`, PBT |
 | Optuna | HPO | TPE sampler + `HyperbandPruner` (≈ BOHB) — see parent module |
-| Microsoft NNI | NAS + HPO toolkit | DARTS, ENAS, ASHA, PBT under one API |
+| Microsoft NNI | NAS + HPO toolkit | DARTS, ENAS, ASHA, PBT under one API — **repository archived by Microsoft on 2024-09-18, read-only**; last release 3.0 (Sept 2023). Do not start new work on it |
 | DARTS / PyTorch | differentiable NAS | continuous relaxation, bilevel opt |
 | Once-for-All | supernet NAS | one supernet, per-target sub-nets, no retrain |
 | NAS-Bench-201 / NATS-Bench | NAS benchmarks | tabular lookup of architectures for fair comparison |
@@ -598,8 +598,8 @@ It is worth it when you have many similar problems to solve or a fixed hardware 
 **Q: What are the three axes that define any NAS method?**
 Every NAS method is defined by its search space, its search strategy, and its performance-estimation strategy. The search space fixes which architectures are reachable (cell-based vs macro); the strategy explores it (RL controller, evolution, or gradient descent); estimation scores a candidate cheaply (full training, a weight-sharing supernet, or a low-fidelity proxy). These are independent — DARTS is (cell space) × (gradient) × (weight-sharing).
 
-**Q: Why did early RL-based NAS cost ~2000 GPU-days while DARTS costs ~1 GPU-day?**
-Because RL-NAS trained thousands of candidate networks from scratch, while DARTS trains one shared supernet a single time and turns search into ordinary gradient descent. The ~1000x saving comes almost entirely from the performance-estimation axis (weight sharing), not from a smarter search strategy. This is the core lesson: in NAS, where you spend fidelity dominates cost.
+**Q: Why did early RL-based NAS cost ~2000 GPU-days while DARTS costs a few GPU-days?**
+Because RL-NAS trained thousands of candidate networks from scratch, while DARTS trains one shared supernet a single time and turns search into ordinary gradient descent. NASNet ran 500 GPUs for 4 days (2000 GPU-days); DARTS reports 1.5 GPU-days first-order and 4 second-order, a 500x to 1300x saving. That saving comes almost entirely from the performance-estimation axis (weight sharing), not from a smarter search strategy. This is the core lesson: in NAS, where you spend fidelity dominates cost.
 
 **Q: How does Successive Halving work and what does the reduction factor eta control?**
 Successive Halving runs many configs at a small budget, keeps the top 1/eta, multiplies the survivors' budget by eta, and repeats until one remains. Eta is the aggressiveness dial: eta=3 keeps a third each rung (81→27→9→3→1), eta=4 keeps a quarter and prunes faster. Larger eta saves more compute but risks killing a slow-starting config that would have won at full budget.

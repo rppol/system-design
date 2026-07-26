@@ -71,10 +71,10 @@ OAuth2 is a framework for **delegated access** — letting an application access
 
 Grant types (flows):
 
-- **Authorization Code + PKCE** — the standard for web/mobile apps with a UI. User is redirected to the Authorization Server, logs in, and consents; the Client receives a one-time code, exchanged server-side for tokens. PKCE (Proof Key for Code Exchange) prevents a stolen authorization code from being redeemed by an attacker (§6.3).
+- **Authorization Code + PKCE** — the standard for web/mobile apps with a UI. User is redirected to the Authorization Server, logs in, and consents; the Client receives a one-time code, exchanged server-side for tokens. PKCE (Proof Key for Code Exchange, **RFC 7636**) prevents a stolen authorization code from being redeemed by an attacker (§6.3). **RFC 9700 / BCP 240** (OAuth 2.0 Security Best Current Practice, January 2025) makes this normative: public clients **MUST** use PKCE, authorization servers **MUST** support it, and it is RECOMMENDED even for confidential clients.
 - **Client Credentials** — service-to-service, no user involved. The service authenticates with its own client ID/secret and gets a token representing *itself*.
 - **Device Code** — for input-constrained devices (smart TVs): the device displays a code, the user enters it on a second device (phone) to authorize.
-- **(Deprecated) Implicit & Resource Owner Password Credentials** — both considered insecure by current best practice (token exposed in URL fragment; app handles raw password directly) and replaced by Authorization Code + PKCE.
+- **Ruled out by RFC 9700** — the resource owner password credentials grant **MUST NOT** be used (the client handles the raw password, so it cannot support MFA or federation), and clients **SHOULD NOT** use the implicit grant or any response type that returns an access token in the authorization response (it leaks and replays via the URL fragment). Both are replaced by Authorization Code + PKCE. RFC 9700 also requires **exact string matching** on redirect URIs, except for the port of a `localhost` redirect.
 
 ### 4.4 OpenID Connect (OIDC) — Authentication on Top of OAuth2
 
@@ -521,8 +521,8 @@ Only the small, per-object DEK ever travels to KMS (solid = encrypt path, dotted
 | Authorization Code + PKCE | Web/mobile apps with login UI | Yes | Current best practice for user-facing apps |
 | Client Credentials | Service-to-service (no user) | No | Service authenticates as itself; pair with short-lived tokens |
 | Device Code | Smart TVs, CLI tools | Yes (on a second device) | User enters a code shown on the constrained device |
-| Implicit (deprecated) | Legacy SPAs | Yes | Token exposed in URL fragment — avoid |
-| Resource Owner Password (deprecated) | Legacy first-party apps | Yes | App handles raw password — avoid; use Authorization Code instead |
+| Implicit | Nothing new | Yes | RFC 9700: clients SHOULD NOT use it — token leaks/replays via the URL fragment |
+| Resource Owner Password | Nothing new | Yes | RFC 9700: MUST NOT be used — client sees the raw password, blocks MFA and federation |
 
 ### RBAC vs. ABAC
 

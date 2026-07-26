@@ -308,7 +308,7 @@ npx @modelcontextprotocol/inspector python my_server.py
 
 ## 7. Real-World Examples
 
-**Reference servers** (`github.com/modelcontextprotocol/servers`, described by the repo as "the small number of reference servers maintained by the MCP steering group" — MCP governance moved to the Linux Foundation's Agentic AI Foundation in December 2025, so these are no longer Anthropic-owned). Only seven are still maintained: **everything, fetch, filesystem, git, memory, sequential-thinking, time**. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers were archived during 2025 and their npm packages carry a deprecation notice — use the vendor's own server instead (for example `github/github-mcp-server`, `@playwright/mcp`).
+**Reference servers** (`github.com/modelcontextprotocol/servers`) are the small set maintained by the MCP steering group under the Linux Foundation's Agentic AI Foundation, kept deliberately narrow as protocol demonstrations: **everything, fetch, filesystem, git, memory, sequential-thinking, time**. For anything vendor-specific, the vendor ships and owns its own server — `github/github-mcp-server` for GitHub, `@playwright/mcp` for browser automation, Brave's own server for search — which is where the real capability and the security posture both live.
 
 **Community servers**: Linear, Notion, Jira, Confluence, AWS, GCP, Stripe, Square, Snowflake, BigQuery, MongoDB, Redis, Elasticsearch, Cloudflare, Vercel, Sentry, PagerDuty, Datadog, hundreds more.
 

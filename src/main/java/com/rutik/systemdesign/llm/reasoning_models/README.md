@@ -800,7 +800,7 @@ flowchart TD
 
     TRIGGER("Incident triggered<br/>PagerDuty alert")
     TRIAGE["Incident Triage Agent<br/>Collects stack trace, last 500 log lines,<br/>git diff of last 3 commits, deployment metadata<br/>Classifies severity: P1 / P2 / P3"]
-    ROUTER["Model Router<br/>P3 low: claude-sonnet-4-6, budget_tokens=4000<br/>P2 medium: gpt-5.6-terra, effort=medium<br/>P1 critical: gpt-5.6-sol, effort=high<br/>Timeout: P1 60s, P2 30s, P3 15s"]
+    ROUTER["Model Router<br/>P3 low: claude-sonnet-5, effort=low<br/>P2 medium: gpt-5.6-terra, effort=medium<br/>P1 critical: gpt-5.6-sol, effort=high<br/>Timeout: P1 60s, P2 30s, P3 15s"]
     REASON["Reasoning Model - GPT-5.6 or Claude<br/>Parses stack trace, correlates logs,<br/>inspects git diff, generates root cause,<br/>fix patch, and regression test<br/>Output: structured JSON"]
     VALID["Validation Sandbox<br/>Apply patch to isolated container<br/>Run test suite - pytest, 120s timeout<br/>Pass: propose PR via GitHub API<br/>Fail: retry with self-correction, max 2x"]
 
@@ -816,10 +816,9 @@ flowchart TD
 ```
 Test-Time Compute Scaling — reasoning-budget effect (ILLUSTRATIVE figures for
 this scenario, not vendor-published benchmarks). Note the knob differs by vendor:
-Anthropic's current models take an effort level (output_config.effort) with adaptive
-thinking, and an integer thinking.budget_tokens only on the older extended-thinking
-models; OpenAI takes reasoning.effort plus a max_completion_tokens ceiling. There is
-no portable "budget_tokens".
+Anthropic takes an effort level (output_config.effort) alongside adaptive thinking;
+OpenAI takes reasoning.effort plus a max_completion_tokens ceiling. There is no
+portable integer token budget.
 
   effort=low    / ~500 reasoning tokens:   gpt-5.6-terra — 12s, 65% solve rate
   effort=medium / ~2,000 reasoning tokens: gpt-5.6-terra — 28s, 78% solve rate
@@ -913,19 +912,14 @@ Think step by step: (1) parse the stack trace to find the failing frame,
 
 
 async def _diagnose_sonnet(prompt: str, incident_id: str) -> DiagnosisResult:
-    """Claude Sonnet 4.6 with extended thinking for P3.
-
-    thinking.type="enabled" with budget_tokens is deprecated on the 4.6 models
-    (requests still succeed) and returns HTTP 400 on Claude 4.7 and later. On a
-    current model use thinking={"type": "adaptive"} with
-    output_config={"effort": "high"} instead.
-    """
+    """Claude Sonnet 5 with adaptive thinking at low effort, for P3."""
     client = anthropic.AsyncAnthropic()
     t0 = time.monotonic()
     response = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=8096,
-        thinking={"type": "enabled", "budget_tokens": 4000},
+        thinking={"type": "adaptive"},
+        output_config={"effort": "low"},
         messages=[{"role": "user", "content": prompt}],
     )
     latency = time.monotonic() - t0
@@ -942,7 +936,7 @@ async def _diagnose_sonnet(prompt: str, incident_id: str) -> DiagnosisResult:
         **parsed,
         thinking_tokens_used=thinking_tokens,
         latency_seconds=latency,
-        model_used="claude-sonnet-4-6",
+        model_used="claude-sonnet-5",
     )
 
 
@@ -1203,13 +1197,13 @@ async def fixed_validate_and_propose(patch: str, test_code: str) -> dict[str, st
 
 ```python
 # BROKEN: Always use gpt-5.6-sol with max budget regardless of incident severity.
-# P3 "CSS layout broke" incident costs $2.10 with gpt-5.6-sol; costs $0.04 with Sonnet
+# P3 "CSS layout broke" incident costs $2.10 with gpt-5.6-sol; costs $0.04 with Sonnet 5
 # (the same per-incident figures as the metrics table below — a ~50x overspend).
 async def broken_always_sol(prompt: str) -> str: ...
 
 # FIX: Tiered routing. Only P1 critical incidents use gpt-5.6-sol.
 # P2: gpt-5.6-terra with budget=2000 or PRM reranking of 4 × gpt-5.6-terra.
-# P3: claude-sonnet-4-6 with extended thinking.
+# P3: claude-sonnet-5 with adaptive thinking at low effort.
 # Cost per incident: P3=$0.04, P2=$0.18, P1=$2.10 avg.
 ```
 
@@ -1217,7 +1211,7 @@ async def broken_always_sol(prompt: str) -> str: ...
 
 All figures below are illustrative for this scenario.
 
-| Metric | Non-reasoning baseline | Sonnet 4.6 (P3) | gpt-5.6-terra (P2) | gpt-5.6-sol (P1) |
+| Metric | Non-reasoning baseline | Sonnet 5 (P3) | gpt-5.6-terra (P2) | gpt-5.6-sol (P1) |
 |--------|-----------------|-----------------|--------------|---------|
 | First-attempt solve rate | 38% | 61% | 79% | 91% |
 | p50 latency | 8s | 14s | 28s | 52s |

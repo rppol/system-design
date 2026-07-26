@@ -426,7 +426,7 @@ Claude Desktop ships with a configuration file (`claude_desktop_config.json`) wh
 
 Claude Desktop spawns each server as a subprocess, negotiates capabilities, and presents the union of all tools and resources to the model. The model can read files, inspect Git history, and recall stored context in a single conversation.
 
-Note on package names: the reference-server set narrowed over 2025. The servers still maintained in `modelcontextprotocol/servers` are **everything, fetch, filesystem, git, memory, sequential-thinking and time**. The early `server-github`, `server-postgres`, `server-slack`, `server-puppeteer`, `server-brave-search` and `server-sqlite` packages were archived and are marked deprecated on npm ("Package no longer supported"); several have been replaced by first-party servers from the vendors themselves (for example GitHub now ships `github/github-mcp-server`). Do not copy the archived names into a new config.
+Note on package names: the reference servers maintained in `modelcontextprotocol/servers` are **everything, fetch, filesystem, git, memory, sequential-thinking and time**. For anything vendor-specific — GitHub, Slack, Postgres, browser automation — use the vendor's own first-party server (for example `github/github-mcp-server` for GitHub, `@playwright/mcp` for the browser).
 
 ### 7.2 IDE Integration (Cursor)
 
@@ -434,15 +434,15 @@ Cursor uses MCP to connect to code-specific servers: a language server adapter t
 
 ### 7.3 Text-to-SQL via PostgreSQL MCP Server
 
-The early reference `@modelcontextprotocol/server-postgres` server (now archived and deprecated on npm; the shape below is still the canonical pattern, and is what community and vendor Postgres servers implement) exposes:
+A PostgreSQL MCP server follows a canonical shape that community and vendor implementations share:
 - Resource: `postgres://<host>/<database>/schema` — the full schema as text, injected into context.
 - Tool: `query` — executes a read-only SQL query and returns results as JSON.
 
 A user asks "How many orders were placed last week?" The model reads the schema resource, generates a SQL query, calls the `query` tool, and presents formatted results — without any custom SQL integration code in the LLM application.
 
-### 7.4 Browser Automation via Puppeteer MCP Server
+### 7.4 Browser Automation via the Playwright MCP Server
 
-The `@modelcontextprotocol/server-puppeteer` server (archived; Microsoft's `@playwright/mcp` is the actively maintained equivalent) exposes tools: `navigate`, `screenshot`, `click`, `fill`, `evaluate`. An agent can browse the web, fill forms, and extract page content through a structured protocol rather than raw browser API calls. User consent is enforced by the client before any `click` or `fill` tool call.
+Microsoft's `@playwright/mcp` (run with `npx @playwright/mcp@latest`) exposes tools including `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_fill_form`, `browser_take_screenshot` and `browser_evaluate`. An agent can browse the web, fill forms, and extract page content through a structured protocol rather than raw browser API calls — `browser_snapshot` returns the accessibility tree, which grounds far more reliably than pixels. User consent is enforced by the client before any `browser_click` or `browser_fill_form` tool call.
 
 ### 7.5 Enterprise Document Search
 
@@ -518,7 +518,7 @@ The comparison table ranks stdio as "lowest latency," and that is true per call 
 
 ### 8.3 MCP vs A2A (Agent2Agent Protocol)
 
-A2A was announced by Google in April 2025 and donated to the **Linux Foundation** in June 2025, where it is now governed as a vendor-neutral project with AWS, Cisco, Microsoft, Salesforce, SAP and ServiceNow among the founding members. Calling it "Google's protocol" is out of date.
+A2A is a vendor-neutral **Linux Foundation** project, with AWS, Cisco, Google, Microsoft, Salesforce, SAP and ServiceNow among the founding members.
 
 | Dimension | MCP | A2A (Agent2Agent, Linux Foundation) |
 |-----------|-----|-------------------------------|
@@ -713,7 +713,7 @@ During the `initialize` handshake, both client and server include a `capabilitie
 Implement a maximum tool-call depth counter in the client's agentic loop — typically 10–25 calls per conversation turn, configurable per tool category. When the limit is reached, inject a synthetic message into the conversation: "Tool call limit reached. Please summarize what you have found so far and ask the user how to proceed." Log tool call sequences (tool name, arguments, result length, timestamp) to detect patterns. On the server side, implement per-session and per-minute rate limits with retry-after hints in error responses. In the model's system prompt, explicitly instruct it to stop and report if it cannot achieve the goal within a bounded number of tool calls.
 
 **Q: Compare MCP and A2A (the Agent2Agent protocol).**
-MCP connects an LLM application (client) to external tools and data (server) — the relationship is hierarchical: model instructs tools. A2A connects agents to other agents — the relationship is peer-to-peer: one agent delegates tasks to another agent that has complementary skills. MCP optimizes for capability discovery and structured tool invocation. A2A optimizes for task delegation, streaming task status updates, and multi-agent workflow orchestration. The two protocols are complementary: a multi-agent system might use A2A for agent-to-agent delegation and MCP for each agent's tool access. Both use SSE for streaming and JSON as the data format, but their message semantics and lifecycle models are distinct. Governance note: A2A was launched by Google in April 2025 and donated to the Linux Foundation that June, so it is no longer a single-vendor protocol.
+MCP connects an LLM application (client) to external tools and data (server) — the relationship is hierarchical: model instructs tools. A2A connects agents to other agents — the relationship is peer-to-peer: one agent delegates tasks to another agent that has complementary skills. MCP optimizes for capability discovery and structured tool invocation. A2A optimizes for task delegation, streaming task status updates, and multi-agent workflow orchestration. The two protocols are complementary: a multi-agent system might use A2A for agent-to-agent delegation and MCP for each agent's tool access. Both use SSE for streaming and JSON as the data format, but their message semantics and lifecycle models are distinct. Governance note: A2A is a vendor-neutral Linux Foundation project, not a single-vendor one.
 
 **Q: What makes a good MCP tool description, and why does it matter?**
 A good tool description is the primary signal the model uses to decide which tool to call — it is prompt engineering embedded in the server. It should state the tool's purpose in one sentence, describe when to use it (user intent or task type), describe when NOT to use it if there is a similar tool, and include parameter descriptions with examples for non-obvious parameters. Poor descriptions cause the model to call the wrong tool, pass malformed arguments, or miss the tool entirely. The description should be written from the model's perspective, not the implementation's: "Use this tool when the user asks to find documents containing specific information" is better than "Performs TF-IDF search over the Elasticsearch index."

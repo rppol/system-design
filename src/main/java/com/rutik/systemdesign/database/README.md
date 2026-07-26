@@ -211,17 +211,18 @@ A 6-week plan over the Interview-Specific Path. Each week pairs modules with one
 
 | Database | Version | Notable Changes |
 |----------|---------|-----------------|
-| PostgreSQL | 15 (2022) | MERGE, pg_walinspect, logical replication row filter |
 | PostgreSQL | 16 (2023) | Parallel workers for logical replication, pg_stat_io |
 | PostgreSQL | 17 (2024) | Incremental backup, MAINTAIN privilege, JSON_TABLE |
-| MySQL | 8.0 (2018-LTS) | Window functions, roles, INSTANT DDL, JSON type |
+| PostgreSQL | 18 (2025) | Asynchronous I/O (up to 3x faster reads), `uuidv7()`, virtual generated columns, B-tree skip scan, OAuth 2.0 auth |
 | MySQL | 8.4 (2024-LTS) | Replication improvements, GTID enhancements |
-| MongoDB | 7.0 (2023) | Compound wildcard indexes, queryable encryption GA |
-| Redis | 7.0 (2022) | Redis Functions (Lua replacement), LMPOP/ZMPOP |
-| Redis | 7.2 (2023) | LPOS with COUNT, keyspace notifications improvements |
-| Cassandra | 4.1 (2023) | Virtual tables, paxos improvements |
-| Elasticsearch | 8.x (2022+) | kNN vector search, TSDB mode, security by default |
-| ClickHouse | 23.x+ | Parallel replicas, lightweight deletes, JSON type |
+| MySQL | 9.7 (2026-LTS) | Hypergraph optimizer, JSON duality, in-database JavaScript, OpenID auth, replication applier metrics in Community |
+| MongoDB | 8.0 (2024) | ~25% better throughput, 54% faster bulk inserts, Queryable Encryption range queries, faster resharding |
+| MongoDB | 8.3 (2026) | Current stable series |
+| Redis | 7.4 (2024) | Hash field expiration (HEXPIRE) |
+| Redis | 8.x (2025+) | AGPLv3 option, JSON/time-series/vector-set and probabilistic types in core, Redis Query Engine, new I/O threading |
+| Cassandra | 5.0 (2024) | Storage-Attached Indexes (SAI), vector type + ANN search, trie memtables/SSTables, dynamic data masking |
+| Elasticsearch | 9.x (2025+) | Lucene 10, Better Binary Quantization GA, ES\|QL JOIN, search/IO parallelism |
+| ClickHouse | 26.x (2026) | Calendar versioning (YY.M); latest stable 26.5 |
 
 ---
 

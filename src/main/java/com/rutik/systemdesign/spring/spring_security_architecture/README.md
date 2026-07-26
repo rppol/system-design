@@ -607,8 +607,7 @@ public class AdminService {
     }
 }
 
-// Root cause: @EnableMethodSecurity (Spring 6.x) or @EnableGlobalMethodSecurity (Spring 5.x)
-// was not added to any @Configuration class
+// Root cause: @EnableMethodSecurity was not added to any @Configuration class
 ```
 
 ```java
@@ -620,9 +619,6 @@ public class AdminService {
 public class SecurityConfig {
     // ...
 }
-
-// Spring Security 5.x (Spring Boot 2.x) — deprecated but still works:
-// @EnableGlobalMethodSecurity(prePostEnabled = true, securedEnabled = true)
 
 // Note: @EnableMethodSecurity uses AuthorizationManagerBeforeMethodInterceptor (AOP),
 // which requires the service bean to be called through a Spring proxy.
@@ -665,39 +661,64 @@ public class ReportService {
 }
 ```
 
-### Pitfall 4: WebSecurityConfigurerAdapter in Spring Security 6.x
+### Pitfall 4: A Second SecurityFilterChain That Never Runs
 
 ```java
-// BROKEN: does not compile with Spring Security 6.x (Spring Boot 3.x)
-// WebSecurityConfigurerAdapter was removed in Spring Security 6.0
+// BROKEN: the API chain declares no securityMatcher, so it matches ANY request.
+// It is ordered first, so the admin chain below it is unreachable.
 
-@Configuration
-public class SecurityConfig extends WebSecurityConfigurerAdapter {  // COMPILE ERROR in Boot 3
+@Bean
+@Order(1)
+public SecurityFilterChain apiChain(HttpSecurity http) throws Exception {
+    http                                            // no securityMatcher -> matches everything
+        .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+    return http.build();
+}
 
-    @Override
-    protected void configure(HttpSecurity http) throws Exception {
-        http.authorizeRequests()
-            .antMatchers("/public/**").permitAll()
-            .anyRequest().authenticated();
-    }
+@Bean
+@Order(2)
+public SecurityFilterChain adminChain(HttpSecurity http) throws Exception {
+    http
+        .securityMatcher("/admin/**")               // dead code: chain 1 already claimed the request
+        .authorizeHttpRequests(auth -> auth.anyRequest().hasRole("ADMIN"))
+        .formLogin(Customizer.withDefaults());
+    return http.build();
 }
 ```
 
-```java
-// FIX: SecurityFilterChain @Bean with lambda DSL
-@Configuration
-@EnableWebSecurity
-public class SecurityConfig {
+Spring Security refuses to start and reports it precisely: *"A filter chain that matches any
+request \[...\] has already been configured, which means that this filter chain \[...\] will never
+get invoked. Please use `HttpSecurity#securityMatcher` to ensure that there is only one filter
+chain configured for 'any request' and that the 'any request' filter chain is published last."*
 
-    @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
-        http
-            .authorizeHttpRequests(auth -> auth  // authorizeHttpRequests replaces authorizeRequests
-                .requestMatchers("/public/**").permitAll()  // requestMatchers replaces antMatchers
-                .anyRequest().authenticated()
-            );
-        return http.build();
-    }
+```java
+// FIX: give every chain but the last an explicit securityMatcher,
+// and publish the catch-all chain last.
+
+@Bean
+@Order(1)
+public SecurityFilterChain apiChain(HttpSecurity http) throws Exception {
+    http
+        .securityMatcher("/api/**")                 // this chain only claims /api/**
+        .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .csrf(CsrfConfigurer::disable)
+        .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+    return http.build();
+}
+
+@Bean
+@Order(2)
+public SecurityFilterChain webChain(HttpSecurity http) throws Exception {
+    http                                            // catch-all, declared last
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers("/public/**").permitAll()
+            .anyRequest().authenticated()
+        )
+        .formLogin(Customizer.withDefaults());
+    return http.build();
 }
 ```
 
