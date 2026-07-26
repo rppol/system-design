@@ -47,7 +47,7 @@ The Lava Flow anti-pattern describes the accumulation of dead, obsolete, or poor
  * monolith. Some methods may no longer be needed. Do NOT remove anything
  * without checking with the platform team first (most of them have left).
  *
- * TODO: Clean this up (added 2019-03-12, still here in 2024)
+ * TODO: Clean this up (added 2019-03-12, still here in 2026)
  */
 public class OrderProcessor {
 
@@ -218,7 +218,7 @@ Dead classes still compile. Dead tests still run (or fail mysteriously). Every C
  *
  * This class is solely responsible for orchestrating the order processing
  * lifecycle: validation, payment, and persistence. All legacy v1 processing
- * was removed in ticket ORD-4821 (2024-01-15) after confirming zero callers
+ * was removed in ticket ORD-4821 (2026-01-15) after confirming zero callers
  * via static analysis and production log search over 90 days.
  */
 public class OrderProcessor {
@@ -319,9 +319,9 @@ When marking code `@Deprecated`, attach a removal date and a ticket number. Exam
 ```java
 /**
  * @deprecated Use {@link OrderProcessor#processOrder(Order)} instead.
- * Scheduled for removal in Q2 2025. See ticket ORD-4500.
+ * Scheduled for removal in Q2 2027. See ticket ORD-4500.
  */
-@Deprecated(since = "2024-01", forRemoval = true)
+@Deprecated(since = "2026-07", forRemoval = true)
 public void processOrderLegacy(Order order) { ... }
 ```
 

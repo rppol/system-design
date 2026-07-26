@@ -148,28 +148,26 @@ ALTER TABLE high_write_table SET (
 | Symbol | What it is |
 |--------|------------|
 | `vacuum_cost_page_hit` | `1` unit — page was already in `shared_buffers`, nearly free |
-| `vacuum_cost_page_miss` | `10` units — page had to be read from disk |
+| `vacuum_cost_page_miss` | `2` units — page had to be read from disk |
 | `vacuum_cost_page_dirty` | `20` units — page was modified and must be written back |
-| `autovacuum_vacuum_cost_limit` | Toll budget spendable per cycle, default `200` |
-| `autovacuum_vacuum_cost_delay` | Sleep once the budget is spent, default `20` ms |
+| `autovacuum_vacuum_cost_limit` | Toll budget spendable per cycle, default `-1` (inherits `vacuum_cost_limit`, `200`) |
+| `autovacuum_vacuum_cost_delay` | Sleep once the budget is spent, default `2` ms |
 
 **Walk one example.** A workload where half the pages are already cached and half are not:
 
 ```
-  average cost per page  =  0.5 x 10 (miss)  +  0.5 x 1 (hit)   =    5.5 units
+  average cost per page  =  0.5 x 2 (miss)  +  0.5 x 1 (hit)    =      1.5 units
 
-  defaults  :  200 / 5.5           =      36.4 pages per cycle
-               1000 ms / 20 ms     =        50 cycles per second
-               36.4 x 50           =     1,818 pages/sec  =  14.2 MB/sec of heap
-
-  tuned     :  2000 / 5.5          =     363.6 pages per cycle
+  defaults  :  200 / 1.5           =     133.3 pages per cycle
                1000 ms / 2 ms      =       500 cycles per second
-               363.6 x 500         =   181,818 pages/sec (ceiling, if I/O allows)
+               133.3 x 500         =    66,667 pages/sec  =  546 MB/sec of heap
 
-  budget x10 and delay /10  ->  100x more pages per second
+  tuned     :  2000 / 1.5          =   1,333.3 pages per cycle
+               1000 ms / 2 ms      =       500 cycles per second
+               1333.3 x 500        =   666,667 pages/sec (ceiling, if I/O allows)
 ```
 
-The tuned figure is a permission ceiling, not a promise — real throughput stops at whatever the disk delivers. What the arithmetic does show is why the two knobs must move together: raising `cost_limit` alone widens each burst but leaves the same 20 ms of sleep between them, so the sustained rate barely improves. Multiply the budget and divide the delay, and the rate multiplies by both factors at once.
+Both figures are permission ceilings, not promises — real throughput stops at whatever the disk delivers, and 546 MB/sec of heap already exceeds what most attached storage can sustain. That is the practical point: at defaults the cost throttle is usually *not* the binding constraint, so the first thing to check on a lagging table is the trigger threshold (the scale factor above), not the toll. Raise `autovacuum_vacuum_cost_limit` only when you have measured that autovacuum is sleeping while the disk still has headroom; the delay is already at its practical floor of 2 ms.
 
 ### XID Wraparound
 
@@ -405,7 +403,7 @@ The quarter-page rule is why the threshold exists at all: PostgreSQL cannot chai
 
 ### Partitioning
 
-PostgreSQL 10+ declarative partitioning. Three types:
+Declarative partitioning. Three types:
 
 ```sql
 -- Range partitioning (most common for time-series)
@@ -429,7 +427,7 @@ CREATE TABLE orders_us PARTITION OF orders FOR VALUES IN ('us-east', 'us-west');
 
 **Partition pruning**: PostgreSQL evaluates partition constraints at query planning time. Query `WHERE created_at > '2024-07-01'` only scans the relevant partitions — others are excluded from the plan.
 
-**Partition-wise joins**: PostgreSQL 11+ can join two partitioned tables partition-by-partition, enabling parallel execution.
+**Partition-wise joins**: PostgreSQL can join two identically partitioned tables partition-by-partition, enabling parallel execution. Off by default — enable with `enable_partitionwise_join = on` (and `enable_partitionwise_aggregate = on`), which costs extra planner memory and time.
 
 ---
 
@@ -534,7 +532,7 @@ Default autovacuum is too conservative for high-write tables. Three knobs: (1) `
 The planner estimates cost for both plans. Sequential scan cost = `seq_page_cost × pages`. Index scan cost = `(cpu_index_tuple_cost × index_tuples) + (random_page_cost × pages_to_fetch)`. If the query returns > ~5-15% of rows, random I/O for each row (at `random_page_cost=4`) exceeds the sequential scan cost. On SSDs, set `random_page_cost=1.1` so the planner prefers index scans at higher selectivity. Also: if the planner's row estimate is wrong (stale statistics), it may choose seq scan when an index would be faster. Fix with `ANALYZE table`.
 
 **Q: What is a replication slot and what are the risks?**
-A replication slot tracks how far a WAL consumer (replica or logical subscriber) has consumed the WAL stream. The primary will not remove WAL segments needed by any active slot. Risk: if a replica goes offline or a logical subscriber stops consuming, the slot retains WAL indefinitely — `restart_lsn` stops advancing — WAL accumulates in `pg_wal`, filling disk. Mitigation: set `max_slot_wal_keep_size = '10GB'` (PostgreSQL 13+) to limit WAL retention per slot. Alert when `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) > 5GB`. Drop unused slots promptly.
+A replication slot tracks how far a WAL consumer (replica or logical subscriber) has consumed the WAL stream. The primary will not remove WAL segments needed by any active slot. Risk: if a replica goes offline or a logical subscriber stops consuming, the slot retains WAL indefinitely — `restart_lsn` stops advancing — WAL accumulates in `pg_wal`, filling disk. Mitigation: set `max_slot_wal_keep_size = '10GB'` (default `-1`, unlimited) to limit WAL retention per slot. Alert when `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) > 5GB`. Drop unused slots promptly.
 
 **Q: Explain TOAST and when it causes performance problems.**
 TOAST (The Oversized Attribute Storage Technique) stores large column values (text, jsonb, bytea > ~2KB) out-of-line in a separate table (`pg_toast_<oid>`). Reading a TOASTed column requires a join to the TOAST table — an extra I/O. Performance problems: (1) `SELECT *` on tables with large JSONB/text fields reads all TOAST data even if unused. (2) Very large documents (1MB+) cause single-row fetch times to exceed 10ms due to TOAST decompression. (3) TOAST tables accumulate dead entries that need their own VACUUM. Fix: select only needed columns, consider splitting large columns to separate tables, set column to STORAGE EXTERNAL to skip compression overhead if application compresses.
@@ -543,7 +541,7 @@ TOAST (The Oversized Attribute Storage Technique) stores large column values (te
 Streaming replication: physical (byte-level) WAL copy to replica. Replica is binary-identical to primary. Supports: standby queries, failover promotion. Requires: same PostgreSQL major version. Logical replication: decodes WAL into logical change events (INSERT/UPDATE/DELETE per table). Supports: cross-version replication, selective table replication, external CDC consumers (Debezium). Requires: `wal_level=logical`. Use streaming for HA/failover replicas. Use logical for: zero-downtime major version upgrades, replicating select tables to a replica, feeding changes to Kafka/data warehouse via Debezium.
 
 **Q: What is the Free Space Map and how does it work with VACUUM?**
-The Free Space Map (FSM) is a data structure tracking how much free space is available in each heap page. When VACUUM reclaims dead tuples, it updates the FSM to mark those pages as available for future inserts. When PostgreSQL needs to INSERT a new row, it consults the FSM to find a page with sufficient free space. Without FSM updates (before PostgreSQL 8.4, FSM had a fixed size limit), inserts would always extend the heap file even when free space existed within the file. With proper VACUUM, the FSM allows reuse of freed space, preventing unbounded table growth.
+The Free Space Map (FSM) is a data structure tracking how much free space is available in each heap page. When VACUUM reclaims dead tuples, it updates the FSM to mark those pages as available for future inserts. When PostgreSQL needs to INSERT a new row, it consults the FSM to find a page with sufficient free space. Without FSM updates, inserts would always extend the heap file even when free space existed within it. With proper VACUUM, the FSM allows reuse of freed space, preventing unbounded table growth.
 
 **Q: How do you diagnose and fix table bloat?**
 ```sql
@@ -586,10 +584,10 @@ VACUUM: marks dead tuples as reusable, updates FSM and VM, removes dead index en
 Autovacuum reads pages into the buffer pool and applies CPU cycles. Without throttling, autovacuum would consume all I/O bandwidth, degrading query performance. Cost-based throttling: after accumulating `autovacuum_vacuum_cost_limit` (default 200) cost units, autovacuum sleeps for `autovacuum_vacuum_cost_delay` (default 20ms). Costs: reading a page from disk = `vacuum_cost_page_miss` (10), reading from cache = `vacuum_cost_page_hit` (1), writing a dirty page = `vacuum_cost_page_dirty` (20). With defaults, autovacuum can process ~200/(0.5×10 + 0.5×1) ≈ 36 pages before sleeping 20ms — approximately 1,800 pages/second. High-write tables need `autovacuum_vacuum_cost_delay=2` and `autovacuum_vacuum_cost_limit=2000`.
 
 **Q: What is the pg_hba.conf file and how does it control authentication?**
-`pg_hba.conf` (Host-Based Authentication) defines who can connect to which databases using which authentication methods. Format: `TYPE DATABASE USER ADDRESS METHOD OPTIONS`. Connection request matches rules top-to-bottom; first match wins. Methods: `trust` (no password — never in production), `md5` (password hash, deprecated), `scram-sha-256` (secure, default in PostgreSQL 14+), `cert` (TLS client certificate), `iam` (AWS RDS IAM), `ldap`, `radius`. Best practice: use `scram-sha-256` for password auth, `cert` for service-to-service, and `reject` as a catch-all at the bottom.
+`pg_hba.conf` (Host-Based Authentication) defines who can connect to which databases using which authentication methods. Format: `TYPE DATABASE USER ADDRESS METHOD OPTIONS`. Connection request matches rules top-to-bottom; first match wins. Methods: `trust` (no password — never in production), `scram-sha-256` (salted challenge-response; the `password_encryption` default), `cert` (TLS client certificate), `oauth` (OAuth 2.0 bearer tokens), `ldap`, `radius`. Best practice: use `scram-sha-256` for password auth, `cert` for service-to-service, and `reject` as a catch-all at the bottom.
 
 **Q: How do you achieve zero-downtime major version upgrades of PostgreSQL?**
-PostgreSQL major versions (13→14→15→16) require a full dump+restore or pg_upgrade. Zero-downtime options: (1) `pg_upgrade --check` then `pg_upgrade` with link mode — fast but requires maintenance window. (2) Logical replication: set up PG16 replica, replicate all tables via logical replication from PG15, wait for lag to catch up, switch application to PG16, drop PG15. Requires `wal_level=logical` on PG15. Limitations: sequences not replicated (sync manually); DDL changes not replicated. (3) Pglogical extension for complex setups. The logical replication path allows < 1 minute of downtime for the cutover (stop PG15 writes, apply remaining lag, restart app against PG16).
+PostgreSQL major versions (16→17→18) require a full dump+restore or pg_upgrade. Zero-downtime options: (1) `pg_upgrade --check` then `pg_upgrade` with link mode — fast but requires a maintenance window; from PostgreSQL 17 onward it also carries replication slots forward, so replicas do not need rebuilding. (2) Logical replication: set up a PG18 subscriber, replicate all tables from PG17, wait for lag to catch up, switch the application to PG18, drop PG17. Requires `wal_level=logical` on PG17. Limitations: sequences not replicated (sync manually); DDL changes not replicated. (3) `pg_createsubscriber` converts an existing physical standby into a logical subscriber in place, which skips the initial data copy entirely — the fastest route for large databases. The logical replication path allows < 1 minute of downtime for the cutover (stop PG17 writes, apply remaining lag, restart app against PG18).
 
 **Q: What is the Visibility Map and how does it accelerate index-only scans?**
 The Visibility Map has 2 bits per heap page: "all tuples on this page are visible to all transactions" (set by VACUUM) and "all tuples are frozen." Index-only scans: for each matching row in the index, check if the row's page is marked all-visible in the VM. If yes: return the index data without visiting the heap (no heap I/O). If no: visit the heap to check MVCC visibility. After `VACUUM`, all pages get the all-visible bit set (if all dead tuples were cleaned). After INSERTs/UPDATEs, the bit is cleared for affected pages. `n_dead_tup = 0` in `pg_stat_user_tables` and `heap_fetches = 0` in EXPLAIN confirm index-only scans are fully effective.
@@ -603,7 +601,7 @@ The Visibility Map has 2 bits per heap page: "all tuples on this page are visibl
 
 1. Never disable autovacuum on production tables. Instead, tune its cost settings per table.
 2. Monitor replication slot lag: `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)`. Alert > 5GB.
-3. Set `max_slot_wal_keep_size = '10GB'` (PostgreSQL 13+) to prevent disk fill from lagging slots.
+3. Set `max_slot_wal_keep_size = '10GB'` (default `-1`, unlimited) to prevent disk fill from lagging slots.
 4. After bulk loads, always run `ANALYZE table_name` explicitly.
 5. Use `pg_stat_statements` with `pg_stat_statements.track = all` in production.
 6. Set connection-level timeouts: `lock_timeout='10s'`, `idle_in_transaction_session_timeout='5min'`.

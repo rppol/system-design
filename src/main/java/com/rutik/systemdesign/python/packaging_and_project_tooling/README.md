@@ -12,7 +12,7 @@ For most of Python's history these concerns were addressed by a patchwork of inc
 
 These PEPs together enable a single `pyproject.toml` to replace `setup.py`, `setup.cfg`, `MANIFEST.in`, and scattered tool configuration files.
 
-Python 3.11 and 3.12 are the current production targets. Python 3.12 ships `tomllib` in the stdlib (read-only TOML parser), removing the need for a `tomli` dependency in build tools.
+Python 3.13 and 3.14 are the current production targets. `tomllib` is in the stdlib (read-only TOML parser), so build tools read `pyproject.toml` with no third-party dependency.
 
 ---
 
@@ -78,7 +78,7 @@ flowchart LR
 
 ### Virtual Environment Strategies
 
-**`venv`** (stdlib, Python 3.3+): `python -m venv .venv`. Lightweight, no additional install. The standard for most projects.
+**`venv`** (stdlib): `python -m venv .venv`. Lightweight, no additional install. The standard for most projects.
 
 **`uv venv`**: Creates a venv 10-100x faster than `python -m venv`. Backed by a global cache — packages are hard-linked rather than copied, so disk usage is minimal.
 
@@ -568,7 +568,7 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 
 **Stripe Python SDK**: Uses `pyproject.toml` with strict `mypy` (all public APIs fully annotated). Generates type stubs (`.pyi` files) from their OpenAPI spec. Ships `py.typed`. Uses `semantic-release` for automated version bumping triggered by commit messages.
 
-**Google Cloud Python client libraries**: All use `pyproject.toml`, ship `py.typed`, and use `nox` (similar to `tox`) to run tests across Python 3.8-3.12 in isolated environments. Each library has separate wheels built for CPython and PyPy.
+**Google Cloud Python client libraries**: All use `pyproject.toml`, ship `py.typed`, and use `nox` (similar to `tox`) to run tests across Python 3.10-3.14 in isolated environments. Each library has separate wheels built for CPython and PyPy.
 
 ---
 
@@ -600,7 +600,7 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 ## 9. When to Use / When NOT to Use
 
 ### Use `pyproject.toml` + `uv` when:
-- Starting any new Python project in 2024+. There is no reason to create `setup.py`.
+- Starting any new Python project. There is no reason to create `setup.py`.
 - Building a FastAPI service that needs reproducible Docker builds.
 - You want a single tool (`uv`) to manage venvs, install packages, run scripts, and generate lock files.
 - CI build times matter — `uv` cache hits make installs nearly instant.

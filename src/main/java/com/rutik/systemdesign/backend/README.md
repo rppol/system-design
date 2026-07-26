@@ -147,7 +147,7 @@ A 5-week plan over the Interview-Specific Path. Each week pairs modules with one
 
 | Module | Topic | Q&As | Difficulty |
 |--------|-------|------|------------|
-| [REST API Design](rest_api_design/) | REST constraints, versioning, idempotency, pagination, ETag, RFC 7807 | 15 | Intermediate |
+| [REST API Design](rest_api_design/) | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 15 | Intermediate |
 | [gRPC & Protobuf](grpc_and_protobuf/) | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 | Advanced |
 | [GraphQL](graphql/) | Schema design, DataLoader N+1, subscriptions, depth limiting | 12 | Intermediate |
 | [WebSockets & SSE](websockets_and_sse/) | WS upgrade, frame structure, SSE, long polling, scaling WS | 12 | Intermediate |
@@ -185,7 +185,7 @@ A 5-week plan over the Interview-Specific Path. Each week pairs modules with one
 
 | Module | Topic | Q&As | Difficulty |
 |--------|-------|------|------------|
-| [Backend Security & OWASP](backend_security_owasp/) | OWASP Top 10 2021, SQL injection, CSRF, SSRF, secret management | 15 | Advanced |
+| [Backend Security & OWASP](backend_security_owasp/) | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 | Advanced |
 | [Auth & Authorization Systems](auth_and_authorization_systems/) | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 15 | Advanced |
 
 ### Phase 7 — Testing & Quality
@@ -233,12 +233,12 @@ A 5-week plan over the Interview-Specific Path. Each week pairs modules with one
 
 | Technology | Version | Key Changes |
 |------------|---------|------------|
-| Java | 21 (LTS) | Virtual threads GA, structured concurrency preview, sequenced collections |
-| Spring Boot | 3.2+ | Virtual threads GA (spring.threads.virtual.enabled=true), RestClient, problems detail |
-| Spring Framework | 6.1 | AOT processing, Micrometer Observation API, HTTP interface clients |
-| Kafka | 3.6+ | KRaft mode (no ZooKeeper), tiered storage, new group coordinator |
-| Resilience4j | 2.x | Spring Boot 3 compatible, virtual thread support |
-| Micrometer | 1.12+ | Observation API, OTLP registry, exemplars |
+| Java | 25 (LTS) | Virtual threads unpinned under `synchronized` (JEP 491, JDK 24), scoped values final (JEP 506), compact source files |
+| Spring Boot | 4.1+ | HTTP service client auto-configuration, API versioning properties, OpenTelemetry starter, Jackson 3 |
+| Spring Framework | 7.0 | Jakarta EE 11 baseline, JSpecify null-safety, API versioning, `@Retryable`/`@ConcurrencyLimit` |
+| Kafka | 4.3+ | KRaft-only (ZooKeeper removed in 4.0), KIP-848 consumer protocol, tiered storage |
+| Resilience4j | 2.4+ | Spring Boot 4 / Spring Cloud 5 compatible, virtual thread support |
+| Micrometer | 1.17+ | Observation API, OTLP registry, exemplars |
 | OpenTelemetry | 1.x | W3C TraceContext, OTLP protocol, Spring integration |
 
 ---

@@ -6,7 +6,7 @@
 |------|-------|------|
 | [mcp_server_building.md](mcp_server_building.md) | Server skeleton, resources/tools/prompts/sampling, lifecycle, MCP Inspector testing | 15+ |
 | [mcp_client_patterns.md](mcp_client_patterns.md) | ClientSession, capability negotiation, tool discovery, sampling roundtrip, multi-server | 15+ |
-| [mcp_transports_and_jsonrpc.md](mcp_transports_and_jsonrpc.md) | JSON-RPC 2.0 framing, stdio vs Streamable HTTP (vs the deprecated HTTP+SSE), connection lifecycle | 15+ |
+| [mcp_transports_and_jsonrpc.md](mcp_transports_and_jsonrpc.md) | JSON-RPC 2.0 framing, stdio vs Streamable HTTP, connection lifecycle | 15+ |
 | [mcp_security.md](mcp_security.md) | Tool injection, prompt shadowing, confused deputy, OAuth/PKCE, defense-in-depth | 15+ |
 | [mcp_registries_and_ecosystem.md](mcp_registries_and_ecosystem.md) | Smithery, MCP Hub, official servers, versioning, signed servers, rollout | 15+ |
 

@@ -32,9 +32,9 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ## 4. Types / Strategies
 
-### 4.1 OpenAI o1 / o3
+### 4.1 OpenAI GPT-5.6 Reasoning Series
 
-OpenAI's original reasoning model series (2024-2025). Uses a hidden "thinking" phase before responding. **Status check (July 2026):** the o-series is being retired — `o1-preview` shut down 2025-07-28, `o1-mini` 2025-10-27, `o1` and `o3-mini` shut down 2026-10-23, `o3` on 2026-12-11. OpenAI's current reasoning line is the GPT-5.6 series (`gpt-5.6-sol` $5/$30 per 1M, `gpt-5.6-terra` $2.50/$15, `gpt-5.6-luna` $1/$6), where `reasoning.effort` replaces a raw token budget and defaults to `medium`. The o1/o3 results below are kept because they are the published record of the test-time-compute result, not because those endpoints are still the ones to build on.
+OpenAI's reasoning line is the GPT-5.6 series: `gpt-5.6-sol` ($5/$30 per 1M), `gpt-5.6-terra` ($2.50/$15) and `gpt-5.6-luna` ($1/$6). Each runs a hidden "thinking" phase before responding, and you set depth with `reasoning.effort` (default `medium`) rather than a raw token budget. The benchmark figures quoted below and in Section 7 come from the o1/o3 generation that first demonstrated test-time-compute scaling — they are the published record of that result, while the tiers above are what you build on.
 
 ```
 User: Prove that √2 is irrational.
@@ -442,11 +442,10 @@ max_thinking_tokens parameter controls how long the model can think:
 Cost model:
   Reasoning token cost = thinking_tokens × price_per_token
   Reasoning tokens are NOT returned to you, but they ARE billed as output tokens.
-  o1 (deprecated, shutdown 2026-10-23): $15/1M input, $60/1M output
-    A 10,000-token thinking chain costs 10,000 × $60/1M = $0.60
+  OpenAI reasoning line: gpt-5.6-sol $5/$30, gpt-5.6-terra $2.50/$15,
+    gpt-5.6-luna $1/$6 per 1M — thinking bills at the output rate.
+    A 10,000-token thinking chain on gpt-5.6-sol costs 10,000 × $30/1M = $0.30
     — 50-100× a standard 100-200 token response at the same rate
-  Current OpenAI reasoning line: gpt-5.6-sol $5/$30, gpt-5.6-terra $2.50/$15,
-    gpt-5.6-luna $1/$6 per 1M. Same rule: thinking bills at the output rate.
   Budget 3-5× the expected VISIBLE output when sizing max_completion_tokens.
 
 Routing strategy to control cost:
@@ -711,11 +710,11 @@ prompt**, not a vendor-published ratio; latency bands are order-of-magnitude.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **OpenAI GPT-5.6 series** (`sol` / `terra` / `luna`) | Top-tier reasoning | Current OpenAI reasoning line; `reasoning.effort` defaults to `medium`. Supersedes o1/o3, which are all deprecated (o1 and o3-mini shut down 2026-10-23, o3 on 2026-12-11; o1-mini already retired 2025-10-27) |
+| **OpenAI GPT-5.6 series** (`sol` / `terra` / `luna`) | Top-tier reasoning | OpenAI's reasoning line; `reasoning.effort` (`minimal`…`high`) defaults to `medium` |
 | **DeepSeek-R1** | Open-weights reasoning | Matched o1 on published benchmarks; free to self-host |
-| **Qwen3** | Open reasoning | Supersedes QwQ-32B (Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters). The original one-model hybrid thinking / non-thinking design was abandoned in the 2507 refresh — Instruct and Thinking now ship as separately trained checkpoints |
-| **Gemini 3.x** (3.1 / 3.5 / 3.6) | Google reasoning | `thinking_level` (`minimal`…`high`) replaced the integer `thinking_budget`; `thinking_budget` is still accepted for back-compat, but the two cannot be sent in the same request |
-| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Summarized thinking blocks returned; thinking tokens billed as output. Adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) on Fable 5 / Opus 5 / Sonnet 5; extended thinking (`thinking.budget_tokens`) on Haiku 4.5. `type: "enabled"` is deprecated on the 4.6 models and returns 400 on Claude 4.7 and later |
+| **Qwen3** | Open reasoning | Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters. Instruct and Thinking ship as separately trained checkpoints |
+| **Gemini 3.x** (3.1 / 3.5 / 3.6) | Google reasoning | Depth is set with the `thinking_level` enum (`minimal`…`high`) |
+| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Summarized thinking blocks returned; thinking tokens billed as output. Adaptive thinking (`thinking.type: "adaptive"` plus `output_config.effort`) on Fable 5 / Opus 5 / Sonnet 5; extended thinking (`thinking.budget_tokens`) on Haiku 4.5 |
 | **Math-Shepherd** | PRM for math | Step-level reward signals |
 | **Lean 4** | Formal verification | Used by AlphaProof |
 | **OpenR** | MCTS for LLMs | Open-source MCTS implementation |

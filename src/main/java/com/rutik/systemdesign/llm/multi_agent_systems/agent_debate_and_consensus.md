@@ -821,7 +821,7 @@ than by whether the debate is still producing value.
 
 **OpenAI Responses / Conversations API** — server-side conversation state: a Conversation object (passed as `conversation="conv_..."` on each Response) holds debate history natively, but one conversation is one agent, so an N-agent debate needs N conversations plus manual cross-agent context injection. No built-in debate orchestration — round-0 parallelism and answer fusion are yours to write.
 
-**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. In the current `autogen-agentchat` package the class is `RoundRobinGroupChat` (import from `autogen_agentchat.teams`); in the legacy 0.2 API the equivalent is `GroupChat(..., speaker_selection_method="round_robin")`. There is no `RoundRobinSpeakerSelection` class in either. Most feature-complete out-of-the-box for multi-agent debate.
+**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. The class is `RoundRobinGroupChat`, imported from `autogen_agentchat.teams` in the `autogen-agentchat` package; there is no `RoundRobinSpeakerSelection` class, so do not reach for one. Most feature-complete out-of-the-box for multi-agent debate.
 
 **CrewAI** — sequential and hierarchical process modes. Hierarchical mode with a manager agent approximates the judge pattern. Less flexible than LangGraph for custom convergence logic.
 

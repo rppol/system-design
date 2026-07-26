@@ -46,8 +46,6 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 # Installation and startup
 pip install vllm
 
-# `vllm serve` is the current entrypoint; the older
-# `python -m vllm.entrypoints.openai.api_server` form still works.
 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --tensor-parallel-size 2 \
     --max-model-len 8192 \
@@ -75,7 +73,7 @@ response = client.chat.completions.create(
 
 ### 4.2 TensorRT-LLM (NVIDIA)
 
-NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwell). Highest raw performance, and since the 1.x line it is a PyTorch-architected framework rather than an ahead-of-time engine compiler — as of the 1.2 release the TensorRT backend is removed outright and PyTorch is the sole execution backend (`LLM(backend="tensorrt")` now raises `ValueError`, and the per-model `convert_checkpoint.py` scripts are gone).
+NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwell). Highest raw performance, and a PyTorch-architected framework: PyTorch is the sole execution backend, and `trtllm-serve` loads a HuggingFace checkpoint directly with no ahead-of-time engine build.
 
 **Key features:**
 - Quantization: INT4, INT8, FP8 with auto-calibration
@@ -85,10 +83,9 @@ NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwel
 - Triton Inference Server integration
 
 ```bash
-# TensorRT-LLM 1.x serves a HuggingFace checkpoint directly.
-# The `pytorch` backend is the default and needs no engine build step;
-# the old `trtllm-build` command was removed (only trtllm-serve,
-# trtllm-bench and trtllm-eval ship as console scripts today).
+# Serves a HuggingFace checkpoint directly. The `pytorch` backend is the
+# default and needs no engine build step. Console scripts that ship:
+# trtllm-serve, trtllm-bench, trtllm-eval.
 trtllm-serve meta-llama/Meta-Llama-3-70B-Instruct \
     --backend pytorch \
     --tp_size 4 \
@@ -206,9 +203,6 @@ docker run --gpus all \
     --max-input-tokens 4096 \
     --max-total-tokens 8192
 ```
-
-(`--max-input-length` still parses but is documented as the legacy spelling of
-`--max-input-tokens`.)
 
 **Features:**
 - Continuous batching, flash attention
@@ -621,10 +615,10 @@ and upgrade. Benchmark first, then divide by your actual fleet size before switc
 - Continuously batches across a multi-tenant fleet
 
 ### Anyscale / Ray Serve
-- Anyscale's self-serve **Endpoints** API shut down on 2024-08-01; LLM serving moved into
-  the managed Anyscale Platform. Do not cite Endpoints as a live product.
-- Ray Serve remains the widely used pattern for request routing and 0 → N autoscaling
-  in front of vLLM replicas
+- Ray Serve is the widely used pattern for request routing and 0 → N autoscaling in front
+  of vLLM replicas; `ray.serve.llm` wraps vLLM engines behind an OpenAI-compatible router
+- Anyscale sells this as the managed **Anyscale Platform** — Ray/Ray Serve on your cloud
+  account rather than a hosted model API
 
 ### Mistral AI
 - Mistral's own deployment docs put **vLLM first** for self-hosting Mistral models, with

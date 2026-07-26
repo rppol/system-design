@@ -242,19 +242,27 @@ A 5-week plan over the Interview-Specific Path. Case studies live in [case_studi
 
 ## 4. Spring Version Matrix
 
-| Feature | Spring 5.3 / Boot 2.7 | Spring 6.0 / Boot 3.0 | Spring 6.1 / Boot 3.1 | Spring 6.2 / Boot 3.3 |
-|---------|----------------------|----------------------|----------------------|----------------------|
-| Baseline JDK | Java 8+ (recommended 11) | Java 17 (minimum) | Java 17 (minimum) | Java 17 (minimum), Java 21 recommended |
-| Jakarta namespace | `javax.*` | `jakarta.*` (full migration) | `jakarta.*` | `jakarta.*` |
-| Security config style | `WebSecurityConfigurerAdapter` (deprecated) | `SecurityFilterChain` bean (mandatory) | `SecurityFilterChain` bean | `SecurityFilterChain` bean |
-| Auto-config SPI | `spring.factories` (`EnableAutoConfiguration` key) | `AutoConfiguration.imports` (new SPI) | `AutoConfiguration.imports` | `AutoConfiguration.imports` |
-| Observability | Spring Cloud Sleuth (separate project) | Micrometer Tracing (built-in) | Micrometer Tracing + OTLP | Micrometer Tracing + OTLP |
-| Native image support | Spring Native (experimental, separate project) | GraalVM native (first-class, `spring-aot-maven-plugin`) | GraalVM native (improved AOT hints) | GraalVM native (stable) |
-| Virtual threads | Not supported | Preview support | `spring.threads.virtual.enabled=true` (production-ready) | Virtual threads default option |
-| HTTP interface clients | Not available | `@HttpExchange` (declarative HTTP clients) | `@HttpExchange` (stable) | `@HttpExchange` (stable) |
-| Problem Details (RFC 7807) | Manual implementation | `ProblemDetail` built-in, `@ControllerAdvice` integration | `ProblemDetail` (stable) | `ProblemDetail` (stable) |
-| RestClient | `RestTemplate` / `WebClient` | `RestTemplate` (legacy), `WebClient` | `RestClient` (new synchronous fluent API) | `RestClient` (stable) |
-| Testcontainers | Manual integration | `@ServiceConnection` (Boot 3.1+) | `@ServiceConnection` (stable) | `@ServiceConnection` (stable) |
+The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0 ships Framework 7.0.8 and Spring Security 7.1.0). Spring Framework 6.2 / Boot 3.5 is the final 6th-generation line and is what most existing codebases still run, so the matrix contrasts the two.
+
+| Feature | Spring 6.2 / Boot 3.5 | Spring 7.0 / Boot 4.1 (current) |
+|---------|----------------------|----------------------------------|
+| Baseline JDK | Java 17–25 | Java 17 minimum, **JDK 25 recommended** |
+| Jakarta EE baseline | EE 10 — Servlet 6.0, JPA 3.1, Bean Validation 3.0 | EE 11 — Servlet 6.1, JPA 3.2, Bean Validation 3.1 (Tomcat 11+, Jetty 12.1+) |
+| Spring Security | 6.5 | 7.1 |
+| Security config style | `SecurityFilterChain` bean, lambda DSL | `SecurityFilterChain` bean, lambda DSL; `AuthorizationManager` is the only authorization SPI |
+| Auto-config SPI | `AutoConfiguration.imports` | `AutoConfiguration.imports` |
+| JSON | Jackson 2.x (`com.fasterxml.jackson`) | **Jackson 3.x default** (`tools.jackson`), 2.x support deprecated |
+| Starter naming | `spring-boot-starter-web` | Modular starters — `spring-boot-starter-webmvc`, `spring-boot-starter-security-oauth2-resource-server`, each with a `-test` companion |
+| Synchronous HTTP client | `RestClient` | `RestClient` (`RestTemplate` is deprecated in the 7.0 reference docs) |
+| HTTP interface clients | `@HttpExchange` + `HttpServiceProxyFactory` | `@ImportHttpServices` group registration + Boot auto-configuration |
+| API versioning | Hand-rolled (URI segment / custom header) | First-class: `@RequestMapping(version = "1.2")`, `spring.mvc.apiversion.*` |
+| Resilience | Spring Retry (separate project) | `@Retryable` / `@ConcurrencyLimit` in core via `@EnableResilientMethods` |
+| Proxying | CGLIB default in Boot | CGLIB default framework-wide, per-bean opt-out with `@Proxyable` |
+| Observability | Micrometer Tracing + OTLP | Micrometer 1.17 / Tracing 1.7, `spring-boot-starter-opentelemetry` |
+| Native image support | GraalVM native (stable) | GraalVM 25, unified "exact reachability metadata" format |
+| Virtual threads | `spring.threads.virtual.enabled=true` | `spring.threads.virtual.enabled=true` |
+| Problem Details (RFC 9457) | `ProblemDetail` | `ProblemDetail` |
+| Testing | `MockMvc`, `WebTestClient`, `@ServiceConnection` | Adds `RestTestClient` (non-reactive `WebTestClient`), JUnit 6 |
 
 ---
 
@@ -284,13 +292,13 @@ A 5-week plan over the Interview-Specific Path. Case studies live in [case_studi
 ### Security
 1. **What is the SecurityFilterChain and how many can you have?** — An ordered list of servlet filters processing every request; multiple chains can be registered with different `securityMatcher` patterns (e.g., one for API, one for UI).
 2. **How does Spring Security store the authenticated user?** — `SecurityContextHolder` uses `ThreadLocal` (or `InheritableThreadLocal`) to hold a `SecurityContext` containing the `Authentication` object.
-3. **What is the difference between authentication and authorization in Spring Security?** — Authentication verifies identity (who); authorization decides what the authenticated principal can do; handled by `AuthenticationManager` and `AccessDecisionManager`/`AuthorizationManager` respectively.
+3. **What is the difference between authentication and authorization in Spring Security?** — Authentication verifies identity (who); authorization decides what the authenticated principal can do; handled by `AuthenticationManager` and `AuthorizationManager` respectively.
 4. **How does CSRF protection work in Spring Security?** — Synchronizer token pattern: server stores a token in the session; every mutating request must include the token in a header or form field; stateless APIs typically disable CSRF.
 5. **How do you validate a JWT in Spring Security?** — Register a `JwtDecoder` bean and use `oauth2ResourceServer().jwt()`; Spring calls the decoder on every request and populates the `SecurityContext` with a `JwtAuthenticationToken`.
 
 ### Spring Boot
 1. **How does @SpringBootApplication work?** — Combines `@Configuration`, `@EnableAutoConfiguration`, and `@ComponentScan`; triggers class-path scanning and loads auto-configuration classes.
-2. **How does auto-configuration know which classes to load?** — Boot 2: `META-INF/spring.factories`; Boot 3: `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`; each entry is a configuration class loaded if conditions are met.
+2. **How does auto-configuration know which classes to load?** — From `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`; each entry is a configuration class loaded if its `@Conditional` gates are met.
 3. **What is the difference between @ConditionalOnMissingBean and @ConditionalOnClass?** — `@ConditionalOnMissingBean` backs off if a bean of the given type is already defined (allows user override); `@ConditionalOnClass` activates only when a class is present on the classpath.
 4. **How do you write a custom Spring Boot starter?** — Create an auto-configuration class annotated with `@AutoConfiguration`, register it in `AutoConfiguration.imports`, package as `my-spring-boot-autoconfigure` + `my-spring-boot-starter` (thin POM).
 5. **How does the Actuator health endpoint work?** — Aggregates all `HealthIndicator` beans; each returns `Health.up()` / `Health.down()`; the composite health is `UP` only if all indicators report `UP`; expose via `management.endpoints.web.exposure.include=health`.

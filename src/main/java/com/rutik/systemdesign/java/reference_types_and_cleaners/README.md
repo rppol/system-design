@@ -548,7 +548,7 @@ Shallow heap is the memory an object itself occupies — its header plus its own
 1. **Always pair a `PhantomReference` with a `ReferenceQueue`** — a phantom reference with no queue can never tell code anything.
 2. **Never let a `Cleaner` action reference the object being cleaned** — use a `static` nested class holding only the raw resource.
 3. **Treat `Cleaner` as a backstop, not the primary cleanup path** — always provide `close()`/`try-with-resources` too.
-4. **Never override `finalize()` in new code** — deprecated for removal since [JEP 421, JDK 18].
+4. **Keep `Cleaner` actions short and non-blocking** — every registration on one `Cleaner` shares a single daemon thread.
 5. **Store `ThreadLocal` instances in `static final` fields**, never construct them per call or per request.
 6. **Always call `threadLocal.remove()` in a `finally` block** on any thread that comes from a pool.
 7. **Don't use `WeakHashMap` as a general-purpose value cache** — use a size/TTL-bounded cache (Caffeine or Guava) instead.
@@ -562,17 +562,17 @@ Shallow heap is the memory an object itself occupies — its header plus its own
 
 ## 14. Case Study
 
-### Native Memory the Heap Dump Cannot See: A `finalize()`-Based Image Codec Leak
+### Native Memory the Heap Dump Cannot See: A GC-Gated Native Codec Leak
 
-**Scenario.** An image-processing microservice wraps a native compression codec in a Java class `NativeCodec`: the constructor allocates a ~2MB native working buffer via JNI, and a legacy `finalize()` override frees it. Under sustained load, container RSS climbs from **2GB to 28GB over 6 hours**, eventually triggering a Kubernetes OOMKill. The on-call engineer's first instinct — "check the heap" — is misleading: `-Xmx4g`, `jstat -gcutil` shows old-gen occupancy flat around 35%, and GC logs look completely healthy. Nothing about the Java heap suggests a leak, because nothing about this leak lives in the Java heap.
+**Scenario.** An image-processing microservice wraps a native compression codec in a Java class `NativeCodec`: the constructor allocates a ~2MB native working buffer via JNI, and a `Cleaner` registration frees it once the wrapper becomes unreachable. There is no `close()`. Under sustained load, container RSS climbs from **2GB to 28GB over 6 hours**, eventually triggering a Kubernetes OOMKill. The on-call engineer's first instinct — "check the heap" — is misleading: `-Xmx4g`, `jstat -gcutil` shows old-gen occupancy flat around 35%, and GC logs look completely healthy. Nothing about the Java heap suggests a leak, because nothing about this leak lives in the Java heap.
 
 ```
   RSS (container):  2GB ----------------------------------------> 28GB   (6 hours)
   Java heap (-Xmx4g): flat, old-gen ~35%, GC logs unremarkable the entire time
                                   ^
-                      the leak is native memory, freed only by finalize(),
-                      and finalize() only runs when the GC decides to run --
-                      which low heap churn means it barely does.
+                      the leak is native memory, freed only by the Cleaner,
+                      and the Cleaner fires only once the GC has proven the
+                      wrapper unreachable -- which low churn means it rarely does.
 ```
 
 #### Investigation commands
@@ -602,13 +602,13 @@ jcmd <pid> GC.class_histogram | grep NativeCodec
 # 5. Differential test: does a forced GC reclaim the native memory?
 jcmd <pid> GC.run
 #    -> RSS drops sharply right after -- proves the native memory IS tied to
-#       Java-side reachability (finalize()), not an unrelated native leak
+#       Java-side reachability, not an unrelated native leak
 
 # 6. Heap dump anyway, to confirm nothing is pinning NativeCodec in Java terms.
 jmap -dump:live,format=b,file=heap.hprof <pid>
 #    -> MAT "Path to GC Root" on a NativeCodec instance shows a healthy,
 #       short-lived reference chain -- objects ARE becoming garbage promptly;
-#       their *native* cleanup, gated on finalize(), just isn't keeping pace.
+#       their *native* cleanup, gated on the GC, just isn't keeping pace.
 ```
 
 **Read it like this.** "A class histogram measures the Java-side wrapper, not the resource it owns — so when a 32-byte object controls a 2 MB native buffer, the histogram under-reports the real footprint by a factor of 65,536 and the leak hides in plain sight."
@@ -654,19 +654,24 @@ narrative above describes this as growing "13x" while `28 / 2` is 14x — 13x is
 #### Root cause
 
 ```java
-// BROKEN: native memory freed only by finalize().
+// BROKEN: native memory released only when the GC gets around to it.
 public final class NativeCodec {
-    private final long nativeHandle;   // raw pointer from JNI malloc, ~2MB per instance
+    private static final Cleaner CLEANER = Cleaner.create();
 
-    public NativeCodec() { this.nativeHandle = nativeAlloc(); }
-
-    public byte[] compress(byte[] data) { return nativeCompress(nativeHandle, data); }
-
-    @Override
-    @SuppressWarnings("removal")
-    protected void finalize() throws Throwable {
-        try { nativeFree(nativeHandle); } finally { super.finalize(); }
+    private static final class NativeState implements Runnable {
+        private final long nativeHandle;   // JNI malloc pointer, ~2MB per instance
+        NativeState(long handle) { this.nativeHandle = handle; }
+        @Override public void run() { nativeFree(nativeHandle); }
     }
+
+    private final NativeState state;
+
+    public NativeCodec() {
+        this.state = new NativeState(nativeAlloc());
+        CLEANER.register(this, state);   // the ONLY release path -- there is no close()
+    }
+
+    public byte[] compress(byte[] data) { return nativeCompress(state.nativeHandle, data); }
 
     private static native long nativeAlloc();
     private static native void nativeFree(long handle);
@@ -674,12 +679,12 @@ public final class NativeCodec {
 }
 ```
 
-Requests allocate small, short-lived Java objects (request/response buffers), keeping Java-heap churn low — which means full GCs run only rarely. `finalize()`-guarded native buffers cannot be freed until the GC decides an object is unreachable AND the single Finalizer thread gets around to running its `finalize()`; under this workload, native buffers accumulate between infrequent GCs faster than the Finalizer thread can drain them, and RSS creeps upward with no matching signal anywhere in the Java heap.
+The registration itself is textbook-correct — a `static` nested state class holding only the raw handle. The bug is treating a backstop as the primary release path. Requests allocate small, short-lived Java objects (request/response buffers), keeping Java-heap churn low, which means collections run only rarely. A `Cleaner`-guarded native buffer cannot be freed until the GC has proven its wrapper unreachable and enqueued the phantom reference; under this workload, native buffers accumulate between infrequent collections far faster than the cleaner thread drains them, and RSS creeps upward with no matching signal anywhere in the Java heap.
 
 #### The fix
 
 ```java
-// FIXED: deterministic close() + Cleaner backstop; no finalize() anywhere.
+// FIXED: deterministic close() on every request; Cleaner demoted to a backstop.
 public final class NativeCodec implements AutoCloseable {
     private static final Cleaner CLEANER = Cleaner.create();
 

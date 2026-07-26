@@ -153,7 +153,7 @@ Two things to carry into an interview from that table. First, **the error is bou
        Same 15 steps over a 1.9× narrower range = a 1.9× finer ruler.
 ```
 
-This is why `zero_point=True` is the default in the AWQ config in the case study below. Symmetric quantization is only competitive when the tensor is genuinely zero-centred (most trained weight matrices roughly are, which is why symmetric survives at all) — the moment a distribution is skewed, as activations and post-GELU tensors are, asymmetric wins outright.
+This is why the case study below quantizes with the asymmetric `W4A16_ASYM` scheme (`symmetric=False`, i.e. a stored zero point) rather than plain `W4A16`. Symmetric quantization is only competitive when the tensor is genuinely zero-centred (most trained weight matrices roughly are, which is why symmetric survives at all) — the moment a distribution is skewed, as activations and post-GELU tensors are, asymmetric wins outright.
 
 **Group-wise quantization, and what the scales actually cost.** One `scale`/`zero_point` pair for a whole 4096×4096 matrix means a single outlier weight stretches the ruler for 16M weights. Group-wise fixes this by computing a fresh pair every `g` consecutive weights — `g=128` is the production standard. The arithmetic of that overhead:
 
@@ -1325,8 +1325,8 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **GPTQModel** | GPTQ quantization | `pip install gptqmodel`; the maintained successor to AutoGPTQ, whose last release (auto-gptq 0.7.1) is from 2024 |
-| **llm-compressor** | AWQ / GPTQ / FP8 / sparsity | `pip install llmcompressor`; vLLM-project library that absorbed AutoAWQ. **AutoAWQ (`pip install autoawq`, last release 0.2.9) is officially deprecated and unmaintained** — its last tested stack was torch 2.6.0 / transformers 4.51.3 |
+| **llm-compressor** | AWQ / GPTQ / FP8 / sparsity | `pip install llmcompressor`; the vLLM-project library and the default path to a quantized checkpoint. Recipes are lists of modifiers run by `oneshot()`; schemes come from `compressed-tensors` presets (`W4A16_ASYM`, `W8A8`, `FP8_DYNAMIC`) |
+| **GPTQModel** | GPTQ quantization | `pip install gptqmodel`; standalone GPTQ with its own kernel work, useful when you want GPTQ outside the llm-compressor recipe model |
 | **bitsandbytes** | 4-bit (NF4/FP4) and 8-bit (LLM.int8()) load-time quantization | Used by QLoRA; easy API. Note its 4-bit types are NF4/FP4 — there is no plain "int4" quant type |
 | **llama.cpp** | GGUF quantization | Best for CPU/metal |
 | **Flash Attention** | Efficient attention | pip install flash-attn |

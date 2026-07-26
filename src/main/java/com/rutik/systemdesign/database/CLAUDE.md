@@ -124,13 +124,13 @@ toggle impact).
 
 | Database | Version |
 |----------|---------|
-| PostgreSQL | 17 (2024) |
-| MySQL | 8.4 (2024 LTS) |
-| MongoDB | 7.0 (2023) |
-| Redis | 7.2 (2023) |
-| Cassandra | 4.1 (2023) |
-| Elasticsearch | 8.x (2022+) |
-| ClickHouse | 23.x+ |
+| PostgreSQL | 18 (2025) |
+| MySQL | 9.7 (2026 LTS) |
+| MongoDB | 8.3 (2026) |
+| Redis | 8.8 (2026) |
+| Cassandra | 5.0 (2024) |
+| Elasticsearch | 9.x (2025+) |
+| ClickHouse | 26.x (2026) |
 
 ---
 

@@ -109,7 +109,7 @@ The striking part is the middle column: every rung costs exactly the same 81 epo
 ### 4.4 The three NAS axes
 
 **Search space:**
-- *Cell-based* (NASNet, DARTS): search one small "cell" (a DAG of ~7 nodes over a fixed operation set — 3×3/5×5 conv, dilated conv, max/avg pool, skip, zero), then stack the discovered cell N times. Small space, transfers across depths and datasets.
+- *Cell-based* (NASNet, DARTS): search one small "cell", then stack the discovered cell N times. DARTS's cell is a DAG of 7 nodes over 8 candidate operations (separable 3×3/5×5 conv, dilated 3×3/5×5 conv, max/avg pool 3×3, skip, zero); NASNet's is B=5 blocks over a 13-operation pool. Small space, transfers across depths and datasets.
 - *Macro / whole-network*: search the entire network graph. Huge space, more expressive, far harder to search.
 
 **Search strategy:**
@@ -119,7 +119,7 @@ The striking part is the middle column: every rung costs exactly the same 81 epo
 
 **Performance estimation strategy** (the cost lever):
 - *Full training*: train each candidate to convergence. Exact, ~2000 GPU-days for RL-NAS.
-- *Weight-sharing / one-shot supernet* (ENAS, DARTS, Once-for-All): one over-parameterized network; every sub-architecture inherits shared weights, scored without per-candidate training. ~1000x cheaper; introduces rank noise.
+- *Weight-sharing / one-shot supernet* (ENAS, DARTS, Once-for-All): one over-parameterized network; every sub-architecture inherits shared weights, scored without per-candidate training. Two-to-three orders of magnitude cheaper; introduces rank noise.
 - *Proxy / low-fidelity*: fewer epochs, downscaled images, subset of data, or a learned accuracy predictor. Fast, biased.
 
 ---
@@ -249,13 +249,20 @@ import autosklearn.metrics
 def run_auto_sklearn(X_train: np.ndarray, y_train: np.ndarray) -> object:
     """
     Auto-sklearn = SMAC Bayesian optimization over sklearn pipelines,
-    warm-started by meta-learning (k-NN over dataset meta-features across
-    ~140 OpenML datasets), then a greedy post-hoc ensemble of the best runs.
+    warm-started by meta-learning (38 meta-features, k=25 nearest of 140 OpenML
+    datasets by L1 distance), then a greedy post-hoc ensemble of the best runs.
+
+    STATUS CHECK BEFORE USING: auto-sklearn's last release is 0.15.0 (Feb 2023)
+    and it is effectively unmaintained; it does not install against current
+    scikit-learn or Python. Treat it as a research baseline, not a production
+    default — AutoGluon or H2O are the maintained tabular options.
     """
     automl = autosklearn.classification.AutoSklearnClassifier(
         time_left_for_this_task=3600,     # total wall-clock budget (seconds)
         per_run_time_limit=300,           # kill any single pipeline after 5 min
-        ensemble_size=50,                 # ensemble the 50 best models found
+        # `ensemble_size=` is deprecated (removal announced for 0.16); the
+        # supported form is ensemble_kwargs.
+        ensemble_kwargs={"ensemble_size": 50},   # ensemble the 50 best models
         metric=autosklearn.metrics.roc_auc,
         resampling_strategy="cv",
         resampling_strategy_arguments={"folds": 5},
@@ -299,7 +306,9 @@ def train_fn(config: dict) -> None:
     model = build_model(config)
     for epoch in range(config["max_epochs"]):
         val_acc = train_one_epoch(model, config)
-        tune.report(val_acc=val_acc)      # value at this rung's budget
+        # Current Ray API: tune.report(metrics: dict, *, checkpoint=None).
+        # The old kwargs form tune.report(val_acc=...) no longer exists.
+        tune.report({"val_acc": val_acc})   # value at this rung's budget
 
 
 def search() -> "tune.ResultGrid":
@@ -386,7 +395,7 @@ for x_tr, y_tr, x_val, y_val in loader:
 final = {edge: ops[a.argmax()] for edge, a in arch_logits.items()}
 ```
 
-Because there is one supernet and search is ordinary gradient descent, DARTS finishes in ~1 GPU-day on CIFAR-10 vs ~2000 for RL-NAS. The catch: alpha is optimized on the val split, so the search *is* fitting the validation set — see the broken-then-fix below.
+Because there is one supernet and search is ordinary gradient descent, DARTS finishes in 1.5 GPU-days (first-order) or 4 GPU-days (second-order) on CIFAR-10, against ~2000 for RL-NAS. The catch: alpha is optimized on the val split, so the search *is* fitting the validation set — see the broken-then-fix below.
 
 **What it means.** "Instead of choosing one operation per edge, run *all* of them and blend their outputs with learnable weights — then the choice becomes a set of numbers you can differentiate, and gradient descent picks the architecture for you."
 
@@ -463,17 +472,17 @@ The same trap sinks NAS: if `alpha` (DARTS) or the controller (ENAS) is selected
 
 ## 7. Real-World Examples
 
-**NASNet (Google, 2017):** an RNN controller trained with REINFORCE searched a cell on CIFAR-10, then transferred the cell to ImageNet — ~2000 GPU-days, 82.7% top-1. It proved NAS could beat hand-designed nets but at a cost only a hyperscaler could pay.
+**NASNet (Google, 2017):** an RNN controller trained with REINFORCE searched a cell on CIFAR-10 (500 GPUs x 4 days = 2000 GPU-days), then transferred the cell to ImageNet — NASNet-A (6 @ 4032) reached 82.7% top-1 / 96.2% top-5, and 74.0% top-1 in the mobile setting. It proved NAS could beat hand-designed nets but at a cost only a hyperscaler could pay.
 
-**DARTS (2018):** differentiable search cut that to ~1 GPU-day on CIFAR-10 with comparable transfer accuracy, making NAS reproducible on a single GPU and triggering the whole one-shot NAS literature.
+**DARTS (2018):** differentiable search cut that to 1.5 GPU-days (first-order) / 4 GPU-days (second-order) on CIFAR-10, at 26.7% ImageNet mobile top-1 error against NASNet-A's 26.0% — making NAS reproducible on a single GPU and triggering the whole one-shot NAS literature.
 
-**EfficientNet (Google, 2019):** NAS found the `EfficientNet-B0` base cell (via a hardware-aware, MnasNet-style search rewarding accuracy and FLOPs), then compound scaling grew it to B1–B7 — 84.3% ImageNet top-1 with ~8x fewer FLOPs than prior SOTA.
+**EfficientNet (Google, 2019):** NAS found the `EfficientNet-B0` base cell using the MnasNet search space and its multi-objective reward `ACC(m) x [FLOPS(m)/T]^w` — note this targeted **FLOPS, not device latency**, so unlike MnasNet it was *not* hardware-aware. Compound scaling then grew B0 (77.1% top-1, 0.39B FLOPs) to B1–B7; B7 reaches 84.3% ImageNet top-1 while being **8.4x smaller in parameters and 6.1x faster at inference** than GPipe (not "8x fewer FLOPs").
 
-**MnasNet / MobileNetV3 (Google, on-device):** hardware-aware NAS put *measured Pixel-phone latency* into the reward, producing models tuned to real device kernels rather than FLOPs; MobileNetV3 mixed NAS with NetAdapt fine-tuning of layer widths.
+**MnasNet / MobileNetV3 (Google, on-device):** hardware-aware NAS put *measured* latency — big CPU core of a Pixel 1 phone, batch size 1 — into a multiplicative reward `ACC(m) x [LAT(m)/T]^w` with w = -0.07, producing models tuned to real device kernels rather than FLOPs; MobileNetV3 mixed NAS with NetAdapt fine-tuning of layer widths.
 
-**Once-for-All (MIT, 2020):** trained one elastic supernet, then extracted specialized sub-networks for phones/FPGAs/CPUs with *no retraining* — search cost amortized across ~all deployment targets, a fit for on-device vision (see §14).
+**Once-for-All (MIT, 2020):** trained one elastic supernet for ~1200 V100-hours, then extracted specialized sub-networks for phones/FPGAs/CPUs with *no retraining* (an extra ~40 GPU-hours builds the accuracy predictor) — search cost amortized across all deployment targets, a fit for on-device vision (see §14).
 
-**Auto-sklearn / AutoGluon on tabular:** AutoGluon's stacked portfolio routinely wins or places on Kaggle tabular tasks within an hour of compute, and both consistently beat non-expert manual baselines — though rarely a *strong* expert-tuned XGBoost on a single well-understood dataset.
+**Auto-sklearn / AutoGluon on tabular:** the AutoGluon-Tabular paper reports that in two popular Kaggle competitions AutoGluon beat 99% of participating data scientists after 4 hours of training, and that it outperformed TPOT, H2O, AutoWEKA, auto-sklearn and Google AutoML Tables across 50 tasks. Both consistently beat non-expert manual baselines — though rarely a *strong* expert-tuned XGBoost on a single well-understood dataset.
 
 ---
 

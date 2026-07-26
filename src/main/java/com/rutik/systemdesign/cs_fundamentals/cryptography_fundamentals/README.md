@@ -625,9 +625,9 @@ import base64
 import time
 
 # PBKDF2-HMAC: the standard library equivalent of bcrypt/Argon2
-# NIST SP 800-132 (2023): minimum 600,000 iterations for PBKDF2-HMAC-SHA256
+# OWASP Password Storage Cheat Sheet: 600,000 iterations for PBKDF2-HMAC-SHA256
 
-ITERATIONS = 600_000   # NIST 2023 minimum
+ITERATIONS = 600_000   # OWASP-recommended iteration count
 SALT_LENGTH = 32       # 256-bit random salt
 DK_LENGTH   = 32       # 256-bit derived key output
 
@@ -1149,7 +1149,7 @@ def correct_mac(message: bytes) -> bytes:
 ## 12. Interview Questions with Answers
 
 **Q: Why should you never use SHA-256 directly to store passwords?**
-SHA-256 is designed to be fast — modern GPUs compute over 1 billion SHA-256 hashes per second. An attacker who steals your password database can attempt billions of guesses per second. Password hashing requires intentional slowness (bcrypt at cost 12 takes ~200 ms, limiting an attacker to ~1,000 guesses/second on a GPU) plus a unique salt per user (defeating rainbow table precomputation). Use bcrypt, scrypt, or Argon2 — never plain hash functions — for passwords.
+SHA-256 is designed to be fast — modern GPUs compute over 1 billion SHA-256 hashes per second. An attacker who steals your password database can attempt billions of guesses per second. Password hashing requires intentional slowness and memory-hardness (Argon2id at m=19456, t=2, p=1 makes every guess allocate 19 MiB; bcrypt at cost 12 takes ~200 ms) plus a unique salt per user (defeating rainbow table precomputation). Use Argon2id, or scrypt/bcrypt where it is unavailable — never plain hash functions — for passwords.
 
 **Q: What is a timing attack and why does it affect MAC verification?**
 A timing attack exploits the fact that Python's `==` operator short-circuits — it returns False as soon as it finds the first mismatched byte. An attacker who can make millions of API calls can statistically measure response times to determine how many bytes of their guessed token match the real token, byte by byte. `hmac.compare_digest` is specifically designed to compare all bytes in constant time regardless of where (or whether) a mismatch occurs, eliminating this information leak.
@@ -1188,13 +1188,19 @@ The birthday paradox states that in a room of 23 people, there is >50% probabili
 Cryptographic security requires high-entropy randomness — unpredictability backed by physical randomness sources. Python's `random` module is a pseudo-random number generator (Mersenne Twister) — its state can be predicted from 624 outputs, making it completely inappropriate for security. `secrets.token_bytes(n)` uses the OS CSPRNG (on Linux: `getrandom()` or `/dev/urandom`; on macOS: `arc4random`) which gathers entropy from hardware events (interrupt timing, disk activity, thermal noise). Always use `secrets` for generating keys, salts, tokens, and any security-critical random values.
 
 **Q: Explain how bcrypt's cost factor provides tunable slowness.**
-bcrypt is the Blowfish cipher initialization function (expensive_key_setup) applied to a password. The cost factor (typically 10–12) determines the number of iterations: the function performs 2^cost rounds of the expensive key setup. At cost 10: ~100 ms on a modern server; cost 12: ~300–400 ms. As hardware gets faster, you increase the cost factor to maintain the desired verification time. GPUs are relatively ineffective against bcrypt because bcrypt requires large amounts of sequential memory access that GPUs cannot parallelize efficiently, unlike SHA-256.
+bcrypt is the Blowfish cipher initialization function (expensive_key_setup) applied to a password. The cost factor determines the number of iterations: the function performs 2^cost rounds of the expensive key setup, so each increment doubles the work. OWASP's floor is cost 10 (~100 ms on a modern server); cost 12 is ~300–400 ms. As hardware gets faster, you increase the cost factor to maintain the desired verification time. GPUs are relatively ineffective against bcrypt because it requires large amounts of sequential memory access that GPUs cannot parallelize efficiently, unlike SHA-256. One sharp edge: bcrypt silently truncates its input at 72 bytes, so a long passphrase or a base64-encoded pre-hash must be SHA-256'd first or everything past byte 72 contributes nothing.
 
 **Q: What is a key derivation function (KDF) and when would you use PBKDF2 vs HKDF?**
 A KDF derives one or more cryptographic keys from a source of keying material. PBKDF2 is a password-based KDF: it adds computational hardness (via iteration count) to derive a key from a low-entropy, human-chosen password — its purpose is to make brute-force expensive. HKDF (HMAC-based KDF) is for high-entropy inputs: it derives multiple cryptographically independent keys from an already-secret, high-entropy input like an ECDH shared secret. HKDF adds no computational overhead (it is fast), relying instead on the input's existing entropy. Use PBKDF2 (or bcrypt/Argon2) for passwords; use HKDF for deriving session keys from a key exchange output.
 
 **Q: What is authenticated encryption with associated data (AEAD) and what goes in the "associated data"?**
 AEAD encrypts plaintext (for confidentiality) and also authenticates associated data that is not encrypted (for integrity). Associated data is typically metadata that must be sent in plaintext but must not be tampered with — for example, a packet header, a recipient identifier, or a version number. An attacker cannot modify the associated data without breaking the authentication tag, even though the associated data is not encrypted. In AES-GCM, passing associated data as the `aad` parameter ensures that both the ciphertext and the metadata are covered by the authentication tag.
+
+**Q: Which of today's primitives survive a quantum computer, and what replaces the ones that don't?**
+Symmetric primitives survive with a doubled key size; every deployed asymmetric primitive does not. Grover's algorithm only square-roots a brute-force search, so AES-256 retains a 128-bit margin and SHA-384/512 retain theirs — that is why AES-256 is preferred over AES-128 for long-lived data. Shor's algorithm, by contrast, breaks RSA, ECDH, ECDSA and Ed25519 outright. NIST published the replacements in August 2024: FIPS 203 ML-KEM (key encapsulation), FIPS 204 ML-DSA and FIPS 205 SLH-DSA (signatures). Deployment is hybrid rather than a swap — TLS 1.3's `X25519MLKEM768` group feeds both an X25519 and an ML-KEM-768 shared secret into the KDF, so the session holds if either survives, and browsers negotiate it by default today.
+
+**Q: Why is "harvest now, decrypt later" a present-tense risk rather than a future one?**
+Because an adversary can record encrypted traffic today and decrypt it once a quantum computer exists, the exposure date is the recording date, not the decryption date. Any data whose confidentiality must outlast the 2030s — health records, state secrets, long-term contracts — is already at risk if it crosses the wire under a classical-only key exchange. This is why hybrid post-quantum key exchange shipped in browsers years ahead of post-quantum certificates: key exchange protects data retroactively, whereas a forged signature can only be used against a future connection, so signature migration can wait for the ecosystem.
 
 ---
 
@@ -1210,13 +1216,14 @@ AEAD encrypts plaintext (for confidentiality) and also authenticates associated 
 - Use SHA-256 or SHA-3-256 for integrity verification, HMAC, digital signatures
 - Never use MD5 or SHA-1 in new security code
 - For file checksums where collision resistance is not security-critical (content-addressable storage), SHA-256 or BLAKE3 are appropriate
-- Always hash passwords with bcrypt (cost 12), scrypt, or Argon2id — never with plain SHA-256
+- Always hash passwords with Argon2id (m=19456, t=2, p=1), scrypt, or bcrypt (cost >= 10) — never with plain SHA-256
 
 ### Encryption
 - Default to AES-256-GCM for symmetric encryption; it is authenticated by default
 - Generate a fresh random 96-bit (12-byte) nonce per encryption operation; store alongside ciphertext
 - Use hybrid encryption for asymmetric scenarios: RSA or ECDH to wrap an AES key, AES-GCM for data
 - Prefer X25519/Ed25519 over RSA for new systems; they are faster, have smaller keys, and are harder to mis-implement
+- Enable a hybrid post-quantum TLS group (`X25519MLKEM768`) wherever your TLS stack supports it, and default to AES-256 over AES-128 for anything with a long confidentiality horizon
 
 ### HMAC and Token Verification
 - Always use `hmac.compare_digest` for comparing MACs, tokens, and any secret values
@@ -1225,9 +1232,10 @@ AEAD encrypts plaintext (for confidentiality) and also authenticates associated 
 - Include context in HMAC inputs to prevent cross-protocol attacks: `HMAC(key, "reset_token:" + user_id + ":" + timestamp)`
 
 ### Password Storage
-- Hash with bcrypt (cost 12), scrypt, or Argon2id — each includes automatic salting
-- If restricted to stdlib: use PBKDF2-HMAC-SHA256 with 600,000+ iterations (NIST 2023) and a 32-byte random salt
-- Set bcrypt cost factor so hashing takes 100–300 ms on your hardware; re-evaluate every 18 months
+- Hash with Argon2id (m=19456, t=2, p=1), scrypt, or bcrypt (cost >= 10) — each includes automatic salting
+- If restricted to stdlib or a FIPS boundary: use PBKDF2-HMAC-SHA256 with 600,000 iterations and a 32-byte random salt
+- Tune Argon2id memory (or bcrypt cost) so verification takes 100–300 ms on your hardware; re-evaluate every 18 months
+- Pre-hash with SHA-256 before bcrypt if passwords can exceed 72 bytes — bcrypt silently ignores everything past that
 - Never store passwords in retrievable form — not encrypted, not plain SHA-256
 
 ### Randomness
@@ -1316,7 +1324,7 @@ import time
 import sqlite3
 from typing import Optional
 
-# NIST SP 800-132 (2023): minimum 600,000 iterations for PBKDF2-HMAC-SHA256
+# OWASP Password Storage Cheat Sheet: 600,000 iterations for PBKDF2-HMAC-SHA256
 PBKDF2_ITERATIONS = 600_000
 SALT_LENGTH       = 32      # 256-bit salt
 DK_LENGTH         = 32      # 256-bit derived key
@@ -1325,7 +1333,9 @@ class PasswordHasher:
     """
     Handles password hashing using PBKDF2-HMAC-SHA256.
     This is the stdlib equivalent of bcrypt when bcrypt is unavailable.
-    In production, prefer bcrypt (cost 12) or Argon2id over PBKDF2.
+    In production, prefer Argon2id (m=19456, t=2, p=1) over PBKDF2 —
+    PBKDF2 is not memory-hard, so it gives a GPU attacker the best odds
+    of the four approved options.
     """
 
     @staticmethod
@@ -1543,7 +1553,7 @@ if __name__ == "__main__":
 | Rainbow table attack | Trivially defeated by salt? | No — attackers have tables | Yes — salt prevents precomputation | Yes — embedded salt |
 | Database breach impact | All passwords immediate | Cracked in hours | Years to crack per account | Years to crack per account |
 | Automatic salt | No | No | No (caller responsible) | Yes |
-| Recommended iterations/cost | — | — | 600,000+ (NIST 2023) | 12 (OWASP 2024) |
+| Recommended iterations/cost | — | — | 600,000 (OWASP) | cost >= 10 (OWASP) |
 
 #### Discussion Questions
 

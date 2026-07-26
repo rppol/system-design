@@ -188,9 +188,9 @@ HTTP verbs map to operations:
 - `PATCH` — partial update, not necessarily idempotent
 - `DELETE` — remove resource, idempotent
 
-Status codes carry semantic meaning:
+Status codes and method semantics are defined by **RFC 9110 (HTTP Semantics, June 2022)** — the single spec that now carries the whole HTTP core:
 - `200 OK`, `201 Created`, `204 No Content`
-- `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Entity`
+- `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Content`
 - `429 Too Many Requests`
 - `500 Internal Server Error`, `503 Service Unavailable`
 
@@ -251,11 +251,12 @@ Two practical consequences. First, offset pagination is perfectly fine for a UI 
 
 **API Keys** — static tokens in headers (`X-API-Key: abc123`). Simple but not user-specific, hard to rotate per-user.
 
-**OAuth 2.0** — authorization framework. Four grant types:
-1. Authorization Code (web apps) — most secure, uses server-side token exchange
+**OAuth 2.0** — authorization framework. The grant types to build with, per **RFC 9700 / BCP 240 (OAuth 2.0 Security Best Current Practice, January 2025)**:
+1. Authorization Code + PKCE (RFC 7636) — every user-facing client, browser or native. Public clients MUST use PKCE; authorization servers MUST support it
 2. Client Credentials (service-to-service) — no user involved
-3. Implicit (deprecated) — was for SPAs, now replaced by Authorization Code + PKCE
-4. Resource Owner Password (legacy) — avoid
+3. Device Authorization Grant (RFC 8628) — TVs, CLIs, anything without a browser
+
+RFC 9700 also rules out the two grants you will still meet in older codebases: the resource owner password credentials grant **MUST NOT** be used, and clients **SHOULD NOT** use the implicit grant.
 
 ```mermaid
 flowchart LR
@@ -267,17 +268,16 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    start{"Which client type?"} -->|"web app,<br/>server-side"| ac["Authorization Code<br/>(+ PKCE)"]
+    start{"Which client type?"} -->|"web app,<br/>server-side"| ac["Authorization Code<br/>+ PKCE"]
+    start -->|"SPA or native app<br/>(public client)"| acp["Authorization Code<br/>+ PKCE (no secret)"]
     start -->|"service-to-service,<br/>no user"| cc["Client Credentials"]
-    start -->|"browser-only SPA"| im["Implicit<br/>(deprecated)"]
-    start -->|"legacy first-party app"| rop["Resource Owner<br/>Password (legacy)"]
+    start -->|"TV, console, CLI<br/>(no browser)"| dev["Device Authorization<br/>Grant (RFC 8628)"]
 
     class start mathOp
-    class ac,cc train
-    class im,rop lossN
+    class ac,acp,cc,dev train
 ```
 
-Only two of the four grant types belong in a new system today — Authorization Code (+PKCE) for user-facing apps and Client Credentials for service-to-service calls — while Implicit and Resource Owner Password are legacy paths to avoid.
+Every user-facing path lands on Authorization Code + PKCE — the client type only changes whether a client secret exists, not the grant. Client Credentials covers machine-to-machine, and the Device Authorization Grant covers input-constrained devices.
 
 **JWT (JSON Web Token)** — self-contained token with header, payload, signature. Stateless verification (server checks signature without DB lookup). Structure: `base64(header).base64(payload).signature`.
 
@@ -871,4 +871,4 @@ Redis cluster is the bottleneck. At 10x (8000 req/sec peak), shard Redis by `has
 Three layers: (1) unit tests force concurrent retries through CountDownLatch and verify only one execution, (2) integration tests with TestContainers Redis kill the Redis container mid-request and verify 503, (3) chaos tests in staging inject 500ms delays and verify exactly-once semantics under retry storms.
 
 **Q: What's the difference between idempotent and safe?**
-Safe (RFC 7231) means no side effects — GET, HEAD, OPTIONS. Idempotent means executing N times has the same effect as executing once — PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.
+Safe (RFC 9110 §9.2.1) means no side effects — GET, HEAD, OPTIONS. Idempotent means executing N times has the same effect as executing once — PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.

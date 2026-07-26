@@ -145,12 +145,12 @@ Knowledge-Question Map and a 5-week Study Plan (interview-readiness prose; no to
 
 | Technology | Version |
 |------------|---------|
-| Java | 21 (LTS) |
-| Spring Boot | 3.2+ |
-| Spring Framework | 6.1 |
-| Kafka | 3.6+ (KRaft mode) |
-| Resilience4j | 2.x |
-| Micrometer | 1.12+ |
+| Java | 25 (LTS) |
+| Spring Boot | 4.1+ |
+| Spring Framework | 7.0 |
+| Kafka | 4.3+ (KRaft-only) |
+| Resilience4j | 2.4+ |
+| Micrometer | 1.17+ |
 | OpenTelemetry | 1.x |
 
 ---
@@ -158,7 +158,7 @@ Knowledge-Question Map and a 5-week Study Plan (interview-readiness prose; no to
 ## Adding a New Backend Module
 
 1. Create `<module_name>/README.md` — 14-section template
-2. Code in Java 21 or relevant tech (YAML, Bash, etc.) — no pseudocode
+2. Code in Java 25 or relevant tech (YAML, Bash, etc.) — no pseudocode
 3. Concrete numbers everywhere; at least 1 BROKEN→FIX block in §10 and §14
 4. Update `README.md` module table
 5. Update `case_studies/README.md` cross-reference map if the module is a dependency for a case study

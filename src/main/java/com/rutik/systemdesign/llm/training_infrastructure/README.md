@@ -580,7 +580,7 @@ run several times higher.
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | **DeepSpeed** | ZeRO optimization, mixed precision | Microsoft; most widely used at scale |
-| **FSDP** | PyTorch-native ZeRO-3 | Meta; now the default choice. The original `FullyShardedDataParallel` wrapper is deprecated — new work uses FSDP2's `torch.distributed.fsdp.fully_shard` |
+| **FSDP** | PyTorch-native ZeRO-3 | Meta; the default choice. The current API is `torch.distributed.fsdp.fully_shard` (FSDP2), applied bottom-up per transformer block, with DTensor-based per-parameter shards |
 | **Megatron-LM** | Tensor/pipeline parallelism | NVIDIA; used for Megatron-Turing NLG |
 | **Nanotron** | Modern training framework | HuggingFace; clean 3D parallel support |
 | **Ray Train** | Distributed training orchestration | Abstracts cluster management |
