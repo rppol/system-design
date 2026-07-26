@@ -31,8 +31,8 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 
 1. **Multi-fidelity is the free lunch.** Cheap, noisy evaluations (fewer epochs, less data, smaller resolution) are strongly rank-correlated with expensive ones for most bad configurations. Spend little on the many, a lot on the few.
 2. **The three NAS axes are independent.** You can pair any search space with any search strategy and any estimation strategy. DARTS = (cell-based space) × (gradient strategy) × (weight-sharing estimation). NASNet = (cell-based space) × (RL strategy) × (full-training estimation).
-3. **Search cost is dominated by estimation, not strategy.** Switching from RL to gradient descent saved little; switching from full-training to weight-sharing saved ~1000x.
-4. **Random search is a brutal baseline.** On many NAS benchmarks (NAS-Bench-201), random search with early stopping is within ~1% of published SOTA NAS — always report it.
+3. **Search cost is dominated by estimation, not strategy.** Switching from RL to gradient descent saved little; switching from full-training to weight-sharing saved two-to-three orders of magnitude.
+4. **Random search is a brutal baseline.** On NAS-Bench-201, plain random search (no weight sharing) lands within 0.2–1.0 percentage points of the strongest methods — 93.70% vs REA's 93.92% on CIFAR-10, 71.04% vs 71.84% on CIFAR-100, 44.57% vs 45.54% on ImageNet16-120. Always report it.
 5. **The objective can be multi-term.** Hardware-aware NAS optimizes `accuracy − λ · latency`, so the winner is Pareto-optimal for a device, not just most accurate.
 6. **Reproducibility is fragile.** NAS gains are dominated by the search space, training tricks (cutout, more epochs, cosine LR), and random seeds. Report seeds, GPU-days, and a random-search baseline or the result is not credible.
 

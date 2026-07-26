@@ -324,7 +324,6 @@ class PhysicianIdentifier:
     SIMILARITY_THRESHOLD = 0.82
 
     def __init__(self, embedding_model_path: str) -> None:
-        # speechbrain.pretrained was renamed speechbrain.inference in SpeechBrain 1.0
         from speechbrain.inference import SpeakerRecognition
         self._encoder = SpeakerRecognition.from_hparams(source=embedding_model_path)
 
@@ -714,8 +713,7 @@ class PHIAuditLogger:
                    access_type: str, timestamp: float) -> None:
         enc_hash = hashlib.sha256(patient_encounter_id.encode()).hexdigest()[:32]
         ts_ns = int(timestamp * 1_000_000_000)
-        # datetime.utcfromtimestamp() is deprecated since Python 3.12 — use an
-        # explicitly UTC-aware datetime so the audit key never depends on TZ.
+        # Explicitly UTC-aware, so the audit key never depends on the host TZ.
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         key = f"audit/{dt.year}/{dt.month:02d}/{dt.day:02d}/{enc_hash}/{ts_ns}.json"
         from dateutil.relativedelta import relativedelta
@@ -758,7 +756,6 @@ class PHIDeletionHandler:
                               audio_deleted=0, transcripts_deleted=transcripts_deleted,
                               audit_log_sealed=len(encounters),
                               fhir_delete_requested=fhir_requests,
-                              # datetime.utcnow() is deprecated since Python 3.12
                               completed_at=datetime.now(timezone.utc))
 ```
 
@@ -787,15 +784,14 @@ Single-region (us-east-1) with multi-AZ is the default — simplest HIPAA bounda
 ## 6. Real-World Implementations
 
 > Vendor founding dates, funding rounds, user counts and acquisition prices move
-> constantly and several could not be reconfirmed against a primary source during
-> the last review — treat every such figure below as approximate and check the
-> vendor's own newsroom before quoting it. Architectural differentiators, which
-> are the reason this section exists, are more durable than the financials.
+> constantly — treat every such figure below as approximate and check the vendor's
+> own newsroom before quoting it. Architectural differentiators, which are the
+> reason this section exists, are more durable than the financials.
 
 **Abridge** (Pittsburgh; UPMC partnership):
 Academic medical center focus with NLP research pedigree from Carnegie Mellon. Deployed across UPMC. Architectural differentiator: real-time note suggestions surfaced during the encounter — the physician accepts or rejects suggestions as the visit proceeds rather than reviewing everything post-encounter.
 
-A previous version of this section stated that Abridge holds an FDA Class II SaMD clearance. **That is incorrect and has been removed.** A search of the FDA 510(k) database (openFDA `device/510k`, applicant and device-name fields) returns no records for Abridge, while control queries against the same endpoint return results normally. No ambient documentation scribe is known to hold a 510(k). This matters for the design: ambient scribes are generally positioned *outside* the device pathway precisely because a licensed clinician reviews and signs every note, which is why the physician sign-off gate in 4.4 is load-bearing rather than cosmetic. Do not assume any vendor in this category is FDA-cleared without checking the 510(k) database yourself.
+Abridge holds no FDA clearance: a search of the FDA 510(k) database (openFDA `device/510k`, applicant and device-name fields) returns no records for it, while control queries against the same endpoint return results normally. No ambient documentation scribe is known to hold a 510(k). This matters for the design: ambient scribes are generally positioned *outside* the device pathway precisely because a licensed clinician reviews and signs every note, which is why the physician sign-off gate in 4.4 is load-bearing rather than cosmetic. Do not assume any vendor in this category is FDA-cleared without checking the 510(k) database yourself.
 
 **Nuance DAX Copilot** (Microsoft, launched 2023):
 Dragon Ambient eXperience — most enterprise-deployed product with 10M+ clinical notes generated. Microsoft acquired Nuance for $19.7B in 2022 to access Dragon Medical One's 550,000 physician base. DAX integrates into Microsoft Teams for telehealth and embeds in Dragon Medical One so physicians with existing dictation workflows adopt ambient AI without behavior change. Backend: Azure OpenAI with HIPAA BAA across 300+ US hospital systems.
@@ -807,7 +803,7 @@ Consumer-friendly UI; fastest time-to-market by avoiding FDA SaMD pathway — po
 Voice-first correction interface — physician dictates note corrections: "Suki, change the diagnosis to hypertension stage 2." $70M Series D; uses Google Cloud Speech-to-Text API with HIPAA BAA. Integration with Allscripts, NextGen, and Google Cloud Healthcare API for EHR write-back.
 
 **DeepScribe** (San Francisco):
-Specializes in documentation-heavy specialties: cardiology, neurology, orthopedics. Custom specialty-specific models fine-tuned on cardiology vocabulary — cardiomegaly, ejection fraction, NYHA classification. The architectural point that transfers is specialty-scoped vocabulary fine-tuning, which is what drives acceptance rate in these specialties. Acquisition details and any specific first-draft acceptance percentage could not be reconfirmed and have been removed rather than restated.
+Specializes in documentation-heavy specialties: cardiology, neurology, orthopedics. Custom specialty-specific models fine-tuned on cardiology vocabulary — cardiomegaly, ejection fraction, NYHA classification. The architectural point that transfers is specialty-scoped vocabulary fine-tuning, which is what drives acceptance rate in these specialties.
 
 ---
 
@@ -897,7 +893,7 @@ Trace: encounter_pipeline (root span)
 
   +-- Span: soap.generation.gpt4o       (22,400ms)
   |     attrs:
-  |       gen_ai.provider.name = "azure_openai"   # renamed from gen_ai.system
+  |       gen_ai.provider.name = "azure_openai"
   |       gen_ai.request.model = "gpt-4o"
   |       gen_ai.usage.input_tokens = 4187
   |       gen_ai.usage.output_tokens = 823

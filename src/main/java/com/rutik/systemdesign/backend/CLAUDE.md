@@ -26,7 +26,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 7807 | 15 |
+| `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 9457 | 15 |
 | `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 |
 | `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 12 |
 | `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 13 |
@@ -64,7 +64,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `backend_security_owasp/` | OWASP Top 10 2021, SQL injection, CSRF, SSRF, secret management | 15 |
+| `backend_security_owasp/` | OWASP Top 10:2025, SQL injection, CSRF, SSRF, secret management | 15 |
 | `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 16 |
 
 ### Phase 7 — Testing & Quality

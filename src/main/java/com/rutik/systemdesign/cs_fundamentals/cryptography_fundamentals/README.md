@@ -948,6 +948,7 @@ The table above states the numbers; the chart is what makes the gap real: MD5/SH
 **Never use:**
 - Plain SHA-256/SHA-512 for password storage, regardless of salting
 - MD5 or SHA-1 in any new security context
+- Reversible encryption of any kind for passwords — 3DES has been disallowed by NIST for encryption since the end of 2023, but the deeper error is that a password you can decrypt is a password the attacker can decrypt
 
 ---
 

@@ -1739,12 +1739,15 @@ def fixed_check_gpu_capability() -> str:
 # 70B INT3 = 26 GB (fits on 1 A100 80GB) — seems attractive.
 # MBPP score: 55.9% (-6.5% vs FP16) — 4.5 points past the 2% SLA, i.e. 3.25x the budget.
 # Code with subtle bugs generated at a rate customers notice → increased support.
-config_int3 = {"w_bit": 3}   # too aggressive for code LLMs
+scheme_int3 = QuantizationArgs(     # too aggressive for code LLMs
+    num_bits=3, type="int", strategy="group", group_size=64, symmetric=False
+)
 
 # FIX: INT4 with FP8 KV cache is the correct production point.
 # INT4 weights (0.5 byte) + FP8 KV cache = approximately 45-50 GB for 70B.
 # MBPP: -1.3% — within SLA. FP8 KV halves cache bytes vs FP16: 2x the concurrent sequences.
-config_optimal = {"w_bit": 4, "kv_cache_dtype": "fp8"}
+scheme_optimal = "W4A16_ASYM"       # weights; KV cache is a serving-side setting:
+kv_cache_dtype = "fp8"              # passed to vLLM at load, not baked into the checkpoint
 ```
 
 **Metrics:**

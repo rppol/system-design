@@ -53,7 +53,7 @@ flowchart TD
     class LRL,LRW frozen
 ```
 
-Each backend process is a separate OS process (~5-10 MB RSS). This is different from MySQL's thread-per-connection model. PostgreSQL 14+ introduced connection pooling via `pg_hba.conf` improvements, but external poolers (PgBouncer) remain essential at scale.
+Each backend process is a separate OS process (~5-10 MB RSS). This is different from MySQL's thread-per-connection model. Cumulative statistics live in shared memory (there is no separate stats-collector process), and `io_method = worker` hands buffered reads to a pool of I/O workers so a backend does not block on every page fault. PostgreSQL still ships no built-in connection pooler, so an external pooler (PgBouncer, pgcat) remains essential at scale.
 
 ---
 
@@ -139,7 +139,7 @@ Per-table override (recommended for high-write tables):
 ALTER TABLE high_write_table SET (
     autovacuum_vacuum_scale_factor = 0.01,  -- Trigger at 1% dead tuples
     autovacuum_vacuum_threshold = 100,
-    autovacuum_vacuum_cost_delay = 2        -- ms of sleep between pages (lower = faster VACUUM)
+    autovacuum_vacuum_cost_limit = 2000     -- 10x the default toll budget per cycle
 );
 ```
 

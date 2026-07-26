@@ -36,7 +36,7 @@ Key distinction: these patterns operate at the structural level — the relation
 |---------|------|--------|---------------------|-------------|
 | Adapter | [adapter/](adapter/) | Convert one interface to another | `InputStreamReader` wrapping `InputStream`; `Arrays.asList()` | Class adapter requires multiple inheritance (use object adapter in Java) |
 | Bridge | [bridge/](bridge/) | Separate abstraction from implementation so both can vary independently | JDBC: `java.sql.Driver` (abstraction) + vendor driver (implementation) | Often mistaken for Adapter — Bridge is designed upfront; Adapter retrofits |
-| Composite | [composite/](composite/) | Treat individual objects and compositions uniformly via a tree | `java.awt.Container` + `Component`; `jakarta.faces.component.UIComponent` (was `javax.faces.*` before Jakarta EE 9) | Leaf-specific operations (e.g., `add()`) don't make sense on leaves; breaks type safety |
+| Composite | [composite/](composite/) | Treat individual objects and compositions uniformly via a tree | `java.awt.Container` + `Component`; `jakarta.faces.component.UIComponent` | Leaf-specific operations (e.g., `add()`) don't make sense on leaves; breaks type safety |
 | Decorator | [decorator/](decorator/) | Attach additional responsibilities to an object dynamically | `BufferedReader(new InputStreamReader(socket.getInputStream()))` | Deep stacking makes debugging hard; ordering of decorators affects behavior |
 | Facade | [facade/](facade/) | Provide a simplified interface to a complex subsystem | `jakarta.faces.context.FacesContext`; Spring's `JdbcTemplate` | Facade can become a God Class if it exposes too much; doesn't prevent direct subsystem access |
 | Flyweight | [flyweight/](flyweight/) | Share common state across many fine-grained objects | `Integer.valueOf()` cache (-128 to 127); `String.intern()`; `Character` cache | Intrinsic/extrinsic state boundary must be clear; thread-safety of shared state required |
@@ -102,7 +102,7 @@ Each branch asks the deciding question for one of the seven patterns; the leaf i
 | Adapter | `HandlerAdapter` in Spring MVC adapts different handler types (Controller, HttpRequestHandler, Servlet) to a single interface. |
 | Facade | `JdbcTemplate` is a Facade over JDBC (handles connection, statement, exception translation). `SLF4J` is a Facade over logging implementations. |
 | Flyweight | `Integer.valueOf(n)` for -128 to 127 returns cached instances. `String.intern()` returns the pool instance. `Charset.forName()` caches Charset instances. |
-| Composite | Spring's `CompositePropertySource`, `CompositeCacheManager`, and Actuator's `CompositeHealthContributor` all use Composite to treat collections of components as a single component. (`CompositeHealthIndicator` was the pre-2.2 name; deprecated in Boot 2.2 and removed in 2.4.) |
+| Composite | Spring's `CompositePropertySource`, `CompositeCacheManager`, and Actuator's `CompositeHealthContributor` all use Composite to treat collections of components as a single component. |
 | Bridge | JDBC is the canonical Java Bridge: the `java.sql` interfaces (`Driver`, `Connection`, `Statement`) are the abstraction; vendor-specific driver classes are the implementations. `DriverManager` is the registry/factory that binds the two, not the abstraction itself. |
 
 ---

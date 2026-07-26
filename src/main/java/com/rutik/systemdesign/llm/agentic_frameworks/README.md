@@ -569,7 +569,7 @@ A: Build custom when: (1) Your use case is simple enough that a framework adds m
 2. **Add observability on day 1** — connect LangSmith or Langfuse before writing any logic.
 3. **Pin framework versions** — breaking changes are frequent; `pip freeze` and test before upgrading.
 4. **Test framework behavior explicitly** — don't assume default chunk size, k-retrieval, or model params are optimal.
-5. **Use LCEL (not legacy chains)** in LangChain — cleaner, faster, better debugging.
+5. **Split LangChain work correctly** — LCEL for straight-line pipelines, `create_agent` on the LangGraph runtime the moment the flow loops or branches on a tool result.
 6. **Prefer typed state in LangGraph** — use TypedDict for agent state; catches bugs at development time.
 
 ---

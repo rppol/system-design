@@ -139,7 +139,7 @@ final text.
 | `subprocess.run()` | Wait for completion, capture output |
 | `subprocess.Popen` | Stream stdout/stderr, bidirectional pipe |
 | `asyncio.create_subprocess_exec` | Non-blocking subprocess in async services |
-| `subprocess.check_output()` | Legacy; prefer `run(capture_output=True, check=True)` |
+| `subprocess.run(..., check=True)` | Fail loudly on a non-zero exit code |
 
 ---
 
@@ -246,7 +246,7 @@ ny_tz = ZoneInfo("America/New_York")
 local: datetime = utc_now.astimezone(ny_tz)
 print(local)  # 2024-06-04 05:15:42.123456-04:00
 
-# Parse ISO 8601 with offset (Python 3.11+ handles full spec)
+# Parse ISO 8601 with offset (fromisoformat handles the full spec, including "Z")
 parsed: datetime = datetime.fromisoformat("2024-01-15T10:30:00+00:00")
 
 # Unix epoch

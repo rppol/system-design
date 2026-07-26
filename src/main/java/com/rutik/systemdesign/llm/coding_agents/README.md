@@ -407,7 +407,7 @@ Tests are the only available oracle — without them, the agent can't verify its
 (1) Identify all affected files via symbol search / grep. (2) Generate edits per file (parallel via subagents in Claude Code-style). (3) Validate: compile/typecheck the project; run tests. (4) On failure, fix and re-validate. The hard part is invariant preservation across files — modern agents use language servers (LSP) for cross-file symbol awareness.
 
 **Q: What is the role of Language Server Protocol (LSP) in coding agents?**
-LSP provides: find references, go to definition, completions, diagnostics — exactly what agents need to navigate large codebases. Agents like SWE-agent's recent versions integrate LSP for accurate cross-file symbol resolution. Avoids the "what does this function do?" needing a full file read.
+LSP provides: find references, go to definition, completions, diagnostics — exactly what agents need to navigate large codebases. SWE-agent integrates LSP for accurate cross-file symbol resolution. Avoids the "what does this function do?" needing a full file read.
 
 **Q: How do coding agents handle the case where an edit breaks unrelated code?**
 After edits, run the full test suite (not just tests for changed files). If unrelated tests fail, the agent must: (1) read the failing test, (2) trace why the edit affected it, (3) either undo + try different approach OR also fix the broken area. This is where multi-file coherence matters most.
