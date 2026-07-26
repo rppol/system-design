@@ -4,7 +4,9 @@
 
 Generative models learn the underlying data distribution p(x) and can sample new examples that look like they came from that distribution. Three dominant paradigms exist today: Variational Autoencoders (VAEs), Generative Adversarial Networks (GANs), and Diffusion Models. Each uses a fundamentally different principle to model and sample from complex high-dimensional distributions (images, audio, video, molecules, text).
 
-VAEs use variational inference to learn a structured latent space — they are stable to train and support smooth interpolation between concepts, but tend to produce blurry samples due to the Gaussian assumption. GANs pit a generator against a discriminator in an adversarial game, producing sharp photorealistic samples, but suffer from training instability and mode collapse. Diffusion models iteratively denoise random noise into structured data, achieving state-of-the-art image quality (Stable Diffusion, DALL-E 2, Imagen) at the cost of slower multi-step sampling.
+VAEs use variational inference to learn a structured latent space — they are stable to train and support smooth interpolation between concepts, but tend to produce blurry samples due to the Gaussian assumption. GANs pit a generator against a discriminator in an adversarial game, producing sharp photorealistic samples, but suffer from training instability and mode collapse. Diffusion models iteratively denoise random noise into structured data, and have held state-of-the-art image quality since 2022 (Stable Diffusion, DALL-E 2, Imagen) at the cost of slower multi-step sampling.
+
+Two things about that third family have changed since the original DDPM formulation, and both are worth knowing before reading the rest of this module. The U-Net backbone has largely been replaced by a **diffusion transformer (DiT)**, and the DDPM noise-prediction objective by **rectified flow / flow matching**, which learns a straight-line path between noise and data instead of a curved one: Stable Diffusion 3/3.5 (MMDiT) and FLUX.1 are both rectified-flow transformers, and the leading video models (Sora, Veo, Kling, Wan) are diffusion transformers too. The mechanics taught below — forward corruption, learned reverse, classifier-free guidance, latent-space diffusion — carry over unchanged; what differs is the network you plug in and the shape of the path between noise and data.
 
 ---
 
@@ -16,7 +18,7 @@ GAN analogy: a GAN is a counterfeiter (generator) vs a detective (discriminator)
 
 Diffusion model analogy: a diffusion model is like learning to restore a photo from a sandstorm — you add sand (noise) step by step, then train a network to remove it step by step. At inference, you start with pure sand (Gaussian noise) and denoise for 1000 steps.
 
-Key insight: the field has converged on diffusion models for image generation due to their superior sample quality, stability, and controllability (classifier-free guidance). GANs are still dominant for real-time applications (single forward pass) and video generation. VAEs remain valuable for structured latent space applications (interpolation, editing, downstream tasks).
+Key insight: the field has converged on diffusion (and its flow-matching successors) for image *and* video generation, due to superior sample quality, training stability, and controllability (classifier-free guidance). GANs survive where a single forward pass is non-negotiable — real-time synthesis, super-resolution, and increasingly as adversarially-distilled one- or few-step students of a diffusion teacher — but they lost video generation outright: Sora, Veo and Kling are diffusion transformers. VAEs remain valuable for structured latent space applications (interpolation, editing, downstream tasks) and, crucially, as the encoder that every latent diffusion model runs inside.
 
 ---
 
@@ -175,6 +177,8 @@ The 2.24 nats of information the latent carries are simply not worth 8.97 nats o
 | LDM (Latent Diffusion) | Diffuse in VAE latent space (Stable Diffusion) | 50 in latent space |
 | Score Matching (SGM) | Score-based continuous SDE | Variable |
 | Consistency Models | Single-step distillation from diffusion | 1-2 |
+| DiT | Transformer backbone replacing the U-Net | Unchanged (backbone swap) |
+| Rectified Flow / Flow Matching | Straight-line noise-to-data path (SD3/3.5, FLUX.1) | 20-50 |
 
 **FID Score (Frechet Inception Distance)**: measures quality and diversity of generated images by comparing statistics of Inception-v3 feature distributions between real and generated sets. Lower FID = better. Computed as: `FID = ||mu_r - mu_g||^2 + Tr(Sigma_r + Sigma_g - 2*(Sigma_r * Sigma_g)^{1/2})`. Requires ~50K generated and real samples for reliable estimates. A FID of 0 would mean identical distributions; DDPM achieves FID ~3.17 on CIFAR-10 (compare: GAN ~4-10).
 
@@ -758,13 +762,13 @@ def detect_mode_collapse(
 
 ## 7. Real-World Examples
 
-**Stable Diffusion (Latent Diffusion Model)**: compresses images to 64x64 latent space via a VQ-VAE (8x compression from 512x512), then runs DDPM in that latent space. This reduces diffusion compute by 64x vs pixel-space diffusion. Uses a CLIP text encoder for conditioning and classifier-free guidance at scale 7.5. Generates 512x512 images in ~2 seconds on a consumer RTX 3090 (50 DDIM steps).
+**Stable Diffusion (Latent Diffusion Model)**: compresses a 512x512 image to a 64x64x4 latent with a KL-regularized autoencoder (the `kl-f8` VAE — the LDM paper offers both VQ- and KL-regularized variants and Stable Diffusion ships the KL one), then runs diffusion in that latent space. The 8x spatial downsample per side means 64x fewer latent positions than pixel-space diffusion. Uses a CLIP text encoder for conditioning and classifier-free guidance at scale 7.5. Generates 512x512 images in ~2 seconds on a consumer RTX 3090 (50 DDIM steps). SD 3/3.5 keeps the latent-space idea but swaps the U-Net for an MMDiT transformer and the DDPM objective for rectified flow.
 
 **StyleGAN2 for face generation**: achieves FID ~2.84 on FFHQ (70K face dataset). Uses progressive growing, style injection, and path length regularization to avoid mode collapse and achieve photorealistic diversity. Deployed by NVIDIA for avatar creation and data augmentation in medical imaging (synthetic face data for privacy-preserving datasets).
 
 **VQ-VAE-2 for hierarchical image generation**: combines a discrete latent codebook (VQ-VAE) with an autoregressive prior (PixelCNN). Achieves diverse high-resolution generation without adversarial training or diffusion. The codebook approach enables discrete manipulation of image structure (changing hairstyle without changing identity).
 
-**VAE for drug discovery (Molecular VAE)**: encodes molecule SMILES strings into a continuous latent space, enabling gradient-based optimization of molecular properties. Novartis and Insilico Medicine use this to explore chemical space efficiently — latent space interpolation between two molecules produces valid intermediate compounds in ~80% of cases vs ~5% for random exploration.
+**VAE for drug discovery (Molecular VAE)**: encodes molecule SMILES strings into a continuous latent space, enabling gradient-based optimization of molecular properties (Gomez-Bombarelli et al., 2018). The practical catch, reported in that work and everything after it, is decoder validity: a plain SMILES VAE decodes many latent points to strings that are not valid molecules at all, which is why grammar- and graph-constrained variants (GrammarVAE, JT-VAE) followed. Generative models are now standard in industrial chemical-space exploration — Insilico Medicine's published pipelines are the best-documented case — but treat any specific "% valid interpolations" number as model- and dataset-specific rather than a property of VAEs.
 
 ---
 
@@ -779,13 +783,16 @@ def detect_mode_collapse(
 | DDIM | Excellent | SOTA | Excellent | Medium (50 steps) | Moderate |
 | LDM | Excellent | SOTA | Excellent | Medium (50 latent) | Good with CFG |
 
-| FID Score Comparison (CIFAR-10 32x32) | FID |
+| FID Score Comparison (CIFAR-10 32x32, unconditional) | FID |
 |---------------------------------------|-----|
 | Real data | 0 |
+| StyleGAN2-ADA | ~2.9 |
 | DDPM | ~3.2 |
-| StyleGAN2 | ~4.4 |
+| StyleGAN2 (no ADA) | ~8.3 |
 | NVAE (hierarchical VAE) | ~23.5 |
 | Standard VAE | ~60-100 |
+
+FID is only comparable within one dataset, resolution, and sample-count protocol — the same StyleGAN2 that scores ~8.3 unconditionally on CIFAR-10 scores ~2.84 on FFHQ at 1024x1024. Never quote a FID without saying which of the three it belongs to.
 
 ---
 
@@ -882,7 +889,7 @@ A diffusion model U-Net was implemented but the timestep t embedding was silentl
 | `accelerate` (HuggingFace) | Multi-GPU/TPU training for diffusion models |
 | CLIP (`openai/clip`) | Text encoder for conditional generation |
 | `einops` | Tensor reshaping for attention in U-Net |
-| `xformers` | Memory-efficient attention for diffusion U-Net (reduces VRAM 40-60%) |
+| `xformers` | Memory-efficient attention for diffusion U-Net (reduces VRAM 40-60%); largely superseded by PyTorch 2.x built-in `scaled_dot_product_attention` |
 
 Key `diffusers` APIs:
 ```python
@@ -926,7 +933,7 @@ DDPM (Denoising Diffusion Probabilistic Models) uses a stochastic reverse proces
 Posterior collapse occurs when the encoder learns to output the prior (mu=0, sigma=1) and the decoder learns to generate good reconstructions by ignoring z entirely. This happens because in early training, a powerful decoder can minimize reconstruction loss without using z, while the KL term pushes toward the prior. Once the decoder learns to ignore z, the encoder has no incentive to encode useful information. Fixes: (1) KL annealing — linearly increase KL weight from 0 to 1 over early training epochs, forcing reconstruction to dominate first; (2) Free bits — set a minimum KL per dimension (e.g., 0.5 nats) below which KL is not penalized; (3) Use a weaker decoder architecture that forces reliance on z; (4) Reduce decoder capacity for text VAEs (LSTM decoder).
 
 **Q: What is the difference between a VAE and a VQ-VAE?**
-A standard VAE uses a continuous Gaussian latent space. A VQ-VAE (Vector Quantized VAE) uses a discrete latent space: the encoder maps inputs to a sequence of discrete codes from a learned codebook (typically 512-8192 codes). The closest codebook vector to each encoder output is used (straight-through estimator for gradient). VQ-VAE avoids posterior collapse (discrete codes cannot collapse to a prior), produces sharper reconstructions than Gaussian VAEs, and enables powerful autoregressive priors (PixelCNN, Transformer) over the discrete codes. Stable Diffusion uses a VQ-VAE variant to compress images to a latent space before diffusion. The limitation is that training is more complex (codebook collapse — unused codes — requires commitment loss and exponential moving average updates).
+A standard VAE uses a continuous Gaussian latent space. A VQ-VAE (Vector Quantized VAE) uses a discrete latent space: the encoder maps inputs to a sequence of discrete codes from a learned codebook (typically 512-8192 codes). The closest codebook vector to each encoder output is used (straight-through estimator for gradient). VQ-VAE avoids posterior collapse (discrete codes cannot collapse to a prior), produces sharper reconstructions than Gaussian VAEs, and enables powerful autoregressive priors (PixelCNN, Transformer) over the discrete codes. Latent diffusion models compress images with an autoencoder before diffusing, and the LDM paper provides both VQ- and KL-regularized variants — Stable Diffusion ships the KL-regularized `kl-f8` one, so it is a continuous latent, not a codebook. The limitation is that training is more complex (codebook collapse — unused codes — requires commitment loss and exponential moving average updates).
 
 **Q: How would you diagnose and fix training instability in a GAN?**
 Symptoms: oscillating loss, mode collapse (D detects fakes trivially), loss of one network going to zero. Diagnosis steps: (1) Plot discriminator accuracy on real and fake — should be ~50-75% during healthy training; >95% means G is failing, <55% means D is too weak. (2) Check gradient norms for both networks. (3) Visualize generated samples every N steps to catch collapse early. Fixes: (1) Reduce discriminator LR or increase generator LR; (2) Switch to WGAN-GP for stable Lipschitz enforcement; (3) Add feature matching loss (generator minimizes difference in discriminator intermediate features, not just final output); (4) Use mini-batch discrimination to prevent mode collapse; (5) Add label smoothing to discriminator targets (real label = 0.9, not 1.0).
@@ -941,7 +948,7 @@ VAEs blur because the pixel-wise Gaussian/MSE reconstruction loss rewards predic
 Inception Score scores only generated images, while FID compares generated and real feature distributions, so FID catches samples that miss the real distribution. IS feeds samples to Inception-v3 and rewards low-entropy per-image predictions (each image clearly one class) plus high marginal entropy (many classes represented) — but because it never looks at real data, a generator can score well while producing unrealistic images or missing modes. FID fits Gaussians to Inception features of ~50K real and ~50K generated images and measures their Frechet distance, penalizing both quality and diversity mismatches; lower is better and 0 means identical distributions. FID is the field standard because it correlates better with human judgment and is sensitive to mode dropping.
 
 **Q: Why are GANs harder to train than diffusion models?**
-GANs optimize a min-max adversarial game with no single loss to monitor, so the two networks can oscillate, collapse to a few modes, or have the discriminator saturate to zero gradient. There is no fixed target: the generator chases a moving discriminator, and equilibrium (D=0.5 everywhere) is a saddle point that gradient descent does not reliably reach. Diffusion models instead train on a stable, stationary regression objective — predict the noise added at a random timestep via MSE — which has a well-defined minimum and no adversary, giving smooth convergence. The tradeoff is inference cost: a GAN generates in one forward pass while diffusion needs 20-1000 denoising steps, so GANs remain preferred for real-time and video generation.
+GANs optimize a min-max adversarial game with no single loss to monitor, so the two networks can oscillate, collapse to a few modes, or have the discriminator saturate to zero gradient. There is no fixed target: the generator chases a moving discriminator, and equilibrium (D=0.5 everywhere) is a saddle point that gradient descent does not reliably reach. Diffusion models instead train on a stable, stationary regression objective — predict the noise added at a random timestep via MSE — which has a well-defined minimum and no adversary, giving smooth convergence. The tradeoff is inference cost: a GAN generates in one forward pass while diffusion needs 20-1000 denoising steps, so GANs still win where latency is hard-capped (real-time synthesis, super-resolution) — though the usual answer now is to distill a diffusion model down to one or a few steps rather than train a GAN from scratch, and video generation went to diffusion transformers outright.
 
 **Q: Why can the DDPM forward process be computed in closed form, and why does it matter for training?**
 Because composing Gaussian noising steps stays Gaussian, x_t can be sampled directly from x_0 as sqrt(alpha_bar_t)*x_0 + sqrt(1-alpha_bar_t)*eps in one shot. Here alpha_bar_t is the cumulative product of (1-beta_s) up to t, so you never have to run the t-step Markov chain during training. This matters because it makes training cheap and parallel: for each image you sample a random timestep t, jump straight to x_t, and train the U-Net to predict the injected noise eps with MSE. Without the closed form you would need up to 1000 sequential steps per training example, making diffusion training infeasible.
@@ -1235,12 +1242,17 @@ def verify_hipaa_compliance(
 betas = torch.linspace(1e-4, 0.02, T)   # linear schedule
 # At T=1000 with linear schedule: by timestep 800, images are 94% noise
 # Network wastes capacity on near-Gaussian denoising; fine details lost
-# FID = 52 with linear vs 24 with cosine schedule
+# In THIS setup (512x512 grayscale X-rays): FID 52 linear vs 24 cosine.
+# The size of that gap is dataset- and resolution-specific, not a constant:
+# Nichol & Dhariwal introduced the cosine schedule on 64x64 ImageNet and
+# CIFAR-10, where the linear schedule is far less harmful. Higher resolution
+# = worse linear schedule, because more of the image is redundant low-frequency
+# signal that linear noising destroys early.
 
 # FIX: cosine beta schedule (Nichol & Dhariwal 2021) is smoother
 # Most timesteps are spent in the medium-noise regime where structure forms
 betas, alphas_cumprod = cosine_beta_schedule(T=1000)
-# FID drops from 52 to 24; clinical fidelity pass rate from 61% to 83%
+# Here: FID drops from 52 to 24; clinical fidelity pass rate from 61% to 83%
 ```
 
 **Pitfall 2 - Generating synthetic images without HIPAA compliance check memorises rare training images:**
@@ -1293,7 +1305,7 @@ X_train_augmented = X_train_real + synthetic_images   # synthetic added to train
 
 **What is the DDPM loss function and what does it measure?** DDPM is trained with a simplified denoising objective: the mean squared error between the true noise epsilon added to the image at timestep t and the noise predicted by the U-Net given the noisy image and timestep. The original DDPM paper (Ho et al. 2020) showed this simplified objective outperforms predicting x0 directly or the variational lower bound, because it weights all noise levels equally rather than over-weighting the low-noise regime. For chest X-rays, the training loss stabilises around 0.04 MSE after 200 epochs, corresponding to the network becoming accurate at predicting both the coarse structure (learned at high noise levels) and fine anatomical detail (learned at low noise levels).
 
-**Why does DDIM sampling achieve 20x speedup over DDPM sampling without retraining?** DDPM sampling requires T=1000 sequential denoising steps, each requiring a U-Net forward pass (~180ms on A100 for 512x512 images) - total 3 minutes per image. DDIM (Denoising Diffusion Implicit Models, Song et al. 2021) replaces the stochastic reverse process with a deterministic ODE that allows larger step sizes. By selecting 50 representative timesteps from the T=1000 schedule and using the DDIM update rule (which does not add stochastic noise at each step), high-quality images are generated in 50 steps (1.8 seconds per image). The quality tradeoff is minimal: FID increases from 24.1 (DDPM, 1000 steps) to 26.4 (DDIM, 50 steps).
+**Why does DDIM sampling achieve 20x speedup over DDPM sampling without retraining?** DDPM sampling requires T=1000 sequential denoising steps, each requiring a U-Net forward pass (~36ms per image on an A100 at 512x512 when batched) - total ~36 seconds per image. DDIM (Denoising Diffusion Implicit Models, Song et al. 2021) replaces the stochastic reverse process with a deterministic ODE that allows larger step sizes. By selecting 50 representative timesteps from the T=1000 schedule and using the DDIM update rule (which does not add stochastic noise at each step), high-quality images are generated in 50 steps (1.8 seconds per image). The quality tradeoff is minimal: FID increases from 24.1 (DDPM, 1000 steps) to 26.4 (DDIM, 50 steps).
 
 **How do you ensure HIPAA compliance when generating synthetic medical images?** HIPAA Safe Harbor requires that generated images contain no information from which an individual could reasonably be re-identified. The primary risk is memorisation: a DDPM with insufficient training data can interpolate close to rare training images, potentially reconstructing identifying features. Mitigation: (1) apply differential privacy training (DP-SGD with epsilon=3.0, delta=1e-5) which adds calibrated noise during training to prevent memorisation; (2) post-generation nearest-neighbour distance check using inception features - reject any synthetic image within distance threshold of a real training image; (3) radiologist review of 20% random sample to confirm images do not appear to depict a specific patient. These three layers collectively reduce re-identification risk below HIPAA's "very small risk" standard.
 

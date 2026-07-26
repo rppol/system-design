@@ -16,7 +16,7 @@ Mental model: the network learns a stack of overlapping templates. At each layer
 
 Why it matters: CNNs power image classification, object detection, semantic segmentation, medical imaging, autonomous driving perception, and satellite imagery analysis. Transfer learning from ImageNet-pretrained CNNs is the most cost-effective starting point for the vast majority of vision tasks.
 
-Key insight: parameter sharing is the core efficiency gain. A 3x3 filter applied to a 224x224 image has 9 parameters and covers the entire image in a single layer, versus a fully connected layer needing 224x224x9 = ~450K parameters for the same spatial coverage.
+Key insight: parameter sharing is the core efficiency gain. A 3x3 filter applied to a 224x224 image has 9 parameters and covers the entire image in a single layer, versus a locally connected (unshared-weight) layer needing 224x224x9 = ~450K parameters for the same spatial coverage — and a genuinely fully connected layer needing far more still (see Section 3).
 
 ---
 
@@ -157,7 +157,9 @@ The 4x activation drop is per pooling layer and it compounds: four such stages c
 | MobileNetV2 | 3.4M | 72.0% | 2018 | Depthwise separable convs |
 | EfficientNet-B0 | 5.3M | 77.1% | 2019 | Compound scaling |
 | EfficientNet-B7 | 66M | 84.4% | 2019 | Scaled up B0 |
-| ConvNeXt-L | 197M | 87.5% | 2022 | Modernized ResNet |
+| ConvNeXt-L | 197M | 84.3% | 2022 | Modernized ResNet |
+
+Two rows need a caveat. AlexNet's 63.3% is the paper's best ILSVRC-2012 entry — a 7-model ensemble pretrained on the ImageNet-2011 release; a single AlexNet scores 56.5% in torchvision. ConvNeXt-L's frequently quoted 87.5% requires ImageNet-22K pretraining evaluated at 384x384 (101 GFLOPs); its ImageNet-1K 224x224 result is the 84.3% shown. Every other row is a single model trained on ImageNet-1K only.
 
 **Standard Convolution vs Depthwise Separable Convolution (MobileNet):**
 
@@ -508,13 +510,13 @@ L3 and L6 are the identical layer — `3x3`, stride 1 — yet L3 adds 8 pixels o
 
 ## 7. Real-World Examples
 
-**ResNet-50 inference timing**: ~4ms on V100 GPU for a batch of 1, ~23ms on modern CPU (Intel Xeon). Used at Google, Meta, and Amazon for image moderation and product classification serving millions of requests per day.
+**ResNet-50 inference timing** (illustrative order of magnitude, not a published benchmark): single-digit milliseconds per image on a datacentre GPU at batch 1, tens of milliseconds on a server CPU. ImageNet-pretrained ResNet-50 is a standard backbone for large-scale image moderation and product classification; the specific latencies you get depend on precision, batch size and runtime, so measure on your own hardware.
 
-**Transfer learning at minimal compute**: fine-tuning ResNet-50 on a 10-class custom dataset of 5,000 images takes ~20 minutes on a single GPU (freeze backbone, train head for 10 epochs) and achieves 85-92% accuracy. Training from scratch on the same dataset achieves ~60%.
+**Transfer learning at minimal compute** (illustrative): fine-tuning ResNet-50 on a 10-class custom dataset of a few thousand images takes on the order of tens of minutes on a single GPU (freeze backbone, train head for 10 epochs), and typically lands far above what training the same architecture from scratch on that dataset achieves. The gap, not the absolute numbers, is the point.
 
-**MobileNet in production**: deployed on-device for Android/iOS camera features. MobileNetV3-Small has 2.5M parameters and runs inference in ~5ms on a Qualcomm Snapdragon 888.
+**MobileNet in production**: deployed on-device for Android/iOS camera features. MobileNetV3-Small has 2.54M parameters and 0.06 GFLOPs (torchvision `MobileNet_V3_Small_Weights`), which is what puts it in the single-digit-millisecond range on a modern mobile SoC.
 
-**EfficientNet for medical imaging**: EfficientNet-B4 trained on diabetic retinopathy images achieved 0.971 AUROC, surpassing human ophthalmologists (0.957). The compound scaling allowed matching accuracy with 3x fewer parameters than comparable ResNets.
+**EfficientNet for medical imaging** (illustrative): EfficientNet backbones are widely used for retinal-image grading and similar diagnostic classification, where compound scaling lets a B3/B4 match ResNet-level accuracy at roughly a third of the parameters. Reported model-versus-clinician AUROC comparisons are highly dataset- and protocol-specific — cite the individual study rather than a generic figure.
 
 ---
 
@@ -589,13 +591,13 @@ def correct_predict(model, image):
 ```
 
 **War story 2 — Forgetting 1x1 projection in ResNet shortcut:**
-A custom ResNet implementation added a 3x3 conv that doubled channels (e.g., 64 -> 128) but kept the identity shortcut. Adding a (128,) output to a (64,) identity is a shape mismatch — PyTorch raised RuntimeError. Less obviously, if the developer silently zero-padded the shortcut instead of using a learned 1x1 projection, gradient flow through the shortcut was correct but the shortcut carried no learned information about the channel-doubled features, degrading accuracy by 3-5% on CIFAR-10.
+A custom ResNet implementation added a 3x3 conv that doubled channels (e.g., 64 -> 128) but kept the identity shortcut. Adding a (128,) output to a (64,) identity is a shape mismatch — PyTorch raised RuntimeError. The fix is either a learned 1x1 projection (option B) or zero-padding the extra channels (option A). Both train; the ResNet paper measured only 0.51pp of ImageNet top-1 between them (25.03% vs 24.52% error for ResNet-34) and used the parameter-free zero-padding option for all of its CIFAR-10 experiments, so treat the projection as a small refinement, not a correctness requirement.
 
 **War story 3 — Batch size of 1 with BatchNorm during training:**
-A segmentation model was trained with batch size 1 (each sample was a large 4K medical image). BatchNorm with batch size 1 has undefined variance (dividing by n-1=0). PyTorch does not error but produces NaN outputs. Training loss immediately became NaN. Fix: switch to GroupNorm (num_groups=32) or InstanceNorm which do not depend on the batch dimension.
+A segmentation model was trained with batch size 1 (each sample was a large 4K medical image). Note what does *not* happen: PyTorch normalizes with the biased variance (`torch.var(input, correction=0)`), so there is no divide-by-`n-1`, and for a 4D input the statistics are pooled over N*H*W, so a single large image still gives plenty of values per channel and no error is raised. What actually breaks is that each step's statistics come from one image, so BatchNorm degenerates into per-sample InstanceNorm, the running averages it accumulates never match the batch statistics used in training, and validation accuracy collapses the moment `model.eval()` switches to them. (`F.batch_norm` does raise `ValueError: Expected more than 1 value per channel when training` — but only when N*H*W == 1, e.g. BatchNorm1d on a single sample or a 1x1 feature map.) Fix: switch to GroupNorm (num_groups=32) or InstanceNorm, which compute statistics inside one sample and behave identically at train and eval time.
 
 **War story 4 — Transfer learning with frozen BN running stats:**
-Fine-tuning a ResNet-50 on a thermal infrared dataset (very different pixel statistics from RGB ImageNet). BatchNorm running stats were from ImageNet (RGB mean ~128, std ~50). With frozen BN layers (common in Phase 1 transfer learning), the normalization applied completely wrong statistics to IR images. Fix: set `bn.track_running_stats = False` or use `model.train()` for BN layers even during head-only training on domain-shifted data.
+Fine-tuning a ResNet-50 on a thermal infrared dataset (very different pixel statistics from RGB ImageNet). BatchNorm running stats are running means and variances of the network's own internal activations, estimated over ImageNet images; IR inputs drive those activations to a different distribution entirely. With BN kept in eval mode (common in Phase 1 transfer learning), every layer was normalized by statistics that no longer described its inputs. Fix: leave BN modules in training mode (`bn.train()`) so they track the new domain's activation statistics, or recalibrate the running stats with a forward-only pass over the target data before evaluating.
 
 ---
 
@@ -604,7 +606,7 @@ Fine-tuning a ResNet-50 on a thermal infrared dataset (very different pixel stat
 | Tool | Purpose |
 |------|---------|
 | `torchvision.models` | Pretrained ResNet, EfficientNet, MobileNet, ViT |
-| `timm` (PyTorch Image Models) | 500+ pretrained vision models, easy fine-tuning |
+| `timm` (PyTorch Image Models) | 700+ pretrained vision models, easy fine-tuning |
 | `albumentations` | Fast image augmentation (RandomCrop, CLAHE, GridDistortion) |
 | `torchvision.transforms.v2` | Modern transform pipeline with consistent API |
 | `torch.utils.data.DataLoader` | Multi-process data loading; num_workers=4, pin_memory=True |
@@ -636,7 +638,7 @@ Without skip connections, very deep networks (>20 layers) achieve worse training
 Max pooling takes the maximum value in each window, retaining the strongest activation and providing spatial invariance. Average pooling takes the mean, producing smoother, more spatially spread representations. Max pooling is preferred in early-to-mid network stages for feature detection. Global average pooling (GAP) is the standard replacement for flattening before classification heads (used in ResNet, EfficientNet) — it reduces each feature map to a single scalar, providing extreme translation invariance and cutting parameters dramatically vs flattening.
 
 **Q: Explain depthwise separable convolutions and their computational advantage.**
-A standard 3x3 conv over C_in channels with C_out filters costs K^2 * C_in * C_out multiply-adds per output location. Depthwise separable convolution splits this into depthwise (one 3x3 filter per input channel: K^2 * C_in cost) followed by pointwise (1x1 conv mixing channels: C_in * C_out cost). Total: K^2 * C_in + C_in * C_out. Reduction factor vs standard: 1/(1/C_out + 1/K^2). For K=3 and C_out=256, this is ~8.9x cheaper. MobileNet uses this throughout, achieving competitive accuracy at ~8x fewer multiply-adds.
+A standard 3x3 conv over C_in channels with C_out filters costs K^2 * C_in * C_out multiply-adds per output location. Depthwise separable convolution splits this into depthwise (one 3x3 filter per input channel: K^2 * C_in cost) followed by pointwise (1x1 conv mixing channels: C_in * C_out cost). Total: K^2 * C_in + C_in * C_out. Reduction factor vs standard: 1/(1/C_out + 1/K^2). For K=3 and C_out=256, this is 1/(1/256 + 1/9) = ~8.7x cheaper, approaching the 9x ceiling set by K^2 as C_out grows. MobileNet uses this throughout, achieving competitive accuracy at ~8x fewer multiply-adds.
 
 **Q: What is transfer learning and why is it effective for computer vision?**
 Transfer learning initializes a model with weights pretrained on a large dataset (usually ImageNet, 1.2M images, 1000 classes) then fine-tunes on a target dataset. It is effective because low-level features (edges, textures) learned from ImageNet are universal across vision tasks. Fine-tuning on 1,000 domain-specific images with a pretrained backbone achieves accuracy that would require 100,000+ images when training from scratch. The typical workflow: freeze backbone, train new head for several epochs, then gradually unfreeze later backbone layers with 10x lower learning rate.
@@ -645,7 +647,7 @@ Transfer learning initializes a model with weights pretrained on a large dataset
 The receptive field (RF) of a neuron is the region of the input image that can influence its output. For a single 3x3 conv with stride 1, RF=3x3. Stacking K such layers gives RF = 2K+1. For deep networks to make semantic predictions (e.g., "is there a car?"), they need RFs large enough to encompass the object. Larger kernels (7x7) or strided convolutions grow the RF faster, at the cost of more parameters or spatial resolution. Dilated (atrous) convolutions grow RF without losing spatial resolution, commonly used in semantic segmentation (DeepLab).
 
 **Q: How does EfficientNet's compound scaling differ from ad-hoc scaling?**
-Prior work scaled models by increasing one dimension independently: wider (more channels), deeper (more layers), or higher resolution. Compound scaling jointly increases all three dimensions with a fixed ratio (depth *= alpha^phi, width *= beta^phi, resolution *= gamma^phi) subject to alpha * beta^2 * gamma^2 ~= 2 (doubling FLOPs per phi increment). This respects the constraint that depth and resolution are more beneficial together — a deeper network benefits more from higher resolution input. Empirically, EfficientNet-B7 achieves better accuracy than ResNet-152 with 8.4x fewer parameters.
+Prior work scaled models by increasing one dimension independently: wider (more channels), deeper (more layers), or higher resolution. Compound scaling jointly increases all three dimensions with a fixed ratio (depth *= alpha^phi, width *= beta^phi, resolution *= gamma^phi) subject to alpha * beta^2 * gamma^2 ~= 2 (doubling FLOPs per phi increment). This respects the constraint that depth and resolution are more beneficial together — a deeper network benefits more from higher resolution input. Empirically, EfficientNet-B7 reaches 84.3% top-1 while being 8.4x smaller and 6.1x faster than GPipe, the prior state of the art, and EfficientNet-B1 beats ResNet-152 with 7.6x fewer parameters.
 
 **Q: What is data augmentation and what are the standard techniques for image classification?**
 Data augmentation applies random transformations to training images to increase dataset effective size and teach the model invariances. Standard: RandomHorizontalFlip (50% probability), RandomCrop (crop 224x224 from 256x256 image), ColorJitter (brightness/contrast/saturation/hue perturbation). Advanced: Mixup (linear interpolation of two image-label pairs), CutMix (paste random patch from one image into another), RandAugment (randomly sample from 14 operations). Augmentation is applied only to training data, not validation/test data.
@@ -663,7 +665,7 @@ Three main strategies: (1) Weighted loss — set per-class weights inversely pro
 BatchNorm subtracts the batch mean, which cancels any constant bias the preceding convolution adds, making that bias a redundant parameter. The BN layer has its own learnable shift (beta) that fully absorbs the offset role, so keeping a conv bias just wastes parameters and adds a no-op term to the gradient. This is why every reference ResNet/EfficientNet implementation uses `bias=False` on conv layers that feed a normalization layer; only convs with no following BN keep their bias.
 
 **Q: What goes wrong when you use BatchNorm with a batch size of 1, and what should you use instead?**
-BatchNorm with batch size 1 has undefined variance (dividing by n-1=0) and silently produces NaN activations, so training loss becomes NaN immediately. This bites teams training on large images (4K medical scans) where only one sample fits in memory. The fix is a normalization that does not depend on the batch dimension: GroupNorm (num_groups=32) or InstanceNorm, both of which compute statistics within a single sample and behave identically at any batch size.
+BatchNorm degenerates into per-sample InstanceNorm, so its running averages never match the training statistics and eval-mode accuracy collapses. PyTorch normalizes with the biased variance, so nothing divides by n-1 and nothing goes NaN; with a 4D input the statistics pool over N*H*W, so one large image raises no error at all (the `Expected more than 1 value per channel when training` ValueError fires only when N*H*W equals 1). The fix is a normalization that does not depend on the batch dimension: GroupNorm (num_groups=32) or InstanceNorm, both of which compute statistics within a single sample and behave identically at train and eval time.
 
 **Q: Why does forgetting to apply the training-time normalization at inference cause a catastrophic accuracy drop?**
 The model learned to expect normalized inputs, so raw pixel values are wildly out of distribution and accuracy can collapse from 76% to 35%. A ResNet trained on ImageNet-normalized tensors (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) has calibrated its first-layer filters to that input scale; feeding [0,255] or even [0,1] tensors shifts every activation far outside the trained range. Always apply the exact same Resize/CenterCrop/Normalize transform at inference that was used in training.
@@ -685,14 +687,14 @@ Dilated convolutions insert gaps between kernel taps to enlarge the receptive fi
 - For transfer learning, use differential learning rates: backbone LR = head LR / 10 to avoid catastrophically forgetting pretrained features.
 - Monitor validation loss and accuracy per epoch; implement early stopping with patience=10 to prevent wasted compute.
 - Use mixed precision (`torch.amp.autocast` + `GradScaler`) — ResNet-50 training saves ~40% memory and runs ~1.7x faster with negligible accuracy impact.
-- Do not set `bias=False` in conv layers before BatchNorm — BN subtracts the mean, making the conv bias redundant. Setting `bias=False` is the standard and correct approach (saves parameters, avoids redundant term).
-- Preferred augmentation library: `albumentations` for speed (10-50x faster than PIL-based transforms for complex augmentations).
+- Always set `bias=False` in conv layers that feed a BatchNorm — BN subtracts the mean, so the conv bias is redundant and BN's own beta absorbs the offset. This is the standard in every reference ResNet/EfficientNet implementation.
+- Preferred augmentation library: `albumentations` for speed — its published benchmarks show a ~1.4x median throughput win over torchvision and Pillow in a full DataLoader pipeline, and roughly 4-6x on isolated transforms measured in the micro-benchmark.
 
 ---
 
 ## 14. Case Study
 
-**Scenario:** A consumer electronics manufacturer (12 production lines, 2.4M units/month) needs automated visual defect detection on PCB assemblies. Each PCB goes through 6 inspection points; human inspectors miss 8.2% of defects at the current 1.8-second inspection window, causing $14M/year in field failures. The target: EfficientNet-B3 transfer learning achieving precision >= 0.96, recall >= 0.94 on 8 defect classes, with inference time under 120ms per image (1920x1080, downsampled to 300x300) on edge GPUs (NVIDIA Jetson AGX Xavier, 32 TOPS).
+**Scenario** (illustrative composite — the company, the volumes, the dollar figures and the measured metrics below are constructed to exercise the design, not drawn from a published deployment)**:** A consumer electronics manufacturer (12 production lines, 2.4M units/month) needs automated visual defect detection on PCB assemblies. Each PCB goes through 6 inspection points; human inspectors miss 8.2% of defects at the current 1.8-second inspection window, causing $14M/year in field failures. The target: EfficientNet-B3 transfer learning achieving precision >= 0.96, recall >= 0.94 on 8 defect classes, with inference time under 120ms per image (1920x1080, downsampled to 300x300) on edge GPUs (NVIDIA Jetson AGX Xavier, 32 TOPS).
 
 **Architecture:**
 ```
@@ -721,7 +723,7 @@ Multi-class + Multi-label Output
 Edge Inference (TensorRT INT8, Jetson AGX Xavier)
   Inference: 85ms p50, 112ms p99
   Model size: 18 MB (INT8 quantised)
-  Throughput: 11 boards/second per camera
+  Throughput: 11 boards/second per camera at p50 (8.9/s if sized off p99)
 ```
 
 **Step-by-step implementation:**
@@ -937,21 +939,27 @@ preds = (probs >= thresholds).float()   # thresholds tuned per-class
 
 **Pitfall 3 - INT8 quantisation without calibration causes precision degradation on defect-heavy images:**
 ```python
-# BROKEN: use default TensorRT INT8 quantisation without calibration dataset
-# TensorRT uses random or uniform calibration; defect-specific activation ranges are missed
-engine = builder.build_engine(network, config)   # no calibration
+# BROKEN: enable INT8 without supplying a calibrator
+# With no IInt8Calibrator attached, TensorRT has no observed activation ranges to
+# derive per-tensor scales from; defect-specific dynamic range is missed
+import tensorrt as trt
+config.set_flag(trt.BuilderFlag.INT8)            # no config.int8_calibrator set
+plan = builder.build_serialized_network(network, config)
+# (builder.build_engine(network, config) was removed in TensorRT 10 - the current
+#  entry points are build_serialized_network / build_engine_with_config)
 # Solder bridge detection precision drops from 0.97 to 0.71 post-quantisation
 
 # FIX: use INT8 calibration with representative defect images (min 500 per class)
-from tensorrt import IInt8EntropyCalibrator2
-class PCBCalibrator(IInt8EntropyCalibrator2):
+class PCBCalibrator(trt.IInt8EntropyCalibrator2):
     def __init__(self, calibration_images: list[np.ndarray], cache_file: str) -> None:
+        trt.IInt8EntropyCalibrator2.__init__(self)   # REQUIRED: pybind11 base init
         self.images = calibration_images   # 500 images covering all defect types
         self.cache_file = cache_file
         self.current_index = 0
     # get_batch_size, get_batch, read/write_calibration_cache methods...
 
 config.int8_calibrator = PCBCalibrator(calib_images, "pcb_calib.cache")
+plan = builder.build_serialized_network(network, config)
 # Post-calibration precision: 0.96 (< 1% drop from fp32)
 ```
 
@@ -972,14 +980,14 @@ config.int8_calibrator = PCBCalibrator(calib_images, "pcb_calib.cache")
 
 **Interview discussion points:**
 
-**Why is EfficientNet-B3 chosen over ResNet-50 or VGG-16 for edge deployment on Jetson?** EfficientNet-B3 achieves 82.1% ImageNet top-1 accuracy with 12M parameters and 1.8 GFLOPS, versus ResNet-50's 80.4% with 25M parameters and 4.1 GFLOPS. The compound scaling (width, depth, resolution simultaneously) gives better accuracy-to-compute trade-off. On Jetson AGX Xavier with 32 TOPS, EfficientNet-B3 achieves 85ms inference versus 148ms for ResNet-50, fitting within the 120ms SLA. VGG-16's 138M parameters would require 512 MB model storage and 2.1 GFLOPS - infeasible for edge deployment.
+**Why is EfficientNet-B3 chosen over ResNet-50 or VGG-16 for edge deployment on Jetson?** EfficientNet-B3 achieves 82.0% ImageNet top-1 accuracy with 12.2M parameters and 1.83 GFLOPS, versus ResNet-50's 76.1% with 25.6M parameters and 4.09 GFLOPS (torchvision `IMAGENET1K_V1` weights for both). The compound scaling (width, depth, resolution simultaneously) gives a better accuracy-to-compute trade-off on paper. VGG-16 is the clear non-starter: 138.4M parameters, a 528 MB fp32 checkpoint and 15.5 GFLOPS. The caveat worth stating in an interview is that FLOPs are a weak proxy for edge latency — EfficientNet's depthwise convolutions are memory-bandwidth bound and often run slower per FLOP than ResNet's dense convolutions on a given accelerator, so the choice must be confirmed by measuring both under TensorRT on the target Jetson, not inferred from the GFLOPS column.
 
 **What is compound scaling in EfficientNet and why does it outperform scaling a single dimension?** EfficientNet's compound scaling multiplies width (number of channels), depth (number of layers), and input resolution simultaneously by factors derived from a grid search, controlled by a single compound coefficient phi. Scaling only depth (adding more layers) hits diminishing returns past a certain depth; scaling only width fails to capture long-range spatial dependencies. Compound scaling maintains the aspect ratio of the feature map across all dimensions, achieving better accuracy per FLOP because wider, deeper, and higher-resolution networks are balanced against each other rather than creating bottlenecks in one dimension.
 
 **How does BCEWithLogitsLoss with positive weights handle the class imbalance between "ok" and rare defects?** In the training set, 82% of images are labelled "ok" (no defects), while "pcb_crack" appears in 0.4% of images. Without reweighting, the model minimises loss by predicting "ok" always, achieving near-zero loss on the majority class. BCEWithLogitsLoss pos_weight = (n_negative / n_positive) per class assigns a weight of (0.996 / 0.004) = 249 to the "pcb_crack" class, making each false negative for pcb_crack 249x more costly in the loss than a false negative for the majority "ok" class. This forces the model to attend to rare defect signals.
 
-**What is catastrophic forgetting and why does the two-phase training prevent it?** Catastrophic forgetting occurs when a neural network rapidly overwrites previously learned representations when exposed to a new task. When fine-tuning EfficientNet-B3 on 8K PCB images with a high backbone LR (3e-4), the ImageNet-learned edge and texture detectors in early layers are overwritten within 2 epochs because the gradient signal from 8K samples is insufficient to maintain 12M parameter values. Phase 1 (frozen backbone) trains only the 1.6M head parameters on the new task, allowing the head to learn PCB-relevant feature combinations from the existing backbone. Phase 2 uses 10x lower LR on the backbone to make small, targeted adjustments to domain-specific features (solder texture, PCB green colour) without destroying the general visual primitives.
+**What is catastrophic forgetting and why does the two-phase training prevent it?** Catastrophic forgetting occurs when a neural network rapidly overwrites previously learned representations when exposed to a new task. When fine-tuning EfficientNet-B3 on 8K PCB images with a high backbone LR (3e-4), the ImageNet-learned edge and texture detectors in early layers are overwritten within 2 epochs because the gradient signal from 8K samples is insufficient to maintain 12M parameter values. Phase 1 (frozen backbone) trains only the ~0.79M head parameters (1536x512 + 512 = 786,944, plus 1,024 for BatchNorm1d(512), plus 512x8 + 8 = 4,104) on the new task, allowing the head to learn PCB-relevant feature combinations from the existing backbone. Phase 2 uses 10x lower LR on the backbone to make small, targeted adjustments to domain-specific features (solder texture, PCB green colour) without destroying the general visual primitives.
 
-**How do you validate that INT8 quantisation does not degrade safety-critical defect recall?** Run the INT8 model and the fp32 model on a held-out test set of 10,000 images, computing per-class precision and recall. For safety-critical classes (solder_bridge, missing_component), set a maximum acceptable precision/recall drop of 2pp versus fp32. If any class exceeds this threshold, use mixed precision quantisation: INT8 for early and middle layers (low sensitivity), fp16 for the final two convolutional blocks and classifier head (high sensitivity). NVIDIA TensorRT supports layer-by-layer precision assignment, typically achieving <0.5% per-class accuracy drop with mixed precision versus full INT8's 3-5% drop on defect-heavy classes.
+**How do you validate that INT8 quantisation does not degrade safety-critical defect recall?** Run the INT8 model and the fp32 model on a held-out test set of 10,000 images, computing per-class precision and recall. For safety-critical classes (solder_bridge, missing_component), set a maximum acceptable precision/recall drop of 2pp versus fp32. If any class exceeds this threshold, use mixed precision quantisation: INT8 for early and middle layers (low sensitivity), fp16 for the final two convolutional blocks and classifier head (high sensitivity). NVIDIA TensorRT supports layer-by-layer precision assignment, so sensitive layers can be pinned to fp16 while the rest stay INT8; the accuracy recovered is model- and data-specific, so measure it per class rather than assuming a fixed recovery.
 
 **What data augmentation strategy is most effective for PCB defect detection and why?** Geometric augmentations (rotation +-15 degrees, horizontal flip) simulate PCB orientation variations on the conveyor belt. Colour jitter (brightness +-20%, contrast +-20%) simulates lighting variations across production lines and times of day. MixUp and CutMix are avoided because combining two PCB images creates unrealistic composite boards that confuse defect localisation. Mosaic augmentation (combining 4 images into one) from YOLOv5 is effective if using a detection head rather than classification, as it increases the effective number of defect instances per training step. Cutout (random rectangular masking) improves robustness to partial occlusion from surface contaminants.

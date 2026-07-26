@@ -41,9 +41,9 @@ Mental model: think of churn as a funnel — many customers are at mild risk (ch
 
 **Training data:** 24 months of history × 5M customers per month = ~60M customer-month records. With 100 features per record: ~600GB training dataset in Parquet (compressed).
 
-**Label distribution:** 8% churn = 400k positive labels per month → significant class imbalance (1:11.5 ratio). Class weight or SMOTE required.
+**Label distribution:** 8% churn = 400k positive labels per month → significant class imbalance (1:11.5 ratio). Handle with class weighting (`scale_pos_weight`) plus threshold tuning — not synthetic oversampling, which does not help strong GBDTs (see §11).
 
-**Intervention budget:** if marketing can contact 100k customers per day at $2/contact (email + SMS) = $200k/day. At 8% monthly churn rate and ~5% lift from intervention for responsive customers, the expected avoided LTV loss is $200k × 0.05 × $150 LTV = $1.5M/month at 100k contacts/day.
+**Intervention budget:** marketing contacts up to 100k customers per day. Delivery cost for an email + SMS touch is cents, not dollars — budget ~$0.05/contact → $5k/day, ~$150k/month (the retention *offer* itself is the expensive part and is capped separately, see §4.3). Business case: of the ~400k customers who churn each month, a 5% incremental retention lift among those the campaign reaches saves ~20k customers/month; at $150 LTV that is ~$3M/month of avoided LTV loss against ~$150k/month of contact spend. (Note the units: multiply *customers* by LTV, never dollars by dollars.)
 
 **Feature computation:** RFM features (recency, frequency, monetary) require rolling 30-day and 90-day aggregations. At 5M customers × 90-day window from raw event tables = 450M row-scan per feature. On a 50-node Spark cluster: ~45 minutes for full feature computation.
 
@@ -190,7 +190,12 @@ def train_with_temporal_cv(
     n_splits: int = 5,
 ) -> tuple[lgb.LGBMClassifier, list[float]]:
     """Walk-forward validation: each fold trains on past months, tests on next month."""
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=30 * 24 * 3600)  # 30-day gap
+    # sklearn's `gap` counts SAMPLES, not seconds — it drops that many rows from the
+    # end of each train split. Sort rows by `timestamps` first, then convert the
+    # desired 30-day purge into a row count for this dataset.
+    rows_per_day = len(X) / max((timestamps.max() - timestamps.min()).days, 1)
+    gap_rows = int(30 * rows_per_day)
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap_rows)  # ~30-day purge
     auc_scores = []
 
     for train_idx, val_idx in tscv.split(X):
@@ -293,7 +298,7 @@ flowchart TD
 Alternatives considered: (a) logistic regression with L2 regularization — too weak for 150-feature non-linear interactions (5pp lower AUC in CV); (b) neural network (3-layer MLP) — 0.5pp higher AUC than GBDT but 8x longer training time, no native SHAP support, and requires careful hyperparameter tuning that the team lacks infra for. GBDT wins: best accuracy/latency/interpretability balance for 5M-row tabular dataset. See [Algorithm Selection](../../model_selection_and_algorithm_choice/README.md).
 
 **Decision 2: T-learner uplift model over direct churn score ranking.**
-Using only churn probability to rank intervention targets wastes budget on "sure churners" who will churn regardless of the offer, and on "sure retainers" who would stay anyway. T-learner identifies "persuadable" customers — those whose retention probability meaningfully increases when offered an incentive. In AB test validation, T-learner uplift targeting improved intervention ROI by 31% over churn-score-only targeting (same budget, fewer contacts, more retained customers).
+Using only churn probability to rank intervention targets wastes budget on "sure churners" who will churn regardless of the offer, and on "sure retainers" who would stay anyway. T-learner identifies "persuadable" customers — those whose retention probability meaningfully increases when offered an incentive. The design target is that a holdback A/B test shows materially better intervention ROI than churn-score-only targeting at the same budget (fewer contacts, more retained customers); the size of that gain is specific to each business and must be measured, not assumed.
 
 **Decision 3: Temporal cross-validation over random k-fold.**
 Random k-fold inflated AUC to 0.91 vs temporal CV's 0.84. The 7pp inflation comes from future data leaking into training folds. All model selection and hyperparameter tuning is done on temporal CV. The final model is trained on all data up to T-90d and evaluated on the most recent 90-day holdout.
@@ -327,13 +332,15 @@ xychart-beta
 
 ## 6. Real-World Implementations
 
-**Spotify (subscriber churn):** uses a two-stage model — first stage predicts churn probability using RFM + listening behavior features; second stage predicts which discount (3-month trial, 20% off, 1 free month) maximizes retention probability per customer. The second stage is a multi-armed bandit (contextual bandits with LinUCB) that learns discount effectiveness from A/B test outcomes in real time. Batch scoring runs nightly; results feed into Braze (marketing automation) for campaign execution.
+*Only the first paragraph of each entry below describes something the company or vendor has documented publicly; the second half of each describes the general industry pattern this case study builds on and should not be read as a disclosure of that company's internal stack.*
 
-**Netflix (subscriber churn):** monitors churn risk implicitly via engagement metrics (hours watched per week below X → early warning signal). Rather than a pure binary churn model, Netflix uses a survival model (discrete-time hazard model) that outputs a weekly hazard rate per subscriber — the probability of cancellation in the next 7 days given they haven't yet cancelled. This enables intervention timing optimization (intervene when hazard rate spikes, not before or after).
+**Subscription streaming (two-stage churn + offer selection):** the widely used pattern is a two-stage model — first stage predicts churn probability using RFM + engagement features; second stage predicts which discount (3-month trial, 20% off, 1 free month) maximizes retention probability per customer. The second stage is naturally a contextual bandit (LinUCB is the canonical starting point, from Li et al. 2010) that learns offer effectiveness from live outcomes. Marketing-automation platforms ship this off the shelf: Braze, for example, publicly documents contextual-bandit "AI decisioning" and predictive-churn features, so the scoring job can run nightly and hand the ranked list to the campaign tool.
 
-**Duolingo (user churn / lapse):** built "streak shield" — a product feature whose effectiveness is evaluated using churn uplift modeling. The model identifies which users have a high churn risk and a high predicted sensitivity to streak restoration. Only those users see the streak shield offer. This is a textbook application of uplift modeling where the product feature itself is the treatment. Duolingo reported 2x improvement in DAU from this approach vs showing streak shield to all churning users.
+**Survival framing instead of a binary label:** for subscription businesses where cancellation timing matters, a discrete-time hazard (survival) model outputs a weekly hazard rate per subscriber — the probability of cancellation in the next 7 days given they have not yet cancelled — rather than a single 30-day binary label. This enables intervention *timing* optimization (intervene when the hazard rate spikes) and handles right-censoring correctly, which a binary classifier cannot. This is a well-established churn-modelling technique in the marketing-analytics literature; the major streaming services have not published their internal churn architectures.
 
-**HubSpot (B2B SaaS churn):** uses feature importance from a churn model to drive a "health score" product — a customer success dashboard that shows each account's top 5 churn risk factors. The model runs weekly. CSMs (customer success managers) use the health score to prioritize outreach. Health score is not the model's raw probability but a normalized 0-100 index derived from SHAP values, designed to be interpretable to non-technical users.
+**Duolingo (streaks and retention):** Duolingo has publicly described its growth work as a Markov model of user states, with the streak — and the forgiving "streak freeze" — as its most important retention lever. Its published figures are a 21% improvement in current-user retention rate over roughly four years alongside a 4.5x DAU increase (Jorge Mazal, "How Duolingo reignited user growth"). The uplift-modelling extension used in this case study — targeting a streak-repair offer only at users who are both at risk *and* predicted to respond, rather than at every lapsing user — is the natural next step of that pattern, but Duolingo has not published an uplift-targeted version or a DAU number attributable to one.
+
+**B2B SaaS health scores:** HubSpot ships a customer health score in its Customer Success workspace: a configurable 0-100 index that adds points for positive signals (completed meetings, high NPS) and subtracts for risk signals (unresolved tickets, low NPS), surfaced on the record for CSMs to prioritize outreach. Note that the shipped feature is criteria-based scoring, not a churn model's output — the ML version described in this case study replaces the hand-set criteria with model-derived factors (mean absolute SHAP for the global drivers, per-account SHAP for the top risk factors), normalized to the same 0-100 scale so it stays legible to non-technical users.
 
 ---
 
@@ -344,7 +351,7 @@ xychart-beta
 | Feature computation | PySpark on EMR | dbt + BigQuery | Spark handles 450M row-scans in 45min; dbt is too slow for this volume |
 | Feature store (offline) | S3 Parquet + DeltaLake | Feast | DeltaLake provides ACID, time-travel for PIT joins; Feast adds operational complexity |
 | Feature store (online) | Redis Cluster | DynamoDB | Redis p99 < 1ms for feature lookup; DynamoDB ~5ms |
-| Model training | LightGBM | XGBoost, sklearn | LightGBM is 3x faster than XGBoost; leaf-wise splits better for high-cardinality features |
+| Model training | LightGBM | XGBoost, sklearn | LightGBM's histogram + leaf-wise growth trains fast on wide tabular data; XGBoost's `hist` tree method has largely closed the old gap, so benchmark both rather than assuming a fixed multiple |
 | Calibration | scikit-learn IsotonicRegression | netcal | sklearn sufficient; isotonic > platt for our distribution |
 | Uplift model | EconML T-Learner | CausalML DoublyRobust | T-learner simpler; sufficient data for separate models per treatment arm |
 | Serving/storage | DynamoDB (TTL 48h) | Redis | DynamoDB managed, cheaper for daily batch results; Redis reserved for real-time serving |
@@ -400,19 +407,21 @@ Resolution: retrain T-learner with corrected treatment assignment labels; valida
 
 ## 9. Common Pitfalls & War Stories
 
-**Pitfall 1 — Training on future data (PIT violation), Unnamed Subscription Company, 2021.**
+*These five are illustrative composites — failure modes that recur across churn programs, written up with representative numbers so the mechanics are concrete. They are not reports of specific, publicly documented incidents, and the company labels and years are scene-setting only. Where a figure is given, treat it as a teaching magnitude, not a measured result.*
+
+**Pitfall 1 — Training on future data (PIT violation), subscription business.**
 Engineering team built churn model using "current" RFM features — the features were computed as of today, not as of the label date. A customer who churned on March 15 had March 16-31 purchase data in their feature vector (because the feature was computed on April 1 when training data was assembled). The model learned "customers who churned have 0 March purchases *after* they churned." AUC was 0.97 offline, 0.61 in production. Root cause discovered 3 months and 2 retrains later via a careful PIT audit. See [Feature Store](./cross_cutting/feature_store_and_point_in_time_correctness.md).
 
-**Pitfall 2 — Optimizing AUC, ignoring calibration, HubSpot (approximation), 2020.**
+**Pitfall 2 — Optimizing AUC, ignoring calibration, B2B SaaS customer-success program.**
 A churn model with 0.90 AUC was deployed to drive customer success outreach. CSMs were told to prioritize accounts with > 60% churn probability. The model was miscalibrated: the 60% threshold corresponded to 85% actual churn risk. 40% of genuinely high-risk accounts were scored below the threshold and missed. The health score product had only 0.62 real-world recall at the operational threshold. Resolution: isotonic calibration, threshold re-derivation at 40% calibrated probability to maintain 80% recall. See [Calibration](./cross_cutting/model_calibration_and_thresholding.md).
 
-**Pitfall 3 — Sending retention offers to "sure churners," Telecom (anonymized), 2019.**
-Marketing team ranked customers by churn probability and sent offers to the top 10% (highest risk). Post-campaign analysis showed that 60% of the targeted customers had already decided to churn before the offer arrived and were unaffected. The offer was effectively free money for customers who would have churned regardless. The missing piece was uplift: the model identified who was at risk but not who was responsive. Switching to T-learner uplift targeting for the same budget improved retained-customer count by 38%. Net revenue impact: $2.1M/year.
+**Pitfall 3 — Sending retention offers to "sure churners," telecom subscription business.**
+Marketing team ranked customers by churn probability and sent offers to the top 10% (highest risk). Post-campaign analysis showed that a large share of the targeted customers had already decided to churn before the offer arrived and were unaffected. The offer was effectively free money for customers who would have churned regardless. The missing piece was uplift: the model identified who was at risk but not who was responsive. Switching to T-learner uplift targeting at the same budget shifts spend onto the persuadable segment; the size of the improvement is entirely business-specific and only a holdback experiment can quantify it, so do not carry a headline percentage or dollar figure from someone else's campaign into your own business case.
 
-**Pitfall 4 — Random k-fold cross-validation inflates AUC by 7pp, Gaming Company (anonymized), 2022.**
+**Pitfall 4 — Random k-fold cross-validation inflates AUC by 7pp, free-to-play games publisher.**
 Data science team reported 0.91 AUC for a player churn model. Production performance after deployment: 0.84 AUC. The gap was traced to random k-fold CV: players who churned in January appeared in both February training folds and January test folds (because random shuffle doesn't respect time). The model learned future behavioral signals. Re-evaluation with temporal CV showed 0.84 AUC — matching production. All subsequent models at the company now use `TimeSeriesSplit` as default.
 
-**Pitfall 5 — Feedback loop degradation, e-commerce platform (anonymized), 2023.**
+**Pitfall 5 — Feedback loop degradation, e-commerce platform.**
 The churn model drove suppression of marketing emails: customers with p(churn) > 0.6 received no marketing. Six months later, the model's AUC dropped from 0.84 to 0.77. Root cause: high-risk customers stopped receiving emails → reduced email engagement signals in future training data → the model lost one of its most predictive features (email open rate in last 30 days). The feedback loop silently degraded the model's feature set. Resolution: maintain a holdout group of high-risk customers who receive emails regardless of model score; use this group to preserve feature signal integrity. See [Drift Monitoring](./cross_cutting/drift_monitoring_and_retraining.md).
 
 ---
@@ -421,13 +430,18 @@ The churn model drove suppression of marketing emails: customers with p(churn) >
 
 **Primary bottleneck: Spark feature computation.**
 
-Feature computation scales linearly with customer base (N) and quadratically with lookback window (W in days) for rolling aggregates:
+Feature computation scales linearly with customer base (N) and linearly with lookback window (W in days) for rolling aggregates — each additional day of window is one more day of events to touch, not a pairwise comparison:
 
 ```
-Compute time ≈ N × W × (features per window) / (cluster throughput)
-= 5M × 90 × 1.5 features/day / (50 nodes × 90M rows/node-minute)
+Compute time ≈ N × W × (aggregate passes) / (cluster throughput)
+= 5M customers × 90 days × 1.5 passes = 675M row-touches
+÷ (50 nodes × 0.3M row-touches/node-minute = 15M/minute)
 ≈ 45 minutes
 ```
+
+The 0.3M row-touches/node-minute figure is a measured shuffle-and-aggregate rate for this
+job on m5.4xlarge, not a raw scan rate — a narrow columnar scan is one to two orders of
+magnitude faster, so always calibrate this constant against your own job before sizing.
 
 **Scaling formula:**
 - If N doubles to 10M: compute time ≈ 90 minutes (add 25 nodes to stay within 45-minute budget, or use columnar format with predicate pushdown to reduce effective scan by 40%).
@@ -445,7 +459,7 @@ Compute time ≈ N × W × (features per window) / (cluster throughput)
 | S3 storage (prediction logs) | 60GB/month | ~$1.40/month |
 | **Total** | | **~$100/day (~$3,000/month)** |
 
-At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. Model operating cost: $3k/month. ROI: 1000:1.
+At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. The ML pipeline itself costs $3k/month — a 1000:1 ratio on that line alone, but that is the wrong denominator to quote to finance. Add the ~$150k/month of contact delivery from §2 and the retention offers themselves (capped at $5 per high-risk customer, §4.3) and the campaign-level return lands around 15-20:1. Quote the campaign number, not the infrastructure number.
 
 ---
 
@@ -467,7 +481,7 @@ Two things degrade: (a) calibration — the model's predicted probabilities are 
 Holdback A/B experiment: 10% of high-risk customers continue to receive the previous model's interventions; 90% receive the new model's interventions. Measure 90-day renewal rate delta (treatment - holdback). Multiply by: (high_risk_customers_count × avg_subscription_revenue × retention_probability_delta) to get monthly revenue impact. This converts model AUC into a dollar figure. Secondary measurement: cost per retained customer (intervention spend / retained customers) — the new model should reduce this.
 
 **Q: How do you handle class imbalance in churn prediction (8% positive rate)?**
-Scale_pos_weight = negative_count / positive_count = 11.5 in LightGBM (equivalent to class-weighted cross-entropy). This is the simplest and most effective approach for GBDT — it adjusts the leaf weight update to penalize FN more than FP. Do not oversample (SMOTE) for GBDT — it does not improve GBDT performance and increases training time by 10x. Do not undersample — it discards 90% of negative examples and wastes data. After training with scale_pos_weight, check calibration (ECE) — scale_pos_weight affects the raw output scale, so isotonic calibration is always needed post-training.
+Scale_pos_weight = negative_count / positive_count = 11.5 in LightGBM (equivalent to class-weighted cross-entropy). This is the simplest and most effective approach for GBDT — it adjusts the leaf weight update to penalize FN more than FP. Do not reach for SMOTE here: the systematic benchmark by Elor and Averbuch-Elor, "To SMOTE, or not to SMOTE?" (arXiv:2201.08528), found that oversampling improves weak learners (MLP, SVM, decision tree) but gives no meaningful gain over strong boosted-tree classifiers, and that simply tuning the decision threshold matches balancing at lower compute cost. It also inflates the training set, and the synthetic positives distort calibration — which this system depends on. Do not undersample either — it discards most negative examples and wastes data. After training with scale_pos_weight, check calibration (ECE) — scale_pos_weight affects the raw output scale, so isotonic calibration is always needed post-training.
 
 **Q: Walk me through how SHAP is used in this system beyond model debugging.**
 SHAP serves three roles: (1) model validation — mean absolute SHAP confirms that the top features (recency, frequency, CSAT score) are business-sensible and that the model has not learned spurious signals; (2) personalized messaging — the top 2 SHAP features for each customer drive the retention message copy: "We noticed you haven't logged in recently (recency=45 days)" vs "We saw you had a recent billing issue (payment_failure=2)"; (3) fairness audit — SHAP values by demographic group ensure no protected attribute is implicitly encoded (e.g., if zip_code SHAP is high, it may be a proxy for ethnicity in markets with residential segregation). See [Responsible AI](./cross_cutting/responsible_ai_fairness_and_explainability.md).
@@ -482,4 +496,4 @@ Four-gate champion/challenger pipeline: (1) data quality gate — validate train
 Three things change: (1) retraining cadence drops to quarterly (minimum label lag for fresh labels = 90 days); (2) survival analysis becomes more attractive — a Cox Proportional Hazards model over a 90-day time-to-event is more informative than a 90-day binary label, and can produce weekly hazard rates that enable earlier intervention; (3) feature window alignment changes — features computed for 90-day labels should use a 90-day lookback (RFM over 90 days, not 30 days) to capture the full behavioral arc leading to the longer-horizon churn event. Monitoring becomes label-lagged: input PSI and score distribution remain real-time; AUC is only computable quarterly.
 
 **Q: How do you present the churn model to a business stakeholder who doesn't understand ML?**
-Focus on business outcomes, not model mechanics. Present: (1) "The model identifies customers who are likely to cancel in the next 30 days, ranked by risk level." (2) "It explains the top 3 reasons for each customer — so marketing can send a personalized message rather than a generic offer." (3) "In our A/B test, using the model for targeting saved $X in churn losses vs using no model." Avoid: AUC, feature importance charts, cross-validation splits. If they ask how it works: "The model learns from 24 months of behavioral patterns — how often customers log in, whether they've had billing issues, how their usage has changed — to predict who is most at risk." Frame every metric in business terms: AUC 0.84 → "The model correctly identifies 84% of churners in the top 15% of the risk score distribution."
+Focus on business outcomes, not model mechanics. Present: (1) "The model identifies customers who are likely to cancel in the next 30 days, ranked by risk level." (2) "It explains the top 3 reasons for each customer — so marketing can send a personalized message rather than a generic offer." (3) "In our A/B test, using the model for targeting saved $X in churn losses vs using no model." Avoid: AUC, feature importance charts, cross-validation splits. If they ask how it works: "The model learns from 24 months of behavioral patterns — how often customers log in, whether they've had billing issues, how their usage has changed — to predict who is most at risk." Frame every metric in business terms — but translate it correctly. AUC 0.84 does *not* mean "84% of churners are in the top 15% of the score"; it means that given one churner and one non-churner, the model ranks the churner as riskier 84% of the time. The business-legible number is the capture rate read off the lift curve: "if you contact the riskiest 15% of customers, you reach roughly N% of everyone who will actually cancel" — compute N from your own holdout rather than inferring it from AUC.

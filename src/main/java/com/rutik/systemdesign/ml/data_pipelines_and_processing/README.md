@@ -20,7 +20,7 @@ One-line analogy: a data pipeline for ML is a factory assembly line where the fi
 
 Mental model: think of each pipeline stage as a pure function with a typed contract. Given the same inputs and code version, the output must be identical. Lazy evaluation (Spark) means the computation graph is built before any data moves — the optimizer can rearrange steps, which is why the API looks like SQL.
 
-Why it matters: 80% of ML project time is data work. A pipeline that silently corrupts features (wrong join key, timezone drift, training/serving skew) will make a model that scores well in offline evaluation and fails in production — the worst class of failure because it is invisible at deployment time.
+Why it matters: data work dominates ML project time — the widely quoted "80%" comes from practitioner surveys, not a controlled measurement, but the direction is not in dispute. A pipeline that silently corrupts features (wrong join key, timezone drift, training/serving skew) will make a model that scores well in offline evaluation and fails in production — the worst class of failure because it is invisible at deployment time.
 
 Key insight: the pipeline is not separate from the model — it IS part of the model. The feature computation logic deployed at serving time must be byte-for-byte identical to the logic used at training time. Any divergence is training/serving skew.
 
@@ -215,7 +215,8 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
 from pyspark.sql.window import Window
 from typing import Optional
-import great_expectations as ge
+import great_expectations as gx
+from great_expectations import expectations as gxe
 from datetime import date
 
 def create_spark_session(app_name: str, shuffle_partitions: int = 200) -> SparkSession:
@@ -228,7 +229,7 @@ def create_spark_session(app_name: str, shuffle_partitions: int = 200) -> SparkS
         SparkSession.builder
         .appName(app_name)
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
-        .config("spark.sql.adaptive.enabled", "true")          # AQE: Spark 3.0+
+        .config("spark.sql.adaptive.enabled", "true")          # AQE: added 3.0, default true since 3.2
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         .getOrCreate()
@@ -305,40 +306,43 @@ def compute_user_features(
 
 def validate_with_great_expectations(df_pandas, suite_name: str) -> bool:
     """
-    Run Great Expectations validation suite.
+    Run a Great Expectations validation suite (GX 1.x API).
+    The pre-1.0 helpers `gx.from_pandas()` and `context.get_validator()` were
+    removed in GX 1.0 — the current path is data source -> asset -> batch
+    definition -> batch.validate(suite).
     Returns True if all expectations pass.
     """
-    ge_df = ge.from_pandas(df_pandas)
+    context = gx.get_context()
+    batch = (
+        context.data_sources.add_pandas("pandas")
+        .add_dataframe_asset(name="user_features")
+        .add_batch_definition_whole_dataframe("whole_df")
+        .get_batch(batch_parameters={"dataframe": df_pandas})
+    )
 
-    results = ge_df.validate(expectation_suite={
-        "expectation_suite_name": suite_name,
-        "expectations": [
-            {
-                "expectation_type": "expect_column_values_to_not_be_null",
-                "kwargs": {"column": "user_id"}
-            },
-            {
-                "expectation_type": "expect_column_values_to_be_between",
-                "kwargs": {"column": "purchase_count_30d", "min_value": 0, "max_value": 10000}
-            },
-            {
-                "expectation_type": "expect_column_values_to_be_between",
-                "kwargs": {"column": "total_spend_30d", "min_value": 0.0}
-            },
-            {
-                "expectation_type": "expect_column_proportion_of_unique_values_to_be_between",
-                "kwargs": {"column": "user_id", "min_value": 0.99}  # near-unique
-            },
-        ]
-    })
+    suite = gx.ExpectationSuite(name=suite_name)
+    suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="user_id"))
+    suite.add_expectation(
+        gxe.ExpectColumnValuesToBeBetween(
+            column="purchase_count_30d", min_value=0, max_value=10000
+        )
+    )
+    suite.add_expectation(
+        gxe.ExpectColumnValuesToBeBetween(column="total_spend_30d", min_value=0.0)
+    )
+    suite.add_expectation(
+        gxe.ExpectColumnProportionOfUniqueValuesToBeBetween(  # near-unique
+            column="user_id", min_value=0.99
+        )
+    )
 
-    success = results["success"]
-    if not success:
-        failed = [r for r in results["results"] if not r["success"]]
+    results = batch.validate(suite)
+    if not results.success:
+        failed = [r for r in results.results if not r.success]
         print(f"Validation FAILED. {len(failed)} expectations violated:")
         for r in failed:
-            print(f"  - {r['expectation_config']['expectation_type']}: {r['result']}")
-    return success
+            print(f"  - {r.expectation_config.type}: {r.result}")
+    return bool(results.success)
 
 
 def write_features_versioned(
@@ -427,7 +431,8 @@ permanently behind, one day per day, until the backlog is unrecoverable.
 Read the `5.76x` as the actual safety margin. It says the cluster could absorb a 5.7x traffic spike,
 or survive a 4-hour outage and still catch up within the same day. It also sizes the recovery
 question directly: at 34.13 MB/s a 3-day backlog of 1,500 GB takes `1500 / 2 = 750 min = 12.5 hours`
-to drain, which fits inside one day's 17.4% duty cycle with room to spare. Halve the cluster to 10
+to drain, which fits inside the 19.8 hours (82.6% of the day) the cluster is otherwise idle — the
+catch-up and that day's own 4.17-hour run still total 16.7 h < 24 h. Halve the cluster to 10
 nodes and headroom drops to 2.88x with a job time of 8.3 hours -- still viable; quarter it to 5
 nodes and the job takes 16.7 hours at 1.44x headroom, which is the point where a single bad day
 cascades.
@@ -438,17 +443,19 @@ which it does only for the narrow (shuffle-free) part of the job. The shuffle do
 linearly, which is what the next two decoders are about.
 
 Volume estimation runs the same divisions backwards, from an event count. Section 7's Spotify figure
-of ~600 billion events/day, at an assumed 200 bytes per serialized event:
+of ~500 billion events/day, at an assumed 200 bytes per serialized event:
 
 ```
-  events/sec  = 600e9 / 86,400        = 6,944,444 events/s     (~6.9M/s)
-  bytes/day   = 600e9 x 200 bytes     = 120 TB/day  (109.1 TiB)
-  at 34 MB/s  = 120e12 / 34.13e6      = 3.5e6 s = 40.7 days     <- one cluster cannot
+  events/sec  = 500e9 / 86,400        = 5,787,037 events/s     (~5.8M/s average)
+  bytes/day   = 500e9 x 200 bytes     = 100 TB/day  (90.9 TiB)
+  at 34 MB/s  = 100e12 / 34.13e6      = 2.93e6 s = 33.9 days    <- one cluster cannot
 ```
 
-That last line is the point of doing the estimate at all: it converts "600 billion events" from an
-impressive number into a hard verdict that the 20-node shape above is off by roughly two orders of
-magnitude, before anyone provisions anything.
+The ~5.8M/s average is a useful sanity check against Spotify's published 8M events/sec peak: a
+peak-to-average ratio of ~1.4x is exactly what a global consumer product should show. And that last
+line is the point of doing the estimate at all: it converts "500 billion events" from an impressive
+number into a hard verdict that the 20-node shape above is off by more than an order of magnitude,
+before anyone provisions anything.
 
 ### Decoding the shuffle partition count
 
@@ -541,7 +548,8 @@ one value (`country = 'US'`) holds 80% of rows. Assume a healthy 128 MB task tak
   hot key 'US' at 80% = 512,000 x 0.80 = 409,600 MB = 400 GB  -> ONE partition
   the other 20%       = 102,400 MB spread over 3,999          = 25.6 MB each
 
-  skew_ratio  = 409,600 / 25.6                              = 16,000x
+  skew_ratio  = 409,600 / 128        (hot bytes / ideal)    = 3,200x
+                409,600 / 25.6       (vs. an actual sibling) = 16,000x
 
   hot task    = 409,600 / 128 x 3 s = 9,600 s               = 2.67 hours
   all 4,000 tasks of work = 4,000 x 3 s = 12,000 task-s
@@ -593,19 +601,19 @@ shuffle entirely:
 That 2,560x is why `spark.sql.autoBroadcastJoinThreshold` (default 10 MB) is the first thing to
 check on a slow join, and why the broadcast side must stay under ~100 MB: the driver collects it
 first, then every one of the 20 executors holds a full copy, so the memory cost is
-`table_size x (1 + node_count)` -- 200 MB total at 10 MB, but 2.1 GB at 100 MB and 21 GB at 1 GB.
+`table_size x (1 + node_count)` -- 210 MB total at 10 MB, but 2.1 GB at 100 MB and 21 GB at 1 GB.
 
 ---
 
 ## 7. Real-World Examples
 
-**Spotify**: processes ~600 billion events/day through Apache Beam pipelines on Google Dataflow. Features for music recommendation (skip rate, play duration, playlist additions) computed in hourly batch jobs. Feature store (Feathr) ensures training/serving consistency.
+**Spotify**: its event delivery infrastructure published ~500 billion events/day (8M events/sec at peak, Q1 2019), landing in Cloud Pub/Sub and processed with Scio (Spotify's Scala API for Apache Beam) on Google Dataflow. Features for music recommendation (skip rate, play duration, playlist additions) are computed in batch Beam jobs; sharing the same Beam/`Featran` transform code between training and serving is what keeps the two consistent.
 
-**Uber**: Michelangelo platform. Offline feature computation on Spark (HDFS), online feature serving from Cassandra. Over 10,000 features maintained across teams. Temporal joins prevent future leakage in trip demand forecasting.
+**Uber**: Michelangelo platform. Offline feature computation on Spark (HDFS/Hive), online feature serving from Cassandra. Uber's 2017 platform post reported approximately 10,000 features in the Feature Store (later productized as Palette). Temporal joins prevent future leakage in trip demand forecasting.
 
-**Airbnb**: Zipline feature store. Search ranking model requires 200+ features computed from host/listing/guest interaction history. Strict schema registry (Thrift) enforced at every pipeline stage — a schema change requires a migration PR reviewed by the data platform team.
+**Airbnb**: Zipline feature platform, renamed Chronon and open-sourced in April 2024. Search ranking models consume large numbers of features computed from host/listing/guest interaction history, and a strict schema registry (Thrift) is enforced at every pipeline stage — a schema change requires a migration PR reviewed by the data platform team. (The exact per-model feature count is not public; treat any specific figure as illustrative.)
 
-**Netflix**: "Meson" pipeline orchestration. Video quality prediction requires frame-level encoding features joined with CDN delivery metrics — two disparate source systems. Point-in-time joins ensure the training dataset reflects what Netflix knew at the time of stream start, not what happened during the stream.
+**Netflix**: pipeline orchestration ran on "Meson" from 2016, and was replaced by **Maestro** — horizontally scalable, open-sourced Apache-2.0 in July 2024 — after Meson hit the vertical-scaling ceiling of a single AWS instance. A workload like video-quality prediction joins frame-level encoding features with CDN delivery metrics across two disparate source systems, and point-in-time joins ensure the training dataset reflects what was known at stream start, not what happened during the stream. (The specific Netflix model is illustrative; the orchestrator history is public.)
 
 ---
 
@@ -758,7 +766,7 @@ At-least-once may reprocess an event on failure and risk duplicates; exactly-onc
 ## 13. Best Practices
 
 - Always specify DataFrame schemas explicitly — never rely on Spark schema inference in production (inference reads the data, is slow, and may guess wrong types)
-- Set `spark.sql.adaptive.enabled=true` (AQE, Spark 3.0+) to let the optimizer dynamically coalesce small shuffle partitions and fix skewed joins at runtime
+- Keep `spark.sql.adaptive.enabled=true` (AQE — added in Spark 3.0, on by default since Spark 3.2) so the optimizer dynamically coalesces small shuffle partitions and fixes skewed joins at runtime; set it explicitly if you inherit a pre-3.2 cluster or a config that disabled it
 - Use `broadcast()` hint for lookup tables under 100 MB to eliminate shuffle joins entirely
 - Write intermediate results as versioned Parquet partitions — never overwrite; use `mode("overwrite")` with deterministic output paths keyed by date + pipeline version
 - Apply Great Expectations validation as the first stage after data extraction — fail fast on bad data before expensive transformations
@@ -826,18 +834,24 @@ def bronze_to_silver(spark: SparkSession, bronze_path: str,
 
 ```python
 import great_expectations as gx
+from great_expectations import expectations as gxe
 
 def validate_silver(df) -> bool:
+    # GX 1.x: data source -> asset -> batch definition -> batch.validate(suite).
+    # `ctx.sources` and `ctx.get_validator()` were removed in GX 1.0.
     ctx = gx.get_context()
-    validator = ctx.sources.add_spark("spark").add_dataframe_asset(
-        "silver", dataframe=df
-    ).build_batch_request()
-    v = ctx.get_validator(batch_request=validator)
-    v.expect_column_values_to_not_be_null("user_id")
-    v.expect_column_values_to_be_between("session_duration_s", 0, 86_400)
-    v.expect_column_values_to_be_unique("event_id")
-    result = v.validate()
-    return bool(result.success)   # fail the job if False; do not write Gold
+    batch = (
+        ctx.data_sources.add_spark("spark")
+        .add_dataframe_asset("silver")
+        .add_batch_definition_whole_dataframe("whole_df")
+        .get_batch(batch_parameters={"dataframe": df})
+    )
+    suite = gx.ExpectationSuite(name="silver")
+    suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="user_id"))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeBetween(
+        column="session_duration_s", min_value=0, max_value=86_400))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="event_id"))
+    return bool(batch.validate(suite).success)  # False -> fail the job, do not write Gold
 ```
 
 **Skew-aware Gold aggregation with salting:**
@@ -927,11 +941,17 @@ df = pd.read_parquet("features/")   # merges all files
 # Delta Lake enforces schema compatibility on write:
 from delta.tables import DeltaTable
 DeltaTable.forPath(spark, "features/").toDF()  # schema is versioned
-# New column: use ALTER TABLE ADD COLUMN with a default value
-spark.sql("ALTER TABLE features ADD COLUMNS (user_tier STRING DEFAULT 'standard')")
-# All historical rows get the default → no NaN pollution
+# Delta's ADD COLUMN may NOT carry a DEFAULT, and existing rows read back as NULL.
+# Defaults are set in a separate ALTER COLUMN, and need Delta 3.1+ with the
+# allowColumnDefaults table feature enabled:
+spark.sql("ALTER TABLE features SET TBLPROPERTIES "
+          "('delta.feature.allowColumnDefaults' = 'enabled')")
+spark.sql("ALTER TABLE features ADD COLUMNS (user_tier STRING)")
+spark.sql("ALTER TABLE features ALTER COLUMN user_tier SET DEFAULT 'standard'")
+# Backfill history explicitly rather than assuming the DEFAULT fills old rows:
+spark.sql("UPDATE features SET user_tier = 'standard' WHERE user_tier IS NULL")
 ```
 
-**How does Apache Spark handle data skew in joins, and what is the remedy?** Data skew occurs when a small number of partition keys hold a disproportionate fraction of data — e.g., 80% of records have `country='US'`. The `US` partition task takes 100× longer than others, stalling the job. Remedy: (1) salting — append a random suffix to the skewed key before join, broadcast the small table with the suffix expanded, then aggregate results: `df.withColumn("salt", F.concat("country", F.lit("_"), (F.rand() * 100).cast("int")))`; (2) broadcast join — if the small table fits in memory (< 8MB default), use `F.broadcast(small_df)` to avoid the shuffle entirely; (3) skew join hint in Spark 3.x: `spark.sql.adaptive.skewJoin.enabled=true` detects and splits skewed partitions automatically.
+**How does Apache Spark handle data skew in joins, and what is the remedy?** Data skew occurs when a small number of partition keys hold a disproportionate fraction of data — e.g., 80% of records have `country='US'`. The `US` partition task takes 100× longer than others, stalling the job. Remedy: (1) salting — append a random suffix to the skewed key before join, broadcast the small table with the suffix expanded, then aggregate results: `df.withColumn("salt", F.concat("country", F.lit("_"), (F.rand() * 100).cast("int")))`; (2) broadcast join — if the small table is under `spark.sql.autoBroadcastJoinThreshold` (default 10 MB), Spark broadcasts it automatically, or force it with `F.broadcast(small_df)` to avoid the shuffle entirely; (3) skew join hint in Spark 3.x: `spark.sql.adaptive.skewJoin.enabled=true` detects and splits skewed partitions automatically.
 
 **What is the role of Great Expectations in a production data pipeline?** Great Expectations defines data quality rules ("expectations") as code and validates them at pipeline boundaries. An expectation like `expect_column_values_to_be_between("price", 0.01, 10_000)` runs on every batch — if any row violates it, the pipeline fails and an alert fires before bad data reaches the feature store or model. This shifts data quality left: instead of discovering that the model degraded because price was encoded as negative numbers 3 days after it happened, you catch the anomaly at ingestion time. Store expectations in version control alongside pipeline code so they evolve with schema changes.

@@ -613,9 +613,9 @@ The entropy term contributes −0.012 out of −1.612 — under 1% of the loss �
 
 **OpenAI Five (2019):** PPO trained on Dota 2 (a 5v5 team game with partial observability and 170K dimensional action space). Each agent ran PPO independently with team reward. Trained on 180 years of self-play per day using 128,000 CPU cores and 256 GPUs. Defeated world champion team 2-0. Demonstrated that sufficient compute + PPO scales to extremely complex cooperative tasks.
 
-**Google DeepMind HVAC Control (2016):** RL agent reduced Google data center cooling energy by 40%. State: 120 sensor readings. Actions: set-points for 20 control systems. Reward: negative power consumption. DQN trained on historical data, then deployed with human override capability. Direct $60M/year energy savings.
+**Google DeepMind data centre cooling (2016 recommendations, 2018 direct control) — read the fine print:** this is usually cited as an RL success story, and the 2016 system was *not* an RL agent. Ensembles of deep neural networks were trained on historical sensor data to **predict** the next hour's PUE, temperature and pressure; the PUE model's recommended set-points were then vetted and applied by human operators. The published predecessor architecture (Gao, Google white paper 2014) is an ordinary feed-forward net — 5 hidden layers, 50 nodes per hidden layer, 19 normalized input variables — predicting PUE to within 0.004 +/- 0.005 mean absolute error. DeepMind reported a 40% reduction in energy used for *cooling*, equating to about a 15% reduction in overall PUE overhead; that result was never peer-reviewed or independently reproduced, and the widely repeated "$60M/year saved" figure is not traceable to any Google or DeepMind source. Direct AI control arrived in 2018: every five minutes the system snapshots thousands of sensors, predicts how candidate action combinations affect future energy use, and selects the lowest-energy action that passes a layered set of safety constraints — architecturally much closer to model-predictive control than to DQN — for roughly 30% average energy savings in its first months. The instructive distinction: "AI runs the data centre" almost always means learned dynamics plus constrained action search, not a policy trained by trial-and-error on a live plant, because exploration on real cooling hardware is exactly the kind of expensive, dangerous interaction Section 9 says rules RL out.
 
-**Recommendation Systems (Netflix, YouTube):** Slate RL frames recommendation as: show K items (action = slate), user clicks are the reward signal, and future engagement depends on what was clicked today (temporal dependency). Contextual bandits approximate this when full MDP formulation is too expensive. YouTube reported 20% increase in watch time after switching from supervised to RL-based recommendation.
+**Recommendation Systems (Netflix, YouTube):** Slate RL frames recommendation as: show K items (action = slate), user clicks are the reward signal, and future engagement depends on what was clicked today (temporal dependency). Contextual bandits approximate this when full MDP formulation is too expensive. YouTube's production REINFORCE recommender (Chen et al., WSDM 2019) reported live-experiment ViewTime gains of +0.07% from serving a stochastic policy and +0.85% from the top-K off-policy correction — single-digit-tenths percentages that are still large in absolute terms at YouTube scale, and a useful calibration against inflated "RL doubled engagement" claims.
 
 **RLHF for LLM Alignment (OpenAI, Anthropic):** A reward model (trained on human preference comparisons) provides the reward signal; PPO fine-tunes the language model to maximize this reward while a KL divergence penalty prevents the policy from drifting too far from the supervised fine-tuned (SFT) base model. This is how GPT-4, Claude, and Gemini learn to follow instructions and refuse harmful requests.
 
@@ -699,7 +699,7 @@ Fix: always normalize advantages to zero mean and unit variance within each mini
 
 ### Pitfall 4: Hyperparameter sensitivity in PPO
 
-PPO is often described as "stable" but is highly sensitive to: learning rate (5e-4 is typical; 1e-3 diverges for many environments), clip_eps (0.2 is standard; 0.3 causes too-large updates), number of epochs per rollout (4-10; more causes overfitting to rollout data), and minibatch size (should divide rollout size evenly). A PPO implementation that works for CartPole may completely fail on Atari without hyperparameter retuning. Always sweep at minimum: lr in [1e-4, 5e-4, 1e-3] and clip_eps in [0.1, 0.2, 0.3].
+PPO is often described as "stable" but is highly sensitive to: learning rate (3e-4 is the common default — the value used in the PPO paper's MuJoCo experiments; 1e-3 diverges for many environments), clip_eps (0.2 is standard; 0.3 causes too-large updates), number of epochs per rollout (4-10; more causes overfitting to rollout data), and minibatch size (should divide rollout size evenly). A PPO implementation that works for CartPole may completely fail on Atari without hyperparameter retuning. Always sweep at minimum: lr in [1e-4, 3e-4, 1e-3] and clip_eps in [0.1, 0.2, 0.3].
 
 ### Pitfall 5: Reward scale mismatch
 
@@ -717,10 +717,10 @@ If rewards are in the range [-100, +100], the Q-network must output values up to
 | CleanRL | Single-file reference implementations | Best for learning; not production |
 | TorchRL | PyTorch-native RL library | Meta's official RL toolkit |
 | MuJoCo | Continuous control physics simulation | Standard benchmark for SAC, TD3 |
-| IsaacGym / IsaacLab (NVIDIA) | GPU-accelerated physics simulation | 10,000+ parallel environments on one GPU |
+| Isaac Lab (NVIDIA) | GPU-accelerated physics simulation | 10,000+ parallel environments on one GPU; supersedes the deprecated Isaac Gym Preview |
 | TF-Agents | TensorFlow RL library | Google's official RL toolkit |
 | Tianshou | PyTorch RL, modular design | Strong support for offline RL |
-| ReAgent (Meta) | Production RL for recommendations | Open-source; used in Facebook ads |
+| Pearl (Meta) | Production RL agent library | Successor to ReAgent, which Meta has archived |
 
 ---
 
@@ -1065,7 +1065,7 @@ def select_action_with_cold_start(self, candidates, context, epsilon_cold=0.15):
 
 **Interview discussion points:**
 
-**Why does Thompson Sampling outperform LinUCB in CTR while also being faster and using less memory?** LinUCB maintains a d x d covariance matrix per arm (128 x 128 x 4 bytes = 65 KB), which becomes 3.9 TB for 30M tracks - infeasible for in-memory serving. In practice, LinUCB must be limited to active tracks or use approximate methods. Thompson Sampling maintains only two scalars per arm (alpha, beta = 16 bytes), scaling to 30M tracks in 480 MB. Furthermore, Thompson Sampling's probabilistic nature provides better exploration by sampling from the posterior uncertainty distribution, while LinUCB uses a deterministic UCB bound that can be overly conservative for contexts where the arm has high uncertainty in only certain directions.
+**Why does Thompson Sampling outperform LinUCB in CTR while also being faster and using less memory?** LinUCB maintains a d x d covariance matrix per arm (128 x 128 x 8 bytes = 131 KB), which becomes 3.9 TB for 30M tracks - infeasible for in-memory serving. In practice, LinUCB must be limited to active tracks or use approximate methods. Thompson Sampling maintains only two scalars per arm (alpha, beta = 16 bytes), scaling to 30M tracks in 480 MB. Furthermore, Thompson Sampling's probabilistic nature provides better exploration by sampling from the posterior uncertainty distribution, while LinUCB uses a deterministic UCB bound that can be overly conservative for contexts where the arm has high uncertainty in only certain directions.
 
 **What is the regret of a bandit algorithm and how is it measured in practice?** Regret is the cumulative difference between the reward of the optimal arm (in hindsight) and the reward received by the algorithm over T steps. For a track with true CTR 0.15, if the algorithm plays a track with CTR 0.08 due to insufficient exploration, it incurs regret of 0.07 for that step. In production, true CTRs are unknown, so offline evaluation uses the inverse propensity score (IPS) estimator: weight each logged reward by 1/P(action|context) where P is the logging policy's probability of choosing that action, creating an unbiased estimator of the counterfactual policy's expected reward.
 

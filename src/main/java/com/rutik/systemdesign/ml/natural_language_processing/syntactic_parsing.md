@@ -548,7 +548,7 @@ The `dep_`, `head`, and `children` attributes expose the full tree; `doc.noun_ch
 
 **spaCy in production NLP pipelines.** spaCy's dependency parser is a neural arc-eager transition parser; `en_core_web_sm` reaches ~92% UAS and parses on CPU at thousands of sentences/second. It underpins entity linking, noun-chunk extraction, and rule-based matchers at companies from Explosion's clients to internal enterprise NLP stacks — chosen because O(n) transition parsing is fast enough to run inline in request paths.
 
-**Google's SyntaxNet / Parsey McParseface (2016).** A globally normalized transition-based parser with beam search, released open-source. It reached ~94% UAS on English news text and was, at release, "the most accurate parser in the world." It demonstrated that beam search plus global normalization closes most of the gap between transition and graph-based parsers.
+**Google's SyntaxNet / Parsey McParseface (May 2016).** A globally normalized transition-based parser with beam search, released open-source and announced as "the world's most accurate parser." Google reported over 94% accuracy on individual dependencies for English newswire (Penn Treebank), against 96–97% agreement between trained human linguists; the underlying paper (Andor et al. 2016) reports 94.61% UAS / 92.79% LAS on the WSJ test set with a beam of 32, and the shipped Parsey McParseface model used a beam of 8. Accuracy fell to just over 90% on the Google Web Treebank — the out-of-domain drop of Pitfall 5. It demonstrated that beam search plus global normalization closes most of the gap between transition and graph-based parsers.
 
 **Stanford CoreNLP and the Universal Dependencies project.** The UD treebanks (200+ treebanks, 100+ languages) standardized dependency annotation so one parser architecture and one relation inventory transfer across languages. Cross-lingual parsers trained on UD power multilingual grammar tools and low-resource-language NLP where no LLM has enough pretraining data.
 
@@ -711,7 +711,7 @@ def dynamic_oracle_cost(action, config, gold_arcs) -> int:
 # instead of always forcing the single static-gold action.
 ```
 
-Beam search plus a dynamic oracle is exactly the combination Google's SyntaxNet used to reach ~94% UAS. In practice: turn on a beam of 16–64 and, if you train your own parser, use a dynamic oracle rather than a static one.
+These two fixes are complementary but distinct, and the distinction is worth getting right: Google's SyntaxNet reached ~94% UAS with beam search plus *globally normalized* (CRF-style) training with early updates — training the score of whole beam paths rather than per-step decisions — not with a dynamic oracle. In practice: turn on a beam of 16–64 (SyntaxNet used 32 in the paper, 8 in the released model) and, if you train your own greedy parser, use a dynamic oracle rather than a static one.
 
 ### Pitfall 2: Naive head-selection decoding yields a non-tree
 

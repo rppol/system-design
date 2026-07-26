@@ -6,7 +6,7 @@
 
 Mental model: Think of pricing as moving along a demand curve in real time. At price $10, you sell 1,000 units; at $12, you sell 850; at $15, you sell 600. The revenue-maximizing price balances units sold against margin. Dynamic pricing continuously re-estimates this demand curve using live data and explores different price points to learn where the curve has shifted.
 
-Why this system exists: A 1% improvement in pricing accuracy translates to a ~3% improvement in operating profit for most retailers (the McKinsey "1% rule"). At $1B GMV, that is $30M in incremental profit from better pricing alone — without selling a single additional unit.
+Why this system exists: pricing is the highest-leverage profit lever there is. McKinsey's widely cited analysis ("Using big data to make better pricing decisions", 2014) found that a 1% price increase translates on average into an **8.7% increase in operating profit, assuming no loss of volume**. For a retailer earning $50M operating profit on $1B of revenue, capturing even a 1% price improvement is worth roughly $4M — without selling a single additional unit. The volume caveat is the whole reason a demand model exists: the job is to find where price can rise without losing the units that paid for it.
 
 ---
 
@@ -44,7 +44,7 @@ Why this system exists: A 1% improvement in pricing accuracy translates to a ~3%
 
 **Demand model training:**
 - Training data: 2 years of daily price × sales data per SKU = 365 × 2 × 500k = 365M rows.
-- LightGBM demand model, 5k trees: ~20 minutes on 8 cores.
+- LightGBM demand model, 300 boosting rounds (see §4.1): ~20 minutes on 8 cores per category model.
 - Model size: ~25 MB per model × 50 category models (trained per category, not per SKU) = 1.25 GB.
 
 **Event volume (for training data collection):**
@@ -52,11 +52,11 @@ Why this system exists: A 1% improvement in pricing accuracy translates to a ~3%
 - Impression events: 5M/day; purchase events: 40k/day.
 - Storage: 5M × 200 bytes = 1 GB/day → 365 GB/year.
 
-**Infrastructure cost:**
-- Re-pricing service: 4 × c5.xlarge (99.9% HA with failover): $200/month.
-- Demand model training: spot r5.4xlarge, 20 min/day = $18/month.
-- Feature store: Redis (4 GB for live inventory + pricing signals): $60/month.
-- Total: ~$278/month.
+**Infrastructure cost** (us-east-1 on-demand list prices, July 2026):
+- Re-pricing service: 4 × c5.xlarge (99.9% HA with failover) at $0.17/hr = $124/month each = **$496/month**.
+- Demand model training: 50 category models × 20 min on 8 cores = ~8 instance-hours/day on a 16-vCPU r5.4xlarge (two models in parallel) = ~250 hr/month. At the $1.008/hr on-demand rate that is **~$250/month**; on Spot (~$0.40/hr) it is ~$100/month.
+- Feature store: Redis (4 GB for live inventory + pricing signals): ~$60/month.
+- Total: **~$800/month** on-demand, ~$650/month with Spot training.
 
 ---
 
@@ -337,49 +337,57 @@ class PriceBanditState:
     base_price: float             # current optimal price
     exploration_radius_pct: float = 0.05  # explore ±5% around base price
     n_arms: int = 5               # number of candidate prices to try
-    alpha: float = 1.0            # Thompson sampling beta distribution alpha
-    beta_param: float = 1.0       # Thompson sampling beta distribution beta
+    # CRITICAL: the Beta posterior is PER ARM. A single shared (alpha, beta) pair
+    # makes Thompson sampling degenerate into uniform-random arm selection —
+    # every arm draws from the same distribution, so the argmax is pure noise
+    # and the bandit never learns which price point converts best.
+    alpha: np.ndarray = field(default_factory=lambda: np.ones(5))       # successes + 1, per arm
+    beta_param: np.ndarray = field(default_factory=lambda: np.ones(5))  # failures + 1, per arm
 
 
 def select_exploration_price(
     state: PriceBanditState,
     exploration_budget_pct: float = 0.02,  # 2% of SKUs get exploration prices
-) -> tuple[float, bool]:
+) -> tuple[float, bool, int]:
     """
     With probability exploration_budget_pct, return an exploration price.
     Otherwise return the base (exploit) price.
-    Thompson sampling: sample from beta distribution to balance explore/exploit.
+    Thompson sampling: draw one sample from EACH arm's Beta posterior and take
+    the argmax — arms with a better or less-certain posterior win more often.
+    Returns (price, is_exploration, arm_index); arm_index is -1 when exploiting.
     """
     if np.random.random() > exploration_budget_pct:
-        return state.base_price, False  # exploit
+        return state.base_price, False, -1  # exploit
 
     # Generate candidate prices within exploration radius
     lower = state.base_price * (1 - state.exploration_radius_pct)
     upper = state.base_price * (1 + state.exploration_radius_pct)
     candidates = np.linspace(lower, upper, state.n_arms)
 
-    # Thompson sampling: sample conversion rate estimate for each arm
-    # Using Beta distribution as conjugate prior for conversion rate
-    samples = np.random.beta(state.alpha, state.beta_param, size=state.n_arms)
-    chosen_arm = np.argmax(samples)
+    # Thompson sampling: one draw per arm from its own Beta posterior
+    samples = np.random.beta(state.alpha, state.beta_param)
+    chosen_arm = int(np.argmax(samples))
 
-    return candidates[chosen_arm], True  # explore
+    return float(candidates[chosen_arm]), True, chosen_arm  # explore
 
 
 def update_bandit_state(
     state: PriceBanditState,
-    price_used: float,
+    arm_index: int,
     units_sold: int,
     units_available: int,
 ) -> PriceBanditState:
     """
-    Update Beta distribution parameters based on observed demand.
-    Success = units_sold; failures = units_available - units_sold (impressions without purchase).
+    Update the Beta posterior of the arm that was actually played.
+    Successes = units_sold; failures = units_available - units_sold
+    (exposures that did not convert).
     """
-    conversion_rate = units_sold / max(units_available, 1)
-    # Beta-Binomial update
-    state.alpha += units_sold
-    state.beta_param += units_available - units_sold
+    if arm_index < 0:
+        return state  # exploit pull: nothing to attribute to an exploration arm
+    failures = max(units_available - units_sold, 0)
+    # Beta-Binomial conjugate update, applied to the played arm only
+    state.alpha[arm_index] += units_sold
+    state.beta_param[arm_index] += failures
     return state
 ```
 
@@ -407,14 +415,17 @@ def compute_price_elasticity(
 def validate_demand_model(
     model: lgb.Booster,
     held_out_data: pd.DataFrame,
+    feature_cols: list[str],
 ) -> dict:
     """
     Validate demand model on hold-out time period.
     Key metric: MAPE on units sold; also check elasticity sign and magnitude.
+    NOTE: select the exact training feature columns in the exact training order.
+    Dropping label columns and passing "everything else" silently feeds ids,
+    dates and raw prices into the model and produces garbage predictions.
     """
-    features = held_out_data.drop(columns=["units_sold", "log_sales"])
     y_true = held_out_data["units_sold"].values
-    y_pred = np.expm1(model.predict(features.values))
+    y_pred = np.expm1(model.predict(held_out_data[feature_cols].values))
 
     mape = np.mean(np.abs(y_true - y_pred) / np.maximum(y_true, 1))
     return {
@@ -433,7 +444,7 @@ def validate_demand_model(
 | Approach | Accuracy | Coverage (sparse SKUs) | Training cost | Cold start |
 |----------|----------|----------------------|--------------|-----------|
 | Per-SKU model | Highest | Poor (no model for new SKUs) | 500k models = infeasible | Severe |
-| Per-category model | Good | Good (SKU inherits category) | 200 models, 20 min each | Mild |
+| Per-category model | Good | Good (SKU inherits category) | 50 models, 20 min each | Mild |
 | Global model with SKU embeddings | Good | Good (embedding similarity) | 1 model, 45 min | Mild |
 
 Use per-category models for top-20 categories (80% of revenue), global model for the long tail. New SKUs inherit the category model immediately. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
@@ -448,7 +459,7 @@ If you randomly assign SKUs to treatment/control (different price levels), custo
 
 **Decision 4: Exploration rate**
 
-Setting exploration_budget_pct too high reduces revenue (you're running suboptimal prices). Too low means the demand model is poorly calibrated for unobserved price points, leading to bad optimization decisions. Production recommendation: 2% of SKUs × 15-minute windows assigned to exploration. At 50k re-priced SKUs per cycle, this is 1,000 SKUs exploring at any time. The expected revenue loss from exploration is ~0.3% (price deviates ±5% for 2% of SKUs).
+Setting exploration_budget_pct too high reduces revenue (you're running suboptimal prices). Too low means the demand model is poorly calibrated for unobserved price points, leading to bad optimization decisions. Production recommendation: 2% of SKUs × 15-minute windows assigned to exploration. At 50k re-priced SKUs per cycle, this is 1,000 SKUs exploring at any time. Exploration cost is second-order, not first-order: at the revenue optimum the gradient is zero, so a ±5% price deviation costs only ~0.2-0.3% of *that SKU's* revenue — and because only 2% of SKUs explore at a time, the blended loss is well under 0.01% of total revenue. That asymmetry (cheap exploration, expensive extrapolation error) is why the exploration budget exists at all.
 
 **Decision 5: Competitor price reaction**
 
@@ -458,15 +469,15 @@ Reactive pricing (always undercut competitor by X%) creates price wars and destr
 
 ## 6. Real-World Implementations
 
-**Amazon (1P Pricing):** Amazon's algorithmic pricing engine re-prices millions of SKUs per minute. Their core innovation is the "Buy Box" algorithm, which combines price, fulfillment speed, and seller rating into a single competitiveness score. For Amazon-owned inventory (1P), they use a demand model that incorporates cross-elasticity (raising the price of Product A increases demand for substitute Product B) — a complexity most retailers ignore. Their 2019 engineering post described using deep learning for demand curve estimation in high-velocity electronics categories, with simpler tree models for the long tail.
+**Amazon (1P Pricing):** Amazon re-prices aggressively and continuously — the most-cited public measurement (Profitero, December 2013) put it at **more than 2.5 million price changes per day**, roughly 1,700 per minute, against ~50,000 changes made by Best Buy and Walmart combined over an entire month. The "Buy Box" algorithm combines price, fulfillment speed, and seller rating into a single competitiveness score, so a seller's effective demand curve is a step function around the Buy Box threshold rather than a smooth curve. Amazon has not published its 1P demand-model architecture; treat any specific description of it as inference, not fact.
 
-**Airbnb (Smart Pricing):** Airbnb's dynamic pricing (Smart Pricing) advises hosts on optimal nightly rates. Key challenge: hosts control the final price and often override Airbnb's suggestion, creating selection bias in the training data (observed prices are a mixture of algorithmic and human decisions). Their solution: use the algorithmic suggestion as an instrument in a two-stage demand estimation approach to correct for host-override selection bias.
+**Airbnb (Smart Pricing):** Airbnb's Smart Pricing advises hosts on nightly rates, and the design is documented in Ye et al., *Customized Regression Model for Airbnb Dynamic Pricing* (KDD 2018). It is a three-stage system: (1) a binary classifier predicting booking probability for each listing-night, (2) a regression model predicting a suggested price trained with a **customized asymmetric loss** rather than plain squared error, and (3) a personalization layer producing the final suggestion. Key structural challenge: hosts stay in control and frequently override the suggestion, so observed prices are a mixture of algorithmic and human decisions — the custom loss is how the paper handles the fact that "correct price" is never directly observed, only booked/not-booked at the price the host actually set.
 
-**Uber (Surge Pricing):** Uber's surge pricing is a supply-demand balance mechanism: multiply the base price by a surge multiplier when demand > supply in a geohex. The pricing model estimates the supply response (how many additional drivers come online per $1 of surge) and the demand response (how many fewer riders request per $1 of surge), then finds the multiplier that clears the market. Key insight from Uber's research: supply response is stronger than demand response — drivers are highly price-responsive; riders are less elastic during peak demand.
+**Uber (Surge Pricing):** Uber's surge pricing is a market-clearing mechanism: multiply the base price by a surge multiplier when demand exceeds supply in a geohex. The pricing model estimates the supply response (additional drivers coming online per unit of surge) and the demand response (riders dropping out per unit of surge), then picks the multiplier that clears the market. Both elasticities are real and both matter; the public literature (Hall, Kendrick & Nosko 2015 on the rider side; Chen & Sheldon 2015 on the driver side) does not support a clean claim that one dominates the other, and estimates vary by city and time of day.
 
-**Booking.com (Accommodation Pricing):** Booking.com uses a combination of their own algorithmic pricing recommendations and hotel-controlled pricing. Their ML model predicts booking probability as a function of price, competitor rates, and remaining inventory. A key feature: "scarcity signal" — properties with < 3 remaining rooms receive a non-linear demand boost, justifying higher prices. They A/B tested this scarcity-aware model against a flat demand model and measured a 2.1% improvement in revenue per available room (RevPAR).
+**Booking.com (Accommodation Pricing):** Booking.com combines algorithmic recommendations with partner-controlled pricing, predicting booking probability as a function of price, competitor rates, and remaining inventory. Scarcity signals ("only 2 rooms left") are a well-known part of the surface, and the company is famous for running everything through large-scale A/B tests. Booking.com has not published a specific revenue-per-available-room lift for a scarcity-aware demand model, so treat the direction (scarcity raises willingness to pay) as the takeaway rather than any particular percentage.
 
-**Zalando (Fashion E-commerce):** Zalando runs markdown optimization — determining when and by how much to discount slow-moving inventory before the season ends. Their model balances two objectives: sell enough units before season end (minimize markdown waste) vs selling at the highest possible price (maximize margin). They model this as a stochastic dynamic programming problem over the remaining inventory × days-until-season-end state space, solving it via approximate DP. The system improved end-of-season sell-through by 8% and reduced markdown depth by 3pp.
+**Zalando (Fashion E-commerce):** Zalando runs markdown optimization — deciding when and how deeply to discount slow-moving inventory before the season ends — and has published on it. Their model balances selling enough units before season end against selling at the highest possible price. In *Tricks from the Trade for Large-Scale Markdown Pricing* (2024), Zalando authors formulate the problem as a large-scale optimization solved by **Lagrangian decomposition with heuristic cut generation** (not approximate dynamic programming) and report improvements of **3-6% in revenue and 2-5% in profit**. A 2026 follow-up on high-frequency pricing covers roughly 600,000 products.
 
 ---
 
@@ -505,6 +516,8 @@ Reactive pricing (always undercut competitor by X%) creates price wars and destr
 
 ## 9. Common Pitfalls & War Stories
 
+*The incidents below are illustrative composites of recurring failure patterns, not citations of specific public incidents. The failure mechanisms are real and common; the company descriptions and the impact figures are representative examples chosen to make the magnitude concrete, and should not be quoted as measured public record.*
+
 **Pitfall 1: Training demand model without controlling for endogeneity.** A large retailer trained a demand model on historical price × sales data. The model found that higher prices correlated with *higher* sales for some SKUs — a positive elasticity. Root cause: SKUs that are popular (high demand) are also priced higher. The correlation was demand → price, not price → demand. The model learned the reverse causality. Fix: use instrumental variable regression or train on experimental price variation (randomized price tests) rather than historical observational data. The endogeneity-corrected model showed uniformly negative elasticity, and the new pricing strategy increased revenue by 4.2%.
 
 **Pitfall 2: Price war from reactive pricing.** An electronics retailer configured their system to match competitors within 5 minutes of any price drop. Their competitors had the same system. The result: a race to the bottom on a popular laptop SKU — price went from $999 to $649 in 4 hours, destroying $3.2M in margin across the industry. Both companies eventually added reaction delays and minimum-margin floors, but the damage was done. Key lesson: reactive pricing policies must have dampening mechanisms (minimum reaction delay, maximum change per cycle).
@@ -532,14 +545,15 @@ Optimizer: 1ms per SKU (scipy minimize_scalar, bounded)
 Total optimizer time: 50k × 1ms = 50 sec → not a bottleneck
 
 Feature fetch: Redis GET for 20 features per SKU
-Redis throughput: 50k/ms using pipeline(batch) → < 1 sec for 50k SKUs via pipelining
+Redis throughput: ~100k ops/sec per node with pipelining (single-threaded command loop)
+  → 50k SKUs × 20 features = 1M ops ≈ 10 sec on one node; shard across 3 nodes → ~3 sec
 ```
 
 **Scaling to 5M SKUs (10× current):**
-- Batch re-pricing: 500k SKUs per cycle. At 100 SKUs/sec per core: 5,000 sec on 1 core → parallelize across 50 cores (10 × r5.xlarge).
-- Switch to vectorized batch prediction (LightGBM predict_proba on batch of 500k): 500k × 10ms → ~5 sec in batch mode.
+- Batch re-pricing: 500k SKUs per cycle. At 100 SKUs/sec per core: 5,000 sec on 1 core → parallelize across 52 cores (13 × r5.xlarge, 4 vCPU each) → ~100 sec, well inside the 15-min window.
+- Switch to vectorized batch prediction (`Booster.predict` on one 500k-row matrix, not 500k single-row calls): the 5,000 sec of per-row overhead collapses to a few seconds, because the per-call Python/marshalling cost dominates single-row inference.
 - Redis: at 500k SKU feature fetches per 15 min, use cluster mode with 3 shards.
-- Monthly infrastructure: $2,400 (10 × r5.xlarge for pricing service + expanded Redis).
+- Monthly infrastructure: ~$2,400 (13 × r5.xlarge at $0.252/hr = $2,390/month for the pricing service, plus expanded Redis).
 
 ---
 
@@ -558,7 +572,7 @@ Implement reaction dampening: (1) minimum delay — do not react to competitor p
 New SKUs have no historical sales data to train a per-SKU demand model. Use the category model as the prior: new SKU inherits the demand curve shape of its category, using similar-attribute SKUs (same brand tier, price tier, product type) for initialization. After the first 7 days, blend the category model with the SKU-specific observed data using a weighted average (weight shifts to observed data as N increases). For the first 3 days, run at a conservative price (P50 of category price distribution) to gather elasticity data before optimizing.
 
 **Q: How do you measure the ROI of dynamic pricing vs static pricing?**
-Run a geo holdout experiment: assign 20% of geographies to a control group with static prices (frozen at the pre-deployment level), apply dynamic pricing to the remaining 80%. Measure revenue per available unit and gross margin over 8 weeks. Expected revenue lift in e-commerce: 2–5%; in travel/hospitality: 5–15%; in ride-sharing: 3–8%. Account for cannibalization: if dynamic pricing in one geo shifts demand to adjacent geos (customers shop in the cheaper geo), the holdout test will overstate the lift. Use geographically distant geographies as control to minimize spillover.
+Run a geo holdout experiment: assign 20% of geographies to a control group with static prices (frozen at the pre-deployment level), apply dynamic pricing to the remaining 80%. Measure revenue per available unit and gross margin over 8 weeks. Do not go in with a hard-coded expected lift — published, verifiable numbers are rare, and the ones that exist are narrow: Zalando reported 3-6% revenue and 2-5% profit improvement from markdown optimization in fashion. Anything you quote as a cross-industry "expected lift" band is vendor marketing unless you can name the study. Account for cannibalization: if dynamic pricing in one geo shifts demand to adjacent geos (customers shop in the cheaper geo), the holdout test will overstate the lift. Use geographically distant geographies as control to minimize spillover.
 
 **Q: What are the fairness concerns with dynamic pricing?**
 Three main concerns: (1) Price discrimination by income or location — if demand model features correlate with protected class membership (e.g., zip code correlates with race), the model can deliver different prices to different demographic groups. In the US, this is legal for most products but ethically problematic. Mitigation: audit price distributions by demographic proxy and test for disparate impact. (2) Essential goods pricing — dynamically pricing necessities (food, medicine) during emergencies is regulated or illegal in many jurisdictions. Design explicit caps. (3) Price gouging allegations — even legal dynamic pricing can generate severe PR risk. Implement maximum daily change caps (e.g., no more than 20% above baseline on any product in any day). See [responsible_ai_fairness_and_explainability.md](cross_cutting/responsible_ai_fairness_and_explainability.md).

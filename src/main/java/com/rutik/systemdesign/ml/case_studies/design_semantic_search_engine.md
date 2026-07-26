@@ -6,7 +6,7 @@
 
 Mental model: Bi-encoder = phone book search (fast, exact lookup, no context). Cross-encoder = a subject matter expert who reads both the query and the document together and judges relevance holistically. Neither alone solves the problem: the phone book misses synonyms and paraphrases; the expert takes too long to read every book in the library.
 
-Why this system exists: Keyword search (BM25) breaks down when queries and documents use different vocabulary for the same concept. Medical search, legal search, enterprise knowledge bases, and e-commerce search all require matching on meaning, not just string overlap. Semantic search using BERT embeddings closes the vocabulary gap and increases recall@10 by 15–30% over pure keyword search in most domains.
+Why this system exists: Keyword search (BM25) breaks down when queries and documents use different vocabulary for the same concept. Medical search, legal search, enterprise knowledge bases, and e-commerce search all require matching on meaning, not just string overlap. Semantic search using BERT embeddings closes the vocabulary gap; the size of the recall gain over pure keyword search is strongly domain-dependent, so measure it on your own corpus rather than assuming a fixed uplift.
 
 ---
 

@@ -134,7 +134,7 @@ The lopsided model flags almost nothing but is right when it does — 90% precis
 | Method             | Strategy                            | When to use                        |
 |--------------------|-------------------------------------|------------------------------------|
 | GridSearchCV       | Exhaustive grid search              | Small param grid (< 100 combos)    |
-| RandomizedSearchCV | Random sampling from distributions  | Larger grids; 60-80% of grid perf  |
+| RandomizedSearchCV | Random sampling from distributions  | Larger grids; budget set by you     |
 | Optuna (TPE)       | Bayesian / Tree-structured Parzen   | Large grids, expensive models      |
 | Hyperopt           | Bayesian (TPE, ATPE)                | Similar to Optuna                  |
 | BOHB               | Bandit + Bayesian                   | Very expensive models (neural)     |
@@ -302,7 +302,8 @@ That first sentence is the definition worth memorizing — `P(score(pos) > score
 **Walk one example.** A deliberately imbalanced set — 1,000 negatives and 10 positives (prevalence 0.99%) — scored by a model that genuinely does rank positives higher, then read both ways:
 
 ```
-  setup (reproduce with numpy + sklearn):
+  setup (one numpy draw, scored with sklearn; with only 10 positives the
+  sampled AUC swings widely around its 0.82 population value):
     negatives ~ Normal(0.0, 1), n = 1000
     positives ~ Normal(1.3, 1), n =   10
     roc_auc_score          -> 0.9076        <- "impressive"
@@ -455,6 +456,7 @@ import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.datasets import make_classification
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
@@ -611,13 +613,18 @@ def calibrate_model(
     corresponds to 70% actual positive rate.
 
     method="sigmoid"  (Platt scaling): few calibration samples (< 1,000), fast.
-    method="isotonic": more samples (> 1,000), flexible non-monotonic correction.
+    method="isotonic": more samples (> 1,000), flexible non-parametric fit —
+      still monotonic (isotonic regression can only be non-decreasing), so it
+      never changes the score ordering, and therefore never changes AUC.
 
     Brier score: mean squared error of probabilities. Lower = better calibrated.
     Expected calibration error (ECE): average abs difference between confidence
       and accuracy across probability bins.
     """
-    calibrated = CalibratedClassifierCV(model, method=method, cv="prefit")
+    # sklearn deprecated cv="prefit" in 1.6 and removed it in 1.8: wrap the
+    # already-fitted estimator in FrozenEstimator so .fit() trains only the
+    # calibrator. You must still keep model-fitting and calibration data disjoint.
+    calibrated = CalibratedClassifierCV(FrozenEstimator(model), method=method)
     calibrated.fit(X_val, y_val)  # fit calibrator on held-out validation set
 
     y_prob_raw = model.predict_proba(X_val)[:, 1]
@@ -650,6 +657,9 @@ def tune_with_optuna(
 
     MedianPruner: stops unpromising trials early if intermediate value
       is below the median of completed trials at that step (similar to early stopping).
+      Pruning only fires if the objective reports intermediate values via
+      trial.report(value, step) and checks trial.should_prune(); the fold-averaged
+      objective below is a single-shot score, so add per-fold reporting to use it.
     """
     try:
         import optuna
@@ -743,7 +753,9 @@ def compare_models_mcnemar(
 
 ## 7. Real-World Examples
 
-**Medical diagnosis (recall vs precision):** A cancer screening model must maximize recall (catch all true positives) because a missed cancer (FN) is far more costly than an unnecessary biopsy (FP). Team uses F2-score (beta=2, weighting recall twice over precision) as the CV objective. Final model achieves recall=0.94, precision=0.61, AUC-PR=0.82. A precision-tuned model at the same AUC-ROC (0.91) had recall=0.78 — 16% more missed cases.
+*The five scenarios below are illustrative composites of recurring industry patterns, not reports of specific published incidents; the numbers are representative teaching figures chosen to be internally consistent, not audited results.*
+
+**Medical diagnosis (recall vs precision):** A cancer screening model must maximize recall (catch all true positives) because a missed cancer (FN) is far more costly than an unnecessary biopsy (FP). Team uses F2-score (beta=2, weighting recall twice over precision) as the CV objective. Final model achieves recall=0.94, precision=0.61, AUC-PR=0.82. A precision-tuned model at the same AUC-ROC (0.91) had recall=0.78 — 16 percentage points lower recall, which on the 200-cancer cohort below means 44 missed cases instead of 12.
 
 **Fraud detection (AUC-PR over AUC-ROC):** Payment fraud rate = 0.3% (severely imbalanced). Model A had AUC-ROC=0.96, AUC-PR=0.72. Model B had AUC-ROC=0.94, AUC-PR=0.41. Team initially chose Model B (higher simplicity). After switching metric to AUC-PR, Model A was selected. At identical 0.1% false positive rate, Model A caught 2.1x more fraud.
 
@@ -782,7 +794,7 @@ def compare_models_mcnemar(
 | Method             | Trials needed to find good params | Handles conditional params | Parallelizable |
 |--------------------|-----------------------------------|----------------------------|----------------|
 | GridSearchCV       | Exponential in param count        | No                         | Yes            |
-| RandomizedSearchCV | 60 trials ~ 95% of grid           | No                         | Yes            |
+| RandomizedSearchCV | 60 trials -> 95% chance of landing in the top-5% region (Bergstra & Bengio 2012) | No | Yes |
 | Optuna TPE         | 50–200 for most problems          | Yes                        | Yes (async)    |
 
 ---
@@ -841,13 +853,13 @@ mape_safe = np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), epsilo
 |-----------------------|----------------------------------------------|-------|
 | scikit-learn          | CV, metrics, calibration, GridSearchCV       | Production standard |
 | Optuna                | Bayesian hyperparameter tuning               | pip install optuna |
-| Hyperopt              | Alternative Bayesian tuning (TPE, ATPE)      | Compatible with XGBoost |
+| Hyperopt              | Alternative Bayesian tuning (TPE, ATPE)      | Compatible with XGBoost; slow-moving (0.2.7 stable since 2021) |
 | Ray Tune              | Distributed hyperparameter search            | Works with PyTorch, sklearn |
 | MLflow                | Experiment tracking, metric logging          | Log CV scores per trial |
 | Weights & Biases      | Experiment tracking + hyperparameter sweeps  | Sweep = distributed random/Bayesian |
 | statsmodels           | McNemar's test, likelihood ratio tests       | pip install statsmodels |
 | imbalanced-learn      | SMOTE, ADASYN, class-weighted CV             | Imbalanced dataset tools |
-| scikit-plot           | AUC curves, confusion matrix visualization   | Quick EDA |
+| scikit-plots          | AUC curves, confusion matrix visualization   | Quick EDA; use the maintained `scikit-plots` fork — the original `scikit-plot` stopped at 0.3.7 in 2018 |
 | SHAP                  | Model explanation alongside evaluation       | Feature importance at evaluation time |
 
 ---
@@ -855,7 +867,7 @@ mape_safe = np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), epsilo
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between AUC-ROC and AUC-PR, and when do you prefer each?**
-AUC-ROC measures the probability that the model scores a random positive higher than a random negative; it is threshold-agnostic and ranges from 0.5 (random) to 1.0. AUC-PR measures the area under the precision-recall curve; its baseline equals the positive class prevalence (e.g., 0.05 for 5% positives). For heavily imbalanced datasets (< 5% positives), AUC-ROC is misleadingly optimistic because the large number of true negatives inflates TPR and TNR. AUC-PR directly measures how well the model retrieves the minority class. Use AUC-PR for fraud detection, rare disease prediction, and any setting where the minority class is the primary concern.
+AUC-ROC measures the probability that the model scores a random positive higher than a random negative; it is threshold-agnostic and runs 0 to 1, with 0.5 meaning random ranking. AUC-PR measures the area under the precision-recall curve; its baseline equals the positive class prevalence (e.g., 0.05 for 5% positives). For heavily imbalanced datasets (< 5% positives), AUC-ROC is misleadingly optimistic because the huge pool of true negatives sits in the FPR denominator, so hundreds of false alarms barely move the x-axis (TPR is unaffected — it never touches TN). AUC-PR directly measures how well the model retrieves the minority class. Use AUC-PR for fraud detection, rare disease prediction, and any setting where the minority class is the primary concern.
 
 **Q: Why must you use StratifiedKFold instead of KFold for classification with imbalanced classes?**
 Plain KFold assigns rows to folds randomly; with 1% positive rate and 1,000 rows, some folds may contain zero positive examples, making AUC computation undefined and giving wildly variable estimates. StratifiedKFold ensures each fold has approximately the same positive rate as the full dataset (here ~10 positives per fold). This produces stable, unbiased cross-validation estimates. Always use StratifiedKFold as the default for classification.
@@ -870,7 +882,7 @@ Calibration means that when a model predicts P(y=1) = 0.7, approximately 70% of 
 Use TimeSeriesSplit whenever rows are temporally dependent — financial data, time-based user events, sensor readings, demand forecasting. The core rule: training data must always be earlier in time than validation data. A purge gap is a buffer period between the training end and validation start. For example, if you train up to day 100 and validate on day 107, you skip days 101–106. This prevents autocorrelated features (e.g., 7-day rolling average) from leaking information across the boundary. Without a purge gap, day-100 training features and day-101 validation features share the same underlying values.
 
 **Q: How does Optuna's TPE sampler work and why is it better than random search?**
-TPE (Tree-structured Parzen Estimator) maintains two models: `l(x)` (distribution of hyperparameter configurations associated with good results) and `g(x)` (associated with poor results). It samples the next candidate from the ratio `l(x)/g(x)`, meaning it prioritizes regions that historically produce good results while maintaining some exploration. After 50–100 trials, TPE focuses search in the most promising parameter regions, whereas random search samples uniformly throughout. In practice TPE finds equivalent or better results in 30–50% fewer trials than random search for standard ML hyperparameter spaces.
+TPE (Tree-structured Parzen Estimator) maintains two models: `l(x)` (distribution of hyperparameter configurations associated with good results) and `g(x)` (associated with poor results). It samples the next candidate from the ratio `l(x)/g(x)`, meaning it prioritizes regions that historically produce good results while maintaining some exploration. After 50–100 trials, TPE focuses search in the most promising parameter regions, whereas random search samples uniformly throughout. Published benchmarks commonly show TPE reaching a comparable score in noticeably fewer trials than random search, but the margin is problem-dependent and random search remains a strong baseline on low-dimensional spaces — quote a speedup only if you measured it on your own task.
 
 **Q: What is the Brier score and how does it relate to calibration?**
 The Brier score is the mean squared error of probability predictions: `mean((y_true - y_prob)^2)`. Range: 0 (perfect) to 1 (worst). A perfectly calibrated model does not guarantee a low Brier score — discrimination (ranking ability) also contributes. The Brier score decomposes into calibration + resolution + uncertainty. It is the most common scalar summary of probability prediction quality. Reduce Brier score by: (1) improving model AUC (better discrimination), (2) calibrating probabilities (better calibration).
@@ -885,7 +897,7 @@ McNemar's test compares two classifiers on a fixed held-out test set based on th
 If you use the test set to compare 20 models and report the best, you have introduced selection bias. The reported metric is the maximum of 20 noisy estimates rather than an unbiased estimate of the winner's true performance — it overestimates true performance by an amount proportional to the number of models compared and the noise in the estimate. Fix: use cross-validation on the training set for all model comparison decisions; reserve the test set for a single final evaluation after all decisions are made.
 
 **Q: How do you choose the number of folds k in k-fold cross-validation?**
-Standard choice is k=5 or k=10. Higher k (10) gives a lower-bias estimate (each validation fold is smaller, training set is larger and closer to full data size) but higher variance (more folds, each noisier). Lower k (5) is faster and still gives reasonable estimates for n > 1,000. For small n (< 500), use LOO-CV or k=n-1. For very large n (> 1M), k=3 is often sufficient — the estimate variance is dominated by the model's own noise, not fold size. Time-series splits: k = number of years or quarters depending on forecast horizon.
+Standard choice is k=5 or k=10. Higher k (10) gives a lower-bias estimate (each validation fold is smaller, training set is larger and closer to full data size) but higher variance (more folds, each noisier). Lower k (5) is faster and still gives reasonable estimates for n > 1,000. For small n (< 500), use LOO-CV (which is exactly k = n). For very large n (> 1M), k=3 is often sufficient — the estimate variance is dominated by the model's own noise, not fold size. Time-series splits: k = number of years or quarters depending on forecast horizon.
 
 **Q: What is MAPE and what are its limitations for regression evaluation?**
 MAPE (Mean Absolute Percentage Error) = `mean(|actual - predicted| / |actual|) * 100`. Limitations: (1) undefined when actual = 0 (division by zero), (2) asymmetric — over-prediction and under-prediction of the same magnitude give different errors, (3) heavy penalty for small actuals (predicting 2 when actual is 1 gives 100% error). Better alternatives: sMAPE (symmetric MAPE), MASE (mean absolute scaled error, relative to naïve forecast), RMSSE. Use MAPE only when actuals are reliably > 0 and interpretability in percentage terms is required.

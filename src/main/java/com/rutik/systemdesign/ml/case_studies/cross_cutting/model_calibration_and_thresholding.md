@@ -176,7 +176,11 @@ def compute_ece(
     n = len(y_true)
 
     for i in range(n_bins):
-        mask = (y_prob >= bin_edges[i]) & (y_prob < bin_edges[i + 1])
+        # last bin is closed on the right so that y_prob == 1.0 is not silently dropped
+        if i == n_bins - 1:
+            mask = (y_prob >= bin_edges[i]) & (y_prob <= bin_edges[i + 1])
+        else:
+            mask = (y_prob >= bin_edges[i]) & (y_prob < bin_edges[i + 1])
         if mask.sum() == 0:
             continue
         bin_acc = float(y_true[mask].mean())           # empirical positive rate in bin
@@ -317,13 +321,15 @@ class ThresholdMonitor:
 
 ## 7. Real-World Examples
 
-**Google Pay (fraud detection):** uses cascaded calibration. The primary fraud scorer (a deep network) outputs raw logits. Platt scaling is applied on a rolling 30-day calibration window to adjust for daily event-rate shifts. The decision threshold is recalibrated weekly using the expected-value framework with merchant-specific cost matrices (chargebacks for card-not-present transactions average $15–$35 plus penalty fees from card networks).
+*None of the payment or ad platforms below publishes its calibration stack; these are the industry patterns those systems are generally understood to use, written as illustrations, not as disclosures. The credit entry is the exception — the regulatory requirement it describes is public law.*
 
-**Spotify (churn prediction):** discovered in 2019 that their GBDT churn model had ECE = 0.31 — severely miscalibrated. The model ranked users correctly (high AUC) but the absolute probabilities were wrong: users labeled 0.60 probability churned at 0.85 rate. The marketing team was setting intervention budgets using the raw probabilities, resulting in 40% under-investment in high-risk users. After isotonic calibration, ECE dropped to 0.04 and budget allocation improved. Intervention ROI increased by 18%.
+**Card-network fraud scoring (cascaded calibration):** the common pattern is a deep fraud scorer emitting raw logits, with Platt scaling refit on a rolling 30-day calibration window so daily event-rate shifts do not leak into the decision. The threshold is then re-derived on an expected-value basis using merchant-specific cost matrices. The cost inputs are the operator's own: chargeback fees, network penalty assessments, and the margin on a wrongly blocked good transaction — do not carry someone else's dollar figures into your matrix.
 
-**Lending Club / credit underwriting:** regulatory requirement (ECOA) demands that declined applicants receive the top 4 adverse factors. The score must also be calibrated so that the cutoff score corresponds to a meaningful default probability (e.g., "applicants below 620 score have >8% 24-month default probability"). Miscalibrated scores violate this requirement because the cutoff would correspond to a different default rate than documented.
+**Churn prediction (why AUC hides the problem):** the recurring failure is a GBDT churn model with a high AUC and a large ECE — it ranks users correctly, but users scored at 0.60 churn at a materially higher rate. Marketing then sets intervention budgets off the raw probability and systematically under-invests in the highest-risk decile. Post-hoc isotonic calibration on a held-out cohort collapses the ECE without touching AUC, and the budget re-allocation follows. The magnitude of the ROI change is entirely business-specific; measure it with a holdback, do not assume it.
 
-**Facebook (content ranking):** uses a two-stage calibration for click-through-rate prediction. Stage 1: isotonic regression calibrates the raw model output to match observed CTR. Stage 2: a real-time prior update adjusts predictions based on the current impression context (time of day, user cohort CTR shift). Without stage 2, predictions made at 09:00 are calibrated for the average day, but CTR at 09:00 is 30% higher than average — leading to systematic under-delivery in the morning.
+**Credit underwriting:** ECOA, as implemented by Regulation B, requires that a declined applicant receive the *specific principal reasons* for the denial; the official commentary to 12 CFR 1002.9(b)(2) adds that "disclosure of more than four reasons is not likely to be helpful to the applicant," which is where the industry convention of four adverse factors comes from — four is a practical ceiling, not a statutory count. Separately, the score must be calibrated so the cutoff corresponds to the default probability the credit policy documents (e.g., "applicants below the cutoff have >8% 24-month default probability"). A miscalibrated score means the documented cutoff and the realized default rate disagree.
+
+**Ad click-through prediction (two-stage calibration):** stage 1 fits isotonic regression so the raw model output matches observed CTR in aggregate; stage 2 applies a real-time prior update for the current impression context (hour of day, user cohort). Stage 2 exists because CTR varies systematically within the day, so a model calibrated to the daily average is biased in every individual hour — over-delivering in the low-CTR hours and under-delivering in the high-CTR ones. Estimate the hourly ratio from your own logs.
 
 ---
 
@@ -373,7 +379,7 @@ class ThresholdMonitor:
 
 **Applying calibration to a model that already uses Platt scaling internally.** Some sklearn classifiers (e.g., `SVC(probability=True)`) apply Platt scaling internally. Applying a second Platt scaling layer on top produces double-calibration, which may be worse than no calibration. Check the model's documentation before adding an external calibrator.
 
-**Using the wrong base rate for calibration.** If the calibration set has a different positive rate than production (common in undersampling strategies), calibrated probabilities will be biased relative to production. Apply a prior correction: p_adj = (p_cal × prevalence_prod) / ((p_cal × prevalence_prod) + ((1 - p_cal) × (1 - prevalence_prod))) for the production base rate.
+**Using the wrong base rate for calibration.** If the calibration set has a different positive rate than production (common in undersampling strategies), calibrated probabilities will be biased relative to production. Apply a prior correction. For a *balanced* (50/50) calibration set the correction collapses to p_adj = (p_cal × prevalence_prod) / ((p_cal × prevalence_prod) + ((1 - p_cal) × (1 - prevalence_prod))); for an arbitrary sampling prevalence use the general form in §12, which divides each term by the sampling prevalence as well.
 
 ---
 

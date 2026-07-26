@@ -22,7 +22,7 @@ Mental model: decompose ETA into three sub-problems — each with a different al
 **Non-functional requirements:**
 - Latency: p99 < 150ms for ETA request (including feature fetch); p99 < 50ms for model inference alone.
 - Throughput: 200k ETA requests/second during peak (major city, rush hour, concurrent events).
-- Accuracy: mean absolute error (MAE) ≤ 90 seconds on trip duration; coverage of p90 interval ≥ 88% (p90 must contain actual ETA at least 88% of the time).
+- Accuracy: mean absolute error (MAE) ≤ 95 seconds on trip duration; coverage of p90 interval ≥ 88% (p90 must contain actual ETA at least 88% of the time).
 - Geographic coverage: 50 cities globally; cross-city model (shared parameters) with city-specific fine-tuning.
 - Freshness: real-time traffic features must be < 2 minutes stale for traffic-sensitive routes.
 
@@ -37,18 +37,19 @@ Mental model: decompose ETA into three sub-problems — each with a different al
 
 **Request volume:** 200k req/s peak across 50 cities = 4k req/s per city average. During city events: up to 20k req/s for a single city.
 
-**Active trips at peak:** 10M concurrent trips globally → 10M × (update_every_15s) = 667k update requests/second for in-progress trip updates. These must be batched (not individual API calls).
+**Active trips at peak:** 10M trips/day with an average trip duration of ~20 minutes means concurrency, not daily volume, drives the update load. At peak (≈10% of the day's trips in one hour) that is 1M trips/hour × 20/60 h = **~330k concurrent trips**, each refreshed every 15 s → **~22k update requests/second**. These must be batched (not individual API calls). Note the arithmetic trap: multiplying *daily* trips by the update rate would give 667k/s and over-provision the fleet ~30x.
 
-**Historical training data:** 3 years × 365 days × 5M trips/day = 5.5B trip segments. Sampled to 500M for training (stratified by city, time-of-day, day-of-week, weather condition).
+**Historical training data:** 3 years × 365 days × 10M trips/day ≈ 11B trips. Sampled to 500M for training (stratified by city, time-of-day, day-of-week, weather condition).
 
 **Real-time features:** road segment speeds from GPS probe data. Global road network: ~50M road segments. Each segment's speed updated every 30 seconds = 1.67M segment updates/second globally → requires a streaming aggregation layer (Flink/Kafka Streams).
 
 **Model size:** LightGBM ensemble (p50 + p90 models): ~200MB combined. Loaded into memory on serving nodes — no disk I/O at request time.
 
-**Serving infrastructure:**
-- 200k req/s × 50ms avg inference = 10,000 CPU-core-equivalents needed.
-- At 32 cores/server: ~315 serving servers globally.
-- With horizontal autoscaling: 200 baseline + 115 for peak headroom.
+**Serving infrastructure:** size on **CPU service time**, not on p99 wall-clock latency — the two differ by 5x here and confusing them is the classic capacity-planning error.
+- Per request the service burns ~10 ms of CPU (feature assembly + two LightGBM inferences); the 50 ms figure is p99 *wall clock*, which includes Redis wait and queueing.
+- 200k req/s × 10 ms CPU = **2,000 CPU-core-equivalents** at theoretical 100% utilisation.
+- Provision at ~50% core utilisation so the tail does not queue: 4,000 cores → at 32 cores/server, **~125 servers** globally.
+- With horizontal autoscaling: 125 baseline + 50 for peak headroom = ~175 servers at peak.
 
 ---
 
@@ -326,13 +327,13 @@ Traffic changes rapidly at events (concerts, sports games). 2-minute staleness m
 
 ```mermaid
 xychart-beta
-    title "Trip-duration MAE (seconds) by algorithm - lower is better; SLO 90s"
+    title "Trip-duration MAE (seconds) by algorithm - lower is better; SLO 95s"
     x-axis ["Hist. avg", "Linear", "LGBM mean", "LGBM quantile", "GNN"]
     y-axis "MAE (seconds)" 0 --> 150
     bar [140, 110, 92, 92, 75]
 ```
 
-*The GNN is the accuracy leader at 75s MAE but costs 45ms CPU inference — over the 50ms model budget without GPUs. LightGBM (92s) clears the 90s SLO at 3–6ms, so it serves p50/p90 today while the GNN stays a research track for long-trip accuracy.*
+*The GNN is the accuracy leader at 75s MAE but costs 45ms CPU inference — over the 50ms model budget without GPUs. LightGBM (92s) clears the 95s SLO at 3–6ms, so it serves p50/p90 today while the GNN stays a research track for long-trip accuracy.*
 
 ---
 
@@ -438,32 +439,33 @@ Per-request compute:
 - Feature assembly + response serialization: 3ms
 Total per request: ~10ms average, 50ms p99
 
-Serving servers needed:
-At 50ms p99 per request, each server can handle:
-  1 / 0.050s = 20 req/s per CPU core
-  32 cores × 20 req/s = 640 req/s per server
+Serving servers needed (size on CPU service time, NOT on p99 wall clock —
+p99 includes Redis wait and queueing, so using it inflates the fleet ~5x):
+  ~10ms CPU per request -> 1 / 0.010s = 100 req/s per CPU core
+  Target 50% core utilisation so the 50ms p99 tail does not queue:
+  32 cores x 100 req/s x 0.5 = 1,600 req/s per server
   At 200k req/s global, 50-city distribution:
-  200k / 640 ≈ 313 servers globally
-  Add 40% headroom for peaks: ~440 servers
+  200k / 1,600 = 125 servers globally
+  Add 40% headroom for regional peaks: ~175 servers
 ```
 
 **Scaling formula:**
-- If requests double to 400k/s: add 440 servers (linear scaling — each server is stateless).
-- If p99 SLO tightens to 50ms: need to reduce Redis lookups (pre-aggregate segments into route-level features) or move to GPU inference (LightGBM GPU: ~0.5ms inference).
+- If requests double to 400k/s: add 175 servers (linear scaling — each server is stateless).
+- If p99 SLO tightens to 50ms: reduce Redis lookups (pre-aggregate segments into route-level features) or move tree inference off CPU. Note that **LightGBM has no native GPU inference** — its GPU support is training-only; GPU-accelerated tree scoring requires exporting to NVIDIA's cuML Forest Inference Library (FIL) or to ONNX Runtime.
 - If cities expand to 200: training infrastructure scales linearly; serving infrastructure scales sub-linearly (smaller cities have lower traffic).
 
 **Cost model (global):**
 
 | Component | Config | Cost/month |
 |---|---|---|
-| ETA serving (440 × c5.2xlarge) | On-demand, multi-region | ~$330k/month |
-| Redis Cluster (real-time traffic) | 10 nodes × r5.2xlarge per region | ~$50k/month |
-| Flink streaming (traffic pipeline) | 20 TaskManagers × 8 cores | ~$25k/month |
-| Training (weekly retrain) | EMR, 50 nodes × 2h | ~$15k/month |
-| S3 storage (training data, logs) | 500GB/day compressed | ~$10k/month |
-| **Total** | | **~$430k/month** |
+| ETA serving | 175 × c5.2xlarge at $0.34/hr | ~$43k |
+| Redis Cluster (real-time traffic) | 10 × r5.2xlarge at $0.504/hr in each of 5 regions | ~$18k |
+| Flink streaming (traffic pipeline) | 20 TaskManagers (c5.2xlarge, 8 vCPU) per region × 5 | ~$25k |
+| Training (weekly retrain) | EMR, 50 nodes × 2h = ~433 node-hr/month on r5.4xlarge | ~$0.6k |
+| S3 storage (training data, logs) | 500GB/day compressed, 2-year retention ≈ 365 TB at $0.023/GB-mo | ~$8k |
+| **Total** | | **~$95k/month** |
 
-At 10M rides/day × $0.50 avg revenue contribution from accurate ETA (reduced cancellations, better driver utilization): $5M/day. Model cost is 0.3% of attributable revenue.
+At 10M rides/day × $0.50 avg revenue contribution from accurate ETA (reduced cancellations, better driver utilization): $5M/day, ~$152M/month. Model cost is ~0.06% of attributable revenue — the interesting consequence is that accuracy, not infrastructure cost, is the only lever worth optimizing here.
 
 ---
 
