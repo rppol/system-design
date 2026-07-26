@@ -249,7 +249,7 @@ Adapter converts one existing interface to another (1:1, fixing an incompatibili
 ---
 
 **Q: Composite: how do you handle leaf-specific operations like `add()` on a leaf node?**
-Two approaches: (a) Declare `add()`/`remove()` on the Component interface and throw `UnsupportedOperationException` from Leaf — maximizes transparency (client uses Component uniformly) at the cost of safety (compiler won't catch the call). (b) Declare `add()`/`remove()` only on Composite — maximizes safety (compiler prevents the call on Leaf) at the cost of transparency (client must downcast to Composite to add children). GoF calls these "transparency" vs "safety" designs. In practice: use option (b) (safety) when leaf/composite distinction is meaningful to clients, and option (a) only when the uniform interface is critical.
+GoF names two designs here: transparency and safety. Transparency declares `add()`/`remove()` on the Component interface and has Leaf throw `UnsupportedOperationException` — the client uses Component uniformly, but the compiler won't catch the bad call. Safety declares `add()`/`remove()` only on Composite — the compiler prevents the call on Leaf, at the cost of the client having to downcast to Composite to add children. In practice: use safety when the leaf/composite distinction is meaningful to clients, and transparency only when the uniform interface is critical.
 
 ---
 
@@ -259,7 +259,7 @@ Intrinsic state is shared — it doesn't vary between instances and can be store
 ---
 
 **Q: When does a Decorator stack become a maintenance problem?**
-When: (a) stack depth is deep (5+ decorators = debugging a `NullPointerException` requires unwrapping every layer), (b) decorator ordering has undocumented semantic constraints (e.g., `GZIPOutputStream` must wrap before `BufferedOutputStream`, not after), (c) decorators are added conditionally at runtime with no visibility. Fix: document the canonical stack order, make ordering constraints part of a factory method or builder, and avoid deep stacks by merging related concerns into one decorator.
+A Decorator stack turns into a maintenance problem when it gets deep, order-sensitive, or assembled conditionally at runtime. Specifically: (a) five or more layers means debugging a `NullPointerException` requires unwrapping every one of them, (b) decorator ordering carries undocumented semantic constraints (`GZIPOutputStream` must wrap before `BufferedOutputStream`, not after), (c) decorators added conditionally at runtime leave no single place to read the effective stack. Fix: document the canonical stack order, make ordering constraints part of a factory method or builder, and avoid deep stacks by merging related concerns into one decorator.
 
 ---
 
@@ -294,7 +294,7 @@ Java doesn't support multiple inheritance of classes, so the GoF class adapter (
 ---
 
 **Q: How does `JdbcTemplate` implement Facade, and what complexity does it hide?**
-`JdbcTemplate.query(sql, mapper)` hides: acquiring a connection from the pool, creating a `PreparedStatement`, setting parameters, executing the query, iterating the `ResultSet`, mapping each row, closing the `ResultSet`, closing the statement, releasing the connection back to the pool, and translating `SQLException` to Spring's `DataAccessException` hierarchy. Without `JdbcTemplate`, each operation requires 10–15 lines of boilerplate with try-with-resources nesting. The facade reduces this to 1–3 lines. The subsystem (JDBC API) remains directly accessible for edge cases that need it.
+`JdbcTemplate.query(sql, mapper)` hides the whole JDBC resource-and-exception dance behind one call. It acquires a connection from the pool, creates a `PreparedStatement`, sets parameters, executes the query, iterates the `ResultSet`, maps each row, closes the `ResultSet`, closes the statement, releases the connection back to the pool, and translates `SQLException` into Spring's `DataAccessException` hierarchy. Without `JdbcTemplate`, each operation requires 10–15 lines of boilerplate with try-with-resources nesting. The facade reduces this to 1–3 lines. The subsystem (JDBC API) remains directly accessible for edge cases that need it.
 
 ---
 
@@ -304,7 +304,7 @@ Yes — that's the point. A `FileSystem` Composite: `FileSystemComponent` is the
 ---
 
 **Q: Which structural patterns are most commonly tested in senior-level interviews, and why?**
-Proxy (Spring AOP mechanics and the self-invocation trap), Decorator vs Proxy (same structure, different intent — a classic gotcha), and Adapter vs Bridge (retrofit vs upfront design) appear most frequently because they require understanding both the pattern mechanics and real-world framework implementations. Flyweight appears in performance-focused interviews (Java memory model, caching). Composite appears when tree structures or recursive algorithms are discussed. Facade and Adapter are often used as warm-up questions before the harder ones.
+Proxy, Decorator-vs-Proxy, and Adapter-vs-Bridge come up most, because each needs both the pattern mechanics and a real framework implementation. Proxy is asked as Spring AOP mechanics and the self-invocation trap; Decorator vs Proxy is the classic gotcha of identical structure with different intent; Adapter vs Bridge is retrofit versus upfront design. Flyweight appears in performance-focused interviews (Java memory model, caching). Composite appears when tree structures or recursive algorithms are discussed. Facade and Adapter are often used as warm-up questions before the harder ones.
 
 ---
 

@@ -22,7 +22,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `request_handling/` | 4 | @RequestMapping, validation, @ControllerAdvice, ProblemDetail |
 | `filters_and_interceptors/` | 4 | Filter vs HandlerInterceptor, OncePerRequestFilter, order |
 | `spring_webflux/` | 4 | Mono/Flux, Netty event loop, backpressure, WebClient, R2DBC |
-| `validation_and_error_handling/` | 4 | Bean Validation (JSR-380), @Valid/@Validated, validation groups, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| `validation_and_error_handling/` | 4 | Bean Validation (JSR-380), @Valid/@Validated, validation groups, custom ConstraintValidator, ProblemDetail (RFC 9457) |
 | `spring_data_jpa/` | 5 | JpaRepository, N+1, projections, locking, Specifications |
 | `spring_transactions/` | 5 | Propagation, isolation, self-invocation, rollback rules |
 | `spring_caching/` | 5 | @Cacheable, @CacheEvict, RedisCacheManager, stampede prevention |
@@ -146,11 +146,14 @@ Learning-path index: `case_studies/README.md` (mandatory; update with every new 
 ## Spring Version Tags
 
 When covering a Spring feature, always note the version:
-- **Spring Boot 2.7 / Spring Framework 5.3** — last `javax.*` baseline, `spring.factories`
 - **Spring Boot 3.0 / Spring Framework 6.0** — `jakarta.*` namespace, `AutoConfiguration.imports`, `WebSecurityConfigurerAdapter` removed, lambda DSL required, JDK 17 baseline
-- **Spring Boot 3.1+** — Testcontainers support out-of-the-box, virtual threads preview
-- **Spring Boot 3.2+** — Virtual threads GA (`spring.threads.virtual.enabled=true`), RestClient
-- **Spring Boot 3.3+** — Spring AI GA, CDS support, service connection improvements
+- **Spring Boot 3.1+** — Testcontainers support out-of-the-box, service connections
+- **Spring Boot 3.2+** — Virtual threads GA (`spring.threads.virtual.enabled=true`), `RestClient`, `@HttpExchange` interface clients
+- **Spring Boot 3.3+** — CDS support, service connection improvements
+- **Spring Boot 3.4+** — Structured logging (`ecs`/`gelf`/`logstash`), `spring.http.client.factory`, actuator access levels (`read-only`/`unrestricted`/`none`)
+- **Spring Boot 3.5+** — `@ServletRegistration`/`@FilterRegistration`, `env:` property imports, `WebClient` config properties, client-side SSL for service connections
+- **Spring Boot 4.0 / Spring Framework 7.0** — Jakarta EE 11 baseline (Servlet 6.1, Tomcat 11, JPA 3.2, Hibernate 7), JSpecify null-safety, first-class API versioning, `@Retryable`/`@ConcurrencyLimit`, `BeanRegistrar`, Jackson 3, Undertow support removed, `HttpHeaders` no longer a `MultiValueMap`
+- **Spring Boot 4.1+ (current)** — HTTP service client auto-configuration, `spring.mvc.apiversion.*` / `spring.webflux.apiversion.*`, `spring-boot-starter-opentelemetry`, Gradle 9; runs on Java 17–26 (JDK 25 recommended)
 
 ## Q&A Minimums (Spring-specific)
 

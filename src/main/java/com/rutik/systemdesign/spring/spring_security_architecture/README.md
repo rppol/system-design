@@ -814,7 +814,7 @@ http.authorizeHttpRequests(auth -> auth
 ## 12. Interview Questions with Answers
 
 **Q: What is FilterChainProxy and how does it differ from a regular servlet filter?**
-`FilterChainProxy` is a single `javax.servlet.Filter` registered in the servlet container that internally delegates to one or more `SecurityFilterChain` instances based on request matching. Unlike a regular filter registered directly in the container, `FilterChainProxy` allows multiple independent filter chains, each with different URL matchers. Only the first matching chain processes the request. This enables distinct security configurations for, say, `/api/**` (stateless JWT) and `/admin/**` (form login with session).
+`FilterChainProxy` is a single `jakarta.servlet.Filter` registered in the servlet container that internally delegates to one or more `SecurityFilterChain` instances based on request matching. Unlike a regular filter registered directly in the container, `FilterChainProxy` allows multiple independent filter chains, each with different URL matchers. Only the first matching chain processes the request. This enables distinct security configurations for, say, `/api/**` (stateless JWT) and `/admin/**` (form login with session).
 
 **Q: Walk through a successful username/password authentication in Spring Security.**
 The request hits `UsernamePasswordAuthenticationFilter`, which extracts credentials and creates an unauthenticated `UsernamePasswordAuthenticationToken`. This token is passed to `ProviderManager.authenticate()`, which iterates its list of `AuthenticationProvider`s. `DaoAuthenticationProvider` calls `UserDetailsService.loadUserByUsername()` to retrieve the `UserDetails`, then calls `PasswordEncoder.matches(rawPassword, storedHash)`. On success, a fully authenticated token is created with granted authorities. `SecurityContextHolder.getContext().setAuthentication(token)` stores it. `AuthenticationSuccessHandler` redirects or returns a response.
@@ -822,8 +822,8 @@ The request hits `UsernamePasswordAuthenticationFilter`, which extracts credenti
 **Q: What is the difference between `hasRole()` and `hasAuthority()` in Spring Security?**
 `hasRole('ADMIN')` automatically prepends the `ROLE_` prefix and checks for the authority `ROLE_ADMIN`. `hasAuthority('ADMIN')` checks for the exact string `ADMIN` without any prefix manipulation. When using `User.builder().roles("ADMIN")`, the authority is stored as `ROLE_ADMIN`, so `hasRole('ADMIN')` is the correct match. When using `User.builder().authorities("ADMIN")`, use `hasAuthority('ADMIN')`. Mixing them (e.g., storing with `authorities("ADMIN")` but checking with `hasRole("ADMIN")`) results in authorization always failing silently.
 
-**Q: What changed between Spring Security 5.x and 6.x (Spring Boot 2.x vs 3.x)?**
-`WebSecurityConfigurerAdapter` was removed; all configuration must now be `SecurityFilterChain` beans. `antMatchers()` was replaced by `requestMatchers()`. Lambda DSL is required; method-chaining without lambdas no longer works. `@EnableGlobalMethodSecurity` was deprecated in 5.6 and removed conceptually in favor of `@EnableMethodSecurity`. `authorizeRequests()` was replaced by `authorizeHttpRequests()`. LDAP, CAS, and various adapters moved to separate modules.
+**Q: How do you make `ROLE_ADMIN` automatically imply `ROLE_USER` across the whole application?**
+Publish a `RoleHierarchy` bean built with `RoleHierarchyImpl.withDefaultRolePrefix()`. The builder reads as `.role("ADMIN").implies("STAFF").role("STAFF").implies("USER").build()`, and `RoleHierarchyImpl.fromHierarchy("ROLE_ADMIN > ROLE_STAFF")` accepts the same graph as a single string. A published `RoleHierarchy` bean is picked up automatically by `authorizeHttpRequests`; for method security you must also expose a `DefaultMethodSecurityExpressionHandler` with `setRoleHierarchy(...)`, and both beans should be declared `static` so they are instantiated before the security infrastructure that consumes them.
 
 **Q: How does `ProviderManager` work when multiple `AuthenticationProvider`s are registered?**
 `ProviderManager` iterates its `List<AuthenticationProvider>` and calls `supports(Class)` on each to find compatible providers. For each compatible provider, it calls `authenticate(authentication)`. If the provider returns a non-null fully authenticated token, iteration stops and that result is returned. If the provider throws `AuthenticationException`, it is recorded but iteration continues to the next provider. If all providers fail or abstain, `ProviderManager` throws the last `AuthenticationException` or delegates to a parent `ProviderManager` if configured.
@@ -874,8 +874,8 @@ public SecurityFilterChain webChain(HttpSecurity http) throws Exception {
 }
 ```
 
-**Q: What is the `AuthorizationManager` API introduced in Spring Security 5.6 / 6.x?**
-`AuthorizationManager<T>` replaces `AccessDecisionManager` and its voter pattern. It provides a single `check(Supplier<Authentication>, T object)` method returning `AuthorizationDecision`. For HTTP requests, `RequestMatcherDelegatingAuthorizationManager` maps URL patterns to `AuthorizationManager` instances. For method security, `PreAuthorizeAuthorizationManager` evaluates SpEL. The new API is simpler (no voter aggregation logic), lazy (authentication is a `Supplier` — not resolved unless needed), and directly testable.
+**Q: What is the `AuthorizationManager` API and how is an authorization decision made?**
+`AuthorizationManager<T>` is the single authorization SPI: one `check(Supplier<Authentication>, T object)` method returning an `AuthorizationDecision`. For HTTP requests, `RequestMatcherDelegatingAuthorizationManager` maps URL patterns to `AuthorizationManager` instances. For method security, `PreAuthorizeAuthorizationManager` evaluates SpEL. The API is lazy — `Authentication` arrives as a `Supplier` and is not resolved unless a rule actually needs it — has no voter-aggregation logic, and a custom implementation is a plain unit-testable class.
 
 **Q: How does Spring Security handle OAuth2 JWT validation in a resource server?**
 Configure `http.oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))`. Spring Security fetches the authorization server's public keys from the JWKS URI (`spring.security.oauth2.resourceserver.jwt.jwks-uri`), caches them, and validates each incoming JWT's signature, expiry, issuer, and audience. A valid JWT results in a `JwtAuthenticationToken` placed in the `SecurityContextHolder`. Authorities are extracted from the `scope` or `roles` claim using a configurable `JwtAuthenticationConverter`. No session is required.
@@ -926,13 +926,13 @@ class AdminControllerTest {
 Spring Security evaluates authorization matchers top-to-bottom and applies the *first* one that matches the request, ignoring the rest. If you put `anyRequest().permitAll()` (or a broad `/**` pattern) before a specific `/admin/**` rule, every request matches the broad rule first and the admin restriction never applies — a silent privilege-escalation hole. The fix is to order from most-specific to least-specific and finish with a catch-all `anyRequest()`. This is a frequent real-world misconfiguration because the app still "works" — it just authorizes too much.
 
 **Q: How do multiple `SecurityFilterChain` beans coexist, and how does Spring pick which one handles a request?**
-You can define several `SecurityFilterChain` beans, each with its own `securityMatcher` (e.g. one for `/api/**` that is stateless + JWT, one for everything else that is form-login + sessions). `FilterChainProxy` holds the ordered list and, per request, selects the *first* chain whose `securityMatcher` matches — only that chain's filters run. Use `@Order` to control evaluation order, and make the most specific matcher first; a chain with no `securityMatcher` matches everything and must come last. This is the modern way (Spring Security 5.7+/6.x) to apply different security models to different parts of one application after `WebSecurityConfigurerAdapter` was removed.
+You can define several `SecurityFilterChain` beans, each with its own `securityMatcher` (e.g. one for `/api/**` that is stateless + JWT, one for everything else that is form-login + sessions). `FilterChainProxy` holds the ordered list and, per request, selects the *first* chain whose `securityMatcher` matches — only that chain's filters run. Use `@Order` to control evaluation order, and make the most specific matcher first; a chain with no `securityMatcher` matches everything and must come last — publish it anywhere earlier and startup fails with "a filter chain that matches any request has already been configured". This is how one application applies different security models to different parts of itself.
 
 ---
 
 ## 13. Best Practices
 
-1. **Use `SecurityFilterChain` beans, never extend `WebSecurityConfigurerAdapter`.** This is mandatory for Spring Security 6.x and produces a cleaner, more testable configuration.
+1. **Express all configuration as `SecurityFilterChain` beans with the lambda DSL.** Each chain is an ordinary bean, so it can be sliced per URL space with `securityMatcher` and asserted directly in tests.
 
 2. **Always configure `permitAll()` for public endpoints explicitly.** The fail-closed default means any unconfigured endpoint is implicitly protected. Never rely on "I'll add security later."
 

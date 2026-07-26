@@ -44,7 +44,7 @@ Python 3.13 and 3.14 are the current production targets. `tomllib` is in the std
 
 ### Dependency Declaration Strategies
 
-**Application projects** (FastAPI services, scripts): declare dependencies in `pyproject.toml` with minimum version lower bounds (`fastapi>=0.111.0`). Generate a lock file for deployment. The lock file is committed to the repository.
+**Application projects** (FastAPI services, scripts): declare dependencies in `pyproject.toml` with minimum version lower bounds (`fastapi>=0.140.0`). Generate a lock file for deployment. The lock file is committed to the repository.
 
 **Library projects** (packages published to PyPI): declare dependencies with loose upper bounds or no upper bounds (`fastapi>=0.100.0`). Never commit a lock file to a library repo — let the user's resolver pick compatible versions. The lock file is for development only and listed in `.gitignore`.
 
@@ -72,13 +72,13 @@ flowchart LR
 
 ### Build Distribution Types
 
-**Wheel** (`.whl`): A ZIP archive with a standardized naming convention. Pre-built — no compilation needed at install time. For pure Python packages the tag is `py3-none-any` (works on any platform). For C extension packages separate wheels exist per Python version and platform (e.g., `cp312-cp312-manylinux_2_17_x86_64.whl`). Install time: milliseconds.
+**Wheel** (`.whl`): A ZIP archive with a standardized naming convention. Pre-built — no compilation needed at install time. For pure Python packages the tag is `py3-none-any` (works on any platform). For C extension packages separate wheels exist per Python version and platform (e.g., `cp313-cp313-manylinux_2_17_x86_64.whl`). Install time: milliseconds.
 
 **Source distribution / sdist** (`.tar.gz`): Archive of raw source files. Requires running the build backend at install time. Platform-agnostic but slower to install. Used as a fallback when no matching wheel exists.
 
 ### Virtual Environment Strategies
 
-**`venv`** (stdlib): `python -m venv .venv`. Lightweight, no additional install. The standard for most projects.
+**`venv`** (stdlib, [3.3]): `python -m venv .venv`. Lightweight, no additional install. The standard for most projects.
 
 **`uv venv`**: Creates a venv 10-100x faster than `python -m venv`. Backed by a global cache — packages are hard-linked rather than copied, so disk usage is minimal.
 
@@ -101,7 +101,7 @@ flowchart LR
 ```
 my-fastapi-service/
 ├── pyproject.toml          ← single source of truth
-├── uv.lock                 ← committed lock file (uv >=0.4)
+├── uv.lock                 ← committed lock file
 ├── .pre-commit-config.yaml ← pre-commit hook definitions
 ├── Makefile                ← developer convenience targets
 ├── Dockerfile              ← multi-stage build
@@ -188,33 +188,33 @@ name = "myservice"
 version = "1.0.0"
 description = "Production FastAPI microservice"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Rutik", email = "dev@example.com" }]
 
 # Direct runtime dependencies — loose lower bounds only
 dependencies = [
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.7.0",
-    "pydantic-settings>=2.2.0",
+    "fastapi>=0.140.0",
+    "uvicorn[standard]>=0.51.0",
+    "pydantic>=2.13.0",
+    "pydantic-settings>=2.13.0",
     "sqlalchemy>=2.0.0",
-    "asyncpg>=0.29.0",
-    "httpx>=0.27.0",
+    "asyncpg>=0.31.0",
+    "httpx>=0.28.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.4.0",
-    "mypy>=1.10.0",
-    "pre-commit>=3.7.0",
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
+    "pre-commit>=4.6.0",
 ]
 test = [
-    "pytest>=8.2.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=5.0.0",
-    "httpx>=0.27.0",       # needed for TestClient
-    "respx>=0.21.0",       # mock httpx calls
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "httpx>=0.28.0",       # needed for TestClient
+    "respx>=0.23.0",       # mock httpx calls
 ]
 
 [project.scripts]
@@ -227,7 +227,7 @@ packages = ["src/myservice"]
 
 # ruff: replaces flake8 + isort + pyupgrade + black
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 88
 src = ["src", "tests"]
 
@@ -254,7 +254,7 @@ indent-style = "space"
 
 # mypy strict mode for the src tree
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -310,8 +310,8 @@ uv sync --all-extras
 #   myservice-1.0.0-py3-none-any.whl
 #
 # C extension (platform-specific):
-#   myservice-1.0.0-cp312-cp312-manylinux_2_17_x86_64.whl
-#   myservice-1.0.0-cp312-cp312-macosx_13_0_arm64.whl
+#   myservice-1.0.0-cp313-cp313-manylinux_2_17_x86_64.whl
+#   myservice-1.0.0-cp313-cp313-macosx_13_0_arm64.whl
 
 # Build both:
 python -m build          # produces both .whl and .tar.gz in dist/
@@ -394,7 +394,7 @@ result = some_untyped_library.call()  # type: ignore[no-any-return]
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.10
+    rev: v0.16.0
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
@@ -403,19 +403,19 @@ repos:
         types_or: [python, pyi]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.10.0
+    rev: v2.3.0
     hooks:
       - id: mypy
         args: [--strict]
         additional_dependencies:
-          - "pydantic>=2.7.0"
-          - "pydantic-settings>=2.2.0"
-          - "fastapi>=0.111.0"
+          - "pydantic>=2.13.0"
+          - "pydantic-settings>=2.13.0"
+          - "fastapi>=0.140.0"
           - "types-requests"
         files: ^src/
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: check-merge-conflict
       - id: check-toml
@@ -504,7 +504,7 @@ twine check dist/*
 # Upload to PyPI (prompts for credentials or uses PYPI_TOKEN env var)
 twine upload dist/*
 
-# Or with uv (uv 0.4+):
+# Or with uv:
 uv publish --token $PYPI_TOKEN
 
 # Upload to TestPyPI first (recommended)
@@ -632,10 +632,10 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 
 ```
 # requirements.txt (BROKEN approach)
-fastapi==0.111.0
-starlette==0.37.2
-pydantic==2.7.1
-anyio==4.3.0
+fastapi==0.140.0
+starlette==1.3.1
+pydantic==2.13.4
+anyio==4.14.2
 # ... 40 more transitive deps pinned manually
 ```
 
@@ -645,8 +645,8 @@ This works until `anyio` releases 4.4.0 and `starlette` releases 0.38.0 with inc
 # FIX: pyproject.toml with direct deps only (loose bounds)
 [project]
 dependencies = [
-    "fastapi>=0.111.0",
-    "pydantic>=2.7.0",
+    "fastapi>=0.140.0",
+    "pydantic>=2.13.0",
 ]
 ```
 
@@ -703,7 +703,7 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 
 **Platform-specific wheels in a multi-arch Docker environment**: Building a wheel on `x86_64` and copying it into an `arm64` container image fails at import time for C extensions. Use multi-platform builds or install from the lock file in the final container stage.
 
-**`pre-commit` hook version drift**: Specifying `rev: v0.4.10` for ruff in `.pre-commit-config.yaml` while developers run `ruff==0.5.0` locally causes inconsistent lint results. Run `pre-commit autoupdate` quarterly and pin the result.
+**`pre-commit` hook version drift**: Specifying `rev: v0.15.0` for ruff in `.pre-commit-config.yaml` while developers run `ruff==0.16.0` locally causes inconsistent lint results. Run `pre-commit autoupdate` quarterly and pin the result.
 
 **Importing from `__future__` annotations incorrectly**: `from __future__ import annotations` turns every annotation into a string (deferred evaluation). This breaks `pydantic` v2 model field resolution when a referenced type is not yet importable at class-definition time, unless you call `model_rebuild()` once the type is in scope.
 
@@ -736,7 +736,7 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 `pyproject.toml` provides a single, declarative file that replaces `setup.py`, `setup.cfg`, `MANIFEST.in`, and scattered tool config files. PEP 517 decouples build frontends from backends via a standard interface. PEP 518 introduces the `[build-system]` table so tools know which backend to invoke. PEP 621 standardizes the `[project]` metadata table (name, version, dependencies). Before these PEPs, `setup.py` executed arbitrary Python code during install, making builds non-reproducible and creating security risks.
 
 **Q2: What is the difference between a wheel and an sdist, and when does each matter?**
-A wheel (`.whl`) is a pre-built archive — install time is just unzipping and copying files. An sdist (`.tar.gz`) is raw source that requires running the build backend at install time, which may involve compiling C extensions. Pure Python wheels use the tag `py3-none-any` and work everywhere. C extension wheels are platform-specific (e.g., `cp312-cp312-manylinux_2_17_x86_64`). In production Docker builds, always install from wheels — missing a wheel for your platform triggers an sdist build that may fail if the build tools are absent.
+A wheel (`.whl`) is a pre-built archive — install time is just unzipping and copying files. An sdist (`.tar.gz`) is raw source that requires running the build backend at install time, which may involve compiling C extensions. Pure Python wheels use the tag `py3-none-any` and work everywhere. C extension wheels are platform-specific (e.g., `cp313-cp313-manylinux_2_17_x86_64`). In production Docker builds, always install from wheels — missing a wheel for your platform triggers an sdist build that may fail if the build tools are absent.
 
 **Q3: Explain how `uv` achieves 10-100x speed improvement over `pip`.**
 `uv` is written in Rust and uses several techniques: a global wheel cache (`~/.cache/uv/`) with hard links (install is a metadata operation, not a copy), a parallel SAT resolver that resolves dependencies concurrently rather than sequentially, and pre-compiled Rust routines for TOML parsing, hash verification, and file system operations. On a warm cache hit, installing a package is ~10ms vs. pip's ~200ms because no network request or file copy occurs — only a directory entry is created.
@@ -769,7 +769,7 @@ The src layout places package source under `src/mypackage/` rather than directly
 Configure `PYPI_TOKEN` as a repository secret. In the release workflow (triggered by a version tag), run `python -m build` to produce the wheel and sdist in `dist/`. Run `twine check dist/*` to verify the artifacts meet PyPI requirements (valid metadata, valid README rendering). Run `twine upload dist/* --non-interactive --username __token__ --password $PYPI_TOKEN`. Alternatively, use `uv publish --token $PYPI_TOKEN`. Use TestPyPI for staging. For automated version bumping, integrate `python-semantic-release` which reads conventional commit messages to determine the next version, updates `pyproject.toml`, creates a git tag, and triggers the release workflow.
 
 **Q13: What happens when you build a wheel with C extensions on an x86_64 machine and copy it into an arm64 Docker container?**
-The import fails at runtime because the compiled `.so` file inside the wheel contains x86_64 machine code that the arm64 container's Python interpreter cannot load. Wheel filenames encode the target platform (`cp312-cp312-manylinux_2_17_x86_64` versus `...macosx_13_0_arm64`), so `pip`/`uv` reject an incompatible wheel during a normal install, but a wheel copied in manually as a build artifact skips that check and fails only when the code actually imports. Fix it with Docker's multi-platform build support (`docker buildx build --platform linux/amd64,linux/arm64`) so each architecture gets its own compiled wheel, or install from the lock file inside each target container's own build stage.
+The import fails at runtime because the compiled `.so` file inside the wheel contains x86_64 machine code that the arm64 container's Python interpreter cannot load. Wheel filenames encode the target platform (`cp313-cp313-manylinux_2_17_x86_64` versus `...macosx_13_0_arm64`), so `pip`/`uv` reject an incompatible wheel during a normal install, but a wheel copied in manually as a build artifact skips that check and fails only when the code actually imports. Fix it with Docker's multi-platform build support (`docker buildx build --platform linux/amd64,linux/arm64`) so each architecture gets its own compiled wheel, or install from the lock file inside each target container's own build stage.
 
 **Q14: What causes different lint results between a developer's local `ruff` run and CI when both use `pre-commit`?**
 The `rev:` field pinned in `.pre-commit-config.yaml` can drift out of sync with the `ruff` version installed in a developer's local environment. `pre-commit` creates an isolated environment per hook using the pinned `rev`, so CI always runs the exact pinned version, but a developer who ran `ruff check` directly instead of `pre-commit run` uses whatever version their local binary happens to be. New rules added between the pinned and installed versions produce lint results that pass locally but fail in CI, or the reverse. Run `pre-commit autoupdate` on a regular cadence and commit the updated `rev` so both paths converge on the same version.
@@ -795,7 +795,7 @@ It turns every type annotation into an unevaluated string, so Pydantic can no lo
 - **Test wheel installation in CI**: Add a CI step that installs the built wheel in a fresh virtualenv and runs a smoke test (`python -c "import mypackage; print(mypackage.__version__)"`) before publishing.
 - **Use `[project.optional-dependencies]` groups**: Keep dev and test dependencies separate from runtime dependencies. CI test jobs install `.[test]`; developers install `.[dev,test]`.
 - **Validate `pyproject.toml` in CI**: Run `python -m build --dry-run` or `hatch build --clean` to verify the build configuration before attempting a release.
-- **Set `requires-python` precisely**: `requires-python = ">=3.12"` prevents accidental installation on Python 3.11, where PEP 695 generic syntax (`def first[T](xs: list[T]) -> T`) is a syntax error.
+- **Set `requires-python` precisely**: `requires-python = ">=3.13"` prevents accidental installation on Python 3.12, where PEP 696 type-parameter defaults (`class Box[T = int]`) are a syntax error.
 
 ---
 
@@ -841,35 +841,35 @@ build-backend = "hatchling.build"
 [project]
 name = "payment-service"
 version = "1.0.0"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.7.0",
-    "pydantic-settings>=2.2.0",
-    "httpx>=0.27.0",
+    "fastapi>=0.140.0",
+    "uvicorn[standard]>=0.51.0",
+    "pydantic>=2.13.0",
+    "pydantic-settings>=2.13.0",
+    "httpx>=0.28.0",
     "structlog>=24.1.0",
 ]
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8.2.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=5.0.0",
-    "httpx>=0.27.0",
-    "respx>=0.21.0",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "httpx>=0.28.0",
+    "respx>=0.23.0",
 ]
 dev = [
-    "ruff>=0.4.0",
-    "mypy>=1.10.0",
-    "pre-commit>=3.7.0",
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
+    "pre-commit>=4.6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/payment_service"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 88
 src = ["src", "tests"]
 
@@ -877,7 +877,7 @@ src = ["src", "tests"]
 select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 plugins = ["pydantic.mypy"]
 
@@ -927,11 +927,11 @@ clean:
 
 ```
 # requirements.txt (BROKEN — output of `pip freeze` on developer's machine)
-fastapi==0.111.0
-anyio==4.3.0
-httpx==0.27.0
-pydantic==2.7.1
-starlette==0.37.2
+fastapi==0.140.0
+anyio==4.14.2
+httpx==0.28.1
+pydantic==2.13.4
+starlette==1.3.1
 # ... 35 more unpredictable transitive pins
 
 # Problems:
@@ -955,7 +955,7 @@ uv pip compile pyproject.toml \
 # requirements.lock (generated — commit this, not pip freeze output)
 # This file is autogenerated by uv pip compile. Do not edit manually.
 #
-# fastapi==0.111.0 \
+# fastapi==0.140.0 \
 #     --hash=sha256:abc123...
 # anyio==4.4.0 \
 #     --hash=sha256:def456...
@@ -975,7 +975,7 @@ uv pip compile --upgrade-package httpx pyproject.toml \
 # syntax=docker/dockerfile:1.7
 
 # Stage 1: dependency installation (cached layer)
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Install uv (single binary, ~10MB, no Python required)
 COPY --from=ghcr.io/astral-sh/uv:0.4.10 /uv /usr/local/bin/uv
@@ -992,12 +992,12 @@ RUN uv pip install --require-hashes -r requirements.lock \
     --target /build/deps
 
 # Stage 2: production image
-FROM python:3.12-slim AS production
+FROM python:3.14-slim AS production
 
 WORKDIR /app
 
 # Copy installed dependencies from builder
-COPY --from=builder /build/deps /usr/local/lib/python3.12/site-packages
+COPY --from=builder /build/deps /usr/local/lib/python3.14/site-packages
 
 # Copy application source
 COPY src/ ./src/

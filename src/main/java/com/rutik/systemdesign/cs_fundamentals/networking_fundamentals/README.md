@@ -99,7 +99,7 @@ OSI layers 5-7 collapse into a single "Application" layer in TCP/IP. In practice
 
 ### 4.3 TCP — Transmission Control Protocol
 
-TCP provides **reliable, ordered, connection-oriented** byte-stream delivery.
+TCP provides **reliable, ordered, connection-oriented** byte-stream delivery. The current specification is **RFC 9293** (2022), which rolls the original RFC 793 plus three decades of errata and extensions into one document.
 
 **3-way handshake (connection setup)**:
 1. Client → Server: SYN (seq=x)
@@ -112,7 +112,7 @@ Cost: 1.5 RTT before any application data. Data can be sent with the third ACK (
 2. Responder → Initiator: ACK
 3. Responder → Initiator: FIN
 4. Initiator → Responder: ACK
-The initiator enters TIME_WAIT for 2×MSL (Maximum Segment Lifetime, typically 60 s) to handle delayed duplicates.
+The initiator enters TIME_WAIT to absorb delayed duplicates. RFC 9293 defines the wait as 2×MSL (Maximum Segment Lifetime); Linux instead fixes it at **60 s** via the compile-time constant `TCP_TIMEWAIT_LEN`, which no sysctl exposes.
 
 **Flow control**: Receiver advertises a receive window (rwnd) in every ACK. Sender cannot have more than rwnd unacknowledged bytes in flight. Default: 65535 bytes (64 KB), extendable to 1 GB with window scaling option.
 
@@ -152,7 +152,7 @@ Engineers conflate all three constantly, and the conflation is expensive: it pro
       12,500,000 / 65,535 = 191x the default  ->  window scaling, not optional
 ```
 
-**Why bandwidth alone never predicts throughput.** The sender transmits one window, then *stops* and waits a full RTT for the ACK before it may send more. Bandwidth sets how fast that window drains onto the wire; RTT sets how long the sender idles afterwards. On a short link the wait is negligible and throughput approaches bandwidth; on a long link the wait dominates and throughput is pinned to `rwnd / RTT` no matter how wide the pipe is. This is the "long fat network" problem, and it is why RFC 1323 window scaling exists, why bulk transfers use many parallel streams, and why moving the data closer (CDN, regional replica) beats buying more bandwidth almost every time. Note the asymmetry in the numbers above: doubling bandwidth changed nothing, while cutting RTT by 10x gave a clean 10x.
+**Why bandwidth alone never predicts throughput.** The sender transmits one window, then *stops* and waits a full RTT for the ACK before it may send more. Bandwidth sets how fast that window drains onto the wire; RTT sets how long the sender idles afterwards. On a short link the wait is negligible and throughput approaches bandwidth; on a long link the wait dominates and throughput is pinned to `rwnd / RTT` no matter how wide the pipe is. This is the "long fat network" problem, and it is why RFC 7323 window scaling exists, why bulk transfers use many parallel streams, and why moving the data closer (CDN, regional replica) beats buying more bandwidth almost every time. Note the asymmetry in the numbers above: doubling bandwidth changed nothing, while cutting RTT by 10x gave a clean 10x.
 
 **Congestion control**:
 - Slow start: begin with cwnd=1 MSS (max segment size, typically 1460 B), double per RTT
@@ -173,7 +173,7 @@ The classic TCP sawtooth: slow start doubles cwnd every RTT (1 to 2 to 4 to 8 to
 
 ### 4.4 UDP — User Datagram Protocol
 
-UDP is **unreliable, connectionless, minimal-overhead**. It adds only port multiplexing and a checksum on top of IP.
+UDP is **unreliable, connectionless, minimal-overhead** (RFC 768). It adds only port multiplexing and a checksum on top of IP.
 
 - Maximum datagram payload: ~65507 bytes (65535 − 20 IP header − 8 UDP header)
 - Typical MTU: 1500 bytes on Ethernet; large UDP datagrams are fragmented by IP
@@ -745,7 +745,7 @@ PROTOCOLS: list[ProtocolOverhead] = [
         teardown_rtt=2.0,
         ordered=True,
         reliable=True,
-        notes="RSA key exchange lacks forward secrecy; deprecated in most configurations",
+        notes="RSA key exchange lacks forward secrecy; TLS 1.3 removed it entirely",
     ),
 ]
 
@@ -815,7 +815,7 @@ print_protocol_comparison()
 | NAT required? | Yes (address exhaustion) | No |
 | Header size | 20 bytes (variable) | 40 bytes (fixed) |
 | Fragmentation | Router or host | Host only |
-| Adoption (2024) | ~65% traffic | ~35–40% traffic |
+| Adoption (2026) | Universal — every host still needs it | ~50% of Google's users (crossed 50% in March 2026) |
 
 ### HTTP/1.1 vs HTTP/2 vs HTTP/3
 
@@ -827,6 +827,7 @@ print_protocol_comparison()
 | Header compression | None | HPACK | QPACK |
 | TLS | Optional | Optional (de facto required) | Mandatory (TLS 1.3) |
 | 0-RTT handshake | No | No | Yes |
+| Specification | RFC 9110/9111/9112 | RFC 9113 | RFC 9114 |
 
 ---
 
@@ -848,7 +849,7 @@ print_protocol_comparison()
 ### UDP
 
 **Use when**:
-- Request fits in a single datagram and loss is tolerable (DNS queries: max ~512 B with UDP)
+- Request fits in a single datagram and loss is tolerable (DNS: 512 B without EDNS(0), commonly 1232 B with it)
 - Application-layer reliability is more efficient than TCP's generic mechanism (QUIC)
 - Low latency matters more than guaranteed delivery (real-time games, live audio)
 - Multicast is required (streaming video to many receivers simultaneously)
@@ -863,7 +864,7 @@ print_protocol_comparison()
 **Always use TLS** for any traffic crossing an untrusted network. The question is which version:
 - Prefer TLS 1.3 for all new deployments — shorter handshake, mandatory forward secrecy, no weak ciphers
 - Maintain TLS 1.2 support only for legacy clients that cannot upgrade
-- Never configure TLS 1.0/1.1 — both have known vulnerabilities (BEAST, POODLE) and are deprecated by RFC 8996
+- Never configure TLS 1.0/1.1 — RFC 8996 says they MUST NOT be used, and both carry known breaks (BEAST, POODLE)
 
 ### DNS TTL tuning
 
@@ -949,7 +950,7 @@ def fixed_server() -> None:
 
 ### Pitfall 2: TIME_WAIT socket exhaustion — not reusing ports
 
-When a TCP connection closes, the initiating side enters TIME_WAIT for 2×MSL (typically 60 s on Linux). During this time the 5-tuple is reserved. A service making thousands of short-lived outbound connections (to a database, a downstream API) will exhaust the ~28,000 ephemeral ports if connections close faster than TIME_WAIT expires.
+When a TCP connection closes, the initiating side enters TIME_WAIT — 60 s on Linux, hardcoded as `TCP_TIMEWAIT_LEN`. During this time the 5-tuple is reserved. A service making thousands of short-lived outbound connections (to a database, a downstream API) will exhaust the ~28,000 ephemeral ports if connections close faster than TIME_WAIT expires.
 
 **BROKEN — creating a new connection per request:**
 
@@ -1083,7 +1084,7 @@ def fixed_client(host: str, port: int, n_requests: int) -> None:
 You'll get a partial read. TCP is a byte stream; the OS splits data across segments based on MSS (~1460 B on Ethernet) and network conditions. A single send() of 4096 B may arrive as three recv() calls returning 1460, 1460, and 1176 bytes. The fix is a length-prefixed framing protocol and a loop that calls recv() until all expected bytes arrive.
 
 **Q: Why does TIME_WAIT exist, and why can it cause problems in production?**
-TIME_WAIT ensures delayed duplicates from the closed connection don't corrupt a new connection reusing the same 5-tuple. It lasts 2×MSL (typically 60 s on Linux). Problem: a service making many short-lived outbound connections exhausts the ~28,000 ephemeral port range. Fixes: connection pooling, `SO_REUSEADDR`, reducing TIME_WAIT duration via `net.ipv4.tcp_tw_reuse`, or using HTTP keep-alive.
+TIME_WAIT ensures delayed duplicates from the closed connection don't corrupt a new connection reusing the same 5-tuple. Linux holds it for a hardcoded 60 s (`TCP_TIMEWAIT_LEN`, not a sysctl). Problem: a service making many short-lived outbound connections exhausts the ~28,000 ephemeral port range. Fixes: connection pooling, `SO_REUSEADDR`, reducing TIME_WAIT duration via `net.ipv4.tcp_tw_reuse`, or using HTTP keep-alive.
 
 **Q: Why is TCP's 3-way handshake 1.5 RTTs, not 1 RTT?**
 The SYN takes 0.5 RTT to reach the server, the SYN-ACK takes 0.5 RTT to return (total 1 RTT) — but the server cannot deliver data until the third ACK arrives (confirming the client received the SYN-ACK). So the client can send data with the ACK, but the first server response arrives 1.5 RTTs after the SYN. TCP Fast Open allows data in the initial SYN, reducing this to 0.5 RTT on cached connections.
@@ -1092,10 +1093,10 @@ The SYN takes 0.5 RTT to reach the server, the SYN-ACK takes 0.5 RTT to return (
 Flow control (receiver window, rwnd) prevents a fast sender from overrunning a slow receiver's buffer — it is end-to-end between sender and receiver. Congestion control (cwnd: slow start, AIMD, CUBIC) prevents the sender from overloading intermediate routers — it is a response to network conditions inferred from packet loss or delay. The effective send window is min(rwnd, cwnd).
 
 **Q: Why would you choose UDP over TCP for a DNS query?**
-A DNS query and response each fit in a single datagram (~50–100 bytes), well under the 1500-byte MTU. No connection is needed. If no response arrives within ~200 ms, the stub resolver retransmits. The overhead of a TCP handshake (1.5 RTT) would dominate the actual DNS query (which should resolve in <10 ms from a nearby resolver). UDP is used by default; TCP is used when responses exceed 512 bytes (DNSSEC, large zone transfers).
+A DNS query and response each fit in a single datagram (~50–100 bytes), well under the 1500-byte MTU. No connection is needed. If no response arrives within ~200 ms, the stub resolver retransmits. The overhead of a TCP handshake (1.5 RTT) would dominate the actual DNS query (which should resolve in <10 ms from a nearby resolver). UDP is used by default; TCP is used when a response exceeds the client's advertised EDNS(0) buffer — 512 bytes without EDNS(0), commonly 1232 bytes with it (DNSSEC, large zone transfers).
 
 **Q: What does TLS 1.3 do differently than TLS 1.2 to achieve 1 RTT?**
-TLS 1.3 merges the key exchange into the ClientHello (sending the ECDHE key share immediately) and the server responds with its key share, certificate, and Finished in one flight. In TLS 1.2, the server sent the certificate in a separate flight, requiring the client to verify it before sending key material. TLS 1.3 also removed RSA key exchange (which lacks forward secrecy) and deprecated all weak cipher suites.
+TLS 1.3 merges the key exchange into the ClientHello (sending the ECDHE key share immediately) and the server responds with its key share, certificate, and Finished in one flight. In TLS 1.2, the server sent the certificate in a separate flight, requiring the client to verify it before sending key material. TLS 1.3 also removed RSA key exchange (which lacks forward secrecy) and deleted every weak cipher suite from the protocol — the five remaining AEAD suites are the whole menu.
 
 **Q: What is 0-RTT resumption in TLS 1.3, and what is the security risk?**
 0-RTT allows the client to send application data with the first ClientHello, using keying material from a prior session ticket. This saves 1 RTT for repeat connections. The risk is replay attacks: a network attacker can capture and re-send the early data. 0-RTT is safe only for idempotent operations (GET, not POST with side effects). Servers must check for replay via a nonce database or restrict 0-RTT to safe methods.
@@ -1132,7 +1133,7 @@ QUIC is a transport protocol developed by Google (standardized as RFC 9000) that
 
 **Prefer connection pools for short-lived operations.** Database connections, HTTP calls to downstream services, and RPC calls should reuse connections. Creating a new TCP connection per operation introduces 1.5 RTT latency, TIME_WAIT socket accumulation, and TLS handshake overhead (1 RTT additional for TLS 1.3).
 
-**Set TCP_NODELAY on latency-sensitive connections.** Nagle's algorithm buffers small TCP segments to reduce packet count, adding up to 40 ms of latency for small messages (the delayed-ACK window). Disable it with `sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)` for request-response protocols where you control framing.
+**Set TCP_NODELAY on latency-sensitive connections.** Nagle's algorithm (RFC 896) withholds a small segment until the previous one is acknowledged; the receiver's delayed ACK (RFC 813) withholds that acknowledgement waiting for data to piggyback on. Neither is slow alone — it is the *interaction* that stalls a write-write-read pattern for up to 40 ms, which is Linux's delayed-ACK timer, not a property of Nagle. Disable it with `sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)` for request-response protocols where you control framing.
 
 **Lower DNS TTLs before any IP-changing deployment.** Change TTLs to 60 s at least `old_TTL` seconds before the deployment window. This ensures all resolvers have refreshed to the shorter TTL before you change the IP, bounding propagation to 60 s after the record update.
 
@@ -1140,7 +1141,7 @@ QUIC is a transport protocol developed by Google (standardized as RFC 9000) that
 
 **Use TLS 1.3 and disable TLS 1.0/1.1 on all services.** Configure nginx/HAProxy with `ssl_protocols TLSv1.2 TLSv1.3;` and prefer TLS 1.3 cipher suites. Monitor for TLS handshake errors after the change to catch legacy clients.
 
-**Tune kernel socket parameters for high-throughput servers.** On Linux: increase `net.core.somaxconn` (listen backlog cap, default 128), `net.ipv4.tcp_max_syn_backlog` (SYN queue, default 1024), and `net.ipv4.ip_local_port_range` (ephemeral port range, default 32768–60999) for servers making many outbound connections.
+**Tune kernel socket parameters for high-throughput servers.** On Linux: increase `net.core.somaxconn` (listen backlog cap, 4096 since Linux 5.4), `net.ipv4.tcp_max_syn_backlog` (SYN queue, sized from system memory at boot), and `net.ipv4.ip_local_port_range` (ephemeral port range, default 32768–60999) for servers making many outbound connections.
 
 **Use CIDR notation to express firewall rules, not individual IPs.** A rule for `10.0.0.0/8` covers all RFC 1918 class-A private addresses; `0.0.0.0/0` matches all IPv4. Avoid /32 rules for groups of IPs that will change — use security group tags or service mesh mTLS policies instead.
 

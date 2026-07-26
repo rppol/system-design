@@ -856,7 +856,7 @@ use `proc.communicate()` which reads stdout/stderr concurrently.
 | Tool / Library | Purpose | Notes |
 |----------------|---------|-------|
 | `datetime` (stdlib) | Date/time arithmetic | Core; always available |
-| `zoneinfo` (stdlib) | Named IANA timezones | Requires `tzdata` on Windows |
+| `zoneinfo` (stdlib, [3.9]) | Named IANA timezones | Requires `tzdata` on Windows |
 | `python-dateutil` | Flexible ISO 8601 parsing, relative deltas | Useful for parsing ambiguous user input |
 | `logging` (stdlib) | Hierarchical structured logging | Core; configure with `dictConfig` |
 | `python-json-logger` | Drop-in JSON formatter for stdlib logging | pip install; widely used in production |

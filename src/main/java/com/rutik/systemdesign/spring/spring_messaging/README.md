@@ -77,7 +77,7 @@ Key insight: The hardest problem in messaging is not sending messages — it is 
 
 ### Spring Cloud Stream Functional Model
 
-Replaces the annotation-based (`@StreamListener`) model. Applications expose beans of type `Consumer<T>`, `Supplier<T>`, or `Function<T,R>`. The binder maps these to topics/queues automatically based on bean name and configuration.
+Applications expose beans of type `Consumer<T>`, `Supplier<T>`, or `Function<T,R>`. The binder maps these to topics/queues automatically based on bean name and configuration — the bean name becomes the binding prefix, so a `processOrder` bean binds `processOrder-in-0` and `processOrder-out-0`.
 
 ### @Async Execution
 
@@ -941,7 +941,7 @@ public void placeOrder(Order order) {
 | spring-kafka | Kafka integration | KafkaTemplate, @KafkaListener, KafkaTransactionManager |
 | spring-amqp | RabbitMQ integration | RabbitTemplate, @RabbitListener, DLX support |
 | Spring Cloud Stream | Binder abstraction | Supports Kafka, RabbitMQ, Azure Service Bus, AWS Kinesis |
-| Apache Kafka | Distributed log / event streaming | Requires ZooKeeper or KRaft mode |
+| Apache Kafka | Distributed log / event streaming | KRaft mode only — ZooKeeper support was removed in Kafka 4.0 |
 | RabbitMQ | AMQP message broker | STOMP plugin for WebSocket relay |
 | spring-websocket | WebSocket + STOMP support | SockJS fallback included |
 | Debezium | CDC for Outbox pattern | Reads DB transaction log, publishes to Kafka |
@@ -973,8 +973,8 @@ A DLX is a regular exchange designated to receive messages that are rejected by 
 **Q: What is the difference between @RabbitListener with AcknowledgeMode.AUTO vs MANUAL?**
 In AUTO mode, Spring AMQP automatically acknowledges the message when the listener method returns without exception, and automatically NACK's (with requeue configured by the container) on exception. This is simpler but less flexible — you cannot conditionally NACK based on the exception type. In MANUAL mode, the consumer controls acknowledgement by injecting Channel and the delivery tag, then explicitly calling channel.basicAck() or channel.basicNack(). MANUAL mode is required when you need to differentiate transient failures (requeue=true) from permanent failures (requeue=false, route to DLX), or when you need to ack only after a side-effect (DB write) succeeds.
 
-**Q: Explain Spring Cloud Stream's functional programming model. How does it differ from @StreamListener?**
-The functional model replaced @StreamListener (deprecated in Spring Cloud Stream 3.x). Instead of annotation-driven listener methods, you expose standard Java functional beans: Consumer<T> for consuming messages, Supplier<T> for producing messages, and Function<T,R> for consuming and producing. The binder discovers these beans and wires them to topics or queues based on the bean name and spring.cloud.stream.bindings configuration. The advantage is that the business logic is pure Java functions with no framework annotations — they are easily unit-testable without a Spring context. The binder handles serialization, error handling, and retry. The functional model also supports reactive types (Flux<T>, Mono<T>) for reactive stream processing.
+**Q: Explain Spring Cloud Stream's functional programming model.**
+You expose standard Java functional beans and the binder wires them to destinations: Consumer<T> to consume, Supplier<T> to produce, Function<T,R> to do both. The binder discovers these beans and wires them to topics or queues based on the bean name and spring.cloud.stream.bindings configuration. The advantage is that the business logic is pure Java functions with no framework annotations — they are easily unit-testable without a Spring context. The binder handles serialization, error handling, and retry. The functional model also supports reactive types (Flux<T>, Mono<T>) for reactive stream processing.
 
 **Q: How does @Async work internally in Spring? What happens if @EnableAsync is missing?**
 @Async is implemented via Spring AOP. When @EnableAsync is present, Spring creates a proxy for every bean that has @Async methods. When the @Async method is called through the proxy, the proxy submits a Runnable to the configured TaskExecutor and returns immediately with a CompletableFuture (or void). The actual method executes in the executor thread. If @EnableAsync is missing, no proxy is created — the @Async annotation is silently ignored and the method executes synchronously in the caller's thread. There is no exception or warning. This is a common source of silent bugs in production.

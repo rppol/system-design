@@ -700,10 +700,10 @@ luck.
   online-softmax inner loop keeps many registers and a large shared-memory tile alive per
   thread block, trading occupancy for the ILP and data reuse that keeps the Tensor Cores fed
   — a textbook case of "low occupancy, compute-bound, and correct."
-- **The historical NVIDIA CUDA Occupancy Calculator spreadsheet** (superseded by the
-  `cudaOccupancy*` runtime APIs and Nsight Compute's live occupancy view) codified exactly the
-  §5 arithmetic — registers, shared memory, and block size in, occupancy percentage out — and
-  is still how most engineers first learn the three-limiter mental model.
+- **The `cudaOccupancy*` runtime APIs and Nsight Compute's live occupancy view** implement
+  exactly the §5 arithmetic — registers, shared memory, and block size in, occupancy
+  percentage out, computed against the real target architecture — and are how most engineers
+  first learn the three-limiter mental model.
 - **Reduction and histogram kernels** (see
   [parallel_patterns_reduction_scan_histogram](../parallel_patterns_reduction_scan_histogram/))
   are the canonical *occupancy-oriented* case: low per-thread ILP, memory-latency-bound, and
@@ -851,7 +851,7 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
 | `__launch_bounds__(maxThreads, minBlocksPerSM)` | Per-kernel compiler hint constraining register usage | Preferred over file-wide flags |
 | `-maxrregcount=N` (nvcc flag) | File-wide register cap | Blunt instrument; can starve sibling kernels |
 | `cuobjdump --resource-usage <binary>` | Post-hoc register/shared-mem usage inspection of a compiled cubin | Useful when you only have the binary, not the source |
-| Nsight Compute — "Occupancy" section | Theoretical vs. Achieved occupancy, binding limiter, warp-state stall reasons | The modern replacement for the legacy Occupancy Calculator spreadsheet — see [profiling_and_performance_analysis](../profiling_and_performance_analysis/) |
+| Nsight Compute — "Occupancy" section | Theoretical vs. Achieved occupancy, binding limiter, warp-state stall reasons | The authoritative source for what a kernel actually achieved and which resource bound it — see [profiling_and_performance_analysis](../profiling_and_performance_analysis/) |
 | `pycuda.tools.OccupancyRecord` | Python-side occupancy arithmetic from a compiled `Function`'s `num_regs`/`shared_size_bytes` | Reproduces the CUDA occupancy calculator's math in Python |
 | `numba.cuda` device attributes (`WARP_SIZE`, `MAX_THREADS_PER_BLOCK`, `MULTIPROCESSOR_COUNT`) | Device query for launch-config heuristics from Python | Kernels still compile through the same nvcc/ptxas pipeline underneath |
 

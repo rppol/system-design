@@ -252,9 +252,10 @@ A 5-week plan over the Interview-Specific Path. Case studies live in [case_studi
 | Switch Expressions | Java 14 | Java 17 (LTS) | High |
 | Pattern Matching switch | Java 21 | Java 21 (LTS) | Growing |
 | Virtual Threads (`Thread.ofVirtual()`) | Java 21 GA (JEP 444) | Java 21 (LTS) | Growing fast |
-| StructuredTaskScope | Java 21 preview (JEP 453); re-preview 22–24 | Java 21 (LTS) | Early adoption |
-| ScopedValue | Java 21 preview (JEP 446); JEP 487 in 24 | Java 21 (LTS) | Early adoption |
+| StructuredTaskScope | Java 21 preview (JEP 453); still preview through Java 26 (JEP 525) | none yet — preview only | Early adoption |
+| ScopedValue | Java 21 preview (JEP 446); final in Java 25 (JEP 506) | Java 25 (LTS) | Growing |
 | Sequenced Collections | Java 21 | Java 21 (LTS) | Growing |
+| `synchronized` no longer pins virtual threads | Java 24 (JEP 491) | Java 25 (LTS) | Transparent (runtime change) |
 
 ---
 

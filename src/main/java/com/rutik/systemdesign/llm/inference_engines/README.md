@@ -761,14 +761,14 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 
 ---
 
-## 14. Case Study: Migrating from OpenAI API to Self-Hosted vLLM
+## 14. Case Study: Migrating from a Hosted API to Self-Hosted vLLM
 
-**Problem:** SaaS startup spending ~$36K/month on OpenAI API for their writing assistant — historically built on the GPT-4-class endpoint. Want to reduce costs and eliminate vendor dependency.
+**Problem:** SaaS startup spending ~$12.75K/month on a frontier hosted API for their writing assistant — the product was built on the top-tier endpoint (Claude Opus 5 class, $5/$25 per MTok) and never re-tiered. Want to reduce cost and eliminate vendor dependency.
 
 **Assessment:**
 - Traffic: 10M tokens/day input, 15M tokens/day output
 - Latency requirement: TTFT < 1s, TPOT < 50ms
-- Quality requirement: blind A/B on real writing tasks showed a small-model quality tier suffices — the GPT-4-class endpoint was overkill for this workload
+- Quality requirement: blind A/B on real writing tasks showed a small-model quality tier suffices — the frontier endpoint was overkill for this workload
 - Privacy: no PII in prompts
 
 **Model choice:** Mistral 7B Instruct → meets quality bar for writing tasks
@@ -789,16 +789,14 @@ vLLM with:
 
 **Cost comparison:**
 ```
-Current OpenAI bill (legacy GPT-4-class rate card, $0.03/$0.06 per 1K):
-  10M input  × $0.03/1K = $300/day
-  15M output × $0.06/1K = $900/day
-  Total: $1,200/day = $36,000/month
-  (a small/cheap endpoint would have been an order of magnitude less — but the
-   product was built on the GPT-4-class endpoint, which is what the bill reflects)
+Current API bill (frontier tier, $5/$25 per MTok):
+  10M input  × $5/M  =  $50/day
+  15M output × $25/M = $375/day
+  Total: $425/day = $12,750/month
 
 Self-hosted vLLM, plan A — the naive lift-and-shift:
   4× A100 at $3.50/GPU-hr × 24hr = $336/day = $10,080/month
-  Cheaper than the API, yes. But look at what those 4 GPUs are doing.
+  Cheaper than the API, yes — by 21%. But look at what those 4 GPUs are doing.
 
 Utilization check:
   25M tokens/day ÷ 86,400 s = 289 tokens/sec average
@@ -809,20 +807,26 @@ Self-hosted vLLM, plan B — size to the actual load:
   1× A100 saturated = $3.50/hr × 24 = $84/day = $2,520/month
   Add 1 standby for availability = $168/day = $5,040/month total
 
-Final: $5,040/month vs $36,000/month → 86% cost reduction
-       (plan A would have banked only 72% of that same migration)
+The option nobody costed: just re-tier the API.
+  Cheap hosted tier ($1/$5 per MTok) meets the same A/B quality bar:
+  10M × $1/M + 15M × $5/M = $85/day = $2,550/month — no GPUs, no on-call
+
+Final: $5,040/month vs $12,750/month → 60% cost reduction
+       (plan A would have banked only 21% of that same migration;
+        re-tiering the API alone banks 80% with zero infrastructure)
 Quality: Acceptable — Mistral 7B matched the small-model quality bar the A/B set;
-         the delta vs the old GPT-4-class endpoint was invisible for these
-         writing tasks (that endpoint was the overkill being paid for)
+         the delta vs the frontier endpoint was invisible for these writing tasks
 ```
 
 **Read it like this.** "Self-hosting is not cheaper per GPU-hour — it is cheaper per
 token, and only once each GPU is kept busy enough to spread its hourly rent over enough tokens."
 
-The comparison above walks into and back out of the classic trap: sized by habit rather than by
-load, the fleet still beats the API bill, which is exactly why nobody audits it. Nothing about the
-hardware changed between plan A and plan B — only the GPU count did, and it took the saving from
-72% to 86%.
+The comparison above walks into and back out of the classic trap twice. Sized by habit rather than
+by load, the fleet still beats the API bill, which is exactly why nobody audits it: nothing about
+the hardware changed between plan A and plan B, only the GPU count, and that alone moved the saving
+from 21% to 60%. The second trap is the baseline — the API bill being beaten was the *frontier*
+tier, and the same A/B that justified Mistral 7B also justified a cheap hosted tier that costs
+about the same as the saturated GPU and needs no on-call rotation.
 
 | Symbol | What it is |
 |--------|------------|
@@ -834,18 +838,21 @@ hardware changed between plan A and plan B — only the GPU count did, and it to
 **Walk one example.** 25M tokens/day of traffic, Mistral 7B:
 
 ```
-  OpenAI, GPT-4-class blended
-    $1,200/day / 25M tokens              = $48.00 per M tokens
+  Hosted API, frontier tier ($5/$25 per MTok)
+    $425/day / 25M tokens                = $17.00 per M tokens   <- the baseline
 
   Self-hosted, 4x on-demand A100, ~2% utilized
-    4 x $3.50/hr x 24 = $336/day / 25M   = $13.44 per M tokens   <- 3.6x cheaper
+    4 x $3.50/hr x 24 = $336/day / 25M   = $13.44 per M tokens   <- only 1.3x cheaper
 
   Self-hosted, 1x on-demand A100, saturated
-    $3.50/hr x 24 = $84/day / 25M        = $ 3.36 per M tokens   <- 14x cheaper
+    $3.50/hr x 24 = $84/day / 25M        = $ 3.36 per M tokens   <- 5.1x cheaper
 
   add one standby GPU for availability
     $168/day / 25M                       = $ 6.72 per M tokens
-    monthly                              = $5,040   vs   $36,000   = 86% saving
+    monthly                              = $5,040   vs   $12,750   = 60% saving
+
+  Hosted API, cheap tier ($1/$5 per MTok) — same measured quality bar
+    $85/day / 25M                        = $ 3.40 per M tokens   <- ties the saturated GPU
 ```
 
 **Why the utilization term is load-bearing.** Drop it and you bank a third of the win you were
@@ -853,6 +860,15 @@ entitled to. Three GPUs in plan A were buying nothing: 25M tokens/day is 289 tok
 and a single A100 running vLLM ceilings around 3,500 tokens/sec (§6), so plan A was provisioned at
 roughly 2% of capacity. The lesson generalizes past this case study — before comparing an API bill
 to a GPU bill, divide your daily token volume by 86,400 and check it against one GPU's ceiling first.
+
+**And check the baseline before you check the GPUs.** The last row is the uncomfortable one: at
+$3.40 versus $3.36 per M tokens, the cheap hosted tier and a fully saturated self-hosted A100 are a
+dead heat, and the API side of that tie carries no capacity planning, no standby GPU, and no
+3 a.m. page. Self-hosting still wins on the things a spreadsheet does not price — data residency,
+no vendor dependency, guaranteed capacity, custom fine-tunes — but at this volume it does not win
+on cost. Price against the *cheapest tier that passes your eval*, not the tier you happened to
+build on; a 10x volume increase is what flips the arithmetic back, because GPU cost is flat in
+tokens and API cost is linear.
 
 ---
 

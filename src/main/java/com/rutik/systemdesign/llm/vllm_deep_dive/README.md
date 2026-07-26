@@ -40,11 +40,10 @@
 
 ## 1. Architecture Overview
 
-> **Version this document targets: vLLM v0.26.0** (released 2026-07-25). vLLM's CLI flags and
-> Python API move fast — the V0 engine was deleted in v0.11.0 and several flags quoted in older
-> tutorials (`--speculative-model`, `--preemption-mode`, `--use-v2-block-manager`, `guided_json`)
-> no longer exist. Every flag, default and signature below was checked against the v0.26.0 source.
-> Re-check against your installed release before copying anything into production.
+> **Version this document targets: vLLM v0.26.0** (released 2026-07-25). Every flag, default and
+> signature below was checked against the v0.26.0 source. vLLM's CLI and Python API move fast, so
+> re-check against your installed release before copying anything into production — and treat any
+> flag you find in a tutorial as unverified until `vllm serve --help` confirms it.
 
 vLLM separates concerns into three layers:
 
@@ -377,25 +376,22 @@ flowchart LR
 
 ### Preemption
 
-When GPU KV cache is full and a running sequence needs another block, the scheduler frees blocks by preempting the lowest-priority running request. There are two ways an engine can do that:
+When GPU KV cache is full and a running sequence needs another block, the scheduler frees blocks by preempting the lowest-priority running request. **vLLM preempts by recomputation only**: the preempted sequence's KV cache is discarded and re-prefilled when it is re-scheduled. There is no GPU↔CPU swap path and no preemption-mode knob to tune. Prefix caching (§6) is what makes this cheap — a recomputed prefix usually hits the cache and collapses to near zero.
 
-1. **Recomputation**: drop the preempted sequence's KV cache entirely; recompute it when re-scheduled (wastes compute, saves memory bandwidth vs swap)
-2. **Swapping**: copy KV cache blocks to CPU RAM via PCIe, restore later (saves compute, uses CPU RAM and PCIe bandwidth)
-
-**vLLM V1 only does recomputation.** The V1 guide is explicit: "vLLM V1 no longer requires KV cache swapping to handle request preemptions." GPU↔CPU KV swapping, the `SWAPPED` request state and the `--preemption-mode` flag were all V0 features, and V0 was deleted from the codebase in v0.11.0 — so there is no swap path to tune any more. Prefix caching (§6) absorbs much of what swapping used to buy, because a recomputed prefix usually hits the cache. The cost comparison below is still worth understanding, since it explains *why* vLLM dropped swapping and it is what disaggregated designs (§7) pay when they move KV across a fabric:
+The alternative — moving KV blocks across a link instead of throwing them away — is still worth costing out, because it is exactly what disaggregated prefill/decode (§7) and opt-in KV offloading (§5) pay:
 
 ```
-swap cost      = 2 x blocks x block_bytes / pcie_bandwidth        (out, then back in)
+transfer cost  = 2 x blocks x block_bytes / pcie_bandwidth        (out, then back in)
 recompute cost = tokens / prefill_throughput                       (paid once, on resume)
 ```
 
-**What this actually says.** "Preempting a sequence means choosing which resource to spend to
-get its KV cache back later — PCIe bandwidth plus CPU RAM if you swap it out, or GPU FLOPs if you
-throw it away and re-prefill."
+**What this actually says.** "Getting a sequence's KV cache back later means choosing which
+resource to spend — PCIe bandwidth plus host RAM if you move the blocks off the GPU, or GPU FLOPs
+if you throw them away and re-prefill."
 
 Neither option is free. The choice hinges on which resource is scarce *at that moment* — and
-vLLM's answer, after V1, is that recompute plus prefix caching wins often enough that the swap
-path is not worth its complexity.
+vLLM's answer for preemption is that recompute plus prefix caching wins often enough that a
+second, transfer-based code path through the block manager is not worth its complexity.
 
 | Symbol | What it is |
 |--------|------------|
@@ -403,33 +399,34 @@ path is not worth its complexity.
 | `block_bytes` | 2 MiB for LLaMA 3 8B FP16 at block_size 16 (computed above) |
 | pcie_bandwidth | Gen4 x16: ~32 GB/s theoretical, ~25 GB/s achieved |
 | prefill_throughput | Prompt tokens/sec on a busy GPU. ~10,000/s for 8B on an A100 80GB — the roofline bound is 312 TFLOPS / (2 x 8e9 FLOPs per token) = 19,500/s at 100% MFU, so ~50% MFU gives ~10,000/s |
-| the leading `2` | Swapping is a round trip. Cost out is not the whole cost |
+| the leading `2` | Moving blocks off and back is a round trip. Cost out is not the whole cost |
 
 **Walk one example.** LLaMA 3 8B, 2 MiB blocks, PCIe Gen4 at 25 GB/s effective:
 
 ```
   short sequence, 256 tokens
     blocks         = ceil(256/16)                = 16 blocks   = 32 MiB
-    swap           = 2 x 32 MiB / 25 GB/s        =  2.7 ms   + 32 MiB of CPU RAM held
-    recompute      = 256 / 10,000                = 25.6 ms   + 0 bytes of CPU RAM
+    transfer       = 2 x 32 MiB / 25 GB/s        =  2.7 ms   + 32 MiB of host RAM held
+    recompute      = 256 / 10,000                = 25.6 ms   + 0 bytes of host RAM
 
   long sequence, 4,096 tokens
     blocks         = ceil(4096/16)               = 256 blocks  = 512 MiB
-    swap           = 2 x 512 MiB / 25 GB/s       =   43 ms   + 512 MiB of CPU RAM held
-    recompute      = 4,096 / 10,000              =  410 ms   + 0 bytes of CPU RAM
+    transfer       = 2 x 512 MiB / 25 GB/s       =   43 ms   + 512 MiB of host RAM held
+    recompute      = 4,096 / 10,000              =  410 ms   + 0 bytes of host RAM
 
-  crossover: recompute cost grows linearly with tokens; swap cost grows linearly too,
-  but swap ALSO holds CPU RAM for the entire time the sequence stays preempted, and
+  crossover: recompute cost grows linearly with tokens; transfer cost grows linearly too,
+  but transfer ALSO holds host RAM for the entire time the blocks sit off-GPU, and
   competes for the same PCIe lanes as weight loading and metrics export
 ```
 
 Read the two columns as different currencies. Recompute spends GPU FLOPs — which are partly idle
-during a bandwidth-bound decode phase — and spends nothing while the sequence sits preempted. Swap
-spends PCIe bandwidth twice and rents CPU RAM for the whole wait. On raw milliseconds swap wins at
-both sizes here, which is exactly why V0 offered it; what killed it is the second column. Prefix
-caching turns most of that 410 ms recompute into a cache hit costing near zero, while swapping
-still pays the full 43 ms round trip plus 512 MiB of pinned host memory and a second code path
-through the block manager.
+during a bandwidth-bound decode phase — and spends nothing while the sequence sits preempted.
+Transfer spends PCIe bandwidth twice and rents host RAM for the whole wait. On raw milliseconds
+transfer wins at both sizes here; the second column is what decides it. Prefix caching turns most
+of that 410 ms recompute into a cache hit costing near zero, while the transfer path still pays
+the full 43 ms round trip plus 512 MiB of pinned host memory. That is why preemption recomputes,
+and why moving KV is reserved for cases where it buys something recompute cannot — a decode pool
+that never ran the prefill (§7), or cache capacity beyond HBM (§5).
 
 **Why preemption *rate* matters more than preemption cost.** A single preemption is a few tens of
 milliseconds; the incident in §21 is a p99 TTFT jump from 600 ms to 8,000 ms. That gap is not one

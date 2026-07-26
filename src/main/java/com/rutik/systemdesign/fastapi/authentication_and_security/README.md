@@ -10,8 +10,8 @@ Core capabilities covered in this module:
 
 - `OAuth2PasswordBearer` and the token endpoint (`OAuth2PasswordRequestForm`)
 - JWT internals: header, payload, signature; `HS256` vs `RS256`
-- `python-jose` vs `PyJWT` — differences and selection criteria
-- Password hashing: `passlib` + `bcrypt` (cost 12 ≈ 250 ms), `argon2`, `scrypt`
+- `PyJWT` for encode/decode and `PyJWKClient` for OIDC JWKS key discovery
+- Password hashing: `pwdlib` + `argon2id` (OWASP primary), `bcrypt`, `scrypt`
 - Refresh token rotation: short-lived access (15 min) + long-lived refresh (7 days)
 - Scope-based authorization with `SecurityScopes`
 - API key authentication: `APIKeyHeader`, `APIKeyQuery`
@@ -20,7 +20,7 @@ Core capabilities covered in this module:
 - Token blacklisting with Redis for explicit logout
 - Cross-links: `../dependency_injection_in_fastapi/README.md`, `../configuration_and_settings_management/README.md`
 
-Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
+Python version: 3.12/3.13. FastAPI version: 0.140+. Pydantic version: v2.
 
 ---
 
@@ -46,7 +46,7 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
 
 **4. Fail closed.** On any validation error — expired token, wrong signature, missing claim — return HTTP 401. Never return a partially authenticated identity. The default FastAPI behavior of raising `HTTPException(status_code=401)` is correct; don't suppress these exceptions.
 
-**5. Time is a security primitive.** JWT `exp` claims, refresh token TTLs, bcrypt work factors, and OIDC `nonce` values are all time-bound. Use `datetime.utcnow()` consistently, or better `datetime.now(tz=timezone.utc)` (Python 3.11+), and verify `exp` on every decode.
+**5. Time is a security primitive.** JWT `exp` claims, refresh token TTLs, password-hash cost parameters, and OIDC `nonce` values are all time-bound. Build every timestamp with `datetime.now(tz=timezone.utc)` so it is timezone-aware, and verify `exp` on every decode.
 
 ---
 
@@ -54,7 +54,7 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
 
 ### 4.1 OAuth2 Password Flow
 
-The simplest grant type: the client (typically your own SPA) sends username + password directly to your token endpoint. The server returns an access token (and optionally a refresh token). Suitable for first-party clients only — never use this for third-party integrations.
+The simplest shape: the client (typically your own SPA) sends username + password directly to your token endpoint, and the server returns an access token and optionally a refresh token. RFC 9700 (BCP 240, the OAuth 2.0 Security Best Current Practice) states that the resource owner password credentials grant **MUST NOT be used**, because it exposes the resource owner's credentials to the client and rules out multi-factor and federated login. Treat FastAPI's `OAuth2PasswordBearer` / `OAuth2PasswordRequestForm` pair as a first-party login endpoint on a server that owns the user records — never as a grant you expose to a third-party client, and never against someone else's authorization server. For anything crossing a trust boundary, use the authorization code flow with PKCE (Section 4.2).
 
 ```mermaid
 sequenceDiagram
@@ -67,9 +67,9 @@ sequenceDiagram
 
 *The client sends the raw username and password directly to the server's own token endpoint — acceptable only because it is a first-party client the same operator controls.*
 
-### 4.2 Authorization Code Flow (OIDC / Third-Party)
+### 4.2 Authorization Code Flow with PKCE (OIDC / Third-Party)
 
-Used for Google/GitHub login. The user is redirected to the provider, authenticates there, and the provider redirects back with a `code`. Your server exchanges the code for tokens at the provider's token endpoint. Never exchange codes client-side.
+Used for Google/GitHub login, and the default choice for every new client including your own SPA. The user is redirected to the provider, authenticates there, and the provider redirects back with a `code`. Your server exchanges the code for tokens at the provider's token endpoint. Never exchange codes client-side. RFC 9700 requires authorization servers to support PKCE and to enforce `code_verifier` at the token endpoint, and requires exact string matching of redirect URIs (the one exception being the port of a `localhost` redirect for a native app).
 
 ### 4.3 API Key Authentication
 
@@ -244,14 +244,11 @@ Standard claims:
 
 `RS256` (RSA-SHA256): asymmetric — private key signs, public key verifies. Services verify with the public key only; the private key stays on the auth server. Required for multi-service architectures and OIDC. Key rotation is possible without service downtime by publishing a JWKS endpoint.
 
-### 6.3 python-jose vs PyJWT
+### 6.3 PyJWT and JWKS
 
-`python-jose` (`jose` package): supports JWS, JWE, JWK, JWKS. Built-in JWKS URL fetching for OIDC. Slightly more complex API. Required for RS256 with JWKS endpoints, JWE encryption, or third-party OIDC.
-
-`PyJWT` (`jwt` package): simpler API, faster, actively maintained (jwt 2.x). Supports HS256, RS256, ES256. Does not bundle JWKS fetching (use `jwcrypto` or `cryptography` separately). Preferred for new projects that only need standard JWT.
+`PyJWT` (the `jwt` import name) is the library FastAPI's own security tutorial uses. It supports HS256, RS256 and ES256, and ships `PyJWKClient`, which fetches an OIDC provider's JWKS document, caches the keys, and selects the right one by the token's `kid` header — so no separate JWKS library is needed.
 
 ```python
-# PyJWT 2.x
 import jwt
 from datetime import datetime, timezone, timedelta
 
@@ -264,13 +261,22 @@ payload = {
 token = jwt.encode(payload, secret, algorithm="HS256")
 decoded = jwt.decode(token, secret, algorithms=["HS256"])
 
-# python-jose
-from jose import jwt as jose_jwt
-token = jose_jwt.encode(payload, secret, algorithm="HS256")
-decoded = jose_jwt.decode(token, secret, algorithms=["HS256"])
+# RS256 against a third-party OIDC provider: resolve the signing key by `kid`
+# jwks_uri comes from the provider's /.well-known/openid-configuration document
+jwks_client = jwt.PyJWKClient(
+    "https://www.googleapis.com/oauth2/v3/certs", cache_keys=True
+)
+signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+claims = jwt.decode(
+    id_token,
+    signing_key.key,
+    algorithms=["RS256"],
+    audience=CLIENT_ID,
+    issuer="https://accounts.google.com",
+)
 ```
 
-Both raise on expired or tampered tokens — but under different exception names (`jwt.ExpiredSignatureError` vs `jose.ExpiredSignatureError`). Handle at the dependency boundary.
+Decoding raises `jwt.ExpiredSignatureError` on an expired token and `jwt.InvalidSignatureError` on a tampered one; both subclass `jwt.PyJWTError`, so catch that at the dependency boundary and translate to a single generic 401.
 
 ### 6.4 Password Hashing
 

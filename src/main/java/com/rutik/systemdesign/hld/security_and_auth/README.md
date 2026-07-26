@@ -34,7 +34,7 @@ Identity verification (AuthN) should happen once, at an Identity Provider (IdP) 
 Any check performed only in JavaScript/mobile code (hide the "Delete" button if not admin) is a UX nicety, not security — an attacker calls the API directly. Every authorization decision must be enforced server-side, on every request, regardless of what the UI shows.
 
 **3. Defense in depth — multiple independent layers.**
-Network segmentation (VPC, security groups), transport encryption (TLS 1.2+/mTLS), application-layer AuthN/AuthZ, and data-layer encryption (encryption at rest, field-level encryption for PII) are independent layers. A failure in one (a misconfigured security group) shouldn't expose data if the others (encryption at rest, AuthZ checks) hold.
+Network segmentation (VPC, security groups), transport encryption (TLS 1.3, with 1.2 as the floor, plus mTLS between services), application-layer AuthN/AuthZ, and data-layer encryption (encryption at rest, field-level encryption for PII) are independent layers. A failure in one (a misconfigured security group) shouldn't expose data if the others (encryption at rest, AuthZ checks) hold.
 
 **4. Principle of least privilege.**
 Every identity — human user, service account, CI/CD pipeline — gets the minimum set of permissions needed, for the minimum time needed. A service that only reads from a queue should have an IAM role that *cannot* write or delete, even if "it would never do that" — because if it's ever compromised, the blast radius is bounded by what its credentials *can* do, not what it *currently does*.
@@ -344,7 +344,7 @@ The 2,880 number is the real argument for the split: the refresh endpoint is the
 
 The standard resolution: **short-lived access tokens (15 min) + longer-lived refresh tokens (days/weeks), with rotation**. The refresh token IS tracked server-side (in a database/Redis) — so it CAN be revoked immediately (disable account -> delete refresh token record -> next refresh attempt fails -> user is fully logged out within 15 minutes at most, when their current access token expires). **Rotation** (§5.4) means each use of a refresh token invalidates it and issues a new one — if an attacker steals a refresh token and uses it, and then the legitimate user's next refresh also fires, the server detects two uses of the same token and can revoke the entire session family as a compromise signal.
 
-### 6.3 PKCE — Why the Authorization Code Alone Isn't Enough
+### 6.3 PKCE (RFC 7636) — Why the Authorization Code Alone Isn't Enough
 
 **Without PKCE (vulnerable on mobile/SPA):**
 
@@ -645,7 +645,7 @@ A database connection string, including a plaintext password, was committed to a
 | Token format / libraries | JWT (jjwt, jose, PyJWT, jsonwebtoken) | Always configure an algorithm allowlist (§10, War Story 1) |
 | Secrets management | HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager | Dynamic, short-lived credentials; audit logging |
 | Encryption / KMS | AWS KMS, GCP Cloud KMS, Azure Key Vault | Envelope encryption (§6.5), key rotation |
-| Service mesh / mTLS | Istio, Linkerd, AWS App Mesh | Automatic mTLS, workload identity, traffic policy |
+| Service mesh / mTLS | Istio, Linkerd, Amazon VPC Lattice / ECS Service Connect | Automatic mTLS, workload identity, traffic policy |
 | Policy engines (ABAC) | Open Policy Agent (OPA), AWS Cedar | Externalized, declarative authorization rules |
 | Password hashing | bcrypt, scrypt, Argon2 | Argon2id is the current OWASP-recommended default |
 
@@ -673,7 +673,7 @@ A: OAuth2 is an *authorization* framework — it grants an access token that let
 
 **Q5: How do you propagate a user's identity across a chain of microservices without each one calling back to the auth server?**
 
-A: The API gateway/edge validates the user's token once (checking signature, expiry, issuer) and then passes a verified identity token (often the same JWT, or an internally-minted short-lived token) downstream via the `Authorization` header on every internal call. Each downstream service independently validates the signature using a cached public key (fetched periodically from a JWKS endpoint) — no network call to the auth server per request. Combined with mTLS (§4.5) between services, this gives both "who is the end user" (from the JWT claims) and "which service is calling me" (from the mTLS certificate) without a synchronous auth-server dependency on the hot path.
+A: The edge validates the token once, then forwards a verified identity token downstream on every internal call. That token is often the same JWT, or an internally-minted short-lived one, carried in the `Authorization` header. Each downstream service independently validates the signature using a cached public key (fetched periodically from a JWKS endpoint) — no network call to the auth server per request. Combined with mTLS (§4.5) between services, this gives both "who is the end user" (from the JWT claims) and "which service is calling me" (from the mTLS certificate) without a synchronous auth-server dependency on the hot path.
 
 **Q6: Why shouldn't you store passwords with encryption instead of hashing?**
 
@@ -689,11 +689,11 @@ A: mTLS (mutual TLS) means both sides of a connection present and verify certifi
 
 **Q9: A user reports they're still logged in on a device 2 hours after you disabled their account. How is this possible, and how do you fix it?**
 
-A: This is the stateless-JWT revocation problem (§6.2) — if the access token has a long TTL (e.g., 24 hours) and validation never checks a database, a previously-issued valid-signature token remains accepted regardless of account status. Fix: reduce access token TTL to ~15 minutes, and ensure refresh tokens ARE checked against a server-side store on every refresh — disabling the account deletes/invalidates the refresh token record, so the next refresh attempt (within 15 minutes) fails, and the user is fully logged out within one access-token lifetime.
+A: This is the stateless-JWT revocation problem (§6.2): a long-TTL access token stays valid until it expires, because nothing re-checks account status. If the TTL is 24 hours and validation never touches a database, the signature alone keeps the session alive. Fix: reduce access token TTL to ~15 minutes, and ensure refresh tokens ARE checked against a server-side store on every refresh — disabling the account deletes/invalidates the refresh token record, so the next refresh attempt (within 15 minutes) fails, and the user is fully logged out within one access-token lifetime.
 
 **Q10: Why is `alg: none` or accepting multiple signature algorithms in JWT validation dangerous?**
 
-A: If validation logic branches on the attacker-controlled `alg` header in the token itself, an attacker can set `alg: none` (no signature required) or, in some libraries, switch from asymmetric (`RS256`, verified with a public key) to symmetric (`HS256`, verified with... the same public key, now misused as an HMAC secret) — since the public key is, by definition, public, the attacker can sign their own forged token with it as if it were an HMAC secret. The fix is an algorithm **allowlist** decided by the verifier, never the token (§10, War Story 1).
+A: Because the `alg` header is attacker-controlled, branching verification logic on it lets the attacker choose how their own token gets checked. Setting `alg: none` skips signature verification entirely; switching `RS256` to `HS256` makes some libraries verify with the public key as if it were an HMAC secret — and the public key is, by definition, public, so the attacker can sign a forged token with it. The fix is an algorithm **allowlist** decided by the verifier, never the token (§10, War Story 1).
 
 **Q11: How would you design authentication for a system with both a web frontend and a public API for third-party developers?**
 
@@ -701,7 +701,7 @@ A: Two different flows, sharing the same underlying IdP/OAuth2 server: the web f
 
 **Q12: What's "envelope encryption" and why is it preferred over encrypting everything directly with one master key?**
 
-A: Envelope encryption uses a Key Management Service (KMS) to generate a per-object Data Encryption Key (DEK); the data is encrypted locally with the DEK (fast), and the DEK itself is encrypted by a Customer Master Key (CMK) that never leaves the KMS. Only the small encrypted DEK is stored alongside the data. This means rotating the CMK requires re-encrypting only the (small) DEKs, not the (potentially petabytes of) underlying data, and every decryption is an auditable KMS API call — giving centralized "who decrypted what, when" logging without re-architecting storage.
+A: Envelope encryption encrypts data locally with a per-object data key, then encrypts that data key with a root key that never leaves the KMS. Only the small wrapped data key is stored alongside the ciphertext. In AWS terms the root key is a **customer managed KMS key** whose material stays inside the HSM, and the per-object key is a **data key** returned by `GenerateDataKey`. Rotating the KMS key therefore re-wraps only the (tiny) data keys rather than re-encrypting petabytes of underlying data, and every decrypt is an auditable KMS API call — centralized "who decrypted what, when" logging without re-architecting storage.
 
 **Q13: What is the principle of least privilege, and why scope a service account narrowly even if "it would never misuse broader permissions"?**
 

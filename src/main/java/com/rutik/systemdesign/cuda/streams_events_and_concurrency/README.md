@@ -613,7 +613,7 @@ scale_kernel<<<blocks, threads, 0, stream>>>(d_buf, 2.0f, n);
 CUDA_CHECK(cudaLaunchHostFunc(stream, on_chunk_done, &chunk_id));
 ```
 
-`cudaLaunchHostFunc` (the modern replacement for the deprecated `cudaStreamAddCallback`)
+`cudaLaunchHostFunc` is the stream-ordered host-callback entry point: it
 enqueues a CPU function that fires once every prior operation in that stream has completed,
 without blocking the device — useful for marking pinned buffers free for reuse, updating a
 progress counter, or signaling a producer/consumer handoff on the host side.

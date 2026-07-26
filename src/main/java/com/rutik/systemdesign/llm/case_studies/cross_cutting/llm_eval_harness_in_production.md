@@ -187,7 +187,6 @@ class EvalDataset:
     name: str
     version: str
     records: list[GoldenRecord]
-    # datetime.utcnow() is deprecated from Python 3.12 — use an aware UTC timestamp
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -559,7 +558,7 @@ jobs:
 
 **Frontier-lab release gating**: Every major lab gates model releases on a large internal eval suite spanning many task categories, combining automated metrics, LLM-as-judge for subjective dimensions (helpfulness, honesty, harmlessness), and human raters as the calibration source. The structural lesson that transfers is category-level gating rather than aggregate gating: a model that improves the mean while regressing one capability category is a regression, and only per-category thresholds catch it. The specific thresholds and review processes labs use internally are not published — do not quote a number you have not measured yourself.
 
-**OpenAI Evals framework**: OpenAI open-sourced an eval framework at github.com/openai/evals in March 2023. It encodes evals as YAML specifications (model, dataset, grading function) and accepted community-contributed evals covering medical, legal, coding, and reasoning tasks. It is worth reading as the earliest widely-adopted statement of eval-as-code — versioned specs, declarative graders, reproducible runs — even though the tooling landscape has since moved to the platforms in Section 11. Its promotion role inside OpenAI is not publicly documented.
+**promptfoo**: promptfoo is the open-source expression of eval-as-code. A `promptfooconfig.yaml` declares prompts, providers (several models side by side) and test cases with assertions — deterministic ones such as `equals`, `contains` and `contains-json`, and model-graded ones such as `llm-rubric` and embedding-based `similar`. `promptfoo eval` runs the whole prompt x provider x test matrix locally or in CI and exits non-zero on assertion failures; the web viewer renders the matrix as a per-cell diff table. Because the config is a file in the repository, an eval change is reviewed in the same PR as the prompt change it gates — which is the property Section 3's "eval-as-code" principle is asking for.
 
 **Braintrust**: Braintrust positions itself as the "CI/CD for LLMs." Teams define evals in code, run them against any LLM via the Braintrust SDK, and review results in a web dashboard that shows score trends over time, example-level diffs, and A/B comparisons. Braintrust stores eval runs immutably — you can compare a PR branch to any past run by ID, which is the property that makes an eval gate trustworthy over months rather than days.
 

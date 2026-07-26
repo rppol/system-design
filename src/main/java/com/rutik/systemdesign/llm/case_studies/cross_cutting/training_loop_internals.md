@@ -67,7 +67,7 @@ At LLM scale the loop must additionally handle: gradient accumulation to simulat
 |--------|---------------|---------------------|-----------------|----------|
 | FP32 | 1× (baseline) | Highest | All GPUs | Reference, loss functions needing stability |
 | BF16 | 0.5× | High (wide exponent) | A100, H100, TPU v4+ | Standard LLM training |
-| FP16 | 0.5× | Medium (narrow exponent, needs loss scaling) | V100, older GPUs | Legacy; prefer bf16 when available |
+| FP16 | 0.5× | Medium (narrow exponent, needs loss scaling) | V100 and earlier | Only when the hardware has no bf16 support |
 | FP8 | 0.25× | Low (requires per-tensor scaling) | H100 only | Experimental pre-training at scale |
 
 ### Optimizer Choices
@@ -130,7 +130,7 @@ Model layer L has 4B parameters = 16 GB in BF16
 
 Without FSDP: each GPU holds 16 GB for layer L alone  (OOM for 70B model on 80 GB GPU)
 
-With FSDP (FULL_SHARD):
+With FSDP (full sharding):
 GPU 0: shard_0 (2 GB)   GPU 4: shard_4 (2 GB)
 GPU 1: shard_1 (2 GB)   GPU 5: shard_5 (2 GB)
 GPU 2: shard_2 (2 GB)   GPU 6: shard_6 (2 GB)
@@ -210,52 +210,43 @@ class TrainingConfig:
 ```python
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    ShardingStrategy,
-    MixedPrecision,
-    StateDictType,
-)
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers import LlamaForCausalLM, LlamaDecoderLayer
-import functools
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
+from transformers import LlamaForCausalLM
 
 
 def build_fsdp_model(
     model: LlamaForCausalLM,
     config: TrainingConfig,
-    local_rank: int,
-) -> FSDP:
+    world_size: int,
+) -> FSDPModule:
     """
-    Wrap a HuggingFace LLM with FSDP using transformer layer auto-wrap policy.
-    Each LlamaDecoderLayer (attention + FFN) becomes an independent FSDP unit —
-    this ensures all-gather happens layer-by-layer rather than materializing the
-    entire model at once, keeping peak memory bounded.
+    Shard a HuggingFace LLM with `fully_shard`. Each LlamaDecoderLayer
+    (attention + FFN) becomes its own communication group: one all-gather for
+    its parameters, one reduce-scatter for its gradients. That is what makes
+    all-gather happen layer-by-layer rather than materializing the entire model
+    at once, keeping peak memory bounded.
     """
-    # Wrap each transformer block independently for memory efficiency
-    auto_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls={LlamaDecoderLayer},
-    )
+    mesh = init_device_mesh("cuda", (world_size,))
 
-    # BF16 for compute and parameters; FP32 for reduction (gradient accumulation
-    # in FP32 prevents precision loss across many accumulation steps)
-    mixed_precision_policy = MixedPrecision(
+    # BF16 for compute and the parameter all-gather; FP32 for the reduction, so
+    # gradients accumulated across many micro-steps do not lose mantissa bits.
+    mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,   # gradients summed in fp32
-        buffer_dtype=torch.bfloat16,
-    ) if config.bf16 else None
+        reduce_dtype=torch.float32,   # gradients reduced in fp32
+    ) if config.bf16 else MixedPrecisionPolicy()
 
-    fsdp_model = FSDP(
-        model,
-        auto_wrap_policy=auto_wrap_policy,
-        mixed_precision=mixed_precision_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,  # ZeRO-3 equivalent
-        device_id=local_rank,
-        use_orig_params=True,   # required for gradient checkpointing compatibility
-        limit_all_gathers=True, # prevents OOM from prefetching too many layers
-    )
-    return fsdp_model
+    # Apply bottom-up: each call groups the parameters not already claimed by an
+    # earlier call on a submodule. Calling it on the root FIRST would swallow the
+    # whole model into one group and defeat the layer-by-layer overlap.
+    for layer in model.model.layers:
+        fully_shard(layer, mesh=mesh, mp_policy=mp_policy)
+
+    # Root last. Its parameters deliberately stay unsharded between forward and
+    # backward (reshard_after_forward defaults to False for the root), because
+    # the root is needed the instant backward begins.
+    fully_shard(model, mesh=mesh, mp_policy=mp_policy)
+    return model
 ```
 
 ### BROKEN Training Loop — Gradient Accumulation Bug
@@ -287,7 +278,6 @@ def train_broken(model, dataloader, optimizer, config):
 ### Fixed Training Loop
 
 ```python
-import contextlib
 import math
 import os
 import threading
@@ -297,6 +287,8 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -327,7 +319,7 @@ def get_cosine_schedule_with_warmup(
 class TrainingLoop:
     def __init__(
         self,
-        model: FSDP,
+        model: FSDPModule,
         optimizer: AdamW,
         scheduler: LambdaLR,
         train_dataloader: DataLoader,
@@ -368,27 +360,20 @@ class TrainingLoop:
 
                 batch = {k: v.cuda(self.rank) for k, v in batch.items()}
 
-                # FSDP requires no_sync context for all but the last micro-step
-                # to avoid premature gradient all-reduces between accumulation steps.
+                # Suppress the gradient reduce-scatter on every micro-step but
+                # the last, so gradients accumulate locally instead of firing one
+                # collective per micro-step. The flag is sticky: it stays in
+                # effect until the next call, so it must be set BEFORE backward.
                 is_last_micro_step = (micro_step == self.config.gradient_accumulation_steps - 1)
-                ctx = (
-                    contextlib.nullcontext()
-                    if is_last_micro_step
-                    else self.model.no_sync()
-                )
+                self.model.set_requires_gradient_sync(is_last_micro_step)
 
-                # backward() MUST run inside the no_sync() scope — the gradient
-                # reduction is triggered by autograd hooks fired during backward,
-                # so calling .backward() outside the context silently re-enables
-                # the per-micro-step all-reduce that no_sync() exists to suppress.
-                with ctx:
-                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.config.bf16):
-                        output = self.model(**batch)
-                        # FIX: divide immediately — the gradient accumulated over
-                        # N micro-steps will then equal the gradient for one
-                        # large batch of N * micro_batch_size sequences.
-                        loss = output.loss / self.config.gradient_accumulation_steps
-                    loss.backward()
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.config.bf16):
+                    output = self.model(**batch)
+                    # FIX: divide immediately — the gradient accumulated over
+                    # N micro-steps will then equal the gradient for one
+                    # large batch of N * micro_batch_size sequences.
+                    loss = output.loss / self.config.gradient_accumulation_steps
+                loss.backward()
 
                 accumulated_loss += loss.item()
 
@@ -396,6 +381,10 @@ class TrainingLoop:
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.config.clip_grad_norm
             )
+            if isinstance(grad_norm, DTensor):
+                # Sharded parameters make the global norm come back as a DTensor;
+                # materialize it before logging or comparing against a threshold.
+                grad_norm = grad_norm.full_tensor()
             self.optimizer.step()
             self.scheduler.step()
 
@@ -421,10 +410,12 @@ class TrainingLoop:
                     print(f"step={global_step} eval_loss={metrics['loss']:.4f} "
                           f"perplexity={metrics['perplexity']:.2f}")
 
-            # --- periodic checkpointing (rank 0 triggers async save) ---
-            if global_step % self.config.checkpoint_every_n_steps == 0 and self.rank == 0:
+            # --- periodic checkpointing ---
+            # Every rank must enter: the state-dict gather inside is a collective.
+            # Only rank 0 goes on to write bytes to disk.
+            if global_step % self.config.checkpoint_every_n_steps == 0:
                 self.ckpt.save_checkpoint_async(
-                    global_step, self.model, self.optimizer, step_loss
+                    global_step, self.model, self.optimizer, step_loss, self.rank
                 )
 
             if self.rank == 0 and global_step % 10 == 0:
@@ -439,6 +430,12 @@ class TrainingLoop:
 import json
 import hashlib
 import shutil
+
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_state_dict,
+    set_state_dict,
+)
 
 
 class AsyncCheckpointManager:
@@ -457,15 +454,22 @@ class AsyncCheckpointManager:
     def save_checkpoint_async(
         self,
         step: int,
-        model: FSDP,
+        model: FSDPModule,
         optimizer: AdamW,
         loss: float,
+        rank: int,
     ) -> None:
-        """Serialize state dict and launch background thread for disk write."""
-        # Collect state on the current thread (GPU operations must be synchronous)
-        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
-            model_state = model.state_dict()
-        optim_state = optimizer.state_dict()
+        """Gather the state dict, then launch a background thread for the write."""
+        # get_state_dict is a COLLECTIVE — every rank must call it. It hides the
+        # parallelism-specific state_dict plumbing and emits canonical FQNs, so
+        # the checkpoint can be resharded onto a different GPU count later.
+        # full_state_dict gathers the DTensor shards; with cpu_offload only rank 0
+        # materializes the tensors (others get an empty dict), which is what keeps
+        # host memory bounded on a 140 GB checkpoint.
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        model_state, optim_state = get_state_dict(model, optimizer, options=options)
+        if rank != 0:
+            return
 
         # Launch background thread for slow disk write
         if self._save_thread and self._save_thread.is_alive():
@@ -520,7 +524,7 @@ class AsyncCheckpointManager:
 
     def load_latest_checkpoint(
         self,
-        model: FSDP,
+        model: FSDPModule,
         optimizer: AdamW,
         scheduler: LambdaLR,
     ) -> int:
@@ -546,9 +550,17 @@ class AsyncCheckpointManager:
             print(f"[Checkpoint] Checksum mismatch for {latest}. Skipping.")
             return 0
 
-        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
-            model.load_state_dict(torch.load(latest / "model.pt", map_location="cpu"))
-        optimizer.load_state_dict(torch.load(latest / "optimizer.pt", map_location="cpu"))
+        # set_state_dict is the counterpart collective: it takes the full,
+        # canonical-FQN dicts and reshards them onto this rank's local shards.
+        # Call it before the first backward or after optimizer.step(), never
+        # between the two, or the optimizer state will not initialize correctly.
+        set_state_dict(
+            model,
+            optimizer,
+            model_state_dict=torch.load(latest / "model.pt", map_location="cpu"),
+            optim_state_dict=torch.load(latest / "optimizer.pt", map_location="cpu"),
+            options=StateDictOptions(full_state_dict=True),
+        )
 
         step = meta["step"]
         self.last_good_step = step
@@ -582,7 +594,7 @@ class LossSpikeDetector:
 
     def rollback_to_last_good_checkpoint(
         self,
-        model: FSDP,
+        model: FSDPModule,
         optimizer: AdamW,
         scheduler: LambdaLR,
         ckpt: AsyncCheckpointManager,
@@ -599,7 +611,7 @@ import math
 
 
 def eval_step(
-    model: FSDP,
+    model: FSDPModule,
     eval_dataloader: DataLoader,
 ) -> dict[str, float]:
     """
@@ -642,7 +654,7 @@ def eval_step(
 
 **EleutherAI GPT-NeoX-20B (2022)** — Trained using DeepSpeed ZeRO-3 (FSDP's equivalent in the DeepSpeed stack) on 96 A100 GPUs. The team encountered a class of bugs where ZeRO-3 and gradient checkpointing interacted to produce OOM at specific sequence lengths. The fix required disabling full activation checkpointing and using selective checkpointing only on attention layers — a fix that is now standard practice when combining FSDP with gradient checkpointing.
 
-**Hugging Face Trainer** — The Trainer class implements gradient accumulation with the correct `loss / gradient_accumulation_steps` normalization in `training_step()`. It uses `model.no_sync()` for FSDP (or DDP) on all but the last micro-step to prevent premature gradient synchronization. The Trainer source code is a reliable reference implementation for anyone writing a custom loop.
+**Hugging Face Trainer** — The Trainer class implements gradient accumulation with the correct `loss / gradient_accumulation_steps` normalization in `training_step()`. It disables gradient synchronization on all but the last micro-step to prevent premature reduction. The Trainer source code is a reliable reference implementation for anyone writing a custom loop.
 
 ---
 
@@ -679,7 +691,7 @@ Written-bytes/day is the pre-rotation figure. Production runs retain only the la
 |--------|--------|-----------------|----------|-------------------|
 | FP32 | 1× | None | All | No |
 | BF16 | 0.5× | Low | A100/H100/TPU | No |
-| FP16 | 0.5× | Medium (overflow at >65504) | V100+ | Yes (GradScaler) |
+| FP16 | 0.5× | Medium (overflow at >65504) | V100+ | Yes (`torch.amp.GradScaler`) |
 | FP8 | 0.25× | High (requires careful scaling) | H100 only | Yes (per-tensor) |
 
 ---
@@ -689,8 +701,8 @@ Written-bytes/day is the pre-rotation figure. Production runs retain only the la
 **Use FSDP when:**
 - Fine-tuning a 70B+ model and per-GPU GPU memory in bf16 (140 GB) exceeds hardware (80 GB H100).
 - You want ZeRO-3-equivalent optimizer state sharding without installing DeepSpeed.
-- The model is a standard transformer — FSDP's `transformer_auto_wrap_policy` handles layer detection automatically.
-- Starting new work on current PyTorch: prefer FSDP2 (`fully_shard`, DTensor-based), since FSDP1 is now deprecated in the PyTorch docs. Reach for FSDP1 only to stay compatible with an existing training repo.
+- The model is a standard transformer — one `fully_shard` call per decoder block gives you the right communication granularity in three lines.
+- You want communication-free sharded state dicts and clean interop with tensor parallelism, both of which fall out of FSDP2's DTensor-based per-parameter sharding.
 
 **Use DDP when:**
 - The full model fits in GPU memory on each device — DDP has lower communication overhead than FSDP.
@@ -703,10 +715,10 @@ Written-bytes/day is the pre-rotation figure. Production runs retain only the la
 
 **Do NOT use bf16 for specific operations:**
 - Loss functions that compute small differences between large numbers (e.g., direct softmax cross-entropy over large vocabularies before log-space normalization). PyTorch's `CrossEntropyLoss` is numerically stable in bf16 because it uses log-sum-exp internally; direct logit subtraction is not.
-- Use `torch.autocast` exclude list: `with torch.autocast("cuda", dtype=torch.bfloat16, enabled=True)` already excludes known-unstable ops automatically. Custom ops need manual exclusion via `@torch.amp.custom_fwd(device_type="cuda")` — the older `torch.cuda.amp.custom_fwd` / `torch.cuda.amp.GradScaler` spellings are deprecated in favour of the device-generic `torch.amp` namespace.
+- Use `torch.autocast` exclude list: `with torch.autocast("cuda", dtype=torch.bfloat16, enabled=True)` already excludes known-unstable ops automatically. Custom ops need manual exclusion via `@torch.amp.custom_fwd(device_type="cuda")`; the whole AMP surface lives in the device-generic `torch.amp` namespace (`torch.amp.GradScaler("cuda")`, `torch.amp.autocast`).
 
-**Do NOT assume `limit_all_gathers=True` is the fix for FSDP + full gradient checkpointing OOM:**
-- FSDP's all-gather materializes a unit's full parameters. Gradient checkpointing re-materializes activations during backward. `limit_all_gathers` throttles prefetch so at most two consecutive FSDP units are materialized at once — but it **defaults to `True` in FSDP1**, so if you are OOMing, it is already on and is not the lever. The real levers are: wrap at a finer granularity (per transformer block, not per model), use selective activation checkpointing (attention layers only, not FFN), or reduce micro-batch sequence length and compensate with more accumulation steps.
+**Do NOT expect a prefetch-throttling knob to fix FSDP + full gradient checkpointing OOM:**
+- FSDP's all-gather materializes a group's full parameters. Gradient checkpointing re-materializes activations during backward. Both land in the same backward hook, and throttling prefetch only bounds you to two consecutive groups co-resident — which is usually the very spike you are already seeing. The real levers are: shard at a finer granularity (one `fully_shard` call per transformer block, not one on the whole model), use selective activation checkpointing (attention layers only, not FFN), or reduce micro-batch sequence length and compensate with more accumulation steps.
 
 ---
 
@@ -728,11 +740,11 @@ Lesson: checkpoint frequency is not an engineering nicety. At scale, it is the p
 
 **Pitfall 3: FSDP + gradient checkpointing OOM**
 
-A team training a 70B model on 8× H100 (80 GB each) enabled both FSDP `FULL_SHARD` and PyTorch's full `gradient_checkpointing_enable()`. Expected peak memory: ~20 GB (sharded 70B in bf16). Actual peak memory: 78 GB — nearly OOM.
+A team training a 70B model on 8× H100 (80 GB each) enabled both full FSDP sharding and PyTorch's `gradient_checkpointing_enable()`. Expected peak memory: ~20 GB (sharded 70B in bf16). Actual peak memory: 78 GB — nearly OOM.
 
-The interaction: during FSDP's backward pass, `all_gather` materializes each unit's full parameters (16 GB for a large FFN layer). Simultaneously, gradient checkpointing re-materializes activations for that same layer. Both events occur in the same backward hook, causing a ~32 GB spike for a single unit. The team's first instinct — "set `limit_all_gathers=True`" — was a no-op: it is already the FSDP1 default, and it only bounds prefetch to two consecutive units, which is exactly the 32 GB they were already seeing.
+The interaction: during FSDP's backward pass, the all-gather materializes each group's full parameters (16 GB for a large FFN layer). Simultaneously, gradient checkpointing re-materializes activations for that same layer. Both events occur in the same backward hook, causing a ~32 GB spike for a single group. The team's first instinct — throttle the prefetch — was a no-op: throttling only bounds you to two consecutive groups co-resident, which is exactly the 32 GB they were already seeing.
 
-The fix that actually worked: wrap at transformer-block granularity via `transformer_auto_wrap_policy` so a single FSDP unit is one decoder layer rather than a coarse module, and switch from full-model checkpointing to selective activation checkpointing (attention layers only, not FFN). That halves the co-resident footprint at the peak.
+The fix that actually worked: call `fully_shard` once per decoder layer so a single FSDP group is one transformer block rather than a coarse module, and switch from full-model checkpointing to selective activation checkpointing (attention layers only, not FFN). That halves the co-resident footprint at the peak.
 
 **Pitfall 4: Corrupt checkpoint from spot instance preemption**
 
@@ -748,11 +760,11 @@ Fix: write to a temp path, compute a SHA-256 checksum of the written file, store
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| PyTorch FSDP | Distributed training | FSDP1 (`FullyShardedDataParallel`) shipped in PyTorch 1.11–1.12 and is now **deprecated** — the PyTorch docs direct new work to FSDP2 (`fully_shard`), which represents shards as DTensors and gives lower, deterministic memory and communication-free sharded state dicts. The FSDP1 code in Section 6 is shown because it is what most existing training repos still run |
+| PyTorch FSDP | Distributed training | `torch.distributed.fsdp.fully_shard`, applied bottom-up per transformer block. Shards are DTensors chunked on dim 0, giving deterministic memory (no `record_stream`), communication-free sharded state dicts, and no constraint on frozen parameters |
 | PyTorch DDP | Distributed training | Stable, simple, use when model fits in single GPU |
 | Hugging Face Accelerate | Training abstraction | Wraps DDP/FSDP/DeepSpeed; `accelerate launch` replaces `torchrun` |
 | Hugging Face Trainer | High-level training loop | Correct gradient accumulation, FSDP support, W&B integration |
-| DeepSpeed ZeRO | Distributed optimization | ZeRO-1/2/3; ZeRO-3 ≈ FSDP FULL_SHARD; ZeRO-Infinity adds CPU/NVMe offload |
+| DeepSpeed ZeRO | Distributed optimization | ZeRO-1/2/3; ZeRO-3 ≈ FSDP full sharding; ZeRO-Infinity adds CPU/NVMe offload |
 | Megatron-LM | Frontier pre-training | Tensor + pipeline parallelism; used for GPT-3, LLaMA, Falcon |
 | TRL (Transformer RL) | SFT / DPO / PPO training | Built on Accelerate; `SFTTrainer`, `DPOTrainer`, `PPOTrainer` classes |
 | torchtune | Lightweight fine-tuning | Pure PyTorch; minimal abstractions; LoRA, QLoRA, full fine-tune |
@@ -775,7 +787,7 @@ Fix: write to a temp path, compute a SHA-256 checksum of the written file, store
 Dividing before `.backward()` ensures each accumulated gradient is proportional to the loss for that micro-batch divided by the number of micro-batches — identical to what you'd get from a single forward pass on the combined batch. PyTorch's autograd scales all gradients by the scalar value of the tensor on which `.backward()` is called. If you accumulate 8 un-normalized losses and then divide only before the optimizer step (dividing the accumulated `.grad` tensors by 8), the effect is the same mathematically — but the standard and safe practice is to normalize the loss scalar before `.backward()` so the gradient magnitude is correct at all times, not just at the optimizer step. Dividing after is not a correctness bug per se, but dividing *never* (the most common mistake) is: with no division, the accumulated gradient is 8× too large, multiplying the effective LR by 8 and causing loss spikes.
 
 **Q: What is the relationship between FSDP and DeepSpeed ZeRO-3?**
-FSDP and ZeRO-3 implement the same mathematical strategy — shard model parameters, gradients, and optimizer states across all workers — but are different codebases. ZeRO-3 is part of the DeepSpeed library (Microsoft). FSDP is native to PyTorch. ZeRO-3 has more features (CPU offload via ZeRO-Infinity, NVMe offload), while FSDP is better integrated into the PyTorch ecosystem (no extra dependency, works seamlessly with `torch.compile`). For new projects on PyTorch 2.x, FSDP (or FSDP2) is preferred over DeepSpeed for simplicity. For extreme memory constraints (model larger than total GPU memory), ZeRO-Infinity's CPU offload is unmatched.
+FSDP and ZeRO-3 implement the same mathematical strategy — shard model parameters, gradients, and optimizer states across all workers — but are different codebases. ZeRO-3 is part of the DeepSpeed library (Microsoft). FSDP is native to PyTorch. ZeRO-3 has more features (CPU offload via ZeRO-Infinity, NVMe offload), while FSDP is better integrated into the PyTorch ecosystem (no extra dependency, works seamlessly with `torch.compile`). For new projects, FSDP is preferred over DeepSpeed for simplicity. For extreme memory constraints (model larger than total GPU memory), ZeRO-Infinity's CPU offload is unmatched.
 
 **Q: What happens physically when gradient norm exceeds the clip threshold?**
 `clip_grad_norm_` computes the L2 norm of all gradient tensors concatenated (the "global norm"): `sqrt(sum(g_i^2))` over all parameters. If this exceeds `max_norm=1.0`, every gradient tensor `g_i` is multiplied by `max_norm / global_norm`. This preserves the gradient direction exactly but reduces magnitude to ensure the global norm equals 1.0. Without clipping, a single outlier batch can produce a gradient 100-1000× normal magnitude, causing a weight update so large it pushes the model into a high-loss region from which it cannot recover. Gradient clipping turns catastrophic updates into large-but-bounded updates.
