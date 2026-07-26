@@ -28,7 +28,9 @@ Stateless vs stateful tokens: JWT access tokens are stateless (server needs no D
 
 Short-lived access tokens: access tokens should expire in 5–60 minutes. A stolen token that expires in 15 minutes limits the attacker's window to 15 minutes.
 
-Refresh token rotation: each use of a refresh token issues a new refresh token and invalidates the old one. If an old (already-used) refresh token is presented, revoke the entire token family — this indicates the refresh token was stolen.
+Refresh token rotation: each use of a refresh token issues a new refresh token and invalidates the old one. If an old (already-used) refresh token is presented, revoke the entire token family — this indicates the refresh token was stolen. RFC 9700 requires authorization servers to detect refresh token replay for public clients by **one of two** methods: refresh token rotation, or sender-constrained refresh tokens.
+
+Sender-constrained (proof-of-possession) tokens: a bearer token is usable by whoever holds it, so binding the token to a key the client must prove it controls removes the value of a stolen token. The two standardized bindings are DPoP (RFC 9449, application-level proof JWT) and mutual-TLS client certificate binding (RFC 8705). The OAuth 2.1 draft says authorization and resource servers SHOULD use one of them for access tokens.
 
 Algorithm pinning: never accept a JWT whose algorithm you did not expect. Specify `RS256` explicitly; never accept `HS256` when you configured `RS256`, and never accept `none`.
 
@@ -59,7 +61,9 @@ The receiver verifies the signature using the public key. If valid, the claims a
 | HS256     | Symmetric   | Shared secret               | Internal service-to-service (same trust domain) |
 | RS256     | Asymmetric  | RSA private/public key pair | Authorization server signs; resource servers verify with public key |
 | ES256     | Asymmetric  | EC private/public key pair  | Same as RS256 but smaller key and signature  |
-| RS512     | Asymmetric  | RSA 4096-bit                | Higher security, larger token                |
+| RS512     | Asymmetric  | RSA private/public key pair | RSASSA-PKCS1-v1_5 with SHA-512 — longer digest, same key |
+
+The number in an `alg` name is the SHA-2 digest size, not the RSA key size: RFC 7518 defines RS256/RS384/RS512 as RSASSA-PKCS1-v1_5 with SHA-256/384/512 and requires a key of **at least 2048 bits for all three**. Choosing RS512 does not imply a 4096-bit key, and does not by itself raise the key strength.
 
 RS256 and ES256 are preferred for OAuth2 systems. The authorization server holds the private key and publishes the public key at a JWKS (JSON Web Key Set) endpoint (`/.well-known/jwks.json`). Resource servers fetch and cache the JWKS to validate tokens without calling the authorization server on every request.
 
@@ -156,6 +160,8 @@ sequenceDiagram
 ```
 
 *The device never sees the user's credentials — it just polls `/token` in a loop while the user completes authorization on a separate, trusted device.*
+
+**Grants you should no longer use:** RFC 9700 (*Best Current Practice for OAuth 2.0 Security*, BCP 240, January 2025) states that the **resource owner password credentials grant MUST NOT be used**, and that clients **SHOULD NOT use the implicit grant** (`response_type=token`) or any other response type that returns an access token in the authorization response. The in-progress OAuth 2.1 draft (`draft-ietf-oauth-v2-1`, still an Internet-Draft as of 2026) simply omits both grants. Replace implicit with Authorization Code + PKCE, and replace password credentials with a redirect-based flow.
 
 ### OpenID Connect (OIDC)
 
@@ -336,7 +342,7 @@ sequenceDiagram
 
 ```java
 // Using Nimbus JOSE + JWT library
-// Dependency: com.nimbusds:nimbus-jose-jwt:9.37.3
+// Dependency: com.nimbusds:nimbus-jose-jwt:10.9.1
 
 @Component
 public class JwtValidator {
@@ -346,8 +352,10 @@ public class JwtValidator {
     private final String expectedAudience = "payments-service";
 
     public JwtValidator() throws Exception {
-        // Load public key from JWKS endpoint (in production, use JWKSCache with refresh)
-        JWKSet jwkSet = JWKSet.load(new URL("https://auth.example.com/.well-known/jwks.json"));
+        // Load public key from JWKS endpoint. Simplified for illustration: production code
+        // must select the key by the token's `kid` and refresh the set on rotation —
+        // use JWKSourceBuilder/RemoteJWKSet + DefaultJWTProcessor rather than index 0.
+        JWKSet jwkSet = JWKSet.load(URI.create("https://auth.example.com/.well-known/jwks.json").toURL());
         RSAKey rsaKey = (RSAKey) jwkSet.getKeys().get(0);
         this.verifier = new RSASSAVerifier(rsaKey.toRSAPublicKey());
     }
@@ -401,8 +409,11 @@ JWT parsed = JWTParser.parse(token); // DO NOT USE — no signature verification
 // FIXED: always specify expected algorithms explicitly
 JWSVerifier verifier = new RSASSAVerifier(publicKey); // RS256 verifier only
 SignedJWT jwt = SignedJWT.parse(token);
-// If token has alg=none, SignedJWT.parse() will throw PlainJWT cannot be cast to SignedJWT
-// OR — explicitly reject:
+// If the token has alg=none, SignedJWT.parse() throws ParseException("Not a JWS header"):
+// Nimbus maps "none" to Algorithm.NONE, which is not a JWSAlgorithm, so JWSHeader.parse
+// rejects it before any signature check. (JWTParser.parse() would instead hand back a
+// PlainJWT, which is exactly the object an unwary cast or `instanceof` miss lets through.)
+// Belt and braces — explicitly reject anything that is not the pinned algorithm:
 if (!JWSAlgorithm.RS256.equals(jwt.getHeader().getAlgorithm())) {
     throw new SecurityException("Algorithm not permitted");
 }
@@ -451,7 +462,10 @@ public class RefreshTokenService {
     }
 
     private void revokeFamily(String familyId) {
-        // Scan and delete all keys matching "refresh:{familyId}:*"
+        // NOTE: RedisTemplate.keys() issues KEYS, which is O(N) over the whole keyspace and
+        // blocks the single-threaded server. Shown for brevity only — in production use
+        // SCAN (redis.scan(...)) or, better, keep the family's token IDs in a Redis SET
+        // so revocation is one SMEMBERS + DEL.
         Set<String> keys = redis.keys("refresh:" + familyId + ":*");
         if (keys != null) redis.delete(keys);
     }
@@ -466,9 +480,9 @@ public class RefreshTokenService {
 
 @Bean
 public RoleHierarchy roleHierarchy() {
-    RoleHierarchyImpl hierarchy = new RoleHierarchyImpl();
-    hierarchy.setHierarchy("ROLE_ADMIN > ROLE_MANAGER > ROLE_USER");
-    return hierarchy;
+    // setHierarchy() + the no-arg constructor were deprecated in Spring Security 6.3
+    // and removed in 7.0. Use the static factory (or RoleHierarchyImpl.withDefaultRolePrefix()).
+    return RoleHierarchyImpl.fromHierarchy("ROLE_ADMIN > ROLE_MANAGER > ROLE_USER");
 }
 
 // Method-level authorization
@@ -573,6 +587,8 @@ That conclusion is what justifies the rest of the design. Because brute force is
 | `PREFIX` (`sk_live_`) | 8 identifying characters. Adds zero entropy — it is a label, not a secret |
 | SHA-256 before storage | One-way. A dumped `api_keys` table yields hashes, not usable credentials |
 
+A *fast* hash is the right choice here only because the secret is 256 uniformly random bits — there is nothing for an offline attacker to guess. Do not carry this over to passwords: a human-chosen password has perhaps 20–40 bits of entropy and needs a deliberately slow, salted KDF (OWASP's current minimums: Argon2id `m=19456, t=2, p=1`; bcrypt work factor 10 or more; PBKDF2-HMAC-SHA256 600,000 iterations).
+
 **Walk one example.** What 256 bits actually buys, against an attacker guessing a billion keys per second:
 
 ```
@@ -586,8 +602,9 @@ That conclusion is what justifies the rest of the design. Because brute force is
 ```
 
 For contrast, an 8-character alphanumeric key — the kind hand-rolled key generators tend to
-produce — has a keyspace of `62^8 ≈ 2.18 × 10^14`, which the same attacker exhausts in about
-109,000 seconds, roughly **30 hours**. The gap between 30 hours and 10^60 years is entirely a
+produce — has a keyspace of `62^8 ≈ 2.18 × 10^14`. On the same expected-guesses basis used
+above (half the space), the attacker lands on a key after about 109,000 seconds, roughly
+**30 hours**; exhausting the whole space takes about 61 hours. The gap between 30 hours and 10^60 years is entirely a
 function of the byte count, which is why "32 bytes from `SecureRandom`" is the whole
 recommendation and no amount of clever formatting substitutes for it.
 
@@ -694,7 +711,7 @@ of memory.
 
 ## 7. Real-World Examples
 
-**Spotify OAuth2 PKCE (Authorization Code):** Spotify's Web Playback SDK uses Authorization Code + PKCE for browser-based apps. No client secret is involved — the app is public. PKCE replaces the secret by proving that the same client that requested the code is the one exchanging it. This is the recommended pattern for all browser and native mobile applications as of OAuth 2.1.
+**Spotify OAuth2 PKCE (Authorization Code):** Spotify's developer documentation names Authorization Code with PKCE "the recommended authorization flow if you're implementing authorization in a mobile app, single page web apps, or any other type of application where the client secret can't be safely stored", and marks its implicit grant flow deprecated. No client secret is involved — the app is public. PKCE replaces the secret by proving that the same client that requested the code is the one exchanging it. The same pattern is mandated for public native app clients by RFC 8252 (BCP 212) and for public clients generally by RFC 9700 (BCP 240).
 
 **AWS Cognito (OIDC Identity Provider):** Cognito acts as an OIDC provider issuing JWTs. Resource servers (API Gateway, Spring Boot services) validate JWTs against Cognito's JWKS endpoint. The token contains `cognito:groups` claims used for RBAC decisions. Cognito supports user pools (for end users) and identity pools (for federated access to AWS resources).
 
@@ -731,7 +748,7 @@ of memory.
 
 **Opaque tokens with introspection:** use when immediate revocation is mandatory (financial transactions, healthcare, government). Use when you cannot afford to have a stolen token valid for any duration.
 
-**Authorization Code + PKCE:** use for any flow involving a human user and a web or mobile client. Required for all public clients (no client secret). Required by OAuth 2.1.
+**Authorization Code + PKCE:** use for any flow involving a human user and a web or mobile client. RFC 9700 makes PKCE a MUST for public clients (no client secret) and RECOMMENDED for confidential clients; RFC 8252 makes it a MUST for public native app clients. The OAuth 2.1 draft goes further and requires `code_challenge`/`code_verifier` on the authorization code grant for every client — but it is still an Internet-Draft (`draft-ietf-oauth-v2-1-15`, March 2026), not yet an RFC.
 
 **Client Credentials:** use for machine-to-machine flows. Never use for flows where a human user is involved.
 
@@ -751,13 +768,13 @@ of memory.
 
 **Pitfall 3 — Storing JWTs in localStorage:** A single-page application stored the access token in `localStorage`. A stored XSS vulnerability in the app allowed an attacker to inject a script that read `localStorage` and exfiltrated the token. Fix: store access tokens in memory (JavaScript variable). For refresh tokens requiring persistence across page loads, use `HttpOnly; Secure; SameSite=Strict` cookies — not accessible to JavaScript.
 
-**Pitfall 4 — Infinite-lived refresh tokens:** A team issued refresh tokens with no expiry. A single phished refresh token gave the attacker permanent access until manually discovered and revoked. Fix: refresh tokens must have an expiry (recommended 30 days maximum). Use refresh token rotation — a token that has not been used in 30 days is automatically expired.
+**Pitfall 4 — Infinite-lived refresh tokens:** A team issued refresh tokens with no expiry. A single phished refresh token gave the attacker permanent access until manually discovered and revoked. Fix: give refresh tokens both an absolute lifetime and an idle timeout — 30 days is a common choice for each, but no RFC fixes the number, so pick it from your session policy. Separately, RFC 9700 requires the authorization server to detect refresh token replay for public clients, via either rotation or sender-constrained refresh tokens (DPoP / mTLS); rotation is the replay control, not the expiry mechanism.
 
 **Pitfall 5 — PKCE code_challenge with plain method:** Using `code_challenge_method=plain` makes PKCE trivial to bypass — `code_challenge == code_verifier`, so an intercepted `code_challenge` from the authorization request gives the attacker the `code_verifier` needed to exchange the code. Always use `code_challenge_method=S256`.
 
 **Pitfall 6 — Not validating state parameter in OAuth2 callback:** The `state` parameter in OAuth2 is a CSRF token for the authorization flow itself. If the callback handler does not verify that the `state` returned from the authorization server matches the one the client generated, an attacker can trick a user into completing an OAuth2 flow with the attacker's `code` — binding the victim's app session to the attacker's identity (account takeover).
 
-**Pitfall 7 — API keys stored in plaintext in DB:** A startup stored API keys in plaintext in the `api_keys` table. A SQL injection vulnerability exposed the table, giving the attacker every active API key. Fix: hash API keys with SHA-256 before storage. The raw key is shown once at creation. Treat API keys exactly like passwords — hash-before-store is non-negotiable.
+**Pitfall 7 — API keys stored in plaintext in DB:** A startup stored API keys in plaintext in the `api_keys` table. A SQL injection vulnerability exposed the table, giving the attacker every active API key. Fix: hash API keys with SHA-256 before storage. The raw key is shown once at creation. Hash-before-store is non-negotiable, exactly as for passwords — but the *algorithm* differs: a random 256-bit key only needs a fast hash, while a password needs a slow KDF (Argon2id, bcrypt, PBKDF2).
 
 ---
 
@@ -803,7 +820,7 @@ RBAC assigns permissions to roles, and users are assigned roles. Authorization d
 JWTs are stateless by design and cannot be revoked by changing a flag in a database — the resource server does not look anything up. Revocation requires either: (1) maintaining a blocklist in Redis of revoked JWT IDs (`jti` claim); the resource server checks this on every request — one Redis lookup per request; (2) short expiry windows (5–15 minutes) so stolen tokens are naturally short-lived; (3) using opaque tokens instead of JWT for high-security contexts where instant revocation is required. The Redis blocklist approach is the most common for JWTs requiring revocation, with TTLs set to the remaining token lifetime to avoid unbounded growth.
 
 **Q: How would you secure API keys?**
-Generate keys using a cryptographically secure random number generator (SecureRandom in Java). Hash the key with SHA-256 before storing in the database. Return the raw key to the user exactly once (at creation); it is never retrievable again. Store only the hash in the DB — treat it like a password. Add a human-readable prefix (e.g., `sk_live_`) for easy identification in logs and for automated secret scanning tools (GitHub's secret scanning hooks on known prefixes). Scope each key to minimum required permissions. Track last-used timestamp. Allow users to delete/rotate keys. Rate limit by API key. Notify users of unusual geographic or volume patterns.
+Generate keys using a cryptographically secure random number generator (SecureRandom in Java). Hash the key with SHA-256 before storing in the database. Return the raw key to the user exactly once (at creation); it is never retrievable again. Store only the hash in the DB. A fast hash is adequate here precisely because the key is 256 random bits; a user-chosen password would instead need a slow KDF (Argon2id, bcrypt work factor 10+, or PBKDF2-HMAC-SHA256 at 600,000 iterations per OWASP). Add a human-readable prefix (e.g., `sk_live_`) for easy identification in logs and for automated secret scanning tools (GitHub's secret scanning hooks on known prefixes). Scope each key to minimum required permissions. Track last-used timestamp. Allow users to delete/rotate keys. Rate limit by API key. Notify users of unusual geographic or volume patterns.
 
 **Q: What is the difference between symmetric and asymmetric JWT signing?**
 HS256 is symmetric: the same secret key is used to sign and to verify. Any party that can verify can also forge tokens. This works for a single service but fails in microservices — sharing the secret means any service can forge tokens for any other service. RS256 and ES256 are asymmetric: the authorization server signs with its private key; resource servers verify with the public key. Resource servers never have signing capability. The public key is published at a JWKS endpoint. This is the correct approach for distributed systems.
@@ -815,16 +832,16 @@ The client credentials flow is used for machine-to-machine API calls where no us
 Both enable federated SSO, but use different protocols and token formats. SAML uses XML-based assertions over HTTP POST redirects — heavy, but mature and widely supported by enterprise identity providers (Okta, ADFS, Ping). OIDC uses JSON/JWT over OAuth2 flows — lighter, REST-friendly, designed for modern web and mobile apps. SAML requires specific libraries for XML signature validation; OIDC uses standard HTTP and JWT libraries. For new systems integrating with enterprise SSO, SAML is still commonly required; for consumer or cloud-native apps, OIDC is preferred.
 
 **Q: What is a JWT claim and which claims should you always validate?**
-A JWT claim is a key-value pair in the token payload making a statement about the subject or the token itself. Always validate: `exp` (expiration time — reject expired tokens), `iat` (issued at — reject tokens with `iat` far in the past if clock skew is a concern), `iss` (issuer — must match the expected authorization server URL), `aud` (audience — must include this service's identifier), `alg` (algorithm — must match expected algorithm, validated before signature check). Additionally validate `nbf` (not before) if present. Never use a JWT that fails any of these checks.
+A JWT claim is a key-value pair in the token payload making a statement about the subject or the token itself. Always validate: `exp` (expiration time — reject expired tokens), `iat` (issued at — reject tokens with `iat` far in the past if clock skew is a concern), `iss` (issuer — must match the expected authorization server URL), `aud` (audience — must include this service's identifier). Additionally validate `nbf` (not before) if present. One check people list here is not a claim at all: `alg` is a JOSE header parameter, and it must be pinned to the algorithm you expect before the signature check rather than read from the token. Never use a JWT that fails any of these checks.
 
 **Q: How would you implement tenant isolation in a multi-tenant API using JWT?**
 Include a `tenantId` claim in the JWT when the user authenticates. In the resource server filter, extract `tenantId` from the validated token and store it in a request-scoped context (e.g., ThreadLocal or Spring `RequestAttributes`). Every data access layer method reads `tenantId` from context and adds it as a WHERE clause condition. Use Spring Data JPA's `@Filter` or row-level security in PostgreSQL to enforce this automatically. Never accept `tenantId` as a request parameter from the client — always derive it from the token. Validate that the requested resource's `tenantId` matches the token's `tenantId` at the service layer.
 
 **Q: What are the security implications of storing a JWT in a cookie vs localStorage?**
-`localStorage` is accessible by JavaScript on the same origin. An XSS vulnerability on any page of the application can read and exfiltrate the token. Cookies with `HttpOnly` flag are not accessible to JavaScript, which prevents XSS-based token theft. However, cookies are automatically sent by the browser on cross-origin requests, making them susceptible to CSRF — mitigated with `SameSite=Strict` or `SameSite=Lax` plus a CSRF token for state-changing requests. Best practice: store access tokens in memory (JavaScript variable) for the shortest lived; use `HttpOnly; Secure; SameSite=Strict` cookies for refresh tokens that need to survive page refresh.
+`localStorage` is accessible by JavaScript on the same origin. An XSS vulnerability on any page of the application can read and exfiltrate the token. Cookies with `HttpOnly` flag are not accessible to JavaScript, which prevents XSS-based token theft. The classic tradeoff is that cookies are attached automatically, which historically made them susceptible to CSRF; that is now partly closed in Chromium-based browsers (Chrome 80+, Edge), which treat a cookie with no `SameSite` attribute as `Lax` — blocking cross-site sends except top-level navigations using a safe method (GET/HEAD/OPTIONS). Never rely on that default: it is per-browser behaviour, not a spec guarantee (Firefox still treats an unset attribute as `None` and relies on cookie partitioning instead), and Chromium's Lax-by-default has a two-minute grace window that still permits cross-site POST. Set `SameSite` explicitly (`Strict`, or `Lax` plus a CSRF token for state-changing requests). Best practice: store access tokens in memory (JavaScript variable) for the shortest lived; use `HttpOnly; Secure; SameSite=Strict` cookies for refresh tokens that need to survive page refresh.
 
 **Q: How do you handle token clock skew between services?**
-JWT expiry (`exp`) is an absolute Unix timestamp. If the issuing server and the validating server have different system clocks, a token that is technically valid may be rejected due to a small time difference. Standard practice: accept a configurable clock skew tolerance of 30–60 seconds in the validator (`new JWTClaimsSetVerifier.Builder().maximumClockSkew(60)...`). Use NTP (Network Time Protocol) to keep server clocks synchronized within a few milliseconds — the clock skew tolerance is a fallback, not the primary mechanism. Kubernetes node clocks are typically synchronized via NTP automatically.
+JWT expiry (`exp`) is an absolute Unix timestamp. If the issuing server and the validating server have different system clocks, a token that is technically valid may be rejected due to a small time difference. Standard practice: accept a configurable clock skew tolerance of 30–60 seconds in the validator — in Nimbus that is `DefaultJWTClaimsVerifier.setMaxClockSkew(60)`, and 60 seconds is already the library default (`DEFAULT_MAX_CLOCK_SKEW_SECONDS`). Use NTP (Network Time Protocol) to keep server clocks synchronized within a few milliseconds — the clock skew tolerance is a fallback, not the primary mechanism. Kubernetes node clocks are typically synchronized via NTP automatically.
 
 **Q: What is token introspection (RFC 7662) and when is it used?**
 Token introspection is an endpoint on the authorization server that resource servers call to validate an opaque token: `POST /introspect, token=<opaque_token>`. The authorization server returns whether the token is active and its associated metadata (scope, sub, exp). It is used when: (1) tokens are opaque (not JWTs) and cannot be validated locally; (2) immediate revocation is required and maintaining a blocklist is impractical; (3) token metadata is too large for a JWT and must be fetched on demand. Downside: every API request requires a call to the introspection endpoint, adding latency and creating a central bottleneck. Cache introspection results with a TTL shorter than the token's expiry to reduce load.
@@ -837,8 +854,8 @@ Token introspection is an endpoint on the authorization server that resource ser
 - Issue access tokens with short expiry (15 minutes for high-security, 60 minutes for standard). Use refresh tokens with rotation for session continuity.
 - Publish public keys at a JWKS endpoint. Resource services cache JWKS with a 1-hour TTL and refresh on key rotation. Support multiple simultaneous public keys to allow zero-downtime key rotation.
 - Include a `jti` (JWT ID) claim in every access token to support revocation via blocklist.
-- Validate all claims: `alg`, `sig`, `exp`, `iss`, `aud`. Log and return 401 on any validation failure — do not return details about which check failed to the caller.
-- Use PKCE for all public clients. Require it for confidential clients as well — OAuth 2.1 mandates PKCE for all authorization code flows.
+- Pin the `alg` header parameter and verify the signature first, then validate the `exp`, `iss` and `aud` claims (`alg` is a JOSE header parameter, not a claim; `sig` is the third compact-serialization part). Log and return 401 on any validation failure — do not return details about which check failed to the caller.
+- Use PKCE for all public clients (RFC 9700: MUST). Use it for confidential clients too — RFC 9700 rates that RECOMMENDED, and the OAuth 2.1 draft requires it for every authorization code flow. Always `code_challenge_method=S256`; RFC 7636 says a client capable of S256 MUST use it.
 - Store API keys hashed (SHA-256) in the database. Never store plaintext. Display the raw key once, at creation.
 - Implement refresh token rotation with token families. On detecting token reuse, revoke the entire family.
 - For multi-tenant systems, always derive `tenantId` from the JWT — never from request parameters.

@@ -83,60 +83,71 @@ Finding row with key=45:
   → pointer to row in heap file
 
 Tree height for N rows:
-  B = branching factor (~100 for 8KB pages, 8 byte integer keys)
+  B = branching factor (~285 for 8KB pages, 8 byte integer keys)
   Height = ceil(log_B(N))
-  N=1M:   height=3 (100^3 = 1M)
-  N=1B:   height=4.5 ≈ 5 (100^5 = 10B)
-  N=1T:   height=6 (100^6 = 1T)
+  N=1M:   height=3 (285^3 = 23M)
+  N=1B:   height=4 (285^4 = 6.6B)
+  N=1T:   height=5 (285^5 = 1.9T)
   → Practically all B+trees are height 3-4
 ```
 
 **In plain terms.** "Each level of the tree multiplies how many rows you can reach by the
 branching factor, so height grows like a logarithm — which is a very polite way of saying it
 barely grows at all." Going from a million rows to a trillion is a *million-fold* increase in
-data and costs you three extra page reads. That flatness is the entire reason indexes work.
+data and costs you two extra page reads. That flatness is the entire reason indexes work.
 
 | Symbol | What it is |
 |--------|------------|
 | `N` | Rows in the table |
-| `B` | Branching factor: how many child pointers fit in one page. `~100` here |
+| `B` | Branching factor: how many child pointers fit in one page. `~285` here |
 | `log_B(N)` | How many times you must multiply by `B` to reach `N`. The tree's depth |
-| `ceil(...)` | Round up — you cannot have 4.5 levels, so 4.5 becomes a real height of 5 |
+| `ceil(...)` | Round up — you cannot have 3.67 levels, so 3.67 becomes a real height of 4 |
 | Height | Page reads per lookup. **Not** comparisons — this is the number that costs I/O |
 
-`B` comes from page geometry, not from tuning: an 8 KB page divided by a 16-byte entry
-(8-byte integer key + 8-byte child pointer) is `8192 / 16 = 512` slots in theory, and roughly
-`100` in practice once you account for page headers, per-tuple overhead, and PostgreSQL's
-policy of leaving pages partly empty so future inserts do not force an immediate split.
+`B` comes from page geometry, not from tuning: an 8 KB page gives 24 bytes to the page header
+and 16 to the B-tree special area, leaving `8192 - 40 = 8152` usable bytes, and each entry
+costs 20 bytes (an 8-byte index-tuple header, an 8-byte `bigint` key, and a 4-byte line
+pointer) — so `8152 / 20 = 407` slots if a page were packed solid. PostgreSQL deliberately
+does not pack them: leaf pages use fillfactor 90 and internal pages a fixed 70, so a real
+internal page carries about `407 × 0.70 = 285` downlinks. Measured on PostgreSQL 16 with a
+5-million-row `bigint` index: 367 entries per leaf page, at most 285 per internal page, and
+3 levels in total.
 
 **Walk one example.** Watch the table size explode while the height crawls:
 
 ```
-      N          log_100(N)      height = ceil(...)     rows reachable = 100^height
+      N          log_285(N)      height = ceil(...)     rows reachable = 285^height
   ----------   ------------    --------------------   ---------------------------
-    1,000,000        3.0                3                    100^3 = 1,000,000
-1,000,000,000        4.5                5                    100^5 = 10,000,000,000
-1,000,000,000,000    6.0                6                    100^6 = 1,000,000,000,000
+    1,000,000       2.44                3                285^3 =        23,149,125
+1,000,000,000       3.67                4                285^4 =     6,597,500,625
+1,000,000,000,000   4.89                5                285^5 = 1,880,287,678,125
 
-  N grows 1,000,000x from the first row to the last.   Height grows from 3 to 6.
+  N grows 1,000,000x from the first row to the last.   Height grows from 3 to 5.
 ```
 
-**Walk the cost that actually matters.** Height is page reads; multiply by SSD latency and
-compare against reading the whole table:
+**Walk the cost that actually matters.** Height is random page reads; multiply by SSD latency
+and compare against streaming the whole table:
 
 ```
-  1 billion rows, ~100 rows per 8 KB heap page, SSD page read ~100 microseconds
+  1 billion rows, ~100 rows per 8 KB heap page,
+  SSD random page read ~100 microseconds, SSD sequential streaming ~1 GB/s
 
-  index lookup   5 page reads      x 100 us  =        500 us   =  0.0005 s
-  seq scan       1e9 / 100
-                 = 10,000,000 pages x 100 us  = 1,000,000,000 us = 1,000 s
+  index lookup   4 index pages + 1 heap page
+                 = 5 random reads   x 100 us  =   500 us  =  0.0005 s
+  seq scan       1e9 / 100 = 10,000,000 pages x 8 KB = 80 GB
+                 80 GB streamed at 1 GB/s              =    80 s
 
-  Ratio: 1,000 s / 0.0005 s = 2,000,000x.
+  Ratio: 80 s / 0.0005 s = 160,000x.
 ```
+
+A sequential scan is charged at streaming bandwidth, not at random-read latency: the storage
+layer and PostgreSQL's read-ahead turn those 10 million page reads into one long sequential
+transfer, which is exactly why the planner prices `seq_page_cost` at 1.0 and
+`random_page_cost` at 4.0 rather than treating every page the same.
 
 Note the difference between the `~30 comparisons` in §2 and the `5` here: `log2(1,000,000,000)
 = 29.9` is the count of *in-memory key comparisons*, which are essentially free. The `5` is the
-count of *page fetches*, which are not. B+trees are shaped the way they are — very wide, very
+count of *page fetches* — four index levels plus the one heap page — which are not. B+trees are shaped the way they are — very wide, very
 shallow — specifically to trade cheap comparisons for expensive I/O.
 
 ### WAL and Checkpoint
@@ -198,7 +209,7 @@ The write path only needs the WAL buffer to return success; the fsync that makes
 PostgreSQL MVCC row header:
   xmin: transaction ID that inserted this version
   xmax: transaction ID that deleted/updated this version (0 if current)
-  ctid: physical location of this row version
+  t_ctid: TID of this or a newer row version (self-pointing until updated)
 
 Example: UPDATE user SET name='Bob' WHERE id=1
 
@@ -231,7 +242,9 @@ Dead tuples accumulate until VACUUM runs → table bloat
 -- Seq Scan: reads every row in the table
 EXPLAIN SELECT * FROM orders WHERE status = 'pending';
 -- Seq Scan on orders (cost=0.00..12345.00 rows=1000 ...)
--- Used when: no index on status, or selectivity too low (>15-20% of rows)
+-- Used when: no index on status, or so many rows match that random I/O costs
+-- more than streaming the table (rule of thumb: >15-20% of rows; there is no
+-- hard threshold in PostgreSQL, only a cost comparison)
 
 -- Index Scan: traverses B+tree, then fetches rows from heap
 EXPLAIN SELECT * FROM orders WHERE id = 123;
@@ -280,7 +293,7 @@ flowchart LR
     class heap frozen
 ```
 
-The planner picks among these four scan shapes purely from estimated selectivity — a low-selectivity filter is cheaper as a full sequential scan than as scattered random I/O, while a highly selective one is worth a B+tree traversal, and only a covering index with a current visibility map earns the index-only fast path.
+The planner picks among these four scan shapes by comparing estimated total cost, with estimated selectivity as the dominant input alongside table size, column correlation and the `random_page_cost`/`seq_page_cost` ratio — a filter matching most of the table is cheaper as a full sequential scan than as scattered random I/O, while a highly selective one is worth a B+tree traversal, and only a covering index with a current visibility map earns the index-only fast path.
 
 ### 6.2 Covering Indexes
 
@@ -359,7 +372,9 @@ WHERE tablename = 'orders';
 
 -- Increase statistics target for columns with poor estimates:
 ALTER TABLE orders ALTER COLUMN user_id SET STATISTICS 500;
--- Default is 100 samples. 500 gives better histograms for skewed data.
+-- Default target is 100: at most 100 most_common_vals entries and 100 histogram
+-- buckets, built from a random sample of 300 x target = 30,000 rows.
+-- A target of 500 samples 150,000 rows and gives better histograms for skewed data.
 
 -- After statistics update:
 ANALYZE orders;
@@ -376,10 +391,12 @@ SELECT * FROM products WHERE attributes @> '{"color": "red", "size": "L"}';
 -- GIN finds all documents containing both key-value pairs efficiently
 ```
 
-**BRIN index for time-series**: A table with 10 billion sensor readings ordered by timestamp can use a BRIN index that is ~1000x smaller than a B-tree while still providing good performance for range queries on timestamp (because physical order correlates with timestamp order):
+**BRIN index for time-series**: A table with 10 billion sensor readings ordered by timestamp can use a BRIN index that is roughly four orders of magnitude smaller than a B-tree while still providing good performance for range queries on timestamp (because physical order correlates with timestamp order):
 ```sql
 CREATE INDEX idx_readings_ts ON sensor_readings USING BRIN (recorded_at);
--- Index size: ~128 KB vs ~2 GB for B-tree on 10B rows
+-- Index size: ~20 MB vs ~210 GB for B-tree on 10B rows
+-- (measured on PostgreSQL 16 at 40M rows: 80 KB BRIN vs 857 MB B-tree,
+--  both of which scale linearly with row count)
 -- Works because rows are naturally inserted in time order
 ```
 
@@ -397,8 +414,8 @@ CREATE INDEX idx_readings_ts ON sensor_readings USING BRIN (recorded_at);
 | Isolation Level | Read performance | Anomalies prevented |
 |----------------|----------------|-------------------|
 | Read Committed | Best | Dirty reads |
-| Repeatable Read | Good | Dirty reads, non-repeatable reads |
-| Serializable | Worst (SSI overhead) | All anomalies |
+| Repeatable Read | Good | Dirty reads, non-repeatable reads, phantom reads (PostgreSQL blocks phantoms here, going beyond the SQL standard) |
+| Serializable | Worst (SSI overhead) | All of the above plus serialization anomalies (e.g. write skew) |
 
 ```mermaid
 quadrantChart
@@ -440,7 +457,7 @@ The two tables above plot onto one curve: Read Committed is fastest but blocks o
 
 **Long transactions blocking VACUUM**: MVCC keeps dead row versions until no active transaction can see them. A long-running transaction (e.g., a batch job that runs for hours inside a transaction) prevents VACUUM from reclaiming dead rows, causing table bloat. The `idle in transaction` state is especially dangerous. Monitor with `SELECT pid, now() - pg_stat_activity.xact_start, state FROM pg_stat_activity WHERE xact_start IS NOT NULL` and kill transactions idle in transaction for more than a few minutes.
 
-**Transaction ID wraparound**: PostgreSQL uses 32-bit transaction IDs (2 billion). If a database reaches 2 billion transactions without VACUUM, it enters "emergency mode" and refuses connections to force VACUUM. Monitor: `SELECT datname, age(datfrozenxid) FROM pg_database ORDER BY 2 DESC;` Alert if age > 1.5 billion.
+**Transaction ID wraparound**: PostgreSQL uses 32-bit transaction IDs — 4 billion values, of which about 2 billion are "in the past" of any given xid under modulo-2^32 comparison. If a database's oldest unfrozen xid drifts toward that 2-billion horizon without VACUUM, PostgreSQL warns at 40 million transactions remaining and, with 3 million left, stops assigning new xids: in-flight transactions finish and read-only transactions still start, but anything that modifies rows or truncates a relation fails until a database-wide VACUUM runs. Monitor: `SELECT datname, age(datfrozenxid) FROM pg_database ORDER BY 2 DESC;` Alert if age > 1.5 billion.
 
 ---
 
@@ -464,7 +481,7 @@ The two tables above plot onto one curve: Read Committed is fastest but blocks o
 ## 12. Interview Questions with Answers
 
 **Q: Describe the structure of a B+tree index and how it enables efficient queries.**
-A B+tree has internal nodes (routing only, store keys for navigation) and leaf nodes (store all key-value pairs with pointers to the heap row, linked in a doubly-linked list). To find a row, traverse from root to leaf in O(log N) steps. For range scans: find the first matching leaf, then traverse the linked list. For a 1-billion row table with branching factor 100, height is ~5 — all lookups require ~5 page reads regardless of table size. This makes B-tree indexes extremely efficient for both equality and range queries.
+A B+tree has internal nodes (routing only, store keys for navigation) and leaf nodes (store all key-value pairs with pointers to the heap row, linked in a doubly-linked list). To find a row, traverse from root to leaf in O(log N) steps. For range scans: find the first matching leaf, then traverse the linked list. For a 1-billion row table with a branching factor of ~285 (8 KB pages, bigint keys), the tree is 4 levels deep — a lookup costs 4 index page reads plus one heap fetch regardless of table size. This makes B-tree indexes extremely efficient for both equality and range queries.
 
 **Q: What is WAL (Write-Ahead Logging) and why is it important?**
 WAL is a durability mechanism: every database modification is first written to the WAL (a sequential append-only log) before being applied to data files. If the server crashes, on restart the database replays WAL from the last checkpoint to recover all committed transactions. WAL enables: crash recovery (replay lost changes), streaming replication (replicas receive and replay WAL), point-in-time recovery (replay WAL to any past point), and logical decoding (CDC tools like Debezium read WAL).
@@ -485,19 +502,19 @@ Table bloat is the accumulation of dead row versions (from UPDATEs and DELETEs) 
 A partial index indexes only a subset of rows (rows matching a WHERE condition). Example: `CREATE INDEX ON users(email) WHERE deleted_at IS NULL` — indexes only non-deleted users. Reduces index size and is only used by queries that include the partial index's condition. A covering index includes all columns needed by a query to enable index-only scans. These are orthogonal — you can have a partial covering index: `CREATE INDEX ON orders(user_id, created_at) INCLUDE (amount) WHERE status = 'active'`.
 
 **Q: How does the query planner decide between Seq Scan and Index Scan?**
-The planner estimates the cost of each plan based on: table size (pages), number of matching rows (from statistics/histograms), page read costs (random vs sequential), and whether pages are in the buffer pool. If a query matches >15-20% of rows (low selectivity), a sequential scan is often cheaper than random I/O from index scans. The planner uses statistics (from ANALYZE) to estimate row counts. Outdated statistics cause wrong plan choices. Random page cost (random_page_cost) is set at 4.0 for spinning disks and 1.1 for SSDs — this significantly affects when the planner prefers index over seq scan.
+The planner estimates the cost of each plan based on: table size (pages), number of matching rows (from statistics/histograms), page read costs (random vs sequential), and whether pages are in the buffer pool. If a query matches >15-20% of rows (low selectivity), a sequential scan is often cheaper than random I/O from index scans. The planner uses statistics (from ANALYZE) to estimate row counts. Outdated statistics cause wrong plan choices. `random_page_cost` defaults to 4.0, a ratio that models spinning disks; on SSDs it is commonly lowered to around 1.1 — this significantly affects when the planner prefers index over seq scan.
 
 **Q: What is the visibility map and why does it matter for Index Only Scans?**
 The visibility map is a per-page bitmap recording whether every row on a page is visible to all current transactions. VACUUM sets the visibility map after cleaning dead rows. For an Index Only Scan, if a page's visibility map bit is set, the planner knows any row version on that page is visible — no need to check the heap for MVCC visibility. If the bit is not set, the planner falls back to fetching the heap page to verify visibility, degrading to a regular Index Scan. Stale visibility maps (from infrequent VACUUM) prevent Index Only Scans.
 
 **Q: Explain transaction ID wraparound in PostgreSQL.**
-PostgreSQL uses 32-bit transaction IDs (xids). The comparison function is modular arithmetic: a transaction is "newer" if its xid is within 2 billion of the current xid. Once a table's oldest unfrozen transaction (datfrozenxid) is more than 2 billion transactions behind the current xid, the database cannot distinguish old from new and enters emergency mode (refuses all writes). Prevention: autovacuum freezes old row versions by replacing their xmin with a special FrozenTransactionId. Monitor with `SELECT age(datfrozenxid) FROM pg_database` — alert at 1.5 billion.
+PostgreSQL uses 32-bit transaction IDs (xids), so the space holds 4 billion values and wraps. The comparison function is modular arithmetic: a transaction is "newer" if its xid is within 2 billion of the current xid, so if a table's oldest unfrozen transaction (datfrozenxid) reached that 2-billion horizon the database could no longer tell old from new. PostgreSQL never lets it get there: it warns at 40 million transactions to go and, with 3 million left, refuses to assign new xids — writes and truncates fail while read-only transactions still run. Prevention: autovacuum freezes old row versions; since PostgreSQL 9.4 freezing sets a flag bit and preserves the original xmin, where earlier versions overwrote xmin with FrozenTransactionId. Monitor with `SELECT age(datfrozenxid) FROM pg_database` — alert at 1.5 billion.
 
 **Q: What is a GIN index and when should you use it?**
 GIN (Generalized Inverted Index) is designed for multi-valued data: arrays, JSONB, full-text tsvectors. An inverted index maps each element value to the rows containing it — like a book's index mapping words to page numbers. For a JSONB column, GIN can quickly find all rows containing `{"color": "red"}` by looking up "color=red" in the inverted index. Use GIN for JSONB containment queries, array element containment, and full-text search. GIN is expensive to update (entire document must be re-indexed on update) — use where reads dominate writes.
 
 **Q: How does BRIN work and when is it appropriate?**
-BRIN (Block Range Index) stores the minimum and maximum values for each contiguous range of heap pages (block range, default 128 pages). For a query `WHERE timestamp BETWEEN X AND Y`, BRIN checks which block ranges could contain matching rows and scans only those. Effective only when data is physically ordered by the indexed column (timestamps inserted in order, sequential IDs). BRIN is tiny (bytes per block range vs bytes per row for B-tree) — a 10 billion row time-series table has a BRIN index of ~100 KB vs ~10 GB for B-tree. Use BRIN for append-only time-series tables; use B-tree for random-access patterns.
+BRIN (Block Range Index) stores the minimum and maximum values for each contiguous range of heap pages (block range, default 128 pages). For a query `WHERE timestamp BETWEEN X AND Y`, BRIN checks which block ranges could contain matching rows and scans only those. Effective only when data is physically ordered by the indexed column (timestamps inserted in order, sequential IDs). BRIN is tiny (tens of bytes per block range vs ~20 bytes per row for B-tree) — a 10 billion row time-series table has a BRIN index of roughly 20 MB versus roughly 210 GB for a B-tree on the same column. Use BRIN for append-only time-series tables; use B-tree for random-access patterns.
 
 **Q: What is the difference between VACUUM and VACUUM FULL?**
 VACUUM removes dead row versions, reclaims space for reuse within the same table file, and updates the visibility map. It does NOT return space to the OS. It takes a lightweight lock (non-blocking for reads/writes). VACUUM FULL rewrites the entire table into a new file (defragmenting it), returning space to the OS. It takes an exclusive lock (blocks all access). VACUUM FULL is rarely needed — use it only to recover disk space after deleting large portions of a table, and only during maintenance windows.
@@ -505,13 +522,15 @@ VACUUM removes dead row versions, reclaims space for reuse within the same table
 **Q: How do you find and fix unused indexes?**
 ```sql
 -- Find indexes with no scans since last stats reset
-SELECT schemaname, relname, indexrelname, idx_scan, idx_tup_read, idx_tup_fetch,
-       pg_size_pretty(pg_relation_size(indexrelid)) as index_size
-FROM pg_stat_user_indexes
-JOIN pg_index ON indexrelid = pg_stat_user_indexes.indexrelid
-WHERE idx_scan = 0
-  AND indisunique = false  -- keep unique indexes
-ORDER BY pg_relation_size(indexrelid) DESC;
+-- Qualify every reference to indexrelid: it exists in BOTH pg_stat_user_indexes
+-- and pg_index, so an unqualified "indexrelid" raises "column reference is ambiguous".
+SELECT s.schemaname, s.relname, s.indexrelname, s.idx_scan, s.idx_tup_read, s.idx_tup_fetch,
+       pg_size_pretty(pg_relation_size(s.indexrelid)) as index_size
+FROM pg_stat_user_indexes s
+JOIN pg_index i ON i.indexrelid = s.indexrelid
+WHERE s.idx_scan = 0
+  AND i.indisunique = false  -- keep unique indexes
+ORDER BY pg_relation_size(s.indexrelid) DESC;
 -- After verifying, drop unused indexes (they slow writes without benefiting reads)
 DROP INDEX CONCURRENTLY idx_unused;  -- CONCURRENTLY avoids table lock
 ```
@@ -555,10 +574,13 @@ Sort  (cost=... rows=50000) (actual rows=45823 loops=1)
 
 **Fix**:
 ```sql
--- Create partial index on recent data + BRIN for full history
+-- Index the filter column. Note what does NOT work here: a PARTIAL index with a
+-- literal cutoff (WHERE created_at > '2023-01-01') is unusable for this query.
+-- PostgreSQL only proves that a query predicate implies an index predicate when it
+-- can compare constants, and NOW() - INTERVAL '30 days' is not one, so the planner
+-- ignores the partial index and falls back to a seq scan. Verified on PostgreSQL 16.
 CREATE INDEX CONCURRENTLY idx_orders_created_recent
-  ON orders (created_at DESC, user_id, amount)
-  WHERE created_at > '2023-01-01';  -- adjust to cover all typical queries
+  ON orders (created_at DESC, user_id, amount);
 
 -- After index creation, EXPLAIN shows:
 -- Index Scan using idx_orders_created_recent

@@ -166,7 +166,10 @@ timeline, and merges them with the user's pre-built feed ZSet. An N-way merge by
 ### 2. Redis ZSet as Feed Store
 
 `ZADD feed:{userId} <timestamp_ms> <postId>` stores postIds sorted by timestamp. Reading a page is
-`ZREVRANGEBYSCORE feed:{userId} <cursor_ts> -inf LIMIT 0 20` — O(log N + page_size). No offset
+`ZRANGE feed:{userId} <cursor_ts> -inf BYSCORE REV LIMIT 0 20` — O(log N + page_size). (The older
+spelling `ZREVRANGEBYSCORE feed:{userId} <cursor_ts> -inf LIMIT 0 20` does the same thing and is what
+Spring Data Redis' `reverseRangeByScoreWithScores` still issues, but Redis has marked it deprecated
+since 6.2 in favour of `ZRANGE ... BYSCORE REV`.) No offset
 arithmetic; the score (timestamp) is the cursor. The ZSet is bounded to the last 1,000 post IDs
 per user via `ZREMRANGEBYRANK feed:{userId} 0 -1001` after each fan-out insertion. Older posts are
 served from the database if the user scrolls back far enough (rare in practice).
@@ -184,9 +187,9 @@ depth and stable across concurrent inserts.
 
 The feed ZSet stores only post IDs. The feed service hydrates post details (text, author, media) in
 a separate step. Post details are cached in Redis Hash structures (`post:{postId}`) with a 24-hour
-TTL. A cache miss fetches from the Post service database. Hydration is parallelized: the service
-fetches all 20 post IDs in the page with a Redis `MGET` pipeline or parallel async calls, keeping
-the total hydration latency under 10ms.
+TTL. A cache miss fetches from the Post service database. Hydration is batched: the service fetches
+all 20 post IDs in the page in one round trip — either `MGET`, or the pipelined `GET`s the code below
+uses (Spring Data Redis' `executePipelined`) — keeping the total hydration latency under 10ms.
 
 ### 5. Feed Cache Eviction
 
@@ -669,7 +672,7 @@ public class FeedWarmUpService {
 | Spring Boot 3.2 | Application framework |
 | Redis 7 (Cluster) | Feed ZSet storage, celebrity timelines, post detail cache |
 | Spring Data Redis | RedisTemplate, ZSetOperations, pipeline support |
-| Kafka 3.x | `post-published` topic for async fan-out |
+| Kafka 4.x (KRaft) | `post-published` topic for async fan-out |
 | Spring Kafka | @KafkaListener with concurrency, manual Acknowledgment |
 | PostgreSQL 15 | Persistent store for posts, follows, user data |
 | Spring Data JPA | Follow and post persistence |
@@ -716,14 +719,18 @@ Redis ZSet is ideal for the feed because sorted set operations (ZADD, ZREVRANGEB
 O(log N) and feed reads are single-key operations that map to one node in Redis Cluster. Cassandra
 with a time-series data model (partition key = userId, clustering key = timestamp) is a valid
 alternative at extremely large scales (billions of users) where Redis memory cost becomes prohibitive.
-Cassandra stores data on disk and is cheaper per GB but has higher read latency (~5ms vs ~0.5ms).
+Cassandra stores data on disk and is cheaper per GB but has higher read latency — single-digit
+milliseconds against Redis' sub-millisecond, order-of-magnitude figures meant as illustration, not as
+a benchmark result; measure on your own hardware and access pattern.
 
 ### Activity Stream vs Materialized Timeline
 
 This design uses a materialized timeline (feed ZSet pre-built at write time). An activity stream
 approach stores a single log of all activities and fans out at read time via a query engine. Activity
 streams are simpler to write but harder to read at scale. Materialized timelines trade write cost
-for read speed, which is the right tradeoff given that reads outnumber writes by ~10:1 in social feeds.
+for read speed, which is the right tradeoff for any feed where reads heavily outnumber writes — the
+condition, not a specific published ratio, is what makes the choice. For this design the requirements
+above pin it down concretely: 1.5 billion feed reads/day against a far smaller post-publish volume.
 
 ---
 
@@ -752,9 +759,10 @@ far behind — this is an operational concern, not a design one.
 
 **Q: Explain cursor-based pagination vs offset-based. Why does offset fail for social feeds?**
 
-Offset pagination (`LIMIT 20 OFFSET 40`) works by skipping 40 rows and returning 20. With Redis
-ZREVRANGEBYSCORE, there is no "skip 40" concept; you scan from the start of the sorted set each
-time. More importantly, offset is unstable: if new posts are published while the user is scrolling,
+Offset pagination (`LIMIT 20 OFFSET 40`) works by skipping 40 rows and returning 20. Redis can
+express this — `LIMIT offset count` skips `offset` matching members — but skipping is work: the
+server still walks those 40 elements before it returns anything, so cost grows with depth. More
+importantly, offset is unstable: if new posts are published while the user is scrolling,
 the positions shift and offset-40 at time T+1 returns different posts than offset-40 at time T,
 causing duplicates or skips. Cursor-based pagination uses the score (timestamp) of the last seen
 post as the next query's upper bound. Regardless of new posts arriving, the cursor points to a
@@ -768,5 +776,8 @@ boost increases the score when a post has high likes/comments shortly after post
 increases it for authors the user interacts with frequently. The fan-out worker writes the initial
 score; a background ranker re-scores recent posts periodically using ZADD (which updates the score
 if the member already exists). Pure re-scoring applies only within the feed window (last 48 hours);
-older posts keep their timestamp-based score. This is how Instagram Explore and TikTok's initial
-hybrid model worked before moving to full ML ranking.
+older posts keep their timestamp-based score. Treat this as a stepping stone, not as a description of
+what the large platforms run: Meta's published account of Instagram Explore describes a multi-stage
+ML funnel — two-tower retrieval, first-stage and second-stage ranking, then reranking — not a
+hand-weighted score written into a sorted set. A heuristic score is where you start; a ranking funnel
+is where you end up.

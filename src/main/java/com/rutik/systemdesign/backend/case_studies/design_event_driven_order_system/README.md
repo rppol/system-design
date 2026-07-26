@@ -7,7 +7,7 @@ Design an order management system where the order lifecycle (Created → Invento
 - CQRS read model for fast order queries without joins across services
 - Schema evolution: adding fields to order events without breaking existing consumers
 - DLQ handling: unprocessable messages must not block the consumer
-- Exactly-once semantics from order creation to Kafka publication (transactional outbox)
+- No lost and no fabricated events from order creation to Kafka publication (transactional outbox gives at-least-once; consumer idempotency makes the effect exactly-once)
 - Event-carried state transfer: downstream services do not need to call back to the order service
 
 ---
@@ -115,7 +115,7 @@ A message escalates through 1s, 2s, then 4s of backoff before landing in the dea
 
 **1. Transactional Outbox + Kafka Transactional Producer**
 
-The order service saves the Order entity and the `OrderCreatedEvent` in the same database transaction. The outbox relay uses a Kafka transactional producer to publish atomically (if Kafka publish fails, the outbox record remains unpublished, and the relay retries). This achieves exactly-once semantics from DB write to Kafka.
+The order service saves the Order entity and the `OrderCreatedEvent` in the same database transaction. The outbox relay then publishes with an idempotent/transactional Kafka producer (if Kafka publish fails, the outbox record remains unpublished, and the relay retries). Note the guarantee this actually buys: **at-least-once** delivery with no lost and no fabricated events. It is not exactly-once end to end — a Kafka transaction cannot span the PostgreSQL transaction, so a relay that publishes and then crashes before marking the row processed will republish on restart. Effective exactly-once comes from combining this with the consumer-side idempotency table in decision 2.
 
 **2. Consumer Idempotency via event_processed Table**
 
@@ -127,18 +127,18 @@ The Order Query Service subscribes to all order lifecycle events and maintains a
 
 **4. Schema Evolution with Avro + Schema Registry**
 
-All events use Avro schemas registered in Schema Registry. New optional fields are added with default values — this is BACKWARD compatible. Consumers that do not have the new schema version receive the field's default value. The Schema Registry enforces BACKWARD compatibility — attempts to register incompatible schema changes are rejected.
+All events use Avro schemas registered in Schema Registry. New optional fields are added with default values — this is BACKWARD compatible. Consumers reading old data with the new schema receive the field's default value. Schema Registry's default compatibility type is BACKWARD, and attempts to register incompatible schema changes are rejected.
 
 ```mermaid
 timeline
     title OrderCreatedEvent Schema Evolution (Avro)
     v1 : 6 required fields, no currency field
-    v2 registered : currency field added, nullable, default USD : BACKWARD compatible
-    Consumers deployed first : read v2 schema, default USD for old events
+    v2 registered : currency field added as union null string, default null : BACKWARD compatible
+    Consumers deployed first : read v2 schema, get null for old events, map to USD
     Producers deployed next : start writing the currency field
 ```
 
-Schema Registry enforces BACKWARD compatibility, so consumers are always upgraded before producers — old events simply default `currency` to `USD` until the newly-deployed producers start populating it. Deploying in the wrong order (producers first) would not break anything here only because the new field is optional with a default; a non-optional field addition would be rejected as an incompatible change outright.
+Under BACKWARD compatibility Confluent's own guidance is to "upgrade all consumers before you start producing new events" — old events decode `currency` as the schema default (`null`, since an Avro union's default must match its first branch), and the projection maps that null to `USD` until the newly-deployed producers start populating it. Deploying in the wrong order (producers first) would not break anything here only because the new field carries a default; adding a field with no default would be rejected as an incompatible change outright.
 
 **5. Per-Aggregate Partition Key**
 
@@ -169,13 +169,15 @@ All order events use `orderId` as the Kafka partition key. This guarantees that 
       ]
     }}},
     {"name": "totalAmount", "type": "double"},
-    {"name": "occurredOn",  "type": "long", "logicalType": "timestamp-millis"}
+    {"name": "occurredOn",  "type": {"type": "long", "logicalType": "timestamp-millis"}}
   ]
 }
 
-// v2: added "currency" field — BACKWARD compatible (default = "USD")
-// Deploy consumers first (they read v2 schema, default "USD" for old events)
-// Then deploy producers (they start writing "currency" field)
+// v2: added "currency" field — BACKWARD compatible because the field has a default.
+// The default of a union must match its FIRST branch, so ["null","string"] can only
+// default to null; the read model substitutes "USD" when it reads null.
+// Deploy consumers first (they read the v2 schema, get null for old events)
+// Then deploy producers (they start writing the "currency" field)
 {
   "fields": [
     ... (all v1 fields),
@@ -365,7 +367,8 @@ public class OrderQueryController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
 
-        // Cursor-based pagination by createdAt DESC
+        // Offset pagination by createdAt DESC. Fine for a user's own order history
+        // (bounded, rarely deep); switch to a createdAt cursor if pages get deep.
         return ResponseEntity.ok(
             readModelRepo.findByUserIdOrderByCreatedAtDesc(userId, PageRequest.of(page, size))
                 .map(OrderView::from)
@@ -380,9 +383,10 @@ public class OrderQueryController {
 
 | Technology | Usage |
 |------------|-------|
-| Apache Kafka 3.6 | Event streaming backbone, partitioned by orderId |
+| Apache Kafka 4.x (KRaft) | Event streaming backbone, partitioned by orderId |
 | Avro + Confluent Schema Registry | Typed event schemas with BACKWARD compatibility |
 | Spring Kafka | `@KafkaListener`, transactional consumer, DLQ via `DefaultErrorHandler` |
+| Axon Framework | `@EventHandler` / `@ProcessingGroup` / `@ResetHandler` for the read-model projection |
 | PostgreSQL | Outbox table, read model, idempotency table |
 | Spring Data JPA | Repository layer for all persistence |
 | Spring Boot Actuator | Consumer lag metrics via Micrometer Kafka binder |
@@ -399,17 +403,19 @@ Fat events (carrying full order data) allow consumers to process events without 
 The CQRS read model has a lag of 100-500ms between event publication and read model update. During this window, `GET /orders/{id}` may return 404 for a newly created order. Mitigation: the `POST /orders` response includes the full order resource, so the client has the data without needing to immediately query. For the redirect-after-create pattern, add an optimistic cache in the controller that holds the just-created order for 1 second.
 
 **Kafka vs RabbitMQ**:
-Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput (1M events/s vs ~50K for RabbitMQ), and retention-based storage (7 days). RabbitMQ would provide lower latency per message and complex routing, but no replay capability — the read model would be unrebuildable from events after a failure.
+Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput, and retention-based storage (Kafka's default `log.retention.hours` is 168, i.e. 7 days). RabbitMQ would provide lower latency per message and richer routing, but classic and quorum queues offer no replay — the read model would be unrebuildable from events after a failure.
+
+The most-cited head-to-head is Confluent's OpenMessaging benchmark on three i3en.2xlarge brokers with 3x replication and 1 KB messages: **Kafka 605 MB/s vs RabbitMQ 38 MB/s** peak (roughly 605K vs 38K msg/s, about 15x). Treat this as directional, not universal — it is vendor-run, RabbitMQ was measured with mirrored queues, and RabbitMQ **Streams** (which do support replay) reach far higher rates than the queue figure below.
 
 ```mermaid
 xychart-beta
-    title "Peak Throughput: Kafka vs RabbitMQ"
-    x-axis ["Kafka", "RabbitMQ"]
-    y-axis "Events / sec" 0 --> 1100000
-    bar [1000000, 50000]
+    title "Confluent OMB peak throughput, 1KB msgs, 3x replication"
+    x-axis ["Kafka", "RabbitMQ (mirrored queues)"]
+    y-axis "MB / sec" 0 --> 700
+    bar [605, 38]
 ```
 
-Kafka's log-based design sustains roughly 20x RabbitMQ's peak throughput (1M events/sec vs ~50K), which is why it wins here despite RabbitMQ's lower per-message latency and richer routing — the gap becomes decisive once `order-events` needs to support full-history replay to rebuild the read model.
+On that benchmark Kafka's log-based design sustained roughly 15x RabbitMQ's peak throughput, which is why it wins here despite RabbitMQ's lower per-message latency and richer routing — but the decisive factor for this design is not raw throughput, it is that `order-events` must support full-history replay to rebuild the read model.
 
 ---
 

@@ -14,7 +14,7 @@ This module covers the full spectrum: cache placement strategies (aside, read-th
 
 **Mental model**: Cache-aside is the most common: check the cache first; if miss, fetch from database and populate the cache; return data. The application controls cache population. For read-heavy workloads where data changes infrequently, cache-aside dramatically reduces database load.
 
-**Why it matters**: At scale, the database cannot serve every read request. Instagram's cache tier serves 99% of media metadata reads. Facebook's Memcached tier serves billions of objects per second. Without caching, any database-backed service hits capacity limits at a fraction of the required scale.
+**Why it matters**: At scale, the database cannot serve every read request. Facebook's memcache tier "handles billions of requests per second and holds trillions of items" (Nishtala et al., *Scaling Memcache at Facebook*, NSDI 2013), and Meta's graph cache TAO serves over a billion reads per second. Without caching, any database-backed service hits capacity limits at a fraction of the required scale.
 
 **Key insight**: The hardest problem in caching is not performance — it is correctness. Cache invalidation, thundering herd, and cache poisoning are the failure modes. A cache that returns wrong data is worse than no cache at all. Design invalidation before you design population.
 
@@ -89,37 +89,44 @@ cache stops being a latency trick and starts being a capacity strategy. This is 
 | Strategy | Description | Consistency | Complexity |
 |----------|-------------|-------------|------------|
 | TTL | Items expire after fixed time | Eventual (staleness = TTL) | Low |
-| Event-driven | Application invalidates on write | Strong | Medium |
-| Write-through | Update cache and DB together | Strong | Medium |
-| Cache-busting | New key per version (e.g., user.v123) | Strong | Medium |
-| Tag-based | Invalidate all items with a tag | Strong | High |
-| CDC (Change Data Capture) | DB changes trigger cache invalidation | Strong | High |
+| Event-driven | Application invalidates on write | Near-strong — a window remains between DB commit and the evict, plus the classic re-populate race (a concurrent reader that already read the old row can SET it back after the evict) | Medium |
+| Write-through | Update cache and DB together | Strong only if the cache and DB writes are made atomic; otherwise a small window | Medium |
+| Cache-busting | New key per version (e.g., user.v123) | Strong (the old key is simply never read again) | Medium |
+| Tag-based | Invalidate all items with a tag | Near-strong — same commit-to-evict window as event-driven | High |
+| CDC (Change Data Capture) | DB changes trigger cache invalidation | Eventual — invalidation is asynchronous; staleness = log-tail + broker + consumer lag | High |
 
 ### 4.3 Redis Data Structures
 
 | Structure | Commands | Use Case |
 |-----------|---------|---------|
 | String | GET, SET, INCR, EXPIRE | Simple key-value, counters, rate limiting |
-| Hash | HGET, HSET, HMSET, HGETALL | User objects, session data (partial updates) |
+| Hash | HGET, HSET, HDEL, HGETALL | User objects, session data (partial updates) |
 | List | LPUSH, RPUSH, LRANGE, LLEN | Activity feeds, message queues, recent items |
 | Set | SADD, SMEMBERS, SINTERSTORE | Tags, unique visitors, following/followers |
 | Sorted Set (ZSet) | ZADD, ZRANGEBYSCORE, ZRANK | Leaderboards, time-ordered feeds, rate limiting |
-| HyperLogLog | PFADD, PFCOUNT | Approximate distinct count (±0.81% error) |
-| Bloom Filter | BF.ADD, BF.EXISTS (RedisBloom) | Definitely-not-present queries (no false negatives) |
+| HyperLogLog | PFADD, PFCOUNT | Approximate distinct count (0.81% standard error) |
+| Bloom Filter | BF.ADD, BF.EXISTS (built into Redis Open Source 8+; a RedisBloom module before that) | Definitely-not-present queries (no false negatives) |
 | Pub/Sub | PUBLISH, SUBSCRIBE | Lightweight real-time messaging |
 | Stream | XADD, XREAD, XGROUP | Persistent, consumer-group based message log |
 
 ### 4.4 Eviction Policies
 
+Set with `maxmemory-policy`. The **default is `noeviction`** — Redis will not evict anything until you change it. Eviction only kicks in once `maxmemory` is set; `maxmemory 0` (the default on 64-bit builds) means no limit, so an untuned Redis grows until the OS kills it.
+
 | Policy | Description | Use Case |
 |--------|-------------|---------|
-| noeviction | Error on write when full | Never evict (return error instead) |
+| noeviction (default) | Error on write when full | Never evict (return error instead) |
 | allkeys-lru | Evict LRU from all keys | General purpose, mixed TTL workload |
 | volatile-lru | Evict LRU from keys with TTL | Protect permanent keys |
 | allkeys-lfu | Evict least-frequently-used | Skewed access patterns |
-| volatile-lfu | Evict LFU from keys with TTL | Frequently accessed permanent keys |
-| allkeys-random | Random eviction | Almost never useful |
-| volatile-ttl | Evict keys with shortest TTL | Self-managing TTL-based caches |
+| volatile-lfu | Evict LFU from keys with TTL | Skewed access, protecting permanent keys |
+| allkeys-lrm | Evict least-recently-*modified* (Redis 8.6+) | Read-heavy sets where stale-but-hot data should still age out |
+| volatile-lrm | Evict LRM from keys with TTL (Redis 8.6+) | Same, protecting permanent keys |
+| allkeys-random | Random eviction | Keys accessed with roughly equal frequency |
+| volatile-random | Random eviction among keys with TTL | Same, protecting permanent keys |
+| volatile-ttl | Evict keys with shortest remaining TTL | Self-managing TTL-based caches |
+
+All `volatile-*` policies behave like `noeviction` if no key has a TTL — a common production surprise. LRU, LFU and LRM are all **approximated**: Redis samples `maxmemory-samples` keys (default 5) per eviction rather than maintaining a true global ordering.
 
 For most caches: `allkeys-lru` or `allkeys-lfu`. LFU is better for workloads where a small set of items is accessed extremely frequently (hot keys).
 
@@ -233,8 +240,9 @@ All three strategies intercept the same cache-miss moment but resolve the conten
 
 #### Decoding the XFetch test in the diagram
 
-The `-β·δ·ln(random)` box is the whole of XFetch. Written out, every reader that gets a cache
-hit evaluates:
+The `-β·δ·ln(random)` box is the whole of XFetch (Vattani, Chierichetti & Lowenstein, *Optimal
+Probabilistic Cache Stampede Prevention*, PVLDB 8(8), 2015 — their Figure 3 tests
+`Time() - Δβ·log(rand()) >= expiry`). Written out, every reader that gets a cache hit evaluates:
 
 ```
 refresh early  if   now - delta x beta x ln(U)  >=  expiry_time
@@ -270,8 +278,10 @@ occasional reader pretends it is far in the future and rebuilds.
      0.10     2.3026              0.4605 s                      461 ms
      0.01     4.6052              0.9210 s                      921 ms  (the lottery winner)
 
-  At 1,000 reads/s, in the final second before expiry roughly one reader draws
-  U <= 0.01 and rebuilds. Everyone else keeps getting the still-valid cached value.
+  A reader with remaining TTL r seconds refreshes with probability e^(-r / 0.2):
+  1.1% at r = 0.9s, 5.0% at r = 0.6s, 37% at r = 0.2s. At 1,000 reads/s the first
+  winner therefore shows up around 0.9s before expiry — it rebuilds, the write
+  resets the TTL, and every reader after it sees a fresh key again.
   Without XFetch, all 1,000 readers in the second AFTER expiry miss at once.
 ```
 
@@ -346,7 +356,10 @@ Set<String> top10 = redisTemplate.opsForZSet()
 Long rank = redisTemplate.opsForZSet()
     .reverseRank("leaderboard", playerId);
 
-// Rate limiting with Sorted Set (sliding window)
+// Rate limiting with Sorted Set (sliding window).
+// NOTE: these four calls are four separate round trips, so concurrent requests
+// can interleave and overshoot the limit. In production, wrap the identical
+// sequence in a Lua script (see 6.3) so Redis executes it atomically.
 String key = "rate:" + userId;
 long now = System.currentTimeMillis();
 long windowStart = now - 60_000; // 1-minute window
@@ -367,22 +380,27 @@ if (count > 100) {
 redisTemplate.opsForHyperLogLog().add("unique_visitors:" + date, userId);
 Long uniqueCount = redisTemplate.opsForHyperLogLog()
     .size("unique_visitors:" + date);
-// Approximate count (±0.81% error), uses only ~12 KB regardless of cardinality
+// Approximate count, 0.81% standard error. At most 12 KB per key (dense
+// encoding); low-cardinality keys use a smaller sparse encoding.
 
 // Hash for user session (partial update without serializing full object)
 String sessionKey = "session:" + sessionId;
 redisTemplate.opsForHash().put(sessionKey, "cart_count", "5");
-redisTemplate.opsForHash().put(sessionKey, "last_activity", now.toString());
+redisTemplate.opsForHash().put(sessionKey, "last_activity", Long.toString(now));
 // No need to read-modify-write the entire session object
-Integer cartCount = (Integer) redisTemplate.opsForHash()
-    .get(sessionKey, "cart_count");
+// Redis stores hash fields as strings — casting straight to Integer throws
+// ClassCastException. Read as String and parse.
+int cartCount = Integer.parseInt(
+    (String) redisTemplate.opsForHash().get(sessionKey, "cart_count"));
 ```
 
 ### 6.3 Distributed Cache Stampede Prevention with Lua
 
 ```lua
 -- Atomic lock acquisition + cache check (prevents race condition)
--- Returns: cached value if found, or nil if caller should refresh and release lock
+-- Returns: the cached value if present, else the sentinel '__LOCK_ACQUIRED__'
+-- (this caller must refresh and then release the lock) or '__LOCK_WAIT__'
+-- (someone else is refreshing; wait and re-read the key).
 
 local key = KEYS[1]
 local lockKey = KEYS[2]
@@ -403,7 +421,7 @@ end
 
 ```java
 // Java usage
-public String getWithStampedeProtection(String key) {
+public String getWithStampedeProtection(String key) throws InterruptedException {
     // Try direct cache hit
     String value = redis.get(key);
     if (value != null) return value;
@@ -413,9 +431,16 @@ public String getWithStampedeProtection(String key) {
     int waitMs = 50;
 
     for (int i = 0; i < maxRetries; i++) {
-        // Try to acquire lock
-        Boolean acquired = redis.setNX(lockKey, "1");
-        redis.expire(lockKey, 5); // 5s lock TTL
+        // BROKEN — do NOT do this:
+        //     Boolean acquired = redis.setNX(lockKey, "1");
+        //     redis.expire(lockKey, 5);
+        // Two problems. (1) SETNX and EXPIRE are separate round trips: crash in
+        // between and the lock never expires, so every future request for this
+        // key waits out the full retry loop forever. (2) EXPIRE runs even when
+        // acquisition FAILED, so a loser keeps pushing out the winner's TTL.
+        // FIX — one atomic call, and a unique token so we only delete our own lock:
+        String token = UUID.randomUUID().toString();
+        boolean acquired = redis.set(lockKey, token, SetArgs.nx().ex(5));
 
         if (acquired) {
             try {
@@ -428,7 +453,12 @@ public String getWithStampedeProtection(String key) {
                 redis.setex(key, 300, value); // 300s TTL
                 return value;
             } finally {
-                redis.del(lockKey);
+                // Compare-and-delete: a plain DEL would delete someone else's
+                // lock if ours had already expired mid-fetch.
+                redis.eval(
+                    "if redis.call('GET', KEYS[1]) == ARGV[1] "
+                  + "then return redis.call('DEL', KEYS[1]) else return 0 end",
+                    List.of(lockKey), token);
             }
         }
 
@@ -440,7 +470,12 @@ public String getWithStampedeProtection(String key) {
         if (value != null) return value;
     }
 
-    // Fallback: fetch directly from DB (prevents blocking indefinitely)
+    // Fallback after ~500ms: fetch directly from DB so no request blocks
+    // indefinitely. Note this deliberately trades away the "exactly one DB
+    // query per key" guarantee — if the rebuild takes longer than
+    // maxRetries * waitMs, every waiter falls through to the database.
+    // Size the retry budget above your p99 rebuild time, or the fallback
+    // reintroduces the very stampede the lock exists to prevent.
     return database.fetch(key);
 }
 ```
@@ -497,11 +532,11 @@ Cache invalidation service:
 
 ## 7. Real-World Examples
 
-**Twitter Feed**: Twitter uses a Redis sorted set per user for their home timeline cache. When a user you follow tweets, the tweet ID is added to your timeline cache (fan-out write). Reading the timeline is a ZRANGE operation — sub-millisecond. For users with millions of followers (celebrities), Twitter skips fan-out and does fan-out on read (mixing cached timelines at read time).
+**Twitter Feed**: As described by Twitter engineering in 2014, the home timeline was a per-user list held in a forked, customized Redis. It did *not* use a sorted set — the team added a purpose-built "hybrid list" (a linked list of ziplists) because a single huge ziplist has to be rewritten on every insert, and evicting one to find contiguous RAM stalled writes. When a followee tweets, the tweet ID is prepended to each follower's timeline (fan-out on write); reading is a range scan over the head of that list. For accounts with millions of followers, fan-out on write is skipped and those tweets are merged in at read time. Treat this as a 2014 snapshot of a system that has since been rebuilt.
 
-**Facebook TAO**: Facebook's distributed graph cache (TAO) caches object associations (friendships, reactions, comments). TAO uses a look-aside cache with write-through invalidation. When any object changes, all relevant cache entries are invalidated. TAO handles 2+ billion requests/second globally.
+**Facebook TAO**: Meta's distributed graph cache (TAO) caches objects and associations (friendships, reactions, comments). TAO is explicitly a **write-through** cache, not a look-aside one — it replaced the earlier memcache-look-aside-over-MySQL pattern precisely so that product code no longer had to hand-manage invalidation. Meta states TAO "handles over a billion read requests and millions of write requests every second."
 
-**Redis for rate limiting**: Stripe, Cloudflare, and most API providers use Redis sorted sets or Lua scripts for distributed rate limiting. Lua's atomic execution prevents race conditions in the sliding window algorithm.
+**Redis for rate limiting**: Stripe's published rate limiter (`stripe.com/blog/rate-limiters`, 2017) and GitHub's sharded, replicated API rate limiter both run their counter logic as Redis Lua scripts; Lua's atomic execution prevents race conditions in the sliding-window/token-bucket update. Note that not every large provider centralizes on Redis: Cloudflare's WAF rate limiting keeps counters **per data center** (the `cf.colo.id` characteristic is mandatory on every rule), because an anycast edge cannot afford a round trip to a central store.
 
 ---
 
@@ -511,7 +546,7 @@ Cache invalidation service:
 |----------|-------------|------------|------------|
 | Cache-aside | Eventual (stale until TTL) | Best (no cache write overhead) | Low |
 | Read-through | Eventual | Good (cache populates on miss) | Medium |
-| Write-through | Strong | Lower (extra cache write per DB write) | Medium |
+| Write-through | Strong *if* the cache and DB writes are atomic | Lower (extra cache write per DB write) | Medium |
 | Write-behind | Eventual | Best for writes | High (data loss risk) |
 
 ```mermaid
@@ -554,7 +589,7 @@ None of the four strategies lands in the "fast and safe" quadrant — every real
 
 ## 10. Common Pitfalls
 
-**Hot key in Redis**: A single Redis key receiving millions of operations per second (e.g., counter for a viral post) becomes a bottleneck. Single-threaded Redis cannot process operations faster than ~100k/s per key. Fix: (1) local caching with short TTL (each app instance caches the hot key for 1 second); (2) Redis cluster with local in-process aggregation and periodic flush; (3) for counters, use Redis Cluster with slot migration or Cassandra counters.
+**Hot key in Redis**: A single Redis key receiving millions of operations per second (e.g., counter for a viral post) becomes a bottleneck. Redis executes commands on one thread, so every operation on a key is serialized behind one core — the ceiling is that core, not a fixed number. Redis's own published benchmark (which by default hammers a *single* key) reaches roughly 180k SET/s without pipelining and about 1.5M SET/s with a pipeline depth of 16 on a commodity Linux box; expect materially less than that once your values, network and TLS are real. The point stands: one key cannot be scaled by adding nodes. Fix: (1) local caching with short TTL (each app instance caches the hot key for 1 second); (2) Redis cluster with local in-process aggregation and periodic flush; (3) for counters, use Redis Cluster with slot migration or Cassandra counters.
 
 **Cache stampede on startup**: Deploying a new service version cold-starts with an empty cache. The first minutes after deployment, all requests miss the cache and hit the database — potentially overwhelming it. Fix: cache warming (load popular items into cache before accepting traffic), or gradually route traffic to new instances.
 
@@ -579,7 +614,7 @@ None of the four strategies lands in the "fast and safe" quadrant — every real
 | Jedis | Java Redis client (synchronous) |
 | Lettuce | Java Redis client (async, reactive) |
 | Redisson | Java Redis client with distributed objects |
-| Memcached | Simple key-value cache (legacy; Redis preferred) |
+| Memcached | Simple key-value cache — actively maintained (1.6.x, releases through 2026) and multi-threaded, so it scales a single hot key across cores better than Redis; choose Redis when you need data structures, persistence or replication |
 | Varnish | HTTP caching proxy |
 | CDN (CloudFront, Fastly) | Edge caching for static and dynamic content |
 
@@ -603,7 +638,7 @@ LRU (Least Recently Used) evicts the item that was accessed least recently — i
 (1) TTL-based: set a short TTL; stale data is eventually evicted. Simple but allows staleness window. (2) Event-driven: the write path explicitly deletes/updates the cache key. Strong consistency but requires all write paths to be aware of the cache. (3) CDC (Change Data Capture): a background process (Debezium) reads DB change logs and invalidates cache keys asynchronously. Decouples invalidation from write path. (4) Write-through: cache and DB always updated together — strongest consistency.
 
 **Q: What is a hot key in Redis and how do you solve it?**
-A hot key is a single Redis key receiving disproportionately high traffic (millions of ops/second). Redis is single-threaded — one key can only be processed as fast as one core allows (~100k simple ops/s). Mitigations: (1) Local read-through cache: each app instance caches the hot key in-process for 1 second, greatly reducing Redis load. (2) Key replication: write to `hotkey:1`, `hotkey:2`, ..., `hotkey:N`; reads randomly pick one replica. (3) Redis Cluster: shard the hotkey across multiple slots. For write-heavy hot keys (counters), use local aggregation and periodic sync.
+A hot key is a single Redis key receiving disproportionately high traffic (millions of ops/second). Redis executes commands on a single thread, so one key can only be processed as fast as one core allows — Redis's own single-key benchmark shows roughly 180k ops/s without pipelining and around 1.5M ops/s at pipeline depth 16, and no amount of sharding raises that, because the key lives in exactly one slot. Mitigations: (1) Local read-through cache: each app instance caches the hot key in-process for 1 second, greatly reducing Redis load. (2) Key replication: write to `hotkey:1`, `hotkey:2`, ..., `hotkey:N`; reads randomly pick one replica. (3) Redis Cluster: shard the hotkey across multiple slots. For write-heavy hot keys (counters), use local aggregation and periodic sync.
 
 **Q: What is the difference between Redis standalone, Sentinel, and Cluster?**
 Standalone: single instance, simple, not HA. Sentinel: monitoring/failover system — N Sentinel processes watch a primary+replicas; if primary dies, Sentinel elects a replica as new primary. Applications use the Sentinel endpoint for transparent failover. No horizontal scaling. Cluster: shards data across multiple primary nodes (16384 hash slots). Horizontal scale for both read and write. Requires client-side cluster awareness. Use Sentinel for HA with simple data; Cluster for horizontal scaling.
@@ -615,16 +650,16 @@ Local cache (Caffeine): latency ~100 nanoseconds vs Redis ~1ms. Use for immutabl
 Write-behind: the application writes to the cache, and the cache writes to the database asynchronously (batched, with delay). The application gets near-instant write acknowledgment. Appropriate for: write-heavy workloads where some data loss is acceptable (analytics events, session data), or writes that can be batched efficiently (many small writes merged into one bulk insert). Not appropriate for: financial transactions, orders, any data where loss is unacceptable.
 
 **Q: How does the XFetch algorithm prevent cache stampedes?**
-XFetch (probabilistic early expiry) triggers cache refresh before the item expires. The probability of early refresh increases as the item approaches expiry: P(refresh) = -β * δ * ln(U) where β = tuning factor (default 1), δ = time to recompute the value, U = uniform random [0,1). As remaining TTL decreases, ln(U) must be smaller (U closer to 1) to trigger refresh — meaning early refresh becomes more likely. Only one request triggers early refresh (the one that "wins the lottery"). All others still get the cached value. No lock needed, no stampede.
+XFetch (probabilistic early expiry) triggers cache refresh before the item expires. Each reader that gets a hit draws a fresh uniform random U in [0,1) and refreshes early if `now - β * δ * ln(U) >= expiry_time`, where β is the tuning factor (default 1) and δ is the measured time it took to recompute the value. Note that `-β * δ * ln(U)` is a *time window*, not a probability — it is an exponentially distributed "lookahead" that the reader pretends to jump forward by. As the remaining TTL shrinks, a smaller lookahead suffices, so a U closer to 1 is enough to win and early refresh becomes steadily more likely. The first winner rebuilds the value and rewrites the key, resetting the TTL, so later readers see a fresh key rather than a miss — the paper (Vattani et al., PVLDB 2015) shows this shrinks the stampede to a small residual size, not that it is provably exactly one refresher. No lock is needed and no request ever blocks.
 
-**Q: What cache invalidation strategy does Stripe use for their API?**
-Stripe uses event-driven invalidation: when an object (charge, customer, subscription) is updated, the write handler explicitly evicts the cache key. They also use short TTLs (60–300 seconds) as a safety net. For read paths, they use cache-aside. For their rate limiting implementation, they use Redis Lua scripts for atomic sliding window counters. They do not use write-through because payment objects have complex consistency requirements.
+**Q: How would you design cache invalidation for a payments API?**
+Use event-driven invalidation on the write path, with a short TTL as a backstop. When an object (charge, customer, subscription) is updated, the handler that commits the write explicitly evicts the cache key, so the next read repopulates from the source of truth; a 60-300 second TTL then bounds the damage from any write path that forgets to evict or any evict that fails. Reads stay cache-aside, because the caller knows which fields are safe to serve slightly stale (a customer's display name) and which must never be (an authorization decision or a balance), so those simply bypass the cache. Avoid write-behind entirely here: acknowledging a payment write before it is durable is exactly the failure mode you cannot accept. (Stripe has publicly described its Redis + Lua *rate limiter*, but not its cache invalidation strategy — do not present internal details of a specific company's cache design as known fact in an interview.)
 
 **Q: How would you design caching for product inventory counts?**
 Inventory counts must be accurate (cannot oversell). Options: (1) Cache with write-through: all inventory decrements update both DB and cache atomically (using a DB transaction + cache update). (2) Don't cache inventory counts — read from DB with SELECT FOR UPDATE during checkout. (3) Cache with short TTL (5 seconds) for display purposes; always verify from DB before deducting. (4) Redis atomic DECR for inventory with a background sync to DB — Redis as the source of truth for inventory. Option 4 is used by high-scale systems (Redis DECR is atomic, preventing oversell at cache level).
 
 **Q: What is the Vary header in HTTP caching and how does it relate to backend caches?**
-The HTTP Vary header tells CDNs/proxies to cache separate responses based on specific request headers. `Vary: Accept-Encoding` means: cache one version for gzip clients and one for uncompressed. This applies to CDN/proxy caches. Backend application caches (Redis) do not use HTTP Vary — but the same concept applies: a product response for user A (with their discount) should not be returned for user B. Include the user-specific factors in the cache key: `product:{id}:user:{userId}` for personalized responses, or `product:{id}` for public responses.
+The HTTP Vary header names the request headers a cache must also match before it may reuse a stored response. `Vary: Accept-Encoding` means: cache one version for gzip clients and one for uncompressed. RFC 9111 section 4.1 states the rule for any cache, private browser caches included, not only shared CDN/proxy caches — a cache MUST NOT reuse a stored response with a Vary header unless every nominated request header matches the original request. Backend application caches (Redis) do not use HTTP Vary — but the same concept applies: a product response for user A (with their discount) should not be returned for user B. Include the user-specific factors in the cache key: `product:{id}:user:{userId}` for personalized responses, or `product:{id}` for public responses.
 
 **Q: How do you design a cache for user authentication tokens?**
 Cache: `session:{token_hash}` → `{userId, permissions, expires_at}`. TTL = token expiry time. On each request: check cache first (Redis GET); if hit, verify expires_at and use userId. If miss: validate token cryptographically (JWT signature) or look up in DB (opaque token). Revocation: when token is revoked, delete from cache immediately. For JWT: maintain a revocation list in Redis (bloom filter for efficiency: check if token hash is in revocation set before signature verification). Cache hit rate should be >99% — nearly every authenticated request reuses a recently checked token.
@@ -642,7 +677,7 @@ LRU eviction tracks only recency, not size, so a 10 MB blob and a 1-byte counter
 - Always set a TTL as a safety net, even for data with explicit invalidation.
 - Use cache-aside as the default strategy; layer on write-through only for consistency-critical data.
 - Prevent stampedes with mutex locks or XFetch for popular items.
-- Monitor cache hit rate per cache; alert if hit rate drops below 80%.
+- Monitor cache hit rate per cache, and alert on a drop relative to that cache's own baseline rather than only on an absolute floor — a fall from 97% to 90% already triples DB load (see section 3) while never crossing an 80% threshold.
 - Use Redis Lua scripts for multi-step operations that must be atomic.
 - Separate local cache (Caffeine) for reference data from distributed cache (Redis) for shared state.
 - Set maxmemory and eviction policy on all Redis instances — never let Redis run without eviction.
@@ -660,8 +695,8 @@ LRU eviction tracks only recency, not size, so a 10 MB blob and a 1-byte counter
 
 **Solutions applied**:
 1. Cache warming: before taking traffic, pre-warm cache for top-1000 most active users.
-2. Stampede protection: mutex lock on cache miss. At most 1 DB query per cache key at a time.
-3. Stale-while-revalidate: serve 5-minute-old recommendations while background thread refreshes. Users see slightly stale recommendations vs zero recommendations.
+2. Stampede protection: mutex lock on cache miss. One request per cache key rebuilds while the rest wait and re-read, with a bounded fallback (see 6.3) so no request blocks indefinitely — the retry budget must exceed the p99 rebuild time or the fallback lets the herd through anyway.
+3. Stale-while-revalidate: TTL raised from 60 seconds to 5 minutes, and a stale entry is served while a background thread refreshes it. Users see slightly stale recommendations vs zero recommendations. (The 5-minute TTL is what the refresh-ahead job below is timed against.)
 
 ```java
 @Cacheable(

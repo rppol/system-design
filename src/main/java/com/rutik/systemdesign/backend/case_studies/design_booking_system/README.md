@@ -149,8 +149,12 @@ Every booking request carries a client-generated `bookingRequestId` (UUID). Befo
 logic, the service checks the `idempotency_keys` table for this ID. If found, the previous result
 is returned directly. If not found, the request is processed and the result is persisted with the
 idempotency key. The check-and-insert is inside the same transaction as the booking, so concurrent
-retries with the same key race to insert — only one wins; the loser gets a unique constraint
-violation and waits, then reads the winning result.
+retries with the same key race to insert — only one wins; the loser blocks on the uncommitted
+duplicate key, then gets a unique constraint violation once the winner commits. Note the mechanic
+that trips people up: in PostgreSQL that error puts the whole transaction into an aborted state, and
+`ROLLBACK` (or `ROLLBACK TO SAVEPOINT`) is the only way to regain control. The loser therefore cannot
+read the winning row in the failed transaction — it must roll back and re-read in a fresh one, which
+is exactly what the outer retry does.
 
 ```mermaid
 sequenceDiagram
@@ -165,12 +169,12 @@ sequenceDiagram
     Svc->>Tbl: check-and-INSERT key=X<br/>inside booking txn
     Tbl-->>Svc: O's transaction<br/>commits first
     Tbl-->>Svc: R's transaction:<br/>unique constraint violation
-    Note over Svc: R waits, then reads<br/>the row O's txn committed
+    Note over Svc: R's txn is aborted:<br/>rollback, re-read in a<br/>fresh transaction
     Svc-->>O: 201 Created<br/>new booking result
     Svc-->>R: 201 Created<br/>O's cached result
 ```
 
-The unique index on `booking_request_id` is the actual arbiter: whichever transaction commits first wins the insert, and the loser's unique-constraint violation is the signal to fall back to reading that same row instead of treating the retry as sold-out or duplicate.
+The unique index on `booking_request_id` is the actual arbiter: whichever transaction commits first wins the insert, and the loser's unique-constraint violation is the signal to roll back and re-read that same row in a new transaction instead of treating the retry as sold-out or duplicate.
 
 ### 3. Two-Phase Booking
 
@@ -394,6 +398,11 @@ public class BookingService {
     private final RedisDistributedLock distributedLock;
     private final ObjectMapper objectMapper;
 
+    // The transactional body lives in a SEPARATE bean. Calling an @Transactional
+    // method on `this` is self-invocation: it does not go through the Spring proxy,
+    // so no transaction is started and steps 4-11 would each commit independently.
+    private final ReservationTransactionService reservationTxService;
+
     // constructor injection omitted for brevity
 
     /**
@@ -430,14 +439,30 @@ public class BookingService {
         }
 
         try {
-            return executeReservationInTransaction(request, lockValue);
+            // Cross-bean call — goes through the proxy, so @Transactional applies
+            return reservationTxService.executeReservation(request, lockValue);
         } finally {
             distributedLock.release(request.getSeatId(), lockValue);
         }
     }
 
+    private BookingResponse deserializeResponse(String json) {
+        try {
+            return objectMapper.readValue(json, BookingResponse.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Deserialization failed", e);
+        }
+    }
+}
+
+@Service
+@Slf4j
+public class ReservationTransactionService {
+
+    // repositories + distributedLock + objectMapper injected here as well
+
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    protected BookingResponse executeReservationInTransaction(
+    public BookingResponse executeReservation(
             BookingRequest request, String lockValue) {
 
         // Step 4: Pessimistic lock on seat row
@@ -751,7 +776,7 @@ CREATE INDEX ix_bookings_expiry ON bookings(expires_at) WHERE status = 'PENDING'
 | Spring Data JPA | ORM with optimistic/pessimistic locking annotations |
 | PostgreSQL 15 | Primary data store; row-level locking, CHECK constraints |
 | Redis 7 | Distributed lock (SET NX EX), seat hold TTL tracking |
-| Kafka 3.x | Event streaming for booking lifecycle events |
+| Kafka 4.x (KRaft) | Event streaming for booking lifecycle events |
 | Spring Kafka | @KafkaListener, KafkaTemplate |
 | Spring Scheduler | Outbox poller, expired hold cleanup |
 | HikariCP | Connection pooling (default pool size 10, tune to 20-30 for this workload) |
@@ -773,20 +798,30 @@ CREATE INDEX ix_bookings_expiry ON bookings(expires_at) WHERE status = 'PENDING'
 
 ### Distributed Lock Alternatives
 
-Redis SETNX is simple and fast (sub-millisecond) but Redis is a single point of failure unless
-Redlock (multi-node consensus) is used. Redlock requires acquiring locks on N/2+1 independent Redis
-nodes, which adds latency. For this use case, a well-configured Redis Sentinel or Redis Cluster
-provides adequate HA without full Redlock overhead.
+Redis SETNX is simple and fast (sub-millisecond) but a single Redis master is a single point of
+failure. Redlock is the documented alternative: it is a majority-quorum algorithm, not a consensus
+protocol — the client races `SET key value NX PX` against N independent masters (the reference value
+is N=5) and considers the lock held only if it acquires N/2+1 of them within the validity time. Redis'
+own documentation carries a consistency disclaimer: implement fencing tokens, and note that Redis
+does not use a monotonic clock for TTL expiry, so a wall-clock shift can hand the same lock to two
+processes. Martin Kleppmann's 2016 analysis disputes Redlock's safety and antirez published a
+rebuttal; read both before relying on it. This design does not: replication-based failover (Sentinel
+or Cluster) explicitly cannot guarantee mutual exclusion because Redis replication is asynchronous,
+which is precisely why the Postgres row lock below remains the authoritative guard.
 
 Zookeeper-based distributed locks (Apache Curator) provide stronger consistency guarantees but add
-operational complexity and higher latency (~5ms vs ~0.1ms for Redis).
+operational complexity and higher latency — order of milliseconds versus sub-millisecond for Redis
+(illustrative magnitudes; benchmark on your own hardware).
 
 Database-level advisory locks (Postgres `pg_advisory_lock`) avoid an extra Redis dependency but
 tie lock lifetime to the DB connection, which is expensive and can exhaust the connection pool.
 
 ### Seat Hold Duration
 
-10 minutes is standard for concert tickets (Ticketmaster uses 8-15 minutes). Too short (under
+10 minutes is a common starting point for concert tickets. Ticketmaster deliberately publishes no
+fixed number — its help centre states only that "we set the time length according to ticket demand,
+so it can differ depending on time of day or for different events"; reported checkout timers cluster
+in the 5-10 minute range. Too short (under
 5 minutes) frustrates users entering payment details. Too long (over 15 minutes) reduces effective
 inventory for other buyers during high-demand windows. The duration should be configurable per event
 type and tunable in production.

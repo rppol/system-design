@@ -16,7 +16,7 @@ This module covers the practical engineering of async systems in Java: thread po
 
 **Why it matters**: Thread pool misconfiguration is one of the most common causes of production failures. A thread pool that is too small causes request timeouts under load. A pool that is too large causes excessive context switching and memory pressure. Wrong thread pool for async callbacks causes subtle deadlocks and latency spikes.
 
-**Key insight**: Java 21 virtual threads change the calculus for IO-bound work — you can have millions of virtual threads without significant overhead. But virtual threads are not magic: they cannot parallelize CPU-bound work, and pinned virtual threads (inside synchronized blocks holding monitors) cause platform thread exhaustion.
+**Key insight**: Java 21 virtual threads change the calculus for IO-bound work — you can have millions of virtual threads without significant overhead. But virtual threads are not magic: they cannot parallelize CPU-bound work, and pinned virtual threads cause carrier thread exhaustion. What pins is version-dependent: on Java 21-23 a `synchronized` block pins; JEP 491 (JDK 24) removed that, so on Java 24+ only native methods and foreign functions pin.
 
 ---
 
@@ -24,7 +24,7 @@ This module covers the practical engineering of async systems in Java: thread po
 
 - **Thread pool sizing**: IO-bound: N = N_cpu * (1 + W/C) where W = wait time, C = CPU time. CPU-bound: N = N_cpu + 1 (one extra for OS scheduling).
 - **CompletableFuture default executor**: ForkJoinPool.commonPool() — shared across the JVM, potentially impacted by other code using it. Use dedicated executors for production code.
-- **Virtual threads**: Cheap, lightweight threads. One per blocking I/O operation is fine. Cannot parallelize CPU-bound work. Watch for pinning.
+- **Virtual threads**: Cheap, lightweight threads. One per blocking I/O operation is fine. Cannot parallelize CPU-bound work. Watch for pinning (Java 21-23: `synchronized`; Java 24+: native methods and foreign functions only).
 - **Backpressure**: In reactive streams, the consumer signals to the producer how fast it can consume. Without backpressure, fast producers overwhelm slow consumers.
 - **Bulkhead**: Each dependency gets its own thread pool. A slow dependency exhausts only its pool, not the whole application.
 
@@ -48,10 +48,11 @@ W/C is the wait-to-compute ratio. For a service that spends 50ms waiting for a D
 | Strategy | Behavior | When to Use |
 |---------|----------|-------------|
 | BUFFER | Buffer excess items | Short-lived bursts with bounded buffer |
-| DROP | Drop excess items | Telemetry, logs, non-critical updates |
+| DROP | Drop each arriving item there is no demand for | Telemetry, logs, non-critical updates |
 | LATEST | Keep only newest | State updates (only latest matters) |
 | ERROR | Signal overflow as error | Strict SLA, must not lose items |
-| BLOCK | Block producer (if synchronous) | Bounded throughput requirement |
+
+The first four map directly onto Reactor's `onBackpressureBuffer` / `onBackpressureDrop` / `onBackpressureLatest` / `onBackpressureError` (RxJava's `BackpressureStrategy` has the same four plus `MISSING`). Blocking the producer is a fifth option in the general sense, but neither library exposes it as a backpressure operator — it only arises when the source is a synchronous, blocking generator that simply stops producing until demand arrives.
 
 ### 4.3 CompletableFuture Method Reference
 
@@ -150,7 +151,7 @@ flowchart LR
     class SB5 base
 ```
 
-For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1 GB of RAM versus ~10 MB for ~few-KB virtual-thread stacks; the unmount/remount trick (~100 ns JVM-level switch instead of a ~1-10 μs kernel context switch) is what lets Spring Boot 3.2's 200 Tomcat threads serve 10,000 concurrent requests.
+For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1-2 GB of RAM versus a few MB for ~few-KB virtual-thread stacks; the unmount/remount trick (~100 ns JVM-level switch instead of a ~1-10 μs kernel context switch) is what lets Spring Boot 3.2 serve 10,000 concurrent requests. Note that with `spring.threads.virtual.enabled=true` Tomcat swaps its bounded 200-thread pool for a virtual-thread executor — the 200 threads are not what carries the 10,000 requests; the carrier pool is the JVM's virtual-thread scheduler, whose default parallelism is `availableProcessors()`.
 
 **Stated plainly.** "Platform threads make you pay a megabyte to sit and wait; virtual threads make waiting nearly free, so the limit stops being memory and starts being the downstream service."
 
@@ -174,7 +175,8 @@ Two separate ceilings are in play. The memory ceiling is how many threads fit in
 
   virtual threads, one per request
     memory  = 10,000 x ~4 KB                    = ~39 MB    <- trivially fits
-    the 200 carrier threads never block; they unmount at every wait
+    the carrier pool (default parallelism = 8 on this box) never blocks;
+    every virtual thread unmounts at every wait
 ```
 
 Watch what actually changed: virtual threads did not make any single request faster -- the database still takes 50ms. They removed the *memory* ceiling so the thread count could follow the concurrency instead of capping it. The corollary bites in production: with 10,000 virtual threads all reaching for a 10-connection HikariCP pool, the bottleneck simply relocates to the connection pool. Virtual threads move the queue; they do not delete it.
@@ -291,7 +293,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph BROKEN["BROKEN — synchronized"]
+    subgraph BROKEN["BROKEN on Java 21-23 — synchronized"]
         direction LR
         B1(["VT enters<br/>synchronized block"]) --> B2{"Acquires monitor<br/>on carrier"}
         B2 --> B3["VT pinned<br/>to carrier"]
@@ -311,25 +313,25 @@ flowchart LR
     class F4 train
 ```
 
-`synchronized` acquires the object monitor on the carrier thread itself, so the virtual thread cannot unmount during the blocking call and the carrier stays pinned; swapping in `ReentrantLock` removes that constraint, letting the virtual thread unmount normally and free its carrier for other work.
+On Java 21-23 `synchronized` associates the object monitor with the carrier thread, so the virtual thread cannot unmount during the blocking call and the carrier stays pinned; swapping in `ReentrantLock` removes that constraint, letting the virtual thread unmount normally and free its carrier for other work. **JEP 491 (JDK 24) made this workaround unnecessary**: monitors are now owned by the virtual thread itself, so a virtual thread blocking inside `synchronized` releases its carrier just like one blocking under a `ReentrantLock`. The diagram therefore describes Java 21-23; on Java 24+ both halves behave like the right-hand one.
 
 ```java
 // Java 21 virtual threads
 // Enable in Spring Boot: spring.threads.virtual.enabled=true
 
 // Virtual threads unmount from carrier thread during blocking I/O
-// EXCEPTION: when inside a synchronized block
-// synchronized acquires a monitor on the CARRIER thread — cannot unmount
+// EXCEPTION on Java 21-23: when inside a synchronized block
+// there, the monitor is tied to the CARRIER thread — cannot unmount
 
-// BROKEN: Virtual thread pinning
+// BROKEN on Java 21-23: Virtual thread pinning
 // If virtualThread is inside synchronized, it pins to its carrier thread
 // Carrier thread is blocked, reducing available parallelism
 public synchronized Response handleRequest(Request req) {
-    // Virtual thread is PINNED here — cannot unmount during blocking calls
+    // Virtual thread is PINNED here (Java 21-23) — cannot unmount during blocking calls
     return database.query(req.getQuery());  // carrier thread blocked during query
 }
 
-// FIX: Use ReentrantLock instead of synchronized
+// FIX (Java 21-23): Use ReentrantLock instead of synchronized
 private final ReentrantLock lock = new ReentrantLock();
 
 public Response handleRequest(Request req) {
@@ -341,21 +343,36 @@ public Response handleRequest(Request req) {
     }
 }
 
-// Also pins: synchronized native methods, cannot be changed
-// Detection: -Djdk.tracePinnedThreads=full (logs when virtual thread pins)
-// Or JFR: jdk.VirtualThreadPinned event
+// Java 24+ (JEP 491): synchronized no longer pins. Monitors are owned by the
+// virtual thread, so blocking inside synchronized releases the carrier.
+// The ReentrantLock rewrite above is no longer required on Java 24+.
+// STILL pins on every version: native methods and foreign (FFM) calls.
+
+// Detection on Java 21-23: -Djdk.tracePinnedThreads=full
+//   (this system property was REMOVED in JDK 24 — setting it now has no effect)
+// Detection on all versions: JFR jdk.VirtualThreadPinned event
+//   (enabled by default, 20 ms threshold)
 
 // Thread-local variables work with virtual threads but be careful:
 // With millions of virtual threads, ThreadLocals that accumulate state
 // (InheritableThreadLocal with complex inheritance) can cause memory pressure.
 
-// Structured concurrency (Java 21 preview):
-try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+// Structured concurrency — STILL A PREVIEW API (JEP 453 in 21 through JEP 533 in 27),
+// and the API has changed incompatibly between previews. This is the Java 21/22 shape:
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {   // requires --enable-preview
     Future<User> user = scope.fork(() -> fetchUser(id));
     Future<Orders> orders = scope.fork(() -> fetchOrders(id));
     scope.join().throwIfFailed();
     return buildProfile(user.get(), orders.get());
 }
+// JDK 25+ (JEP 505) REMOVED ShutdownOnFailure/ShutdownOnSuccess and the public
+// constructors. Scopes are opened by a static factory and given a Joiner:
+//   try (var scope = StructuredTaskScope.open()) {          // all-succeed-or-throw
+//       var user   = scope.fork(() -> fetchUser(id));       // returns Subtask<User>
+//       var orders = scope.fork(() -> fetchOrders(id));
+//       scope.join();
+//       return buildProfile(user.get(), orders.get());
+//   }
 // If either subtask fails, the scope is cancelled — both tasks cancelled
 // Clean, structured lifetime for child tasks
 ```
@@ -376,18 +393,20 @@ sequenceDiagram
     S->>P: request(N) when ready for more
 ```
 
-The Reactive Streams protocol is pull-based: the Subscriber tells the Publisher exactly how many items it can absorb via `request(N)`, and the Publisher is contractually bound to send at most that many `onNext` calls before waiting on the next request — this is what makes backpressure possible without an explicit acknowledgment per item.
+The Reactive Streams specification calls this a "dynamic push-pull" protocol, not a pure pull: the Subscriber tells the Publisher exactly how many items it can absorb via `request(N)` (the pull half, an upper bound on outstanding demand), and the Publisher then pushes at most that many `onNext` calls — this is what makes backpressure possible without an explicit acknowledgment per item. The Subscriber may signal further demand at any time, including before the current batch is exhausted, so a fast consumer never stalls waiting for a round trip.
 
 ```java
 // Project Reactor backpressure strategies
 Flux<Event> eventStream = eventSource.subscribe()
-    // Drop oldest items when buffer overflows
+    // Requests unbounded demand upstream and DROPS each arriving element that
+    // downstream has not requested. There is no buffer, so it is the newly
+    // observed items that are discarded, never previously accepted ones.
     .onBackpressureDrop(dropped ->
         log.warn("Dropped event due to backpressure: {}", dropped))
     // or
-    // .onBackpressureBuffer(1000)  // buffer up to 1000 items
-    // .onBackpressureLatest()      // keep only latest
-    // .onBackpressureError()       // throw OverflowException
+    // .onBackpressureBuffer(1000)  // buffer up to 1000 overflow items, then cancel the source
+    // .onBackpressureLatest()      // retain only the most recent observed item
+    // .onBackpressureError()       // onError with Exceptions.failWithOverflow()
 
     .flatMap(event -> processEvent(event), 16)  // max 16 concurrent processings
     .subscribe(
@@ -501,9 +520,9 @@ The lesson is counterintuitive: the *smaller* queue is the better one. Both queu
 
 **Netflix Hystrix → Resilience4j**: Netflix developed Hystrix for bulkhead thread pool isolation. Each downstream dependency (user service, movie metadata, recommendations) gets its own thread pool. When recommendations become slow, they exhaust only the recommendations pool. The main request thread is unblocked quickly (the bulkhead returns a default value). Hystrix was deprecated; Resilience4j provides the same bulkhead patterns.
 
-**Project Reactor at Pivotal/VMware**: Spring WebFlux runs on Netty's event loop threads (small pool, typically N_cpu). All I/O operations must be non-blocking — any blocking call on an event loop thread blocks all requests on that thread. Virtual threads in Spring Boot 3.2 change this: blocking calls are now acceptable because virtual threads unmount during I/O.
+**Project Reactor at Pivotal/VMware**: Spring WebFlux runs on Reactor Netty's event loop threads — a small pool sized `max(availableProcessors(), 4)`. All I/O operations must be non-blocking: any blocking call on an event loop thread blocks every request multiplexed onto that thread. Note that `spring.threads.virtual.enabled=true` does **not** rescue this — that property swaps Spring's task executors and the Servlet containers (Tomcat/Jetty/Undertow) to virtual threads, but Reactor Netty keeps its own event loops. Blocking a WebFlux event loop is still fatal on Java 21+; offload with `subscribeOn(Schedulers.boundedElastic())` instead.
 
-**LinkedIn's async framework**: LinkedIn's backend is heavily async, using CompletableFuture chains throughout. Their internal framework enforces that all blocking calls are on designated IO executor threads, with automated detection of blocking calls on event loop threads.
+**LinkedIn's ParSeq**: LinkedIn open-sourced ParSeq, a framework "that makes it easier to write asynchronous code in Java". It composes work as its own `Task` abstraction (with `Task.par()`, `map()`, `andThen()`) rather than as `CompletableFuture` chains, and ships execution tracing plus operation batching and retry policies. Details of how LinkedIn enforces blocking-call placement internally are not publicly documented; treat any such enforcement claim as unverified.
 
 ---
 
@@ -514,7 +533,7 @@ The lesson is counterintuitive: the *smaller* queue is the better one. Both queu
 | Blocking + large thread pool | High | Low | Low | High (1 MB/thread) |
 | Virtual threads (Java 21) | Very high | Low | Low | Low (~few KB/VT) |
 | Reactive (Project Reactor) | Very high | Low | High | Low |
-| async-profiler + CompletableFuture | High | Low | Medium | Medium |
+| CompletableFuture on platform-thread pools | High | Low | Medium | Medium |
 
 | Backpressure | Data loss | Latency | Use Case |
 |-------------|-----------|---------|---------|
@@ -539,7 +558,9 @@ The lesson is counterintuitive: the *smaller* queue is the better one. Both queu
 
 **CompletableFuture blocking on join() in a reactive context**: Calling cf.join() inside a Flux/Mono callback blocks the event loop thread, preventing other requests from being processed. In reactive code, compose futures with thenCompose/flatMap. Never call .get() or .join() inside reactive operators.
 
-**Virtual thread pinning in HikariCP**: HikariCP before version 5.1 used synchronized for pool operations. With virtual threads, this pinned the carrier thread during pool operations. HikariCP 5.1 (Spring Boot 3.2+) replaced synchronized with ReentrantLock, fixing the pinning issue. Verify HikariCP version when enabling virtual threads.
+**Assuming a library "fixed pinning" by moving off `synchronized`**: this is a widely repeated but incorrect story about HikariCP. A community PR to swap HikariCP's `synchronized` blocks for `ReentrantLock` (#2055) was **closed unmerged** in November 2024: the maintainer's position was that none of those methods can pin a virtual thread in the first place, because pinning requires *blocking while holding the monitor* and HikariCP's synchronized sections do no blocking work — plus `ReentrantLock` would add allocation and indirection. JEP 491 (JDK 24) then removed `synchronized` pinning entirely, making the migration moot. The lesson generalizes: `synchronized` alone is not a pinning bug, and no HikariCP release notes claim a pinning fix. Before rewriting a dependency, confirm with `jdk.VirtualThreadPinned` JFR events that it actually pins.
+
+**Expecting virtual threads to raise database concurrency**: the real HikariCP interaction is that the connection pool, not the thread count, is the ceiling. Ten thousand virtual threads contending for a 10-connection pool simply relocates the queue from the thread pool to `getConnection()`, and `connectionTimeout` starts firing where thread-pool rejection used to. Size the connection pool to the database's capacity and treat virtual threads as removing only the *thread* constraint.
 
 **Using ForkJoinPool.commonPool for blocking I/O**: The common pool has parallelism = N_cpu - 1. Using it for blocking database calls monopolizes the pool for I/O waiting, leaving no threads for legitimate CPU work (ForkJoin tasks, parallel streams). Always use a dedicated IO executor for blocking operations.
 
@@ -558,9 +579,9 @@ The lesson is counterintuitive: the *smaller* queue is the better one. Both queu
 | CompletableFuture | Built-in Java async primitives |
 | Executors | Java thread pool factory |
 | Resilience4j | Bulkhead, circuit breaker, retry |
-| Virtual Threads (Java 21) | Lightweight threads for IO-bound work |
-| Structured Concurrency (Java 21 preview) | Scoped lifecycle for concurrent tasks |
-| JFR VirtualThreadPinned event | Detect virtual thread pinning |
+| Virtual Threads (Java 21+) | Lightweight threads for IO-bound work |
+| Structured Concurrency (still preview through JDK 27) | Scoped lifecycle for concurrent tasks |
+| JFR `jdk.VirtualThreadPinned` event | Detect virtual thread pinning (on by default, 20 ms threshold) |
 | `jstack` | Detect thread pool exhaustion |
 | Micrometer | Thread pool utilization metrics |
 
@@ -575,7 +596,7 @@ Use the formula: N = N_cpu * (1 + W/C) where W is average wait time and C is ave
 thenApply transforms a CompletableFuture's result with a synchronous function: CF<A> → CF<B>. thenCompose chains an asynchronous function that itself returns a CompletableFuture: CF<A> → CF<B> (where the function returns CF<B>). If you use thenApply with an async function, you get CF<CF<B>> — a nested future that requires .join() to unwrap. thenCompose flattens this: always use thenCompose for functions that return CompletableFuture.
 
 **Q: What is virtual thread pinning and how do you detect it?**
-Virtual thread pinning occurs when a virtual thread is inside a synchronized block (or synchronized method). The JVM cannot unmount a virtual thread from its carrier (platform) thread while the carrier holds the object monitor. The carrier thread blocks until the synchronized block exits. With many pinned virtual threads, carrier threads are all blocked, reducing throughput to platform-thread levels. Detection: `-Djdk.tracePinnedThreads=full` logs pinning events; JFR `jdk.VirtualThreadPinned` event records them. Fix: replace synchronized with ReentrantLock.
+Pinning is when a virtual thread cannot unmount from its carrier during a blocking operation, so the carrier platform thread stays blocked and the scheduler loses a worker. With many pinned virtual threads all carriers block and throughput falls back to platform-thread levels. What causes pinning is version-dependent, and this is the detail interviewers probe: on Java 21-23 a `synchronized` block pins, because the monitor is tied to the carrier — the standard fix there was to replace `synchronized` with `ReentrantLock`. JEP 491 in JDK 24 moved monitor ownership to the virtual thread, so `synchronized` no longer pins and that rewrite is unnecessary on Java 24+. What still pins on every version is native methods and foreign-function (FFM) calls. Detection: the JFR `jdk.VirtualThreadPinned` event works everywhere and is enabled by default with a 20 ms threshold; `-Djdk.tracePinnedThreads=full` works only on Java 21-23 and was removed in JDK 24, where setting it has no effect.
 
 **Q: What is the bulkhead pattern and how does it prevent cascade failures?**
 The bulkhead pattern isolates thread pools per dependency. Each downstream service (database A, external API B) gets a fixed thread pool. When dependency B becomes slow and exhausts its thread pool, only calls to B are affected — calls to A, database C, and other services continue using their own pools. Without bulkhead, all dependencies share a pool: one slow dependency consumes all threads and blocks everything. Resilience4j ThreadPoolBulkhead implements this pattern.
@@ -587,13 +608,13 @@ Backpressure is a signal from consumer to producer: "I can only process N items 
 The ForkJoinPool.commonPool() has a fixed parallelism equal to N_cpu - 1. When all threads are busy with blocking I/O, new tasks submitted to commonPool wait in the queue. CPU-bound parallel operations (parallel streams, ForkJoinTask) also wait. This can cause complete starvation: if IO-bound CompletableFuture tasks fill commonPool, parallel stream computations starve until those futures complete. Always use dedicated, separate thread pools for IO-bound and CPU-bound work.
 
 **Q: How does structured concurrency differ from CompletableFuture.allOf?**
-CompletableFuture.allOf() starts all futures and waits for all to complete. If one fails, the returned CF completes exceptionally but the other futures continue running until completion (or cancellation must be manual). Structured concurrency (Java 21 StructuredTaskScope) defines a scope: all forked tasks are owned by the scope. When the scope closes, all tasks must complete. ShutdownOnFailure scope cancels all tasks when any one fails. ShutdownOnSuccess cancels when any one succeeds. Lifetimes are lexically scoped — no orphaned tasks, no resource leaks from forgotten futures.
+CompletableFuture.allOf() starts all futures and waits for all to complete. If one fails, the returned CF completes exceptionally but the other futures continue running until completion (or cancellation must be manual). Structured concurrency (`StructuredTaskScope`) defines a scope: all forked tasks are owned by the scope, and when the scope closes all tasks must have completed. In the Java 21/22 preview API the policy came from subclasses — `ShutdownOnFailure` cancelled all tasks when any one failed, `ShutdownOnSuccess` when any one succeeded. JDK 25 (JEP 505) removed both: you now call `StructuredTaskScope.open()` and pass a `Joiner` such as `Joiner.allSuccessfulOrThrow()` or `Joiner.anySuccessfulOrThrow()`, and `fork()` returns a `Subtask<T>` rather than a `Future<T>`. It has been a preview API in every release from JDK 21 through JDK 27, so it still requires `--enable-preview` and is not yet safe to depend on in production. Either way lifetimes are lexically scoped — no orphaned tasks, no resource leaks from forgotten futures.
 
 **Q: What is work stealing in ForkJoinPool?**
 In a ForkJoinPool, each thread has a deque (double-ended queue) of tasks. Work stealing allows an idle thread to "steal" tasks from the tail of another thread's deque while the owner works on tasks from its own head. This reduces idle time and improves throughput when tasks have unequal sizes. ForkJoinPool is designed for recursive, divide-and-conquer tasks. It is less appropriate for IO-bound work (where threads spend most time waiting, and stealing provides no benefit).
 
 **Q: How do you implement a timeout for a CompletableFuture?**
-Java 9+ provides `orTimeout(long, TimeUnit)`: if the future does not complete within the specified time, it completes with a TimeoutException. Or `completeOnTimeout(defaultValue, long, TimeUnit)`: complete with a default value instead of exception. Internally, these use the JVM's delay mechanism (ScheduledExecutorService).
+Java 9+ provides `orTimeout(long, TimeUnit)`: if the future does not complete within the specified time, it completes with a TimeoutException. Or `completeOnTimeout(defaultValue, long, TimeUnit)`: complete with a default value instead of exception. Both schedule the timeout on an internal JDK delay scheduler that you do not supply or control — do not assume it is your executor, and never do blocking work in the timeout path. Note that `orTimeout` does not interrupt or cancel the work already in flight; it only completes the future, so the underlying task keeps running and still occupies its pool thread.
 ```java
 CompletableFuture<User> user = CompletableFuture
     .supplyAsync(() -> fetchUser(id), ioExecutor)
@@ -602,28 +623,26 @@ CompletableFuture<User> user = CompletableFuture
 ```
 
 **Q: How do you limit concurrency in a CompletableFuture pipeline processing a list?**
-For processing a stream of items with limited concurrency, use a Semaphore:
+The simplest correct answer is to bound the executor itself — a fixed pool of 10 already caps concurrency at 10, and no semaphore is needed. Use a Semaphore only when several pipelines share one executor and each needs its own limit. Two traps make the naive version wrong: `Semaphore.acquire()` throws the checked `InterruptedException`, which a `Supplier` lambda cannot propagate (it will not compile — use `acquireUninterruptibly()`, or catch and restore the interrupt), and acquiring *inside* the task limits nothing, because every task has already been submitted and is merely blocking a pool thread while it waits. Acquire before submitting:
 ```java
-Semaphore semaphore = new Semaphore(10); // max 10 concurrent
+Semaphore semaphore = new Semaphore(10); // max 10 in flight
 List<CompletableFuture<Result>> futures = items.stream()
-    .map(item -> CompletableFuture.supplyAsync(() -> {
-        semaphore.acquire();
-        try {
-            return process(item);
-        } finally {
-            semaphore.release();
-        }
-    }, ioExecutor))
+    .map(item -> {
+        semaphore.acquireUninterruptibly();   // throttles the SUBMITTER
+        return CompletableFuture
+            .supplyAsync(() -> process(item), ioExecutor)
+            .whenComplete((r, ex) -> semaphore.release());
+    })
     .toList();
 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 ```
 Or use Project Reactor's `Flux.flatMap(fn, maxConcurrency)` for reactive pipelines.
 
 **Q: What metrics should you monitor for a thread pool?**
-Active threads (currently executing tasks), queue size (tasks waiting), completed tasks (throughput), rejected tasks (pool overloaded), thread pool utilization = active / pool_size. Alerts: queue > 0 consistently (pool is bottleneck), utilization consistently > 80% (approaching exhaustion), rejection rate > 0 (tasks being dropped). Use Micrometer's ThreadPoolTaskExecutorMetrics or register via `executor.recordStats()` for a ThreadPoolExecutor.
+Active threads (currently executing tasks), queue size (tasks waiting), completed tasks (throughput), rejected tasks (pool overloaded), thread pool utilization = active / pool_size. Alerts: queue > 0 consistently (pool is bottleneck), utilization consistently > 80% (approaching exhaustion), rejection rate > 0 (tasks being dropped). `ThreadPoolExecutor` exposes `getActiveCount()`, `getPoolSize()`, `getQueue().size()` and `getCompletedTaskCount()` directly — note it has no `recordStats()` method, and rejections are not counted for you, so wrap the `RejectedExecutionHandler` in a counter yourself. To wire this into Micrometer use `ExecutorServiceMetrics.monitor(registry, executor, "io-pool")`, which emits `executor.active`, `executor.queued`, `executor.queue.remaining`, `executor.pool.size` and `executor.completed`; for a Spring `ThreadPoolTaskExecutor`, pass its `getThreadPoolExecutor()`.
 
 **Q: When would you use virtual threads instead of reactive programming?**
-Use virtual threads when: you want to write simple, blocking, sequential code without reactive complexity; your service is IO-bound (database calls, HTTP calls); you are using Spring Boot 3.2+ which has first-class virtual thread support. Use reactive programming when: you need fine-grained backpressure control; you are composing complex async pipelines with error handling across many stages; you are migrating existing reactive code. Virtual threads and reactive can coexist — Spring WebFlux on virtual threads is not contradictory, but the reactive model provides additional composability.
+Use virtual threads when: you want to write simple, blocking, sequential code without reactive complexity; your service is IO-bound (database calls, HTTP calls); you are using Spring Boot 3.2+ which has first-class virtual thread support. Use reactive programming when: you need fine-grained backpressure control; you are composing complex async pipelines with error handling across many stages; you are migrating existing reactive code. Be precise about what `spring.threads.virtual.enabled=true` does: it switches Spring's task executors and the Servlet containers to virtual threads, but leaves Reactor Netty's event loops alone, so enabling it does not make blocking calls safe inside a WebFlux handler chain.
 
 **Q: How do you detect thread pool exhaustion in production?**
 Signs: increasing request latency (tasks queuing), increasing error rate (if queue is bounded and rejects), thread dump showing all threads WAITING in queue.take() with many queued tasks. Monitor: hikaricp_connections_pending (DB pool), executor_queue_size (task queue depth), executor_active_count approaching executor_pool_size. Alert on: queue depth growing, utilization consistently above 80%, rejection count > 0. Preventive: circuit breakers that stop sending work when downstream is slow.
@@ -642,8 +661,8 @@ Reactive Streams (java.util.concurrent.Flow in Java 9+) defines four interfaces:
 - Always use explicit executors for CompletableFuture in production — never rely on ForkJoinPool.commonPool for blocking I/O.
 - Use thenCompose (not thenApply) for functions that return CompletableFuture.
 - Implement bulkhead isolation with separate thread pools per downstream dependency.
-- Enable virtual threads in Spring Boot 3.2+ for IO-bound services (spring.threads.virtual.enabled=true).
-- Check for virtual thread pinning with -Djdk.tracePinnedThreads=full after enabling virtual threads.
+- Enable virtual threads in Spring Boot 3.2+ for IO-bound services (spring.threads.virtual.enabled=true). It covers Spring's task executors and the Servlet containers, not Reactor Netty event loops.
+- Check for virtual thread pinning with the `jdk.VirtualThreadPinned` JFR event, which works on every version. `-Djdk.tracePinnedThreads=full` only applies to Java 21-23; it was removed in JDK 24 and is silently ignored there.
 - Use bounded queues in thread pools and configure rejection policies explicitly.
 - Monitor thread pool queue depth and utilization in Micrometer; alert before exhaustion.
 
@@ -651,7 +670,7 @@ Reactive Streams (java.util.concurrent.Flow in Java 9+) defines four interfaces:
 
 ## 14. Case Study
 
-**Problem**: A product detail service made 4 downstream calls per request: fetchProduct(), fetchInventory(), fetchReviews(), fetchRecommendations(). All were sequential. Average latency: 4 * 80ms = 320ms.
+**Problem** (illustrative composite, not a published incident; the latency figures are round numbers chosen to make the arithmetic checkable): A product detail service made 4 downstream calls per request: fetchProduct(), fetchInventory(), fetchReviews(), fetchRecommendations(). All were sequential. Average latency: 4 * 80ms = 320ms.
 
 **Phase 1: Parallel execution with CompletableFuture**:
 ```java
@@ -676,8 +695,9 @@ CompletableFuture<List<Product>> recsFuture =
 
 CompletableFuture.allOf(productFuture, invFuture, reviewsFuture, recsFuture)
     .join();
-// Total: max(80ms, 80ms, 80ms, 200ms timeout) = 200ms (limited by timeout)
-// Worst case without timeout: 80ms (all four in parallel)
+// Normal case: max(80ms, 80ms, 80ms, 80ms) = 80ms (all four in parallel)
+// Recommendations degraded: max(80, 80, 80, 200ms cap) = 200ms, empty list
+// Without the orTimeout cap, a hung recommendations call hangs the whole page
 ```
 
 **What the formula is telling you.** "Four calls that used to add up now only overlap — so the page costs whatever the slowest single call costs, and the timeout you put on the slowest one becomes the page's latency."
@@ -716,13 +736,18 @@ Executor recsPool = Executors.newFixedThreadPool(5);
 // Recommendations can be slow without affecting product/inventory
 ```
 
-**Phase 3: Enable virtual threads (Java 21)**:
-- Replaced all platform thread pools with virtual thread executor.
-- Each downstream call creates a virtual thread (zero-cost for blocking wait).
-- Memory: 4 VTs * few KB vs 4 platform threads * 1 MB.
+**Phase 3: Enable virtual threads (Java 21+)**:
+- Replaced all platform thread pools with a virtual thread executor.
+- Each downstream call creates a virtual thread (near-zero cost for a blocking wait).
+- Memory: 4 VTs * few KB vs 4 platform threads * ~1 MB.
+- Caveat: this removes only the thread ceiling. The four downstream clients and any
+  connection pool behind them still cap real concurrency, and bulkhead limits must be
+  re-expressed as semaphores since there is no longer a pool size to bound them.
 
-**Results**:
-- Sequential (before): 320ms p50, 800ms p99
-- Parallel CF: 80ms p50, 200ms p99 (4x improvement)
+**Results** (illustrative figures consistent with the arithmetic above, not measured production data):
+- Sequential (before): 320ms p50
+- Parallel CF: 80ms p50 — 320/80 = 4x, the ceiling set by the slowest branch
+- Recommendations degraded: 200ms p50, bounded by `orTimeout` instead of hanging
 - With bulkhead: recommendations slowness no longer affects product/inventory
-- With virtual threads: 10x increase in concurrent requests with same memory
+- With virtual threads: per-request memory drops from ~1 MB to a few KB, so concurrency
+  becomes limited by the downstream services rather than by RAM

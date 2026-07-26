@@ -42,8 +42,9 @@ sequenceDiagram
     Note right of NOTIF: Best-effort only —<br/>failure does NOT trigger compensation
 
     alt Any of steps 1-3 (Inventory, Payment, Order) fails
-        ORCH->>INV: ReleaseInventoryCommand
         ORCH->>ORD: CancelOrderCommand
+        ORCH->>PAY: RefundPaymentCommand<br/>only if the charge already succeeded
+        ORCH->>INV: ReleaseInventoryCommand
         Note over ORCH: status = COMPENSATED
     end
 ```
@@ -82,11 +83,11 @@ Orchestration chosen because: payment flow has complex compensation logic that i
 
 **2. Idempotency Key Table**
 
-Every payment request includes a client-generated idempotency key (UUID). Before processing, the API layer checks the `payment_idempotency` table. If the key exists, it returns the cached response (the exact same response as the original request). This prevents double-charges from client retries. The idempotency key has a 24-hour TTL.
+Every payment request includes a client-generated idempotency key (UUID). Before processing, the API layer checks the `payment_idempotency` table. If the key exists, it returns the cached response (the exact same response as the original request). This stops a client retry that arrives *after* the first request committed. A retry that arrives while the first is still in flight sees no row yet, so the lookup alone is not sufficient — the primary key on `idempotency_key` is what actually serializes the duplicate, and the loser is rejected rather than starting a second saga. The idempotency key has a 24-hour TTL, matching the minimum retention Stripe documents for its own keys.
 
 **3. Outbox Pattern for Command Publishing**
 
-Every saga state update and corresponding command publication happen atomically: the saga state is updated in the DB AND the command is written to the `outbox_events` table in the same `@Transactional` method. The outbox relay publishes commands to Kafka. This ensures no command is lost if Kafka is temporarily unavailable.
+Every saga state update and corresponding command publication happen atomically: the saga state is updated in the DB AND the command is written to the `outbox_events` table in the same `@Transactional` method. The outbox relay publishes commands to Kafka in `seq` order. This ensures no command is lost if Kafka is temporarily unavailable.
 
 **4. Compensating Transactions**
 
@@ -96,11 +97,11 @@ Each saga step has a defined compensating transaction:
 - Order confirmation → Cancel order
 - Notification → No compensation (best-effort, non-critical)
 
-Compensating transactions must be idempotent (safe to retry) and do not have to be perfect undos (e.g., a refund is a new debit transaction, not a deletion of the original charge).
+Compensating transactions must be idempotent (safe to retry) and do not have to be perfect undos (e.g., a refund is a new transaction that credits the cardholder, not a deletion of the original charge). The refund case shows why "not a perfect undo" is literal rather than pedantic: Stripe has not returned the processing fee on refunds since 2019, so a charge-then-refund round trip leaves the merchant down the original fee even though the customer is made whole.
 
 **5. External Payment Gateway Idempotency**
 
-Calls to the external payment gateway (Stripe-like API) include the `sagaId` as the idempotency key. If the saga retries the charge step after a timeout, the gateway returns the same result for the same idempotency key rather than charging twice.
+Calls to the external payment gateway (Stripe-like API) include the `sagaId` as the idempotency key. If the saga retries the charge step after a timeout, the gateway returns the same result for the same idempotency key rather than charging twice — Stripe, for example, saves the status code and body of the first request under that key and replays them, including the failures. Two limits are worth knowing: replaying only starts once the first request has finished, so a retry fired while the original is still executing is rejected as a conflict rather than deduplicated, and the key is only guaranteed for 24 hours, after which the same key is treated as a fresh request.
 
 ---
 
@@ -118,6 +119,7 @@ CREATE TABLE payment_sagas (
     currency        VARCHAR(3) NOT NULL DEFAULT 'USD',
     status          VARCHAR(50) NOT NULL,          -- PENDING, INVENTORY_RESERVING, ...
     current_step    VARCHAR(100),
+    charge_id       VARCHAR(100),                  -- gateway charge id; required to refund
     failure_reason  TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -149,12 +151,15 @@ CREATE TABLE payment_audit_log (
 -- Outbox events
 CREATE TABLE outbox_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    seq             BIGSERIAL NOT NULL,            -- insertion order; UUIDs do not sort
     aggregate_id    VARCHAR(36) NOT NULL,
     event_type      VARCHAR(200) NOT NULL,
     payload         JSONB NOT NULL,
     published_at    TIMESTAMPTZ
 );
-CREATE INDEX idx_outbox_unpublished ON outbox_events(id) WHERE published_at IS NULL;
+-- The relay reads and publishes in seq order; ordering by the random UUID id would
+-- deliver a saga's commands out of order.
+CREATE INDEX idx_outbox_unpublished ON outbox_events(seq) WHERE published_at IS NULL;
 ```
 
 ### Payment API with Idempotency Check
@@ -165,10 +170,11 @@ CREATE INDEX idx_outbox_unpublished ON outbox_events(id) WHERE published_at IS N
 @RequestMapping("/api/payments")
 public class PaymentController {
 
-    private final PaymentSagaService sagaService;
+    private final PaymentSagaOrchestrator sagaService;
     private final PaymentIdempotencyRepository idempotencyRepo;
 
     @PostMapping
+    @Transactional   // saga row and idempotency row must commit together, or neither
     public ResponseEntity<PaymentResponse> initiatePayment(
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody PaymentRequest request) {
@@ -186,8 +192,13 @@ public class PaymentController {
 
         PaymentResponse response = PaymentResponse.accepted(saga.getId());
 
-        // Store idempotency record
-        idempotencyRepo.save(PaymentIdempotency.builder()
+        // Store idempotency record. The read above is NOT enough on its own: two
+        // concurrent requests carrying the same key both miss it. saveAndFlush forces
+        // the INSERT now, so the loser of the race hits the PRIMARY KEY constraint and
+        // the whole request — saga row included — rolls back instead of starting a
+        // second saga. The violation surfaces as 409, matching how Stripe rejects a
+        // second in-flight request on a key already in progress.
+        idempotencyRepo.saveAndFlush(PaymentIdempotency.builder()
             .idempotencyKey(idempotencyKey)
             .sagaId(saga.getId())
             .responseStatus(202)
@@ -195,6 +206,11 @@ public class PaymentController {
             .build());
 
         return ResponseEntity.accepted().body(response);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<Void> onDuplicateInFlightKey(DataIntegrityViolationException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).build();
     }
 }
 ```
@@ -269,6 +285,8 @@ public class PaymentSagaOrchestrator {
 
         if (event.isSuccess()) {
             saga.setStatus(SagaStatus.PAYMENT_CHARGED);
+            // Persist the gateway charge id — the refund compensation cannot be issued without it.
+            saga.setChargeId(event.getChargeId());
             appendAuditLog(saga, SagaStatus.PAYMENT_CHARGING, SagaStatus.PAYMENT_CHARGED,
                 "Payment charged: " + event.getChargeId());
 
@@ -298,17 +316,30 @@ public class PaymentSagaOrchestrator {
         }
     }
 
+    // Called by the listeners above via self-invocation, which bypasses the Spring proxy:
+    // this @Transactional is inert on those paths and the work simply joins the listener's
+    // transaction. That is the behaviour we want here, but do not read the annotation as
+    // giving compensation a transaction of its own.
     @Transactional
     public void startCompensation(PaymentSaga saga, String reason) {
+        // Capture the previous status BEFORE mutating it, or the audit row records
+        // COMPENSATING -> COMPENSATING and loses the step that actually failed.
+        SagaStatus previous = saga.getStatus();
         saga.setStatus(SagaStatus.COMPENSATING);
         saga.setFailureReason(reason);
-        appendAuditLog(saga, saga.getStatus(), SagaStatus.COMPENSATING, reason);
+        appendAuditLog(saga, previous, SagaStatus.COMPENSATING, reason);
 
-        // Compensate in reverse order of execution
+        // Compensate in reverse order of execution: order -> payment -> inventory.
+        publishCommand(saga, new CancelOrderCommand(saga.getId(), saga.getOrderId()));
+        if (saga.wasPaymentCharged()) {
+            // Mandatory: if the charge succeeded and order confirmation then failed,
+            // omitting this leaves the customer charged for a cancelled order.
+            publishCommand(saga, new RefundPaymentCommand(saga.getId(), saga.getChargeId(),
+                saga.getAmount(), saga.getCurrency()));
+        }
         if (saga.wasInventoryReserved()) {
             publishCommand(saga, new ReleaseInventoryCommand(saga.getId(), saga.getOrderId()));
         }
-        publishCommand(saga, new CancelOrderCommand(saga.getId(), saga.getOrderId()));
         sagaRepository.save(saga);
     }
 
@@ -361,19 +392,19 @@ Two-phase commit would provide stronger consistency (all-or-nothing) but the coo
 **Synchronous vs Asynchronous**:
 The payment flow could be fully synchronous (API waits for all steps to complete, returns final status). This is simpler but requires holding the HTTP connection open for potentially 5-10 seconds across multiple service calls. The asynchronous approach returns 202 Accepted immediately and delivers the final result via webhook or polling — better for reliability and user experience.
 
-**Exactly-Once Charge Guarantee**:
-The external payment gateway is called with `sagaId` as the idempotency key. If the saga retries the charge step after a timeout, the gateway returns the same charge ID rather than charging again. This, combined with the saga's own idempotency key on the API layer, provides end-to-end exactly-once charging semantics.
+**Effectively-Once Charge Guarantee**:
+The external payment gateway is called with `sagaId` as the idempotency key. If the saga retries the charge step after a timeout, the gateway returns the same charge ID rather than charging again. Combined with the saga's own idempotency key at the API layer, this gives *effectively-once* charging, not exactly-once: the delivery is still at-least-once and deduplication is what makes the repeats harmless. No mainstream gateway promises more — Stripe's idempotency contract is a replay of the first stored response, bounded by a 24-hour key lifetime, and it explicitly does not cover a duplicate that arrives while the first request is still executing. Treat the guarantee as "at most one charge per key, for as long as the key lives", and reconcile against the gateway's own records rather than assuming the invariant holds.
 
 ---
 
 ## Interview Discussion Points
 
-- **How do you prevent double-charging if the client retries?** Idempotency key table at the API layer: first check, return cached response if key exists. The key expires after 24 hours.
+- **How do you prevent double-charging if the client retries?** Idempotency key table at the API layer: first check, return cached response if key exists. The lookup handles retries that arrive after the first request committed; the primary key on `idempotency_key` handles the harder case of two duplicates in flight at once, where both miss the lookup and the loser's insert is rejected. The key expires after 24 hours.
 
 - **What happens if the orchestrator crashes mid-saga?** The saga state is persisted in PostgreSQL. On restart, a `@Scheduled` job scans for sagas in non-terminal states that have not been updated in > 5 minutes and resubmits the current step's command. Kafka consumer idempotency in each service prevents double-processing.
 
-- **How do you ensure the compensation transactions are executed even if the orchestrator crashes during compensation?** Same recovery mechanism: on restart, sagas in COMPENSATING state have their compensation commands re-submitted. Compensation commands are idempotent: releasing already-released inventory is a no-op, cancelling an already-cancelled order is a no-op.
+- **How do you ensure the compensation transactions are executed even if the orchestrator crashes during compensation?** Same recovery mechanism: on restart, sagas in COMPENSATING state have their compensation commands re-submitted. Compensation commands are idempotent: releasing already-released inventory is a no-op, cancelling an already-cancelled order is a no-op, and a refund replayed under the same gateway idempotency key returns the original refund instead of issuing a second one.
 
-- **What is the audit log used for?** Regulatory compliance (financial services require complete audit trail of every payment state transition), debugging (trace exactly what happened for a disputed charge), and analytics (measure saga step latency to identify bottlenecks).
+- **What is the audit log used for?** Compliance evidence, debugging, and analytics. Payment operators are generally expected to be able to reconstruct the history of any individual payment on demand, which is what an append-only transition log gives you; it also lets you trace exactly what happened for a disputed charge, and measure saga step latency to identify bottlenecks. Which specific regime applies and what it demands depends on the card schemes, the acquirer contract and the jurisdiction, so treat the retention period here as a placeholder to be set from your own obligations rather than a figure carried over from this design.
 
 - **How do you scale the orchestrator?** The orchestrator is stateless (all state in DB). Multiple instances can run simultaneously. Each Kafka consumer group has one active consumer per partition. Partition key = `sagaId` ensures one saga is always processed by the same consumer instance (partition affinity), preventing concurrent processing of the same saga.

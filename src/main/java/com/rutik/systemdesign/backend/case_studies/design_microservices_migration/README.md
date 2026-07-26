@@ -158,12 +158,14 @@ spring:
     name: api-gateway
   cloud:
     gateway:
-      discovery:
-        locator:
-          enabled: true
-      default-filters:
-        - AddRequestHeader=X-Gateway-Version, 2.0
-        - AddResponseHeader=X-Processed-By, api-gateway
+      server:
+        webflux:            # prefix since Spring Cloud 2025.0; bare
+          discovery:        # spring.cloud.gateway.* is deprecated and warns
+            locator:
+              enabled: true
+          default-filters:
+            - AddRequestHeader=X-Gateway-Version, 2.0
+            - AddResponseHeader=X-Processed-By, api-gateway
 ```
 
 ### Step 2: Canary Traffic Splitting for Search Service
@@ -213,17 +215,19 @@ public class SearchRoutingConfig {
     "plugin.name": "pgoutput",
     "slot.name": "inventory_migration_slot",
 
-    // Only capture inventory-related tables
     "table.include.list": "public.inventory_items,public.inventory_reservations",
-
-    "transforms": "route",
-    "transforms.route.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
-    "transforms.route.renames": "prod_id:productId,inv_qty_on_hand:quantityOnHand",
 
     "topic.prefix": "migration"
   }
 }
 ```
+
+No field-renaming SMT here, deliberately. `ReplaceField$Value` acts on the **top-level** fields of
+the record value, and a Debezium record's value is the change envelope (`before`, `after`, `source`,
+`op`, `ts_ms`) — `prod_id` and `inv_qty_on_hand` live nested inside `after`, so a rename configured
+at that level is a silent no-op. To rename in Connect you must first flatten with
+`ExtractNewRecordState`, which discards the `before` image the consumer below needs for DELETEs.
+Renaming is therefore left to the anti-corruption layer in the consumer (decision 5).
 
 ```java
 // Inventory service CDC consumer — populates new service's DB
@@ -262,6 +266,7 @@ public class InventoryShadowValidator {
     private final MonolithInventoryClient monolithClient;
     private final InventoryService inventoryService;
     private final MeterRegistry meterRegistry;
+    private final AlertingService alertingService;
 
     @Scheduled(fixedDelay = 30000)  // every 30 seconds
     public void validateConsistency() {

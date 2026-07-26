@@ -10,7 +10,7 @@ If you only have time for three case studies, read these first:
 
 | File | Why |
 |------|-----|
-| [Design a Payment Processor](design_payment_processor/) | Covers the hardest backend problem — distributed saga with rollback, outbox pattern, and idempotency. These three patterns appear together in nearly every payment/order system interview. |
+| [Design a Payment Processor](design_payment_processor/) | Covers the hardest backend problem — distributed saga with compensating transactions (a semantic undo, not a rollback: a saga step is already committed and can only be counteracted by a new transaction), outbox pattern, and idempotency. These three patterns appear together in nearly every payment/order system interview. |
 | [Design a Feed Service](design_feed_service/) | Teaches the canonical fan-out tradeoff (write vs read) and Redis sorted-set patterns that recur in every social/recommendation system. |
 | [Design a Booking System](design_booking_system/) | Introduces the optimistic vs pessimistic locking decision under high concurrency — the core tension in any reservation or inventory system. |
 
@@ -30,7 +30,7 @@ Grouped by primary engineering concern, not product category:
 
 | Case Study | Primary Concern | What It Teaches |
 |------------|----------------|----------------|
-| [Design an Event-Driven Order System](design_event_driven_order_system/) | Kafka EOS, CQRS, transactional outbox | How to achieve exactly-once order processing end-to-end: Kafka idempotent producer + transactional outbox + consumer idempotency; CQRS read model projection via Kafka Streams; DLQ handling and dead-letter replay. |
+| [Design an Event-Driven Order System](design_event_driven_order_system/) | Kafka EOS, CQRS, transactional outbox | How to get effectively-once order processing: the outbox gives at-least-once publication with no lost or fabricated events, and a consumer-side idempotency table absorbs the duplicates; CQRS read-model projection; DLQ handling and dead-letter replay. |
 
 ### Distributed Transactions & Saga
 
@@ -84,8 +84,7 @@ flowchart LR
 
     booking(["design_booking_system"]) -->|"locking primitives"| payment(["design_payment_processor<br/>(saga + outbox)"])
     payment -->|"outbox pattern reused"| eventOrder(["design_event_driven_order_system<br/>(Kafka EOS + CQRS)"])
-    msFund(["microservices_fundamentals<br/>(external module)"]) -->|"decomposition theory"| migration(["design_microservices_migration"])
-    migration -->|"traffic cutover patterns reused"| eventOrder
+    msFund(["microservices_fundamentals<br/>(external module)"]) -->|"decomposition theory"| migration(["design_microservices_migration<br/>(standalone: strangler fig + CDC)"])
     feed(["design_feed_service<br/>(standalone: fan-out + Redis)"])
 
     class booking,feed base
@@ -94,7 +93,7 @@ flowchart LR
     class msFund frozen
 ```
 
-Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service` has no prerequisites and can be read standalone.
+Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service` and `design_microservices_migration` share no patterns with the others and can each be read standalone.
 
 ---
 

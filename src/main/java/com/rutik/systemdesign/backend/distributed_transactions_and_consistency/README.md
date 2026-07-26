@@ -14,7 +14,7 @@ Distributed transactions coordinate data mutations that span multiple databases,
 
 In a monolith backed by a single relational database, the database engine handles ACID atomicity. Once a system is decomposed into microservices, each service owns its own datastore. A business operation such as "debit account A and credit account B across two different services" can no longer rely on a single database transaction. Network partitions, node crashes, and message loss mean that some participants may commit while others do not, leaving the system in an inconsistent state.
 
-The core tension is: strong consistency (all nodes agree immediately) conflicts with availability and partition tolerance (CAP theorem). Distributed transaction protocols attempt to resolve this tension with varying tradeoffs between correctness guarantees, availability, and complexity.
+The core tension is stated by the CAP theorem (Gilbert and Lynch's 2002 proof of Brewer's conjecture): **when a network partition occurs**, a system cannot be both linearizable and available — it must give up one. CAP is not a standing "pick two of three" menu, and no system "chooses CA"; outside a partition a system can be both consistent and available, and the C-vs-A choice can be made per operation (Brewer, "CAP Twelve Years Later", 2012). Distributed transaction protocols differ in which side of that partition-time choice they take, and at what cost in complexity.
 
 Key concerns:
 - **Atomicity across services**: either all local transactions commit or all are compensated.
@@ -86,16 +86,16 @@ The coordinator sends a `PREPARE` message to all participants. Each participant:
 | After sending COMMIT to some but not all | Recovery: re-sends to remaining participants; they apply COMMIT idempotently |
 
 **The blocking problem**
-A participant that voted `VOTE_COMMIT` cannot unilaterally abort. It holds locks and waits. If the coordinator crashes after the prepare phase, the participant is blocked until the coordinator recovers. In a system with hundreds of participants and an SLA of 100ms, a coordinator failure can hold locks for minutes, causing cascading timeouts. This is why 2PC is rarely acceptable in microservices.
+A participant that has voted `VOTE_COMMIT` is in the *prepared* (uncertain) state: it may neither commit nor abort on its own, so it holds its locks and waits. It can run a cooperative termination protocol and ask its peers, but that only helps if some reachable peer already knows the decision — if every peer it can reach is also prepared-and-uncertain, none of them can decide, and the transaction is stuck until the coordinator (or its durable decision log) comes back. Note precisely what is blocked: only the prepared participants and anything contending for their locks; a participant that voted `VOTE_ABORT`, or that never received `PREPARE`, can time out and abort unilaterally. In a system with hundreds of participants and an SLA of 100ms, a coordinator failure can hold locks for minutes, causing cascading timeouts. This is why 2PC is rarely acceptable in microservices.
 
 **Why 2PC is rarely used in microservices**
 - Participants hold locks across a network round-trip (2× latency minimum).
 - Coordinator is a single point of failure.
 - Recovery requires the coordinator log to be durable and accessible.
 - Heterogeneous services (different databases, messaging systems) rarely expose the XA interface needed for 2PC.
-- P in CAP: 2PC is not partition-tolerant; if a participant cannot reach the coordinator, it blocks.
+- CAP: 2PC keeps consistency and gives up availability during a partition (it is CP, not "not partition-tolerant") — a participant that cannot reach the coordinator blocks rather than deciding on its own.
 
-**Read it like this.** "Every participant must hold its locks for the full width of two network round trips, because it cannot know the outcome until the slowest participant has voted and the coordinator has told everyone."
+**Read it like this.** "A participant holds its locks for up to the full width of two network round trips, because it cannot know the outcome until the slowest participant has voted and the coordinator has told everyone."
 
 The "2× latency minimum" line is doing a lot of work. It is not the coordinator's latency budget that hurts — it is that the number becomes the *lock hold time* on every row the transaction touched, and lock hold time is the denominator of contended throughput.
 
@@ -104,7 +104,7 @@ The "2× latency minimum" line is doing a lot of work. It is not the coordinator
 | RTT | One network round trip between coordinator and a participant |
 | Phase 1 | PREPARE out, votes back. One RTT, paced by the *slowest* participant |
 | Phase 2 | COMMIT/ABORT out, acks back. One more RTT |
-| `2 × RTT` | Minimum lock hold time at every participant. The number that matters |
+| `2 × RTT` | Upper bound on lock hold at a participant, measured from its own PREPARE to the decision. The first participant prepared pays close to the full 2 RTT; the slowest voter pays about 1. Size capacity off the bound |
 | Blocking window | If the coordinator dies after phase 1, lock hold becomes "until coordinator recovery" — unbounded |
 | Contended throughput | `1 / lock hold time` — serial transactions per second on any single hot row |
 
@@ -114,7 +114,7 @@ The "2× latency minimum" line is doing a lot of work. It is not the coordinator
   Phase 1 (PREPARE + votes)     10 ms
   Phase 2 (COMMIT + acks)       10 ms
   ------------------------------------
-  Lock hold per participant     20 ms      vs ~1 ms for a purely local transaction  = 20x
+  Lock hold (worst case)        20 ms      vs ~1 ms for a purely local transaction  = 20x
 
   Against a 100 ms SLA:  100 - 20 = 80 ms left for all business logic
 
@@ -144,11 +144,11 @@ Adds a `PRE-COMMIT` phase between prepare and commit to allow participants to de
 
 **What it solves**: In 2PC, a participant in the prepared state cannot distinguish between "coordinator crashed before deciding" and "coordinator decided ABORT". In 3PC, if a participant has received `PRE-COMMIT`, it knows the coordinator decided COMMIT, so it can complete the commit independently.
 
-**What it does NOT solve**: 3PC assumes a synchronous network with bounded message delays. In the presence of network partitions, two groups of participants can independently decide different outcomes (split-brain). 3PC is therefore not partition-tolerant and is rarely used in practice.
+**What it does NOT solve**: 3PC is non-blocking only under a *synchronous* model — bounded message delay, bounded clock drift, and fail-stop crashes — because its timeouts must be able to distinguish "crashed" from "slow". Real networks are asynchronous, and non-blocking atomic commitment there is as hard as consensus, which FLP (Fischer, Lynch and Paterson, 1985) proved no deterministic protocol can guarantee — agreement and termination together, with even one crash failure. So 3PC does not "solve" 2PC's blocking in a real network; it only moves the failure. Worse, its timeout-driven unilateral commit trades safety away: during a network partition two groups can time out and decide different outcomes (split-brain), so 3PC can end up *inconsistent* where 2PC would merely have stalled. That, not a lack of partition tolerance, is why 3PC is essentially never used in practice; production systems reach for consensus-replicated coordinators (Paxos/Raft) instead.
 
 ### 4.3 Saga Pattern
 
-A saga is a sequence of local transactions. Each local transaction updates a single service's database and publishes an event or sends a command. If step N fails, steps N-1 through 1 are compensated in reverse order.
+A saga (Garcia-Molina and Salem, "Sagas", SIGMOD 1987) is a sequence of local transactions. Each local transaction updates a single service's database and publishes an event or sends a command. If step N fails, steps N-1 through 1 are compensated in reverse order. As the original paper defines it, a compensating transaction undoes a step **semantically** — it restores an acceptable approximation of the prior state, not the exact prior state.
 
 **Choreography-based saga**
 - No central coordinator.
@@ -262,7 +262,7 @@ flowchart LR
     class respond io
 ```
 
-The single lookup is the whole pattern: a new key falls through to normal processing, a completed key short-circuits to the stored response, and an in-flight key — the retry racing its own original request — gets a 409 instead of double-processing, which is exactly how Stripe's production implementation (section 7) behaves for 24 hours per key.
+The single lookup is the whole pattern: a new key falls through to normal processing, a completed key short-circuits to the stored response, and an in-flight key — the retry racing its own original request — gets a 409 instead of double-processing, which matches Stripe's production behaviour: Stripe's HTTP status reference defines 409 Conflict as "the request conflicts with another request (perhaps due to using the same idempotent key)", and keys are retained for at least 24 hours (section 7).
 
 Idempotency keys should expire after a reasonable window (24 hours for payments, 7 days for long-running orders) to prevent unbounded table growth.
 
@@ -384,7 +384,7 @@ flowchart LR
     class consumer io
 ```
 
-Debezium tails the WAL/binlog directly instead of polling the outbox table, so the order write and its outbox insert commit in one local transaction while the CDC connector streams changes to Kafka with sub-100ms latency and zero added query load on the database.
+Debezium tails the WAL/binlog directly instead of polling the outbox table, so the order write and its outbox insert commit in one local transaction while the CDC connector streams changes to Kafka with no added query load on the database. End-to-end lag is bounded by the WAL flush plus connector and broker latency rather than by a poll interval — typically well under a second, though Debezium publishes no latency guarantee and the real figure is workload- and deployment-specific.
 
 ---
 
@@ -412,6 +412,9 @@ public class OutboxEvent {
 
     @Column(nullable = false)
     private boolean published;
+
+    @Column
+    private Instant publishedAt;
 
     // standard constructors, getters, setters
 }
@@ -451,6 +454,7 @@ public class OrderService {
 }
 
 // Relay process — polls outbox and publishes to broker
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class OutboxRelay {
@@ -465,16 +469,21 @@ public class OutboxRelay {
             .findTop100ByPublishedFalseOrderByCreatedAtAsc();
 
         for (OutboxEvent event : pending) {
-            kafkaTemplate.send("domain-events", event.getId().toString(), event.getPayload())
-                .addCallback(
-                    result -> markPublished(event.getId()),
-                    ex -> log.error("Failed to publish event {}", event.getId(), ex)
-                );
-        }
-    }
+            try {
+                // Since spring-kafka 3.0 send() returns CompletableFuture<SendResult>,
+                // not the removed ListenableFuture — there is no addCallback(). Block
+                // here on purpose: the "published" flag must be set inside THIS
+                // transaction, so it cannot be set from an async producer thread.
+                kafkaTemplate.send("domain-events", event.getId().toString(), event.getPayload())
+                    .get(5, TimeUnit.SECONDS);
 
-    private void markPublished(UUID id) {
-        outboxRepository.markAsPublished(id, Instant.now());
+                event.setPublished(true);      // managed entity — flushed on commit
+                event.setPublishedAt(Instant.now());
+            } catch (Exception ex) {
+                // Leave published = false; the next poll retries. At-least-once by design.
+                log.error("Failed to publish event {}, will retry next poll", event.getId(), ex);
+            }
+        }
     }
 }
 ```
@@ -591,6 +600,7 @@ public class OrderSagaOrchestrator {
 ### 6.3 Idempotent Consumer with Transactional Inbox
 
 ```java
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class InventoryEventConsumer {
@@ -603,7 +613,10 @@ public class InventoryEventConsumer {
     public void handle(ConsumerRecord<String, String> record) {
         String idempotencyKey = record.topic() + "-" + record.partition() + "-" + record.offset();
 
-        // Attempt to claim this event — throws DataIntegrityViolationException on duplicate
+        // Cheap fast path for an obvious redelivery. It is NOT the safety mechanism:
+        // check-then-insert is a race. The PRIMARY KEY on idempotency_key is what
+        // actually prevents double-processing — a concurrent duplicate fails the
+        // save() below with DataIntegrityViolationException and rolls this transaction back.
         if (inboxRepository.existsByIdempotencyKey(idempotencyKey)) {
             log.info("Duplicate event, skipping: {}", idempotencyKey);
             return;
@@ -659,23 +672,28 @@ public void onCreditFailed(UUID sagaId) {
 | Semantic | Kafka Config | Throughput Impact | Duplicate Risk |
 |---|---|---|---|
 | At-most-once | `acks=0`, no retry | Highest — no ack wait | High data loss |
-| At-least-once | `acks=all`, `retries=MAX_INT`, idempotent=false | Medium | Low; duplicates possible |
-| Exactly-once (producer) | `enable.idempotence=true`, `acks=all`, `transactional.id=x` | ~15% overhead | None within Kafka cluster |
+| At-least-once | `acks=all`, `retries=MAX_INT` (already the default), `enable.idempotence=false` — note this is an explicit *downgrade*, since idempotence is enabled by default when no conflicting config is set | Medium | Low; duplicates possible |
+| Exactly-once (producer) | `enable.idempotence=true`, `acks=all`, `transactional.id=x` | ~3% throughput loss at 1 KB records committing every 100 ms (Confluent's own measurement); materially worse with smaller records or shorter commit intervals | None within Kafka cluster |
 | End-to-end exactly-once | Above + transactional inbox in consumer | Additional DB write per message | None |
+
+The transaction overhead is per commit, not per message, so it is independent of how many
+messages a transaction contains — batching more messages per commit amortises it. Confluent
+also reports no throughput degradation for consumers reading in `read_committed` mode, since
+zero-copy reads are preserved.
 
 ---
 
 ## 7. Real-World Examples
 
-**Amazon**: Order placement spans inventory, payment, fulfillment, and notification services. Amazon uses orchestration-based sagas. Compensation for a failed payment releases reserved inventory and cancels the order record. Each step has explicit dead-letter handling for compensation failures, which route to manual review queues.
+**AWS (reference architecture)**: AWS Prescriptive Guidance publishes the saga orchestration pattern as its answer for transactions spanning multiple service-owned databases — "a central coordinator (an orchestrator) to preserve data integrity in distributed transactions that span multiple services" — with a reference implementation on Step Functions standard workflows plus DynamoDB, and notes that using Step Functions removes the orchestrator single-point-of-failure by spreading it across Availability Zones. Applied to an order flow: compensation for a failed payment releases reserved inventory and cancels the order record, and every compensation command needs explicit dead-letter handling routing to a manual review queue. (Amazon's own internal retail order pipeline is not publicly documented — treat any specific claim about it as unverified.)
 
-**Uber**: Trip fare calculation and driver payout span payment processors, driver payout services, and tax computation. Uber's money platform uses the outbox pattern with Kafka CDC to guarantee event publication. Idempotency keys on external payment API calls prevent double charges during retries.
+**Uber**: Gulfstream, Uber's fifth-generation payment platform, is built on double-entry accounting and idempotency: the order-insertion service "creates the payment orders, publishes the order data to messaging topics and persists it to OrderStore", persists every account change to an entity change log versioned per user, and uses deterministically generated unique order identifiers to guarantee once-only order processing. Uber's published account is a *message-queue plus change-log* design; it does not describe a Debezium-style outbox relay, so do not attribute one to it.
 
-**Stripe**: Every API call that creates a charge or transfer accepts an `Idempotency-Key` header. Stripe stores the request fingerprint and response for 24 hours. Duplicate requests within that window return the original response without reprocessing. This is the production-grade idempotency key pattern.
+**Stripe**: Every API call that creates a charge or transfer accepts an `Idempotency-Key` header. Stripe saves "the resulting status code and body of the first request made for any given idempotency key, regardless of whether it succeeds or fails", compares incoming parameters against the original request, and removes keys after they are at least 24 hours old. Duplicate requests within that window return the original response without reprocessing; a request that collides with one still executing returns 409 Conflict. This is the production-grade idempotency key pattern.
 
-**Google Spanner**: Uses TrueTime and 2PC for cross-shard transactions, but the coordinator is co-located with the transaction leader replica, minimising blocking duration to sub-10ms under normal operation. This works because Spanner controls both the coordinator and all participants within its own infrastructure — not feasible for cross-organisation microservices.
+**Google Spanner**: Uses TrueTime and 2PC for cross-shard transactions, layered over Paxos. One of the participant groups is chosen as the coordinator, and — this is the key part — the coordinator's transaction-manager state is stored in that group's Paxos log and therefore replicated, so a coordinator crash is survived by leader election rather than blocking every participant. It is not fast: the OSDI 2012 paper's Table 4 measures mean commit latency of **17.0 ms ± 1.4 for one participant**, 42.7 ms for 50 and 71.4 ms for 100. This works because Spanner controls both the coordinator and all participants within its own infrastructure — not feasible for cross-organisation microservices.
 
-**Netflix**: Uses the outbox pattern + Debezium + Kafka for event-driven choreography between microservices. The outbox table is in the same PostgreSQL database as the service's domain tables. Debezium uses PostgreSQL logical replication (wal2json plugin) to stream changes with sub-100ms latency.
+**Netflix**: Built and published **DBLog**, its own change-data-capture framework (Andreakis and Papapanagiotou, arXiv 2010.12597, submitted 23 October 2020), which interleaves transaction-log events with watermarked table selects so a full-state dump never stalls log progress. The paper states DBLog "is currently used in production by tens of microservices at Netflix". The general lesson holds — put the outbox table in the same database as the domain tables and let CDC tail the log — but the specific stack is Netflix's own, and no public Netflix source describes a Debezium-plus-wal2json outbox pipeline.
 
 ---
 
@@ -683,13 +701,17 @@ public void onCreditFailed(UUID sagaId) {
 
 ### Protocol Comparison
 
-| Protocol | Consistency | Availability | Blocking | Partition Tolerance | Complexity |
+The "Partition Tolerance" column that usually appears here is dropped on purpose: every one of
+these protocols runs on a network that can partition, so none of them can opt out of P. What
+actually differs is the *behaviour during* a partition, which is the only thing CAP constrains.
+
+| Protocol | Consistency | Availability | Blocking | Behaviour during a partition | Complexity |
 |---|---|---|---|---|---|
-| 2PC | Strong | Low (coordinator SPOF) | Yes — on coordinator crash | No | Medium |
-| 3PC | Strong | Medium | Reduced | No | High |
-| Saga (Choreography) | Eventual | High | No | Yes | Medium (distributed logic) |
-| Saga (Orchestration) | Eventual | High (orchestrator is stateless) | No | Yes | Medium (centralised logic) |
-| Outbox + CDC | Eventual | High | No | Yes | Low–Medium |
+| 2PC | Strong | Low (coordinator SPOF) | Yes — on coordinator crash | Stays safe, stops serving: prepared participants block (CP) | Medium |
+| 3PC | Strong only if the network is synchronous | Medium | Reduced | Can lose safety: two sides may time out and decide differently (split-brain) | High |
+| Saga (Choreography) | Eventual | High | No | Stays available, each side commits locally and converges after | Medium (distributed logic) |
+| Saga (Orchestration) | Eventual | High (orchestrator is stateless) | No | Stays available; orchestrator resumes from persisted state | Medium (centralised logic) |
+| Outbox + CDC | Eventual | High | No | Stays available; events buffer in the outbox until the relay reconnects | Low–Medium |
 
 ```mermaid
 quadrantChart
@@ -707,14 +729,19 @@ quadrantChart
     Outbox + CDC: [0.9, 0.15]
 ```
 
-Plotting the table above onto the CAP tension named in section 1 shows the split cleanly: 2PC and 3PC buy strong consistency by giving up availability (coordinator SPOF, blocking on crash), while every saga variant and outbox + CDC land in the eventual-and-resilient corner — no protocol here reaches the empty top-right quadrant, because nothing escapes the tradeoff.
+Plotting the table above onto the CAP tension named in section 1 shows the split cleanly: 2PC buys strong consistency by giving up availability when a partition hits (coordinator SPOF, blocking on crash), and 3PC buys back part of that availability by risking the consistency — so its position on the vertical axis is optimistic, holding only while the network stays synchronous. Every saga variant and outbox + CDC land in the eventual-and-resilient corner. No protocol here reaches the empty top-right quadrant, because CAP forbids exactly that corner during a partition.
 
 ### Consistency Model Comparison
 
+These are *single-object* consistency models — they constrain the ordering of reads and writes.
+They are not isolation levels, which constrain the interleaving of multi-object transactions.
+Serializability is the transaction-level property (some serial order exists); linearizability
+is the recency property (that order respects real time). Strict serializability is both.
+
 | Model | Guarantee | Latency | Implementation |
 |---|---|---|---|
-| Linearizability | Reads see the most recent write globally | Highest | Consensus (Raft/Paxos), 2PC |
-| Sequential consistency | All nodes see operations in same order | High | Total-order broadcast |
+| Linearizability | Every operation appears to take effect instantaneously at some point between its call and its return, so a read never returns a value older than a completed write — a real-time guarantee | Highest | Consensus (Raft/Paxos); 2PC only when layered over consensus-replicated participants, as in Spanner |
+| Sequential consistency | All nodes see one common order that respects each process's own program order — but that order need not match real time, so a read may return a stale value | High | Total-order broadcast |
 | Causal consistency | Causally related ops seen in order | Medium | Vector clocks, causal tokens |
 | Read-your-writes | You always see your own writes | Low–Medium | Sticky sessions or sync replication |
 | Eventual consistency | All nodes converge given no new writes | Lowest | Async replication |
@@ -736,8 +763,8 @@ Plotting the table above onto the CAP tension named in section 1 shows the split
 ### When to Use 2PC
 - All participants implement XA (e.g., multiple relational databases owned by the same team).
 - Operations are short-lived (sub-second) and participant availability is high.
-- Strong consistency is a hard requirement and distributed partition probability is low (same data center).
-- Example: transferring funds between two schemas in the same PostgreSQL instance (not actually distributed, but XA-capable setups like Oracle RAC).
+- Strong consistency is a hard requirement and partition probability is low (same data center).
+- Example: transferring funds between two *separate* PostgreSQL instances owned by one team, via an XA transaction manager. Two schemas inside a single instance need no 2PC at all — one local transaction already spans them. Note that PostgreSQL ships with `max_prepared_transactions = 0`, which disables `PREPARE TRANSACTION` entirely; you must raise it (at least to `max_connections`) and restart before any XA coordinator can prepare against it, and orphaned prepared transactions then hold locks and pin the oldest xmin until they are resolved.
 
 ### When NOT to Use 2PC
 - Cross-organisation services or third-party APIs (no XA support).
@@ -753,7 +780,7 @@ Plotting the table above onto the CAP tension named in section 1 shows the split
 
 ### When NOT to Use Sagas
 - When a compensating transaction does not exist or is impractical (e.g., launching a missile — there is no "undo").
-- When strict isolation is required (saga intermediate states are visible to other requests during execution — this is the ACI[D] problem; sagas sacrifice isolation).
+- When strict isolation is required (saga intermediate states are visible to other requests during execution — a saga is **ACD**: it keeps Atomicity, Consistency and Durability and gives up Isolation).
 - Simple two-table updates within a single service — use a local ACID transaction instead.
 
 ### When to Use the Outbox Pattern
@@ -768,9 +795,13 @@ Plotting the table above onto the CAP tension named in section 1 shows the split
 
 ## 10. Common Pitfalls
 
+Every pitfall below is an **illustrative composite**: the failure mode, the broken code and the
+fix are real and recurrent, but the companies, volumes, durations and losses are constructed to
+make the mechanics concrete. None of them is a citation to a published incident report.
+
 ### Pitfall 1: Dual Write Without Outbox — The Production Nightmare
 
-A team at a mid-size e-commerce company shipped order placement with this code:
+A team ships order placement with this code:
 
 ```java
 // BROKEN production code — dual write
@@ -782,7 +813,9 @@ public Order placeOrder(PlaceOrderRequest req) {
 }
 ```
 
-On Black Friday, a Kafka broker rolled over for a leader election. For approximately 90 seconds, `kafkaTemplate.send()` threw a `TimeoutException`. The `@Transactional` boundary did not roll back the DB write because the Kafka send was non-transactional. Result: approximately 4,200 orders in the database with no corresponding events. The inventory service never reserved stock. Orders showed as "confirmed" to customers but had no inventory allocation. The resolution required a reconciliation job running over 6 hours.
+On the peak traffic day, a Kafka broker rolls over for a leader election and sends start failing for roughly 90 seconds. Note the actual mechanism, because it is the opposite of what most people assume: `kafkaTemplate.send()` is **asynchronous**. It appends the record to the producer's accumulator and returns a `CompletableFuture` immediately, so `placeOrder` returns normally and the `@Transactional` boundary **commits**. The delivery failure surfaces later, on a producer I/O thread, in a future that this code never inspects — so it is swallowed. Result: about 4,200 orders committed to the database with no corresponding events. The inventory service never reserved stock. Orders showed as "confirmed" to customers but had no inventory allocation, and the cleanup was a reconciliation job.
+
+The mirror-image failure exists too and is worth naming: when the send *succeeds* and the record reaches the broker, but the surrounding transaction then rolls back — a later exception in the method, or a failure at commit time — you get the divergence the other way round: an event on the topic for an order that does not exist, and consumers acting on it. (Note also that a send can fail *synchronously*, throwing `TimeoutException` if metadata is unavailable or the buffer stays full past `max.block.ms`, default 60 s; that path does at least roll the transaction back, because the record never enters the accumulator.) Whichever way you order the two writes, one of these two divergences is reachable — which is the whole argument for the outbox.
 
 Fix: transactional outbox. The DB write and the outbox record commit atomically. The relay/CDC process publishes events independently.
 
@@ -797,7 +830,7 @@ public void compensateCharge(UUID orderId) {
 }
 ```
 
-When the compensation command was retried (the first attempt timed out in transit), the payment processor issued two refunds. The customer received double the refund. The loss was approximately $180,000 before the oncall engineer noticed the billing anomaly.
+When the compensation command is retried (the first attempt timed out in transit), the payment processor issues two refunds and the customer receives double the refund. Left unnoticed across a batch of retries, the loss accumulates silently until someone reads the billing anomaly report.
 
 Fix: pass an idempotency key derived from the saga ID and step:
 
@@ -816,7 +849,9 @@ Fix: every compensation command must have a dead-letter queue. A monitoring aler
 
 ### Pitfall 4: Large Outbox Table Causing Read Latency
 
-A team's outbox relay polled `SELECT * FROM outbox_events WHERE published = FALSE ORDER BY created_at` every 500ms. Over 3 months, the outbox table accumulated 50 million rows (the `published = TRUE` rows were never deleted). The query took 8 seconds due to a full table scan. The partial index on `published = FALSE` was not created; instead a regular index on `published` was used, which the query planner ignored for low-selectivity columns.
+An outbox relay polls `SELECT * FROM outbox_events WHERE published = FALSE ORDER BY created_at` every 500ms. Over 3 months the outbox table accumulates 50 million rows, because the `published = TRUE` rows are never deleted. No index supports the query: the predicate matches only the small unpublished backlog, but with nothing indexed the planner must sequentially scan all 50 million rows and then sort them by `created_at`, and the poll takes seconds.
+
+The trap is subtle enough to be worth stating precisely, because "just add an index on `published`" is the wrong lesson. A plain B-tree on a boolean *would* be picked here — `published = FALSE` is a highly selective predicate once almost every row is `TRUE`, so the estimated row count is tiny. What that index still cannot do is supply the `ORDER BY created_at`, and it carries an entry for all 50 million rows, so it bloats and has to be maintained on every insert and every publish flip. The partial index solves both at once: it indexes `created_at` (giving the ordering for free) and only over the rows matching `published = FALSE` (so it stays roughly the size of the backlog, not the table).
 
 Fix:
 1. Create a partial index: `CREATE INDEX idx_outbox_unpublished ON outbox_events (created_at) WHERE published = FALSE`.
@@ -832,8 +867,8 @@ The subtle part is that the relay only ever *cares about* the unpublished rows, 
 | Publish latency | `0` to one full interval. Averages half the interval |
 | Ingest rate | Events written per second by the application |
 | Table size | `ingest rate × retention` — governed entirely by the cleanup job |
-| Partial index | `... WHERE published = FALSE` — indexes only the rows the relay reads |
-| Selectivity | Fraction of rows matching the predicate. Below roughly 1%, a plain index is useful; near 100% the planner ignores it |
+| Partial index | `... WHERE published = FALSE` — indexes `created_at` over only the rows the relay reads, so it supplies the ORDER BY *and* stays backlog-sized |
+| Selectivity | Fraction of rows matching the predicate. A small fraction favours an index scan, a large fraction favours a sequential scan — but selectivity alone never supplies an ordering |
 
 **Walk one example.** The incident's own numbers, and what retention changes:
 
@@ -853,16 +888,16 @@ The subtle part is that the relay only ever *cares about* the unpublished rows, 
 
 A sustained 6.4 rows/second is a trivially small write rate — which is the whole lesson. Nothing
 about the traffic was extreme; the table reached 50 million rows purely because nothing ever
-deleted from it, and an 8-second full scan every 500 ms means the relay is permanently behind,
-overlapping its own runs and pinning the database. Both fixes are needed and they fix different
-things: the partial index makes the *scan* cheap regardless of table size, and the retention job
-makes the *table* small. Ship only the index and storage grows without bound; ship only the
-cleanup and you are still one traffic spike away from the planner abandoning a low-selectivity
-index again.
+deleted from it, and once a poll takes longer than the 500 ms interval the relay is permanently
+behind, overlapping its own runs and pinning the database. Both fixes are needed and they fix
+different things: the partial index makes the *scan* cheap regardless of table size, and the
+retention job makes the *table* small. Ship only the index and storage grows without bound
+(and the index is still rebuilt on every publish flip); ship only the cleanup and the relay is
+still doing an unindexed sort on every poll.
 
 ### Pitfall 5: Missing Idempotency on Forward Steps
 
-A saga's `ReserveInventoryCommand` consumer was not idempotent. During a Kafka consumer group rebalance, the same message was delivered twice within 200ms. Two goroutines in the inventory service processed the command concurrently, each checking stock availability and reserving — both succeeded. The inventory for one item was double-reserved, causing an oversell.
+A saga's `ReserveInventoryCommand` consumer was not idempotent. During a Kafka consumer group rebalance, the same message was redelivered to a second consumer instance before the first had committed its offset. Both instances processed the command concurrently, each checking stock availability and reserving — both succeeded. The inventory for one item was double-reserved, causing an oversell.
 
 Fix: transactional inbox (idempotency key insert before processing). All saga command consumers must be idempotent.
 
@@ -876,7 +911,7 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 |---|---|---|
 | Axon Framework | Java | Full CQRS + event sourcing + saga orchestration, built-in saga lifecycle management |
 | Temporal | Go/Java/Python/TypeScript | Durable workflow engine; saga logic written as code with automatic retry/compensation |
-| Conductor (Netflix) | Java | Workflow engine with visual designer; JSON-DSL for orchestration |
+| Conductor OSS | Java | Workflow engine with visual designer; JSON-DSL for orchestration. Created at Netflix, which stopped maintaining the OSS repo in December 2023; now stewarded by Orkes and the Conductor OSS community |
 | Apache Camel Saga EIP | Java | Lightweight saga support in Camel route DSL |
 | Spring State Machine | Java | State machine framework; useful for saga orchestrator state management |
 | Eventuate Tram | Java | Library by Chris Richardson specifically for the saga pattern + outbox pattern |
@@ -887,7 +922,7 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 |---|---|
 | Debezium | Open-source CDC connector for PostgreSQL, MySQL, MongoDB, Oracle; runs on Kafka Connect |
 | Maxwell's Daemon | MySQL binlog CDC; simpler than Debezium, fewer connectors |
-| Postgres logical replication + custom | Using wal2json or pgoutput plugins with a custom relay consumer |
+| Postgres logical replication + custom | A custom relay consuming a replication slot. `pgoutput` is built into PostgreSQL 10+; `wal2json` is a separate extension you must install (and is no longer usable with Debezium) |
 | AWS DMS | Managed CDC service for databases hosted on AWS |
 
 ### Message Brokers
@@ -896,14 +931,14 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 |---|---|---|---|---|
 | Apache Kafka | At-least-once (EOS available) | Per partition | Configurable (log) | High-throughput event streaming, outbox relay |
 | RabbitMQ | At-least-once or at-most-once | Per queue | Message TTL | Task queues, saga commands |
-| AWS SQS | At-least-once (FIFO: exactly-once) | FIFO queues | 14 days max | AWS-native microservices |
+| AWS SQS | At-least-once (FIFO: no duplicates introduced within a **5-minute** deduplication interval) | FIFO queues | 14 days max | AWS-native microservices |
 | AWS SNS + SQS | At-least-once | No guarantee (fan-out) | SQS retention | Event fan-out to multiple consumers |
 
 ### Distributed Transaction Databases
 
 | Database | Protocol | Notes |
 |---|---|---|
-| Google Spanner | External consistency via TrueTime | Globally distributed, millisecond-latency 2PC |
+| Google Spanner | External consistency via TrueTime | Globally distributed; 2PC layered over Paxos, so the coordinator's state is replicated. OSDI 2012 reports 17.0 ms mean commit latency for one participant, rising to 71.4 ms at 100 |
 | CockroachDB | Serializable via Raft + MVCC | Open-source Spanner-like, PostgreSQL-compatible |
 | TiDB | Percolator (2PC with TSO) | MySQL-compatible, HTAP |
 | YugabyteDB | Distributed SQL, Raft | PostgreSQL-compatible wire |
@@ -913,19 +948,19 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 ## 12. Interview Questions with Answers
 
 **Q1: What is the blocking problem in 2PC and why does it make 2PC unsuitable for microservices?**
-In 2PC, once a participant votes `VOTE_COMMIT`, it cannot unilaterally abort — it must hold all its locks until it hears the coordinator's decision. If the coordinator crashes after the prepare phase, participants are blocked indefinitely, holding locks that prevent other transactions from proceeding. In a microservices environment, services are independently deployable and may use different datastores that do not expose an XA interface. The coordinator is a single point of failure, network partitions can leave participants waiting for minutes, and lock hold times across network round-trips degrade throughput unacceptably for most SLAs.
+In 2PC, once a participant votes `VOTE_COMMIT`, it cannot unilaterally abort — it must hold all its locks until it hears the coordinator's decision. If the coordinator crashes after the prepare phase, every prepared participant stays uncertain — unable to commit or abort, holding locks that block other transactions — until the coordinator or its durable decision log comes back, or until a peer that already knows the outcome can tell it. In a microservices environment, services are independently deployable and may use different datastores that do not expose an XA interface. The coordinator is a single point of failure, network partitions can leave participants waiting for minutes, and lock hold times across network round-trips degrade throughput unacceptably for most SLAs.
 
 **Q2: How does the saga pattern achieve atomicity without distributed locking?**
-A saga replaces distributed atomic commits with a sequence of local transactions and compensating transactions. Each service performs an ACID local transaction and publishes an event or responds to a command. If any step fails, all previously completed steps are reversed by executing their compensating transactions in reverse order. There are no distributed locks; intermediate states are visible (sacrificing isolation), and compensating transactions must be idempotent to handle retries. The guarantee achieved is ACD (Atomicity, Consistency, Durability) without Isolation — sometimes called the ACI problem of sagas.
+A saga replaces distributed atomic commits with a sequence of local transactions and compensating transactions. Each service performs an ACID local transaction and publishes an event or responds to a command. If any step fails, all previously completed steps are reversed by executing their compensating transactions in reverse order. There are no distributed locks; intermediate states are visible (sacrificing isolation), and compensating transactions must be idempotent to handle retries. The guarantee achieved is ACD — Atomicity, Consistency and Durability, with Isolation dropped.
 
 **Q3: What is the difference between choreography and orchestration sagas? When would you choose each?**
-In a choreography saga, each service reacts to domain events published by the previous step, with no central coordinator. The workflow emerges from event subscriptions. In an orchestration saga, a central orchestrator explicitly sends commands to each service and receives replies, maintaining the workflow state in a persistent state machine. Choreography favors loose coupling and suits simpler linear flows with 3–4 steps. Orchestration suits complex workflows with many branches, conditional paths, and compensation sequences, because all business logic is in one place and much easier to debug and monitor. Most production-grade payment and order fulfillment systems use orchestration.
+In a choreography saga, each service reacts to domain events published by the previous step, with no central coordinator. The workflow emerges from event subscriptions. In an orchestration saga, a central orchestrator explicitly sends commands to each service and receives replies, maintaining the workflow state in a persistent state machine. Choreography favors loose coupling and suits simpler linear flows with 3–4 steps. Orchestration suits complex workflows with many branches, conditional paths, and compensation sequences, because all business logic is in one place and much easier to debug and monitor. That is why complex payment and order-fulfillment workflows usually end up orchestrated — and why AWS Prescriptive Guidance publishes saga *orchestration* (on Step Functions) as its reference pattern for transactions spanning several service-owned databases.
 
 **Q4: Why is dual write dangerous and how does the transactional outbox pattern solve it?**
-Dual write means writing to a database and publishing to a message broker in two separate operations. Any crash between them leaves the two systems inconsistent — the DB committed but the event never published, or the event was published but the DB write was rolled back. The outbox pattern solves this by writing both the domain entity and an `outbox_events` record in a single local ACID database transaction. A separate relay process reads the unpublished outbox records and publishes them to the broker, then marks them published. Because the relay uses at-least-once publishing and consumers are idempotent, the system achieves end-to-end exactly-once semantics.
+Dual write means writing to a database and publishing to a message broker in two separate operations. Any crash between them leaves the two systems inconsistent — the DB committed but the event never published, or the event was published but the DB write was rolled back. The outbox pattern solves this by writing both the domain entity and an `outbox_events` record in a single local ACID database transaction. A separate relay process reads the unpublished outbox records and publishes them to the broker, then marks them published. Because the relay publishes at-least-once and consumers are idempotent, the system achieves effectively-once processing: delivery is still at-least-once, but each event's effect is applied exactly once.
 
 **Q5: What is Change Data Capture (CDC) and how does Debezium work?**
-CDC captures every insert, update, and delete from a database by tailing its write-ahead log or binary log — the same log the database uses for replication. Debezium connects as a logical replication client to PostgreSQL (using the pgoutput or wal2json output plugin) or as a binlog consumer for MySQL. It reads row-level change events and publishes them to Kafka topics. This means applications do not need to poll an outbox table; Debezium detects changes within milliseconds of the WAL flush with sub-100ms latency. It requires no application code changes for the outbox emit step — only the outbox table structure matters.
+CDC captures every insert, update, and delete from a database by tailing its write-ahead log or binary log — the same log the database uses for replication. Debezium connects as a logical replication client to PostgreSQL — using `pgoutput`, which PostgreSQL 10+ ships natively, or `decoderbufs`; support for the older `wal2json` plugin was removed in Debezium 2.0 — or as a binlog consumer for MySQL. It reads row-level change events and publishes them to Kafka topics. This means applications do not need to poll an outbox table; Debezium sees each change as the WAL is decoded, so end-to-end lag is bounded by flush plus network rather than by a poll interval. It requires no application code changes for the outbox emit step — only the outbox table structure matters.
 
 **Q6: What makes a compensating transaction "approximately correct" rather than a true rollback?**
 A true database rollback is a physical undo: the exact bytes written are removed, as if the operation never happened. A compensating transaction is a new forward operation with the opposite business effect. "Approximately correct" means the end business state is acceptable, but some side effects cannot be reversed. For example, if step 3 sent a confirmation email to a customer and step 4 fails, the compensation cannot "un-send" the email. The order is cancelled (compensated at the DB level), but the customer received a confirmation that is now incorrect. The business must decide whether to send a follow-up cancellation email or accept the inconsistency. Compensation design must explicitly document these irreversible side effects.
@@ -934,7 +969,7 @@ A true database rollback is a physical undo: the exact bytes written are removed
 An idempotency key is a client-generated unique identifier (typically UUID v4) attached to a mutating request. The server uses this key to detect and deduplicate retries, returning the original response without reprocessing. Keys should be scoped per operation type (not reused across different endpoint types). They should be stored with the operation's result in a single atomic transaction. Expiry should match the retry window: 24 hours for payment APIs (matching typical client retry timeouts), 7 days for long-running workflows. After expiry, the same key can be used for a genuinely new request. Keys stored without TTL cause unbounded table growth.
 
 **Q8: What is the difference between at-least-once, at-most-once, and exactly-once delivery, and how do you achieve each in Kafka?**
-At-most-once delivery means messages may be lost but are never duplicated; achieved by committing consumer offsets before processing (`enable.auto.commit=true` with short intervals, or manual pre-processing commit). At-least-once means messages are never lost but may be duplicated; achieved with `acks=all`, `retries=MAX_INT`, and committing offsets only after successful processing. Exactly-once within Kafka is achieved with idempotent producers (`enable.idempotence=true`, which adds sequence numbers to prevent broker-side duplication) and Kafka transactions (`transactional.id`, `isolation.level=read_committed`). End-to-end exactly-once with external systems (databases) requires the transactional inbox pattern because Kafka transactions do not span external systems.
+At-most-once delivery means messages may be lost but are never duplicated; achieved by committing consumer offsets before processing (`enable.auto.commit=true` with short intervals, or manual pre-processing commit). At-least-once means messages are never lost but may be duplicated; achieved with `acks=all`, `retries=MAX_INT`, and committing offsets only after successful processing. Exactly-once within Kafka is achieved with idempotent producers (`enable.idempotence=true` — enabled by default since Kafka 3.0 when no conflicting config is set; it stamps a producer ID and per-partition sequence number so the broker discards a retried duplicate) and Kafka transactions (`transactional.id`, `isolation.level=read_committed`). End-to-end exactly-once with external systems (databases) requires the transactional inbox pattern because Kafka transactions do not span external systems.
 
 **Q9: How do you handle a saga that is stuck in the compensating state?**
 First, all compensation commands must be sent to queues with configured dead-letter queues (DLQs) and retry policies (exponential backoff with max retries). A scheduled monitoring job should query for sagas in COMPENSATING state for longer than a threshold (e.g., 30 minutes) and alert an oncall engineer. The system should provide an operator console to manually trigger individual compensation commands or mark a saga as FAILED after human review. For truly unrecoverable compensations (downstream service permanently gone), the saga is marked FAILED with audit trail, and a data reconciliation report is generated for manual resolution. The key principle: never silently drop compensation failures.
@@ -943,13 +978,13 @@ First, all compensation commands must be sent to queues with configured dead-let
 Causal consistency guarantees that if operation B is causally dependent on operation A (B happened after A, and B's author saw A's result), then all observers see A before B. It is not sufficient when independent concurrent writes must be reconciled — causal consistency does not impose an order on causally unrelated operations. Example: if user A and user B both independently update their profile photos at the same time, causal consistency does not guarantee all nodes see these updates in the same order. For applications requiring a global total order of operations (financial ledgers, counter increments), linearizability or sequential consistency is required, at higher latency cost.
 
 **Q11: How does the transactional inbox prevent double-processing in a Kafka consumer?**
-Before processing a message, the consumer attempts to insert a record with the message's idempotency key (derived from topic + partition + offset) into an `inbox_events` table within the same database transaction that applies the business operation. If the insert succeeds and the business operation succeeds, both commit atomically. If the message is redelivered (consumer rebalance, retry), the insert fails with a unique constraint violation; the consumer catches this exception and skips processing. Because the inbox insert and business operation are in the same local transaction, there is no window where one can commit without the other.
+The consumer inserts the message's idempotency key into an `inbox_events` table inside the same transaction as the business write, so a redelivery hits the unique constraint and is skipped. The key is derived from topic + partition + offset. If the insert succeeds and the business operation succeeds, both commit atomically. If the message is redelivered (consumer rebalance, retry), the insert fails with a unique constraint violation; the consumer catches this exception and skips processing. Because the inbox insert and business operation are in the same local transaction, there is no window where one can commit without the other.
 
-**Q12: What is the ACI problem of sagas (isolation) and how do microservices deal with it?**
-Sagas execute as a sequence of local transactions; between steps, intermediate state is committed to each service's database and is visible to other requests. Unlike a database transaction with SERIALIZABLE isolation, there is no saga-level isolation. This creates anomalies: a second request might read the inventory reservation made in step 2 of a saga, but the saga later compensates step 2 (reverses the reservation). The second request made a decision based on state that no longer exists — a "dirty read" at the saga level. Mitigations include: semantic locking (reserving records with a PENDING status that other operations treat as unavailable), optimistic locking with version numbers, and commutative operations that are safe to reorder.
+**Q12: Why are sagas described as ACD, and how do microservices deal with their lack of isolation?**
+Sagas are called ACD because they keep Atomicity, Consistency and Durability but drop Isolation. Each step is a local transaction that commits immediately, so intermediate state is visible to other requests before the saga finishes. Unlike a database transaction running at SERIALIZABLE isolation, there is no saga-level isolation. This creates anomalies: a second request might read the inventory reservation made in step 2 of a saga, but the saga later compensates step 2 (reverses the reservation). The second request made a decision based on state that no longer exists — a "dirty read" at the saga level. Mitigations include: semantic locking (reserving records with a PENDING status that other operations treat as unavailable), optimistic locking with version numbers, and commutative operations that are safe to reorder.
 
 **Q13: Compare the operational complexity of Debezium CDC outbox vs. polling outbox.**
-The polling outbox is simpler to operate: one scheduled job, no external infrastructure beyond the existing DB and broker. It introduces polling latency (500ms to 5s typical), load on the DB with repeated queries, and potential for stale reads if the partial index is not properly maintained. Debezium CDC requires Kafka Connect infrastructure (at least 3 nodes for production HA), connector management, schema registry for Avro/Protobuf serialization, WAL retention configuration (PostgreSQL `wal_level=logical`, `max_replication_slots`, `max_wal_senders`), and slot lag monitoring (unbounded WAL growth if the slot consumer falls behind). In exchange, Debezium achieves sub-100ms latency, zero polling DB load, and supports any table change not just the outbox. Choose polling for simplicity and low volume; choose CDC for latency-sensitive, high-volume, or multi-table change capture.
+The polling outbox is simpler to operate: one scheduled job, no external infrastructure beyond the existing DB and broker. It introduces polling latency (500ms to 5s typical), load on the DB with repeated queries, and potential for stale reads if the partial index is not properly maintained. Debezium CDC requires Kafka Connect infrastructure (at least 3 nodes for production HA), connector management, schema registry for Avro/Protobuf serialization, WAL retention configuration (PostgreSQL `wal_level=logical`, `max_replication_slots`, `max_wal_senders`), and slot lag monitoring (unbounded WAL growth if the slot consumer falls behind). In exchange, Debezium removes the poll interval from the latency budget entirely, adds no polling load on the DB, and supports any table change not just the outbox. Choose polling for simplicity and low volume; choose CDC for latency-sensitive, high-volume, or multi-table change capture.
 
 **Q14: What is semantic locking in the context of sagas, and give a concrete example?**
 Semantic locking is an application-level lock that signals to other transactions that a record is in a pending state as part of an in-flight saga. Unlike a database lock, it is implemented by setting a status field. For example, when a saga begins an inventory reservation, the inventory record is set to `status = PENDING_RESERVATION`. Other sagas or queries that attempt to reserve the same inventory check for this status and either wait (polling) or fail fast (return "temporarily unavailable"). When the saga completes or compensates, the status changes to `RESERVED` or `AVAILABLE`. This prevents concurrent sagas from operating on the same resource simultaneously without database-level locking.
@@ -1007,7 +1042,7 @@ stateDiagram-v2
     CANCELLED --> [*]
 ```
 
-The happy path (STARTED to COMPLETED) and the compensation path (PAYMENT_FAILED to CANCELLED) share the same FARE_LOCKED branch point — ChargePaymentCmd is the one step with two outcomes, and the production numbers below show it fails 2–5% of the time versus under 0.5% for the seat and fare steps.
+The happy path (STARTED to COMPLETED) and the compensation path (PAYMENT_FAILED to CANCELLED) share the same FARE_LOCKED branch point — ChargePaymentCmd is the one step with two outcomes, and the illustrative figures below assume it fails 2–5% of the time versus under 0.5% for the seat and fare steps.
 
 **Key design decisions**:
 
@@ -1042,7 +1077,7 @@ CREATE INDEX idx_booking_sagas_state ON booking_sagas (state, updated_at)
     WHERE state NOT IN ('COMPLETED', 'CANCELLED');
 ```
 
-**Failure rate and compensation statistics** (typical production numbers):
+**Failure rate and compensation statistics** — illustrative planning figures for this worked example, not measurements from a published system; use them to size retries and alert thresholds, not as citable industry benchmarks:
 - Seat reservation failure: <0.1% (inventory conflicts)
 - Fare lock failure: <0.5% (pricing service restarts)
 - Payment failure: 2–5% (declined cards, processor timeouts)
@@ -1050,4 +1085,4 @@ CREATE INDEX idx_booking_sagas_state ON booking_sagas (state, updated_at)
 - Compensation success rate for payment failures: 99.8%
 - Manual operator intervention required: <0.2% of all bookings
 
-**Lesson learned**: The team initially used choreography. After 3 months, the event dependency graph had grown to 14 event types across 4 services, with 6 different compensation paths. Debugging a failed booking required correlating 8–12 events across 4 service logs. Migrating to orchestration reduced mean time to resolution for booking issues from 45 minutes to 6 minutes.
+**Lesson learned** (illustrative, consistent with the worked example above rather than measured from a public system): the team starts with choreography. Within a few months the event dependency graph has grown to 14 event types across 4 services with 6 distinct compensation paths, and debugging one failed booking means correlating 8–12 events across 4 service logs. Moving to orchestration collapses that to a single state row per booking, and mean time to resolution drops by roughly an order of magnitude — the mechanism (one queryable saga state instead of an event archaeology exercise) is the transferable part, not the specific minutes.

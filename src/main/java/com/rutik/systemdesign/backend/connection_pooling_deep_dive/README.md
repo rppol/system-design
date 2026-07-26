@@ -14,9 +14,9 @@ HikariCP is the fastest, most widely used JDBC connection pool for Java. Spring 
 
 **Mental model**: The pool holds N connections. A thread needing a connection calls getConnection(), which returns an available connection from the pool in microseconds. When done, the thread calls close() — which does NOT close the TCP connection but returns it to the pool. If all N connections are checked out, getConnection() waits until a connection is returned or the connectionTimeout (default 30s) expires.
 
-**Why it matters**: Pool sizing is one of the most misunderstood configuration parameters. Bigger is not better — too many connections cause database-side context switching and memory pressure. Too few cause connection timeout under load. HikariCP's default of 10 is deliberately conservative, based on research that shows database performance often degrades beyond (core_count * 2) + spindle_count connections.
+**Why it matters**: Pool sizing is one of the most misunderstood configuration parameters. Bigger is not better — too many connections cause database-side context switching and memory pressure. Too few cause connection timeout under load. HikariCP's default of 10 is deliberately conservative, matching the empirical rule on the PostgreSQL project's "Number Of Database Connections" wiki page: throughput peaks near (core_count * 2) + effective_spindle_count active connections.
 
-**Key insight**: The formula `pool_size = (core_count * 2) + effective_spindle_count` (where effective_spindle_count = 1 for SSDs) comes from Little's Law applied to queuing theory. For a 4-core database with SSD: optimal pool = (4 * 2) + 1 = 9 connections per application server. This is shockingly small for most engineers who expect "more connections = more parallelism."
+**Key insight**: The formula `pool_size = (core_count * 2) + effective_spindle_count` is that PostgreSQL wiki rule, which HikariCP's "About Pool Sizing" wiki adopts verbatim — it is an empirical starting point, not a derivation from Little's Law. `effective_spindle_count` is 0 when the working set is fully cached and rises toward the real spindle count as the cache hit rate falls; the PostgreSQL wiki states plainly that "there hasn't been any analysis so far regarding how well the formula works with SSDs," so do not treat "1 for SSD" as an established constant. HikariCP's own worked example is a 4-core box with one disk: (4 * 2) + 1 = 9, "call it 10 as a nice round number." This is shockingly small for most engineers who expect "more connections = more parallelism."
 
 **In plain terms.** "The number of connections you actually need is throughput multiplied by how long each query holds one — and the database's core count, not your traffic, sets the ceiling on how many are useful."
 
@@ -27,10 +27,10 @@ Little's Law (`L = λ × W`) tells you the *demand* side; the HikariCP formula t
 | `L` | Average number of connections busy at any instant — what the pool must cover |
 | `λ` | Arrival rate, queries per second |
 | `W` | Average time one query holds a connection, in **seconds** (10ms = `0.010`) |
-| `core_count` | CPU cores on the **database** server, not the application server |
-| `effective_spindle_count` | Concurrent disk seeks the storage supports; `1` for SSD |
+| `core_count` | CPU cores on the **database** server, not the application server (hyperthreads excluded) |
+| `effective_spindle_count` | `0` when the working set is fully cached, rising toward the real spindle count as the cache hit rate falls (unanalysed for SSD) |
 
-**Walk one example.** A service at 100 req/s against a 4-core PostgreSQL box on SSD, 10ms queries:
+**Walk one example.** A service at 100 req/s against a 4-core PostgreSQL box with one disk, 10ms queries:
 
     Little's Law (demand)
       L = lambda x W = 100 x 0.010 s        = 1.0 connections busy on average
@@ -43,7 +43,7 @@ Little's Law (`L = λ × W`) tells you the *demand* side; the HikariCP formula t
     what 9 connections can actually absorb
       capacity = pool / W = 9 / 0.010 s      = 900 req/s sustained
 
-Provisioning the Little's Law answer of 1 connection would collapse on the first burst, because `L` is a *mean* and arrivals are not uniform. Provisioning 50 would not help either: past roughly `cores × 2`, extra connections do not add parallelism, they add context switches and lock contention on the database — which is why the danger zone in the chart below starts near 25.
+Provisioning the Little's Law answer of 1 connection would collapse on the first burst, because `L` is a *mean* and arrivals are not uniform. Provisioning 50 would not help either: past roughly `cores × 2`, extra connections do not add parallelism, they add context switches and lock contention on the database. The "danger zone" marker in the chart below is an illustrative point on that curve, not a published PostgreSQL threshold — neither the PostgreSQL nor the HikariCP wiki names a specific connection count at which degradation begins.
 
 ---
 
@@ -66,7 +66,7 @@ Provisioning the Little's Law answer of 1 connection would collapse on the first
 | HikariCP | Fastest | Minimal but complete | Spring Boot default, all JDBC |
 | Apache DBCP2 | Good | Many config options | Legacy projects |
 | c3p0 | Dated | Extensive logging | Old projects, do not use for new |
-| Tomcat Pool | Good | Tomcat-integrated | Embedded Tomcat, no Spring Boot |
+| Tomcat Pool | Good | Tomcat-integrated | Legacy Tomcat deployments; Spring Boot's documented second choice if HikariCP is absent |
 | Vibur | Good | Monitoring focus | Specific use cases |
 
 HikariCP benchmarks show it handles 100,000s of borrow/return operations per second with near-zero overhead.
@@ -76,24 +76,28 @@ HikariCP benchmarks show it handles 100,000s of borrow/return operations per sec
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | maximumPoolSize | 10 | Maximum connections in pool |
-| minimumIdle | same as maximumPoolSize | Minimum idle connections maintained |
-| connectionTimeout | 30,000 ms | Max wait for connection before exception |
+| minimumIdle | same as maximumPoolSize | HikariCP explicitly recommends *not* setting this — leave it as a fixed-size pool |
+| connectionTimeout | 30,000 ms | Max wait for connection before exception (min 250 ms) |
 | idleTimeout | 600,000 ms | Idle connection removed after this (min 10s) |
-| maxLifetime | 1,800,000 ms | Connection max age (30 min) — must be < DB/firewall timeout |
-| keepaliveTime | 0 (disabled) | Interval for keepalive test on idle connections |
-| leakDetectionThreshold | 0 (disabled) | Warn if connection held longer than this |
-| connectionTestQuery | null | Query to test connection (use isValid() for JDBC4) |
-| validationTimeout | 5,000 ms | Timeout for isValid() check |
+| maxLifetime | 1,800,000 ms | Connection max age (30 min) — must be < DB/firewall timeout (min 30s) |
+| keepaliveTime | 120,000 ms (2 min) since HikariCP 6.2.1; 0 (disabled) in 4.0.0–6.2.0 | Keepalive test on idle connections (min 30s, must be < maxLifetime) |
+| leakDetectionThreshold | 0 (disabled) | Warn if connection held longer than this (min 2,000 ms when enabled) |
+| connectionTestQuery | none | Legacy drivers only — HikariCP "strongly recommends not setting this" if the driver supports JDBC4 `isValid()` |
+| validationTimeout | 5,000 ms | Timeout for isValid() check (min 250 ms) |
+
+Defaults above are from the HikariCP 7.x README and `HikariConfig` source. Spring Boot 4.1 manages HikariCP 7.0.2, but older Spring Boot 3.x lines manage HikariCP 5.x, where `keepaliveTime` still defaulted to 0 — check the version your build actually resolves before assuming keepalive is on.
 
 ### 4.3 PgBouncer Connection Modes
 
 | Mode | Behavior | Use Case |
 |------|----------|---------|
-| Session | Connection held for entire client session | Stateful sessions (SET, PREPARE) |
+| Session (default `pool_mode`) | Connection held for entire client session | Stateful sessions (SET, PREPARE, LISTEN, advisory locks) |
 | Transaction | Connection returned to pool after each transaction | Most backend services |
-| Statement | Connection returned after each statement | Pure read workloads, stateless |
+| Statement | Connection returned after each statement; multi-statement transactions are disallowed | Autocommit-only, stateless workloads |
 
 Transaction mode with PgBouncer multiplexes many application connections to a small number of PostgreSQL connections — critical for applications with thousands of connection pool threads.
+
+**What transaction mode actually breaks.** PgBouncer's own feature matrix marks these as never available under transaction pooling: `SET`/`RESET`, `LISTEN`, `WITH HOLD` cursors, `PREPARE`/`DEALLOCATE`, `PRESERVE ROWS`/`DELETE ROWS` temp tables, the `LOAD` statement, and session-level advisory locks. One exception is worth knowing: since PgBouncer 1.21, *protocol-level* named prepared statements (what JDBC's `useServerPrepStmts` issues) are tracked and do work in transaction and statement mode when `max_prepared_statements` is non-zero — its default is 200. SQL-level `PREPARE` is still unsupported. `default_pool_size` defaults to 20 server connections per user/database pair.
 
 ---
 
@@ -151,7 +155,7 @@ xychart-beta
     bar [1, 1.5, 9, 25]
 ```
 
-*Little's Law (L = λ × W: average connections in use = throughput in queries/second times average query duration in seconds) on 100 req/s at 10ms each gives L = 100 × 0.010 = 1 connection in use on average, and a naive 50% safety margin only reaches 1.5 — both under-provision for bursts. The HikariCP formula, (cores × 2) + spindles = (4 × 2) + 1 = 9, lands with real headroom, well below the ~20-30 connection point where PostgreSQL performance starts to degrade from locking and context switching; 10 connections at that rate comfortably serves ~1000 req/s at 10ms per query.*
+*Little's Law (L = λ × W: average connections in use = throughput in queries/second times average query duration in seconds) on 100 req/s at 10ms each gives L = 100 × 0.010 = 1 connection in use on average, and a naive 50% safety margin only reaches 1.5 — both under-provision for bursts. The HikariCP formula, (cores × 2) + spindles = (4 × 2) + 1 = 9, lands with real headroom; 10 connections at that rate comfortably serves 10 / 0.010 = ~1000 req/s at 10ms per query. The fourth bar is an illustrative marker for "far past the formula, where locking and context switching dominate" — neither the PostgreSQL nor the HikariCP wiki publishes a specific connection count at which degradation begins, so do not quote 25 as a measured threshold.*
 
 ### Connection Lifecycle
 
@@ -198,15 +202,16 @@ spring:
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 10          # database's capacity, not application desire
-      minimum-idle: 5                # keep warm connections for fast borrowing
+      minimum-idle: 10               # = maximumPoolSize; HikariCP recommends a fixed-size pool
       connection-timeout: 5000       # fail fast: 5s wait max (not 30s default)
       idle-timeout: 600000           # remove idle after 10 minutes
       max-lifetime: 1740000          # 29 minutes (< firewall/LB 30-min timeout)
-      keepalive-time: 60000          # keepalive test every 60s
-      leak-detection-threshold: 10000 # warn if connection held > 10s
+      keepalive-time: 60000          # keepalive test every 60s (min allowed 30000)
+      leak-detection-threshold: 10000 # warn if connection held > 10s (min allowed 2000)
       pool-name: MyApp-DB
-      # PostgreSQL specific: test connection validity
-      connection-test-query: SELECT 1  # only if JDBC driver doesn't support isValid()
+      # Do NOT set connection-test-query with the PostgreSQL driver: it supports JDBC4
+      # isValid(), and HikariCP strongly recommends leaving this unset in that case.
+      # connection-test-query: SELECT 1  # legacy drivers without isValid() only
       data-source-properties:
         cachePrepStmts: true
         prepStmtCacheSize: 250
@@ -222,12 +227,17 @@ spring:
 // 2. connectionTestQuery: fallback for older drivers
 
 // When validation runs:
-//   - On borrow: if connection was idle > 500ms (configurable via connectionInitSql)
-//   - For keepaliveTime: periodic validation of idle connections
+//   - On borrow: if connection was idle > 500ms. That window is HikariPool's
+//     ALIVE_BYPASS_WINDOW_MS, overridable only via the JVM system property
+//     -Dcom.zaxxer.hikari.aliveBypassWindowMs=<ms> (it is NOT a HikariConfig setter).
+//   - For keepaliveTime: periodic validation of idle connections, driven by the
+//     HouseKeeper task (period 30s, -Dcom.zaxxer.hikari.housekeeping.periodMs)
 //   - If isValid() fails: connection is closed, new connection created
 
-// BROKEN: NOT validating connections (default before HikariCP 4.x):
-// Silent failures when network partition occurs and connections become stale
+// BROKEN: relying on borrow-time validation alone. keepaliveTime did not exist
+// before HikariCP 4.0.0, and defaulted to 0 (disabled) from 4.0.0 through 6.2.0;
+// 6.2.1 changed the default to 2 minutes. On any pool older than that, a connection
+// silently killed by a firewall or failover is only discovered when someone borrows it.
 // Symptom: "Connection is closed" or "Broken pipe" errors in application
 
 // FIX: keepaliveTime sends periodic keepalive:
@@ -348,9 +358,9 @@ The last line is the point: at 200ms the same 10-connection pool absorbs 250 con
 
 ## 7. Real-World Examples
 
-**Stack Overflow**: Famously used with default PostgreSQL and SQL Server settings. Their blog documented that a 4-core web server with pool size 10 per instance handled their entire traffic. Most engineers are shocked — 10 connections per web server is often sufficient.
+**Oracle Real-World Performance group**: the demonstration HikariCP's pool-sizing wiki cites is the strongest public evidence that smaller pools win. Dropping the connection count from 2,048 to 96 — with no other change — took application response time from ~100ms to ~2ms, which HikariCP describes as "over 50x improvement." The same wiki works the formula for "your little 4-Core i7 server with one hard disk": `9 = ((4 * 2) + 1)`, "call it 10 as a nice round number." That, not any traffic estimate, is where HikariCP's default of 10 comes from.
 
-**PgBouncer at scale**: Companies with thousands of microservice instances (each with a 10-connection HikariCP pool) would create 10,000+ connections to PostgreSQL — far exceeding its capacity (recommended max: 100-200). PgBouncer in transaction mode multiplexes 10,000 application connections to 50 PostgreSQL connections, enabling microservices scale without PostgreSQL connection limit issues.
+**PgBouncer at scale**: Companies with thousands of microservice instances (each with a 10-connection HikariCP pool) would create 10,000+ connections to PostgreSQL — far beyond `max_connections`, whose documented default is 100. PgBouncer in transaction mode multiplexes those application connections down to a small server-side pool (`default_pool_size` defaults to 20 per user/database pair), enabling microservices scale without PostgreSQL connection limit issues.
 
 **Read it like this.** "The database never sees your pool size — it sees your pool size times your instance count, and that product is what has to fit under `max_connections`."
 
@@ -364,7 +374,7 @@ This is the single most common way a per-service configuration that looks conser
 | `max_connections` | Hard PostgreSQL ceiling; attempts beyond it are refused, not queued |
 | `I_safe` | `max_connections / P` — instances you may run before the ceiling breaks |
 
-**Walk one example.** The payment-service fleet from the case study, `max_connections = 100`:
+**Walk one example.** The illustrative payment-service fleet from the case study in section 14, with PostgreSQL left at its documented default `max_connections = 100`:
 
     per-instance config looks harmless
       P = 20 connections                    ("plenty of headroom" for one service)
@@ -391,7 +401,7 @@ Halving the pool moves the cliff from 5 instances to 10; it does not reach 30. T
 |-----------|----------|-------------|
 | Too small (<5) | High wait times under moderate load | Poor throughput |
 | Optimal (formula) | Low wait times, low DB overhead | Best |
-| Too large (>50 per DB server) | DB context switching, lock contention | Degrades |
+| Too large (several multiples of the formula) | DB context switching, lock contention | Degrades |
 
 | Validation Strategy | Reliability | Overhead |
 |--------------------|------------|---------|
@@ -406,7 +416,7 @@ Halving the pool moves the cliff from 5 instances to 10; it does not reach 30. T
 
 **HikariCP directly**: Use for any Java application connecting to a relational database. The default Spring Boot configuration is HikariCP — do not change unless you have a specific reason.
 
-**PgBouncer in front of PostgreSQL**: Use when you have many application servers (>20) each with a connection pool, and your connection count approaches PostgreSQL's limit. PostgreSQL supports up to ~200-500 connections before performance degrades.
+**PgBouncer in front of PostgreSQL**: Use when you have many application servers (>20) each with a connection pool, and your connection count approaches PostgreSQL's limit. `max_connections` defaults to 100 and is a hard ceiling — attempts past it are refused, not queued — and PostgreSQL's own docs warn that raising it raises shared-memory allocation with it. There is no published connection count at which PostgreSQL "starts to degrade"; treat the (cores × 2) + spindles rule as the target for *active* connections and size `max_connections` above it only with a pooler in the path.
 
 **Increase pool size**: Only after profiling confirms pool wait time is the bottleneck. Use `hikaricp_connections_pending` Micrometer metric. Increasing pool size blindly often makes the database the bottleneck instead.
 
@@ -414,7 +424,7 @@ Halving the pool moves the cliff from 5 instances to 10; it does not reach 30. T
 
 ## 10. Common Pitfalls
 
-**maxLifetime longer than load balancer/firewall timeout**: AWS RDS, Azure Database, and cloud proxies close idle connections after a timeout (typically 1800–3600 seconds). If maxLifetime is 30 minutes (1,800,000 ms) and the load balancer timeout is 1800 seconds (1,800,000 ms), connections may be closed by the LB exactly as HikariCP tries to retire them — causing connection errors. Set maxLifetime to at least 30 seconds below the firewall/LB timeout: `maxLifetime = LB_timeout_ms - 30_000`.
+**maxLifetime longer than load balancer/firewall timeout**: cloud proxies and load balancers close idle connections after their own timeout — AWS RDS Proxy's documented `IdleClientTimeout` default is 1,800 seconds (30 minutes), and it separately enforces a non-configurable 24-hour maximum client-connection life. If maxLifetime is 30 minutes (1,800,000 ms) and the load balancer timeout is 1800 seconds (1,800,000 ms), connections may be closed by the LB exactly as HikariCP tries to retire them — causing connection errors. Set maxLifetime to at least 30 seconds below the firewall/LB timeout: `maxLifetime = LB_timeout_ms - 30_000`.
 
 **Put simply.** "Retire the connection yourself, with a safety margin, before anything on the network path decides to retire it for you."
 
@@ -427,7 +437,7 @@ The failure mode is a race, not a leak: if both sides expire the connection at t
 | `margin` | `LB_timeout_ms - maxLifetime` — the gap that keeps the two from colliding |
 | `keepaliveTime` | How often an idle connection is probed so it never *looks* idle to the LB |
 
-**Walk one example.** The default HikariCP settings against a typical 30-minute LB timeout:
+**Walk one example.** The default HikariCP settings against RDS Proxy's default 30-minute idle client timeout:
 
     the collision (defaults)
       LB_timeout  = 1,800,000 ms   (30 min)
@@ -461,7 +471,7 @@ Hold time, not query time, is the denominator. A transaction that spends 5ms que
 
     external call INSIDE the transaction
       T_hold      = 5 ms query + 500 ms HTTP  = 505 ms  = 0.505 s
-      throughput  = 10 / 0.5                  ~ 20 req/s
+      throughput  = 10 / 0.505                ~ 19.8 req/s (~20)
       utilization = 5 / 505                   = 0.99%   <- 99% of the pool is idle-but-held
 
     external call moved OUTSIDE the transaction
@@ -474,9 +484,9 @@ Hold time, not query time, is the denominator. A transaction that spends 5ms que
 
 No database work changed and no connection was added; only the checkout window moved. This is why "the database is slow" is so often wrong — at 20 req/s the database in this example is 99% idle, and adding read replicas or a bigger instance would improve nothing. Watch `hikaricp_connections_acquire_seconds` alongside actual query timings: a large gap between them is exactly this pattern.
 
-**minimumIdle causing connection thrashing**: If minimumIdle is set to 0 (no warm connections), every incoming request must create a new connection. Connection creation takes 20-100ms, adding latency to the first request after an idle period. Keep minimumIdle equal to expected steady-state concurrent connections.
+**minimumIdle causing connection thrashing**: If minimumIdle is set to 0 (no warm connections), every incoming request must create a new connection. Connection creation takes 20-100ms, adding latency to the first request after an idle period. HikariCP's documented advice is to leave minimumIdle unset, which makes it equal maximumPoolSize and gives you a fixed-size pool "for maximum performance and responsiveness to spike demands."
 
-**Ignoring connectionTimeout in error handling**: When the pool exhausts, HikariCP throws CannotGetJdbcConnectionException with cause HikariPool$PoolTimeoutException. Many applications treat all DataAccessException as retriable — retrying a pool exhaustion exception will not help (the pool is still exhausted). Detect this specific exception and return 503 Service Unavailable rather than retrying.
+**Ignoring connectionTimeout in error handling**: When the pool exhausts, HikariCP itself throws `java.sql.SQLTransientConnectionException` with the message `<poolName> - Connection is not available, request timed out after Nms (total=…, active=…, idle=…, waiting=…)`; Spring's `DataSourceUtils` then wraps it in `CannotGetJdbcConnectionException`. (There is no `HikariPool$PoolTimeoutException` class — do not catch by that name.) Many applications treat all DataAccessException as retriable — retrying a pool exhaustion exception will not help (the pool is still exhausted). Detect this specific exception and return 503 Service Unavailable rather than retrying.
 
 ---
 
@@ -488,7 +498,7 @@ No database work changed and no connection was added; only the checkout window m
 | PgBouncer | PostgreSQL connection pooler (proxy) |
 | ProxySQL | MySQL connection pooler |
 | `hikaricp_*` metrics | Micrometer gauges for pool monitoring |
-| `jcmd <pid> VM.native_memory` | View total memory including connection pool buffers |
+| `jcmd <pid> VM.native_memory` | JVM native memory breakdown — requires `-XX:NativeMemoryTracking=summary` at startup |
 | `ss -tn` | View actual TCP connections to database |
 | `SELECT * FROM pg_stat_activity` | View PostgreSQL connections from DB side |
 | `SHOW PROCESSLIST` | View MySQL connections |
@@ -501,13 +511,13 @@ No database work changed and no connection was added; only the checkout window m
 A connection pool pre-establishes and maintains a set of database connections for reuse. Creating a JDBC connection involves TCP handshake, TLS (if SSL is enabled), authentication (username/password), session setup — totaling 20–100ms. For applications handling 100+ requests/second, creating a connection per request is prohibitively expensive. A pool reduces this to microseconds per borrow by reusing established connections.
 
 **Q: How does HikariCP's ConcurrentBag work?**
-ConcurrentBag is a custom concurrent data structure optimized for borrow/return patterns. It uses three tiers: a ThreadLocal list of previously used connections (first check for fast, uncontested borrow), a CopyOnWriteArrayList of all connections (scanned with CAS operations), and a SynchronousTransferQueue for threads waiting when all connections are in use (direct handoff from returning thread to waiter without queue traversal). This design minimizes lock contention and achieves microsecond borrow times.
+ConcurrentBag is a custom concurrent data structure optimized for borrow/return patterns. It uses three tiers: a `ThreadLocal<List<Object>>` of previously used connections (first check for fast, uncontested borrow), a `CopyOnWriteArrayList` of all connections (scanned with CAS operations), and a `java.util.concurrent.SynchronousQueue` handoff queue for threads waiting when all connections are in use (direct handoff from returning thread to waiter without queue traversal). This design minimizes lock contention and achieves microsecond borrow times.
 
 **Q: What is the optimal database connection pool size?**
-The HikariCP formula is: `pool_size = (core_count * 2) + effective_spindle_count`. For a 4-core database server with SSD (effective_spindle = 1), optimal pool ≈ 9 connections per application server. This is based on research showing that more connections than ~2x cores causes database context switching overhead that reduces overall throughput. The default HikariCP maximumPoolSize of 10 is deliberately conservative and appropriate for most workloads.
+The HikariCP formula is: `pool_size = (core_count * 2) + effective_spindle_count`. It is an empirical rule taken from the PostgreSQL project's "Number Of Database Connections" wiki page, not a queuing-theory derivation, and that page notes the formula has not been analysed for SSDs. HikariCP's own worked example is a 4-core server with one disk: (4 * 2) + 1 = 9, rounded up to 10 — which is exactly where the default maximumPoolSize of 10 comes from. The supporting evidence HikariCP cites is the Oracle Real-World Performance demo, where cutting connections from 2,048 to 96 alone dropped response time from ~100ms to ~2ms.
 
 **Q: What happens when the connection pool exhausts?**
-When all connections are in use (count == maximumPoolSize), new borrow requests wait up to connectionTimeout (default 30s). If no connection becomes available within that time, HikariCP throws CannotGetJdbcConnectionException. The application should treat this as a 503 Service Unavailable, not a retriable error. Pool exhaustion indicates either the pool is too small (increase if DB can handle it) or queries are too slow (optimize queries or fix downstream issue).
+When all connections are in use (count == maximumPoolSize), new borrow requests wait up to connectionTimeout (default 30s). If no connection becomes available within that time, HikariCP throws `java.sql.SQLTransientConnectionException` ("Connection is not available, request timed out after Nms"), which Spring wraps in `CannotGetJdbcConnectionException`. The application should treat this as a 503 Service Unavailable, not a retriable error. Pool exhaustion indicates either the pool is too small (increase if DB can handle it) or queries are too slow (optimize queries or fix downstream issue).
 
 **Q: How does HikariCP detect connection leaks?**
 When leakDetectionThreshold is set (e.g., 10000 ms), HikariCP starts a timer when a connection is borrowed. If the connection is not returned within the threshold, HikariCP logs a warning with the stack trace of where the connection was borrowed. This identifies code paths that hold connections too long (transaction spanning external HTTP calls, forgot close, caught exception before finally). The connection continues to function; the leak detection only warns.
@@ -516,13 +526,13 @@ When leakDetectionThreshold is set (e.g., 10000 ms), HikariCP starts a timer whe
 maxLifetime sets the maximum age of a connection in the pool. When a connection reaches its maxLifetime, HikariCP retires it and creates a new one. This prevents accumulation of ancient connections that may have accumulated state, and prevents connections from being closed mid-request by load balancers or firewalls that have their own idle connection timeouts. maxLifetime must be set shorter than the database firewall or load balancer idle timeout to avoid getting a connection closed just as it is being handed out.
 
 **Q: What is PgBouncer and when should you use it?**
-PgBouncer is a PostgreSQL connection pooler that sits between application servers and PostgreSQL. In transaction mode, it borrows a PostgreSQL connection only for the duration of a transaction and returns it immediately — allowing thousands of application connections to multiplex through tens of PostgreSQL connections. Use PgBouncer when you have many application server instances, each with its own HikariCP pool, and the total connection count would exceed PostgreSQL's maximum (~100-500 connections for good performance).
+PgBouncer is a PostgreSQL connection pooler that sits between application servers and PostgreSQL. In transaction mode, it borrows a PostgreSQL connection only for the duration of a transaction and returns it immediately — allowing thousands of application connections to multiplex through tens of PostgreSQL connections. Use PgBouncer when you have many application server instances, each with its own HikariCP pool, and the total connection count would exceed `max_connections`, whose PostgreSQL default is 100. The cost is that transaction mode permanently disables session-scoped features: `SET`/`RESET`, `LISTEN`, `WITH HOLD` cursors, SQL-level `PREPARE`/`DEALLOCATE`, session-level advisory locks and persistent temp tables.
 
 **Q: How should HikariCP be configured to work behind AWS RDS?**
-AWS RDS has a connection idle timeout (default varies, but commonly 3600s for RDS Proxy, shorter for direct connections). Configure: `maxLifetime = 1740000` (29 min, safely below RDS's 30-min idle timeout), `keepaliveTime = 60000` (60s keepalive prevents idle connection death from RDS side), `connectionTimeout = 5000` (fail fast, do not wait 30s). For RDS Proxy: the proxy manages connection pooling, so application pool can be smaller; ensure `maxLifetime` < RDS Proxy's `connectionBorrowTimeout`.
+RDS Proxy's idle client connection timeout defaults to 1,800 seconds (30 minutes), so set HikariCP's maxLifetime safely below it. Configure: `maxLifetime = 1740000` (29 min, leaving 60s of margin under that default), `keepaliveTime = 60000` (60s keepalive so an idle connection never looks idle to the proxy), `connectionTimeout = 5000` (fail fast, do not wait 30s). RDS Proxy additionally enforces a non-configurable 24-hour maximum life on client connections, and AWS explicitly advises configuring your pool's maximum connection life below both limits. Do not tie maxLifetime to `ConnectionBorrowTimeout` — that setting (default 120 seconds) governs how long the proxy waits for one of its own pooled connections to free up, not how long a client may sit idle.
 
 **Q: What metrics should you monitor for a HikariCP pool?**
-Key Micrometer metrics: `hikaricp_connections` (total), `hikaricp_connections_active` (in use), `hikaricp_connections_idle` (available), `hikaricp_connections_pending` (waiting threads), `hikaricp_connections_creation_seconds` (time to create connections), `hikaricp_connections_acquire_seconds` (time to borrow from pool). Alert on: pending > 0 consistently (pool exhaustion starting), acquire_seconds p99 > 100ms (contention), active approaching pool size (near exhaustion).
+Watch three things: pool saturation, borrow wait time, and connection churn. Key Micrometer metrics: `hikaricp_connections` (total), `hikaricp_connections_active` (in use), `hikaricp_connections_idle` (available), `hikaricp_connections_pending` (waiting threads), `hikaricp_connections_creation_seconds` (time to create connections), `hikaricp_connections_acquire_seconds` (time to borrow from pool). Alert on: pending > 0 consistently (pool exhaustion starting), acquire_seconds p99 > 100ms (contention), active approaching pool size (near exhaustion).
 
 **Q: Why should you avoid holding connections during external service calls?**
 Database connections are a scarce resource (pool of 10). If a `@Transactional` method calls an external HTTP API that takes 500ms, the connection is held idle during that 500ms. With 10 connections and 500ms lock time, the service can only process 10 / 0.5 = 20 requests/second through this code path — even if the database could handle 1,000. This is connection pool starvation from external latency. Keep transactions short: fetch data, close transaction, call external service, open new transaction to save results.
@@ -534,13 +544,13 @@ HikariCP validates connections before handing them out if the connection has bee
 This warning fires when a borrowed connection is not returned within `leakDetectionThreshold` milliseconds. Common causes: (1) Code path exits via exception without closing the connection (fix: try-with-resources); (2) Long-running transaction (heavy computation or external calls inside @Transactional, fix: minimize transaction scope); (3) Forgotten close in unit tests (fix: @Transactional on test method or explicit cleanup). The stack trace in the warning points to the exact location where the connection was borrowed.
 
 **Q: How does read replica routing work with connection pooling?**
-Use separate HikariCP pools — one for the primary (read-write), one per read replica (read-only). Route read-only queries (SELECT without transaction) to the read pool and writes to the primary pool. In Spring: configure two DataSources and use an AbstractRoutingDataSource with a ThreadLocal to switch. Alternatively, PgBouncer or ProxySQL can do read/write splitting at the proxy layer based on SQL parsing. Ensure the read pool's maxLifetime is shorter than the replication lag threshold (a connection pointing to a replica that has fallen behind should be detected).
+Use separate HikariCP pools — one for the primary (read-write), one per read replica (read-only). Route read-only queries (SELECT without transaction) to the read pool and writes to the primary pool. In Spring: configure two DataSources and use an AbstractRoutingDataSource with a ThreadLocal to switch. Alternatively, PgBouncer or ProxySQL can do read/write splitting at the proxy layer based on SQL parsing. Do not try to express staleness tolerance through maxLifetime — connection age says nothing about replica lag; measure lag directly (`pg_last_xact_replay_timestamp()` on PostgreSQL, `Seconds_Behind_Master` on MySQL) and route reads back to the primary when it exceeds your tolerance.
 
 **Q: How do you tell whether a connection pool is too small versus the queries simply being too slow?**
-The `hikaricp_connections_pending` metric is the tell: it stays above zero only when the pool itself is undersized, not when queries are simply slow. A healthy 200ms-query workload drains and refills a 10-connection pool every cycle without any pending threads. The same pool serving a query that suddenly takes 10 seconds holds all 10 connections past the default 5000ms connectionTimeout, so every waiter times out — a symptom that looks identical to "pool too small" until you check how long the query itself is taking. Blindly enlarging the pool when queries are the real bottleneck only adds more concurrent slow queries competing for the database's CPU, locks, and disk, making the underlying problem worse; profile the slow query first, and only increase pool size after confirming query duration is normal and wait time is still the limiting factor.
+Compare query duration against pool wait time — `hikaricp_connections_pending` rises in both cases, so only a normal query time alongside a high wait proves the pool itself is undersized. A healthy 200ms-query workload drains and refills a 10-connection pool every cycle with little or no pending backlog. The same pool serving a query that suddenly takes 10 seconds holds all 10 connections past the default 5000ms connectionTimeout, so every waiter times out — a symptom that looks identical to "pool too small" until you check how long the query itself is taking. Blindly enlarging the pool when queries are the real bottleneck only adds more concurrent slow queries competing for the database's CPU, locks, and disk, making the underlying problem worse; profile the slow query first, and only increase pool size after confirming query duration is normal and wait time is still the limiting factor.
 
 **Q: What causes "FATAL: sorry, too many clients already" and how do you fix it without redesigning every service?**
-This PostgreSQL error means total connection attempts across all app instances exceeded max_connections, and the fix is a pooling proxy like PgBouncer, not smaller per-service pools. In one production case, 30 instances each running a 20-connection HikariCP pool attempted 600 connections against a PostgreSQL server configured with max_connections=100 — six times over the limit — and every excess attempt failed with this exact error. Deploying PgBouncer in transaction mode let the applications keep their existing pool sizes while multiplexing the real traffic down to 50 actual PostgreSQL connections, because PgBouncer only holds a real connection for the duration of one transaction rather than one client session. Put a pooling proxy in front of PostgreSQL before assuming the fix is a bigger database instance or smaller application pools.
+This PostgreSQL error means total connection attempts across all app instances exceeded max_connections, and the fix is a pooling proxy like PgBouncer, not smaller per-service pools. In the illustrative scenario in section 14, 30 instances each running a 20-connection HikariCP pool attempted 600 connections against a PostgreSQL server left at the default max_connections=100 — six times over the limit — and every excess attempt failed with this exact error. Deploying PgBouncer in transaction mode let the applications keep their existing pool sizes while multiplexing the real traffic down to 50 actual PostgreSQL connections, because PgBouncer only holds a real connection for the duration of one transaction rather than one client session. Put a pooling proxy in front of PostgreSQL before assuming the fix is a bigger database instance or smaller application pools.
 
 **Q: What happens if you set HikariCP's minimumIdle to 0?**
 Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a request arriving after any idle period pays the full cost of creating a new connection first. Connection creation involves a TCP handshake, optional TLS negotiation, and database authentication — 20 to 100ms — which becomes added latency on the first request after any idle gap instead of being hidden ahead of time. This connection thrashing is worst for bursty traffic patterns, where the pool repeatedly drains to zero idle connections and then pays the creation cost again for the next burst. Keep minimumIdle equal to maximumPoolSize, HikariCP's own recommended default, so the pool maintains warm connections sized to expected steady-state concurrency.
@@ -549,7 +559,7 @@ Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a re
 
 ## 13. Best Practices
 
-- Start with pool size = (DB core count * 2) + 1 per application server. Adjust based on metrics.
+- Start with pool size = (DB core count * 2) + effective spindle count per application server, and multiply by instance count before comparing against `max_connections`. Adjust based on metrics.
 - Always set maxLifetime 30 seconds below any load balancer or firewall idle timeout.
 - Enable leakDetectionThreshold = 10000 in all non-production environments to catch leaks early.
 - Enable keepaliveTime = 60000 on connections that may sit idle through NAT timeouts.
@@ -564,13 +574,13 @@ Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a re
 
 See the [Java case study: design_connection_pool](../java/case_studies/design_connection_pool.md) for a full implementation from scratch. The backend production scenario:
 
-**Production incident**: A payment service running 30 instances, each with a 20-connection HikariCP pool, was connecting to a PostgreSQL 12 server with max_connections=100. Under normal load: 30 instances * 20 connections = 600 connections attempted. PostgreSQL was refusing connections at max_connections, causing `org.postgresql.util.PSQLException: FATAL: sorry, too many clients already`.
+**Illustrative incident** (a composite scenario built from the arithmetic, not a published case): a payment service running 30 instances, each with a 20-connection HikariCP pool, connecting to a PostgreSQL server left at the default max_connections=100. Under normal load: 30 instances * 20 connections = 600 connections attempted. PostgreSQL refuses connections past max_connections, causing `org.postgresql.util.PSQLException: FATAL: sorry, too many clients already`.
 
 **Root cause**: Pool size (20) was set based on "enough headroom" rather than the database capacity formula. 30 * 20 = 600 far exceeds PostgreSQL's safe limit.
 
 **Fix**: Deployed PgBouncer in transaction mode. Application continues to use 20-connection pools. PgBouncer forwards transactions to only 50 PostgreSQL connections. Total PostgreSQL connections: 50 (constant). Application pools: 600 (unchanged). PgBouncer acts as a multiplexer.
 
-**Longer term**: Reduced HikariCP pool to 10 per instance based on the formula (PostgreSQL on 4-core server: (4*2)+1 = 9 ≈ 10 per instance). With PgBouncer: 30 * 10 = 300 connections through PgBouncer → 50 real PostgreSQL connections. 80% reduction in DB connection overhead.
+**Longer term**: Reduced HikariCP pool to 10 per instance based on the formula (PostgreSQL on a 4-core server with one disk: (4*2)+1 = 9 ≈ 10 per instance). With PgBouncer: 30 * 10 = 300 connections through PgBouncer → 50 real PostgreSQL connections, a 6:1 fan-in and 250/300 = 83% fewer real connections than the client side opens.
 
 ```mermaid
 flowchart LR
@@ -595,4 +605,4 @@ flowchart LR
     class F train
 ```
 
-*Connecting the fleet directly overwhelms PostgreSQL's max_connections=100 — 600 attempted connections exceed it 6x and every excess attempt fails with `FATAL: sorry, too many clients already`. Routing through PgBouncer in transaction mode instead multiplexes application-side pools down to a constant 50 real PostgreSQL connections, the 80% reduction in DB connection overhead described above.*
+*Connecting the fleet directly overwhelms PostgreSQL's max_connections=100 — 600 attempted connections exceed it 6x and every excess attempt fails with `FATAL: sorry, too many clients already`. Routing through PgBouncer in transaction mode instead multiplexes application-side pools down to a constant 50 real PostgreSQL connections — the 6:1 fan-in, 83% fewer real connections, described above.*

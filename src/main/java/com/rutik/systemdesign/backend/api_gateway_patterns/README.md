@@ -62,7 +62,7 @@ The gateway aggregates responses from multiple services and returns a single res
 
 ### GraphQL Gateway
 
-A GraphQL server (Apollo Federation, Spring for GraphQL) acts as the gateway. Services expose GraphQL subgraphs. The gateway federates them into a single unified schema. Clients specify exactly the fields they need; the gateway fetches only the required data from the relevant services.
+A federated GraphQL router (Apollo Federation / Apollo Router) acts as the gateway. Services expose GraphQL subgraphs — Spring for GraphQL implements the *subgraph* side via its `federation-jvm` integration, not the federating router itself. The gateway federates the subgraphs into a single unified schema. Clients specify exactly the fields they need; the gateway fetches only the required data from the relevant services.
 
 ---
 
@@ -270,6 +270,8 @@ spring:
           args:
             maxSize: 5MB
 ```
+
+Property-prefix note: from Spring Cloud 2025.0 the gateway modules were renamed and `spring.cloud.gateway.*` is deprecated in favour of `spring.cloud.gateway.server.webflux.*`. The old prefix above still binds (it logs a deprecation warning, and `spring-boot-properties-migrator` maps it); on Spring Cloud 2025.0 or later, prefer the new one.
 
 **In plain terms.** "Every caller gets 100 requests per second forever, plus a one-time 200-request cushion for bursts — and a failed GET is retried three times with the wait doubling each round."
 
@@ -484,11 +486,11 @@ public class FallbackController {
 
 **Netflix Zuul / Spring Cloud Gateway**: Netflix built Zuul as their first-generation gateway. Zuul 1 used a thread-per-connection model and became a bottleneck at high concurrency. Zuul 2 (and Spring Cloud Gateway) uses a non-blocking reactive model (Netty) that handles thousands of concurrent connections with far fewer threads.
 
-**AWS API Gateway**: used by companies running serverless architectures. Lambda authorizers validate custom tokens. Usage plans and API keys enforce per-client rate limits. Throttling settings at 10,000 requests per second default, adjustable per stage and method.
+**AWS API Gateway**: used by companies running serverless architectures. Lambda authorizers validate custom tokens. Usage plans and API keys enforce per-client rate limits (REST APIs only — HTTP APIs have no usage plans). The default account-level throttle is 10,000 requests per second per Region across HTTP, REST and WebSocket APIs, with a 5,000-request burst bucket; it is raisable through Service Quotas, and per-stage and per-method throttling are configured separately.
 
-**Kong at Instacart**: Kong (Nginx-based) handles 1M+ requests per hour. Rate limiting, JWT validation, and request transformation are all Kong plugins. Declarative configuration via deck allows infrastructure-as-code for gateway config.
+**Kong**: Kong Gateway is built on Nginx/OpenResty. Rate limiting, JWT validation, and request transformation are all Kong plugins — the bundled ones are written in Lua, with Go, Python and JavaScript PDKs available for custom plugins. Declarative configuration via the decK CLI allows infrastructure-as-code for gateway config.
 
-**Uber's API Gateway**: Uber built a custom gateway (APEX) that routes to 2,000+ microservices. It handles service discovery, protocol translation (HTTP to Thrift), and dynamic routing based on request attributes.
+**Uber's API Gateway**: Uber built its gateway in-house. The second generation, RTAPI (Real Time-API), communicated with ~400+ downstream services owned by 100+ teams; the current generation is Edge Gateway, Uber's API lifecycle management platform. It handles service discovery, protocol translation (external HTTP/JSON down to Uber's internal multiplexed bidirectional transport, later gRPC), and dynamic routing based on request attributes.
 
 ---
 
@@ -499,24 +501,24 @@ public class FallbackController {
 | Cross-cutting concerns | Centralized (auth, rate limiting once) | Duplicated in every service |
 | Client simplicity | One endpoint, aggregated responses | Multiple service calls per page |
 | Operational complexity | Additional component to deploy and monitor | Simpler topology |
-| Latency | +5-20ms per request (gateway overhead) | Direct service calls are faster |
+| Latency | One extra proxy hop per request. Kong markets sub-millisecond processing latency and its own published benchmark shows ~3.8ms at p95 under saturation; a managed gateway adds more | Direct service calls are faster |
 | SPOF risk | High if gateway is single instance | No gateway = no gateway SPOF |
 | Service discoverability | Hidden behind gateway (good for security) | Services directly exposed |
 | BFF flexibility | Per-client tailoring possible | All clients hit same APIs |
 | Protocol translation | HTTP to gRPC, WebSocket, etc. | Each client handles protocols |
 
-**Read it like this.** "The gateway hop costs you 5-20ms on every single request — the only question is whether it saves the client more round trips than that."
+**Read it like this.** "The gateway hop costs you something on every single request — the only question is whether it saves the client more round trips than it costs."
 
-The `+5-20ms` row is the one line in this table with a number, and it is the line the decision actually turns on. Treat it as a latency tax charged per request, then check whether aggregation refunds it.
+The latency row is the line the decision actually turns on. Treat the hop as a tax charged per request, then check whether aggregation refunds it. The hop cost below is a deliberately pessimistic **assumed 20ms** so the tax is not understated; measure your own before using it in a budget.
 
 | Symbol | What it is |
 |--------|------------|
-| gateway hop | Added one-way latency: TLS termination, filter chain, upstream connect. `5-20ms` |
+| gateway hop | Added latency: TLS termination, filter chain, upstream connect. Assumed `20ms` here |
 | direct p99 | What the client would see calling the service itself |
 | tax % | `hop / direct p99` — how much of the budget the gateway eats |
 | round trips saved | Client calls collapsed into one composed call |
 
-**Walk one example.** A single service call, then the same page built two ways:
+**Walk one example.** A single service call, then the same page built two ways, reusing the four service latencies from Section 6:
 
 ```
   one route, no aggregation
@@ -524,14 +526,22 @@ The `+5-20ms` row is the one line in this table with a number, and it is the lin
     through the gateway = 60 + 20 = 80ms
     tax = 20 / 60 = 33.3% slower for zero benefit
 
-  a product page needing 4 services, client on mobile (60ms RTT each)
-    client calls them itself : 4 x 60             = 240ms
-    gateway composes them    : 90 (slowest) + 20  = 110ms
-                                                    ------
-    net win                                         130ms
+  a product page needing the 4 services from Section 6,
+  client on mobile at 60ms network RTT per round trip
+    client calls them itself : 4 x 60 RTT              = 240ms network
+                             + 40 + 25 + 15 + 90       = 170ms service
+                                                         ------
+                                                          410ms
+
+    gateway composes them    : 60 RTT + 20 hop         =  80ms
+                             + 90 (slowest, parallel)  =  90ms
+                                                         ------
+                                                          170ms
+                                                         ------
+    net win                                              240ms
 ```
 
-That is the rule the "sub-millisecond latency" bullet in Section 9 is really stating: a gateway that only *proxies* is pure tax, and a gateway that *aggregates* pays for itself several times over. Route-by-route, not gateway-wide, is the level at which this should be decided.
+That is the rule the latency bullet in Section 9 is really stating: a gateway that only *proxies* is pure tax, and a gateway that *aggregates* pays for itself several times over. Route-by-route, not gateway-wide, is the level at which this should be decided.
 
 ### Gateway Products Comparison
 
@@ -541,19 +551,19 @@ That is the rule the "sub-millisecond latency" bullet in Section 9 is really sta
 | Config | Java/YAML, code | declarative YAML / admin API / deck | Console / Terraform / CDK |
 | Auth | Custom filters, Spring Security | JWT, OAuth2, basic-auth plugins | Lambda authorizer, Cognito |
 | Rate limiting | Redis-backed token bucket | Redis-backed, per consumer | Usage plans per API key |
-| Service discovery | Eureka, Kubernetes, Consul | Consul, DNS | Not applicable (Lambda/EC2 targets) |
-| Cost | Open source | Open source (EE paid) | Per-request pricing (~$3.50/million) |
+| Service discovery | Eureka, Kubernetes, Consul | Consul, DNS | VPC links to ALB/NLB; AWS Cloud Map for HTTP API private integrations |
+| Cost | Open source | Open source (EE paid) | Per-request, tiered (REST $3.50/M for the first 333M; HTTP APIs $1.00/M) |
 | Best for | Spring Boot shops, full control | Polyglot, plugin ecosystem | AWS-native, serverless |
 
 **Put simply.** "Managed gateways bill per request, so their cost grows with your traffic while a self-hosted gateway's cost grows with your instance count — and those two curves cross."
 
-The `~$3.50/million` figure looks trivially small per request and stops looking small the moment you multiply it by a production request rate. This is the single arithmetic that decides the "Cost" row.
+The `$3.50/million` figure looks trivially small per request and stops looking small the moment you multiply it by a production request rate. This is the single arithmetic that decides the "Cost" row — and it is **tiered**, so a flat multiply overstates the bill.
 
 | Symbol | What it is |
 |--------|------------|
-| `$3.50/million` | AWS API Gateway per-request price for REST APIs |
+| `$3.50/million` | AWS API Gateway REST-API price for the **first 333M** requests/month; then `$2.80/M` for the next 667M and `$2.38/M` beyond 1B. HTTP APIs are cheaper: `$1.00/M` for the first 300M, `$0.90/M` after |
 | requests/month | `rps x 86,400 seconds/day x 30 days` |
-| managed cost | `requests/month / 1,000,000 x 3.50` |
+| managed cost | The **tiered sum**, not `requests/month / 1,000,000 x 3.50` |
 | self-hosted cost | Roughly flat: instance hours + the engineer-time to operate it |
 
 **Walk one example.** A steady 500 rps, which is a mid-sized service, not a giant:
@@ -562,13 +572,21 @@ The `~$3.50/million` figure looks trivially small per request and stops looking 
   requests/day   = 500 x 86,400              =    43,200,000
   requests/month = 43,200,000 x 30           = 1,296,000,000  (1,296M)
 
-  cost = 1,296 x $3.50                       = $4,536 / month
+  tiered, NOT 1,296 x $3.50:
+    first  333M x $3.50 = $1,165.50
+    next   667M x $2.80 = $1,867.60
+    last   296M x $2.38 =   $704.48
+                          ----------
+  cost                    $3,737.58 / month
 
-  at the 10,000 rps default throttle ceiling:
-  cost = 25,920M / 1M x $3.50                = $90,720 / month
+  at the 10,000 rps default account throttle ceiling (25,920M/month):
+    333M x $3.50 + 667M x $2.80 + 24,920M x $2.38
+                          ----------
+                        $62,342.70 / month  (upper bound: AWS tiers
+                                             again at very high volume)
 ```
 
-$4,536/month buys a lot of Spring Cloud Gateway instances, which is why high-volume shops self-host and low-volume or spiky serverless shops do not. The break-even is not about features — both gateways do the same job — it is about whether your traffic is high enough that a per-request price beats a per-instance one.
+$3,738/month buys a lot of Spring Cloud Gateway instances, which is why high-volume shops self-host and low-volume or spiky serverless shops do not. The break-even is not about features — both gateways do the same job — it is about whether your traffic is high enough that a per-request price beats a per-instance one.
 
 ---
 
@@ -584,7 +602,7 @@ $4,536/month buys a lot of Spring Cloud Gateway instances, which is why high-vol
 **Do NOT use an API gateway when:**
 - You have a monolith or very few services — overhead is not justified.
 - You need to put business logic in the gateway — it will become a bottleneck.
-- You need sub-millisecond latency — every gateway hop adds 5-20ms.
+- You need the tightest achievable latency — every gateway hop adds a proxy round trip on top of the service call (Kong markets sub-millisecond processing, and its published benchmark shows ~3.8ms at p95 under saturation; managed gateways add more).
 - You are building an internal service mesh — a service mesh handles internal traffic better than a gateway.
 
 **BFF when:**
@@ -619,7 +637,7 @@ flowchart LR
     class standard,bff train
 ```
 
-A monolith or a handful of services rarely justifies the added 5-20ms hop; once services multiply, the remaining choice is whether client needs diverge enough to warrant a BFF per client type instead of one shared gateway.
+A monolith or a handful of services rarely justifies the added proxy hop; once services multiply, the remaining choice is whether client needs diverge enough to warrant a BFF per client type instead of one shared gateway.
 
 ---
 
@@ -628,7 +646,7 @@ A monolith or a handful of services rarely justifies the added 5-20ms hop; once 
 **The Smart Gateway Anti-Pattern**
 Teams gradually add business logic to the gateway: "let's validate stock availability at the gateway level." Now the gateway calls the inventory service to check stock before routing to the order service. The gateway has business logic. A change in inventory rules requires a gateway deployment. The gateway team is on the critical path for every feature. Keep the gateway thin: routing, auth, rate limiting, logging only.
 
-Production war story: a major e-commerce company's gateway team became a 12-person team maintaining 4,000 lines of routing rules, coupon validation, A/B test routing, and personalization logic. A gateway deployment caused a 40-minute outage during peak hours. The gateway had become the most complex and fragile component in the system.
+Production war story (illustrative composite, not a published incident): a large e-commerce company's gateway team became a 12-person team maintaining 4,000 lines of routing rules, coupon validation, A/B test routing, and personalization logic. A gateway deployment caused a 40-minute outage during peak hours. The gateway had become the most complex and fragile component in the system.
 
 ```mermaid
 stateDiagram-v2
@@ -671,7 +689,7 @@ A downstream service fails and the gateway returns 502 to the client with no con
 The gateway adds X-User-Id and X-User-Roles headers for downstream services. If the gateway also reflects these headers back to the external client, clients can read (and potentially spoof) internal headers on subsequent requests. Strip internal headers from client responses. Validate and re-generate internal headers from the JWT on each request, never trust X-User-Id from the incoming request.
 
 **No Request Size Limits**
-Without request size limits, a client can send a 500MB body to any service. Add `RequestSize` filters (default 5MB) at the gateway default-filters level. Without this, a single large upload can exhaust memory on a downstream service.
+Without request size limits, a client can send a 500MB body to any service. Add `RequestSize` filters (the Spring Cloud Gateway default is 5 MB when `maxSize` is omitted; over-limit requests get 413 Payload Too Large plus an `errorMessage` header) at the gateway default-filters level. Without this, a single large upload can exhaust memory on a downstream service.
 
 **Rate Limiting Without User-Level Keys**
 Rate limiting per IP allows a single malicious user with many IPs to bypass limits, while legitimate users on shared IPs (corporate NAT) get unfairly throttled. Rate limit by authenticated user ID for logged-in endpoints, by API key for partner endpoints, and by IP only for public unauthenticated endpoints.
@@ -686,11 +704,11 @@ Rate limiting per IP allows a single malicious user with many IPs to bypass limi
 | Nginx-based | Kong (open source / enterprise), Nginx Plus |
 | Managed cloud | AWS API Gateway, Azure API Management, GCP Apigee |
 | Service mesh with gateway | Istio Ingress Gateway, Envoy as edge proxy |
-| GraphQL federation | Apollo Federation, Spring for GraphQL |
+| GraphQL federation | Apollo Federation / Apollo Router (router side); Spring for GraphQL + federation-jvm (subgraph side) |
 | Rate limiting backend | Redis (token bucket / sliding window) |
 | Auth | Spring Security OAuth2, Keycloak, Auth0, Okta |
 | Circuit breaker | Resilience4j (integrated with Spring Cloud Gateway) |
-| API design / contract | OpenAPI 3.0 (Swagger), AsyncAPI for event-driven |
+| API design / contract | OpenAPI 3.x (3.2.0, September 2025, is current; Swagger tooling), AsyncAPI for event-driven |
 
 ---
 
@@ -700,19 +718,19 @@ Rate limiting per IP allows a single malicious user with many IPs to bypass limi
 An API gateway is the single entry point for all external traffic in a microservices architecture. It handles routing (directing requests to the correct service), authentication and authorization offloading (JWT validation before the request reaches a service), rate limiting, SSL termination, request and response transformation, logging, and metrics collection. The key benefit is centralizing cross-cutting concerns that would otherwise be duplicated across every service.
 
 **Q: What is the BFF (Backend For Frontend) pattern and when do you use it?**
-BFF creates a separate gateway instance tailored to each client type: a Mobile BFF returns compact payloads optimized for bandwidth-constrained devices; a Web BFF returns richer payloads; a Partner BFF enforces API key auth and usage metering. Use BFF when different clients have fundamentally different data shape requirements and when client teams are large enough to own their gateway tier. It prevents the single-gateway team from becoming a bottleneck, as each BFF is owned by the team that builds its corresponding client.
+BFF creates a separate gateway instance tailored to each client type. A Mobile BFF returns compact payloads optimized for bandwidth-constrained devices; a Web BFF returns richer payloads; a Partner BFF enforces API key auth and usage metering. Use BFF when different clients have fundamentally different data shape requirements and when client teams are large enough to own their gateway tier. It prevents the single-gateway team from becoming a bottleneck, as each BFF is owned by the team that builds its corresponding client.
 
 **Q: How does Spring Cloud Gateway differ from Zuul 1?**
 Spring Cloud Gateway is fully reactive, built on Project Reactor and Netty, using non-blocking I/O. It handles thousands of concurrent connections with a small, fixed thread pool. Zuul 1 uses a blocking, thread-per-connection model: each request ties up a thread for the duration of the call. Under high concurrency (thousands of concurrent slow upstream services), Zuul 1 exhausts the thread pool and backs up. Spring Cloud Gateway scales better under high concurrency and integrates naturally with reactive Spring WebFlux.
 
 **Q: Explain Spring Cloud Gateway predicates and filters.**
-Predicates are conditions that a request must match for a route to apply: `Path=/api/v1/users/**`, `Header=X-API-Version: 2`, `Method=GET`, `Host=api.example.com`. Filters transform the request before routing or the response after: `StripPrefix` removes path segments, `AddRequestHeader` injects headers, `CircuitBreaker` wraps the route with a circuit breaker, `RequestRateLimiter` enforces rate limits via Redis, `RewritePath` transforms the URL. `GlobalFilter` beans apply to every route, while per-route filters apply only to matching routes.
+Predicates are conditions that a request must match for a route to apply. Examples are `Path=/api/v1/users/**`, `Header=X-API-Version, 2`, `Method=GET` and `Host=api.example.com` — note that the Header predicate separates name from value-regexp with a comma, not a colon. Filters transform the request before routing or the response after: `StripPrefix` removes path segments, `AddRequestHeader` injects headers, `CircuitBreaker` wraps the route with a circuit breaker, `RequestRateLimiter` enforces rate limits via Redis, `RewritePath` transforms the URL. `GlobalFilter` beans apply to every route, while per-route filters apply only to matching routes.
 
 **Q: How do you prevent the API gateway from becoming a single point of failure?**
 Run multiple gateway instances (minimum 3) behind a load balancer (AWS ALB, Nginx). Each instance is stateless — rate limit state and session state live in Redis. Use circuit breakers on every route so a failing upstream service returns a fallback response rather than causing the gateway to hang. Health checks on each gateway instance allow the load balancer to route around a failed instance. Use rolling deployments so gateway updates do not cause downtime.
 
 **Q: How does JWT authentication work at the gateway level?**
-The gateway intercepts every request, extracts the Bearer token from the Authorization header, validates the JWT signature using the public key (from the authorization server's JWKS endpoint), and checks expiry and claims. On success, the gateway extracts user identity from the JWT claims and injects it as trusted internal headers (X-User-Id, X-User-Roles) before forwarding to the downstream service. Downstream services trust these headers because they are inside the network perimeter and never exposed to external clients. This removes the need for each service to validate JWTs independently.
+The gateway intercepts every request, extracts the Bearer token from the Authorization header, and validates the JWT signature against the authorization server's JWKS public key. It then checks expiry and claims. On success, the gateway extracts user identity from the JWT claims and injects it as trusted internal headers (X-User-Id, X-User-Roles) before forwarding to the downstream service. Downstream services trust these headers because they are inside the network perimeter and never exposed to external clients. This removes the need for each service to validate JWTs independently.
 
 **Q: What is API composition at the gateway level?**
 API composition aggregates responses from multiple services into a single response for the client. For a product detail page, the gateway calls catalog, pricing, inventory, and review services in parallel using reactive composition (Mono.zip), merges the responses, and returns one JSON object to the client. This reduces client round trips from 4 to 1. The tradeoff: the gateway now calls multiple services per request, and the gateway's response time is the maximum of all upstream calls.
@@ -721,16 +739,16 @@ API composition aggregates responses from multiple services into a single respon
 Spring Cloud Gateway uses the `RequestRateLimiter` filter backed by Redis. The token bucket algorithm allows a `replenishRate` (steady-state tokens added per second) and a `burstCapacity` (maximum tokens in the bucket, allowing short bursts). A `KeyResolver` bean determines the rate limit key: by user ID for authenticated endpoints (extracted from the JWT-populated X-User-Id header), by API key for partner endpoints, or by IP for public unauthenticated endpoints. When the bucket is empty, the gateway returns 429 Too Many Requests.
 
 **Q: What is the difference between a circuit breaker at the gateway level versus at the service level?**
-A gateway-level circuit breaker (Spring Cloud Gateway + Resilience4j) protects the gateway from spending time waiting on a failing downstream service, returns a fallback response to the client, and prevents the gateway thread pool from exhausting. A service-level circuit breaker (Resilience4j in the calling service) protects a service from a failing dependency. Both are necessary for defense in depth: gateway-level catches client-facing degradation early; service-level handles internal service-to-service failures. Configure both with appropriate timeouts and fallback behaviors.
+A gateway-level circuit breaker stops the gateway waiting on a failing downstream service and returns a fallback to the client instead. It also keeps in-flight requests from piling up and exhausting the gateway's upstream connections and heap — a reactive gateway has no per-request thread to exhaust, but its connection pools and memory are finite. A service-level circuit breaker (Resilience4j in the calling service) protects a service from a failing dependency. Both are necessary for defense in depth: gateway-level catches client-facing degradation early; service-level handles internal service-to-service failures. Configure both with appropriate timeouts and fallback behaviors.
 
 **Q: How do you handle versioning at the API gateway?**
-Route predicates select routes based on URL path (Path=/api/v2/**) or headers (Header=X-API-Version: 2). Version 1 routes to the old service; version 2 routes to a new service or to the same service with a rewritten path. The gateway allows running multiple API versions simultaneously during migration without requiring all clients to upgrade at once. Deprecate old versions by returning a Deprecation response header with the sunset date.
+Route predicates select routes based on URL path (`Path=/api/v2/**`) or headers (`Header=X-API-Version, 2`). Version 1 routes to the old service; version 2 routes to a new service or to the same service with a rewritten path. The gateway allows running multiple API versions simultaneously during migration without requiring all clients to upgrade at once. Deprecate old versions by returning a Deprecation response header with the sunset date.
 
 **Q: What is Kong and how does it differ from Spring Cloud Gateway?**
-Kong is an Nginx-based API gateway with a plugin architecture. Core functionality (rate limiting, JWT auth, OAuth2, request transformation, logging) is provided by plugins written in Lua. Configuration is declarative via YAML files managed by the deck CLI. Kong is language-agnostic — it sits in front of any backend technology. Spring Cloud Gateway is JVM-native, configured in Java and YAML, integrates deeply with the Spring ecosystem (Eureka, Spring Security, Micrometer), and is better suited for Spring Boot shops that want full programmatic control. Kong is better for polyglot environments where the gateway team wants plugin-based configuration without writing Java code.
+Kong is an Nginx-based API gateway with a plugin architecture. Core functionality (rate limiting, JWT auth, OAuth2, request transformation, logging) is provided by plugins — the bundled ones are written in Lua, and custom plugins can also use the Go, Python or JavaScript PDKs. Configuration is declarative via YAML files managed by the decK CLI. Kong is language-agnostic — it sits in front of any backend technology. Spring Cloud Gateway is JVM-native, configured in Java and YAML, integrates deeply with the Spring ecosystem (Eureka, Spring Security, Micrometer), and is better suited for Spring Boot shops that want full programmatic control. Kong is better for polyglot environments where the gateway team wants plugin-based configuration without writing Java code.
 
 **Q: How does AWS API Gateway work with Lambda authorizers?**
-A Lambda authorizer is a Lambda function that runs before the backend Lambda (or HTTP endpoint). It receives the request token (JWT, API key, or custom header) and returns an IAM policy document that allows or denies access to the API resource. AWS API Gateway caches the authorizer response for a configurable TTL (300 seconds default). Usage plans and API keys enforce rate limits and quotas per client. This model is fully serverless — no always-on gateway instances to manage.
+A Lambda authorizer is a Lambda function that runs before the backend Lambda (or HTTP endpoint). It receives the request token (JWT, API key, or custom header) and returns an IAM policy document that allows or denies access to the API resource. AWS API Gateway caches the authorizer response for a configurable TTL (`authorizerResultTtlInSeconds` defaults to 300 seconds, maximum 3600; 0 disables caching). Usage plans and API keys enforce rate limits and quotas per client on REST APIs. This model is fully serverless — no always-on gateway instances to manage.
 
 **Q: How do you propagate correlation IDs through the gateway?**
 A Global filter checks for an X-Correlation-ID header. If absent (i.e., the request originates from an external client), the filter generates a UUID and sets it. If present (internal service-to-service call relayed through the gateway), it reuses the existing ID. The filter adds the correlation ID to the outgoing request headers (forwarded to downstream services), adds it to the response headers (returned to the client for support tickets), and writes it to the MDC for structured logging. All downstream services must propagate this header to their own outbound calls.
@@ -763,7 +781,7 @@ Configure a `CircuitBreaker` filter with a `fallbackUri` for every route. The fa
 
 ### API Gateway Migration: From Nginx Routing Table to Spring Cloud Gateway
 
-**Context**: A fintech company running 35 microservices with a hand-maintained Nginx configuration file of 2,300 lines for routing. JWT validation was implemented in 20 out of 35 services (inconsistently). Rate limiting existed for 3 services. No circuit breakers. A security audit found that 8 services were accepting requests without JWT validation.
+**Context** (illustrative composite — the company, numbers and timings below are a teaching scenario, not a published case): A fintech company running 35 microservices with a hand-maintained Nginx configuration file of 2,300 lines for routing. JWT validation was implemented in 20 out of 35 services (inconsistently). Rate limiting existed for 3 services. No circuit breakers. A security audit found that 8 services were accepting requests without JWT validation.
 
 **Problem**: every new service required an Nginx config PR reviewed by the ops team. JWT validation was duplicated and inconsistently implemented. A JWT library vulnerability required patching 20 services. No rate limiting on 32 services meant one abusive client could starve others.
 
@@ -861,11 +879,11 @@ flowchart LR
     class us,os,ps,cs,more base
 ```
 
-All three BFFs share one ALB entry point and one Redis-backed rate-limit store, then fan out to the same 35 downstream services — the end state of the migration described above.
+All three BFFs share one ALB entry point and one Redis-backed rate-limit store — each setting its own per-key limit, tightening or matching the global 100 req/s/user established in Phase 3 — then fan out to the same 35 downstream services — the end state of the migration described above.
 
 **Results**:
 - JWT patching: 1 gateway deployment instead of 20 service deployments. Patch delivered in 2 hours vs estimated 3 weeks.
-- Rate limiting coverage: 0/35 services to 35/35 in 2 weeks.
+- Rate limiting coverage: 3/35 services to 35/35 in 2 weeks.
 - Circuit breaker coverage: 0/35 to 35/35. First month: 12 circuit breaker trips, all returned fallback responses instead of cascading failures.
 - New service onboarding: add 4 lines of YAML to gateway config. No ops team involvement.
 - Mobile app load time: reduced 340ms average (4 sequential API calls) to 95ms (1 gateway call with parallel composition).
