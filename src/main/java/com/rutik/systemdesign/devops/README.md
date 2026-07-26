@@ -107,7 +107,7 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 ```
 Phase 1 — Foundations
 +------------------------------------------------------------+
-|  linux_and_os_fundamentals     shell_scripting_and_         |
+|  linux_and_os_fundamentals     shell_scripting_and_        |
 |  networking_for_devops         automation                  |
 |  version_control_and_git_workflows                         |
 +------------------------------------------------------------+

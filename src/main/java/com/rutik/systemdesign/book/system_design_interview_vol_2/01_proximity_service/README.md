@@ -606,7 +606,7 @@ Quadtree: recursively split any cell holding > 100 businesses into 4.
   (200M > 100, split)           empty desert stays one shallow leaf.
 
   +---------------+             +-------+-------+---------------+
-  |               |             | 40  | 60|               |
+  |               |             | 40  | 60|                   |
   |               |    split    +-----+---+   |   desert      |
   |               |   ------->  | 100 | 30|   |   (0 biz,     |
   |               |             +-----+---+---+   1 leaf)     |

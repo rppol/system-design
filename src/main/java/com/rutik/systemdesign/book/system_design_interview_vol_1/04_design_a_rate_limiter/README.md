@@ -832,7 +832,7 @@ overlaps the rolling 60-second view).
                      rolling 60s window ends at "now"
               |<-------------------- 60s -------------------->|
               |     70% of previous     |    100% of current  |
-              |        5 x 0.70         |          3           |
+              |        5 x 0.70         |          3          |
                                                 estimate
   estimate = 3 + 5 x 0.70 = 3 + 3.5 = 6.5   ->   6.5 > 5   ->   REJECT
 ```

@@ -223,7 +223,7 @@ The canonical 64-bit layout (Twitter's original split, also used by this repo's 
 ```
  63          22 21     17 16     12 11              0
   |-----------|---------|---------|----------------|
-  | 41-bit ts | 5-bit DC | 5-bit W |  12-bit seq    |
+  | 41-bit ts | 5-bit DC | 5-bit W |  12-bit seq   |
   |-----------|---------|---------|----------------|
    bit 63 (sign) is always 0 -> ID is always a positive signed long
 
@@ -755,16 +755,16 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
  +----------------------------------------------------------------+
  |  Worker-ID pool utilization     [###########.......]  812/1024   |
  |                                   (79.3% -- below 80% warn line) |
- |                                                                    |
+ |                                                                  |
  |  NTP offset, p99 across fleet    3.2 ms        (warn > 10ms)     |
  |  NTP drift, p99 across fleet     18 ppm        (warn > 100ppm)   |
- |                                                                    |
+ |                                                                  |
  |  Clock-backward events (24h)     0             (page on > 0)     |
  |  Sequence-exhaustion events (1h) 4  (node-37)  (investigate > few/sec) |
- |                                                                    |
+ |                                                                  |
  |  ZK session expiries (24h)       1  (node-512) (page if > 1/hr/node) |
  |  Ephemeral znode count            1,000        (matches live count -- OK) |
- |                                                                    |
+ |                                                                  |
  |  ID-service P50 / P99 (Model b)   0.6ms / 2.1ms (page if P99 > 5ms) |
  +----------------------------------------------------------------+
 ```

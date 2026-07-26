@@ -124,9 +124,9 @@ MIG vs time-slicing on a single A100:
   MIG (hardware partition, isolated)            Time-slicing (oversubscription, shared)
   ┌───────────── A100 80GB ─────────────┐       ┌───────────── A100 80GB ─────────────┐
   │ 1g.10gb │ 1g.10gb │ 1g.10gb │ ...   │       │   one context, time-multiplexed      │
-  │  10 GB  │  10 GB  │  10 GB  │ (7 max)│       │  advertised as nvidia.com/gpu: 4     │
+  │  10 GB  │  10 GB  │  10 GB  │ (7 max)│       │  advertised as nvidia.com/gpu: 4    │
   │ SMs walled off, separate mem buses  │       │  4 Pods share ALL 80GB + ALL SMs     │
-  │ Pod A cannot touch Pod B's memory   │       │  Pod A OOM can evict/crash Pod B      │
+  │ Pod A cannot touch Pod B's memory   │       │  Pod A OOM can evict/crash Pod B     │
   └─────────────────────────────────────┘       └─────────────────────────────────────┘
   Isolation: STRONG   Utilization: medium        Isolation: NONE   Utilization: HIGH
   (fragments wasted if slice sizes mismatch)      (best for bursty, trusted workloads)
