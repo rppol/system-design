@@ -14,7 +14,7 @@
 
 ## 1. Concept Overview
 
-Model Context Protocol (MCP) is an open protocol published by Anthropic in November 2024 that standardizes how LLM applications connect to external data sources and tools. Before MCP, every integration between an LLM-powered application and an external system (a database, a file system, a SaaS API) required bespoke code on both sides. MCP replaces that N-times-M integration matrix with a single, versioned, capability-negotiated protocol. Spec revisions are date-stamped strings; the released revisions to date are `2024-11-05`, `2025-03-26`, `2025-06-18` and `2025-11-25`, with `2026-07-28` in release candidate at the time of writing (July 2026). Unless stated otherwise this module describes `2025-11-25`, the current released revision. MCP is no longer a single-vendor protocol: Anthropic donated it on 9 December 2025 to the **Agentic AI Foundation**, a directed fund under the Linux Foundation, and the specification is now developed by Working Groups under that governance.
+Model Context Protocol (MCP) is an open protocol published by Anthropic in November 2024 that standardizes how LLM applications connect to external data sources and tools. Before MCP, every integration between an LLM-powered application and an external system (a database, a file system, a SaaS API) required bespoke code on both sides. MCP replaces that N-times-M integration matrix with a single, versioned, capability-negotiated protocol. Spec revisions are date-stamped strings; unless stated otherwise this module describes `2025-11-25`, the current released revision, with `2026-07-28` in release candidate at the time of writing (July 2026). MCP is no longer a single-vendor protocol: Anthropic donated it on 9 December 2025 to the **Agentic AI Foundation**, a directed fund under the Linux Foundation, and the specification is now developed by Working Groups under that governance.
 
 MCP defines three primitives that **servers** offer to clients:
 
@@ -22,9 +22,9 @@ MCP defines three primitives that **servers** offer to clients:
 - **Tools** — typed, callable functions the model can invoke to cause actions (write a file, query a database, call an API). Tools have explicit input/output schemas and may have side effects.
 - **Prompts** — reusable, parameterized prompt templates that servers expose so clients can compose consistent interactions without embedding raw strings in application code.
 
-Three further primitives run the other way — features **clients** offer to servers: **Sampling** (a server asks the client's LLM to generate text, enabling server-side agentic logic that delegates generation back to the host model), **Roots** (the server asks which URI or filesystem boundaries it may operate in), and **Elicitation** (added in the 2025-06-18 revision; the server asks the user for additional information mid-interaction). The 2025-11-25 revision also adds an experimental **Tasks** utility for long-running, pollable requests.
+Three further primitives run the other way — features **clients** offer to servers: **Sampling** (a server asks the client's LLM to generate text, enabling server-side agentic logic that delegates generation back to the host model), **Roots** (the server asks which URI or filesystem boundaries it may operate in), and **Elicitation** (the server asks the user for additional information mid-interaction). An experimental **Tasks** utility covers long-running, pollable requests.
 
-The wire format is JSON-RPC 2.0. As of the current revision the spec defines two standard transports: **stdio** (standard input/output, used for local subprocess servers) and **Streamable HTTP** (used for remote servers). The original HTTP+SSE transport from the 2024-11-05 revision is deprecated and kept only for backwards compatibility. The protocol is transport-agnostic by design; custom transports can be layered on top.
+The wire format is JSON-RPC 2.0. The spec defines two standard transports: **stdio** (standard input/output, used for local subprocess servers) and **Streamable HTTP** (used for remote servers). The protocol is transport-agnostic by design; custom transports can be layered on top.
 
 MCP operates as a client-server architecture. The **host** is the LLM application (Claude Desktop, an IDE plugin, a custom agent). Each host contains one or more **MCP clients**, each maintaining a 1:1 stateful session with one **MCP server**. Servers expose capabilities; clients consume them.
 
@@ -94,9 +94,7 @@ Sampling inverts the normal flow. A server can ask the client to run an LLM comp
 
 **Stdio transport:** The MCP client spawns the server as a subprocess and communicates over stdin/stdout. Ideal for local tools (filesystem, local database, CLI wrappers). Process isolation provides a natural security boundary. Latency is minimal. Does not work for remote servers.
 
-**Streamable HTTP transport (introduced in the 2025-03-26 revision; the current HTTP transport):** The server exposes a single MCP endpoint that supports both POST and GET. Each client POST receives either one `application/json` response or an upgraded `text/event-stream` SSE stream for that request; an optional GET opens an SSE stream for server-initiated messages. Enables remote, multi-client deployments. Requires TLS in production. Supports authentication headers.
-
-**HTTP+SSE transport (2024-11-05 revision; deprecated):** The client opened an HTTP GET to a `/sse` endpoint for server-to-client events and POSTed messages to a second endpoint. Superseded by Streamable HTTP; retained only for backwards compatibility with older servers.
+**Streamable HTTP transport:** The server exposes a single MCP endpoint that supports both POST and GET. Each client POST receives either one `application/json` response or an upgraded `text/event-stream` SSE stream for that request; an optional GET opens an SSE stream for server-initiated messages. Enables remote, multi-client deployments. Requires TLS in production. Supports authentication headers.
 
 ---
 
@@ -475,14 +473,14 @@ Multiple internal LLM applications (a support bot, a contract reviewer, an onboa
 
 ### 8.2 Transport Comparison
 
-| Dimension | stdio | HTTP+SSE (deprecated) | Streamable HTTP (current) |
-|-----------|-------|---------------|-----------------|
-| Use case | Local subprocess | Remote server, legacy only | Remote server |
-| Latency | Lowest (IPC) | Network RTT | Network RTT |
-| Multi-client | No (1:1 process) | Yes | Yes |
-| Auth | Process isolation | HTTP headers (Bearer/OAuth) | HTTP headers |
-| Proxy-friendly | N/A | Yes (with keep-alive tuning) | Yes |
-| Connection overhead | Process spawn (~50–200ms) | HTTP handshake | Single HTTP connection |
+| Dimension | stdio | Streamable HTTP |
+|-----------|-------|-----------------|
+| Use case | Local subprocess | Remote server |
+| Latency | Lowest (IPC) | Network RTT |
+| Multi-client | No (1:1 process) | Yes |
+| Auth | Process isolation | HTTP headers (Bearer/OAuth) |
+| Proxy-friendly | N/A | Yes (with keep-alive tuning) |
+| Connection overhead | Process spawn (~50–200ms) | Single HTTP connection |
 
 **What the formula is telling you.** "Transport cost is a one-time setup charge plus a small per-call charge — so the right transport depends entirely on how many calls you spread the setup across."
 

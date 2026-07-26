@@ -12,7 +12,7 @@ The core architectural pillars are:
 - **AuthenticationManager** — authenticates credentials; delegates to a list of `AuthenticationProvider` implementations
 - **AuthorizationManager** — makes access-control decisions using the `Authentication` from `SecurityContextHolder`
 
-Spring Boot 3.x / Spring Security 6.x made breaking changes: `WebSecurityConfigurerAdapter` was removed, lambda DSL became the only way to configure `HttpSecurity`, and `@EnableMethodSecurity` replaced `@EnableGlobalMethodSecurity`.
+All configuration is expressed as `SecurityFilterChain` beans built with the lambda DSL, method security is switched on with `@EnableMethodSecurity`, and every authorization decision — URL-based or method-based — runs through an `AuthorizationManager`.
 
 ---
 
@@ -24,7 +24,7 @@ Spring Boot 3.x / Spring Security 6.x made breaking changes: `WebSecurityConfigu
 
 **Why it matters:** Security logic scattered across controllers is untestable, inconsistent, and easy to forget on new endpoints. Centralizing it in filters means every request — including those to future endpoints — is automatically covered by the configured rules.
 
-**Key insight:** Spring Security 6.x (Spring Boot 3.x) requires all configuration via `SecurityFilterChain` beans with lambda DSL. The old `extends WebSecurityConfigurerAdapter` approach will not compile. Understanding the filter chain order is essential for diagnosing why security rules are applied (or not applied) to specific requests.
+**Key insight:** Configuration is a set of `SecurityFilterChain` beans built with the lambda DSL, and the chain that handles a request is chosen by `securityMatcher` — the first match wins. Understanding filter chain order is essential for diagnosing why security rules are applied (or not applied) to specific requests.
 
 ---
 
@@ -198,7 +198,7 @@ Method security is orthogonal to the filter chain: it runs at the AOP proxy boun
 
 ## 6. How It Works — Detailed Mechanics
 
-### Spring Security 6.x Configuration (Spring Boot 3.x)
+### SecurityFilterChain Configuration
 
 ```java
 @Configuration
@@ -209,7 +209,6 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-            // Lambda DSL required in Spring Security 6.x
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health", "/api/public/**").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")

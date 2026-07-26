@@ -1133,8 +1133,8 @@ def correct_mac(message: bytes) -> bytes:
 | Python `hmac` | Python | HMAC-SHA256, constant-time compare | Standard library |
 | Python `secrets` | Python | Cryptographically secure random bytes/tokens | Standard library; use instead of `random` |
 | `cryptography` (PyPI) | Python | AES-GCM, RSA, ECDSA, X25519 | De-facto Python crypto library; wraps OpenSSL |
-| `bcrypt` (PyPI) | Python | bcrypt password hashing | Industry standard; uses C extension |
-| `argon2-cffi` (PyPI) | Python | Argon2id password hashing | Current OWASP recommendation |
+| `argon2-cffi` (PyPI) | Python | Argon2id password hashing | The default choice for new systems (OWASP) |
+| `bcrypt` (PyPI) | Python | bcrypt password hashing | Well-studied; fine for existing estates |
 | OpenSSL | C / CLI | TLS, AES, RSA, ECC, X.509 | Foundation for most TLS implementations |
 | Bouncy Castle | Java | Full crypto suite | Common in Java/Android |
 | libsodium / NaCl | C | Modern crypto primitives (Curve25519, XSalsa20, Poly1305) | High-level, hard-to-misuse API |

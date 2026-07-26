@@ -492,12 +492,14 @@ The same trap sinks NAS: if `alpha` (DARTS) or the controller (ENAS) is selected
 
 | Strategy | Typical search cost | Final quality | Stability / reproducibility | Best when |
 |----------|---------------------|---------------|-----------------------------|-----------|
-| RL controller (NASNet) | ~2000 GPU-days (full-train) | very high | low (seed-sensitive) | you have hyperscaler compute |
-| Evolutionary (AmoebaNet) | ~3000 GPU-days (full-train) | very high | medium; robust on discrete spaces | non-differentiable search space |
-| Gradient / DARTS | ~1 GPU-day (weight-share) | high | low — can collapse to all skip-connects | differentiable cell space, tight budget |
-| ENAS (RL + weight-share) | ~0.5 GPU-day | medium-high | medium | cheap search, tolerant of rank noise |
-| Once-for-All | ~1200 GPU-hours once, then ~free per target | high across targets | high | many hardware targets to serve |
-| Random search + early stop | ~1 GPU-day | surprisingly competitive | high (the baseline to beat) | always run it first |
+| RL controller (NASNet) | 2000 GPU-days (full-train) | very high | low (seed-sensitive) | you have hyperscaler compute |
+| Evolutionary (AmoebaNet) | 3150 GPU-days (full-train) | very high | medium; robust on discrete spaces | non-differentiable search space |
+| Gradient / DARTS | 1.5 GPU-days first-order, 4 second-order (weight-share) | high | low — can collapse to all skip-connects | differentiable cell space, tight budget |
+| ENAS (RL + weight-share) | 0.5 GPU-day | medium-high | medium | cheap search, tolerant of rank noise |
+| Once-for-All | ~1200 V100-hours once, then ~free per target | high across targets | high | many hardware targets to serve |
+| Random search | 4 GPU-days (DARTS's own random baseline) | surprisingly competitive | high (the baseline to beat) | always run it first |
+
+Costs in this table are the figures reported side by side in DARTS Table 1 (CIFAR-10 search), which is the only place they are measured on a common footing.
 
 ### Multi-fidelity HPO comparison
 
@@ -552,13 +554,13 @@ A team ran DARTS, optimized `alpha` on a val split, and reported that same split
 Vanilla DARTS often degenerates: as the supernet trains, `softmax(alpha)` concentrates on parameter-free skip-connect ops (they reduce training loss fastest early), yielding a shallow, weak final net. Fixes: DARTS+ (early stopping on skip count), P-DARTS (progressive depth), or a regularizer penalizing skip dominance. If your searched cell is mostly skips, you hit this.
 
 **Pitfall 3 — Weight-sharing rank disorder.**
-One-shot supernets score sub-architectures with shared weights, but the supernet ranking is only weakly correlated (Kendall tau often 0.2–0.5) with true stand-alone accuracy. The "best" supernet architecture may not be the best when trained from scratch. Mitigate with fairness sampling (SPOS), or retrain the top-k candidates standalone before choosing.
+One-shot supernets score sub-architectures with shared weights, but the supernet ranking can correlate poorly with true stand-alone accuracy. Reported Kendall tau spans nearly the whole range depending on the supernet and search space — FairNAS notes that a method based on incomplete training reaches an average tau of only 0.474 while FairNAS itself reports 0.9487, and other work finds many one-shot supernets near zero. Do not assume any particular value; measure it on your own space. The "best" supernet architecture may not be the best when trained from scratch. Mitigate with a sampling scheme that trains candidates more evenly (uniform single-path sampling in SPOS, strict fairness sampling in FairNAS), or retrain the top-k candidates standalone before choosing.
 
 **Pitfall 4 — AutoML CV leakage (see §6.6).**
 Fitting scalers, imputers, or target encoders on the full dataset before CV inflates scores 2–4 points. Every fit-transform must live inside the CV fold via a Pipeline. This is the number-one reason an AutoML leaderboard score does not reproduce in production.
 
 **Pitfall 5 — Not running the random-search baseline.**
-On NAS-Bench-201, random search with early stopping is within ~1% of many published NAS methods. Teams have burned thousands of GPU-hours on elaborate searches that never beat random. Report random search or the result is not credible.
+On NAS-Bench-201, plain random search lands 0.2–1.0 percentage points behind the strongest methods on all three datasets (93.70/71.04/44.57 vs REA's 93.92/71.84/45.54). Teams have burned thousands of GPU-hours on elaborate searches that never beat random. Note the same table also shows random search *with parameter sharing* (RSPS) collapsing to 87.66/58.33/31.14 — the weight sharing, not the random sampling, is what destroys it. Report random search or the result is not credible.
 
 **Pitfall 6 — Optimizing FLOPs as a latency proxy.**
 FLOPs correlate poorly with real device latency — memory-bound depthwise convs and non-fused ops can be slow at low FLOPs. Hardware-aware NAS must use *measured* latency (or a latency LUT/predictor for the actual device), not FLOPs, or the "efficient" model is slow in production.

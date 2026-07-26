@@ -789,7 +789,7 @@ rewards; the paper does not publish the weighting):
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **TRL (HuggingFace)** | DPO, GRPO, RLOO, KTO, reward models | Most used; stable trainers are DPOTrainer, GRPOTrainer, RLOOTrainer, KTOTrainer, RewardTrainer — PPOTrainer and ORPOTrainer moved to `trl.experimental` in TRL 1.x |
+| **TRL (HuggingFace)** | DPO, GRPO, RLOO, KTO, reward models | Most used; the stable surface is SFTTrainer, DPOTrainer, GRPOTrainer, RLOOTrainer, KTOTrainer, RewardTrainer. PPO and ORPO live in `trl.experimental`, which can change in any release — do not pin production on them |
 | **OpenRLHF** | Production RLHF | Large-scale; Ray-based; better than TRL at scale |
 | **LLaMA-Factory** | DPO/RLHF training | Easy YAML config |
 | **Argilla** | Preference labeling UI | Collect human comparison data |
@@ -941,7 +941,7 @@ def train_dpo(
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model_id,
-        dtype="bfloat16",          # `torch_dtype` was renamed `dtype` in Transformers v5
+        dtype="bfloat16",
         device_map="auto",
     )
 
@@ -981,11 +981,11 @@ def train_dpo(
         logging_steps=50,
         save_steps=200,
         eval_steps=200,
-        eval_strategy="steps",     # `evaluation_strategy` was removed in Transformers 4.46
+        eval_strategy="steps",
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         remove_unused_columns=False,
-        max_length=1024,           # `max_prompt_length` was dropped from DPOConfig in TRL 1.x
+        max_length=1024,           # total prompt + completion length budget
     )
 
     trainer = DPOTrainer(
@@ -994,7 +994,7 @@ def train_dpo(
         args=dpo_config,
         train_dataset=train_test["train"],
         eval_dataset=train_test["test"],
-        processing_class=tokenizer,   # `tokenizer=` was removed in favor of processing_class
+        processing_class=tokenizer,
     )
 
     trainer.train()
@@ -1035,7 +1035,7 @@ def train_reward_model(
     model = AutoModelForSequenceClassification.from_pretrained(
         base_model_id,
         num_labels=1,            # single scalar reward head
-        dtype=torch.bfloat16,    # `torch_dtype` renamed to `dtype` in Transformers v5
+        dtype=torch.bfloat16,
     )
     # Replace CausalLM head with regression head
     model.config.pad_token_id = tokenizer.pad_token_id

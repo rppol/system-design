@@ -519,7 +519,7 @@ twine upload --repository testpypi dist/*
 
 ```mermaid
 xychart-beta
-    title "Astral tooling: speedup vs. legacy baseline"
+    title "Astral tooling: speedup vs. the Python-implemented baseline"
     x-axis ["Lint (ruff/flake8)", "Dependency resolve (uv/pip)", "Warm-cache install (uv/pip)"]
     y-axis "Times faster" 0 --> 120
     bar [30, 100, 20]
@@ -535,7 +535,7 @@ A speedup figure is meaningless without naming the baseline, which is why every 
 
 | Symbol | What it is |
 |--------|------------|
-| `t_old` | Wall-clock of the legacy tool (`flake8`, `pip`) on the same input |
+| `t_old` | Wall-clock of the baseline tool (`flake8`, `pip`) on the same input |
 | `t_new` | Wall-clock of the Rust tool (`ruff`, `uv`) on that same input |
 | `t_old / t_new` | The speedup multiple — the y-axis of the chart above |
 | Warm cache | The `~/.cache/uv/` hit path, where install is a hard-link, not a download |
@@ -580,9 +580,9 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 | Lock file | Manual (`pip freeze`) | `uv pip compile` or `uv.lock` | `poetry.lock` (built-in) | No built-in lock |
 | Virtual env management | `python -m venv` separately | `uv venv` (built-in) | Built-in (`poetry shell`) | Built-in |
 | Publishing to PyPI | `twine` separately | `uv publish` (built-in) | `poetry publish` (built-in) | `hatch publish` |
-| Python version management | No | `uv python install 3.12` | No (use pyenv) | No (use pyenv) |
+| Python version management | No | `uv python install 3.14` | No (use pyenv) | No (use pyenv) |
 | Build backend | N/A (installer only) | N/A (uses any PEP 517 backend) | Custom (poetry-core) | hatchling |
-| Adoption | Universal legacy | Rapidly growing (2023+) | Large (data science) | Moderate |
+| Adoption | Universal (ships with CPython) | Very large and still growing | Large (data science) | Moderate |
 | PEP 621 compliance | N/A | Yes (reads standard `[project]`) | Partial (uses `[tool.poetry]`) | Yes |
 
 ### Wheel vs sdist
@@ -617,8 +617,8 @@ The chart plots the **conservative end** of each range: the resolve bar shows `1
 
 ### Do NOT use `setup.py` for new projects:
 - `setup.py` executes arbitrary code during install, making builds non-reproducible and creating a security surface.
-- Deprecated in favor of declarative `pyproject.toml`.
-- Still required for very old packages with complex build logic; use `setup.py` + `setup.cfg` only to maintain existing packages, not for new ones.
+- Declarative `pyproject.toml` expresses the same metadata without executing anything.
+- You will still meet `setup.py` in older codebases; keep it only to maintain those, never to start a project.
 
 ### Do NOT use `pip freeze` as your lock file workflow:
 - `pip freeze` includes every package in the environment (including tools like `ruff`, `pytest`) in a flat list with no dependency graph information.
@@ -705,7 +705,7 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 
 **`pre-commit` hook version drift**: Specifying `rev: v0.4.10` for ruff in `.pre-commit-config.yaml` while developers run `ruff==0.5.0` locally causes inconsistent lint results. Run `pre-commit autoupdate` quarterly and pin the result.
 
-**Importing from `__future__` annotations incorrectly**: In Python 3.11, `from __future__ import annotations` makes all annotations strings (deferred evaluation). This breaks `pydantic` v2 model field resolution unless you use `model_rebuild()` or switch to `from __future__ import annotations` aware config.
+**Importing from `__future__` annotations incorrectly**: `from __future__ import annotations` turns every annotation into a string (deferred evaluation). This breaks `pydantic` v2 model field resolution when a referenced type is not yet importable at class-definition time, unless you call `model_rebuild()` once the type is in scope.
 
 ---
 
@@ -795,7 +795,7 @@ It turns every type annotation into an unevaluated string, so Pydantic can no lo
 - **Test wheel installation in CI**: Add a CI step that installs the built wheel in a fresh virtualenv and runs a smoke test (`python -c "import mypackage; print(mypackage.__version__)"`) before publishing.
 - **Use `[project.optional-dependencies]` groups**: Keep dev and test dependencies separate from runtime dependencies. CI test jobs install `.[test]`; developers install `.[dev,test]`.
 - **Validate `pyproject.toml` in CI**: Run `python -m build --dry-run` or `hatch build --clean` to verify the build configuration before attempting a release.
-- **Set `requires-python` precisely**: `requires-python = ">=3.11"` prevents accidental installation on Python 3.9 where f-string improvements and `tomllib` are unavailable.
+- **Set `requires-python` precisely**: `requires-python = ">=3.12"` prevents accidental installation on Python 3.11, where PEP 695 generic syntax (`def first[T](xs: list[T]) -> T`) is a syntax error.
 
 ---
 
@@ -935,9 +935,9 @@ starlette==0.37.2
 # ... 35 more unpredictable transitive pins
 
 # Problems:
-# 1. Developer A has Python 3.11, freezes environment with package X==1.2.3
-# 2. Developer B has Python 3.12, installs same requirements.txt — gets different
-#    transitive dep Y because X==1.2.3 pulls a different Y on 3.12
+# 1. Developer A has Python 3.13, freezes environment with package X==1.2.3
+# 2. Developer B has Python 3.14, installs same requirements.txt — gets different
+#    transitive dep Y because X==1.2.3 pulls a different Y on 3.14
 # 3. Docker build on linux/amd64 gets different binary wheels than macOS arm64
 # 4. Next month, pip silently resolves to a newer compatible version of
 #    an unlisted transitive dep, breaking the service

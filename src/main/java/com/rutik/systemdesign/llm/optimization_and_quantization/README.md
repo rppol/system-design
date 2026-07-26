@@ -1546,7 +1546,7 @@ import statistics
 from dataclasses import dataclass
 import torch
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -1561,7 +1561,7 @@ class LatencyBenchmark:
     mbpp_score: float    # from separate eval run
 
 
-def build_awq_engine(model_dir: str, tensor_parallel: int = 2) -> AsyncLLMEngine:
+def build_awq_engine(model_dir: str, tensor_parallel: int = 2) -> AsyncLLM:
     """
     Load AWQ-quantized model in vLLM.
     vLLM natively supports AWQ: quantization="awq" loads INT4 weights,
@@ -1577,13 +1577,12 @@ def build_awq_engine(model_dir: str, tensor_parallel: int = 2) -> AsyncLLMEngine
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
         kv_cache_dtype="fp8",             # FP8 KV cache saves additional 50% KV memory
-    )                                     # (no use_v2_block_manager — removed from vLLM;
-                                          #  V1 block management is the only path now)
-    return AsyncLLMEngine.from_engine_args(args)
+    )
+    return AsyncLLM.from_engine_args(args)
 
 
 async def latency_benchmark(
-    engine: AsyncLLMEngine,
+    engine: AsyncLLM,
     prompts: list[str],
     max_new_tokens: int = 256,
 ) -> LatencyBenchmark:

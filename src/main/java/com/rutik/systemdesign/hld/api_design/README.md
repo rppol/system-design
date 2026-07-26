@@ -382,7 +382,7 @@ Rarely implemented fully in practice, but link inclusion is common.
 
 **Verb-based URLs** — `POST /createUser` violates REST. Use `POST /users`.
 
-**Inconsistent error formats** — different endpoints returning different error shapes forces consumers to handle each case specially. Standardize on one error envelope.
+**Inconsistent error formats** — different endpoints returning different error shapes forces consumers to handle each case specially. Standardize on one error envelope; **RFC 9457 (Problem Details for HTTP APIs, July 2023)** is the off-the-shelf answer — media type `application/problem+json` with `type`, `title`, `status`, `detail`, and `instance` members, all optional and extensible with your own fields.
 
 **Ignoring HTTP status codes** — returning `200 OK` with `{ "success": false }` in the body is an anti-pattern. Use appropriate 4xx/5xx codes.
 
@@ -410,7 +410,7 @@ Rarely implemented fully in practice, but link inclusion is common.
 | API Frameworks (GraphQL) | Apollo Server, Strawberry, Hasura, Pothos |
 | API Frameworks (gRPC) | grpc-go, grpc-java, grpcio, grpc-node |
 | API Gateway | Kong, AWS API Gateway, Apigee, Traefik, Envoy |
-| Documentation | OpenAPI/Swagger, Redoc, Stoplight, GraphQL Playground |
+| Documentation | OpenAPI 3.2 (released 2025-09-19), Redoc, Stoplight, GraphQL Playground |
 | Testing | Postman, Insomnia, k6, Hurl, Karate |
 | Mocking | WireMock, Mockoon, Microcks |
 | SDK Generation | OpenAPI Generator, Buf (for protobuf) |
@@ -476,7 +476,7 @@ A single GraphQL query can request deeply nested or duplicated fields that fan o
 - Use plural nouns consistently: `/users/42`, not `/user/42`
 - Return consistent JSON envelope: `{ "data": {}, "meta": {}, "errors": [] }`
 - Always include pagination metadata: `{ "data": [...], "meta": { "next_cursor": "...", "has_more": true } }`
-- Document every endpoint with OpenAPI/Swagger before implementing
+- Document every endpoint with an OpenAPI 3.2 description before implementing
 - Use semantic versioning in the path: `/v1/`, `/v2/`
 - Provide `Retry-After` headers on `429` and `503` responses
 - Validate and sanitize all inputs server-side — never trust the client

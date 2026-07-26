@@ -216,7 +216,7 @@ Per-call figures above are order-of-magnitude only. On modern JDKs the JDK-proxy
 | Bridge | JDBC (`java.sql.Driver`), `java.util.logging.Handler` | N/A — architectural choice | N/A |
 | Composite | `java.awt.Container`, `jakarta.faces.component.UIComponent` | `CompositePropertySource`, `CompositeCacheManager`, `CompositeHealthContributor` | Apache Commons Configuration |
 | Decorator | `java.io.*` streams, `java.util.Collections.synchronized*` | `BeanDefinitionDecorator` | Lombok `@Delegate` |
-| Facade | `jakarta.faces.context.FacesContext` | `JdbcTemplate`, `RestClient`/`RestTemplate`, `RedisTemplate` | SLF4J |
+| Facade | `jakarta.faces.context.FacesContext` | `JdbcTemplate`, `RestClient`, `RedisTemplate` | SLF4J |
 | Flyweight | `Integer.valueOf()`, `String.intern()`, `Boolean.valueOf()` | `SimpleTypeConverter` cache | Guava `Interners` |
 | Proxy | `java.lang.reflect.Proxy`, RMI stubs | Spring AOP, `@Transactional`, `@Cacheable` | ByteBuddy, Javassist, Mockito |
 

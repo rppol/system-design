@@ -733,7 +733,7 @@ RSS plateaued at ~2.2GB across the 48-hour soak, matching the pooled-instance co
 
 ### Interview Discussion Points
 
-**Why did the Java heap and GC logs look completely healthy while native memory grew 13x?** Because the leak was never in the Java heap — small Java wrapper objects (~32 bytes each) retained large native buffers (~2MB each) that only `finalize()` could free, and `finalize()` only runs on the GC's schedule, which stayed slow because Java-heap churn was low.
+**Why did the Java heap and GC logs look completely healthy while native memory grew 13x?** Because the leak was never in the Java heap — small Java wrapper objects (~32 bytes each) retained large native buffers (~2MB each) that only the `Cleaner` could free, and the `Cleaner` fires only after the GC proves a wrapper unreachable — which stayed slow because Java-heap churn was low.
 
 **Why does forcing a GC (`jcmd <pid> GC.run`) and watching RSS drop count as evidence, not just a workaround?** If RSS falls sharply right after a forced collection, the native memory's release is demonstrably tied to Java object reachability — ruling out an unrelated native leak (a raw buffer overrun, a native-side cache with no Java tie-in) that a GC could never affect.
 
@@ -747,7 +747,7 @@ RSS plateaued at ~2.2GB across the 48-hour soak, matching the pooled-instance co
 
 ## Related / See Also
 
-- [JVM Internals](../jvm_internals/README.md) — GC algorithms, tri-color marking, and the finalizer-queue mechanics that make `finalize()` a GC-pause risk
-- [Java Memory Model](../java_memory_model/README.md) — happens-before rules; object-construction-happens-before-`finalize()` is one of the JMM's own edges
+- [JVM Internals](../jvm_internals/README.md) — GC algorithms, tri-color marking, and the reference-processing phase that decides when a `Cleaner` action can run at all
+- [Java Memory Model](../java_memory_model/README.md) — happens-before rules; safe publication of the state a cleanup action reads from the cleaner's own thread
 - [Performance & Tuning](../performance_and_tuning/README.md) — heap dump, JFR, and async-profiler methodology used to hunt the leaks this module diagnoses
 - [Concurrency](../concurrency/README.md) — `ThreadLocal`, thread pools, and the pooled-thread lifecycle that makes `ThreadLocalMap` leaks possible

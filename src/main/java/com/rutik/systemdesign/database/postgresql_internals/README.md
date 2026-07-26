@@ -526,7 +526,7 @@ A low-traffic database had autovacuum disabled in development. After 2 years, th
 PostgreSQL implements MVCC by never modifying rows in-place. Every UPDATE creates a new row version (new xmin, old row marked with xmax). The old version remains in the heap as a "dead tuple" until VACUUM reclaims it. Under heavy UPDATE workloads, dead tuples accumulate faster than VACUUM can clean them. Each dead tuple occupies 8-23 bytes plus the full row payload. A 10M-row table with 1M updates/day can accumulate 10M dead tuples per week if autovacuum lags. The heap file grows, sequential scans read more pages, index scans return dead rows that must be filtered — all degrading performance.
 
 **Q: How do you tune autovacuum for a high-write table?**
-Default autovacuum is too conservative for high-write tables. Three knobs: (1) `autovacuum_vacuum_scale_factor`: lower from 0.2 to 0.01-0.05 to trigger vacuum at 1-5% dead tuples instead of 20%. (2) `autovacuum_vacuum_cost_delay`: lower from 20ms to 2ms to allow vacuum to run faster (at cost of more I/O). (3) `autovacuum_vacuum_cost_limit`: increase from 200 to 800-2000 to allow vacuum to clean more per "cycle." Apply per-table: `ALTER TABLE t SET (autovacuum_vacuum_scale_factor=0.01, autovacuum_vacuum_cost_delay=2)`. Monitor effectiveness via `pg_stat_user_tables.n_dead_tup` trending down after each autovacuum run.
+Default autovacuum triggers too late for high-write tables. Three knobs, in order of impact: (1) `autovacuum_vacuum_scale_factor`: lower from 0.2 to 0.01-0.05 to trigger vacuum at 1-5% dead tuples instead of 20% — this is almost always the real fix. (2) `autovacuum_vacuum_cost_limit`: raise from the inherited 200 to 800-2000 so each cycle cleans more pages before sleeping. (3) `autovacuum_max_workers`: raise from 3 if many tables queue at once; since PostgreSQL 18 it is changeable without a restart, up to `autovacuum_worker_slots` (default 16). Note `autovacuum_vacuum_cost_delay` is already 2ms by default — there is nothing left to win there. Apply per-table: `ALTER TABLE t SET (autovacuum_vacuum_scale_factor=0.01, autovacuum_vacuum_cost_limit=2000)`. Monitor effectiveness via `pg_stat_user_tables.n_dead_tup` trending down after each autovacuum run.
 
 **Q: When does the query planner choose a sequential scan over an index scan?**
 The planner estimates cost for both plans. Sequential scan cost = `seq_page_cost × pages`. Index scan cost = `(cpu_index_tuple_cost × index_tuples) + (random_page_cost × pages_to_fetch)`. If the query returns > ~5-15% of rows, random I/O for each row (at `random_page_cost=4`) exceeds the sequential scan cost. On SSDs, set `random_page_cost=1.1` so the planner prefers index scans at higher selectivity. Also: if the planner's row estimate is wrong (stale statistics), it may choose seq scan when an index would be faster. Fix with `ANALYZE table`.
@@ -581,7 +581,7 @@ Partition pruning eliminates partitions from query planning when their constrain
 VACUUM: marks dead tuples as reusable, updates FSM and VM, removes dead index entries, advances relfrozenxid. Does NOT lock the table (allows concurrent reads and writes). Does NOT return disk space to OS. File size does not shrink. VACUUM FULL: acquires ACCESS EXCLUSIVE lock (blocks all reads and writes). Copies all live tuples to a new file, drops the old file. Actual disk space returned to OS. Table file shrinks to minimum size. Used when: table bloat is so severe it's causing storage issues. Alternative without locking: `pg_repack` extension — rebuilds table in background, performs an atomic swap. Always prefer `pg_repack` over VACUUM FULL in production.
 
 **Q: How does the autovacuum cost-based throttling work?**
-Autovacuum reads pages into the buffer pool and applies CPU cycles. Without throttling, autovacuum would consume all I/O bandwidth, degrading query performance. Cost-based throttling: after accumulating `autovacuum_vacuum_cost_limit` (default 200) cost units, autovacuum sleeps for `autovacuum_vacuum_cost_delay` (default 20ms). Costs: reading a page from disk = `vacuum_cost_page_miss` (10), reading from cache = `vacuum_cost_page_hit` (1), writing a dirty page = `vacuum_cost_page_dirty` (20). With defaults, autovacuum can process ~200/(0.5×10 + 0.5×1) ≈ 36 pages before sleeping 20ms — approximately 1,800 pages/second. High-write tables need `autovacuum_vacuum_cost_delay=2` and `autovacuum_vacuum_cost_limit=2000`.
+Autovacuum reads pages into the buffer pool and applies CPU cycles. Without throttling, autovacuum would consume all I/O bandwidth, degrading query performance. Cost-based throttling: after accumulating `autovacuum_vacuum_cost_limit` cost units (default `-1`, meaning it inherits `vacuum_cost_limit` = 200), autovacuum sleeps for `autovacuum_vacuum_cost_delay` (default 2ms). Costs: reading a page from disk = `vacuum_cost_page_miss` (2), reading from cache = `vacuum_cost_page_hit` (1), writing a dirty page = `vacuum_cost_page_dirty` (20). With defaults and a half-cached workload, autovacuum can process ~200/(0.5×2 + 0.5×1) ≈ 133 pages before sleeping 2ms — roughly 66,000 pages/second, or 546 MB/s of heap, which already exceeds most attached storage. So on modern defaults the throttle is rarely what makes autovacuum lag; the trigger threshold usually is. Raise `autovacuum_vacuum_cost_limit` to 2000 only after confirming autovacuum is sleeping while the disk still has headroom.
 
 **Q: What is the pg_hba.conf file and how does it control authentication?**
 `pg_hba.conf` (Host-Based Authentication) defines who can connect to which databases using which authentication methods. Format: `TYPE DATABASE USER ADDRESS METHOD OPTIONS`. Connection request matches rules top-to-bottom; first match wins. Methods: `trust` (no password — never in production), `scram-sha-256` (salted challenge-response; the `password_encryption` default), `cert` (TLS client certificate), `oauth` (OAuth 2.0 bearer tokens), `ldap`, `radius`. Best practice: use `scram-sha-256` for password auth, `cert` for service-to-service, and `reject` as a catch-all at the bottom.
@@ -614,7 +614,7 @@ The Visibility Map has 2 bits per heap page: "all tuples on this page are visibl
 
 ## 14. Case Study
 
-**Scenario**: A SaaS platform's PostgreSQL database starts experiencing 10-30 second query latency spikes twice daily. The database is an RDS PostgreSQL 15 instance (16 vCPU, 64GB RAM). Table: `events` (5B rows, 2TB heap). Daily write rate: 50M rows inserted, 20M rows updated.
+**Scenario**: A SaaS platform's PostgreSQL database starts experiencing 10-30 second query latency spikes twice daily. The database is an RDS PostgreSQL 18 instance (16 vCPU, 64GB RAM). Table: `events` (5B rows, 2TB heap). Daily write rate: 50M rows inserted, 20M rows updated.
 
 **Diagnosis sequence**:
 ```sql
@@ -646,9 +646,8 @@ VACUUM (VERBOSE, ANALYZE) events;
 
 -- 2. Per-table autovacuum tuning
 ALTER TABLE events SET (
-    autovacuum_vacuum_scale_factor = 0.005,   -- 0.5% of rows
-    autovacuum_vacuum_cost_delay = 2,          -- 2ms sleep (was 20ms)
-    autovacuum_vacuum_cost_limit = 2000,       -- 10x default budget
+    autovacuum_vacuum_scale_factor = 0.005,   -- 0.5% of rows (was 20%)
+    autovacuum_vacuum_cost_limit = 2000,      -- 10x the inherited 200 budget
     autovacuum_analyze_scale_factor = 0.01    -- Analyze at 1% change
 );
 
