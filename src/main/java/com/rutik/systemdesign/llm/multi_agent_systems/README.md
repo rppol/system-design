@@ -186,7 +186,7 @@ That trade is the whole point. A threshold is not a quality dial — it is a dia
    unanimity k = 5      j  = 5                    0.168                     83.2%
 ```
 
-The majority row is the 5-agent majority vote: `0.700 -> 0.837`, a 13.7-point gain that brackets the 8-12% improvement over 2-agent debate. But read the unanimity row before reaching for a stricter threshold — demanding all five agree yields a verdict on only 16.8% of inputs and dumps the other 83% onto whatever your fallback is. If that fallback is "default to most recent proposal," you have built an expensive five-agent system that behaves like a single agent five times out of six.
+The majority row is the 5-agent majority vote: `0.700 -> 0.837`, a 13.7-point gain — and note that this gain is *derived*, not measured, so it is the number to expect only when the independence assumption below actually holds. But read the unanimity row before reaching for a stricter threshold — demanding all five agree yields a verdict on only 16.8% of inputs and dumps the other 83% onto whatever your fallback is. If that fallback is "default to most recent proposal," you have built an expensive five-agent system that behaves like a single agent five times out of six.
 
 **Why correlation destroys this table — and is the real story behind sycophantic collapse.** Every number above assumes the five agents fail *independently*. Five instances of the same base model with the same prompt do not:
 
@@ -449,25 +449,25 @@ Cascading failure prevention:
 
 ## 7. Real-World Examples
 
-### ChatDev (Open Source, 2023)
+### ChatDev (Open Source, 2023; ACL 2024 paper)
 - Simulates a software company with 5-7 agent roles
 - Input: "Build a snake game in Python"
 - Output: complete runnable codebase with documentation
 - Reduces hallucination via structured inter-agent communication
-- ~$0.10 average cost per task using GPT-3.5/4
+- Paper-reported average cost **$0.2967 per software** and 409.84s (under 7 min) per run on 70 tasks, using `ChatGPT-turbo-16k`; 86.66% executability
 - https://github.com/OpenBMB/ChatDev
 
 ### MetaGPT (Open Source, 2023)
 - "Multi-agent framework based on SOP (Standard Operating Procedure)"
 - Structured outputs: PRD, design docs, UML diagrams, code files, tests
 - Role-play based: each agent has specific responsibilities
-- 20K+ GitHub stars; widely used for automated software development
+- ~70K GitHub stars; repository now at `FoundationAgents/MetaGPT` (moved from `geekan/`)
 
-### OpenAI Swarm (Experimental, 2024)
-- Lightweight multi-agent handoff framework
+### OpenAI Swarm (Experimental, 2024) — deprecated
+- Lightweight multi-agent handoff framework, released October 2024
 - Core concepts: agents + handoffs (transfer control between agents)
-- Designed for production customer service, routing workflows
-- Educational framework (not production-hardened)
+- Explicitly an **educational** framework, never production-hardened; OpenAI now directs all production use to the **OpenAI Agents SDK**, which is the maintained successor
+- Still worth reading as the clearest minimal statement of the handoff primitive — under 1,000 lines of Python
 
 ### Anthropic Multi-Agent Research
 - Internal research system using Claude for long-horizon research workflows
@@ -524,12 +524,13 @@ Cascading failure prevention:
 | **LangGraph** | Multi-agent orchestration | Best for production; stateful graphs |
 | **CrewAI** | Role-based multi-agent | Easy to set up; good for teams |
 | **AutoGen** | Conversation-based agents | Microsoft; code execution focus |
-| **Swarm (OpenAI)** | Lightweight handoffs | Experimental; clean abstractions |
+| **OpenAI Agents SDK** | Production handoffs | Maintained successor to Swarm; use this, not Swarm |
+| **Swarm (OpenAI)** | Lightweight handoffs | Deprecated/educational; clean abstractions |
 | **MetaGPT** | Software development | Structured multi-role SOP |
 | **ChatDev** | Software company sim | Research-oriented; open source |
 | **Microsoft Semantic Kernel** | Enterprise multi-agent | C#, Python, Java |
 | **Agentverse (Fetch.ai)** | Distributed agents | Blockchain-based agent marketplace |
-| **AgentBench** | Multi-agent evaluation | Benchmarks for agent systems |
+| **AgentBench** | Agent evaluation | Benchmarks LLMs *as agents* across environments — single-agent, not a multi-agent-coordination benchmark |
 
 ---
 
@@ -598,37 +599,41 @@ A: Emergent behavior — patterns present in the system but not in any single ag
 
 ## 14. Case Study: Multi-Agent Technical Writing System
 
+> Illustrative composite. The architecture and the model-tiering rationale are
+> the transferable parts; the outcome percentages below are a worked scenario,
+> not a published deployment.
+
 **Problem:** Enterprise software company needs to auto-generate technical documentation from source code changes. Single agent attempt: hallucinations, inconsistent style, missing coverage.
 
 **Multi-Agent Design:**
 ```
 Agents:
   1. Code Analyst Agent
-     Model: Claude 3.5 Sonnet
+     Model: Claude Sonnet 5
      Input: git diff, changed files
      Output: structured analysis of what changed and why
      Tools: read_file, list_symbols, git_history
 
   2. Documentation Researcher Agent
-     Model: GPT-4o-mini (cost-effective for retrieval)
+     Model: Claude Haiku 4.5 (cost-effective for retrieval)
      Input: code analysis
      Output: relevant existing docs + API references
      Tools: search_docs, search_api_reference
 
   3. Documentation Writer Agent
-     Model: Claude 3.5 Sonnet
+     Model: Claude Sonnet 5
      Input: code analysis + existing docs
      Output: draft documentation
      Persona: "Expert technical writer for developer audience"
 
   4. Technical Reviewer Agent
-     Model: GPT-4o
+     Model: Claude Opus 5 (frontier model on the correctness gate)
      Input: draft documentation
      Output: review with specific correction requests
      Checklist: accuracy, completeness, code examples work, style guide
 
   5. Final Editor Agent
-     Model: Claude 3.5 Sonnet
+     Model: Claude Sonnet 5
      Input: draft + review comments
      Output: final polished documentation
 
@@ -692,7 +697,7 @@ class OrchestratorV2:
 
 **How do you prevent a multi-agent system from amplifying errors across agents?** Use bounded error propagation: each agent outputs a confidence score; the orchestrator treats low-confidence outputs as optional context, not ground truth. Implement a verification agent that independently checks outputs from other agents on a sampling basis (5-10% of production tasks). Use checkpointing: the orchestrator saves intermediate results to a persistent store so that if a downstream agent produces a contradictory result, you can trace which upstream agent introduced the error. Avoid passing raw agent outputs as facts in subsequent agent prompts; instead frame them as "Agent A claimed X — verify this."
 
-**What is the A2A (Agent-to-Agent) protocol and why does it matter for multi-vendor agent systems?** A2A is a Google-proposed open protocol for agent interoperability — agents publish an "agent card" (JSON) describing their capabilities, input/output schemas, and authentication requirements. Other agents discover and invoke them via standardized HTTP+SSE messages without custom integration code. A2A matters because production multi-agent systems increasingly mix agents from different vendors (OpenAI Assistants, Claude agents, custom LangGraph agents), and without a standard protocol, each integration requires custom adapter code. A2A and MCP together form the emerging standard: MCP for tool access, A2A for agent-to-agent delegation.
+**What is the A2A (Agent-to-Agent) protocol and why does it matter for multi-vendor agent systems?** A2A is an open protocol for agent interoperability, published by Google in April 2025 and donated to the Linux Foundation in June 2025 — agents publish an "agent card" (JSON at `/.well-known/agent-card.json`) describing their capabilities, input/output schemas, and authentication requirements. Other agents discover and invoke them over one of A2A's three standard bindings (JSON-RPC 2.0, gRPC, or HTTP+JSON/REST, with SSE for streaming) without custom integration code. A2A matters because production multi-agent systems increasingly mix agents from different vendors (OpenAI Assistants, Claude agents, custom LangGraph agents), and without a standard protocol, each integration requires custom adapter code. A2A and MCP together form the emerging standard: MCP for tool access, A2A for agent-to-agent delegation.
 
 **Quick-reference table:**
 
@@ -731,9 +736,9 @@ async def dispatch_smart(history: list[Message], task: str,
 # Token cost: 40,000 → 5,000 tokens per round (8× reduction)
 ```
 
-**How do you prevent agent debate systems from converging to the wrong answer via social pressure?** In multi-agent debate (Model A proposes, Model B critiques, they iterate), a high-confidence but incorrect argument from one agent can cause the other to capitulate — "sycophantic collapse." Mitigations: (1) blind debate — agents cannot see each other's confidence scores, only content; (2) majority voting — use N≥5 agents, take the majority answer rather than the final agreed answer; (3) adversarial role enforcement — explicitly assign one agent the role of devil's advocate with instructions to never agree until shown a proof. Empirically, 5-agent majority vote outperforms 2-agent debate by 8-12% on MATH and logic benchmarks.
+**How do you prevent agent debate systems from converging to the wrong answer via social pressure?** In multi-agent debate (Model A proposes, Model B critiques, they iterate), a high-confidence but incorrect argument from one agent can cause the other to capitulate — "sycophantic collapse." Mitigations: (1) blind debate — agents cannot see each other's confidence scores, only content; (2) majority voting — use N≥5 agents, take the majority answer rather than the final agreed answer; (3) adversarial role enforcement — explicitly assign one agent the role of devil's advocate with instructions to never agree until shown a proof. The size of the majority-vote gain is not a constant to memorize: it falls straight out of the binomial arithmetic in Section 4.2 (five agents at 70% per-agent accuracy give an 83.7% majority, a 13.7-point gain) and collapses toward zero as the agents' errors become correlated.
 
-**What is the A2A (Agent-to-Agent) protocol and why does it matter for heterogeneous agent systems?** A2A is a standardized communication protocol (Google DeepMind open-source, 2024) that allows agents built on different frameworks (LangGraph, AutoGen, CrewAI) to communicate via a common message schema: task requests, progress updates, and results are wrapped in A2A envelopes with metadata (sender ID, task ID, priority). Without A2A, multi-framework agent systems require custom adapters between every pair of frameworks — O(N²) complexity. With A2A, each framework implements one A2A adapter — O(N) complexity. In practice: an orchestrator built in LangGraph can dispatch tasks to specialized workers built in AutoGen without custom glue code.
+**What is the A2A (Agent-to-Agent) protocol and why does it matter for heterogeneous agent systems?** A2A is a standardized communication protocol published by Google in April 2025 and governed by the Linux Foundation since June 2025 (spec now at v1.0.0), allowing agents built on different frameworks (LangGraph, AutoGen, CrewAI) to communicate via a common message schema: task requests, progress updates, and results are wrapped in A2A envelopes with metadata (sender ID, task ID, priority). Without A2A, multi-framework agent systems require custom adapters between every pair of frameworks — O(N²) complexity. With A2A, each framework implements one A2A adapter — O(N) complexity. In practice: an orchestrator built in LangGraph can dispatch tasks to specialized workers built in AutoGen without custom glue code.
 
 ---
 

@@ -65,25 +65,38 @@ Required GPUs at peak:
   1,200,000 concurrent streams / 50 rt-factor = 24,000 A10Gs
   At 70% target utilization: 24,000 / 0.70 = 34,286 A10Gs
 
-Cost at $1.30/GPU-hour (spot, us-east-1):
+Cost at $1.30/GPU-hour (on-demand, us-east-1: g5.12xlarge is $5.672/hour
+for 4x A10G = $1.42/GPU-hour; g5.xlarge is $1.006/hour. Spot on the same
+family runs ~$0.65-1.09/GPU-hour, so $1.30 is a conservative planning rate):
   34,286 x $1.30 = $44,572/hour
   x 8 peak hours/day + 16 off-peak hours at 30% load:
   ($44,572 x 8) + ($44,572 x 0.30 x 16) = $356,576 + $213,946 = $570,522/day
 
-Note: self-hosted STT at $0.0004/audio-min vs API (Whisper API: $0.006/min)
-  API cost: 11.25M hours x 60 min/hour x $0.006 = $4,050,000/day -- not viable
-  Self-hosted: 11.25M hours x 60 min x $0.0004 = $270,000/day -- 15x cheaper
+Note: two different self-hosted numbers apply and must not be conflated.
+  Marginal GPU cost at 100% utilization:
+    $1.30/GPU-hour / (50 streams x 60 min) = $0.00043/audio-min
+    11.25M hours x 60 min x $0.00043 = ~$290,000/day
+  Provisioned cost (70% utilization target + peak/off-peak profile above):
+    $570,522/day = $0.00085/audio-min -- this is the number to budget against
+  Managed API (OpenAI whisper-1 or gpt-4o-transcribe, both $0.006/min;
+  gpt-4o-mini-transcribe is $0.003/min):
+    11.25M hours x 60 min/hour x $0.006 = $4,050,000/day -- not viable
+  Self-hosted is ~7x cheaper on provisioned cost, ~14x on marginal cost.
 ```
 
 ### LLM Summarization Cost
 ```
-Summarization model: GPT-4o-mini at $0.0005/1K output tokens
+Summarization model: a small-tier model -- gpt-5.4-nano at $0.20/1M input
+and $1.25/1M output (Claude Haiku 4.5 at $1/$5 is the Anthropic equivalent)
 Avg transcript: 6,000 words -> 8,000 tokens input, 400 tokens output (summary)
 Map-reduce overhead for long meetings: 2x multiplier on average
 Effective output tokens per meeting: 800 tokens
 Daily meetings: 5M users x 3 = 15M meetings/day
 Daily output tokens: 15M x 800 = 12B tokens
-Cost: 12B / 1M x $0.50 = $6,000/day (manageable)
+Output cost: 12B / 1M x $1.25 = $15,000/day
+(Input dominates by volume -- 15M x 16,000 tokens = 240B/day x $0.20/M
+ = $48,000/day -- so budget ~$63,000/day for summarization, still two
+ orders of magnitude below the GPU fleet.)
 ```
 
 ### Storage
@@ -130,7 +143,7 @@ flowchart LR
         OSAUD(["CoreAudio macOS or<br/>WASAPI Windows"]) -->|"per-process<br/>audio taps"| LA(["Local Agent<br/>Swift / Rust"])
         LA -->|"VAD-filtered speech only<br/>raw audio never leaves device"| VAD2(["Local VAD<br/>WebRTC or Silero on-device"])
         VAD2 --> STT2(["STT API call<br/>cloud Whisper or<br/>local whisper.cpp"])
-        STT2 -->|"transcript<br/>text only"| LLM2(["LLM Pipeline<br/>GPT-4o-mini API<br/>or Claude Haiku"])
+        STT2 -->|"transcript<br/>text only"| LLM2(["LLM Pipeline<br/>small-tier API<br/>gpt-5.4-nano or<br/>Claude Haiku 4.5"])
         LLM2 -->|"summary,<br/>action items"| UI(["Local App UI +<br/>Cloud Sync optional"])
     end
 
@@ -722,9 +735,9 @@ class AutoJoiner:
 | Decision | Option A (chosen) | Option B | Rationale |
 |---|---|---|---|
 | Capture path | Bot-in-meeting (primary) + local-process (premium) | Bot-in-meeting only | Local-process provides lower cloud cost and better privacy; required to serve privacy-conscious enterprise and macOS power users |
-| STT hosting | Self-hosted Whisper on A10G spot fleet | API (OpenAI Whisper, AssemblyAI) | API cost: $4.05M/day; self-hosted: $270K/day — 15x cost reduction justifies ops investment at this scale |
+| STT hosting | Self-hosted Whisper on an A10G fleet (spot where interruption-tolerant) | API (OpenAI whisper-1 / gpt-4o-transcribe, AssemblyAI) | API cost: $4.05M/day; self-hosted provisioned: $570K/day — ~7x cost reduction justifies ops investment at this scale |
 | Transcription mode | Real-time streaming with sliding window | Post-meeting only | Real-time transcript is table-stakes UX; post-meeting only is untenable for the "glanceable during meeting" use case |
-| Summarization model | GPT-4o-mini with structured output | Per-workspace fine-tuned Llama 3 8B | Fine-tuning cost: ~$200/workspace, latency advantage minimal; GPT-4o-mini structured output is reliable; revisit at 50K+ workspace scale |
+| Summarization model | Small-tier hosted model (gpt-5.4-nano / Claude Haiku 4.5) with structured output | Per-workspace fine-tuned open-weight 8B | Fine-tuning cost: ~$200/workspace, latency advantage minimal; small-tier structured output is reliable; revisit at 50K+ workspace scale |
 | Transcript storage | Raw segments (Postgres) + compressed summaries (S3) | Summaries only | Raw segments required for full-text search, speaker timeline view, and re-summarization on model upgrade; marginal storage cost ($270K/year) justified |
 | Diarization approach | Cloud pyannote.audio (bot path) / local channel separation (local-process path) | Speaker-independent labels only | Named speaker attribution directly impacts action item accuracy; UNKNOWN labels cause 40% drop in action item adoption |
 
@@ -732,13 +745,13 @@ class AutoJoiner:
 
 ## 6. Real-World Implementations
 
-**Granola** (local-process, macOS): captures CoreAudio directly using the macOS ScreenCaptureKit API introduced in macOS 14. Only text — never raw audio — is transmitted to cloud LLM APIs. This architectural choice gives Granola sub-1-second transcript latency (no audio upload round-trip) and a strong privacy story: "your voice never leaves your Mac." Granola's editor-first UI, where the AI transcript fills in behind user-typed notes, achieved 90%+ daily retention among early power users. Acquired by Duolingo in early 2025 for a reported $100 million, a direct bet on the local-process moat before macOS-level audio APIs commoditize the approach.
+**Granola** (local-process first, now cross-platform): captures system audio on the device rather than joining as a bot. Two distinct macOS APIs enable this and are often conflated: **ScreenCaptureKit** (introduced in macOS 12.3) captures system and per-application audio, and **Core Audio process taps** (`AudioHardwareCreateProcessTap`, introduced in macOS 14.2) provide genuine per-process audio taps. Only text — never raw audio — is transmitted to cloud LLM APIs. This architectural choice gives Granola low transcript latency (no audio upload round-trip) and a strong privacy story: "your voice never leaves your device." Granola's editor-first UI, where the AI transcript fills in behind user-typed notes, is its most-copied design decision. Granola, Inc. remains independent, raised $125M in a round announced March 2025, and has since shipped Windows, iOS, and Android clients — so the local-process approach is no longer macOS-only, and the macOS-exclusivity moat has already eroded.
 
-**Fireflies.ai**: bot-in-meeting, multi-platform (Zoom, Meet, Teams, Webex). Deep CRM integrations with Salesforce and HubSpot allow automatic population of call notes from meeting transcript. Fireflies uses a proprietary STT model fine-tuned on sales call vocabulary to improve recognition of product names, competitor names, and pricing terms — achieving 12% lower WER than base Whisper on their domain-specific test set. Reported 10M+ users and approximately $30M ARR as of 2024.
+**Fireflies.ai**: bot-in-meeting, multi-platform (Zoom, Meet, Teams, Webex). Deep CRM integrations with Salesforce and HubSpot allow automatic population of call notes from meeting transcript. Fireflies markets a proprietary STT model tuned on sales-call vocabulary to improve recognition of product names, competitor names, and pricing terms; the size of that WER gain over base Whisper is not independently published, so treat any specific figure as vendor-reported. Company-reported user and revenue figures are self-disclosed and not audited.
 
-**Otter.ai**: the original consumer meeting assistant (founded 2016), pre-GPT. Pivoted from individual transcription to team-wide meeting intelligence as the individual market commoditized. Raised $200 million total; introduced "OtterPilot" as an AI that actively participates in meetings by answering questions in the chat. Otter's challenge: commoditization from Zoom AI Companion (free for all paid Zoom users) has pressured the consumer segment, pushing Otter toward enterprise with admin controls and compliance features.
+**Otter.ai**: the original consumer meeting assistant (founded 2016 by Sam Liang and Yun Fu, originally AISense), pre-GPT. Pivoted from individual transcription to team-wide meeting intelligence as the individual market commoditized. Venture-backed across multiple rounds (including a $10M round led by Docomo Ventures in January 2020); introduced "OtterPilot" as an AI that actively participates in meetings by answering questions in the chat. Otter's challenge: commoditization from Zoom AI Companion (included for paid Zoom users) has pressured the consumer segment, pushing Otter toward enterprise with admin controls and compliance features.
 
-**Zoom AI Companion**: structurally advantaged — no bot needed. Zoom captures audio internally and passes it directly to its ASR pipeline without SDK round-trips or bot join latency. Available at no additional cost to all paid Zoom subscribers (40M+). The key limitation: meeting transcripts are siloed inside Zoom's ecosystem. Integration with external tools (Notion, Linear, Slack) requires Zoom Apps SDK wrappers that introduce additional latency and OAuth complexity that third-party tools do not face.
+**Zoom AI Companion**: structurally advantaged — no bot needed. Zoom captures audio internally and passes it directly to its ASR pipeline without SDK round-trips or bot join latency. Included at no additional cost with paid Zoom plans. The key limitation: meeting transcripts are siloed inside Zoom's ecosystem. Integration with external tools (Notion, Linear, Slack) requires Zoom Apps SDK wrappers that introduce additional latency and OAuth complexity that third-party tools do not face.
 
 **Microsoft Copilot in Teams**: similar native-access advantage as Zoom. Uses Azure OpenAI for summarization. Has explicit enterprise contract provisions covering data residency (EU data stays in EU) and data not being used for model training — a critical enterprise procurement requirement that Fireflies and Otter cannot match without custom DPA negotiations.
 
@@ -748,17 +761,31 @@ class AutoJoiner:
 
 ### STT Engine Comparison
 
-| Engine | WER (clean audio) | Real-time factor | Cost/audio-min | Streaming | Diarization built-in |
-|---|---|---|---|---|---|
-| Whisper large-v3 (self-hosted A10G) | 2.7% | 50x | $0.0004 | No (needs chunking) | No (needs pyannote) |
-| AssemblyAI Universal-2 | 3.1% | Real-time | $0.0035 | Yes | Yes |
-| Deepgram Nova-2 | 3.4% | Real-time | $0.0043 | Yes | Yes |
-| Google STT v2 | 4.1% | Real-time | $0.0048 | Yes | Yes (limited) |
-| Azure Speech | 4.8% | Real-time | $0.0100 | Yes | Yes |
+Vendor list prices as of July 2026 (verify before committing — this market re-prices
+often, and WER varies enough by domain that vendor-published WER should be treated
+as a starting point, not a ranking).
 
-Whisper self-hosted wins on cost and WER but requires building the streaming wrapper described in Section 4a. At 11.25M audio-hours/day, the cost difference between Whisper self-hosted ($270K/day) and the next cheapest managed option, AssemblyAI ($945K/day), is $675K/day — justifying a dedicated STT infrastructure team.
+| Engine | Real-time factor | Cost/audio-min | Streaming | Diarization built-in |
+|---|---|---|---|---|
+| Whisper large-v3 (self-hosted A10G) | 50x | $0.00043 marginal / $0.00085 provisioned | No (needs chunking) | No (needs pyannote) |
+| AssemblyAI Universal-3.5 Pro | Real-time | $0.0035 pre-recorded ($0.21/hr), $0.0075 streaming ($0.45/hr) | Yes | Yes |
+| AssemblyAI Universal-2 (legacy) | Real-time | $0.0025 ($0.15/hr) | Yes | Yes |
+| Deepgram Nova-3 (monolingual) | Real-time | $0.0048 streaming | Yes | Yes |
+| Deepgram Flux (English) | Real-time | $0.0065 streaming | Yes | Yes |
+| OpenAI gpt-4o-transcribe / whisper-1 | Batch | $0.006 ($0.003 for gpt-4o-mini-transcribe) | Limited | No |
+| Google STT / Azure AI Speech | Real-time | Region- and tier-dependent; read the vendor calculator | Yes | Yes |
+
+Deepgram Nova-2 and AssemblyAI's `best`/`nano`/SLAM-1 identifiers are legacy and
+should not be used in new designs.
+
+Whisper self-hosted wins on cost but requires building the streaming wrapper described in Section 4a. At 11.25M audio-hours/day, the cost difference between Whisper self-hosted ($570K/day provisioned) and the flagship managed option, AssemblyAI Universal-3.5 Pro (11.25M hr x $0.21/hr = $2.36M/day), is ~$1.8M/day — justifying a dedicated STT infrastructure team.
 
 ### Diarization
+
+DER figures below are order-of-magnitude planning values, not vendor-published
+benchmarks — DER is extremely sensitive to corpus, crosstalk rate, and audio
+quality, so re-measure on your own labelled set before treating any of them as a
+ranking.
 
 | Tool | DER (2 speakers) | DER (4 speakers) | Latency | Notes |
 |---|---|---|---|---|
@@ -779,7 +806,7 @@ Three automated eval gates run on every model or prompt change before deployment
 
 **Action item recall gate**: 200 hand-labeled meetings where a human annotator identified all action items with owner and task. Automated eval measures recall (fraction of ground-truth action items present in model output) and precision (fraction of model-output action items that are real). Target: recall >= 0.72, precision >= 0.68. Current production: recall 0.76, precision 0.71.
 
-**Summary length and quality gate**: LLM-as-judge (GPT-4o) scores summaries on a 5-point rubric: accuracy, brevity (penalizes summaries longer than 4 sentences), actionability. Gate blocks if mean score drops below 3.8/5.0.
+**Summary length and quality gate**: LLM-as-judge (a frontier model distinct from the summarizer — e.g. Claude Sonnet 5 judging gpt-5.4-nano output) scores summaries on a 5-point rubric: accuracy, brevity (penalizes summaries longer than 4 sentences), actionability. Gate blocks if mean score drops below 3.8/5.0.
 
 See [./cross_cutting/llm_eval_harness_in_production.md](./cross_cutting/llm_eval_harness_in_production.md) for the full eval harness implementation including dataset versioning and result tracking.
 
@@ -828,7 +855,7 @@ See [./cross_cutting/opentelemetry_for_llm_apps.md](./cross_cutting/opentelemetr
 - Symptom: `summarizer.latency_p95_ms` exceeds 30,000 ms; users report no summary email after meeting ends.
 - Diagnosis: check LLM provider status (OpenAI / Anthropic status pages); check if meeting was unusually long (>2 hours triggers more map-reduce chunks); check token budget — very long transcripts may exhaust context window and retry.
 - Mitigation: send user a partial result email ("Your meeting notes are being processed — action items will arrive within the next 5 minutes") immediately at meeting end. Retry summarizer job with exponential backoff (30s, 60s, 120s).
-- Resolution: if LLM provider outage, fail over to secondary provider (Claude Haiku as backup for GPT-4o-mini). If long-meeting timeout, add more aggressive chunking at >4-hour meetings.
+- Resolution: if LLM provider outage, fail over to the secondary provider's small tier (Claude Haiku 4.5 as backup for gpt-5.4-nano, or vice versa). If long-meeting timeout, add more aggressive chunking at >4-hour meetings.
 
 **Runbook 4: CONSENT_AUDIT_FAILURE — consent log write fails for an active meeting**
 - Symptom: `consent.audit_write_failure_rate` > 0; S3 write errors in CloudWatch for consent bucket.
@@ -841,21 +868,21 @@ See [./cross_cutting/opentelemetry_for_llm_apps.md](./cross_cutting/opentelemetr
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Whisper hallucinations on silence**
-Whisper large-v3 generates text even when fed pure silence or non-speech audio (applause, keyboard typing, HVAC noise). In production the model outputs phrases like "Thank you for watching" or "Subtitle by" — artifacts from YouTube training data — into meeting transcripts at a rate of approximately 1 hallucinated sentence per 8 minutes of non-speech audio. Otter.ai suffered a wave of support tickets in early 2023 when thousands of users found fabricated sentences in their transcripts. The fix is mandatory VAD (Voice Activity Detection) gating before every STT call: Silero VAD (10 MB model, runs on CPU, 95% accuracy) drops non-speech audio before it reaches Whisper. After VAD gating, hallucination rate dropped to <0.01 per meeting in internal testing.
+Whisper large-v3 generates text even when fed pure silence or non-speech audio (applause, keyboard typing, HVAC noise). In production the model outputs phrases like "Thank you for watching" or "Subtitle by" — artifacts from YouTube training data — into meeting transcripts. This is a well-documented Whisper failure mode; the exact rate depends heavily on the silence and noise profile of your audio, so measure it on your own corpus rather than importing a published number. The fix is mandatory VAD (Voice Activity Detection) gating before every STT call: Silero VAD (a ~1.2-2.3 MB model depending on the exported format — `silero_vad.jit` is 2.27 MB, `silero_vad.onnx` 2.33 MB, the 16 kHz safetensors build 1.24 MB — runs on CPU) drops non-speech audio before it reaches Whisper. Hallucination rate after VAD gating should be tracked as an explicit eval metric, not assumed.
 
 **Pitfall 2: Enterprise IT blocks bots**
-Fireflies.ai discovered that approximately 15% of Fortune 500 companies configure Zoom to block all external app participants. The Fireflies bot join would fail silently — the user saw no error, just no transcript. Root cause: Zoom Enterprise plans allow IT admins to whitelist-only participant apps. Impact: significant churn among enterprise trial users who set up Fireflies, found it "didn't work," and churned before understanding the IT configuration requirement. Resolution: Fireflies added a bot-pre-check step that tests join permission 24 hours before the first meeting and sends an IT configuration guide email if the check fails. They also built a direct email-forwarding path (forward your Zoom invitation to bot@fireflies.ai) as a fallback that bypasses the bot-join restriction.
+*(Illustrative composite of a pattern every bot-in-meeting vendor hits; the percentages below are modelling assumptions, not published figures.)* A meaningful share of large enterprises configure Zoom to block all external app participants — Zoom Enterprise plans let IT admins run an allowlist for participant apps. The bot join then fails silently: the user sees no error, just no transcript. Impact: churn among enterprise trial users who set the product up, found it "didn't work," and left before understanding the IT configuration requirement. The standard resolution is a bot pre-check that tests join permission 24 hours before the first meeting and emails an IT configuration guide if the check fails, plus an email-forwarding fallback path that bypasses the bot-join restriction entirely.
 
 **Pitfall 3: Speaker diarization collapse in brainstorming sessions**
-A meeting with 3 or more participants who frequently interrupt and speak simultaneously is the diarization model's worst case. In cross-talk-heavy meetings (design reviews, brainstorming, engineering standups), pyannote.audio's DER rises from the baseline 5% to 35%+. The practical effect: action items are attributed to the wrong person. An action item attributed to the wrong owner in a shared Slack export is a team-trust failure. The mitigation for bot-in-meeting mode is voice enrollment: during user onboarding, each participant records a 10-second voice sample used to pre-populate speaker embeddings. Enrollment reduces DER to 9% even in high-crosstalk conditions. Users who complete enrollment have 67% higher 30-day retention than users who skip it.
+A meeting with 3 or more participants who frequently interrupt and speak simultaneously is the diarization model's worst case. In cross-talk-heavy meetings (design reviews, brainstorming, engineering standups), pyannote.audio's DER rises from the baseline 5% to 35%+. The practical effect: action items are attributed to the wrong person. An action item attributed to the wrong owner in a shared Slack export is a team-trust failure. The mitigation for bot-in-meeting mode is voice enrollment: during user onboarding, each participant records a 10-second voice sample used to pre-populate speaker embeddings. Enrollment materially reduces DER even in high-crosstalk conditions, because the clustering step is seeded with known-good embeddings rather than discovering speakers blind. Track enrollment completion as a retention driver in your own funnel — the correlation is strong but the magnitude is product-specific, so do not import someone else's number.
 
 **Pitfall 4: Cross-tenant transcript data exposure**
-A misconfigured S3 bucket policy at a meeting assistant startup (details anonymized per disclosure agreement) allowed tenant A's S3 IAM role to list and read objects in tenant B's transcript prefix. The bug was introduced when an infrastructure engineer copy-pasted a bucket policy template and forgot to scope the Principal to the correct IAM role ARN. Approximately 2,000 meetings across 14 enterprise workspaces were readable cross-tenant for 11 days before discovery during a routine access review. The resulting GDPR fine was 400,000 EUR. The fix: per-tenant S3 prefixes are not sufficient isolation — each tenant must have a dedicated KMS key, and S3 bucket policies must be generated programmatically from a template that parameterizes the tenant IAM role ARN rather than copied manually. Automated policy drift detection via AWS Config rules now runs every 6 hours.
+*(Illustrative composite — the figures below are modelled, not a verified public enforcement record.)* A misconfigured S3 bucket policy allows tenant A's S3 IAM role to list and read objects in tenant B's transcript prefix. The bug was introduced when an infrastructure engineer copy-pasted a bucket policy template and forgot to scope the Principal to the correct IAM role ARN. Approximately 2,000 meetings across 14 enterprise workspaces were readable cross-tenant for 11 days before discovery during a routine access review. A breach of this shape is a GDPR Article 33 notifiable incident and, in the modelled scenario, draws a six-figure EUR fine. The fix: per-tenant S3 prefixes are not sufficient isolation — each tenant must have a dedicated KMS key, and S3 bucket policies must be generated programmatically from a template that parameterizes the tenant IAM role ARN rather than copied manually. Automated policy drift detection via AWS Config rules now runs every 6 hours.
 
 See [./cross_cutting/tenant_isolation_patterns.md](./cross_cutting/tenant_isolation_patterns.md) for the full per-tenant KMS + S3 isolation pattern with policy templates.
 
 **Pitfall 5: Summary length kills adoption**
-The first version of a meeting summarizer at a well-funded assistant startup (2022) produced summaries averaging 600 words — a "comprehensive" output that product believed users would value. 30-day activation rate (user opens and reads the summary) was 11%. A user research session revealed that users opened the summary email, saw two paragraphs with sub-bullets, and closed it — they did not have 3 minutes to read a summary of a meeting they just attended. The redesign enforced hard constraints: executive summary capped at 3 sentences, action items limited to 7 maximum (truncated with "and N more"), open questions limited to 3. Activation rate increased to 67% within two weeks of the redesign. The lesson: LLM comprehensiveness is an anti-pattern for consumption. Constraints enforced at the prompt level ("return exactly 3 sentences") outperform post-hoc truncation because the model actively selects the 3 most important sentences rather than truncating a longer output.
+*(Illustrative composite; the activation percentages are modelled to show the shape of the effect.)* A first-generation meeting summarizer produces summaries averaging 600 words — a "comprehensive" output that product believed users would value. 30-day activation rate (user opens and reads the summary) was 11%. A user research session revealed that users opened the summary email, saw two paragraphs with sub-bullets, and closed it — they did not have 3 minutes to read a summary of a meeting they just attended. The redesign enforced hard constraints: executive summary capped at 3 sentences, action items limited to 7 maximum (truncated with "and N more"), open questions limited to 3. Activation rate increased to 67% within two weeks of the redesign. The lesson: LLM comprehensiveness is an anti-pattern for consumption. Constraints enforced at the prompt level ("return exactly 3 sentences") outperform post-hoc truncation because the model actively selects the 3 most important sentences rather than truncating a longer output.
 
 ---
 
@@ -893,24 +920,27 @@ peak_concurrent_streams:
   = 1,171,875 concurrent streams
 
 required_gpus:
-  ceil(1,171,875 / 50 / 0.70) = ceil(33,482) = 33,482 A10Gs
+  1,171,875 / 50 / 0.70 = 33,482.14 -> ceil = 33,483 A10Gs
 
-GPU cost (A10G spot, us-east-1, $1.30/GPU-hour):
-  Peak 8 hours: 33,482 x $1.30 x 8 = $347,813
-  Off-peak 16 hours at 30% load: 33,482 x 0.30 x $1.30 x 16 = $209,125
-  Daily GPU cost: $556,938
+GPU cost (A10G, us-east-1, $1.30/GPU-hour on-demand planning rate):
+  Peak 8 hours: 33,483 x $1.30 x 8 = $348,223
+  Off-peak 16 hours at 30% load: 33,483 x 0.30 x $1.30 x 16 = $208,934
+  Daily GPU cost: $557,157
 
-At 15M meetings/day, LLM summarization:
-  15M x 800 output tokens / 1M x $0.50 = $6,000/day
+At 15M meetings/day, LLM summarization (gpt-5.4-nano, $0.20/$1.25 per M):
+  output: 15M x 800 / 1M x $1.25   = $15,000/day
+  input:  15M x 16,000 / 1M x $0.20 = $48,000/day
+  LLM subtotal: $63,000/day
 
-Total daily infra cost: $556,938 (GPU) + $6,000 (LLM) + ~$50,000 (DB, S3, network)
-  = ~$613,000/day
+Total daily infra cost: $557,157 (GPU) + $63,000 (LLM) + ~$50,000 (DB, S3, network)
+  = ~$670,000/day
 
 Break-even at $10/user/month:
-  $613,000/day x 30 = $18.4M/month
-  $18.4M / $10 = 1.84M paying users required to cover infra alone
-  At 5M DAU: implies 37% paid conversion required
-  Industry benchmark (Fireflies): ~5-8% freemium conversion
+  $670,000/day x 30 = $20.1M/month
+  $20.1M / $10 = 2.01M paying users required to cover infra alone
+  At 5M DAU: implies ~40% paid conversion required
+  Typical freemium conversion in this category is low single-digit to
+  high single-digit percent -- an order of magnitude short
   -> Self-hosted Whisper is necessary but not sufficient; additional cost reduction
      via quantization (INT8 Whisper) can push rt-factor to 80x, reducing GPU count by 38%
 ```
@@ -922,22 +952,22 @@ See [./cross_cutting/gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.m
 ## 11. Interview Discussion Points
 
 **Q: Why does local-process beat bot-in-meeting for privacy, even though both use cloud LLMs?**
-The privacy distinction is about what data reaches the cloud. In bot-in-meeting, raw audio — containing voice biometrics, emotional tone, and potentially off-topic conversation — is streamed to a cloud STT service. In local-process (Granola model), audio never leaves the device. Only the text transcript is sent to the LLM API. Text carries far less regulatory exposure than voice biometric data under GDPR, CCPA, and Illinois BIPA. From an enterprise legal review perspective, "we send text to an LLM" is a qualitatively different data processing claim than "we stream audio to our servers." This distinction is worth $100M+ in enterprise contract unlock.
+The privacy distinction is about what data reaches the cloud. In bot-in-meeting, raw audio — containing voice biometrics, emotional tone, and potentially off-topic conversation — is streamed to a cloud STT service. In local-process (Granola model), audio never leaves the device. Only the text transcript is sent to the LLM API. Text carries far less regulatory exposure than voice biometric data under GDPR, CCPA, and Illinois BIPA. From an enterprise legal review perspective, "we send text to an LLM" is a qualitatively different data processing claim than "we stream audio to our servers." In regulated verticals this distinction is frequently the difference between a deal closing and a security review blocking it.
 
 **Q: How does the sliding-window Whisper approach avoid word-boundary artifacts?**
 Whisper is a sequence-to-sequence model whose attention spans the entire input. When audio is chunked into hard non-overlapping segments, a word that begins 4.9 seconds into a 5-second chunk has only 0.1 seconds of acoustic context after it — insufficient for the model to resolve phonemes correctly. The sliding window keeps a 30-second audio buffer that advances by 5 seconds per inference. Every word is therefore transcribed with up to 25 seconds of prior acoustic context, which is sufficient for accurate phoneme resolution. The deduplication cursor (`_last_committed_ms`) ensures each word is emitted exactly once despite multiple overlapping windows covering it.
 
-**Q: Why does self-hosted STT cost 10,000x less than API at scale?**
-The cost difference is 15x (not 10,000x) at the specific scale analyzed: $270K/day self-hosted versus $4.05M/day API. The mechanism is GPU utilization density. Whisper on a self-hosted A10G achieves 50x real-time factor — one GPU handles 50 simultaneous audio streams. The managed API provider charges $0.006/audio-minute and carries similar GPU costs but adds margin, reliability infrastructure, and per-request overhead. At 11.25M audio-hours/day, the margin differential compounds to $3.78M/day. The crossover point where self-hosting beats API on TCO (including devops headcount) is approximately 500,000 audio-hours/month, which a 200,000 DAU product reaches.
+**Q: Why does self-hosted STT cost so much less than a managed API at scale?**
+The gap is roughly 7x at the scale analyzed, not the order-of-magnitude figure people quote: $570K/day self-hosted versus $4.05M/day on a managed API. The mechanism is GPU utilization density. Whisper on a self-hosted A10G achieves 50x real-time factor — one GPU handles 50 simultaneous audio streams. A managed provider charges $0.006/audio-minute (OpenAI whisper-1 / gpt-4o-transcribe) and carries similar GPU costs but adds margin, reliability infrastructure, and per-request overhead. At 11.25M audio-hours/day the differential compounds to ~$3.5M/day. Two numbers get conflated here and should not be: the *marginal* self-hosted rate at full GPU utilization (~$0.00043/audio-min) and the *provisioned* rate you actually pay after a 70% utilization target and a peak/off-peak fleet profile (~$0.00085/audio-min). Budget against the provisioned rate. The crossover where self-hosting beats API on TCO — including the devops headcount the API price is really buying you — is in the low hundreds of thousands of audio-hours per month.
 
 **Q: How does map-reduce handle a 2-hour meeting transcript?**
-A 2-hour meeting produces approximately 24,000 words — 32,000 tokens — which exceeds reliable action item extraction with a single LLM call even in 128K-context models (context length is not the binding constraint; attention dilution over long contexts is). Map-reduce segments the transcript by topic using sentence embedding cosine similarity drops as boundary signals. Each segment (typically 800-1,500 tokens) is summarized independently in parallel. The parallel chunk summaries are then merged in a final LLM call that reconciles action items across segments and resolves speaker references. The merge step is the quality bottleneck: if the same action item appears in two chunks under different phrasings, the merge must deduplicate it. Addressing this with a "seen action items" set passed into the merge prompt reduces duplicate action items by 73% in internal testing.
+It splits the transcript on topic boundaries, summarizes each segment in parallel, then reconciles the segment summaries in one final merge call. A 2-hour meeting produces approximately 24,000 words — 32,000 tokens — which exceeds reliable action item extraction with a single LLM call even in 128K-context models (context length is not the binding constraint; attention dilution over long contexts is). Map-reduce segments the transcript by topic using sentence embedding cosine similarity drops as boundary signals. Each segment (typically 800-1,500 tokens) is summarized independently in parallel. The parallel chunk summaries are then merged in a final LLM call that reconciles action items across segments and resolves speaker references. The merge step is the quality bottleneck: if the same action item appears in two chunks under different phrasings, the merge must deduplicate it. Addressing this with a "seen action items" set passed into the merge prompt reduces duplicate action items by 73% in internal testing.
 
 **Q: How is GDPR consent compliance architected to withstand regulatory audit?**
 Four properties are required: (1) Consent is captured before transcription begins — the bot announcement and 60-second grace period must precede the first STT call. (2) Each consent event is written to an immutable audit log (S3 Object Lock, WORM mode, 7-year retention) before transcription continues. (3) Opt-out is honored within 60 seconds — the consent cache is checked per audio chunk, and chunks for opted-out participants are dropped before VAD and STT. (4) Consent records use SHA-256 hashed email addresses to minimize PII in the audit log itself while remaining linkable to a participant identity during regulatory review via a separately secured lookup table.
 
 **Q: Why is speaker diarization harder in bot-in-meeting mode than local-process?**
-In bot-in-meeting mode, all participants' audio arrives mixed in a single channel. The diarizer must perform blind source separation — distinguishing N voices from one stream using only acoustic embedding differences. When speakers overlap, embedding clustering fails. In local-process mode on macOS, ScreenCaptureKit provides separate audio taps per process: the Zoom process audio (remote participants) and the local microphone (host) are already separated. This means the host is always correctly identified as a distinct channel, and remote participants arrive in a single channel rather than a mix of all participants including the host. The effective diarization problem reduces from N-speaker mixed to (N-1)-speaker mixed — a meaningful reduction in problem complexity.
+In bot-in-meeting mode, all participants' audio arrives mixed in a single channel. The diarizer must perform blind source separation — distinguishing N voices from one stream using only acoustic embedding differences. When speakers overlap, embedding clustering fails. In local-process mode on macOS, Core Audio process taps (`AudioHardwareCreateProcessTap`, macOS 14.2+) provide separate audio taps per process, and ScreenCaptureKit (macOS 12.3+) provides per-application capture: the Zoom process audio (remote participants) and the local microphone (host) are already separated. This means the host is always correctly identified as a distinct channel, and remote participants arrive in a single channel rather than a mix of all participants including the host. The effective diarization problem reduces from N-speaker mixed to (N-1)-speaker mixed — a meaningful reduction in problem complexity.
 
 **Q: How do you handle bot join failure gracefully without the user losing their meeting?**
 A complete bot join failure must be surfaced to the user before the meeting starts, not discovered afterward. The AutoJoiner performs a pre-flight check 10 minutes before the meeting: it attempts to obtain a Zoom join token and validates that the meeting's host settings allow external participants. If this check fails, the user receives a push notification and email with: (1) the reason for failure in plain language, (2) a meeting ID and instructions for manually uploading a recording afterward, (3) an IT configuration guide if the failure is due to organization policy. The manual upload path uses the same STT and summarization pipeline as real-time capture — users get a complete summary within 5 minutes of upload. Approximately 8% of enterprise users end up using the upload path regularly as a deliberate privacy choice.
@@ -945,8 +975,8 @@ A complete bot join failure must be surfaced to the user before the meeting star
 **Q: What makes action item extraction harder than meeting summarization?**
 Summarization is a compression task — reduce N words to M words while preserving the salient information. Action item extraction is a structured information extraction task with semantic ambiguity. The model must: (1) distinguish a committed action ("I will send the proposal by Friday") from a conditional or hypothetical ("we might want to send a proposal"), (2) identify the owner when the action is stated in passive voice ("the proposal should be sent"), (3) resolve pronoun references across the transcript ("John said he'd handle it" requires knowing what "it" refers to from 3 minutes earlier), and (4) assign a due date from relative time references ("by end of quarter" requires knowing the current date). Each of these sub-tasks has its own failure mode. In practice, owner identification is the hardest: in meetings with absent stakeholders ("I'll check with Sarah"), the owner is someone not present whose name must be preserved verbatim.
 
-**Q: Why was Granola acquired for $100M given that it only works on macOS?**
-The local-process moat is the answer. macOS gives Granola native access to CoreAudio process tapping — a capability that does not exist on Windows or Android with equivalent privacy guarantees. Competitors (Fireflies, Otter) cannot replicate local-process without shipping a native app on every platform and navigating each OS's audio API (macOS ScreenCaptureKit, Windows WASAPI, Android AudioRecord — each with different permission models). The macOS-only constraint turns into a feature for Duolingo's target segment: knowledge workers at tech companies, where macOS market share exceeds 60%. Additionally, Granola's architecture means Duolingo can offer meeting transcription with a strong "your audio never leaves your Mac" privacy guarantee — a requirement for healthcare, legal, and financial services customers that bot-in-meeting competitors cannot credibly make.
+**Q: How durable is the local-process moat, given that OS audio APIs keep improving?**
+It is a real but decaying moat, and the decay is the interesting part. The initial advantage was genuine: macOS shipped Core Audio process taps (macOS 14.2) and per-application capture via ScreenCaptureKit (macOS 12.3), so a native Mac app could separate the conferencing app's audio from the local microphone without joining the meeting as a bot. Competitors could not replicate that without shipping a native client on every platform and navigating each OS's audio stack (macOS ScreenCaptureKit and Core Audio taps, Windows WASAPI loopback, Android AudioRecord) with different permission models each. But the moat is engineering effort, not a patent: Granola itself has since shipped Windows, iOS, and Android clients, which demonstrates the port is tractable. What persists is the *privacy claim* the architecture licenses — "your audio never leaves your device" — which is a procurement requirement in healthcare, legal, and financial services that bot-in-meeting competitors cannot credibly make regardless of platform coverage. Design for the privacy posture, not for the OS exclusivity.
 
 **Q: How do you measure STT quality in production without ground-truth transcripts?**
-Three proxies work without ground truth: (1) Speaker turn consistency: if a segment is attributed to Speaker A but the previous 5 segments were all Speaker B with no pause longer than 200ms, the diarizer likely mislabeled. A high rate of single-segment speaker switches is a diarization degradation signal. (2) Whisper confidence scores: Whisper's log-probabilities per token are available when running with `logprobs=True`. A rolling average log-prob below -0.8 per token indicates model uncertainty — typically triggered by noise, non-English speech, or audio quality issues — without requiring a ground-truth reference. (3) Action item downstream proxy: if the fraction of meetings where the user edits or deletes AI-generated action items exceeds a threshold (typically 35%), this is a leading indicator of transcript quality degradation upstream. This last metric has a 2-hour lag but is the most direct signal that output quality has degraded in a way that matters to users.
+Use three unsupervised proxies that need no reference transcript. (1) Speaker turn consistency: if a segment is attributed to Speaker A but the previous 5 segments were all Speaker B with no pause longer than 200ms, the diarizer likely mislabeled. A high rate of single-segment speaker switches is a diarization degradation signal. (2) Whisper confidence scores: Whisper's log-probabilities per token are available when running with `logprobs=True`. A rolling average log-prob below -0.8 per token indicates model uncertainty — typically triggered by noise, non-English speech, or audio quality issues — without requiring a ground-truth reference. (3) Action item downstream proxy: if the fraction of meetings where the user edits or deletes AI-generated action items exceeds a threshold (typically 35%), this is a leading indicator of transcript quality degradation upstream. This last metric has a 2-hour lag but is the most direct signal that output quality has degraded in a way that matters to users.

@@ -16,7 +16,7 @@ One-line analogy: a sommelier does not memorize the tasting notes of every bottl
 
 Mental model: treat each tool as a document. The agent's query is a search query. Retrieval narrows 500 tools to 8 relevant candidates; the LLM then reasons over only those 8.
 
-Why it matters: GPT-4 function-calling accuracy drops roughly 15 percentage points when given 100 tools versus 10 relevant tools (internal evaluations from the ToolBench paper, 2023). At 100 tools with average schema size of 300 tokens each, the tool block alone consumes 30,000 tokens — nearly half of a 64K context window.
+Why it matters: function-calling accuracy degrades as the candidate set grows — the model's attention is spread over more schemas and position bias favours whichever tools were listed first. The size of that drop is model- and catalogue-specific and there is no canonical published figure to quote; measure it on your own catalogue. The token cost, by contrast, is exact: at 100 tools with an average schema size of 300 tokens each, the tool block alone consumes 30,000 tokens — nearly half of a 64K context window.
 
 Key insight: the model reads the tool description, not the name, to decide whether to call a tool. A precise, example-rich description is the highest-leverage lever for improving tool selection quality.
 
@@ -56,7 +56,7 @@ Registration is not free storage. The schema block is re-sent with each request,
   saved = 30,000 - 3,000 = 27,000 tokens per call  (90% of the tool block)
 ```
 
-Both failure modes named in the overview fall out of that one line. The cost failure is `N x S` landing on the bill; the accuracy failure is `N x S` competing for attention. The 15-point accuracy drop and the 30,000 tokens are not two problems — they are the same multiplication seen from two sides.
+Both failure modes named in the overview fall out of that one line. The cost failure is `N x S` landing on the bill; the accuracy failure is `N x S` competing for attention. They are not two problems — they are the same multiplication seen from two sides.
 
 ---
 
@@ -90,9 +90,9 @@ Inject all N tool schemas into the system prompt unconditionally. Works for N <=
 Embed every tool description offline using a text embedding model (e.g., `text-embedding-3-small`, 1536 dimensions). At query time, embed the user message and retrieve top-k tools by cosine similarity. Inject only retrieved tools into the context. Embedding-model selection and ANN index tradeoffs are covered in [Embeddings & Similarity Search](../embeddings_and_similarity_search/README.md).
 
 Key parameters:
-- k = 5 to 10 (k=10 achieves ~95% recall on ToolBench, k=5 achieves ~88%)
+- k = 5 to 10. The worked figures below use Recall@10 = 0.95 and Recall@5 = 0.88 as *illustrative* working assumptions; recall is catalogue-specific and must be measured on your own labelled (query, expected_tool) set
 - Embedding model: `text-embedding-3-small` (cost: $0.02 per 1M tokens) or `all-MiniLM-L6-v2` (free, local)
-- Index: FAISS `IndexFlatIP` for exact search up to ~50K tools; HNSW for larger catalogues
+- Index: FAISS `IndexFlatIP` for exact search up to roughly 100K vectors; HNSW for larger catalogues
 
 #### Decoding Recall@k
 
@@ -108,7 +108,7 @@ Recall@k measures the retriever alone and says nothing about whether the model t
 | Symbol | What it is |
 |--------|------------|
 | `k` | How many tools the retriever hands to the model. The one knob you tune |
-| `Recall@k` | Probability the correct tool sits somewhere in those k. 0.95 at k=10 above |
+| `Recall@k` | Probability the correct tool sits somewhere in those k. 0.95 at k=10 in the illustrative figures above |
 | `miss@k` | The complement: fraction of queries the agent cannot possibly get right |
 | top-k | The k highest cosine scores. Ranked, but rank order does not affect recall |
 
@@ -194,7 +194,7 @@ flowchart TD
 
     Query([User Query]) --> Prompt
     Prompt["System Prompt\n100 tool schemas × 300 tokens\n= 30,000 tokens / call"] --> LLM
-    LLM["LLM\n(full context, degraded attention)"] --> Call["Tool call\n(accuracy ~70% with 100 tools)"]
+    LLM["LLM\n(full context, degraded attention)"] --> Call["Tool call\n(accuracy degraded by 100-tool dilution)"]
 
     class Query,Call io
     class Prompt lossN
@@ -224,7 +224,7 @@ flowchart TD
         Search --> Schemas["Retrieved Tool Schemas\nk=10, ~3,000 tokens"]
         Schemas --> Prompt["System Prompt\n10 relevant schemas\n~3,000 tokens"]
         Prompt --> LLM["LLM\n(tight context, high attention)"]
-        LLM --> Call["Tool call\n(accuracy ~92% with k=10)"]
+        LLM --> Call["Tool call\n(tight candidate set, high attention)"]
     end
 
     class Query,Call io
@@ -413,7 +413,7 @@ class ToolRegistry:
     def retrieve(self, query: str, k: int = 10) -> list[Tool]:
         """
         Retrieve top-k tools most relevant to the query.
-        k=10 achieves ~95% recall on ToolBench benchmark.
+        k=10 is the recommended default; measure Recall@10 on your own catalogue.
         """
         if self.index is None:
             raise RuntimeError("Call build_index() before retrieve()")
@@ -670,13 +670,13 @@ class VersionedToolRegistry(ToolRegistry):
 
 ## 7. Real-World Examples
 
-**ToolBench (Tsinghua / OpenBMB, 2023).** The ToolBench benchmark contains 16,464 real-world APIs collected from RapidAPI. The associated ToolLLM paper fine-tunes LLaMA-2 on (query, tool-use trajectory) pairs sampled from this catalogue. The fine-tuned 7B model matches or exceeds GPT-4 on API selection accuracy across 49 categories — demonstrating that a small model with retrieval-aware training outperforms a large model using naive prompting.
+**ToolBench (Tsinghua / OpenBMB, 2023).** The ToolBench benchmark contains 16,464 real-world RESTful APIs collected from RapidAPI across 49 categories. The associated ToolLLM paper fine-tunes LLaMA-2 on (query, tool-use trajectory) pairs sampled from this catalogue. The fine-tuned 7B ToolLLaMA with DFSDT reaches a 66.7% pass rate against ChatGPT's 64.8% and GPT-4's 71.1% — "almost on par with ChatGPT" and only slightly inferior to GPT-4, which is the real claim: a 7B model with retrieval-aware training gets within a few points of frontier models on API selection. Its API retriever reports average NDCG@1 of 78.0% and NDCG@5 of 84.9%.
 
 **Gorilla LLM (UC Berkeley, 2023).** Gorilla is a LLaMA-based model fine-tuned specifically for API calling on TensorFlow Hub, Torch Hub, and HuggingFace Hub. Its key insight: the model is fine-tuned with a retriever in the loop, so it learns to use retrieved API documentation rather than memorised API signatures. This eliminates hallucinated parameter names, which are the dominant failure mode in naive tool use.
 
-**Stripe's internal agent.** Stripe's developer tools team documented (engineering blog, 2024) that their internal coding agent had access to 340 internal microservice APIs. Injecting all 340 into each prompt cost ~$0.18 per call in GPT-4 token fees and reduced accuracy due to context dilution. After implementing RAG-over-tools (k=12, `text-embedding-3-small`), token cost dropped by 82% and task completion rate rose from 61% to 79%.
+**Large-catalogue internal coding agent (illustrative composite, not a published deployment).** A platform team's internal coding agent has access to 340 internal microservice APIs. Injecting all 340 into each prompt costs ~$0.18 per call in input-token fees and reduces accuracy through context dilution. After implementing RAG-over-tools (k=12, `text-embedding-3-small`), token cost drops by 82% and task completion rate rises from 61% to 79%. The numbers below are worked through to show how a retrieval saving is computed, not to report a vendor's published result — Stripe's public engineering writing on its coding agents ("Minions", 2026) does not report tool-retrieval figures.
 
-### Decoding Stripe's 82%
+### Decoding the 82% figure
 
 ```
 total_input   = fixed_overhead + (N x S)
@@ -690,17 +690,17 @@ reduction     = 1 - (cost_after / cost_before)
 |--------|------------|
 | `N x S` | The tool block. 340 schemas before, k=12 after |
 | `fixed_overhead` | System prompt, history, user message. Retrieval never touches these |
-| `price_per_token` | $5 per 1M input tokens for GPT-4o, i.e. $0.000005 per token |
+| `price_per_token` | $2.50 per 1M input tokens for GPT-4o, i.e. $0.0000025 per token |
 | `reduction` | The headline percentage, always measured against the total, not the tool block |
 
-**Walk one example.** Work backwards from the two published figures:
+**Walk one example.** Work backwards from the two figures:
 
 ```
   upper bound on schema size (treat the whole $0.18 as tool tokens):
-  $0.18 / ($5 per 1,000,000 tokens) = 36,000 input tokens per call
-  36,000 / 340 tools                =    105.9 tokens per schema at most
+  $0.18 / ($2.50 per 1,000,000 tokens) = 72,000 input tokens per call
+  72,000 / 340 tools                   =    211.8 tokens per schema at most
 
-  -> Stripe's schemas are well under the 300-token average used elsewhere
+  -> these schemas are under the 300-token average used elsewhere
      in this file. Schema size is a design choice, not a constant.
 
   the tool block itself:  1 - (12 / 340) = 96.5% fewer schemas
@@ -708,9 +708,9 @@ reduction     = 1 - (cost_after / cost_before)
   cost after:             0.18 x 0.18    = $0.0324 per call
 ```
 
-The gap between 96.5% and 82% is the tell: a fixed overhead rides along on every call and dilutes the saving. Whenever a vendor quotes a retrieval saving below the schema-count reduction, that difference *is* the non-tool part of their prompt.
+The gap between 96.5% and 82% is the tell: a fixed overhead rides along on every call and dilutes the saving. Whenever a retrieval saving comes in below the schema-count reduction, that difference *is* the non-tool part of the prompt.
 
-**Salesforce Agentforce.** Salesforce's production agent platform supports custom tool catalogues per org, often 100–500 tools. Agentforce uses a two-stage retrieval pipeline: an offline category classifier routes the query, then a per-category FAISS index retrieves the final tool set injected into the agent prompt.
+**Salesforce Agentforce.** Salesforce's production agent platform supports custom tool catalogues per org, often 100–500 actions. Agentforce's documented model groups actions under *topics*, and the agent selects a topic before selecting an action within it — a hierarchical menu in the sense of Section 4.3. Salesforce does not publish the retrieval implementation behind that selection, so treat any specific index or classifier design attributed to it as unverified.
 
 ---
 
@@ -725,7 +725,7 @@ The gap between 96.5% and 82% is the tell: a fixed overhead rides along on every
 | Hybrid (classifier+RAG) | ~2.5K tokens/call | 55-80ms total | ~98% | High |
 
 Notes:
-- Recall is the probability the correct tool appears in the retrieved set.
+- Recall is the probability the correct tool appears in the retrieved set. The Recall@10 column holds **illustrative** figures used consistently throughout this file — the token-cost and latency columns are computable, recall is not; measure it on your own catalogue.
 - Hierarchical menu recall is lower because category assignment errors eliminate the correct tool entirely.
 - Hybrid achieves highest recall by using two independent filtering signals.
 
@@ -742,29 +742,33 @@ dollars_call = tool_tokens x price_per_token
 |--------|------------|
 | `k_effective` | Schemas that actually reach the model. 500 naive, ~10 for RAG, ~8 for hybrid |
 | `S` | 300 tokens per schema, the working assumption behind the N=500 column |
-| `price_per_token` | $0.000005 for GPT-4o input |
+| `price_per_token` | $0.0000025 for GPT-4o input ($2.50 per 1M) |
 | Recall @10 | A separate axis entirely. See the Recall@k decoder in Section 4.2 |
 
 **Walk one example.** Reproduce three rows of the table above at N = 500:
 
 ```
                      k_eff    tool tokens          $ / call (GPT-4o input)
-  Naive               500     500 x 300 = 150,000        0.7500
-  RAG-over-tools       10      10 x 300 =   3,000        0.0150
-  Hybrid                8       8 x 300 =   2,400        0.0120
+  Naive               500     500 x 300 = 150,000        0.3750
+  RAG-over-tools       10      10 x 300 =   3,000        0.0075
+  Hybrid                8       8 x 300 =   2,400        0.0060
 
   Naive -> RAG:  150,000 - 3,000 = 147,000 tokens saved = 98.0% of the block
 ```
 
 The hybrid row in the table reads ~2.5K rather than the 2,400 computed here because the classifier stage adds its own small prompt. Note the shape of the two columns: latency is *additive* (a fixed 5–15ms for FAISS) while cost is *multiplicative*. Spending 15ms once to delete 98% of the tool block is why the RAG row dominates the naive row on every axis except implementation effort.
 
-| Schema design factor | Impact on accuracy |
+Schema-design factors, ordered by the leverage practitioners consistently report. The
+directions are robust; the magnitudes are not published numbers, so run an ablation on
+your own eval set before quoting any of them:
+
+| Schema design factor | Effect on accuracy |
 |---|---|
-| Precise description (>30 words) | +12% call accuracy vs vague |
-| Example inputs in description | +8% |
-| Namespaced tool name | +5% (reduces collision confusion) |
-| Required vs optional fields marked | +6% (reduces missing-arg errors) |
-| Schema version pinned | -3% drift errors eliminated |
+| Precise description (>30 words) | Largest single lever — drives both retrieval and selection |
+| Example inputs in description ("Use when the user asks to...") | Strong; improves query-to-description semantic alignment |
+| Namespaced tool name | Moderate; removes collision confusion between servers |
+| Required vs optional fields marked | Moderate; reduces missing-argument errors |
+| Schema version pinned | Prevents silent drift errors rather than raising the ceiling |
 
 ---
 
@@ -825,8 +829,8 @@ def call_agent(user_message: str) -> str:
     return response.choices[0].message.content
 
 # Problems:
-# 1. $0.18 per call in input tokens (GPT-4o at $5/1M tokens)
-# 2. ~15% accuracy drop vs 10 relevant tools (ToolBench data)
+# 1. $0.075 per call in input tokens (GPT-4o at $2.50/1M input tokens)
+# 2. Measurable accuracy drop vs 10 relevant tools (size is catalogue-specific)
 # 3. Context window pressure forces shorter conversation history
 # 4. Model attends to early tools more than late tools (position bias)
 ```
@@ -861,8 +865,8 @@ def call_agent(user_message: str) -> str:
     return response.choices[0].message.content
 
 # Result:
-# - Token cost: ~3,000 vs 30,000 tokens (90% reduction)
-# - Accuracy: ~92% vs ~75% (ToolBench k=10 vs k=100)
+# - Token cost: ~3,000 vs 30,000 tokens (90% reduction) -- exact, from N x S
+# - Accuracy: improves, by an amount you must measure on your own eval set
 # - Latency: +12ms for FAISS retrieval (acceptable)
 ```
 
@@ -926,26 +930,26 @@ class VersionedToolRegistry(ToolRegistry):
 |---|---|---|
 | Embedding model (local) | `all-MiniLM-L6-v2` (384 dims), `all-mpnet-base-v2` (768 dims) | Free, runs on CPU, 80ms per batch |
 | Embedding model (API) | `text-embedding-3-small` (1536 dims), `text-embedding-3-large` | $0.02 / $0.13 per 1M tokens |
-| Vector index | FAISS `IndexFlatIP` | Exact cosine, supports up to ~100K tools |
-| Vector index (large) | FAISS HNSW, Qdrant, Weaviate | Approximate, better for 100K+ tools |
+| Vector index | FAISS `IndexFlatIP` | Exact cosine (brute force), practical up to ~100K vectors |
+| Vector index (large) | FAISS HNSW, Qdrant, Weaviate | Approximate, better for 100K+ vectors |
 | Routing classifier | DistilBERT (66M params), TinyBERT (14M params) | < 50ms on CPU; fine-tune on synthetic data |
 | Tool schema format | OpenAI function-calling JSON schema | Also compatible with Anthropic tool use |
 | Schema versioning | Tool schema hash (SHA-256) | Detect drift on deploy |
 | Benchmarks | ToolBench (16K APIs), API-Bank, ToolAlpaca | Use for evaluation |
-| Fine-tuned models | Gorilla LLM, ToolLLM (LLaMA-2 7B) | Strong API calling without RAG |
+| Fine-tuned models | Gorilla LLM, ToolLLaMA (LLaMA-2 7B) | Near-ChatGPT API-calling from a 7B model; both train with a retriever in the loop |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q: Why does model accuracy drop when you give it 100 tools instead of 10?**
-The model's attention is diluted across more tokens, and the correct tool may appear at a position that receives less attention weight. Additionally, irrelevant tools introduce noise into the function-selection decision. ToolBench empirical data shows a ~15 percentage point accuracy drop from 10 to 100 tools with GPT-4 function calling.
+The model's attention is diluted across more tokens, and the correct tool may appear at a position that receives less attention weight. Additionally, irrelevant tools introduce noise into the function-selection decision. The size of the drop is not a constant — it depends on the model, how semantically distinct the tools are, and where the correct tool sits in the list — so quote a measured number from your own eval set rather than a benchmark headline.
 
 **Q: What is RAG-over-tools and how is it different from RAG-over-documents?**
 RAG-over-tools embeds tool descriptions (instead of document chunks) and retrieves the most relevant tool schemas at query time. The key difference is the retrieved artifact: tool schemas are injected into the `tools` parameter of an LLM API call, not into the prompt text. The retrieval mechanics (embedding, cosine search) are identical.
 
 **Q: What value of k should you use in top-k tool retrieval?**
-k=10 achieves approximately 95% recall on ToolBench; k=5 achieves approximately 88%. For production systems, set k=10 as the default and measure task completion rate. Increasing k beyond 15 yields diminishing recall gains while adding token cost.
+Set k=10 as the production default, then measure Recall@k on your own labelled query set and tune from there. The shape of the tradeoff is universal even though the numbers are not: recall rises steeply from k=1 to about k=10 and then flattens, while token cost keeps climbing linearly at `k x S`. Increasing k beyond 15 buys diminishing recall for a strictly linear cost.
 
 **Q: Why is the tool description more important than the tool name for selection accuracy?**
 The model reads the description to understand what the tool does before deciding whether to call it. The embedding of the description also determines whether retrieval surfaces the tool for a given query. A poorly named but well-described tool is retrieved and called correctly far more often than a well-named but vague-description tool.
@@ -954,7 +958,7 @@ The model reads the description to understand what the tool does before deciding
 Use a namespacing convention: `<server>_<verb>_<object>`. For example, `github_create_pr` and `jira_create_issue` instead of two tools both named `create`. This eliminates ambiguity in both the LLM's function-selection decision and in server-side routing.
 
 **Q: What is the ToolBench benchmark and why does it matter?**
-ToolBench (Tsinghua / OpenBMB, 2023) is a benchmark of 16,464 real-world APIs from RapidAPI covering 49 categories. It provides standardised evaluation of tool selection accuracy and multi-step tool use. The associated ToolLLM paper shows that a 7B model fine-tuned with retrieval-aware training matches GPT-4 on this benchmark, which implies that retrieval quality matters as much as model size for tool use.
+ToolBench (Tsinghua / OpenBMB, 2023) is a benchmark of 16,464 real-world RESTful APIs from RapidAPI covering 49 categories. It provides standardised evaluation of tool selection accuracy and multi-step tool use. The associated ToolLLM paper shows a 7B model fine-tuned with retrieval-aware training (ToolLLaMA + DFSDT) reaching a 66.7% pass rate — just ahead of ChatGPT's 64.8% and a few points behind GPT-4's 71.1% — which implies retrieval quality matters nearly as much as model size for tool use.
 
 **Q: What is Gorilla LLM and what problem does it solve?**
 Gorilla is a LLaMA-based model fine-tuned for API calling on TensorFlow Hub, Torch Hub, and HuggingFace Hub APIs. Its primary contribution is eliminating hallucinated parameter names, which are the dominant error mode when GPT-4 or similar models call APIs from memory. Gorilla is trained with a retriever in the loop, so it learns to ground calls in retrieved documentation rather than parametric memory.
@@ -981,7 +985,7 @@ Tool selection accuracy measures whether the correct tool is called with correct
 Assign the tool to its primary category in the routing classifier. In the RAG index, the tool's embedding will naturally retrieve it for cross-category queries because semantic similarity operates on the full description, not the category label. The classifier is a coarse filter; RAG handles cross-category retrieval.
 
 **Q: What are the production costs of RAG-over-tools at 1 million calls per day?**
-Using `text-embedding-3-small` at $0.02/1M tokens: embedding each query (average 50 tokens) costs $0.001 per 1K calls = $1/day at 1M calls. Saved tokens: 27,000 tokens per call (30,000 naive minus 3,000 retrieved) x 1M calls = 27B tokens/day. At GPT-4o input pricing of $5/1M tokens, savings = $135,000/day. The embedding retrieval system pays for itself in the first hour of operation.
+Using `text-embedding-3-small` at $0.02/1M tokens: embedding each query (average 50 tokens) costs $0.001 per 1K calls = $1/day at 1M calls. Saved tokens: 27,000 tokens per call (30,000 naive minus 3,000 retrieved) x 1M calls = 27B tokens/day. At GPT-4o input pricing of $2.50/1M tokens, savings = $67,500/day against a $1/day embedding bill. The embedding retrieval system pays for itself in the first two seconds of operation.
 
 ---
 
@@ -1015,7 +1019,7 @@ Using `text-embedding-3-small` at $0.02/1M tokens: embedding each query (average
 
 **Problem Statement**
 
-An enterprise DevOps agent platform integrates with 380 tools across GitHub, GitLab, Jira, Confluence, PagerDuty, Datadog, AWS, GCP, Azure, Jenkins, Kubernetes, and 15 internal microservices. Each tool schema averages 280 tokens. Injecting all 380 schemas costs 106,400 tokens per call at $0.53 per call (GPT-4o pricing). Target: reduce to under $0.05 per call while maintaining 90%+ task completion rate.
+An enterprise DevOps agent platform integrates with 380 tools across GitHub, GitLab, Jira, Confluence, PagerDuty, Datadog, AWS, GCP, Azure, Jenkins, Kubernetes, and 15 internal microservices. Each tool schema averages 280 tokens. Injecting all 380 schemas costs 106,400 tokens per call at $0.27 per call (GPT-4o input pricing, $2.50/1M). Target: reduce to under $0.05 per call while raising task completion rate above 80%.
 
 **Architecture Overview**
 
@@ -1056,7 +1060,7 @@ flowchart TD
 
 2. Classifier training: 200 synthetic queries per category (12 categories) generated by GPT-4 = 2400 examples. DistilBERT fine-tuned for 3 epochs, batch size 32, learning rate 2e-5. Routing accuracy on held-out set: 94.2%. Inference: 45ms on 2-core CPU.
 
-3. Token budget: 12 retrieved tools x 280 tokens = 3360 tool tokens per call. Total prompt: ~4500 tokens with system prompt and user message. Cost: $0.022 per call (vs $0.53 naive). Savings: 96%.
+3. Token budget: 12 retrieved tools x 280 tokens = 3360 tool tokens per call. Total prompt: ~4500 tokens with system prompt and user message. Cost: $0.011 per call (vs $0.27 naive). Savings: 96%.
 
 4. Fallback: if classifier confidence score < 0.5 for all categories, skip classifier and run RAG across full 380-tool catalogue (k=15). This handles out-of-distribution queries at 96% token overhead instead of 100%.
 
@@ -1064,7 +1068,7 @@ flowchart TD
 
 **Results**
 
-- Token cost per call: $0.53 -> $0.022 (96% reduction)
+- Token cost per call: $0.27 -> $0.011 (96% reduction)
 - Task completion rate: 61% (naive, 380 tools) -> 83% (RAG k=12)
 - Latency added by retrieval pipeline: 53ms (45ms classifier + 8ms FAISS)
 - Recall@12 on internal eval set of 500 labelled queries: 96.4%
@@ -1078,7 +1082,7 @@ cost_call     = prompt_tokens x price_per_token
 index_bytes   = N x D x 4                      4 bytes per float32
 ```
 
-**What the formula is telling you.** "The 96% cost saving and the 584KB index are the same two multiplications run at different scales — tools times schema size, and tools times dimensions."
+**What the formula is telling you.** "The 96% cost saving and the 584KB index are the same two multiplications run at different scales — tools times schema size, and tools times dimensions." Note that the *percentage* is price-independent: halve `price_per_token` and both sides of the ratio halve with it.
 
 | Symbol | What it is |
 |--------|------------|
@@ -1092,10 +1096,10 @@ index_bytes   = N x D x 4                      4 bytes per float32
 **Walk one example.** Every published number in this case study, recomputed:
 
 ```
-  naive prompt   :  380 x 280 = 106,400 tokens  ->  x $5/1M  = $0.532    ("$0.53")
+  naive prompt   :  380 x 280 = 106,400 tokens  -> x $2.50/1M = $0.2660  ("$0.27")
   RAG prompt     :   12 x 280 =   3,360 tokens
-                   + 1,140 overhead =  4,500    ->  x $5/1M  = $0.0225   ("$0.022")
-  reduction      :  1 - 0.0225 / 0.532 = 95.77%                          ("96%")
+                   + 1,140 overhead =  4,500    -> x $2.50/1M = $0.01125 ("$0.011")
+  reduction      :  1 - 0.01125 / 0.266 = 95.77%                         ("96%")
 
   index size     :  380 x 384 x 4 = 583,680 bytes = 584 KB  (570 KiB)
 

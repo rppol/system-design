@@ -63,7 +63,10 @@ Codebase sizes:
   Large (enterprise): 500K-5M tokens
 
 Strategy by codebase size:
-  < 50K tokens: put entire codebase in long context (Gemini 1.5 Pro or Claude 3.5)
+  < 50K tokens: put entire codebase in long context. Frontier models now ship
+    1M-token context windows as standard (Claude Sonnet 5 / Opus 5, gpt-5.x),
+    so "does it fit" is rarely the binding constraint any more — cost and the
+    "lost in the middle" attention falloff are.
   50K-500K tokens: smart RAG selection (top-20 most relevant files)
   > 500K tokens: strict RAG (top-10 files by relevance + dependency graph)
 ```
@@ -89,7 +92,7 @@ flowchart TD
         COMP["Completion\nService"]
         CHAT["Chat\nService"]
         CTX["Context Assembly Service\ncodebase RAG (repo index)\nfile dependency graph\nopen tabs + recent edits\nLSP symbols (types, imports)"]
-        ORCH["Model Orchestrator\nInline: fast model (< 300ms)\nChat: quality model (GPT-4o)\nAgent: reasoning model (o3)"]
+        ORCH["Model Orchestrator\nInline: fast FIM model (< 300ms)\nChat: mid-tier frontier model\nAgent: top-tier reasoning model"]
         AGENT["Agent Engine\ntool execution (code runner)\nmulti-step planning\nerror recovery loop"]
     end
 
@@ -180,10 +183,17 @@ Tight latency budget breakdown:
 Model selection for completions:
   Requirement: fast inference, good code quality, FIM support
   Options:
-    Codestral (Mistral, 22B, FIM-native): excellent
-    DeepSeek-Coder-1.3B (quantized, local): 30ms but lower quality
-    GPT-3.5-turbo: not FIM-native; slightly worse for mid-file completions
-    Cursor uses: proprietary cursor-small for completions, GPT-4o for chat
+    Codestral (Mistral, current release 25.08, FIM-native via a dedicated
+      fill-in-the-middle endpoint): the standard hosted choice. Note the
+      original Codestral 22B and Codestral 25.01 are retired — do not cite
+      the 22B parameter count as current, Mistral no longer publishes a
+      size for the Codestral line.
+    A small local code model (1-3B, quantized): ~30ms but lower quality
+    A general chat model without native FIM: worse for mid-file completions,
+      because it must reconstruct the suffix rather than condition on it
+  Commercial assistants (Cursor, Copilot) serve completions from
+  proprietary in-house models they do not document; treat any specific
+  claim about which model backs which product as unverifiable.
 
 Completion prompt (FIM format):
   <file_path>src/auth/users.py</file_path>
@@ -318,8 +328,9 @@ Step 10: git_commit("Add comprehensive unit tests for auth module")
 Task complete. Summary: Added 10 unit tests, fixed fixture issue, all passing.
 
 Model for agent tasks:
-  Use: Claude 3.5 Sonnet, GPT-4o, or o3 (for complex planning)
-  o3/o4 preferred: reasoning models handle multi-step planning better
+  Use a current frontier agentic-coding model: Claude Opus 5 / Sonnet 5, or
+    a gpt-5.x model. Adaptive-thinking models handle multi-step planning
+    better than a fast completion model at any size.
   Each agent step: 1-2 LLM calls
   Average task: 10-20 steps = 20-40 LLM calls per agent task
 ```
@@ -374,10 +385,14 @@ Deployment modes:
   3. On-premise: full deployment in customer data center
 
 For on-premise / private cloud:
-  Self-hosted LLMs: Llama 3 70B or Qwen-Coder-32B
+  Self-hosted LLMs: a current open-weights code model (e.g. the Qwen Coder
+    line) served locally
   Local inference: vLLM cluster inside customer network
   Local index: FAISS index on developer's machine or local server
-  No external API calls: Bing search replaced with internal docs
+  No external API calls: the web_search tool is repointed at internal docs.
+    Note the Bing Search API was retired by Microsoft in 2025 and its docs
+    moved to the archive, so a design that assumed Bing as the default
+    external search backend needs replacing regardless of deployment mode.
   Audit log: stored in customer's own storage
 
 Code handling policy:
@@ -425,11 +440,11 @@ Codebase index quality:
 
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
-| Completion model | Codestral 22B (FIM-native) | GPT-3.5 | FIM-native gives better mid-file completions |
+| Completion model | Codestral (FIM-native) | General chat model without FIM | FIM-native gives better mid-file completions |
 | Context collection | Hybrid (local FAISS + LSP) | Pure embedding RAG | LSP gives precise type info; FAISS for semantic |
 | Repo index | Local (developer machine) | Remote server | Zero latency; privacy (code stays local) |
-| Agent model | Claude 3.5 Sonnet / o3 | Smaller models | Agent tasks need strong reasoning; cost acceptable |
-| Sandbox | Docker (warm pool) | VM | Container start time 100ms (warm); VM = 30s |
+| Agent model | Claude Opus 5 / Sonnet 5 or gpt-5.x | Smaller models | Agent tasks need strong reasoning; cost acceptable |
+| Sandbox | Docker (warm pool) | VM | Cold container start is 5-10s and a VM is ~30s; a warm pool amortizes that to a near-instant checkout from the pool |
 | Network access | IDE WebSocket persistent | HTTP polling | Low latency; instant push; efficient |
 | Privacy | On-premise option | Cloud only | Enterprise requirement; enables regulated industries |
 
@@ -441,7 +456,7 @@ Codebase index quality:
 
 **The agent reliability problem.** The hardest challenge isn't generating code — it's ensuring the agent doesn't make wrong assumptions, break working code, or loop endlessly. Mitigations: (1) always run tests after changes; (2) use git to checkpoint before each agent task (easy rollback); (3) surface all changes to developer before committing; (4) set hard limits (max steps, max file edits).
 
-**Why multi-model architecture?** Completions need speed (Codestral); chat needs quality (GPT-4o); agent tasks need planning (o3/Claude). Using one model for all three would mean: either too slow for completions (GPT-4o) or too weak for agent planning (small model). The 10ms routing decision unlocks 10× cost optimization.
+**Why multi-model architecture?** Completions need speed (a FIM-native code model like Codestral); chat needs quality (a mid-tier frontier model); agent tasks need planning (a top-tier adaptive-thinking model). Using one model for all three would mean either too slow for completions or too weak for agent planning. The 10ms routing decision is what unlocks the order-of-magnitude cost spread between the tiers.
 
 **Latency-accuracy trade-off in FIM.** Providing more context (open tabs, dependency files) improves completion quality but adds tokens and increases latency. Cursor's empirical finding: beyond 1,500 tokens of context, completion quality improvement is marginal but latency increases linearly. The context budget is a product decision, not just a technical one.
 
@@ -511,8 +526,10 @@ def build_context_window(
 Standard text chunking (by character count or line count) splits code at syntactically meaningless points. Tree-sitter parses code into a concrete syntax tree and enables semantically-aware chunking:
 
 ```python
-from tree_sitter import Language, Parser
-from tree_sitter_languages import get_language, get_parser
+# NOTE: the old `tree_sitter_languages` package is unmaintained and breaks
+# against current tree-sitter core. Use `tree-sitter-language-pack`, which
+# exposes the same get_parser/get_language helpers.
+from tree_sitter_language_pack import get_parser
 
 def extract_semantic_chunks(
     source_code: str,
@@ -546,8 +563,10 @@ def extract_semantic_chunks(
 
     return chunks
 
-# Result: chunks are always syntactically complete (no cut-off class bodies or function signatures)
-# This improves embedding quality by 15-20% on code retrieval benchmarks vs character-based chunking
+# Result: chunks are always syntactically complete (no cut-off class bodies or function signatures).
+# The retrieval gain over character-based chunking is real but workload-specific; measure it on your
+# own repo rather than quoting a fixed percentage, since published numbers vary widely by language,
+# chunk size, and embedding model.
 ```
 
 ---
@@ -569,7 +588,7 @@ flowchart TD
     SRC(["Source files\nmonitored via git hooks"])
     TS["Tree-sitter parse\nAST-aware chunking"]
     CH["Semantic chunks\nfunction / class level"]
-    EMB["Code embedding model\nCodeBERT · UniXcoder · text-embedding-3"]
+    EMB["Code embedding model\nCodestral Embed · text-embedding-3-large"]
     IDX[("Vector index HNSW + metadata index\nfile path · function name · git commit hash")]
     Q(["User query\nnatural language or code snippet"])
     HYB["Hybrid retrieval\nBM25 on identifier names + dense semantic intent"]
@@ -697,7 +716,7 @@ A coding agent tasked with "update the database configuration for the new region
 
 **Failure 2 — Code RAG Retrieving Outdated API Signatures After Library Upgrade**
 
-The team upgraded from SQLAlchemy 1.4 to 2.0. The code RAG index still contained 50,000 cached chunks from the old codebase with `session.execute(text(sql), params)` (SQLAlchemy 1.4 API). After the upgrade, the assistant continued generating deprecated API calls, which caused runtime errors. The RAG index was not invalidated on library version changes.
+The team upgraded from SQLAlchemy 1.3 to 2.0. The code RAG index still contained 50,000 cached chunks from the old codebase using the legacy Query API — `session.query(User).filter(...)` and bare-string `session.execute("SELECT ...")`. In 2.0 the first is legacy and the second raises, because raw SQL must be wrapped: `session.execute(text("SELECT ..."), params)`. After the upgrade, the assistant kept generating the pre-2.0 forms it saw in the stale index, causing runtime errors. The RAG index was not invalidated on library version changes.
 
 **Fix:** Added a dependency hash to the index metadata. When `requirements.txt` or `pyproject.toml` changes, invalidate all chunks that reference changed packages by re-indexing all files that import those packages.
 
@@ -707,9 +726,9 @@ The team upgraded from SQLAlchemy 1.4 to 2.0. The code RAG index still contained
 
 **How do you design context window management for an agent that needs to operate on a file that is longer than the context window?** Use a sliding window with overlap: divide the file into chunks with 20% overlap between adjacent chunks (so that code at chunk boundaries appears in both chunks). The agent processes each chunk independently but maintains a persistent "state object" across chunks: a running summary of: (1) functions and classes seen; (2) variables modified; (3) pending tasks. At each chunk, the state object is prepended to the context window as a compact summary (~200 tokens). This allows the agent to maintain coherence across a 100,000-token file using a 4,000-token context window, at the cost of multiple LLM passes.
 
-**How does tree-sitter AST-based chunking improve code RAG quality compared to character-based chunking?** Character-based chunking cuts at arbitrary positions — potentially in the middle of a function, between a method signature and its body, or between a class definition and its methods. When these malformed chunks are embedded and retrieved, the embedding model cannot produce a meaningful representation of an incomplete code fragment, reducing retrieval accuracy by 15-20% on code search benchmarks. Tree-sitter ensures every chunk is a syntactically complete unit (a function, a class, a method), which produces coherent embeddings and prevents context fragments from being retrieved that are meaningless in isolation.
+**How does tree-sitter AST-based chunking improve code RAG quality compared to character-based chunking?** Character-based chunking cuts at arbitrary positions — potentially in the middle of a function, between a method signature and its body, or between a class definition and its methods. When these malformed chunks are embedded and retrieved, the embedding model cannot produce a meaningful representation of an incomplete code fragment, measurably reducing retrieval accuracy on code search — though the size of the gap depends heavily on language, chunk size, and embedding model, so treat any single headline percentage with suspicion. Tree-sitter ensures every chunk is a syntactically complete unit (a function, a class, a method), which produces coherent embeddings and prevents context fragments from being retrieved that are meaningless in isolation.
 
-**What is the agent reliability gap between "Devin-style" full autonomy and "Copilot Chat-style" assisted generation, and when should each be used?** Full autonomy agents (Devin, SWE-agent) can complete multi-step engineering tasks without human checkpoints but fail on ~70% of SWE-bench tasks even at state-of-the-art (as of 2024) and can introduce subtle bugs that only appear at runtime. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes, requires human approval, and achieves near-100% accuracy on the specific change the human requested because the human validates it. In production codebases, full autonomy is appropriate for low-risk tasks (writing tests for existing functions, generating boilerplate, updating documentation); assisted generation is required for any change that modifies business logic, database schemas, or security-sensitive code.
+**What is the agent reliability gap between "Devin-style" full autonomy and "Copilot Chat-style" assisted generation, and when should each be used?** Full autonomy agents can complete multi-step engineering tasks without human checkpoints, but they still introduce subtle bugs that only surface at runtime, and their headline benchmark numbers overstate real-world reliability. Be careful quoting SWE-bench here: the mid-2024 figures often repeated in interviews (roughly 70% of SWE-bench Verified tasks unsolved at state of the art) are badly out of date — frontier scores climbed steeply through 2025, and by 2026 the major labs had largely stopped leading with SWE-bench Verified in favour of harder agentic suites (Anthropic's Opus 5 launch, for instance, reports Frontier-Bench, CursorBench, Terminal-Bench-style agent indices and OSWorld rather than SWE-bench). Quote the benchmark you actually ran, with its date. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes, requires human approval, and achieves near-100% accuracy on the specific change the human requested because the human validates it. In production codebases, full autonomy is appropriate for low-risk tasks (writing tests for existing functions, generating boilerplate, updating documentation); assisted generation is required for any change that modifies business logic, database schemas, or security-sensitive code.
 
 **How do you implement "explain this code" across multiple files with dependency traversal?** When the user highlights a function and asks "explain this," the system: (1) extracts the function's AST using tree-sitter; (2) identifies all external symbols called within the function (function calls, class references, global variables); (3) resolves each symbol to its definition file via the language server protocol (LSP) using `textDocument/definition`; (4) retrieves the signatures (not full bodies) of all direct dependencies; (5) builds a context window with the target function + dependency signatures. This produces an explanation that correctly describes what `process_payment()` does even when it calls `stripe_client.charge()` from a third-party library — the function's signature is retrieved and included, so the LLM understands the interface even without the implementation.
 
@@ -764,26 +783,50 @@ Request rate estimation:
   Chat requests (Copilot Chat-style): 4,000 × 40 chats/day = 160,000/day
   Agent tasks (multi-step): 4,000 × 2 tasks/day = 8,000 long-running tasks/day
 
-Completion serving (FIM model, CodeLlama-7B):
+Completion serving (self-hosted FIM model)
   Peak rate: 38.4M / (8h × 3600s) = 1,333 completions/sec peak
-  CodeLlama-7B on A10G: 350 FIM completions/sec at p99 < 150ms
-  Required A10Gs: 1,333 / 350 = 4 A10Gs (with 2× headroom: 8 A10Gs)
-  Cost: 8 × $1.10/hr × 24 × 365 = $77,000/year
 
-Chat serving (GPT-4o via Azure OpenAI):
-  160,000 chats/day × avg 2,000 tokens output × $0.015/1k = $4,800/day = $1.75M/year
+  Size this on FLOPs, never on a quoted requests/sec number. A completion is
+  dominated by prefill over the ~1,500-token context, not by the 40 decoded
+  tokens:
+    3B FIM model, prefill: 2 × 3e9 × 1,500 = 9 TFLOP
+    decode 40 tokens:      2 × 3e9 × 40    = 0.24 TFLOP
+    with ~70% prefix-cache hit on the stable file-outline prefix,
+    effective ≈ 3 TFLOP per completion
+  H100 BF16 dense peak is 989 TFLOPS; at a realistic 40% MFU ≈ 400 TFLOPS.
+    Required: 1,333 × 3 / 400 = ~10 H100s (2× headroom: 20 H100s)
+    Cost: 20 × $2.50/hr × 24 × 365 = $438,000/year
 
-Agent serving (Claude Sonnet 3.5, avg 15k tokens/task):
-  8,000 tasks/day × 15,000 tokens × $0.003/1k = $360/day = $131K/year
+  Sanity check for interviews: a claim like "350 FIM completions/sec on one
+  mid-range GPU" for a 7B model is off by two orders of magnitude. 7B over
+  1,500 prefill tokens is 21 TFLOP per request, so 350/sec would demand
+  7.4 PFLOPS from a single card — more than any single accelerator shipped.
 
-Total AI infrastructure cost: ~$2M/year for 4,000 engineers
-Cost per engineer: $500/year ($42/month) vs $19/month Copilot — 2.2× premium
-Justification: self-hosted means no code leaves the VPC, critical for proprietary code
+Chat serving (frontier API model, gpt-5.4 at $2.50/M in, $15/M out):
+  Output: 160,000 × 2,000 tok = 320M tok/day × $15/M = $4,800/day
+  Input:  160,000 × 3,000 tok = 480M tok/day × $2.50/M = $1,200/day
+  Chat total: $6,000/day = $2.19M/year
+
+Agent serving (Claude Sonnet 5 at $3/M in, $15/M out; 15k tokens/task
+  split ~12k input / 3k output):
+  Input:  8,000 × 12,000 = 96M tok/day × $3/M  = $288/day
+  Output: 8,000 ×  3,000 = 24M tok/day × $15/M = $360/day
+  Agent total: $648/day = $237K/year
+
+Total AI infrastructure cost: $438K + $2.19M + $237K = ~$2.87M/year
+Cost per engineer: $716/year ($60/month) vs $19/month Copilot Business
+  — a 3.1× premium
+Justification: self-hosting the completion tier means no code leaves the VPC.
+  Note the premium sits almost entirely in the two hosted tiers: chat alone is
+  76% of the bill. If the goal is a defensible cost story, the lever is
+  routing chat to a cheaper tier, not squeezing the self-hosted GPUs.
 
 Semantic cache for completions (identical context within 60-second window):
   Hit rate: 12% (coders repeat similar patterns within a session)
-  Savings: 38.4M × 0.12 × $0.0001 (embedding cost only — model is self-hosted) = $461/day
-  Minor savings: cache is more valuable for reducing latency variance than cost here
+  Because the completion model is self-hosted, a cache hit saves GPU time
+  rather than API spend: 38.4M × 0.12 × 3 TFLOP = 13.8 PFLOP/day avoided,
+  ~1.2 H100-equivalent, roughly $75/day. The cache is worth more for cutting
+  p99 latency variance than for the dollar saving.
 ```
 
 ---

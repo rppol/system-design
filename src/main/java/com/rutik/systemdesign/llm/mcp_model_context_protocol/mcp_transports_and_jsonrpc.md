@@ -6,9 +6,9 @@ Deep-dive sub-file of [MCP — Model Context Protocol](README.md).
 
 ## 1. Concept Overview
 
-MCP uses JSON-RPC 2.0 as its message format over two primary transports: **stdio** (client spawns server as a subprocess, communicates via standard input/output streams) and **Streamable HTTP** (HTTP service receiving POST requests and emitting Server-Sent Events). A deprecated SSE transport exists for legacy compatibility.
+MCP uses JSON-RPC 2.0 as its message format over the two transports the spec standardizes: **stdio** (client spawns server as a subprocess, communicates via standard input/output streams) and **Streamable HTTP** (HTTP service receiving POST requests and optionally emitting Server-Sent Events). The older HTTP+SSE transport from the `2024-11-05` revision is deprecated and kept only for legacy compatibility.
 
-This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications, batching), transport selection trade-offs (stdio vs HTTP), the new Streamable HTTP protocol (2025 spec, replaces SSE-only transport), connection lifecycle (handshake, ping/pong, graceful shutdown), reconnection semantics, and concrete latency numbers for each.
+This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notifications), transport selection trade-offs (stdio vs HTTP), the Streamable HTTP transport introduced in the `2025-03-26` revision, connection lifecycle (handshake, ping, transport-level shutdown), reconnection and resumability semantics, and concrete latency numbers for each. It also covers one JSON-RPC feature MCP deliberately does **not** use: request batching, removed in the `2025-06-18` revision. Descriptions here track the current released revision, `2025-11-25`.
 
 ---
 
@@ -20,19 +20,19 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 
 **Why it matters**: Transport choice affects latency, security, scalability, and deployment topology. Stdio is fast (~1-2ms message round-trip) but local-only. Streamable HTTP supports remote servers (10-50ms RTT) and multi-client serving. Get the transport choice wrong, and you'll fight infrastructure constraints.
 
-**Key insight**: The 2025 protocol revision replaced the original SSE-only HTTP transport with Streamable HTTP — a single endpoint that handles both stateless single-request and stateful streaming sessions. Massively simpler to deploy than the previous "two endpoints, one for events, one for requests" SSE design.
+**Key insight**: The `2025-03-26` revision replaced the original HTTP+SSE transport with Streamable HTTP — a single endpoint that handles both stateless single-request and stateful streaming sessions. Massively simpler to deploy than the previous "two endpoints, one for events, one for requests" design. The `2026-07-28` release candidate continues in the same direction, dropping the protocol-level session entirely so any request can land on any server instance.
 
 ---
 
 ## 3. Core Principles
 
-- **JSON-RPC 2.0 contract**: id-based correlation, error codes, batch support.
+- **JSON-RPC 2.0 contract**: id-based correlation and error codes. Batching is part of JSON-RPC but **not** of MCP — it was removed in the `2025-06-18` revision.
 - **Three message types**: request (id, expects response), response (echoes id), notification (no id, no response).
-- **Stdio framing**: newline-delimited JSON-RPC over stdin/stdout.
-- **HTTP framing**: POST per request; response may be JSON or SSE stream.
-- **Bidirectional**: server can send requests too (e.g., `sampling/createMessage`).
+- **Stdio framing**: newline-delimited JSON-RPC over stdin/stdout; messages must not contain embedded newlines, and stdout carries nothing but MCP messages.
+- **HTTP framing**: one POST per message; response may be JSON or an SSE stream.
+- **Bidirectional**: server can send requests too (e.g., `sampling/createMessage`, `elicitation/create`).
 - **Ordered delivery**: messages over a single connection are processed in order.
-- **Lifecycle hygiene**: initialize → operate → shutdown; ping for keepalive.
+- **Lifecycle hygiene**: initialize → operate → close the transport. There is no `shutdown` message; `ping` is the keepalive.
 
 ---
 
@@ -42,13 +42,13 @@ This deep-dive covers the wire format (JSON-RPC 2.0 requests, responses, notific
 
 Client spawns server as subprocess. Server reads requests from stdin (newline-delimited JSON-RPC), writes responses to stdout. Use for local tools (filesystem, local DB, single-user CLI).
 
-### 4.2 Streamable HTTP Transport (2025)
+### 4.2 Streamable HTTP Transport (since 2025-03-26)
 
-Server is an HTTP service with a single MCP endpoint. Client POSTs requests; server responds with either standard JSON (one-shot) or `text/event-stream` (SSE) for streaming responses. Supports stateful sessions via `Mcp-Session-Id` header.
+Server is an HTTP service with a single MCP endpoint supporting both POST and GET. Client POSTs each message; server responds with either standard JSON (one-shot) or `text/event-stream` (SSE) for streaming responses. Optional stateful sessions via the `MCP-Session-Id` header, and the negotiated version must be echoed in `MCP-Protocol-Version` on every request after `initialize`.
 
-### 4.3 Legacy SSE Transport (Deprecated)
+### 4.3 Legacy HTTP+SSE Transport (Deprecated)
 
-Older spec: server exposed two endpoints — `/sse` (GET, server→client events) and `/messages` (POST, client→server). Replaced by Streamable HTTP in 2025 spec. Some older servers still use it.
+The `2024-11-05` transport: server exposed two endpoints — `/sse` (GET, server→client events) and a POST endpoint advertised via an `endpoint` event (client→server). Replaced by Streamable HTTP in the `2025-03-26` revision. Some older servers still use it; a client can detect it by POSTing `initialize` and falling back to the GET/`endpoint` handshake on a 400/404/405.
 
 ### 4.4 Custom Transports
 
@@ -118,7 +118,8 @@ Streamable HTTP Flow
 
   Stateful session (multiple requests, one stream):
     Client: POST /mcp
-            Header: Mcp-Session-Id: abc123
+            Header: MCP-Session-Id: abc123
+            Header: MCP-Protocol-Version: 2025-11-25
             Body: {"jsonrpc":"2.0","id":1,"method":"...","params":{...}}
     Server: 200 OK, Content-Type: text/event-stream
             Body: data: {"jsonrpc":"2.0","id":1,"result":...}\n\n
@@ -135,14 +136,14 @@ sequenceDiagram
     S-->>C: initialize_result(server_caps)
     C->>S: notifications/initialized (no id, no response)
     Note over C,S: normal operation — tools/list, tools/call, resources/read (bidirectional)
-    loop keepalive, every 30s
-        C->>S: ping
-        S-->>C: pong
+    loop keepalive (interval is implementation-chosen, e.g. 30s)
+        C->>S: ping (request, has id)
+        S-->>C: empty result {}
     end
-    C->>S: shutdown — close connection (stdio: EOF on stdin · HTTP: DELETE session)
+    C->>S: no shutdown message — close the transport (stdio: EOF on stdin · HTTP: close conn, optionally DELETE session)
 ```
 
-The three-step handshake (initialize → initialize_result → initialized notification) must complete before any tools/list call; ping/pong at ~30s intervals detects dead connections on long-lived sessions.
+The three-step handshake (initialize → InitializeResult → `notifications/initialized`) must complete before any tools/list call. Keepalive uses the MCP `ping` request, whose reply is an empty `result: {}` — there is no `pong` method, and the spec fixes no interval, only that it be configurable and not excessive.
 
 ---
 
@@ -187,7 +188,7 @@ send_message({
     "id": 1,
     "method": "initialize",
     "params": {
-        "protocolVersion": "2025-03-26",
+        "protocolVersion": "2025-11-25",
         "capabilities": {"sampling": {}},
         "clientInfo": {"name": "my-client", "version": "1.0.0"},
     },
@@ -216,14 +217,18 @@ import httpx
 import json
 
 class StreamableHTTPClient:
+    PROTOCOL_VERSION = "2025-11-25"
+
     def __init__(self, url: str):
         self.url = url
         self.session_id: str | None = None
+        self.protocol_version: str | None = None
         self.next_id = 1
         self.http = httpx.AsyncClient(timeout=60)
-    
+
     async def call(self, method: str, params: dict = None) -> dict:
-        """Single JSON-RPC call."""
+        """Single JSON-RPC call. MCP removed batching in 2025-06-18: the POST body
+        MUST be exactly one request, notification, or response."""
         message = {
             "jsonrpc": "2.0",
             "id": self.next_id,
@@ -231,36 +236,58 @@ class StreamableHTTPClient:
             "params": params or {},
         }
         self.next_id += 1
-        
+
         headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
-        
-        response = await self.http.post(self.url, json=message, headers=headers)
-        
-        # Capture session ID from response (for stateful sessions)
-        if "Mcp-Session-Id" in response.headers:
-            self.session_id = response.headers["Mcp-Session-Id"]
-        
-        content_type = response.headers.get("Content-Type", "")
-        if content_type.startswith("application/json"):
-            # Stateless response
-            return response.json()
-        elif content_type.startswith("text/event-stream"):
-            # SSE stream — parse events
-            for line in response.iter_lines():
-                if line.startswith("data: "):
-                    data = json.loads(line[6:])
-                    if "result" in data or "error" in data:
-                        return data
-        raise ValueError(f"Unexpected content type: {content_type}")
-    
+            headers["MCP-Session-Id"] = self.session_id
+        if self.protocol_version:
+            # Required on every request after initialize when using HTTP.
+            headers["MCP-Protocol-Version"] = self.protocol_version
+
+        # Must stream: the server may answer with either one JSON object or an SSE
+        # stream, and you cannot know which until the response headers arrive.
+        async with self.http.stream("POST", self.url, json=message, headers=headers) as response:
+            # Capture session ID from response (for stateful sessions)
+            if "MCP-Session-Id" in response.headers:
+                self.session_id = response.headers["MCP-Session-Id"]
+
+            content_type = response.headers.get("Content-Type", "")
+            if content_type.startswith("application/json"):
+                await response.aread()
+                return response.json()
+            if content_type.startswith("text/event-stream"):
+                # On an AsyncClient you must use aiter_lines(), not iter_lines().
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = json.loads(line[6:])
+                        if "result" in data or "error" in data:
+                            return data
+            raise ValueError(f"Unexpected content type: {content_type}")
+
     async def initialize(self) -> dict:
-        return await self.call("initialize", {
-            "protocolVersion": "2025-03-26",
+        result = await self.call("initialize", {
+            "protocolVersion": self.PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "manual-http-client", "version": "1.0.0"},
         })
+        # The server echoes the version it agreed to; that is what goes in the header.
+        self.protocol_version = result["result"]["protocolVersion"]
+        # Handshake is not complete until the client sends this notification.
+        await self.notify("notifications/initialized")
+        return result
+
+    async def notify(self, method: str, params: dict = None) -> None:
+        """Notifications have no id and get an HTTP 202 with no body."""
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if self.session_id:
+            headers["MCP-Session-Id"] = self.session_id
+        if self.protocol_version:
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        await self.http.post(
+            self.url,
+            json={"jsonrpc": "2.0", "method": method, "params": params or {}},
+            headers=headers,
+        )
 
 
 # Usage
@@ -269,52 +296,60 @@ init = await client.initialize()
 tools = await client.call("tools/list")
 ```
 
-### Batching (JSON-RPC 2.0 Feature)
+### Batching: a JSON-RPC 2.0 Feature that MCP Removed
+
+JSON-RPC 2.0 allows a client to send an *array* of requests and receive an array of responses.
+**MCP supported this only briefly and removed it in the `2025-06-18` revision.** Under the current
+spec the Streamable HTTP body "MUST be a single JSON-RPC *request*, *notification*, or *response*",
+and a batch array is simply invalid. Do not send one, and do not build a client that expects a
+server to accept one.
 
 ```json
-// Request batch
+// What batching looked like — INVALID in MCP since 2025-06-18
 [
   {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
   {"jsonrpc": "2.0", "id": 2, "method": "resources/list"},
   {"jsonrpc": "2.0", "id": 3, "method": "prompts/list"}
 ]
-
-// Response batch (same order or by id)
-[
-  {"jsonrpc": "2.0", "id": 1, "result": {...}},
-  {"jsonrpc": "2.0", "id": 2, "result": {...}},
-  {"jsonrpc": "2.0", "id": 3, "result": {...}}
-]
 ```
 
-Most MCP servers support batching; reduces round-trips when listing multiple capability types at startup.
+```json
+// Current spec: one message per POST. Discovery is three separate calls.
+{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+```
+
+The arithmetic below is retained because it explains **what the removal costs and why the working
+group judged it acceptable** — not as guidance to batch. It is also the right model for the
+mitigation that *is* available: issue the three discovery calls concurrently on a connection that
+is already open, so they overlap in flight rather than serializing.
 
 **In plain terms.** "Three questions asked one after another cost three network round-trips;
-the same three questions in one array cost one — the payload barely changes, the waiting
-collapses."
+the same three questions issued together cost about one — the payload barely changes, the
+waiting collapses."
 
-Batching does not make the server faster or the JSON smaller. It removes *serialization of
-waiting*, which is why it only helps where the round-trip dominates and does nothing on stdio.
+Concurrency (like the batching it replaced) does not make the server faster or the JSON smaller.
+It removes *serialization of waiting*, which is why it only helps where the round-trip dominates
+and does nothing on stdio.
 
 ```
-  unbatched_time = fixed_overhead + n x RTT
-  batched_time   = fixed_overhead + 1 x RTT
+  serial_time     = fixed_overhead + n x RTT
+  overlapped_time = fixed_overhead + 1 x RTT
 
   saving = (n - 1) x RTT / (fixed_overhead + n x RTT)
 ```
 
 | Symbol | What it is |
 |--------|------------|
-| `n` | Requests in the batch. 3 at startup: `tools/list`, `resources/list`, `prompts/list` |
+| `n` | Discovery requests at startup: `tools/list`, `resources/list`, `prompts/list` — so 3 |
 | `RTT` | One network round-trip. 10-50ms on Streamable HTTP, 1-2ms on stdio |
-| `fixed_overhead` | Connection setup, TLS handshake, auth — paid once, unaffected by batching |
+| `fixed_overhead` | Connection setup, TLS handshake, auth — paid once, unaffected either way |
 | `saving` | Fraction of startup latency removed |
 
 **Walk one example.** Startup capability discovery, at `RTT = 30ms` (mid-range HTTP):
 
 ```
-  unbatched : 3 x 30 = 90 ms of round-trips
-  batched   : 1 x 30 = 30 ms of round-trips
+  serial     : 3 x 30 = 90 ms of round-trips
+  overlapped : 1 x 30 = 30 ms of round-trips
   pure RTT saving = 2/3 = 66.7%
 ```
 
@@ -328,26 +363,33 @@ lets you solve for the fixed overhead you cannot see directly:
                           F + 90 = 150
                                F = 60 ms     <- equals two round-trips
 
-  check:  unbatched = 60 + 90 = 150 ms
-          batched   = 60 + 30 =  90 ms
-          saving    = 60/150  = 40%   matches the measured figure
+  check:  serial     = 60 + 90 = 150 ms
+          overlapped = 60 + 30 =  90 ms
+          saving     = 60/150  = 40%   matches the measured figure
 ```
 
 So roughly 60ms of that gateway's startup is TLS handshake, OAuth validation, and connection
-establishment — cost that batching can never touch. That is the general shape: **batching's
-ceiling is set by how much of your latency is not round-trips.** A system where `F` dwarfs
-`n x RTT` gets almost nothing from batching, no matter how many calls you fold together.
+establishment — cost no amount of request folding can touch. That is the general shape:
+**the ceiling is set by how much of your latency is not round-trips.** A system where `F` dwarfs
+`n x RTT` gains almost nothing, no matter how many calls you overlap.
 
 It also explains the transport asymmetry in the §8 table. On stdio at 1-2ms per message, three
-discovery calls cost 3-6ms total — batching saves single-digit milliseconds and adds
-response-correlation complexity for no user-visible gain. Batching is a remote-transport
-optimization that happens to be legal on local ones.
+discovery calls cost 3-6ms total — overlapping them saves single-digit milliseconds for added
+concurrency complexity and no user-visible gain. This is a remote-transport optimization that is
+merely harmless on local ones.
+
+**Why MCP dropped batching rather than keeping it as an optimization.** The saving above is real
+but bounded and only lands once per session, at startup; against that, batching forces every
+server to correlate an array of ids, complicates streaming (which of the N responses upgrades to
+SSE?), and interacts badly with the per-message `202 Accepted` rule for notifications. The
+working group traded a one-off `(n-1) x RTT` for a materially simpler wire contract. Concurrent
+single-message requests recover most of the same saving without any of that.
 
 ---
 
 ## 7. Real-World Examples
 
-**Claude Desktop**: uses stdio for all servers (subprocess per server, in user's process tree).
+**Claude Desktop**: spawns local servers over stdio (subprocess per server, in the user's process tree) and also connects to remote servers over Streamable HTTP as "connectors".
 
 **Smithery-hosted MCP servers**: use Streamable HTTP for remote access; users connect by URL.
 
@@ -472,7 +514,7 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 | Tool | Purpose |
 |---|---|
 | JSON-RPC 2.0 spec | Wire format |
-| MCP spec (2025-03-26) | Protocol + transports |
+| MCP spec (2025-11-25; RC 2026-07-28) | Protocol + transports |
 | `mcp` SDK | Hides transport details |
 | MCP Inspector | Debug JSON-RPC traffic |
 | `httpx` / `aiohttp` | HTTP client for Streamable transport |
@@ -486,28 +528,28 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. The MCP `notifications/initialized` message is a notification (no id, no response). Mixing them up causes deadlocks (one party waits forever).
 
 **Q: Why does MCP use JSON-RPC 2.0 specifically?**
-JSON-RPC 2.0 is mature (2010), simple, language-agnostic, supports requests/responses/notifications/batching. Alternatives (gRPC, custom protocols) would add weight without benefit. JSON is human-readable for debugging.
+JSON-RPC 2.0 is mature (spec dated 2010), simple, language-agnostic, and models requests, responses and notifications with almost no machinery. Alternatives (gRPC, custom protocols) would add weight without benefit, and JSON is human-readable for debugging. MCP adopts the message model but not the whole spec — it dropped JSON-RPC batching in the 2025-06-18 revision.
 
 **Q: When should you use stdio vs HTTP transport?**
 Stdio for local tools (filesystem, local DB) — fastest, most secure, single-user per server. HTTP (Streamable HTTP) for shared cloud services, multi-tenant, requires network — adds 10-50ms RTT but enables scale.
 
 **Q: What replaced the legacy SSE-only HTTP transport?**
-Streamable HTTP (2025 spec). The legacy design had two endpoints (`/sse` for events, `/messages` for requests) which was complex to deploy and limited stateless usage. Streamable HTTP uses a single endpoint that handles both stateless one-shots (JSON response) and streaming (SSE response) based on content type negotiation.
+Streamable HTTP, introduced in the 2025-03-26 revision. The legacy 2024-11-05 design had two endpoints (a GET `/sse` stream for events plus a separate POST endpoint advertised by an `endpoint` event), which was complex to deploy and could not work statelessly. Streamable HTTP uses a single endpoint serving both POST and GET, and the server chooses per request whether to answer with `application/json` or upgrade to a `text/event-stream`.
 
-**Q: What's the role of the `Mcp-Session-Id` header?**
-For stateful sessions over Streamable HTTP. Server returns an Mcp-Session-Id on the first response; client echoes it on subsequent requests in the same session. Lets the server route requests to the right session state (e.g., conversation memory).
+**Q: What's the role of the `MCP-Session-Id` header?**
+For stateful sessions over Streamable HTTP. The server may return `MCP-Session-Id` on the response carrying `InitializeResult`; if it does, the client MUST echo it on every subsequent request. It lets the server route requests to the right session state (e.g., conversation memory). Two related rules: a server that has expired the session answers with HTTP 404, and the client must then re-initialize without a session id; and a client leaving for good should send an HTTP DELETE with the header. Note that the 2026-07-28 release candidate removes this header along with the protocol-level session.
 
-**Q: How does ping/pong keepalive work?**
-Either party can send a `ping` request; the other responds with an empty `pong`. Default interval: 30 seconds. Detects dead connections. Most SDK implementations handle automatically; only matters when you implement manually.
+**Q: How does the ping keepalive work?**
+Either party sends a `ping` request and the other MUST reply promptly with an empty `result: {}` — there is no `pong` method, the reply is just an ordinary empty JSON-RPC response. A missed reply lets the sender treat the connection as stale and reconnect. The spec sets no default interval: it says the frequency should be configurable and that excessive pinging should be avoided, so any "every 30s" figure is an implementation choice, not a protocol rule. Most SDKs handle this automatically; it only matters when you implement the transport yourself.
 
 **Q: What does the initialize handshake negotiate?**
-Protocol version (both parties must agree on a compatible version), capabilities (client says "I support sampling"; server says "I have tools and resources"). After initialize, both know what the other supports.
+Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request.
 
 **Q: What's the typical latency for each transport?**
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.
 
 **Q: How is JSON-RPC batching used in MCP?**
-Send an array of requests instead of one; server responds with an array of responses. Useful at startup when you want to list tools, resources, and prompts in one round-trip. Most servers support; not all clients use it.
+It is not used at all: MCP removed JSON-RPC batching in the 2025-06-18 revision, so a batch array is now an invalid MCP message. Plain JSON-RPC 2.0 lets a client send an array of requests and get an array of responses, and MCP briefly allowed it, but the current spec requires the Streamable HTTP body to be exactly one request, notification, or response. The removal cost a one-off saving at startup, where `tools/list`, `resources/list` and `prompts/list` could have shared a round-trip; it bought a much simpler wire contract, since batching complicates id correlation, the SSE-upgrade decision, and the `202 Accepted` rule for notifications. Recover most of the lost latency by issuing those independent calls concurrently on the already-open connection rather than serially. This is a common interview trap: candidates cite batching as a live MCP optimization years after it was taken out.
 
 **Q: What happens if the same id is used twice in JSON-RPC?**
 Spec says don't do it (id should be unique per session). In practice: response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
@@ -519,10 +561,10 @@ Yes — bidirectional. The main use case is `sampling/createMessage` (server ask
 Stdout is the JSON-RPC channel; any non-JSON output breaks the parser. Stderr is for diagnostics/logs and is read separately (or not at all) by the client. All MCP SDK implementations set up logging to stderr by default; custom implementations must do the same.
 
 **Q: How does graceful shutdown work?**
-Client sends shutdown notification or closes the connection. Server cleans up resources. For stdio: client closes stdin → server detects EOF → exits gracefully. For HTTP: client sends a DELETE on the session URL (per spec).
+MCP defines no shutdown or exit message — termination is signalled entirely by the transport, unlike LSP where `shutdown`/`exit` are real requests. For stdio the client closes the server's stdin, waits for the process to exit, then sends SIGTERM and finally SIGKILL if it does not. For HTTP the client closes the connection, and if the server issued an `MCP-Session-Id` it should also send an HTTP DELETE to the MCP endpoint with that header (the server may answer 405 if it does not allow client-initiated session termination). Servers therefore cannot rely on a farewell message and need idle timeouts to reclaim state.
 
 **Q: What error codes does JSON-RPC define?**
--32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, -32000 to -32099 Server error (application-defined). MCP defines additional codes for protocol-specific errors.
+-32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, and -32000 to -32099 for application-defined server errors. On top of these MCP defines -32002 for "Resource not found". Note that tool *execution* failures do not use error codes at all: they come back as a normal result with `isError: true` so the model can self-correct.
 
 **Q: How do you debug JSON-RPC traffic?**
 (1) MCP Inspector for interactive debugging. (2) Log all messages with timestamps in your client. (3) For stdio: intercept the pipes with a logging proxy. (4) For HTTP: standard HTTP debugging (Charles Proxy, mitmproxy, browser network tab).
@@ -533,13 +575,13 @@ Client sends shutdown notification or closes the connection. Server cleans up re
 
 1. Use the SDK's built-in transports — don't roll your own JSON-RPC unless absolutely necessary.
 2. For stdio: log to stderr ONLY in your server. Stdout is sacred.
-3. For HTTP: use Streamable HTTP (2025 spec), not legacy SSE.
+3. For HTTP: use Streamable HTTP (2025-03-26 onward), not the deprecated HTTP+SSE transport.
 4. Always include `Accept: application/json, text/event-stream` on Streamable HTTP requests — server may respond with either.
 5. Handle bidirectional messages: server may send requests (sampling, notifications) — your client must process them.
 6. Use unique, monotonic ids per session — never reuse.
-7. Implement ping/pong keepalive on long-lived connections (15-30s interval).
+7. Implement `ping` keepalive on long-lived connections (interval is yours to choose; 15-30s is a common default, not a spec requirement).
 8. For HTTP servers, use TLS + auth always — MCP servers may expose privileged tools (threat model: [MCP Security](mcp_security.md)).
-9. Cap message size (1MB typical) — JSON-RPC isn't designed for huge payloads.
+9. Cap message size — the spec sets no limit, so pick one (1MB is a common choice) and enforce it; JSON-RPC is not designed for huge payloads. Return large blobs as resource links or pre-signed URLs instead.
 10. Test with MCP Inspector at every stage — catches protocol bugs early.
 
 ---
@@ -562,7 +604,7 @@ Client sends shutdown notification or closes the connection. Server cleans up re
 **Wire-protocol benefits**:
 - Stateless clients to gateway (any client instance can serve any request)
 - Backend servers can use whatever transport suits them
-- Gateway batches requests where possible (saving round-trips)
+- Gateway issues independent discovery calls concurrently where possible (saving round-trips; MCP forbids JSON-RPC batching since 2025-06-18)
 
 **Results**:
 - 200+ developers using single gateway URL
@@ -572,6 +614,6 @@ Client sends shutdown notification or closes the connection. Server cleans up re
 
 **Lessons**:
 1. Streamable HTTP at the edge + stdio internally was the right hybrid.
-2. JSON-RPC batching at the gateway cut RTT by 40% on startup capability discovery.
+2. Overlapping the independent discovery calls at the gateway cut startup capability-discovery latency by 40%. (The gateway originally did this with JSON-RPC batching, which MCP removed in the 2025-06-18 revision; issuing the calls concurrently recovers the same saving and is what a current implementation must do.)
 3. Audit logs revealed which MCP tools were most used → guided investment in caching.
-4. Sticky session via Mcp-Session-Id mattered for stateful operations (multi-turn tool sequences).
+4. Sticky session via `MCP-Session-Id` mattered for stateful operations (multi-turn tool sequences) — a constraint the 2026-07-28 revision removes by going stateless.

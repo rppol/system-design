@@ -6,9 +6,9 @@
 
 LangChain is the most widely adopted orchestration framework for LLM applications, providing composable building blocks: prompt templates, output parsers, chains, agents, memory, and 300+ tool/data-source integrations. Released in October 2022, it became the default choice for LLM developers within six months due to its breadth of integrations and active community.
 
-LangChain Expression Language (LCEL), introduced in 2023 with version 0.1.0, replaced the legacy chain classes (LLMChain, ConversationalRetrievalChain) with a composable pipe-based API. LCEL is now the canonical way to build with LangChain.
+LangChain Expression Language (LCEL), introduced in 2023 and made the canonical API in the 0.1.0 release, replaced the legacy chain classes (LLMChain, ConversationalRetrievalChain) with a composable pipe-based API. LCEL is now the canonical way to build with LangChain.
 
-**Current version**: langchain-core 0.2.x / langchain 0.2.x / langchain-community 0.2.x
+**Current version**: langchain / langchain-core / langchain-community 1.x (1.2.x is the current stable line; Python 3.10+). The 1.0 release moved the legacy chain classes out of `langchain` into a separate `langchain-classic` package.
 **Production adoption signal**: Used by Notion AI, Elastic, Replit (initially), numerous enterprise deployments. The most-starred LLM framework on GitHub as of 2024.
 
 ---
@@ -148,7 +148,7 @@ prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful assistant."),
     ("human", "{question}")
 ])
-model = ChatOpenAI(model="gpt-4o", temperature=0)
+model = ChatOpenAI(model="gpt-5.5", temperature=0)
 parser = StrOutputParser()
 
 # | operator creates a new Runnable (RunnableSequence)
@@ -196,7 +196,7 @@ rag_chain = (
         "question": RunnablePassthrough()     # passes original question through
     })
     | prompt
-    | ChatOpenAI(model="gpt-4o")
+    | ChatOpenAI(model="gpt-5.5")
     | StrOutputParser()
 )
 
@@ -257,7 +257,7 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{text}")
 ]).partial(format_instructions=parser.get_format_instructions())
 
-chain = prompt | ChatOpenAI(model="gpt-4o") | parser
+chain = prompt | ChatOpenAI(model="gpt-5.5") | parser
 result: ExtractionResult = chain.invoke({"text": "Jane Doe, CTO at Acme Corp..."})
 print(result.name)  # "Jane Doe"
 ```
@@ -279,7 +279,7 @@ def get_weather(city: str) -> str:
     return weather_api(city)
 
 agent = create_tool_calling_agent(
-    llm=ChatOpenAI(model="gpt-4o"),
+    llm=ChatOpenAI(model="gpt-5.5"),
     tools=[search_web, get_weather],
     prompt=prompt
 )
@@ -293,39 +293,38 @@ result = executor.invoke({"input": "What is the weather in San Francisco?"})
 ```python
 from langchain_core.runnables import RunnableWithFallbacks
 
-primary = ChatOpenAI(model="gpt-4o")
-fallback = ChatOpenAI(model="gpt-3.5-turbo")
+primary = ChatOpenAI(model="gpt-5.5")
+fallback = ChatOpenAI(model="gpt-5.4-mini")
 
 # If primary raises an exception, try fallback
 robust_model = primary.with_fallbacks([fallback])
 
 # Retry with backoff (built into ChatOpenAI via tenacity)
 model_with_retry = ChatOpenAI(
-    model="gpt-4o",
+    model="gpt-5.5",
     max_retries=3,  # exponential backoff, default
 )
 ```
 
 ### Prompt Caching with LangChain
 
-Anthropic's prompt caching reduces cost by 90% and latency by 80% for long, repeated system prompts (1000+ tokens) — see [LLM Caching](../llm_caching/README.md) for the full caching-layer landscape. Pass `cache_control` via `extra_headers` on the `ChatAnthropic` model:
+Anthropic's prompt caching cuts the cost of the cached prefix by 90% and substantially reduces time-to-first-token for long, repeated system prompts — see [LLM Caching](../llm_caching/README.md) for the full caching-layer landscape. Prompt caching is generally available (no beta header); mark the prefix with `cache_control` on the `ChatAnthropic` model:
 
 ```python
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # Mark the system prompt for caching — Anthropic caches the prefix up to this marker
-model = ChatAnthropic(
-    model="claude-opus-4-6",
-    extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
-)
+model = ChatAnthropic(model="claude-opus-5")
 
-# Cache the long system prompt (must be >= 1024 tokens for claude-3, >= 2048 for claude-3-5)
+# Cache the long system prompt. The minimum cacheable prefix is model-dependent:
+# 512 tokens on Claude Opus 5 / Fable 5, 1024 on Opus 4.8 / Sonnet 5 / Sonnet 4.6,
+# 2048 on Opus 4.7, 4096 on Opus 4.6 and Haiku 4.5. Shorter prefixes silently do not cache.
 system_message = SystemMessage(
     content=[{
         "type": "text",
         "text": "<long system prompt with 2000+ tokens of context, documentation, etc.>",
-        "cache_control": {"type": "ephemeral"}  # cache this prefix
+        "cache_control": {"type": "ephemeral"}  # 5-minute TTL; add "ttl": "1h" for 1 hour
     }]
 )
 
@@ -340,9 +339,9 @@ response2 = chain.invoke([system_message, HumanMessage(content="Question 2")])
 # response2.response_metadata["usage"] includes "cache_read_input_tokens"
 ```
 
-For OpenAI (GPT-4o-mini, GPT-4o on API), automatic prefix caching is enabled by default. Inspect `usage.prompt_tokens_details.cached_tokens` in the response metadata to verify cache hits. Cached tokens are billed at 50% of standard input price.
+For OpenAI, automatic prefix caching is enabled by default on the current GPT-5.x models. Inspect `usage.prompt_tokens_details.cached_tokens` in the response metadata to verify cache hits. On the GPT-5.x line cached input is billed at 10% of the standard input price (a 90% discount — e.g. $0.50/1M against $5.00/1M on `gpt-5.5`); the older GPT-4.1 family discounted cached input by 75%. Cached prefixes are retained for up to 24 hours by default, and from `gpt-5.6` onward cache writes are billed at 1.25x the uncached input rate.
 
-**Cost impact**: A RAG chain with a 4096-token system prompt making 1000 calls/day: uncached = $0.02/call × 1000 = $20/day; cached = $0.002/call × 1000 = $2/day. Cache hits also reduce TTFT by 400-600ms for long prompts.
+**Cost impact**: A RAG chain with a 4096-token system prompt making 1000 calls/day: uncached = $0.02/call × 1000 = $20/day; cached = $0.002/call × 1000 = $2/day. Cache hits also cut time-to-first-token noticeably on long prompts, because the cached prefix skips prefill.
 
 **In plain terms.** "The repeated part of your prompt is charged at full price on every single call unless you tell the provider it repeats — then it is charged at a tenth."
 
@@ -372,11 +371,12 @@ the user's actual question. Caching only ever attacks the fixed prefix, so its l
 exactly the ratio of static prefix to total prompt. A chain with a 200-token system prompt
 and 4000 tokens of retrieved context has almost nothing to cache.
 
-**A warning about the minimum block size.** The `>= 1024` / `>= 2048` token thresholds in
-the code above are the reason many teams see zero savings after wiring this up. A
-900-token system prompt is simply not cached — no error is raised, `cache_read_input_tokens`
-just stays 0. Always verify against the usage metadata rather than assuming the header took
-effect.
+**A warning about the minimum block size.** The per-model minimum thresholds in the code
+above (512 to 4096 tokens depending on the model) are the reason many teams see zero savings
+after wiring this up, and the thresholds are not monotonic across generations — a 3K-token
+prompt caches on Claude Opus 5 and silently does not on Opus 4.6. No error is raised;
+`cache_read_input_tokens` just stays 0. Always verify against the usage metadata rather than
+assuming the marker took effect.
 
 ### Streaming Structured Outputs
 
@@ -394,7 +394,7 @@ class ProductReview(BaseModel):
     pros: list[str]
     cons: list[str]
 
-model = ChatOpenAI(model="gpt-4o", temperature=0)
+model = ChatOpenAI(model="gpt-5.5", temperature=0)
 
 # with_structured_output in streaming mode — yields partial Pydantic objects
 structured_model = model.with_structured_output(ProductReview, include_raw=False)
@@ -418,7 +418,7 @@ for partial_dict in chain.stream("Extract review info: ..."):
         print(f"Score so far: {partial_dict['score']}")
 ```
 
-**Streaming mode**: `streaming_mode="partial"` in `with_structured_output` yields progressively more complete Pydantic models. Use this for real-time UI updates (show fields as they parse rather than waiting for complete JSON). Caveat: partial Pydantic validation fails — use `include_raw=True` to get the raw chunk alongside the validated object.
+**Streaming mode**: streaming `with_structured_output` yields progressively more complete objects as JSON tokens arrive. Use this for real-time UI updates (show fields as they parse rather than waiting for complete JSON). Caveat: partial Pydantic validation fails — use `include_raw=True` to get the raw chunk alongside the validated object, or fall back to `JsonOutputParser`, which yields plain partial dicts with no validation step.
 
 ---
 
@@ -504,7 +504,7 @@ than compose it from per-step percentiles.
 | Async | Consistent `.ainvoke()` | Inconsistent support |
 | Batching | `.batch()` with concurrency | Not built-in |
 | Debugging | `chain.get_graph()`, LangSmith | Stack-trace hunting |
-| Status | Current, maintained | Deprecated, will be removed |
+| Status | Current, maintained | Moved out of `langchain` into `langchain-classic` at 1.0; slated for removal in 2.0 |
 
 ---
 
@@ -576,7 +576,7 @@ print(f"Trace: https://smith.langchain.com/runs/{run_id}")
 This approach is thread-safe (LangSmith handles concurrency), captures full input/output/latency at each step, and links traces across services when the same `run_id` is propagated.
 
 **Pitfall 7: Memory in production**
-`ConversationBufferMemory` stores entire conversation history in RAM. A chat session with 100 messages and 500 tokens each = 50K tokens of history passed on every call. Cost: $0.25/call for GPT-4o. Fix: use `ConversationSummaryMemory` with a 2K token budget, or `ConversationBufferWindowMemory(k=5)` to keep last 5 turns only.
+`ConversationBufferMemory` stores entire conversation history in RAM. A chat session with 100 messages and 500 tokens each = 50K tokens of history passed on every call. Cost: $0.25/call on a $5/1M-input model such as GPT-5.5. Fix: use `ConversationSummaryMemory` with a 2K token budget, or `ConversationBufferWindowMemory(k=5)` to keep last 5 turns only.
 
 **What the formula is telling you.** "An unbounded buffer makes the cost of turn number `n` proportional to `n`, so the conversation's total cost grows with the *square* of its length."
 
@@ -585,7 +585,7 @@ This approach is thread-safe (LangSmith handles concurrency), captures full inpu
 | `m` | Messages so far in the session |
 | `t` | Average tokens per message, 500 here |
 | `m x t` | History tokens re-sent on the next call — the buffer is resent in full, every time |
-| `$5 / M` | GPT-4o input price |
+| `$5 / M` | Input price of a flagship model such as GPT-5.5 or Claude Opus 5 |
 | `k` | Window size in `ConversationBufferWindowMemory(k=5)` — caps `m` at `2k` messages |
 
 **Walk one example.** Watch the per-call cost climb as the same session goes on:
@@ -616,22 +616,25 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 
 | Tool | Category | Version Notes |
 |------|----------|---------------|
-| `langchain-core` | Core Runnable abstractions | 0.2.x — stable interface |
-| `langchain` | High-level chains + agents | 0.2.x — pin strictly |
+| `langchain-core` | Core Runnable abstractions | 1.x — stable interface |
+| `langchain` | High-level agents + LCEL primitives | 1.x — pin strictly |
+| `langchain-classic` | Legacy pre-1.0 chains (LLMChain, RetrievalQA) | Compatibility shim split out at 1.0; migrate off it |
 | `langchain-community` | 300+ third-party integrations | Moves fast, pin strictly |
 | `langchain-openai` | OpenAI-specific integration | Separate package since 0.1 |
 | `langchain-anthropic` | Anthropic-specific integration | Separate package since 0.1 |
 | `langsmith` | Tracing, evaluation, dataset management | Set `LANGSMITH_TRACING=true`; dataset versioning, A/B testing for chains |
 | [`langgraph`](langgraph.md) | Stateful agent graphs | Companion to LangChain |
-| `pydantic` v2 | Output validation | LangChain 0.2+ requires pydantic v2 |
+| `pydantic` v2 | Output validation | Required since LangChain 0.2 |
 
 **Version matrix:**
 - LangChain 0.0.x (2022-2023): legacy chains, not LCEL
 - LangChain 0.1.x (early 2024): LCEL introduced, legacy deprecation announced
-- LangChain 0.2.x (mid-2024): pydantic v2, package split, legacy removed
+- LangChain 0.2.x (mid-2024): pydantic v2, package split
+- LangChain 0.3.x: pydantic v2 required end-to-end
+- LangChain 1.x (current, 1.2.x stable): legacy chains moved out to `langchain-classic`, `create_agent` becomes the recommended agent API, Python 3.10+ required. Breaking changes are reserved for 2.0 per the published release policy.
 - `langchain-core`: the stable foundation; updates are backward-compatible
 
-**LangSmith 2025 features:**
+**LangSmith features:**
 - **Dataset versioning**: tag datasets (`v1`, `v2`, `baseline`) and compare chain performance across versions.
 - **A/B testing chains**: run two chain variants against the same dataset, compare scores side-by-side, and select the winner with statistical confidence.
 - **Prompt Hub versioning**: commit prompts with versions, pull specific versions by commit hash, track prompt performance over time.
@@ -642,7 +645,7 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 ## 12. Interview Questions with Answers
 
 **Q: What is LCEL and how does it differ from legacy LangChain chains?**
-LCEL (LangChain Expression Language) is a composable Runnable API using Python's pipe operator (`|`) to chain components. Legacy chains (`LLMChain`, `ConversationalRetrievalChain`) were class-based, required subclassing to customize, had inconsistent streaming support, and buried state in the chain object. LCEL is stateless by default, streaming-native, async-native, and supports `.batch()` with configurable concurrency. Legacy chains are deprecated as of LangChain 0.2.
+LCEL (LangChain Expression Language) is a composable Runnable API using Python's pipe operator (`|`) to chain components. Legacy chains (`LLMChain`, `ConversationalRetrievalChain`) were class-based, required subclassing to customize, had inconsistent streaming support, and buried state in the chain object. LCEL is stateless by default, streaming-native, async-native, and supports `.batch()` with configurable concurrency. Legacy chains were deprecated during 0.1/0.2 and moved out of the main `langchain` package into `langchain-classic` at 1.0.
 
 **Q: What is a Runnable in LangChain?**
 A Runnable is any object implementing the protocol: `invoke(input) -> output`, `stream(input) -> Iterator`, `batch(inputs) -> List`, and async variants `ainvoke`, `astream`, `abatch`. Built-in Runnables include `ChatPromptTemplate`, `ChatOpenAI`, `StrOutputParser`, `RunnableLambda`, `RunnableParallel`. Composing Runnables with `|` produces a `RunnableSequence`, which is itself a Runnable. This uniformity means you can swap any component without changing callers.
@@ -660,7 +663,7 @@ Use `RunnableWithMessageHistory`. Wrap the chain, provide a `get_session_history
 When you call `chain.stream(input)`, LangChain iterates through each component. Non-streaming components (prompt templates) complete synchronously and pass to the next. The LLM model, if the provider supports it, returns a streaming iterator that yields `AIMessageChunk` objects as tokens arrive from the API. The output parser, if streaming-compatible, processes each chunk and yields partial results. The `|` composition propagates chunks from the LLM through the parser to the caller. Token-by-token streaming requires: (1) a model that supports streaming, (2) an output parser that handles partial chunks (most built-in parsers do), and (3) calling `.stream()` not `.invoke()`.
 
 **Q: How do you implement a fallback chain in LangChain?**
-Use `.with_fallbacks([alternative_runnable])`. When the primary Runnable raises an exception (API error, rate limit, timeout), LangChain retries with the fallback. Example: `gpt4.with_fallbacks([gpt35])` — if GPT-4o returns a 429 error, retry with GPT-3.5-turbo. For model-level retries (same model, transient errors), use `max_retries` parameter on `ChatOpenAI`. For structured output validation failures, chain with `StrOutputParser().with_fallbacks([default_response_lambda])`.
+Use `.with_fallbacks([alternative_runnable])`. When the primary Runnable raises an exception (API error, rate limit, timeout), LangChain retries with the fallback. Example: `flagship.with_fallbacks([mini])` — if `gpt-5.5` returns a 429 error, retry with the cheaper `gpt-5.4-mini`. For model-level retries (same model, transient errors), use `max_retries` parameter on `ChatOpenAI`. For structured output validation failures, chain with `StrOutputParser().with_fallbacks([default_response_lambda])`.
 
 **Q: What is the tool-calling agent pattern and how does it differ from ReAct?**
 Tool-calling agent uses native function calling (OpenAI function calling, Anthropic tool use) — the model outputs structured JSON specifying which tool to call and with what arguments. This is parsed deterministically. ReAct (Reasoning + Acting) predates native function calling: the model produces free-text Thought/Action/Observation blocks which are parsed with regex. Tool-calling is more reliable (structured output), faster (fewer tokens), and works better with smaller models. ReAct is more flexible (works with any model, any tool description) but has higher parse failure rates. Use tool-calling for production; use ReAct only for models without native function calling support.
@@ -669,10 +672,10 @@ Tool-calling agent uses native function calling (OpenAI function calling, Anthro
 Three approaches: (1) LangSmith: set `LANGSMITH_TRACING=true` — every invocation is traced with full input/output/latency at each step; view at smith.langchain.com; click into any step to see the exact prompt sent; (2) `chain.get_graph().print_ascii()` — visualizes the chain structure to catch misconfiguration; (3) Call each component individually: `prompt.invoke(input)`, then `model.invoke(prompt_output)`, then `parser.invoke(model_output)` — isolates which step fails. For intermittent failures, LangSmith's run history is the only reliable debugging tool.
 
 **Q: How do you implement cost budgeting per user in a LangChain application?**
-Use a custom callback handler that tracks tokens: subclass `BaseCallbackHandler`, implement `on_llm_end(response)`, extract `response.llm_output["token_usage"]`, accumulate per session ID. Inject the callback at invocation time: `chain.invoke(input, config={"callbacks": [budget_tracker]})`. Check budget before each invocation: `if budget_tracker.total_cost(session_id) >= BUDGET_LIMIT: raise BudgetExceededException`. Concrete numbers: GPT-4o costs $5/1M input tokens + $15/1M output tokens; a 10K token/day user budget = ~$0.15/day at typical input/output ratios.
+Use a custom callback handler that tracks tokens: subclass `BaseCallbackHandler`, implement `on_llm_end(response)`, extract `response.llm_output["token_usage"]`, accumulate per session ID. Inject the callback at invocation time: `chain.invoke(input, config={"callbacks": [budget_tracker]})`. Check budget before each invocation: `if budget_tracker.total_cost(session_id) >= BUDGET_LIMIT: raise BudgetExceededException`. Concrete numbers: `gpt-5.5` costs $5/1M input tokens + $30/1M output tokens; a 10K token/day user budget works out to roughly $0.10/day at typical input/output ratios.
 
-**Q: What are the package boundaries in LangChain 0.2+?**
-`langchain-core`: Runnable protocol, base classes (BaseLanguageModel, BaseRetriever, etc.), no third-party dependencies. `langchain`: High-level chains, agents, and prompt templates built on core. `langchain-community`: Third-party integrations (vector stores, LLMs, tools, document loaders) — these have external dependencies. `langchain-openai`, `langchain-anthropic`, `langchain-google-genai`: Provider-specific implementations, maintained by providers. This split means you can use `langchain-core` + `langchain-openai` without installing the 300+ community dependencies. In production, only install what you need.
+**Q: What are the package boundaries in LangChain 1.x?**
+`langchain-core`: Runnable protocol, base classes (BaseLanguageModel, BaseRetriever, etc.), no third-party dependencies. `langchain`: High-level agents, LCEL primitives, and prompt templates built on core; `langchain-classic` holds the pre-1.0 chain classes that were split out at 1.0. `langchain-community`: Third-party integrations (vector stores, LLMs, tools, document loaders) — these have external dependencies. `langchain-openai`, `langchain-anthropic`, `langchain-google-genai`: Provider-specific implementations, maintained by providers. This split means you can use `langchain-core` + `langchain-openai` without installing the 300+ community dependencies. In production, only install what you need.
 
 **Q: How do you test a LangChain chain?**
 Unit test components independently: test prompt templates with `prompt.format_messages(question="test")`, test output parsers with expected model outputs, test RunnableLambda functions as plain Python. For integration tests, use `pytest` with `@pytest.mark.vcr` to record and replay actual API responses (using `vcrpy`). For evaluation, use LangSmith's dataset + evaluator pattern: upload test cases to a dataset, run the chain against each, apply an LLM-as-judge evaluator for correctness. Concrete: a RAG chain evaluation should test retrieval recall (are relevant docs retrieved?), answer faithfulness (does the answer stay in context?), and answer relevance (does it address the question?).
@@ -690,7 +693,7 @@ Signs: (1) more time debugging LangChain internals than your own logic; (2) cust
 LangSmith is LangChain's observability and evaluation platform. It automatically captures: every LLM call with full input/output/latency/cost, tool calls with arguments and results, chain execution trees with per-step breakdown. It is necessary for production because: (1) without it, debugging means guessing — you see input and output but not intermediate state; (2) cost monitoring — track token usage per user/endpoint; (3) quality evaluation — run automated evaluators on a sample of production traces; (4) creating test datasets from real production queries. Setup: `LANGSMITH_API_KEY=<key>` environment variable, `LANGSMITH_TRACING=true`. Zero code changes required.
 
 **Q: How does prompt caching work with LangChain and Anthropic, and what cost savings does it provide?**
-Anthropic's prompt caching saves the KV cache for a prompt prefix marked with `cache_control: {"type": "ephemeral"}`. When subsequent requests share the same prefix, the cached KV is reused instead of recomputing attention over the full context. In LangChain, pass `extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}` to `ChatAnthropic` and annotate the system message content with `cache_control`. Cost impact: cached tokens are billed at 10% of standard input price (90% discount); cache writes cost 25% more per token than regular input, but pay back after the second cache hit. For a 4096-token system prompt used in 1000 daily requests, uncached = $0.020/request × 1000 = $20/day; cached = $0.002/request × 1000 = $2/day. Minimum cacheable block: 1024 tokens for claude-3; 2048 for claude-3-5 and later. Cache TTL: 5 minutes (ephemeral).
+Anthropic's prompt caching saves the KV cache for a prompt prefix marked with `cache_control: {"type": "ephemeral"}`. When subsequent requests share the same prefix, the cached KV is reused instead of recomputing attention over the full context. In LangChain, the feature is generally available (no beta header) — just annotate the system message content with `cache_control` on `ChatAnthropic`. Cost impact: cached reads are billed at 10% of standard input price (90% discount); cache writes cost 25% more per token than regular input at the default 5-minute TTL, so they pay back on the second cache hit. For a 4096-token system prompt used in 1000 daily requests, uncached = $0.020/request × 1000 = $20/day; cached = $0.002/request × 1000 = $2/day. There is also a 1-hour TTL (`"ttl": "1h"`) whose writes cost 2x regular input, so it needs at least three requests to pay back — use it for bursty traffic with gaps longer than five minutes. The minimum cacheable block is model-dependent and not monotonic across generations: 512 tokens on Claude Opus 5 and Fable 5, 1024 on Opus 4.8 / Sonnet 5 / Sonnet 4.6, 2048 on Opus 4.7, and 4096 on Opus 4.6 and Haiku 4.5.
 
 **Q: How do you stream structured outputs (Pydantic models) from a LangChain chain?**
 Use `model.with_structured_output(YourModel)` and call `.astream()` — LangChain yields progressively completed Pydantic objects as tokens arrive. Early yields will have `None` for fields not yet parsed. Alternatively, use `JsonOutputParser` and `.stream()` to receive partial dicts growing token-by-token: first `{}`, then `{"name": "Jan"}`, then `{"name": "Jane", "role": "CTO"}`. The tradeoff: `with_structured_output` gives typed objects but validation only completes at the end; `JsonOutputParser` gives raw dicts at every step. For real-time UI updates where you want to show fields as they arrive, use `JsonOutputParser` with field-presence checks. Partial Pydantic validation: set `include_raw=True` to receive both the partial model and the raw string chunk at each step.
@@ -703,7 +706,7 @@ Create a LangSmith dataset with representative input examples. Run both chain va
 ## 13. Best Practices
 
 1. **Always use LCEL** — never use legacy chains. They are deprecated and will be removed.
-2. **Pin all LangChain packages** — `langchain==0.2.x`, `langchain-core==0.2.x`, `langchain-community==0.2.x` — independently, not just `langchain`.
+2. **Pin all LangChain packages** — `langchain`, `langchain-core`, `langchain-community` (currently the 1.x line) — independently, not just `langchain`.
 3. **Connect LangSmith before writing any chain logic** — retroactive debugging is much harder.
 4. **Keep RunnableLambda functions stateless** — no mutable closures; all state in the input dict.
 5. **Tune retrieval parameters** — default `k=4` is almost never optimal; benchmark with your specific documents.
@@ -738,7 +741,7 @@ ChatPromptTemplate
 (system: use only provided context, cite sources)
     |
     v
-ChatOpenAI(model="gpt-4o", streaming=True)
+ChatOpenAI(model="gpt-5.5", streaming=True)
     |
     v
 StrOutputParser (streaming)
@@ -761,9 +764,9 @@ class DepartmentCostTracker(BaseCallbackHandler):
 
     def on_llm_end(self, response, **kwargs):
         usage = response.llm_output.get("token_usage", {})
-        # GPT-4o pricing: $5/1M input, $15/1M output
+        # gpt-5.5 pricing: $5/1M input, $30/1M output
         cost = (usage.get("prompt_tokens", 0) * 5e-6 +
-                usage.get("completion_tokens", 0) * 15e-6)
+                usage.get("completion_tokens", 0) * 30e-6)
         self.total_cost += cost
         if self.total_cost >= self.budget:
             # Alert: department approaching budget
@@ -785,7 +788,7 @@ def build_rag_chain(user: User) -> Runnable:
             "question": RunnablePassthrough()
         })
         | prompt
-        | ChatOpenAI(model="gpt-4o", streaming=True)
+        | ChatOpenAI(model="gpt-5.5", streaming=True)
         | StrOutputParser()
     )
 

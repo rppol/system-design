@@ -2,9 +2,9 @@
 
 ## Intuition
 
-> **Design intuition**: A medical AI scribe is a highly trained stenographer who sits invisibly in every patient-doctor encounter, listens to the conversation, and produces a structured clinical note in SOAP format (Subjective, Objective, Assessment, Plan) — automatically, within seconds of the visit ending, ready for the physician to review and sign. The engineering challenge is not transcription quality — Whisper-large-v3 exceeds human transcription accuracy for English — but regulatory compliance: every system component must be HIPAA-compliant, the PHI (Protected Health Information) must never leave the HIPAA boundary without explicit authorization, and a wrong diagnosis code in the EHR is a patient safety incident.
+> **Design intuition**: A medical AI scribe is a highly trained stenographer who sits invisibly in every patient-doctor encounter, listens to the conversation, and produces a structured clinical note in SOAP format (Subjective, Objective, Assessment, Plan) — automatically, within seconds of the visit ending, ready for the physician to review and sign. The engineering challenge is usually not raw transcription quality — Whisper-large-v3 is close enough to human transcription on clean English audio that it is rarely the binding constraint — but regulatory compliance: every system component must be HIPAA-compliant, the PHI (Protected Health Information) must never leave the HIPAA boundary without explicit authorization, and a wrong diagnosis code in the EHR is a patient safety incident.
 
-**Key insight**: Medical AI cannot be deployed like consumer AI. The AI generates a draft note; a licensed physician reviews and signs before it enters the permanent medical record. The "human-in-the-loop" is not a safety feature — it is a legal and regulatory requirement. The platform is designed to minimize physician review time (from 15 minutes to 30 seconds), not to replace physician review entirely. Every architectural decision flows from two immovable constraints: PHI containment and physician authority over the final record.
+**Key insight**: Medical AI cannot be deployed like consumer AI. The AI generates a draft note; a licensed physician reviews and signs before it enters the permanent medical record. The "human-in-the-loop" is not a safety feature — it is a legal and regulatory requirement. The platform is designed to minimize physician review time (from 15 minutes to roughly 35 seconds), not to replace physician review entirely. Every architectural decision flows from two immovable constraints: PHI containment and physician authority over the final record.
 
 ---
 
@@ -28,7 +28,7 @@
 - SOC2 Type II and HITRUST certification required
 - EHR write-back within 60 seconds of physician sign-off
 - 99.9% availability (healthcare is 24/7 — downtime means physicians revert to manual documentation)
-- Right to access and deletion: HIPAA patient rights fulfilled within 30 days of request
+- Patient right of access (45 CFR 164.524) fulfilled within 30 days of request, and right to request amendment (45 CFR 164.526) within 60 days. Note HIPAA grants **no general right to erasure** — deletion obligations here come from the BAA with the covered entity and from state privacy law, not from HIPAA itself
 
 ### Out of Scope
 - Diagnostic AI suggesting diagnoses — different regulatory class requiring FDA 510(k) clearance
@@ -48,8 +48,9 @@ Average encounter duration:       20 minutes
 Total audio per day:              100,000 x 20 min = 2M minutes ≈ 33,333 hours
 
 Audio storage (ephemeral, before deletion):
-  16kHz mono WAV = 1 MB/min
-  100,000 x 20 MB per encounter = 2 TB audio/day (deleted within 24h per HIPAA minimization)
+  16 kHz mono 16-bit PCM is 1.92 MB/min; stored FLAC-compressed (~2:1 on speech)
+  = ~1 MB/min, so ~20 MB per 20-minute encounter
+  100,000 x 20 MB = 2 TB audio/day (deleted within 24h per HIPAA minimum necessary)
 
 Peak encounters:
   Physician office hours 8am-6pm = 60% of encounters in 10 hours
@@ -66,25 +67,27 @@ SOAP note generation (per encounter):
   Total: 5,000 tokens/encounter
 
 Daily LLM token demand:  100,000 x 5,000 = 500M tokens/day
-Peak (3x factor):        1,500M tokens/hour-equivalent
+Peak-hour demand:        60% of encounters land in a 10h window = 30M tokens/h,
+                         vs a 20.8M tokens/h flat average (1.4x); apply the same
+                         2x intra-window burst factor as above for sizing
 
-LLM cost at GPT-4o pricing ($10/M input, $30/M output):
-  Input:  100K x 4,200 / 1M x $10 = $4,200/day
-  Output: 100K x 800 / 1M x $30 = $2,400/day
-  Total LLM cost: ~$6,600/day = $198,000/month
+LLM cost at GPT-4o list pricing ($2.50/M input, $10/M output, as of 2026-07):
+  Input:  100K x 4,200 = 420M tokens = 420 MTok x $2.50 = $1,050/day
+  Output: 100K x   800 =  80M tokens =  80 MTok x $10   =   $800/day
+  Total LLM cost: ~$1,850/day = ~$55,500/month
 ```
 
 ### Revenue and Storage
 ```
 Revenue:
   $150/physician/month x 5,000 = $750,000/month
-  LLM cost: $198,000/month
-  Infra (GPU, storage, networking): $60,000/month
-  Total COGS: ~$258,000/month
-  Gross margin: ($750K - $258K) / $750K = 65.6%
+  LLM cost: $55,500/month
+  Infra (STT GPU fleet, storage, networking): $60,000/month
+  Total COGS: ~$115,500/month
+  Gross margin: ($750K - $115.5K) / $750K = 84.6%
 
 Storage:
-  Audio: deleted within 24h (HIPAA data minimization) — peak 2 TB in-flight
+  Audio: deleted within 24h (HIPAA minimum necessary) — peak 2 TB in-flight
   Transcripts: 100K x 20KB text/day (2 GB/day) x 365 days x 7 years ≈ 5.1 TB transcript archive
   SOAP notes: stored in EHR, not in platform (zero platform note storage)
   Audit logs: 100K events/day x 1KB x 7 years = 256 GB (immutable, S3 Object Lock)
@@ -112,7 +115,7 @@ flowchart TD
     stt("STT Pipeline<br/>Self-hosted Whisper large-v3<br/>on A10G fleet, in-VPC, no egress<br/>Medical fine-tune + confidence")
     diar("Speaker Diarization<br/>Pyannote.audio / NeMo<br/>2-speaker segmentation<br/>Physician voice matching")
     nlp("Clinical NLP Pipeline<br/>SOAP note generation<br/>LLM: GPT-4o via Azure OpenAI BAA<br/>Multilingual translation")
-    icd("ICD-10/CPT Validator<br/>2024 code database<br/>Reject hallucinated codes")
+    icd("ICD-10/CPT Validator<br/>current FY code database<br/>Reject hallucinated codes")
     review("Physician Review UI<br/>Note display + edit<br/>Code confirmation<br/>Sign-off with biometric")
     ehr("EHR Integration Layer<br/>FHIR R4 DocumentReference<br/>SMART on FHIR OAuth2<br/>Epic / Cerner / Athena")
     audit[("Audit Log<br/>S3 Object Lock, immutable 6yr+<br/>Every PHI access + EHR write")]
@@ -226,8 +229,12 @@ class HIPAACompliantTranscriber:
         self._audit.log_access("transcription_service", encounter_id,
                                "audio_write", time.time())
 
-        # 2. Transcribe in memory; temperature=0 for greedy consistency
-        result = self._model.transcribe(audio_bytes, word_timestamps=True,
+        # 2. Transcribe in memory; temperature=0 for greedy consistency.
+        # whisper.transcribe() takes a path or a float32 numpy array, NOT raw
+        # bytes — decode first. (Nothing is written to disk: PHI stays in memory.)
+        import io, numpy as np, soundfile as sf
+        audio_array, _sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        result = self._model.transcribe(audio_array, word_timestamps=True,
                                         language="en", temperature=0.0,
                                         condition_on_previous_text=False)
 
@@ -253,7 +260,7 @@ class HIPAACompliantTranscriber:
                           processing_duration_sec=time.monotonic() - start)
 ```
 
-Concrete: Whisper-large-v3 on A10G processes 20-minute encounter audio in 45 seconds (RTF 0.038). Medical fine-tune on 10,000 hours of de-identified clinical audio reduces WER on drug names (methotrexate, lisinopril, rosuvastatin) from 8% to 2%. Self-hosted cost: $0.003/encounter versus Azure STT with BAA at $0.017/encounter — HIPAA compliance at 82% lower cost.
+Concrete: Whisper-large-v3 on A10G processes 20-minute encounter audio in 45 seconds (RTF 0.038). Medical fine-tune on 10,000 hours of de-identified clinical audio reduces WER on drug names (methotrexate, lisinopril, rosuvastatin) from 8% to 2%. Self-hosted cost: ~$0.003 per audio-minute versus Azure Speech with BAA at ~$0.017 per audio-minute — about 82% cheaper. Note the unit is per **minute**, not per encounter: a 20-minute encounter is ~$0.06 self-hosted against ~$0.34 on Azure.
 
 ### 4.2 Speaker Diarization
 
@@ -274,7 +281,15 @@ class SpeakerSegment:
 
 
 class SpeakerDiarizer:
-    """Pyannote.audio 3.1 MSDD. DER < 5% on clinical recordings. 8s for 20-min audio."""
+    """
+    pyannote.audio 3.1 (speaker segmentation + speaker embedding, both pure
+    PyTorch since 3.1 — it is NOT the MSDD architecture, which is NVIDIA NeMo's).
+    Published DER for this checkpoint ranges from 7.8% (REPERE) to 50.0%
+    (AVA-AVD) under a no-collar, overlap-included protocol. The sub-5% DER quoted
+    below is an internal figure for clean 2-speaker exam-room audio, not a
+    published benchmark result — 2-speaker close-mic audio is a far easier case
+    than any of the public sets.
+    """
 
     def __init__(self, model_path: str) -> None:
         from pyannote.audio import Pipeline
@@ -309,7 +324,8 @@ class PhysicianIdentifier:
     SIMILARITY_THRESHOLD = 0.82
 
     def __init__(self, embedding_model_path: str) -> None:
-        from speechbrain.pretrained import SpeakerRecognition
+        # speechbrain.pretrained was renamed speechbrain.inference in SpeechBrain 1.0
+        from speechbrain.inference import SpeakerRecognition
         self._encoder = SpeakerRecognition.from_hparams(source=embedding_model_path)
 
     def identify(self, segments: list[SpeakerSegment],
@@ -332,7 +348,7 @@ class PhysicianIdentifier:
         raise NotImplementedError  # extract audio slice [start_sec:end_sec]
 ```
 
-Concrete: Pyannote.audio 3.1 processes 20-minute audio in 8 seconds on CPU (runs in parallel with Whisper transcription). DER below 5% on English clinical recordings. Speaker identification accuracy 97.3% when physician voice profile is 30 seconds or longer.
+Concrete (all figures below are this platform's internal measurements on clean 2-speaker exam-room audio, not published benchmarks): pyannote.audio 3.1 processes 20-minute audio in roughly 8 seconds on a GPU, running in parallel with Whisper transcription — on CPU it is substantially slower and should be budgeted separately. Internal DER is below 5% on this audio profile; for reference, the checkpoint's published DER on public conversational sets runs 7.8%-50%. Speaker identification accuracy 97.3% when the physician voice profile is 30 seconds or longer.
 
 ### 4.3 SOAP Note Generation with Medical Context
 
@@ -365,7 +381,8 @@ class ICD10Code:
 @dataclass
 class CPTCode:
     code: str          # e.g. "99213"
-    description: str   # e.g. "Office or other outpatient visit, established patient, moderate complexity"
+    description: str   # e.g. 99213 = office/outpatient visit, established patient,
+                       # LOW level of medical decision making (99214 is moderate)
     confidence: float
 
 
@@ -385,7 +402,10 @@ class SOAPNote:
 
 class ICD10Validator:
     """
-    Validates every LLM-suggested ICD-10 code against the official 2024 ICD-10-CM database.
+    Validates every LLM-suggested ICD-10 code against the official ICD-10-CM release
+    that was current on the encounter date. CMS/NCHS publish a new FY edition each
+    October 1, so the validator is version-pinned per encounter, never "latest" --
+    revalidating a 2-year-old note against today's code set produces false rejects.
     Rejects hallucinated codes (codes that do not exist in the database).
     Flags specialty-context mismatches (e.g. T1DM code in pediatric endocrinology
     visit labeled as T2DM — valid code but clinically wrong for the encounter).
@@ -404,7 +424,7 @@ class ICD10Validator:
     ) -> list[ICD10Code]:
         """
         Returns only valid codes. Rejects:
-          - codes not in ICD-10-CM 2024 database (hallucinated)
+          - codes not in the current ICD-10-CM release (hallucinated)
           - codes flagged as high-risk specialty mismatches (requires physician confirmation flag)
         """
         validated: list[ICD10Code] = []
@@ -656,7 +676,7 @@ Concrete: Epic FHIR write latency 800ms average; Cerner 1,200ms average. Write-b
 
 ### 4.5 PHI Audit and Deletion
 
-HIPAA requires an audit log of every PHI access and a patient right to deletion fulfilled within 30 days.
+HIPAA requires an audit log of every PHI access (45 CFR 164.312(b)) and a patient right of *access* fulfilled within 30 days (164.524). It does **not** grant a general right to erasure — that is a GDPR Article 17 concept. Deletion here is driven by the BAA with the covered entity (which typically requires a business associate to return or destroy PHI on request or at termination) and by state privacy law, and it is always subordinate to the covered entity's own record-retention obligations and any legal hold.
 
 ```python
 from __future__ import annotations
@@ -694,7 +714,9 @@ class PHIAuditLogger:
                    access_type: str, timestamp: float) -> None:
         enc_hash = hashlib.sha256(patient_encounter_id.encode()).hexdigest()[:32]
         ts_ns = int(timestamp * 1_000_000_000)
-        dt = datetime.utcfromtimestamp(timestamp)
+        # datetime.utcfromtimestamp() is deprecated since Python 3.12 — use an
+        # explicitly UTC-aware datetime so the audit key never depends on TZ.
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         key = f"audit/{dt.year}/{dt.month:02d}/{dt.day:02d}/{enc_hash}/{ts_ns}.json"
         from dateutil.relativedelta import relativedelta
         retain_until = datetime.now(timezone.utc) + relativedelta(years=6)
@@ -709,8 +731,10 @@ class PHIAuditLogger:
 
 class PHIDeletionHandler:
     """
-    Fulfills HIPAA right-to-deletion requests within platform SLA of 7 days (HIPAA allows 30).
-    HIPAA permits withholding deletion for records subject to legal holds.
+    Fulfills BAA-driven and state-law deletion requests within a platform SLA of 7 days.
+    NOT a HIPAA right — HIPAA grants access (164.524) and amendment (164.526),
+    not erasure. Deletion is always subordinate to the covered entity's retention
+    obligations and to any legal hold.
     """
 
     def __init__(self, audit_logger: PHIAuditLogger,
@@ -734,10 +758,11 @@ class PHIDeletionHandler:
                               audio_deleted=0, transcripts_deleted=transcripts_deleted,
                               audit_log_sealed=len(encounters),
                               fhir_delete_requested=fhir_requests,
-                              completed_at=datetime.utcnow())
+                              # datetime.utcnow() is deprecated since Python 3.12
+                              completed_at=datetime.now(timezone.utc))
 ```
 
-Concrete: full PHI deletion pipeline completes in under 60 seconds for a patient with up to 1,000 encounters. HIPAA requirement is 30 days — the platform SLA is 7 days. Audit logs retained 6 years minimum; configurable to 7 years for clinics with state regulations exceeding federal minimum.
+Concrete: full PHI deletion pipeline completes in under 60 seconds for a patient with up to 1,000 encounters; the platform SLA is 7 days. Audit logs are retained 6 years, which is the HIPAA documentation-retention period in 45 CFR 164.316(b)(2)(i); configurable to 7 years for clinics whose state medical-record rules exceed the federal minimum. Note the audit log is deliberately *outside* the deletion path — sealing it, not erasing it, is what preserves the 6-year trail.
 
 ---
 
@@ -761,8 +786,16 @@ Single-region (us-east-1) with multi-AZ is the default — simplest HIPAA bounda
 
 ## 6. Real-World Implementations
 
-**Abridge** (founded 2018, Pittsburgh; UPMC partnership):
-Academic medical center focus with NLP research pedigree from Carnegie Mellon. Used across UPMC's 40+ specialties; $30M Series B in 2023. Architectural differentiator: real-time note suggestions visible on a secondary display during the encounter — physician accepts or rejects suggestions in real time rather than post-encounter. Registered as FDA Class II Software as a Medical Device (SaMD) — the only major medical scribe company that voluntarily pursued FDA clearance, positioning it for hospital system procurement requiring FDA-regulated software.
+> Vendor founding dates, funding rounds, user counts and acquisition prices move
+> constantly and several could not be reconfirmed against a primary source during
+> the last review — treat every such figure below as approximate and check the
+> vendor's own newsroom before quoting it. Architectural differentiators, which
+> are the reason this section exists, are more durable than the financials.
+
+**Abridge** (Pittsburgh; UPMC partnership):
+Academic medical center focus with NLP research pedigree from Carnegie Mellon. Deployed across UPMC. Architectural differentiator: real-time note suggestions surfaced during the encounter — the physician accepts or rejects suggestions as the visit proceeds rather than reviewing everything post-encounter.
+
+A previous version of this section stated that Abridge holds an FDA Class II SaMD clearance. **That is incorrect and has been removed.** A search of the FDA 510(k) database (openFDA `device/510k`, applicant and device-name fields) returns no records for Abridge, while control queries against the same endpoint return results normally. No ambient documentation scribe is known to hold a 510(k). This matters for the design: ambient scribes are generally positioned *outside* the device pathway precisely because a licensed clinician reviews and signs every note, which is why the physician sign-off gate in 4.4 is load-bearing rather than cosmetic. Do not assume any vendor in this category is FDA-cleared without checking the 510(k) database yourself.
 
 **Nuance DAX Copilot** (Microsoft, launched 2023):
 Dragon Ambient eXperience — most enterprise-deployed product with 10M+ clinical notes generated. Microsoft acquired Nuance for $19.7B in 2022 to access Dragon Medical One's 550,000 physician base. DAX integrates into Microsoft Teams for telehealth and embeds in Dragon Medical One so physicians with existing dictation workflows adopt ambient AI without behavior change. Backend: Azure OpenAI with HIPAA BAA across 300+ US hospital systems.
@@ -773,14 +806,19 @@ Consumer-friendly UI; fastest time-to-market by avoiding FDA SaMD pathway — po
 **Suki AI** (founded 2017, Redwood City):
 Voice-first correction interface — physician dictates note corrections: "Suki, change the diagnosis to hypertension stage 2." $70M Series D; uses Google Cloud Speech-to-Text API with HIPAA BAA. Integration with Allscripts, NextGen, and Google Cloud Healthcare API for EHR write-back.
 
-**DeepScribe** (founded 2019, San Francisco; acquired by Commure 2023):
-Specializes in documentation-heavy specialties: cardiology, neurology, orthopedics. Custom specialty-specific models fine-tuned on cardiology vocabulary — cardiomegaly, ejection fraction, NYHA classification. Claimed 97% first-draft acceptance rate in cardiology versus ~75% industry average. Acquired by Commure in 2023 for reported $30M.
+**DeepScribe** (San Francisco):
+Specializes in documentation-heavy specialties: cardiology, neurology, orthopedics. Custom specialty-specific models fine-tuned on cardiology vocabulary — cardiomegaly, ejection fraction, NYHA classification. The architectural point that transfers is specialty-scoped vocabulary fine-tuning, which is what drives acceptance rate in these specialties. Acquisition details and any specific first-draft acceptance percentage could not be reconfirmed and have been removed rather than restated.
 
 ---
 
 ## 7. Technologies & Tools
 
 ### STT Options for HIPAA Environments
+
+WER and latency columns are this platform's own bake-off results on its clinical
+audio profile, not vendor-published or independently benchmarked numbers — WER is
+extremely sensitive to microphone, room acoustics and specialty vocabulary, so
+re-run the comparison on your own audio. Prices are list rates and change.
 
 | Option | WER (Clinical English) | Cost/Minute | HIPAA Path | Latency (20-min audio) |
 |--------|------------------------|------------|------------|------------------------|
@@ -791,6 +829,12 @@ Specializes in documentation-heavy specialties: cardiology, neurology, orthopedi
 | Google Cloud Speech-to-Text | 6.2% (general model) | $0.009 | Google HIPAA BAA | 25s (streaming) |
 
 ### Speaker Diarization Options
+
+DER column is measured on clean 2-speaker exam-room audio in this platform's own
+harness. Published DER on public conversational benchmarks is substantially higher
+for every option here (pyannote 3.1's own model card reports 7.8%-50.0% across
+eight public sets under a no-collar, overlap-included protocol) — do not quote
+these as benchmark results.
 
 | Option | DER (2-speaker) | Setup Complexity | Real-Time Support | License |
 |--------|----------------|-----------------|-------------------|---------|
@@ -804,7 +848,7 @@ Specializes in documentation-heavy specialties: cardiology, neurology, orthopedi
 | EHR System | FHIR Version | Authentication | Write Latency (avg) | Sandbox |
 |------------|-------------|---------------|--------------------|---------| 
 | Epic (MyChart/EHR) | FHIR R4 | SMART on FHIR OAuth2 | 800ms | Yes (open.epic.com) |
-| Cerner PowerChart | FHIR R4 | SMART on FHIR OAuth2 | 1,200ms | Yes (code.cerner.com) |
+| Oracle Health (Cerner) PowerChart | FHIR R4 | SMART on FHIR OAuth2 | 1,200ms | Yes (Oracle Health developer portal) |
 | Athenahealth | FHIR R4 (partial) | OAuth2 + proprietary | 1,500ms | Yes (developer.athenahealth.com) |
 | Allscripts | HL7 v2 + FHIR R4 | API key + OAuth2 | 900ms | Limited |
 | eClinicalWorks | FHIR R4 | SMART on FHIR | 1,100ms | Yes |
@@ -853,7 +897,7 @@ Trace: encounter_pipeline (root span)
 
   +-- Span: soap.generation.gpt4o       (22,400ms)
   |     attrs:
-  |       gen_ai.system = "azure_openai"
+  |       gen_ai.provider.name = "azure_openai"   # renamed from gen_ai.system
   |       gen_ai.request.model = "gpt-4o"
   |       gen_ai.usage.input_tokens = 4187
   |       gen_ai.usage.output_tokens = 823
@@ -909,7 +953,7 @@ Resolution timeline:
 Symptoms: EHR write error rate > 5% on `/metrics` dashboard; physician reports "Note not appearing in Epic"; `ehr_write_failure_total` Prometheus counter exceeds 50/hour.
 
 Diagnosis:
-1. Check FHIR API status page (Epic/Cerner publish status at status.epic.com)
+1. Check the EHR vendor's status channel for your tenant. Epic and Oracle Health do not publish a single public status page — status is delivered per-customer through the vendor's support portal, so wire that feed into the runbook during onboarding rather than assuming a public URL exists
 2. Check OAuth token expiry: tokens expire every 1 hour; token refresh failures cascade
 3. Check FHIR payload validation: Epic rejects malformed DocumentReference resources
 
@@ -948,7 +992,7 @@ Resolution:
 Symptoms: claim rejection from payer citing invalid or mismatched ICD-10 code; physician amendment to signed note; pattern detected in post-hoc audit of signed notes.
 
 Diagnosis:
-1. Determine if code existed in ICD-10-CM 2024 database (valid code, wrong context) versus code that was truly hallucinated (nonexistent code)
+1. Determine if the code exists in the ICD-10-CM release that was live on the encounter date (valid code, wrong context) versus code that was truly hallucinated (nonexistent code)
 2. Check ICD-10 validator logs for the affected encounter date — was validator running?
 3. Identify if failure is isolated or systematic (same code appearing across multiple physicians)
 
@@ -966,6 +1010,13 @@ Resolution:
 ---
 
 ## 9. Common Pitfalls & War Stories
+
+> These five are **illustrative composites** drawn from recurring failure patterns
+> in ambient clinical documentation, not incident reports about identifiable health
+> systems. Ticket counts, dollar figures, WER deltas and durations are example
+> magnitudes, not verified public record. The failure mechanisms — HVAC noise floor,
+> unlogged UI reads, valid-but-wrong codes, group-visit diarization collapse,
+> synchronous write-back during shift change — are the transferable part.
 
 **Ambient noise destroying transcription accuracy in procedure rooms**
 
@@ -1020,14 +1071,24 @@ Peak hours: 8am-6pm, 60% of encounters in 10h window (36,000 sec)
 Peak concurrent GPUs: (60,000 x 1,200) / (36,000 x 26) = 77 A10Gs
 Fleet with 30% headroom: 100 A10G GPUs
 
-Cost:
-  On-demand A10G: 100 x $0.75 x 24h = $1,800/day
-  Spot-blended (70% idle off-peak at $0.25/hr): ~$900/day = $27,000/month
-  LLM (SOAP generation): $198,000/month
-  Total COGS: $258,000/month
-  Revenue (5,000 x $150): $750,000/month → gross margin 65.6%
+Cost (AWS g5.xlarge = 1x A10G, us-east-1: $1.006/hr on-demand, $0.647/hr spot):
+  All on-demand:  100 x $1.006 x 24h = $2,414/day = ~$72,400/month
+  Spot-blended (peak 77 on-demand, the rest spot):
+    77 x $1.006 x 24 + 23 x $0.647 x 24 = $1,859 + $357 = ~$2,216/day
+  Right-sized (scale the fleet down off-peak instead of holding 100 GPUs
+  for 24h) brings this to roughly $900-1,100/day = ~$30,000/month
+  LLM (SOAP generation): $55,500/month
+  STT + LLM subtotal: ~$85,500/month
+  Plus storage, networking, audit and app tier: ~$30,000/month
+  Total COGS: ~$115,500/month (matches Section 2)
+  Revenue (5,000 x $150): $750,000/month → gross margin 84.6%
 
-10x scale (500,000 enc/day): 1,000 A10Gs, $270K GPU + $1.98M LLM = 15,000 physicians needed
+10x scale (500,000 enc/day) needs ~1,000 A10Gs and ~$555K/month of LLM spend,
+against ~$300K/month of GPU: ~$855K/month COGS. Serving 500,000 encounters/day
+at the 20-encounters-per-physician-per-day rate above implies 25,000 physicians,
+so revenue is 25,000 x $150 = $3.75M/month — margin holds at ~77% as scale
+increases, because LLM cost is strictly per-encounter while the fixed platform
+tier amortizes.
 ```
 
 ---
@@ -1036,7 +1097,7 @@ Cost:
 
 **Q: Why is self-hosted STT often required for HIPAA rather than using the OpenAI Whisper API?**
 
-HIPAA requires a signed Business Associate Agreement (BAA) with any vendor that processes Protected Health Information. OpenAI does not offer a HIPAA BAA for its standard API products as of 2025. Without a BAA, sending patient audio to the OpenAI Whisper API is a HIPAA violation regardless of encryption in transit. Azure OpenAI Service does offer a HIPAA BAA, which is why Suki AI uses Google Cloud Speech (also with BAA) and why Azure-hosted Whisper is a valid alternative. Self-hosted Whisper within your own VPC eliminates the BAA requirement entirely because PHI never leaves your infrastructure — and at scale, the self-hosted cost at $0.003/min is 82% cheaper than Azure STT at $0.017/min.
+HIPAA requires a signed Business Associate Agreement (BAA) with any vendor that processes Protected Health Information. OpenAI does not offer a HIPAA BAA on its standard self-serve API tier (BAAs are handled through enterprise agreements, so confirm the terms covering your own account rather than assuming either way). Without a BAA, sending patient audio to the OpenAI Whisper API is a HIPAA violation regardless of encryption in transit. Azure OpenAI Service does offer a HIPAA BAA, which is why Suki AI uses Google Cloud Speech (also with BAA) and why Azure-hosted Whisper is a valid alternative. Self-hosted Whisper within your own VPC eliminates the BAA requirement entirely because PHI never leaves your infrastructure — and at scale, the self-hosted cost at $0.003/min is 82% cheaper than Azure STT at $0.017/min.
 
 **Q: How does speaker diarization determine which voice is the physician versus the patient?**
 
@@ -1044,15 +1105,15 @@ Diarization assigns arbitrary labels (SPEAKER_0, SPEAKER_1) based purely on voic
 
 **Q: Why is physician sign-off a legal requirement rather than just a UX feature?**
 
-Under 21 CFR Part 11 (FDA electronic records) and HIPAA, a clinical note in an EHR must be authored and authenticated by a licensed clinician. An AI-generated note has no legal standing until a physician co-signs it. The signature establishes medical-legal responsibility — if the note contains an error that leads to patient harm, the physician who signed is responsible, not the AI vendor. This is why the sign-off cannot be optional or auto-accepted: a note that enters the EHR without physician review is practicing medicine without a license under most state medical boards. The product's value proposition is reducing review time from 15 minutes to 35 seconds, not eliminating review.
+Medical-record authentication is required by the CMS Conditions of Participation, by state medical-record law, and by payer documentation rules. Specifically, 42 CFR 482.24(c) requires every entry in the medical record to be dated, timed and authenticated by the responsible practitioner. It is **not** 21 CFR Part 11 — Part 11 governs electronic records FDA itself relies on (clinical trial data, manufacturing records), not routine EHR clinical notes; citing it here is a common and incorrect shorthand. An unsigned AI-generated draft therefore has no standing in the record. The signature is what establishes medical-legal responsibility: if the note contains an error that leads to patient harm, the physician who signed is answerable for it. That is why sign-off cannot be optional or auto-accepted, and why the FHIR write path in 4.4 refuses to write without a verified signature. The product's value proposition is reducing review time from 15 minutes to 35 seconds, not eliminating review.
 
 **Q: How do you handle ICD-10 code hallucinations where the AI suggests a valid code that is clinically wrong?**
 
-Two-layer validation: first, every suggested code is checked against the ICD-10-CM 2024 database — truly hallucinated codes (nonexistent) are silently dropped before reaching the physician. Second, specialty-context validation catches valid-but-wrong codes: for example, any E11.x (Type 2 DM) code suggested in a pediatric endocrinology encounter triggers a mandatory physician confirmation dialog ("This code indicates Type 2 DM — please confirm vs Type 1 DM"). The 94% accuracy figure measures whether the AI's suggested codes appear in the physician's final signed note; it does not measure whether the correct T1/T2 distinction was made — a separate metric tracks code amendment rate by specialty.
+Two-layer validation: first, every suggested code is checked against the current ICD-10-CM release — truly hallucinated codes (nonexistent) are silently dropped before reaching the physician. Second, specialty-context validation catches valid-but-wrong codes: for example, any E11.x (Type 2 DM) code suggested in a pediatric endocrinology encounter triggers a mandatory physician confirmation dialog ("This code indicates Type 2 DM — please confirm vs Type 1 DM"). The 94% accuracy figure measures whether the AI's suggested codes appear in the physician's final signed note; it does not measure whether the correct T1/T2 distinction was made — a separate metric tracks code amendment rate by specialty.
 
 **Q: What is the difference between FDA SaMD Class I, II, and III and which class does an AI medical scribe fall under?**
 
-SaMD (Software as a Medical Device) classes are determined by the intended use and the risk of harm if the software fails. Class I: general wellness, low risk (e.g. a step counter). Class II: moderate risk, requires 510(k) premarket notification (e.g. Abridge's ambient documentation tool — FDA cleared as Class II in 2024). Class III: high risk, requires Premarket Approval (PMA) — e.g. AI that autonomously diagnoses cancer from imaging. A medical scribe that generates a note draft for physician review is Class II because failure (a wrong code or missed finding) carries risk but a licensed physician catches errors before they affect care. If the AI were to autonomously enter diagnoses into the EHR without physician review, it would be Class III. Most scribe vendors position their products as Class II or avoid the SaMD pathway entirely by designing the product so it has no effect on clinical decisions without physician confirmation.
+SaMD classes are determined by intended use and the risk of harm if the software fails. Class I: low risk, generally exempt (e.g. a step counter). Class II: moderate risk, requires 510(k) premarket notification (e.g. computer-aided detection that flags findings on imaging). Class III: high risk, requires Premarket Approval (PMA) — e.g. software that autonomously diagnoses from imaging with no clinician in the loop. An ambient scribe that drafts a note for physician review generally sits **outside** the device pathway rather than in Class II: it is administrative documentation support, the licensed physician reviews and signs before anything enters the record, and it makes no diagnostic claim. No ambient scribe is known to hold a 510(k) — the openFDA 510(k) database returns no records for the major vendors in this category. The design consequence is that the moment a scribe starts *suggesting diagnoses* rather than transcribing what the clinician said, it moves toward the device pathway — which is exactly why diagnostic suggestion is listed as out of scope in Section 1. Do not state a regulatory classification for any product without checking the FDA databases directly.
 
 **Q: How does FHIR R4 write-back work technically, and what authenticates the write?**
 
@@ -1072,7 +1133,7 @@ The signed note and the physician signature event are committed to the platform'
 
 **Q: Why is per-encounter billing better than per-seat (physician) billing for hospital systems?**
 
-Per-seat billing charges a fixed monthly fee per physician account. Hospital systems have 40-60% of physicians who are low-volume users (part-time, research, administrative roles) — a $150/physician/month per-seat model charges equally for a physician who sees 3 patients per week and one who sees 40. Per-encounter billing ($4-8/note) aligns cost with value: high-volume physicians generate proportional revenue; low-volume physicians remain economical. For the vendor, per-encounter billing also accurately reflects infrastructure costs (each note costs approximately $0.30 in LLM + compute). The risk of per-encounter billing is revenue volatility — a physician vacation reduces monthly revenue. Hospital systems typically prefer predictable budgets, so enterprise contracts often use a minimum-commit model: 1,000 encounters/month guaranteed, overage at per-encounter rate.
+Per-seat billing charges a fixed monthly fee per physician account. Hospital systems have 40-60% of physicians who are low-volume users (part-time, research, administrative roles) — a $150/physician/month per-seat model charges equally for a physician who sees 3 patients per week and one who sees 40. Per-encounter billing ($4-8/note) aligns cost with value: high-volume physicians generate proportional revenue; low-volume physicians remain economical. For the vendor, per-encounter billing also accurately reflects infrastructure costs. Per note that is about $0.02 of LLM (4,200 input + 800 output tokens at GPT-4o's $2.50/$10 per 1M) plus roughly $0.06 of self-hosted STT for a 20-minute encounter — call it under $0.10 marginal, which is why a $4-8 per-note price carries a wide margin. The risk of per-encounter billing is revenue volatility — a physician vacation reduces monthly revenue. Hospital systems typically prefer predictable budgets, so enterprise contracts often use a minimum-commit model: 1,000 encounters/month guaranteed, overage at per-encounter rate.
 
 **Q: How would you handle a patient who speaks Spanish while their physician speaks English?**
 

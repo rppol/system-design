@@ -45,7 +45,7 @@ Average tokens per document: 10,000 tokens
 Chunks per document: ~22 chunks
 Total chunks: 10M × 22 = 220M chunks
 
-Embedding dimension: 1,536 (OpenAI text-embedding-3-large)
+Embedding dimension: 1,536 (OpenAI text-embedding-3-small; the -large model is 3,072-dim)
 Storage per chunk embedding: 1,536 × 4 bytes = 6KB
 Total embedding storage: 220M × 6KB = 1.32TB
 
@@ -93,7 +93,7 @@ flowchart TD
         MF --> FUSE
         FUSE --> RR["Reranking Service\ncross-encoder reranker\ntop-50 → top-5"]
         RR --> CA["Context Assembly Service\nfetch full chunk text · add surrounding context\nformat with citations"]
-        CA --> GEN["LLM Generation Service\nGPT-4o / Claude 3.5\ngrounded response generation"]
+        CA --> GEN["LLM Generation Service\nGPT-4o / Claude Sonnet 5\ngrounded response generation"]
         GEN --> PP["Response Post-processing\ncitation formatting · factuality check\nsource verification"]
         PP --> UR(["User Response\nanswer + citations"])
     end
@@ -222,7 +222,12 @@ Stage 2 (cross-encoder): ~100ms for 50 documents
 Cross-encoder models:
   Open source: ms-marco-MiniLM-L-12-v2 (fastest, good quality)
               bge-reranker-large (best quality, slower)
-  Commercial: Cohere Rerank 3 (best overall; $1/1K calls)
+  Commercial: Cohere Rerank 4 (current generation; Rerank 4 Pro also offered as a
+              dedicated Model Vault instance at $5.00/hour). Cohere bills per
+              "search unit" = one query with up to 100 documents; documents over
+              500 tokens are split into chunks that each count separately, so a
+              50-document rerank of long chunks can bill as more than one unit.
+              Check the current per-unit API rate before modelling cost.
 
 Reranker input:
   Query: "unlimited liability clause"
@@ -416,7 +421,11 @@ LLM generates 3 variants:
   3. "vendor indemnification and liability provisions"
 
 Run retrieval for all 4 queries, union results, deduplicate, rerank
-Result: 40% improvement in recall for complex queries
+Result on this pipeline's internal eval set: roughly 40% relative recall gain on
+complex, multi-entity queries — and near zero on simple factual lookups, which is
+why it is gated on a complexity classifier rather than applied to all traffic.
+This is an internal measurement, not a published benchmark; re-measure on your own
+eval set before budgeting for it.
 ```
 
 ### HyDE (Hypothetical Document Embedding)
@@ -436,6 +445,10 @@ Benefit: hypothetical answer contains technical vocabulary that matches document
 
 ## 7. Trade-offs and Design Decisions
 
+Percentage deltas in the Reason column are this pipeline's own eval-set measurements
+on enterprise document retrieval, not published benchmark results. They set the
+expected direction and rough magnitude; the actual numbers are corpus-dependent.
+
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
 | Chunking | Semantic boundaries | Fixed size | Semantic chunks have higher retrieval quality |
@@ -443,7 +456,7 @@ Benefit: hypothetical answer contains technical vocabulary that matches document
 | Reranker | Cross-encoder (top-50 → 5) | None | +25% accuracy; adds 100ms acceptable for quality |
 | Vector DB | Qdrant | Pinecone, Weaviate | Open source; tenant filtering; self-hostable |
 | Tenant isolation | Filter at query time | Separate indexes | Balance: performance vs cost (separate indexes for high-compliance) |
-| LLM | GPT-4o | Claude 3.5, Llama 3 | Quality on complex queries; grounding instructions |
+| LLM | GPT-4o | Claude Sonnet 5, Llama 3.3 70B | Quality on complex queries; grounding instructions |
 | Citations | Inline + summary | None | Increases user trust; enables source verification |
 
 ---
@@ -479,18 +492,22 @@ Benefit: hypothetical answer contains technical vocabulary that matches document
 ## 9. Cost Analysis
 
 ```
-For 5M queries/day, 10M documents:
+For 5M queries/day, 10M documents. All list prices as of 2026-07.
 
-Embedding costs (query time):
-  5M queries × 1 embedding × $0.0001/1K tokens × 100 tokens = $50/day
+Embedding costs (query time), text-embedding-3-small at $0.02/1M tokens:
+  5M queries × 100 tokens = 500M tokens = 500 MTok × $0.02 = $10/day
 
-Reranking costs (Cohere Rerank):
-  5M queries × 50 docs × $0.001/1K docs = $250/day
+Reranking costs (self-hosted cross-encoder, consistent with Section 12):
+  5M queries × 50 candidates = 250M cross-encoder passes/day
+  Amortized GPU fleet: ~$400/day
+  (Managed Cohere Rerank bills per search unit — one query with up to 100
+   documents — so 5M queries is at least 5M search units. Check the current
+   per-unit rate before substituting; it dominates this line item if used.)
 
-LLM generation costs (GPT-4o, $5/1M input, $15/1M output):
-  5M queries × 1,000 input tokens × $5/1M = $25,000/day
-  5M queries × 300 output tokens × $15/1M = $22,500/day
-  LLM total: $47,500/day
+LLM generation costs (GPT-4o at $2.50/1M input, $10/1M output):
+  5M × 1,000 input tokens  = 5,000 MTok × $2.50 = $12,500/day
+  5M ×   300 output tokens = 1,500 MTok × $10   = $15,000/day
+  LLM total: $27,500/day
 
 Infrastructure:
   Qdrant cluster (3 nodes, 16 cores, 64GB RAM each): ~$300/day
@@ -498,13 +515,17 @@ Infrastructure:
   GPU servers for embedding generation: ~$100/day
   Total infra: ~$600/day
 
-TOTAL: ~$48,400/day ≈ $1.45M/month
+TOTAL: ~$28,510/day ≈ $855K/month
 
 Optimization strategies:
-  - Semantic caching (30% repeat queries) → cache LLM responses → save $14,250/day
-  - Use Claude Haiku for simple queries (80% of traffic) → 10× cheaper LLM
-  - Use local embedding model (E5-large) → eliminate $50/day embedding cost
-  Optimized total: ~$15,000/day ≈ $450K/month (70% cost reduction)
+  - Semantic caching (30% repeat queries) → save 0.30 × $27,500 = $8,250/day;
+    3.5M uncached queries/day remain
+  - Route 80% of the remainder to Claude Haiku 4.5 ($1/1M in, $5/1M out):
+    per-query GPT-4o = $0.0055, Haiku 4.5 = $0.0025
+    2.8M × $0.0025 + 0.7M × $0.0055 = $7,000 + $3,850 = $10,850/day
+  - Local embedding model (E5-large) → eliminates the $10/day embedding cost
+  Optimized total: $10,850 + $400 + $600 ≈ $11,850/day ≈ $356K/month
+  (58% reduction, driven almost entirely by model routing, not by caching)
 ```
 
 ---
@@ -519,15 +540,19 @@ Optimization strategies:
 
 **Monitoring for RAG drift.** Unlike static software, RAG quality degrades silently as: (1) documents go stale, (2) query distribution shifts, (3) embedding model updates change the embedding space. Run RAGAS evaluation weekly and alert on degradation.
 
-**When to upgrade the pipeline.** Start simple: single retrieval pass + GPT-4. Add complexity only when measurements show where quality fails: low recall → add hybrid; low faithfulness → improve grounding prompts; slow latency → add caching; complex queries → add multi-query expansion.
+**When to upgrade the pipeline.** Start simple: single retrieval pass + one capable generation model. Add complexity only when measurements show where quality fails: low recall → add hybrid; low faithfulness → improve grounding prompts; slow latency → add caching; complex queries → add multi-query expansion.
 
 ---
 
 ## 11. Production Failure Scenarios
 
+> Both incidents below are **illustrative composites**, not reports of named public
+> outages. The similarity/faithfulness numbers are example magnitudes chosen to show
+> the shape of the failure; the mechanisms are the transferable part.
+
 ### Incident 1: Embedding Model Update Breaks Retrieval Without Warning
 
-**What happened:** The team upgraded `text-embedding-ada-002` to `text-embedding-3-small`. The new model's embeddings are not compatible with ada-002 (different vector space, different dimensionality: 1536 vs 1536 but different distribution). The FAISS index was not rebuilt. Retrieval cosine similarity dropped from 0.82 average to 0.31 — the index returned semantically irrelevant documents. Faithfulness score dropped from 0.87 to 0.31 in RAGAS evaluation. Production queries started returning wrong answers. The degradation was silent — no code exception, no HTTP error — for 4 hours until a user reported incorrect answers.
+**What happened:** The team migrated from `text-embedding-ada-002` (retired by OpenAI on 2024-01-04) to `text-embedding-3-small`. Both models emit 1,536-dimensional vectors, so nothing about the shape changed — and that is exactly why the failure was silent: the vectors occupy a *different embedding space*, so old index entries and new query vectors are simply not comparable, yet every array dimension check still passes. The FAISS index was not rebuilt. Average retrieval cosine similarity fell from ~0.82 to ~0.31 and the index began returning semantically irrelevant documents; RAGAS faithfulness fell correspondingly. No exception, no HTTP error — the degradation ran for hours until a user reported wrong answers.
 
 **Root cause:** No compatibility validation between the embedding model version used to build the index and the model used at query time.
 
@@ -541,7 +566,10 @@ def get_model_fingerprint(model_name: str, sample_text: str = "hello world") -> 
     import openai
     response = openai.embeddings.create(model=model_name, input=sample_text)
     vec = response.data[0].embedding[:10]  # first 10 dims are sufficient for identity
-    return hashlib.sha256(json.dumps(vec, ndigits=6).encode()).hexdigest()[:16]
+    # json.dumps has no `ndigits` argument — round the values, then serialize.
+    return hashlib.sha256(
+        json.dumps([round(x, 6) for x in vec]).encode()
+    ).hexdigest()[:16]
 
 class SafeVectorIndex:
     def __init__(self, index_path: str, model_fingerprint: str) -> None:
@@ -605,10 +633,14 @@ def build_prompt_with_context_budget(
         used_tokens += chunk_tokens
 
     if len(selected_chunks) < len(chunks):
-        # Inform the model it has partial context
-        partial_notice = f"[Note: {len(chunks) - len(selected_chunks)} additional sources "
-                         f"were omitted due to length limits. This answer is based on "
-                         f"{len(selected_chunks)} of {len(chunks)} retrieved sources.]\n\n"
+        # Inform the model it has partial context.
+        # Implicit string concatenation across lines needs enclosing parentheses;
+        # without them this is a SyntaxError, not a multi-line string.
+        partial_notice = (
+            f"[Note: {len(chunks) - len(selected_chunks)} additional sources "
+            f"were omitted due to length limits. This answer is based on "
+            f"{len(selected_chunks)} of {len(chunks)} retrieved sources.]\n\n"
+        )
     else:
         partial_notice = ""
 
@@ -621,33 +653,43 @@ def build_prompt_with_context_budget(
 
 ## 12. Capacity Planning Math
 
-**Target:** 500 concurrent enterprise users, 10M queries/month, corpus of 10M documents (100GB source text).
+**Target:** 500 concurrent enterprise users, 10M queries/month, corpus of 10M documents (500 GB source text, per Section 2). Note this is a *smaller query tier* than the 5M queries/day (150M/month) headline in Section 1 — the index sizing below is shared, but scale the serving fleet and the query-cost lines by 15x for that tier.
 
 ```
 Infrastructure sizing:
 
-Vector Index (FAISS HNSW):
-  10M documents × 10 chunks/doc = 100M vectors
+Vector Index (FAISS HNSW) — same corpus as Section 2 (22 chunks/doc, not 10):
+  10M documents × 22 chunks/doc = 220M vectors
   Embedding dimension: 1536 (text-embedding-3-small)
-  Storage: 100M × 1536 × 4 bytes (fp32) = 614 GB raw vectors
-  HNSW graph overhead: ~30 GB additional
-  Total RAM required: ~650 GB → 3 × r6g.8xlarge (each 256 GB RAM)
-  HNSW ef_search=64 → 97% recall at 12ms per query
+  Storage: 220M × 1536 × 4 bytes (fp32) = 1.35 TB raw vectors
+  HNSW graph overhead (M=16, so 32 links on layer 0): 220M × 32 × 4 B ≈ 28 GB
+  Total RAM required: ~1.38 TB → 6 × r6g.8xlarge (each 256 GiB RAM = 1.5 TB)
+  ef_search=64 gives roughly 97% recall at ~12ms/query on this index —
+  measure recall@k on your own corpus; it is index- and data-dependent,
+  not a published constant.
 
-Ingestion pipeline (indexing new documents):
-  Embedding throughput: text-embedding-3-small = 10,000 tokens/s via batch API
-  100 GB corpus (avg 500 tokens/chunk): 200M tokens total
-  Indexing time: 200M / 10,000 = 20,000 seconds ≈ 5.6 hours for initial build
+Ingestion pipeline (initial build):
+  Corpus: 10M docs × 10,000 tokens/doc = 100B tokens (500 GB text, per Section 2)
+  Embedding throughput: ~10,000 tokens/s per concurrent batch stream
+  Serial time: 100B / 10,000 = 10M worker-seconds = 2,778 worker-hours
+  With 200 parallel streams: ~14 hours for the initial build
   Incremental ingestion (100 new docs/day): < 5 minutes
 
-Query cost at 10M queries/month:
-  Retrieval (embedding query): 10M × 0.02 cents/1k tokens × 0.2k avg = $400/month
-  LLM generation (GPT-4o-mini, avg 600 output tokens): 
-    10M × 600 tok × $0.015/1k = $90,000/month
+Query cost at 10M queries/month (list prices as of 2026-07):
+  Retrieval (query embedding), text-embedding-3-small at $0.02/1M:
+    10M × 200 tokens = 2,000 MTok × $0.02 = $40/month
+  LLM generation (GPT-4o-mini at $0.15/1M in, $0.60/1M out; 1,000 in + 600 out):
+    10M × 1,000 = 10,000 MTok × $0.15 = $1,500/month
+    10M ×   600 =  6,000 MTok × $0.60 = $3,600/month
+    Subtotal: $5,100/month
   Reranker inference (MiniLM, 50 candidates × 10M): self-hosted, $800/month GPU
   Redis semantic cache (30% hit rate saves 3M LLM calls):
-    Savings: 3M × 600 tok × $0.015/1k = $27,000/month
-  Net LLM cost: $90,000 - $27,000 = $63,000/month
+    Savings: 0.30 × $5,100 = $1,530/month
+  Net LLM cost: $5,100 - $1,530 = $3,570/month
+
+Note the shape of this bill: at GPT-4o-mini prices the LLM is no longer the
+dominant line item — the reranker GPU is. Re-derive which component dominates
+whenever you change models; the answer is not stable across price generations.
 ```
 
 ---
@@ -776,7 +818,7 @@ SMB Pool (< 100 documents each)
 Chunk-level versioning: maintain a `chunks` table with `{chunk_id, doc_id, section_hash, embedding, indexed_at}`. When a document is updated, re-parse only the modified sections (detected by section hash comparison). Delete stale chunks from the FAISS index by their IDs (using `IndexIDMap.remove_ids`), re-embed the updated sections, and add the new chunks with new IDs. This allows surgical updates without full re-indexing. Limitation: if the document's structure changes significantly (sections merged, reordered), full re-indexing is necessary — structure change detection is done by comparing the table of contents before and after the update.
 
 **Q: When should you use a local embedding model (E5-large, BGE) vs. the OpenAI API for embeddings?**
-Local model criteria: (1) cost at scale: at > 1B tokens/month, self-hosting E5-large on A10G ($1.10/hr) costs ~$13/month vs. text-embedding-3-small at $0.02/1M tokens = $20,000/month — local wins decisively above ~100M tokens/month; (2) latency: local inference adds 2ms vs. API's 50-80ms round trip — critical for real-time applications; (3) data privacy: regulated industries (healthcare, finance) cannot send documents to third-party APIs. OpenAI API criteria: (1) text-embedding-3-large quality is 5-8% better than open-source alternatives on most benchmarks — justified for high-precision retrieval; (2) no infrastructure to manage; (3) at < 10M tokens/month, API cost ($0.20) is lower than GPU instance amortization.
+Cost is almost never the reason — run the arithmetic before assuming self-hosting is cheaper. text-embedding-3-small is $0.02 per 1M tokens, so 1B tokens/month costs $20; a g5.xlarge (1x A10G) is $1.006/hr on-demand in us-east-1, which is ~$734/month running continuously (~$472/month at the $0.647/hr spot rate). The API stays cheaper until roughly 37B tokens/month, and at 10M tokens/month it costs $0.20 against a three-figure GPU bill. The real local-model criteria are: (1) latency — local inference adds ~2ms versus 50-80ms for an API round trip, which matters for real-time paths; (2) data residency — regulated industries (healthcare, finance) cannot send documents to third-party APIs at all, at any price; (3) avoiding a vendor's model-deprecation cycle forcing a full re-index. API criteria: no infrastructure to manage, and higher retrieval quality than most open-source alternatives on MTEB-style leaderboards — benchmark both on your own corpus rather than trusting a leaderboard delta, since retrieval quality is highly domain-dependent.
 
 **Q: How do you decide how many chunks (top-k) to pass to the LLM after retrieval and reranking?**
 Pass the fewest chunks that cover the answer — typically 3-10 for most RAG applications — because irrelevant chunks in context actively degrade generation quality even when the top chunks are correct (the "lost in the middle" effect). Bound it two ways: by the context budget (with a 128K window and 512-token chunks you could fit ~200 chunks, but rarely should) and by a relevance floor (drop any reranked chunk below a score threshold, e.g., Cohere relevance < 0.3). Empirically, going from top-5 to top-20 raises recall but starts lowering answer precision as noise accumulates; tune k on a labeled eval set by plotting faithfulness and answer relevancy against k and picking the knee. When fewer than 2-3 chunks clear the relevance floor, abstain ("I don't have enough information") rather than padding context with weak matches.

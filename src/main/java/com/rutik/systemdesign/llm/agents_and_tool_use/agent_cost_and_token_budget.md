@@ -71,18 +71,22 @@ Ten calls, but you paid for 14.5 calls' worth of a flat context. Step 10 alone c
 
 ## 4. Types / Architectures / Strategies
 
-### 4.1 Pricing Reference (early 2025)
+### 4.1 Pricing Reference (July 2026)
 
 | Model | Input $/M | Output $/M | Cache write $/M | Cache read $/M |
 |---|---|---|---|---|
-| Claude Haiku 4.5 | $0.80 | $4.00 | $1.00 | $0.08 |
+| Claude Haiku 4.5 | $1.00 | $5.00 | $1.25 | $0.10 |
 | Claude Sonnet 4.6 | $3.00 | $15.00 | $3.75 | $0.30 |
-| Claude Opus 4.7 | $15.00 | $75.00 | $18.75 | $1.50 |
-| GPT-4o mini | $0.15 | $0.60 | — | — |
-| GPT-4o | $2.50 | $10.00 | — | $1.25 (50% off) |
-| OpenAI o1 | $15.00 | $60.00 | — | — |
-| Gemini 1.5 Flash | $0.075 | $0.30 | — | $0.019 |
-| Gemini 1.5 Pro | $1.25 | $5.00 | — | $0.3125 |
+| Claude Opus 4.7 | $5.00 | $25.00 | $6.25 | $0.50 |
+| Claude Opus 5 | $5.00 | $25.00 | $6.25 | $0.50 |
+| gpt-5.4-nano | $0.20 | $1.25 | — | $0.02 (90% off) |
+| gpt-5.4-mini | $0.75 | $4.50 | — | $0.075 (90% off) |
+| gpt-5.4 | $2.50 | $15.00 | — | $0.25 (90% off) |
+| gpt-5.6-sol | $5.00 | $30.00 | — | $0.50 (90% off) |
+| Gemini 2.5 Flash-Lite | $0.10 | $0.40 | — | $0.01 |
+| Gemini 2.5 Pro (≤200K) | $1.25 | $10.00 | — | $0.125 |
+
+Anthropic cache-write/read multipliers are `1.25×` and `0.1×` of that model's input price, so the two cache columns above are derived, not independently quoted. OpenAI's cached-input discount is 90% (cached tokens bill at 10% of the input rate) and applies automatically to repeated prefixes; Google's context-caching price is a per-token read rate plus an hourly storage charge ($1.00/M-tokens/hour for Flash-tier, $4.50 for Pro-tier).
 
 Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA. Full per-token pricing mechanics and self-hosting break-even analysis: [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md).
 
@@ -96,7 +100,7 @@ Start cheap, escalate on confidence threshold or explicit hard-step detection. T
 
 ### 4.4 Context Compaction
 
-When input_tokens approaches 70% of model's window, summarize all-but-last-N tool results. Compaction itself is one extra LLM call but pays back across remaining iterations.
+When input_tokens approaches 70% of the agent's working token budget, summarize all-but-last-N tool results. Compaction itself is one extra LLM call but pays back across remaining iterations.
 
 ### 4.5 Targeted Tool Output Extraction
 
@@ -120,7 +124,7 @@ xychart-beta
     line [0.006, 0.012, 0.024, 0.048, 0.096, 0.150, 0.210, 0.300, 0.090, 0.105]
 ```
 
-Context grows 2K → 100K tokens by step 8 — the compaction trigger (70% of the 200K window) — driving per-call cost to $0.300; compacting back to 30K makes step 9 cost $0.090. Total for the 10-step run: $1.04 without compaction vs $0.72 with compaction at step 8.
+Context grows 2K → 100K tokens by step 8 — the compaction trigger for an agent whose self-imposed working budget is ~143K tokens (100K is 70% of it) — driving per-call cost to $0.300; compacting back to 30K makes step 9 cost $0.090. The plotted series sums to $1.04 for the whole 10-step run. Had steps 9 and 10 kept growing at the same ~30K/step instead (130K → $0.39, 160K → $0.48), the run would have cost $1.72 — so compacting once at step 8 saved $0.68, or 39%.
 
 ### Cost Accumulation With Caching
 
@@ -196,7 +200,7 @@ Without cascade (all Opus): $0.05/step. With cascade (80% easy, 20% hard): 0.8×
 | `f_easy` | Fraction of steps routed to the cheap model. Here `0.8` |
 | `f_hard` | The remainder, `1 - f_easy = 0.2` — steps escalated to Opus |
 | `c_easy` | Haiku cost per step, `$0.005` |
-| `c_hard` | Opus cost per step, `$0.05` — 10× the cheap one |
+| `c_hard` | Opus cost per step, `$0.05` — 10× the cheap one. Note Opus list price is only 5× Haiku's per token (§4.1); the other 2× comes from hard steps generating roughly twice the output |
 | `c_router` | Classification overhead paid on *every* step, `$0.0005` |
 | blended | `f_easy x c_easy + f_hard x c_hard + c_router` |
 
@@ -215,7 +219,7 @@ Without cascade (all Opus): $0.05/step. With cascade (80% easy, 20% hard): 0.8×
      0.8 x 0.005 + 0.2 x 0.05 + 0.0005 = $0.0145   ->  71% (not 72%)
 ```
 
-**Why the 10× price gap makes `f_hard` the only knob that matters.** Because `c_hard` is 10× `c_easy`, the hard branch dominates the average the moment `f_hard` clears about 10%: at `f_hard = 0.2` the 20% of hard steps contribute `$0.010` of the `$0.014` total — 71% of the bill from a fifth of the traffic. So cascade savings are a bet on router *precision*, not on the cheap model being cheap. A router that over-escalates from 20% to 50% keeps only half the promised win, and the router's own `$0.0005` per step is noise by comparison — it costs 1 percentage point of savings.
+**Why the 10× cost gap makes `f_hard` the only knob that matters.** Because `c_hard` is 10× `c_easy`, the hard branch dominates the average the moment `f_hard` clears about 10%: at `f_hard = 0.2` the 20% of hard steps contribute `$0.010` of the `$0.014` total — 71% of the bill from a fifth of the traffic. So cascade savings are a bet on router *precision*, not on the cheap model being cheap. A router that over-escalates from 20% to 50% keeps only half the promised win, and the router's own `$0.0005` per step is noise by comparison — it costs 1 percentage point of savings.
 
 ### Cost Attribution Per Tool Call
 
@@ -291,12 +295,12 @@ PRICING = {
         "cache_write": 3.75e-6, "cache_read": 0.30e-6,
     },
     "claude-haiku-4-5": {
-        "input": 0.80e-6, "output": 4.00e-6,
-        "cache_write": 1.00e-6, "cache_read": 0.08e-6,
+        "input": 1.00e-6, "output": 5.00e-6,
+        "cache_write": 1.25e-6, "cache_read": 0.10e-6,
     },
     "claude-opus-4-7": {
-        "input": 15.00e-6, "output": 75.00e-6,
-        "cache_write": 18.75e-6, "cache_read": 1.50e-6,
+        "input": 5.00e-6, "output": 25.00e-6,
+        "cache_write": 6.25e-6, "cache_read": 0.50e-6,
     },
 }
 
@@ -472,13 +476,13 @@ def read_file_targeted(path: str, grep: str | None = None, lines: str | None = N
 
 ## 7. Real-World Examples
 
-**Cursor Composer** uses prompt caching extensively — file contents are cached so iterative edits don't re-pay for file context on every turn. Reports caching cuts their per-user cost 60%.
+**Cursor Composer** uses prompt caching extensively — file contents are cached so iterative edits don't re-pay for file context on every turn. Cursor has not published a per-user cost-reduction figure; treat any specific percentage you see quoted as unverified.
 
-**Claude Code** maintains `CLAUDE.md` as a long-lived cached prefix. Project-level conventions injected at the start of every conversation; cached so subsequent calls in a session are ~$0.0001 input cost instead of $0.005.
+**Claude Code** maintains `CLAUDE.md` as a long-lived cached prefix. Project-level conventions injected at the start of every conversation; cached so subsequent calls in a session bill that prefix at the `0.1×` cache-read rate instead of full input price.
 
 **OpenAI ChatGPT memory feature** uses retrieval-augmented prompting (only relevant memories injected) vs prompt-concatenating all memories — keeps cost flat as memory grows.
 
-**Production support agent at a fintech**: started uncapped at $4200/month; added budgets + caching + targeted file extraction → $980/month for same traffic (77% reduction).
+**Illustrative composite — production support agent at a fintech**: started uncapped at $4,200/month; added budgets + caching + targeted file extraction → $980/month for the same traffic (77% reduction). Anonymized and reconstructed from the mechanics above, not a published case.
 
 ---
 
@@ -565,7 +569,7 @@ messages = [{"role": "user", "content": f"Today is {datetime.now()}\n\nQuery: {q
 # System cached; user content dynamic
 ```
 
-**War story**: A SaaS team's agent feature went viral; bills jumped 18× in one week. Root cause: a single power user's automated workflow triggered 20K agent runs/day, each agent hitting an infinite loop reading the same 200KB file. Three fixes: (1) per-user daily cost cap ($5), (2) per-task budget ($0.20), (3) tool output cap (50KB). Bill dropped 85% with no perceptible quality loss.
+**War story (illustrative composite, not a published incident)**: A SaaS team's agent feature went viral; bills jumped 18× in one week. Root cause: a single power user's automated workflow triggered 20K agent runs/day, each agent hitting an infinite loop reading the same 200KB file. Three fixes: (1) per-user daily cost cap ($5), (2) per-task budget ($0.20), (3) tool output cap (50KB). Bill dropped 85% with no perceptible quality loss.
 
 ---
 
@@ -574,7 +578,7 @@ messages = [{"role": "user", "content": f"Today is {datetime.now()}\n\nQuery: {q
 | Tool | Purpose |
 |---|---|
 | Anthropic prompt caching | Native cache_control |
-| OpenAI Prompt Caching (50% off cached reads) | Auto for repeated prefixes |
+| OpenAI Prompt Caching (90% off cached input) | Auto for repeated prefixes |
 | OpenAI Batch API (50% off, 24h SLA) | Async workloads |
 | Anthropic Message Batches API | Batch processing |
 | LangSmith / Langfuse | Cost tracking dashboards |
@@ -590,7 +594,7 @@ messages = [{"role": "user", "content": f"Today is {datetime.now()}\n\nQuery: {q
 Agent loops send the ENTIRE conversation history on every API call. After N tool calls, the input context contains all N prior tool results, plus reasoning, plus the new user message. Cost is O(N²) in conversation length, not O(N). A 20-step agent with average 3K-token tool outputs costs ~30× a single completion at the same output budget.
 
 **Q: What does Anthropic's prompt caching cost and when does it pay back?**
-Cache writes cost 1.25× base input price. Cache reads cost 0.1× base input price. The cache TTL is 5 minutes (ephemeral) or 1 hour (with `cache_control: {"type": "ephemeral", "ttl": "1h"}`). Breakeven is after 2 reads — so any prefix called >2 times in the cache window is a net win.
+Cache writes cost 1.25× base input price. Cache reads cost 0.1× base input price. The cache TTL is 5 minutes (ephemeral) or 1 hour (with `cache_control: {"type": "ephemeral", "ttl": "1h"}`). With the 5-minute TTL, the first read already pays the write back (1.25 + 0.1 = 1.35 vs 2.0 uncached), so any prefix used twice in the cache window is a net win; the 1-hour TTL costs 2× to write and needs three uses (2.0 + 0.2 = 2.2 vs 3.0).
 
 **Q: How do you implement a hard cost cap on an agent?**
 Track cumulative input_tokens, output_tokens, cache_read_tokens, cache_write_tokens after every API call (from `response.usage`). Multiply by the model's pricing. Before every iteration, check if cumulative cost exceeds the budget; if so, return a partial result with a "budget exceeded" marker. Always set max_iterations as a backup cap.
@@ -599,10 +603,10 @@ Track cumulative input_tokens, output_tokens, cache_read_tokens, cache_write_tok
 Use Batch API when: (a) task is async/offline (overnight processing, daily reports), (b) latency tolerance is >1 hour, (c) cost matters and you can wait. Batch is 50% cheaper but has 24h SLA. Use synchronous for: any user-facing latency, real-time agents, interactive applications.
 
 **Q: What is the right context compaction trigger and strategy?**
-Trigger at 70% of the model's context window (Claude: 200K → trigger at 140K). Strategy: summarize all-but-the-last-4 tool result pairs into 5-10 bullet points using a cheaper model (Haiku). Replace the early conversation with the summary. Keep the most recent results verbatim since they're usually the most relevant for the next decision.
+Trigger at 70% of your working token budget, not of the model's raw context window. Current Claude models expose a 1M-token window, and Haiku 4.5 a 200K one, but agents rarely want to pay for a full million — so set a self-imposed ceiling (say 200K) and compact at 70% of that, 140K. Strategy: summarize all-but-the-last-4 tool result pairs into 5-10 bullet points using a cheaper model (Haiku). Replace the early conversation with the summary. Keep the most recent results verbatim since they're usually the most relevant for the next decision.
 
 **Q: How do you decide which model to use in a cascade?**
-Static heuristic: routing/classification → Haiku (cheap, fast). Standard tool use → Sonnet (good balance). Complex multi-step reasoning, code generation → Opus or o1. Dynamic: use a router LLM call (Haiku) to classify task difficulty, route to model. Most production systems use static heuristics for predictability.
+Static heuristic: routing/classification → Haiku (cheap, fast). Standard tool use → Sonnet (good balance). Complex multi-step reasoning and code generation → Opus, or a raised `effort` level on the same model. Dynamic: use a router LLM call (Haiku) to classify task difficulty, route to model. Most production systems use static heuristics for predictability.
 
 **Q: What is the typical cost reduction from model cascading?**
 60-80% if your task mix is 70-80% "easy" (handled by Haiku) and 20-30% "hard" (needs Sonnet/Opus). Compute the per-task cost across the mix vs all-Opus baseline. The savings come not just from cheaper model price but also from cheaper models being faster (lower latency, less wall-clock spent).
@@ -623,7 +627,7 @@ Ephemeral (5-min TTL) costs the standard 1.25× write / 0.1× read. 1-hour cache
 Both. You can add `cache_control: {"type": "ephemeral"}` to any content block. For agents: cache the system prompt always (most stable), cache the tools definition (also stable), and optionally cache the conversation history up through the last "checkpoint" (a stable point you don't expect to change). Up to 4 cache breakpoints per request on Anthropic.
 
 **Q: What is the LiteLLM router and how does it help with cost?**
-LiteLLM is a proxy that sits in front of LLM APIs. It provides: (a) per-team and per-key budget caps (block requests when exceeded), (b) per-model spend tracking and reporting, (c) automatic failover between providers (e.g., Claude → GPT-4o if Anthropic is rate-limited), (d) semantic caching (return cached response for similar prompts). Critical for multi-team enterprise deployments.
+LiteLLM is a proxy that sits in front of LLM APIs. It provides: (a) per-team and per-key budget caps (block requests when exceeded), (b) per-model spend tracking and reporting, (c) automatic failover between providers (e.g., Claude → an OpenAI GPT-5.4-tier model if Anthropic is rate-limited), (d) semantic caching (return cached response for similar prompts). Critical for multi-team enterprise deployments.
 
 **Q: How do you forecast cost for a new agent feature?**
 (1) Run 20-50 representative tasks through a prototype, capture actual token usage. (2) Compute mean/p50/p95/p99 cost per task. (3) Multiply by expected traffic. (4) Add 30% safety margin for prompt injections and edge cases. (5) Set per-task budget at p95 + 50%. Always re-measure after first week of production — real traffic differs from prototyping.
@@ -656,13 +660,15 @@ For typical agents with 2-3K-token system prompts and tools, caching saves 60-75
 
 **Optimizations applied (month 2)**:
 
-1. **Prompt caching**: cached 3500-token system prompt + 1200-token tool definitions. Cache hit rate after 1 week: 92%. **Saved: $0.18/conversation.**
+Savings below are *marginal* — each is measured against the state after the previous optimization was already in place, so they sum exactly to the total reduction rather than double-counting the same tokens.
 
-2. **Model cascade**: routing/classification on Haiku, tool use on Sonnet, only "complex resolution" on Opus. 78% of tasks resolved without Opus. **Saved: $0.06/conversation.**
+1. **Prompt caching**: cached 3500-token system prompt + 1200-token tool definitions. Cache hit rate after 1 week: 92%. **Saved: $0.148/conversation.**
 
-3. **Tool output truncation**: capped CRM lookups at 30KB (was returning 100-300KB customer history). **Saved: $0.05/conversation.**
+2. **Model cascade**: routing/classification on Haiku, tool use on Sonnet, only "complex resolution" on Opus. 78% of tasks resolved without Opus. **Saved: $0.060/conversation.**
 
-4. **Context compaction at 70%**: triggered on long debugging conversations. **Saved: $0.02/conversation.**
+3. **Tool output truncation**: capped CRM lookups at 30KB (was returning 100-300KB customer history). **Saved: $0.040/conversation.**
+
+4. **Context compaction at 70%**: triggered on long debugging conversations. **Saved: $0.020/conversation.**
 
 5. **Per-user daily cap**: $3/day per support session. Prevented one prompt-injection attack that would have cost $400 in one user-session.
 

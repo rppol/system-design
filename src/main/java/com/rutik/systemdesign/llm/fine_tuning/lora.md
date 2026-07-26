@@ -4,7 +4,7 @@
 
 LoRA (Low-Rank Adaptation, Hu et al. 2021) is a [parameter-efficient fine-tuning](peft_methods.md) method that adds small trainable matrices alongside frozen pre-trained weights. Instead of updating all d×k parameters in a weight matrix W, LoRA decomposes the update ΔW into a product of two low-rank matrices: ΔW = B × A, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d, k).
 
-For a 7B model where a typical attention weight matrix is 4096×4096, the full update is 16.7M parameters. LoRA at rank 16 decomposes this into a 16×4096 + 4096×16 = 131K parameter update — 127× fewer parameters for one weight matrix. Across all target modules, LoRA adds ~0.1-1% of the total model parameters as trainable.
+For a 7B model where a typical attention weight matrix is 4096×4096, the full update is 16.7M parameters. LoRA at rank 16 decomposes this into a 16×4096 + 4096×16 = 131K parameter update — 128× fewer parameters for one weight matrix. Across all target modules, LoRA adds ~0.1-1% of the total model parameters as trainable.
 
 ---
 
@@ -14,9 +14,9 @@ For a 7B model where a typical attention weight matrix is 4096×4096, the full u
 
 **Mental model**: Pre-trained model weights encode general language and world knowledge. Fine-tuning teaches the model new task-specific behavior. The key insight is that the necessary weight updates have low intrinsic rank — the "direction of change" during fine-tuning can be captured by a low-dimensional subspace. LoRA explicitly enforces this: ΔW = B×A forces the update to live in an r-dimensional subspace. Because fine-tuning changes are empirically low-rank, this constraint loses little quality while reducing trainable parameters by 100-1000×.
 
-**Why it matters**: LoRA reduced the compute and memory requirements for LLM fine-tuning from "requires a compute cluster" to "works on two to four consumer GPUs." This democratized fine-tuning: researchers, startups, and individuals can now produce production-quality specialized models from open-source base models.
+**Why it matters**: LoRA reduced the compute and memory requirements for LLM fine-tuning from "requires a compute cluster" to "works on one 16-24 GB consumer GPU" for a 7B model. This democratized fine-tuning: researchers, startups, and individuals can now produce production-quality specialized models from open-source base models.
 
-**Key insight**: The intrinsic dimensionality hypothesis — that the important variation in weight updates during fine-tuning lies in a low-rank subspace — is what makes LoRA work. It's not an approximation: for most tasks, rank 16 captures 90%+ of the representational change needed.
+**Key insight**: The intrinsic dimensionality hypothesis — that the important variation in weight updates during fine-tuning lies in a low-rank subspace — is what makes LoRA work. The original paper's evidence is striking: on GPT-3 175B, adapting Wq and Wv at r=1 through r=64 produced essentially the same WikiSQL and MultiNLI scores (73.3-73.8 / 91.3-91.6), and LoRA matched or beat full fine-tuning on all three of its GPT-3 tasks.
 
 ---
 
@@ -95,10 +95,14 @@ If instead you initialize *both* from `N(0, 0.02²)` at `r=16, alpha=32`, each e
 ### 3.2 Parameter Count Comparison
 
 ```
-7B LLaMA-3 model:
-  Total parameters: 7,000,000,000
+7B LLaMA-2-style model (multi-head attention, no GQA):
+  Total parameters: 6,738,415,616 (rounded to 7,000,000,000 below)
   Attention matrices per layer: Q, K, V, O projections
     Each: 4096 × 4096 = 16,777,216 parameters
+
+  CAUTION: on a GQA model (Llama-3-8B, Mistral-7B) k_proj and v_proj are
+  4096 × 1024, not 4096 × 4096, so their adapters cost 16 × (1024 + 4096),
+  not 16 × 8192. Assuming square k/v overstates the trainable count by ~2.5×.
 
 LoRA at rank r=16, targeting Q and V projections in 32 layers:
   Per projection, per layer:
@@ -191,7 +195,7 @@ LoRA never trains the full ΔW. It factors that update into two thin matrices:
   └────────────────────┘           └┘         131,072 params total (B + A)
        all cells trained        tall sliver   wide sliver
 
-  16.7M  →  131K trainable params  —  127× fewer for a single weight matrix
+  16.7M  →  131K trainable params  —  128× fewer for a single weight matrix
 ```
 The two slivers only ever touch at rank r=16, so their product is forced to be
 rank ≤ 16 — that low-rank constraint is exactly what makes the parameter count
@@ -266,9 +270,9 @@ Singular values of the fine-tuning update ΔW, sorted largest-first:
  σ3  │███████████
  σ4  │████████
  σ8  │█████
- σ16 │███                  ← rank r=16 cutoff: top components capture ~90-98% of ΔW
+ σ16 │███                  ← rank r=16 cutoff: the top components carry most of ΔW
  σ32 │█                    ┐
- σ64 │▏                    │ long thin tail — discarding it costs only ~2-10% quality
+ σ64 │▏                    │ long thin tail — cheap to discard on most tasks
  σ128│·                    ┘
      └──────────────────────────────────────────────
       the task-relevant change lives in the top few directions
@@ -277,9 +281,10 @@ Healthy adapter: values decay steeply (like above) → r is large enough.
 Rank too low:    every σ stays near σ1 (no decay) → the update needs more than r
                  dimensions; raise r and re-check the eval metric.
 ```
-This decay is the intrinsic-rank hypothesis made visible: fine-tuning moves the
-weights mostly along a handful of directions, so a rank-16 factorization recovers
-nearly all of it.
+The bar heights above are illustrative, not measured. The shape is the point, and it
+is what the LoRA paper's subspace-similarity analysis found: the top singular
+directions of an r=8 adapter and an r=64 adapter overlap strongly while the rest do
+not, i.e. fine-tuning moves the weights mostly along a handful of directions.
 
 ### 3.4 Target Module Selection
 
@@ -306,11 +311,15 @@ Standard — task adaptation:
 Full attention + FFN — domain adaptation:
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
                    "gate_proj", "up_proj", "down_proj"]
-  Trainable: ~30M params
+  Trainable: ~40M params (FFN matrices are 4096x11008, so each FFN adapter
+             costs 16 x 15104 = 241,664 — 1.84x an attention adapter)
   Use when: significant domain shift, specialized knowledge
 
-Research finding: v_proj contributes most to quality; q_proj second.
-Including k_proj and o_proj adds marginal improvement over q+v.
+Research finding (LoRA paper, Table 5 — GPT-3 175B at a fixed 18M-parameter budget,
+WikiSQL accuracy): adapting one matrix type gives Wq 70.4, Wk 70.0, Wv 73.0, Wo 73.2;
+two types Wq+Wk 71.4 but Wq+Wv 73.7; all four (at r=2) also 73.7. The paper's
+conclusion is to spread a fixed budget over MORE matrix types at LOWER rank rather
+than concentrate it on one type — and that Wq+Wv is the best two-matrix pick.
 ```
 
 ### 3.5 Merging LoRA Weights
@@ -379,13 +388,14 @@ The `2` in `2 * d_out * d_in` is one multiply plus one add per weight. The overh
 ### 3.6 PEFT Configuration Code
 
 ```python
+import torch
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM
 
 # Load base model
 base_model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Meta-Llama-3-8B-Instruct",
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,   # `torch_dtype` was renamed `dtype` in transformers 4.56+
     device_map="auto"
 )
 
@@ -507,10 +517,10 @@ flowchart LR
     r3["request  tag: legal"]
     r4["request  tag: ..."]
     base["Base Model\n14 GB · frozen\nloaded once on GPU"]
-    a1["sql_adapter\n~130 MB\nB, A only"]
-    a2["chat_adapter\n~130 MB\nB, A only"]
-    a3["legal_adapter\n~130 MB\nB, A only"]
-    a4["...more adapters\n~130 MB each"]
+    a1["sql_adapter\n~34 MB\nB, A only"]
+    a2["chat_adapter\n~34 MB\nB, A only"]
+    a3["legal_adapter\n~34 MB\nB, A only"]
+    a4["...more adapters\n~34 MB each"]
     r1 --> base
     r2 --> base
     r3 --> base
@@ -525,7 +535,8 @@ flowchart LR
     class a1,a2,a3,a4 train
 ```
 
-The 14 GB base model loads once; each adapter is just its B and A matrices (~130 MB).
+The 14 GB base model loads once; each adapter is just its B and A matrices — 16,777,216
+bf16 parameters, i.e. ~34 MB, for r=16 on q/k/v/o of a 7B model.
 Swapping tasks is a matrix-add at request time (vLLM hot-swap), not a 14 GB model
 reload — the economic core of serving 50+ specialized models on one GPU.
 
@@ -533,15 +544,22 @@ reload — the economic core of serving 50+ specialized models on one GPU.
 
 ## 5. Real-World Examples
 
-### LLaMA → Alpaca (2023)
-- Stanford: fine-tuned LLaMA 7B with LoRA r=8 on 52K instruction-following examples
-- Training cost: ~$100 on cloud GPUs; 3 hours on 4× A100
-- Achieved instruction-following capability comparable to text-davinci-003
+### LLaMA → Alpaca (2023), and Alpaca-LoRA
+- Stanford's own Alpaca was a **full** fine-tune of LLaMA 7B on 52K self-instruct
+  examples generated with text-davinci-003: 3 hours on 8× A100 80GB, "less than $100"
+  of compute (data generation cost under $500)
+- The community reproduction, Alpaca-LoRA, used LoRA instead — r=16 on
+  q/k/v/o_proj — and ran "within hours on a single RTX 4090", producing outputs its
+  authors called comparable to Stanford's full fine-tune
+- That side-by-side is the cleanest demonstration of what LoRA bought: an 8-GPU
+  server job became a one-consumer-card job
 
 ### LLaMA → Code-focused adapters
-- Community LoRA adapters for code generation: WizardCoder, Phind-CodeLlama
-- r=16 to r=64 targeting all attention + FFN modules
-- Released as separate adapter weights on HuggingFace; swappable over the same base model
+- Community LoRA adapters for code generation are published on HuggingFace Hub,
+  typically r=16 to r=64 targeting all attention + FFN modules
+- Note that the best-known code models of that era (WizardCoder, Phind-CodeLlama) were
+  **full** fine-tunes, not adapters — do not cite them as LoRA examples
+- Adapters ship as separate weights; swappable over the same base model
 
 ### Multi-adapter serving (vLLM)
 - [vLLM](../vllm_deep_dive/README.md) supports serving multiple LoRA adapters from a single base model
@@ -552,13 +570,15 @@ reload — the economic core of serving 50+ specialized models on one GPU.
 
 ## 6. Tradeoffs
 
+Trainable percentages below are for Llama-2-7B (6,738,415,616 parameters, no GQA):
+
 | Configuration | Trainable % | Memory | Quality | Training Speed |
 |--------------|-------------|--------|---------|----------------|
 | Full fine-tune | 100% | ~56GB (7B) | Best | Slowest |
-| LoRA r=4 (Q+V) | 0.06% | ~15GB | Good (style) | Fastest |
-| LoRA r=16 (all attn) | 0.24% | ~16GB | Very good | Fast |
-| LoRA r=16 (all+FFN) | 0.52% | ~16GB | Excellent | Fast |
-| LoRA r=64 (all+FFN) | 2.1% | ~18GB | Near-full | Moderate |
+| LoRA r=4 (Q+V) | 0.031% (2.1M) | ~15GB | Good (style) | Fastest |
+| LoRA r=16 (all attn) | 0.249% (16.8M) | ~16GB | Very good | Fast |
+| LoRA r=16 (all+FFN) | 0.593% (40.0M) | ~16GB | Excellent | Fast |
+| LoRA r=64 (all+FFN) | 2.37% (159.9M) | ~18GB | Near-full | Moderate |
 
 ---
 
@@ -585,7 +605,7 @@ reload — the economic core of serving 50+ specialized models on one GPU.
 ## 8. Common Pitfalls
 
 **1. Wrong alpha/rank ratio**
-Setting alpha = r (instead of alpha = 2×r or alpha = r) halves the effective learning rate of the adapter. This silently reduces training effectiveness.
+Setting alpha = r (instead of the conventional alpha = 2×r) halves the effective learning rate of the adapter. This silently reduces training effectiveness.
 Fix: Use alpha = 2×r as the default starting point (r=16, alpha=32). If training is unstable, reduce alpha. If adapters don't learn fast enough, increase alpha.
 
 **2. Targeting only Q and V for complex tasks**
@@ -601,7 +621,7 @@ With batch_size=1 and gradient_accumulation_steps=8, the effective batch size is
 Fix: Scale LR by √(effective_batch_size / reference_batch_size). Or use a learning rate scheduler that accounts for gradient accumulation.
 
 **5. Loading LoRA adapter with mismatched base model version**
-A LoRA adapter trained on LLaMA-3-8B-Instruct will not work correctly with LLaMA-3-8B-Base (different vocabulary, different system prompt structure).
+A LoRA adapter trained on LLaMA-3-8B-Instruct will not work correctly on LLaMA-3-8B base. The vocabulary is identical (128,256 tokens), but the base checkpoint's weights are different and it has no chat template, so an adapter trained as a delta on the instruct weights lands on the wrong starting point.
 Fix: Always record the exact base model checkpoint used for training. Store this as metadata with the adapter. Validate base model compatibility before serving.
 
 ---
@@ -623,13 +643,13 @@ Fix: Always record the exact base model checkpoint used for training. Store this
 ## 10. Interview Questions with Answers
 
 **Q: What is LoRA and why is it efficient?**
-A: LoRA (Low-Rank Adaptation) adds trainable low-rank matrices ΔW = B×A to frozen pre-trained weights, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d,k). For a 4096×4096 weight matrix, full fine-tuning updates 16.7M parameters; LoRA at r=16 updates only 2 × (16×4096) = 131K parameters — 127× fewer. Efficiency comes from two sources: fewer parameters means much less gradient computation and memory for optimizer states; frozen base weights need no gradient accumulation, saving ~2× the weight memory. For a 7B model: full FT requires ~56GB; LoRA r=16 requires ~15-16GB.
+A: LoRA (Low-Rank Adaptation) adds trainable low-rank matrices ΔW = B×A to frozen pre-trained weights, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d,k). For a 4096×4096 weight matrix, full fine-tuning updates 16.7M parameters; LoRA at r=16 updates only 2 × (16×4096) = 131K parameters — 128× fewer. Efficiency comes from two sources: fewer parameters means much less gradient computation and memory for optimizer states; frozen base weights need no gradient accumulation, saving ~2× the weight memory. For a 7B model: full FT requires ~56GB; LoRA r=16 requires ~15-16GB.
 
 **Q: What is the difference between LoRA and full fine-tuning?**
 A: Full fine-tuning updates every parameter in the model, providing maximum flexibility and quality but requiring the same memory as pre-training (~56GB for a 7B model). LoRA freezes all pre-trained parameters and trains only small adapter matrices, updating ~0.1-1% of parameters. Full fine-tuning: higher risk of catastrophic forgetting (all weights change), requires large GPU cluster, best quality. LoRA: much lower memory (fits in 16GB GPU), lower forgetting risk (base weights preserved), comparable quality for most tasks, adapters are modular and swappable (50MB file vs. 14GB model). The choice is primarily driven by budget, quality requirements, and whether multiple task-specific adapters are needed.
 
 **Q: How does the intrinsic rank hypothesis justify LoRA?**
-A: The intrinsic rank hypothesis (Aghajanyan et al. 2020) states that fine-tuning objectives have low intrinsic dimensionality — the optimal fine-tuned model lives in a low-dimensional subspace of the full parameter space. Concretely: when you train a full fine-tuned model and analyze the weight update matrix ΔW = W_finetuned - W_pretrained, the singular value decomposition shows that most of the "work" is done by the top-r singular components. LoRA exploits this by directly parameterizing ΔW as a rank-r matrix. The empirical validation: LoRA at r=16 achieves 95-98% of full fine-tuning quality on most benchmarks, confirming that the update is approximately rank-16.
+A: The intrinsic rank hypothesis (Aghajanyan et al. 2020) states that fine-tuning objectives have low intrinsic dimensionality — the optimal fine-tuned model lives in a low-dimensional subspace of the full parameter space. Concretely: when you train a full fine-tuned model and analyze the weight update matrix ΔW = W_finetuned - W_pretrained, the singular value decomposition shows that most of the "work" is done by the top-r singular components. LoRA exploits this by directly parameterizing ΔW as a rank-r matrix. The empirical validation in the LoRA paper: on GPT-3 175B, LoRA matched or exceeded full fine-tuning on WikiSQL (73.4/74.0 vs 73.8), MNLI-m (91.7 vs 89.5) and SAMSum, and ranks from 1 to 64 scored within noise of each other. Later work is less uniformly positive — Biderman et al. (2024) report LoRA trailing full fine-tuning on code and math continued-pretraining while forgetting less — so treat "matches full FT" as task-dependent, not universal.
 
 **Q: How do you choose the right LoRA rank for your use case?**
 A: Rank determines the expressiveness of the adapter. Rule of thumb: start with r=16, alpha=32 for most production tasks. r=4 to r=8: style/format changes, simple instruction alignment, small dataset (<1K examples). r=16: standard instruction tuning, task-specific adaptation, most production fine-tuning scenarios. r=32 to r=64: domain adaptation, complex reasoning chains, significant behavior change. Above r=64 shows diminishing returns relative to cost. Empirically: train with r=16 first, evaluate on your task metric, then try r=32 if quality is insufficient. The quality improvement from r=16 to r=32 is meaningful; from r=64 to r=128 is minimal.
@@ -638,13 +658,13 @@ A: Rank determines the expressiveness of the adapter. Rule of thumb: start with 
 A: Alpha is a scaling factor applied to the LoRA output: h = W×x + (B×A)×x×(alpha/r). The ratio alpha/r controls the effective learning rate of the adapter — larger alpha/r means the adapter's output contributes more strongly to the final activation. Convention: alpha = 2×r (e.g., r=16, alpha=32) gives alpha/r = 2, which empirically produces good training stability. Setting alpha=r (alpha/r=1) effectively halves the adapter's contribution. Setting alpha=4×r can cause training instability. The alpha parameter exists to decouple the scaling from the rank choice: you can change r without changing the effective scale by adjusting alpha accordingly.
 
 **Q: When should you merge LoRA adapters vs. keep them separate?**
-A: Merge when: the final production model is a single-task deployment and inference efficiency is critical (no adapter overhead); deploying to inference frameworks that don't support adapters (llama.cpp, some quantization pipelines). Keep separate when: serving multiple task-specific adapters from the same base model (vLLM multi-adapter serving); the base model is extremely large (70B — storing 14GB of adapters beats 280GB of merged models); continuing fine-tuning with additional data; distributing on HuggingFace (users apply the adapter to their own copy of the base model). Merging is mathematically lossless: W_merged = W + B×A×(alpha/r) is exact, not an approximation.
+A: Merge when: the final production model is a single-task deployment and inference efficiency is critical (no adapter overhead); deploying to inference frameworks that don't support adapters (llama.cpp, some quantization pipelines). Keep separate when: serving multiple task-specific adapters from the same base model (vLLM multi-adapter serving); the base model is extremely large (a 70B checkpoint is ~140GB in BF16, so ten merged variants cost 1.4TB of storage against ten adapters of a few hundred MB each); continuing fine-tuning with additional data; distributing on HuggingFace (users apply the adapter to their own copy of the base model). Merging is mathematically lossless: W_merged = W + B×A×(alpha/r) is exact, not an approximation.
 
 **Q: How does LoRA prevent catastrophic forgetting?**
 A: LoRA prevents forgetting through the frozen weights mechanism: the original pre-trained weights W are never updated. All gradient flow is through A and B matrices only. Since W is unchanged, the base model's representations and capabilities are fully preserved. The only change is in the adapter output B×A×x, which is additive — the base model's contribution W×x is always present. In practice, LoRA rarely causes forgetting even for large rank values, unlike full fine-tuning where high learning rates can overwrite general capabilities. The one exception: if training data is heavily one-sided (only domain text, no general text), the adapter can "steer" the model's outputs in ways that appear to reduce general capability.
 
 **Q: How do target module choices affect LoRA quality?**
-A: Each target module captures a different aspect of the transformer's computation. Q and V projections control what information is attended to and what's extracted from attended positions — most task-specific behavior changes. O projection controls how attention heads are combined. K projection controls key representations for attention scoring. FFN modules (gate, up, down) control feedforward transformations that encode most of the model's "factual knowledge." For format and style tuning: Q+V is sufficient. For task adaptation: Q+K+V+O captures full attention behavior. For domain knowledge: add FFN modules. Research shows V contributes most to quality improvements, followed by Q; K adds less; O and FFN add incrementally.
+A: Each target module captures a different aspect of the transformer's computation. Q and V projections control what information is attended to and what's extracted from attended positions — most task-specific behavior changes. O projection controls how attention heads are combined. K projection controls key representations for attention scoring. FFN modules (gate, up, down) control feedforward transformations that encode most of the model's "factual knowledge." For format and style tuning: Q+V is sufficient. For task adaptation: Q+K+V+O captures full attention behavior. For domain knowledge: add FFN modules. In the LoRA paper's fixed-budget ablation (GPT-3 175B, WikiSQL) the single best matrices were Wo (73.2) and Wv (73.0), with Wq (70.4) and Wk (70.0) clearly behind; the best pair was Wq+Wv (73.7), and spreading the same budget across all four at lower rank matched it — so "more matrix types at lower rank" beats "one type at high rank."
 
 **Q: What is the difference between LoRA and adapter layers (Houlsby adapters)?**
 A: Adapter layers (Houlsby et al. 2019) insert small bottleneck modules (down-projection → activation → up-projection) after each attention and FFN block. They're always active during inference (unlike merged LoRA). LoRA modifies existing weight matrices in place and can be merged post-training. Key differences: (1) Inference overhead — adapters always add computational cost; merged LoRA has zero overhead; (2) Position — adapters are inserted; LoRA modifies in-place; (3) Mergeability — LoRA merges cleanly; adapters cannot merge; (4) Quality — comparable for most tasks. LoRA has become the dominant PEFT method because of mergeability and the ability to serve multiple adapters from one base model.
@@ -653,7 +673,7 @@ A: Adapter layers (Houlsby et al. 2019) insert small bottleneck modules (down-pr
 A: LoRA applies identically to vision and multimodal models. In Vision Transformers (ViT): apply LoRA to attention Q, K, V, O projections in the image encoder. In multimodal models (LLaVA, InstructBLIP): can apply LoRA to both the language model decoder and the vision encoder independently, or jointly. The rank and target module choices follow the same guidelines as language-only models. One consideration for multimodal fine-tuning: the vision encoder often requires lower ranks (r=4 to r=8) because visual representations change less than language representations during task adaptation. Keep separate LoRA configurations for vision and language components if they require different learning dynamics.
 
 **Q: How do you serve multiple LoRA adapters efficiently from a single base model?**
-A: Multi-LoRA serving loads one copy of the base model weights on GPU and dynamically applies per-request adapter weights. vLLM implements this natively: the base model occupies the bulk of GPU memory; each adapter is stored as a small set of matrices loaded into a pre-allocated adapter slot. Memory cost per adapter: for each target layer, the adapter adds rank × 2 × hidden_dim × 2 bytes (one A matrix and one B matrix in BF16). For a 7B model with r=16 targeting q_proj and v_proj across 32 layers: 16 × 2 × 4096 × 2 bytes × 2 projections × 32 layers = 134MB per adapter. vLLM can serve 50+ adapters from one base model instance by keeping only the active adapter's weights in GPU SRAM during a request; idle adapter weights can reside in pinned CPU memory and transfer in ~5-10ms. Route requests using an adapter_id tag in the request metadata.
+A: Multi-LoRA serving loads one copy of the base model weights on GPU and dynamically applies per-request adapter weights. vLLM implements this natively: the base model occupies the bulk of GPU memory; each adapter is stored as a small set of matrices loaded into a pre-allocated adapter slot. Memory cost per adapter: for each target layer, the adapter adds rank × 2 × hidden_dim parameters (one A matrix and one B matrix), at 2 bytes each in BF16. For a 7B model with r=16 targeting q_proj and v_proj across 32 layers: 16 × 2 × 4096 × 2 projections × 32 layers = 8,388,608 parameters × 2 bytes = ~17MB per adapter (~34MB if you also target k_proj and o_proj). vLLM can serve 50+ adapters from one base model instance by keeping only the active adapter's weights in GPU SRAM during a request; idle adapter weights can reside in pinned CPU memory and transfer in ~5-10ms. Route requests using an adapter_id tag in the request metadata.
 
 **Q: How do you diagnose whether your LoRA rank is too low for the task?**
 A: Rank insufficiency shows two clear signals. First, validation loss plateaus early and stays high — training loss continues decreasing (the rank-constrained adapter overfits to the training distribution) while validation loss stagnates, indicating the low-rank subspace cannot represent the task-relevant update directions. Second, the model fails specifically on complex patterns while succeeding on simple ones — for a SQL generation task, it handles basic SELECT queries but fails on multi-table JOINs or subqueries. Diagnosis steps: train with r=16 and evaluate; train with r=32 and compare; if r=32 shows meaningful improvement (>2% on your eval metric), the bottleneck was rank. Also inspect adapter singular values: a well-fit adapter has singular values that decay gradually; a rank-insufficient adapter has all singular values near the maximum, indicating the rank constraint is actively binding.
@@ -662,7 +682,7 @@ A: Rank insufficiency shows two clear signals. First, validation loss plateaus e
 A: Multiple LoRA adapters can be combined through linear combination of their weight updates: W_combined = W_base + lambda_1 × (B_1 × A_1) + lambda_2 × (B_2 × A_2). The lambdas are mixing coefficients (typically summing to 1). In practice with two adapters (lambda_1 = lambda_2 = 0.5), the combined model retains roughly 80-90% of each individual adapter's task performance. Quality degrades noticeably with three or more adapters — the low-rank updates from different tasks increasingly interfere in weight space, and the combined update no longer sits cleanly in any single task's useful subspace. Ties-Merging and DARE are techniques that prune redundant adapter parameters before merging to reduce interference. For production multi-task serving, hot-swapping discrete adapters per request is more reliable than merging — blending is primarily useful for style interpolation (e.g., 70% formal + 30% concise tone adapter).
 
 **Q: What is the quality impact of applying LoRA to MLP layers in addition to attention layers?**
-A: Targeting only attention layers (q_proj, v_proj) is the standard starting point and handles most behavior changes. Adding MLP layers (gate_proj, up_proj, down_proj) increases trainable parameters by roughly 50% for a standard LLaMA architecture — from approximately 8M to 30M parameters for a 7B model at r=16 — and empirically improves quality by 2-5% on complex tasks. The mechanism: attention layers primarily control what information is attended to and combined; MLP layers encode the model's factual knowledge and transformation functions. Tasks requiring new domain knowledge (medical terminology, specialized code APIs, legal reasoning patterns) benefit more from including MLP layers because the relevant information is stored in FFN weights. Simple behavior changes (output format, response style, persona) do not need MLP layers. A practical rule: include gate_proj, up_proj, down_proj when your training data contains substantial domain-specific vocabulary or factual content not well-represented in the base model.
+A: Targeting only attention layers (q_proj, v_proj) is the standard starting point and handles most behavior changes. Adding MLP layers (gate_proj, up_proj, down_proj) more than doubles trainable parameters on a standard LLaMA architecture — 16.8M for q/k/v/o at r=16 becomes 40.0M with the MLP modules added, because d_ff is 11008 and each MLP adapter therefore costs 1.84× an attention adapter — and it generally helps most on knowledge-heavy tasks. The mechanism: attention layers primarily control what information is attended to and combined; MLP layers encode the model's factual knowledge and transformation functions. Tasks requiring new domain knowledge (medical terminology, specialized code APIs, legal reasoning patterns) benefit more from including MLP layers because the relevant information is stored in FFN weights. Simple behavior changes (output format, response style, persona) do not need MLP layers. A practical rule: include gate_proj, up_proj, down_proj when your training data contains substantial domain-specific vocabulary or factual content not well-represented in the base model.
 
 **Q: How do you prevent catastrophic forgetting of general capabilities during LoRA fine-tuning?**
 A: LoRA's frozen base weights are the primary defense against forgetting — general capabilities encoded in W are never updated. However, the adapter output B×A×x can steer the model's responses in ways that effectively suppress general capabilities even without changing W. The main risk is heavy domain concentration in training data. Mitigation strategies: mix 10-20% general instruction-following examples (e.g., Alpaca, ShareGPT) into the training set alongside domain-specific data; this regularizes the adapter to maintain general response quality. Use a lower learning rate for LoRA (1e-4 rather than 3e-4) to constrain how strongly the adapter shifts model behavior. Monitor general capability benchmarks (MMLU, MT-Bench, or a held-out general instruction set) alongside task-specific metrics throughout training; if general scores drop more than 5% relative, reduce the learning rate or increase the general data mixture. Gradient clipping at 1.0 also helps prevent large adapter updates that dominate base model representations.
@@ -682,6 +702,8 @@ A: LoRA's frozen base weights are the primary defense against forgetting — gen
 ---
 
 ## 12. Case Study: Fine-Tuning LLaMA 3 8B with LoRA for Customer Support
+
+*Illustrative worked example — the configuration and parameter counts are real, but the company, dataset and accuracy figures are a composite, not a published deployment.*
 
 **Problem Statement**: A SaaS company needs to fine-tune LLaMA 3 8B Instruct to handle customer support tickets. The base model responds well to general questions but fails on three key requirements: (1) always structuring responses in a specific JSON format with fields for `issue_category`, `resolution_steps`, and `escalation_required`; (2) using company-specific product terminology correctly (product names, internal codes); (3) keeping responses under 200 words. The previous prompt-engineering approach required 800-token system prompts that ate into the context window and added latency.
 
@@ -703,7 +725,7 @@ flowchart TD
         ip --> ds["jsonl dataset"]
     end
     subgraph ft["  Fine-tuning  ·  1× A100 40 GB  "]
-        bm["meta-llama/Meta-Llama-3-8B-Instruct"] -->|"LoRA r=16, alpha=32\nq/k/v/o_proj · 0.42% trainable"| ad["support_v1 adapter\n2h 40min · ~$12"]
+        bm["meta-llama/Meta-Llama-3-8B-Instruct"] -->|"LoRA r=16, alpha=32\nq/k/v/o_proj · 0.17% trainable"| ad["support_v1 adapter\n2h 40min · ~$12"]
     end
     subgraph sv["  Serving  ·  vLLM  "]
         sh["shared base model  14 GB"] -->|"hot-swap adapter_id"| sa["support_v1"]
@@ -741,7 +763,7 @@ import torch
 
 base_model = AutoModelForCausalLM.from_pretrained(
     "meta-llama/Meta-Llama-3-8B-Instruct",
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,   # `torch_dtype` was renamed `dtype` in transformers 4.56+
     device_map="auto"
 )
 
@@ -755,7 +777,10 @@ lora_config = LoraConfig(
 )
 
 model = get_peft_model(base_model, lora_config)
-# Trainable: 33,554,432 / 8,030,261,248 = 0.42%
+# Trainable: 13,631,488 / 8,030,261,248 = 0.17%
+# (Llama-3-8B uses GQA: k_proj and v_proj are 4096x1024, so their adapters cost
+#  16 x (1024 + 4096) each, not 16 x 8192. Assuming square k/v would give the
+#  wrong answer, 33,554,432 — a 2.5x overcount.)
 
 training_args = TrainingArguments(
     output_dir="./support_lora",
@@ -767,7 +792,7 @@ training_args = TrainingArguments(
     warmup_ratio=0.03,
     bf16=True,
     logging_steps=50,
-    evaluation_strategy="steps",
+    eval_strategy="steps",   # `evaluation_strategy` was removed in transformers 4.46
     eval_steps=200,
     save_strategy="best",
     metric_for_best_model="eval_loss"
@@ -777,9 +802,9 @@ trainer = SFTTrainer(
     model=model,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    args=training_args,
-    max_seq_length=1024
-)
+    args=training_args,   # TRL converts a plain TrainingArguments into an SFTConfig;
+)                         # sequence length now lives on SFTConfig as `max_length`
+
 trainer.train()
 model.save_pretrained("./support_lora_adapter")
 ```
@@ -797,4 +822,4 @@ model.save_pretrained("./support_lora_adapter")
 - Full fine-tuning was evaluated: achieved 94% format adherence (vs. 91% with LoRA r=16), not worth the 56GB memory requirement and inability to share the GPU across four adapter variants.
 - LoRA r=32 was evaluated: 91.5% format adherence vs. 91.0% for r=16; the 0.5% gain did not justify doubling trainable parameters and adapter file size.
 - Prompt engineering alone (no fine-tuning): 61% format adherence — the structured JSON output requirement was too strict for prompt-only approaches to reliably satisfy across ticket types.
-- [QLoRA](qlora.md) was considered: A100 40GB had sufficient memory for standard LoRA; QLoRA would have added 20% training time overhead (dequantization) with no memory benefit on this hardware.
+- [QLoRA](qlora.md) was considered: A100 40GB had sufficient memory for standard LoRA; QLoRA would have added per-step overhead (NF4 dequantization on every forward pass) with no memory benefit on this hardware.

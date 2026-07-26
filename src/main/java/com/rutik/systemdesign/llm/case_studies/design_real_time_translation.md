@@ -23,9 +23,11 @@
 
 ### Non-Functional Requirements
 - **Latency**: P50 < 500ms, P95 < 1s, P99 < 1.5s per sentence (end-to-end)
-- **Throughput**: 50,000 translations/second at peak
+- **Throughput**: 6,000 translations/second at peak (2.6x the 2,315/s daily average)
 - **Availability**: 99.95% (communication platform is always-on)
-- **Quality**: BLEU > 35 average across all pairs; > 45 for top-20 language pairs
+- **Quality**: BLEU > 35 average across all pairs; > 45 for top-20 language pairs, measured on
+  this platform's own held-out chat test set. BLEU is only comparable within one test set and
+  tokenizer, so these targets are not comparable to published WMT or FLORES-200 scores
 - **Scale**: 200M translations/day; 2M concurrent conversations
 
 ### Out of Scope
@@ -43,7 +45,8 @@
 Daily translations: 200M
 Average message length: 25 tokens (chat messages are short)
 Peak concurrent conversations: 2M
-Peak translation rate: 50,000 translations/second
+Daily average rate:    200M / 86,400 = 2,315 translations/second
+Peak translation rate: 6,000 translations/second (2.6x diurnal peak)
 
 Token estimates per translation:
   Input (source text + context): 150 tokens average
@@ -157,7 +160,7 @@ User A (French)                              User B (Japanese)
        |                          |
        v                          v
 [NMT Inference Cluster]    [LLM Translation Service]
-  - NLLB-3.3B on GPU          - GPT-4o-mini / Claude 3.5 Haiku
+  - NLLB-3.3B on GPU          - GPT-4o-mini / Claude Haiku 4.5
   - TensorRT optimized         - Streaming SSE responses
   - Batch size: 32             - Context-aware prompting
   - Latency: 80-150ms          - Latency: 300-800ms
@@ -217,7 +220,8 @@ Tier 1: User profile language (0ms, always available)
 
 Tier 2: fastText language ID (< 5ms, 176 languages)
   Meta's fastText lid.176.bin model.
-  Accuracy: 97% on sentences > 20 chars; drops to 72% on < 10 chars.
+  Accuracy on this platform's chat corpus (ILLUSTRATIVE internal measurement, not a
+  published fastText benchmark): ~97% on sentences > 20 chars; ~72% on < 10 chars.
   Returns top-3 predictions with confidence scores.
   Decision: if top prediction confidence > 0.7 → use it.
             if top prediction confidence 0.4-0.7 → combine with user profile prior.
@@ -237,7 +241,7 @@ Edge cases handled:
   Message already in target language → skip translation (save cost)
   Mixed-language message → translate as single unit (model handles it)
 
-Detection accuracy by message length:
+Detection accuracy by message length (ILLUSTRATIVE internal measurements):
   > 50 chars:  98.5%
   20-50 chars: 95.2%
   10-20 chars: 88.7%
@@ -283,7 +287,9 @@ Tier 1: Specialized NMT Models (85% of traffic)
     No formality control without fine-tuning separate models
 
 Tier 2: LLM Translation (15% of traffic)
-  Model: GPT-4o-mini (primary), Claude 3.5 Haiku (fallback)
+  Model: GPT-4o-mini (primary), Claude Haiku 4.5 (fallback)
+  (Claude 3.5 Haiku was retired from the Claude API on 2026-02-19; Haiku 4.5 is
+   the current small-model tier at $1/$5 per MTok.)
   Used for:
     Low-resource language pairs (Swahili, Yoruba, Kazakh, etc.)
     Context-dependent translations (pronoun resolution, tone matching)
@@ -311,10 +317,11 @@ Tier 2: LLM Translation (15% of traffic)
     Translate: "{source_text}"
 
   Deployment:
-    API calls to GPT-4o-mini / Claude 3.5 Haiku
+    API calls to GPT-4o-mini / Claude Haiku 4.5
     Streaming enabled for partial translation delivery
     Latency: 300ms P50, 800ms P95
-    Cost: ~$0.15/1M input tokens, ~$0.60/1M output tokens (GPT-4o-mini)
+    Cost: $0.15/1M input tokens, $0.60/1M output tokens (GPT-4o-mini, current
+          OpenAI list price); $1/1M input, $5/1M output (Claude Haiku 4.5)
 
   Advantages:
     Context-aware (conversation history in prompt)
@@ -329,7 +336,9 @@ Tier 2: LLM Translation (15% of traffic)
     Non-deterministic (same input may produce different output)
     Occasional refusals on edge-case content
 
-Quality comparison (BLEU scores on internal benchmark):
+Quality comparison (ILLUSTRATIVE — internal benchmark on this platform's own chat test
+set, not published results; absolute BLEU is a function of the test set and tokenizer and
+does not transfer across systems. Only the relative ordering per pair carries the lesson):
   Language Pair     NLLB-3.3B   GPT-4o-mini   Winner
   EN → ES           52.1        48.3          NMT
   EN → FR           49.8        47.6          NMT
@@ -353,9 +362,10 @@ The `TranslationRouter` makes the cheapest-model decision for every request. Thr
 from enum import Enum
 
 class TranslationModel(Enum):
-    NLLB_200      = "nllb-200-3.3b"     # 80ms,  $0.001/1K — 80% of volume
-    GPT4O_MINI    = "gpt-4o-mini"       # 250ms, $0.010/1K — 18% of volume
-    CLAUDE_SONNET = "claude-sonnet-4-6" # 350ms, $0.030/1K —  2% of volume (domain)
+    # Cost is $ per translation at 150 input + 30 output tokens (see Section 8).
+    NLLB_200     = "nllb-200-3.3b"   #  80ms, $0.0000025 — 85% of volume (GPU-amortised)
+    GPT4O_MINI   = "gpt-4o-mini"     # 250ms, $0.0000405 — 13% of volume
+    CLAUDE_HAIKU = "claude-haiku-4-5"# 300ms, $0.0003    —  2% of volume (domain/glossary)
 
 HIGH_RESOURCE_PAIRS: frozenset[tuple[str, str]] = frozenset({
     ("en","es"),("en","fr"),("en","de"),("en","pt"),("en","zh"),
@@ -372,10 +382,10 @@ class TranslationRouter:
         pair = (src_lang.lower(), tgt_lang.lower())
         is_hr = pair in HIGH_RESOURCE_PAIRS or pair[::-1] in HIGH_RESOURCE_PAIRS
         if domain in DOMAIN_SPECIFIC and text_complexity >= 0.5:
-            return TranslationModel.CLAUDE_SONNET   # glossary + domain prompt, 2%
+            return TranslationModel.CLAUDE_HAIKU    # glossary + domain prompt, 2%
         if is_hr and text_complexity < 0.6:
-            return TranslationModel.NLLB_200         # NMT fast path, 80%
-        return TranslationModel.GPT4O_MINI           # low-resource / complex, 18%
+            return TranslationModel.NLLB_200         # NMT fast path, 85%
+        return TranslationModel.GPT4O_MINI           # low-resource / complex, 13%
 
     async def translate(self, src_lang: str, tgt_lang: str, text: str,
                         domain: str = "general", glossary: dict[str,str] | None = None) -> str:
@@ -385,7 +395,7 @@ class TranslationRouter:
         model = self.route(src_lang, tgt_lang, complexity, domain)
         if model == TranslationModel.NLLB_200:
             return await self._translate_nllb(src_lang, tgt_lang, text, glossary)
-        mid = "gpt-4o-mini" if model == TranslationModel.GPT4O_MINI else "claude-sonnet-4-6"
+        mid = "gpt-4o-mini" if model == TranslationModel.GPT4O_MINI else "claude-haiku-4-5"
         return await self._translate_llm(mid, src_lang, tgt_lang, text, glossary,
                                          domain_prompt=(domain if mid != "gpt-4o-mini" else None))
 
@@ -397,10 +407,12 @@ class QualityEstimator:
         raise NotImplementedError("delegate to COMET-QE batch inference endpoint")
 ```
 
-Cost breakdown at scale (200M translations/day):
-- NLLB 80% at $0.001/1K → $160/day; GPT-4o-mini 18% at $0.010/1K → $360/day
-- Claude Sonnet 2% at $0.030/1K → $60/day
-- Blended effective cost: $0.002/1K tokens — 5x cheaper than routing everything to GPT-4o-mini
+Cost breakdown at scale (200M translations/day, 150 input + 30 output tokens each):
+- NLLB 85% = 170M x $0.0000025 (GPU-amortised, Section 8) = $425/day
+- GPT-4o-mini 13% = 26M x $0.0000405 ($0.15/$0.60 per MTok) = $1,053/day
+- Claude Haiku 4.5 2% = 4M x $0.0003 ($1/$5 per MTok) = $1,200/day
+- Blended: $2,678/day = $0.0000134/translation = $13.40 per million translations —
+  3.0x cheaper than routing all 200M through GPT-4o-mini ($8,100/day)
 
 ---
 
@@ -599,7 +611,8 @@ TTS — see [Voice Agents](../voice_agents/README.md) for the full voice stack, 
 **BROKEN: Sequential pipeline**
 
 ```python
-# BROKEN: each stage blocks on the previous — total latency ~2.1s
+# BROKEN: each stage blocks on the previous.
+# 1,000ms utterance + 600 + 200 + 300 = ~2.1s before the listener hears anything.
 async def translate_voice_naive(audio: bytes, src_lang: str, tgt_lang: str) -> bytes:
     transcript = await stt_model.transcribe(audio)        # 600ms — waits for full utterance
     translated = await nmt_model.translate(transcript)    # 200ms — waits for full transcript
@@ -611,8 +624,9 @@ async def translate_voice_naive(audio: bytes, src_lang: str, tgt_lang: str) -> b
 TTS starts while the next partial arrives. Perceived latency drops from 2.1s to 540ms.**
 
 ```python
-# Latency budget (A10G GPU): STT 120ms + NMT 80ms + TTS 90ms = 540ms total target
-# (LLM path: 250ms for NMT step on complex sentences → still under 540ms with pipelining)
+# Latency budget (A10G GPU): 200ms audio chunk + STT 120ms + NMT 80ms + TTS 90ms
+#   + ~50ms network = 540ms perceived first-audio latency (processing alone is 290ms)
+# (LLM path: 250ms for the MT step on complex sentences → ~710ms, still under 1s)
 
 class TranslationStreamPipeline:
     VAD_ENERGY_THRESHOLD = 0.5  # RMS energy ratio; below = silence, skip STT (saves ~15%)
@@ -854,9 +868,13 @@ Cache invalidation:
 
 Cost savings from caching:
   20% cache hit rate on 200M daily translations = 40M cached responses.
-  40M x $0.0001 per NMT inference saved = $4,000/day saved.
-  40M x $0.0005 per LLM inference saved = $20,000/day saved (if all were LLM).
-  Blended savings: ~$6,000/day.
+  Unit costs are the ones derived in Section 8 (not round numbers — check them):
+    NMT           $0.0000025/translation  x 34.0M avoided (85%) = $85/day
+    GPT-4o-mini   $0.0000405/translation  x  5.2M avoided (13%) = $211/day
+    Haiku 4.5     $0.0003/translation     x  0.8M avoided ( 2%) = $240/day
+  Blended savings: ~$536/day (~14% of the $3,801/day run rate).
+  The dollar saving is modest; the real wins are the 5ms cache path replacing a
+  80-800ms inference, and 20% less GPU fleet to provision for peak.
 ```
 
 ---
@@ -943,16 +961,19 @@ NMT inference costs (85% of traffic = 170M translations/day):
   Auto-scaling peak (up to 80 GPUs): add $200/day peak surcharge
   NMT GPU total: ~$430/day
 
-LLM inference costs (15% of traffic = 30M translations/day):
-  Input tokens: 30M x 150 tokens = 4.5B tokens/day
-  Output tokens: 30M x 30 tokens = 900M tokens/day
-  GPT-4o-mini pricing: $0.15/1M input, $0.60/1M output
-  Input cost: 4.5B x $0.15/1M = $675/day
-  Output cost: 900M x $0.60/1M = $540/day
-  LLM total: $1,215/day
+LLM inference costs (15% of traffic = 30M translations/day, split 13% + 2%):
+  GPT-4o-mini tier (13% = 26M translations/day) at $0.15/1M in, $0.60/1M out:
+    Input:  26M x 150 = 3.9B tokens x $0.15/1M = $585/day
+    Output: 26M x  30 = 780M tokens x $0.60/1M = $468/day
+    Subtotal: $1,053/day
+  Claude Haiku 4.5 tier (2% = 4M/day, domain/glossary-critical) at $1/1M in, $5/1M out:
+    Input:  4M x 150 = 600M tokens x $1/1M = $600/day
+    Output: 4M x  30 = 120M tokens x $5/1M = $600/day
+    Subtotal: $1,200/day
+  LLM total: $2,253/day
 
 NMT-to-LLM fallback (3% of NMT traffic = 5.1M/day):
-  Already included in LLM budget above (adds ~$200/day)
+  Already included in the GPT-4o-mini tier above (adds ~$207/day)
 
 Quality estimation model:
   4x A10G GPUs (shared with NMT cluster): $38/day
@@ -971,18 +992,21 @@ Human evaluation:
 
 Total daily cost:
   NMT inference:     $430
-  LLM inference:     $1,215
+  LLM inference:     $2,253
   QE model:          $38
   Infrastructure:    $580
   Human evaluation:  $500
   ---
-  Total:             $2,763/day = ~$83,000/month
+  Total:             $3,801/day = ~$114,000/month
 
 Cost per translation:
-  $2,763 / 200M = $0.0000138 = $0.014 per 1,000 translations
+  $3,801 / 200M = $0.000019 = $0.019 per 1,000 translations
 
-Comparison: all-LLM approach:
-  200M x 180 tokens x avg $0.30/1M = $10,800/day = 3.9x more expensive
+Comparison: all-LLM approach (everything through GPT-4o-mini):
+  Blended token price at a 150-in / 30-out mix:
+    (150 x $0.15 + 30 x $0.60) / 180 = $0.225 per 1M tokens (NOT $0.30 — the
+    output share is only 1/6 of the tokens)
+  200M x 180 tokens x $0.225/1M = $8,100/day = 2.1x more expensive
   Plus higher latency on all translations.
 
 Comparison: all-NMT approach:
@@ -1046,7 +1070,7 @@ cache.lookup exact-hit drop > 3 points signals an invalidation storm.
 Symptom: COMET-QE drops more than 0.05 for a language pair within 1 hour.
 1. Check model registry for NLLB deployment in last 6h → A/B vs previous checkpoint on 500 golden pairs; rollback if previous scores >= baseline.
 2. If no model change: check glossary version updated in last 24h → constrained-decoding failures raise low-QE rate. Revert glossary version and investigate term conflicts.
-3. If no glossary change: check GPT-4o-mini provider status page → failover router to Claude Sonnet for affected pairs until restored.
+3. If no glossary change: check GPT-4o-mini provider status page → failover router to Claude Haiku 4.5 for affected pairs until restored.
 4. Escalate to ML team if BLEU also drops and no deployment change is detected.
 
 **Runbook 2: STT pipeline latency spike (voice mode)**
@@ -1085,11 +1109,11 @@ latency-based routing configuration, see
 
 **Why choose a hybrid NMT + LLM approach instead of using LLMs for everything?** Specialized NMT models like NLLB-3.3B deliver 5-10x lower latency (80ms vs. 400ms) and 20-50x lower cost per translation for high-resource language pairs. On the top 20 pairs that represent 85% of traffic, NMT also produces equal or better BLEU scores. LLMs excel on low-resource pairs (Swahili, Yoruba) where NMT quality drops sharply, and on context-dependent translations requiring pronoun resolution or tone matching. The hybrid router captures the best of both: use NMT where it wins on latency, cost, and quality, and LLM where it wins on coverage and contextual understanding.
 
-**How do you handle language detection failures on very short messages?** Short messages (under 10 characters) drop fastText accuracy from 97% to 68%. The system uses a three-tier approach: fastText statistical detection combined with character script analysis (Cyrillic, CJK, Arabic scripts narrow the candidate set) and a Bayesian prior from the user's profile language setting. The prior boosts detection accuracy on short text from 68% to 89%. For single-word messages where detection confidence remains below 0.4, the system falls back to the user's profile language. This is almost always correct because users rarely switch languages mid-conversation without context.
+**How do you handle language detection failures on very short messages?** Short messages (under 10 characters) drop fastText accuracy from about 97% to about 72% on this platform's chat corpus, and to about 68% below 5 characters. The system uses a three-tier approach: fastText statistical detection combined with character script analysis (Cyrillic, CJK, Arabic scripts narrow the candidate set) and a Bayesian prior from the user's profile language setting. The prior boosts detection accuracy on short text from 68% to 89%. For single-word messages where detection confidence remains below 0.4, the system falls back to the user's profile language. This is almost always correct because users rarely switch languages mid-conversation without context.
 
 **What is the hardest part about maintaining consistent terminology across conversation turns?** The core challenge is that NMT models are stateless -- they translate each sentence independently. Without intervention, the same term might be translated differently in turn 1 vs. turn 5. The system maintains a per-conversation term memory that extracts key term pairs after each translation and injects them as glossary constraints on subsequent turns. This adds 15-30ms of latency for constrained decoding but eliminates the jarring experience of inconsistent terminology. For the LLM path, conversation history in the prompt provides natural consistency, but even LLMs can drift over long conversations, so the term memory serves as a hard constraint for both paths.
 
-**How does quality estimation work without reference translations, and what happens when confidence is low?** The QE model is an XLM-RoBERTa-large fine-tuned on 530K sentence pairs with human quality scores. It takes source + translation as input and outputs a 0.0-1.0 confidence score in 30ms. When confidence drops below 0.4 (about 5% of translations), the system has three options depending on configuration: show the translation with a warning label, retry with the LLM if the original was NMT (catches NMT failures on edge cases), or route to an async human translator queue for critical domains like medical or legal. The retry strategy is particularly effective -- about 70% of NMT low-confidence translations score above 0.6 when retried with an LLM, because the LLM handles the ambiguity or context dependency that tripped up the NMT model.
+**How does quality estimation work without reference translations, and what happens when confidence is low?** The QE model is an XLM-RoBERTa-large (560M parameters) fine-tuned on 530K sentence pairs with human quality scores. It takes source + translation as input and outputs a 0.0-1.0 confidence score in 30ms. When confidence drops below 0.4 (about 5% of translations), the system has three options depending on configuration: show the translation with a warning label, retry with the LLM if the original was NMT (catches NMT failures on edge cases), or route to an async human translator queue for critical domains like medical or legal. The retry strategy is particularly effective -- about 70% of NMT low-confidence translations score above 0.6 when retried with an LLM, because the LLM handles the ambiguity or context dependency that tripped up the NMT model.
 
 **How do you enforce domain-specific glossary terms in translation output?** Two different strategies depending on the model path. For NMT models, [constrained decoding](../inference_and_decoding/constrained_decoding_and_structured_outputs.md) modifies beam search to force glossary-matching tokens at aligned positions, achieving 99% compliance with a 15-30ms latency penalty. For LLMs, glossary terms are injected into the system prompt, achieving about 92% compliance. A post-processing step then scans LLM output for any glossary violations and replaces incorrect translations. The replacement step uses a morphological analyzer to adjust surrounding words for grammatical agreement (gender, case, number) in the target language, preventing grammatically broken sentences from simple find-and-replace.
 
@@ -1101,4 +1125,4 @@ latency-based routing configuration, see
 
 **How do you prevent translation of entities like URLs, code blocks, and brand names?** A pre-processing step scans the source text with compiled regex patterns and a multilingual NER model (spaCy, 10ms). Detected entities are replaced with indexed placeholders ([URL_0], [EMAIL_0], [CODE_0]) before translation. After translation, placeholders are restored with the original entities. The tricky part is positional -- the placeholder must end up in the grammatically correct position in the target language. For numbers and dates, the system goes further: it reformats according to target locale conventions (e.g., 1,234.56 becomes 1.234,56 in German; MM/DD/YYYY becomes DD.MM.YYYY). Brand names from the glossary system are marked as do-not-translate entities, preventing the model from attempting to translate "iPhone" or "Google Maps."
 
-**How does the three-tier cache change the economics, and what is the risk of fuzzy matching?** The exact-match tier (SHA256 of source + language pair + domain + formality) hits ~12% of traffic in under 5ms, and the fuzzy tier adds ~8% by embedding the source with multilingual-e5-small and matching at cosine > 0.97 -- together they eliminate inference for roughly 40M of the 200M daily translations, saving about $6,000/day blended. The risk concentrates in the fuzzy tier: two similar-looking but semantically opposite sentences ("I can pay you tomorrow" vs. "I can't pay you tomorrow") can clear a loose similarity threshold and silently deliver the wrong cached translation, which is why the threshold is set at a very conservative 0.97 rather than the 0.90-0.95 typical of semantic caches. Cache entries are also invalidated wholesale on any glossary or model update, because a stale cached translation is indistinguishable from a model error to the user -- cache correctness bugs surface as unexplained quality complaints, not clean failures.
+**How does the three-tier cache change the economics, and what is the risk of fuzzy matching?** The exact-match tier (SHA256 of source + language pair + domain + formality) hits ~12% of traffic in under 5ms, and the fuzzy tier adds ~8% by embedding the source with multilingual-e5-small and matching at cosine > 0.97 -- together they eliminate inference for roughly 40M of the 200M daily translations, saving about $536/day blended (a modest 14% of the run rate — the bigger wins are latency and 20% less peak GPU capacity to provision). The risk concentrates in the fuzzy tier: two similar-looking but semantically opposite sentences ("I can pay you tomorrow" vs. "I can't pay you tomorrow") can clear a loose similarity threshold and silently deliver the wrong cached translation, which is why the threshold is set at a very conservative 0.97 rather than the 0.90-0.95 typical of semantic caches. Cache entries are also invalidated wholesale on any glossary or model update, because a stale cached translation is indistinguishable from a model error to the user -- cache correctness bugs surface as unexplained quality complaints, not clean failures.

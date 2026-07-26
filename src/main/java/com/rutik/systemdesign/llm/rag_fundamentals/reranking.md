@@ -14,7 +14,7 @@ Initial retrieval via bi-encoders encodes queries and documents independently �
 
 **Mental model**: A bi-encoder encodes the query and each document separately into vectors, then compares vectors by cosine similarity. This is fast (compute once, compare with dot product) but misses fine-grained interaction — "What is the capital of France?" and a document saying "Paris is called the 'City of Light' and serves as France's political center" may have moderate cosine similarity even though the document perfectly answers the question. A cross-encoder concatenates query+document as a single input and produces a direct relevance score using full attention across both — it can detect that "political center" answers "capital" and score this document higher.
 
-**Why it matters**: Adding a cross-encoder reranker to an existing retrieval pipeline typically improves precision@5 (the fraction of top-5 results that are relevant) from 70-80% to 90%+ — a significant quality improvement for a ~50-100ms latency cost. The reranker is the single highest-ROI addition to most production RAG pipelines.
+**Why it matters**: Adding a cross-encoder reranker to an existing retrieval pipeline is usually the largest single precision win available — Section 12's case study moved precision@5 from 51% to 81% for a ~95ms latency cost. The starting point varies enormously by corpus, so measure your own baseline rather than assuming a headline range; the reranker is nonetheless the single highest-ROI addition to most production RAG pipelines.
 
 **Key insight**: The two-stage retrieval pipeline (bi-encoder for recall, cross-encoder for precision) is the correct separation of concerns — each component does what it's architecturally suited for.
 
@@ -80,7 +80,7 @@ That single structural difference — precomputable versus not — is the entire
 | `n` | Candidates scored at query time — 100 in the standard pipeline, `N` if used as retriever |
 | `L` | Sequence length of the concatenated query + document, capped at 512 here |
 | `L^2` | Self-attention's cost: every token attends to every other token |
-| per-pair latency | Amortized wall-clock per `(query, doc)` pair in a batched pass — 0.8 ms for BGE-reranker-large on an A10G |
+| per-pair latency | Amortized wall-clock per `(query, doc)` pair in a batched pass — 0.8 ms for BGE-reranker-large (~560M params) on an A10G |
 | `N` | Corpus size — 45,000 chunks in Section 12, 1,000,000 in the "why not first stage" argument |
 
 **Walk one example — why it cannot be the retriever.** Section 10's 1M-document corpus, at the 0.8 ms/pair implied by the table in Section 6 (100 candidates in ~80 ms):
@@ -269,24 +269,24 @@ The score itself scales with query length, not with quality: the grid above sums
 ```python
 import cohere
 
-co = cohere.Client(api_key="...")
+co = cohere.ClientV2(api_key="...")   # ClientV2 is the current SDK entry point
 
 def cohere_rerank(query: str, documents: list[str], top_k: int = 5):
     results = co.rerank(
-        model="rerank-english-v3.0",
+        model="rerank-v4.0-fast",   # v3.x (rerank-v3.5, rerank-english-v3.0) still resolves
         query=query,
         documents=documents,
         top_n=top_k,
-        return_documents=True
     )
-    return [(r.document.text, r.relevance_score) for r in results.results]
+    # Index back into the caller's list — robust whether or not documents are echoed.
+    return [(documents[r.index], r.relevance_score) for r in results.results]
 ```
 
-Cohere Rerank 3 properties:
+Cohere Rerank properties:
 - Multilingual: 100+ languages in a single model
-- Best-in-class managed reranking API
-- ~100ms latency; $2/1000 queries
-- No GPU needed (fully managed)
+- Managed API — no GPU needed
+- ~100ms latency; `rerank-v4.0-fast` is $2.00 per 1K searches, `rerank-v4.0-pro` $2.50
+- The v3.x models carry a 4,096-token per-document context limit (query + document combined)
 
 ### Reading the Three Score Scales
 
@@ -387,15 +387,16 @@ ColBERT (Late Interaction):
 - AI coding assistant: 200 code snippet candidates → cross-encoder reranks → top-5 for generation
 - Legal document search: 100 retrieved clauses → reranker → top-3 most relevant clauses cited
 
-### Retrieval-Augmented Legal AI (Harvey, Lexis+)
+### Legal AI research assistants (illustrative pattern; vendors such as Harvey and Lexis+ describe this shape but do not publish component-level retrieval metrics)
 - Dense retrieval over millions of case law documents → cross-encoder reranker
-- Reranker specifically fine-tuned on legal relevance judgments
-- Without reranker: 65% relevant in top-5. With reranker: 92% relevant in top-5.
+- Reranker fine-tuned on legal relevance judgments, because general web-text rerankers
+  misread legal shorthand and citation formats
 
-### OpenAI File Search (Assistants API)
-- Vector search retrieval → embedding-based reranking (as of 2024)
+### OpenAI managed file search
+- Vector search retrieval followed by a reranking pass over the retrieved chunks,
+  exposed as a built-in tool rather than something you assemble yourself
 - Applied to user-uploaded documents before generating responses
-- Significantly reduced hallucination from irrelevant retrieved context
+- The point of the pattern is the same everywhere: cut irrelevant context before generation
 
 ---
 
@@ -407,8 +408,8 @@ ColBERT (Late Interaction):
 | BGE-reranker-base | ~30ms GPU | Good | Self-hosted | Compact model |
 | BGE-reranker-large | ~80ms GPU | Very good | Self-hosted | Best open source |
 | ColBERT | ~5ms GPU | Good | Self-hosted | Best latency |
-| Cohere Rerank 3 | ~100ms API | Best | $2/1K queries | Best multilingual |
-| GPT-4o-mini as reranker | ~500ms API | Excellent | Expensive | Not recommended for this purpose |
+| Cohere Rerank (v4.0-fast) | ~100ms API | Best | $2/1K searches | Best multilingual |
+| A small general LLM as reranker | ~500ms API | Excellent | Expensive | Not recommended for this purpose |
 
 ---
 
@@ -466,7 +467,7 @@ Fix: Batch all candidates in a single model forward pass with padding. This is 1
 |------|------|-------|
 | **BGE-reranker-large** | Open source cross-encoder | Best open-source; BAAI; 512 token limit |
 | **BGE-reranker-v2-m3** | Open source cross-encoder | Multilingual; longer context than v1 |
-| **Cohere Rerank 3** | Managed API | Best multilingual; 4096 token limit; $2/1K queries |
+| **Cohere Rerank** | Managed API | Best multilingual; current IDs `rerank-v4.0-fast` / `rerank-v4.0-pro`; v3.x has a 4,096-token per-document limit; $2.00-$2.50 per 1K searches |
 | **ColBERT v2** | Late interaction | Best latency; good quality; large index size |
 | **SPLADE** | Learned sparse + rerank | Combined sparse + reranking approach |
 | **LlamaIndex SentenceTransformerRerank** | Reranking module | Wraps cross-encoder models; integrates with LlamaIndex |
@@ -479,7 +480,7 @@ Fix: Batch all candidates in a single model forward pass with padding. This is 1
 ## 10. Interview Questions with Answers
 
 **Q: What is a cross-encoder reranker and when should you use it?**
-A: A cross-encoder takes the query and a candidate document together as a single input sequence and outputs a direct relevance score using full self-attention across both texts. This joint encoding captures fine-grained query-document interactions that bi-encoders miss — "capital" in a query correctly matching "political center" in a document. Use it as a second stage after initial retrieval: bi-encoder retrieves top-100 candidates (fast, high recall); cross-encoder reranks to top-5 (slow but high precision). Adding reranking to an existing RAG pipeline typically improves precision@5 from 70-80% to 90%+. The cost is ~50-100ms additional latency and self-hosting or API charges for the reranker model.
+A: A cross-encoder takes the query and a candidate document together as a single input sequence and outputs a direct relevance score using full self-attention across both texts. This joint encoding captures fine-grained query-document interactions that bi-encoders miss — "capital" in a query correctly matching "political center" in a document. Use it as a second stage after initial retrieval: bi-encoder retrieves top-100 candidates (fast, high recall); cross-encoder reranks to top-5 (slow but high precision). The precision gain is corpus-dependent and can be large — Section 12 measured precision@5 going from 51% to 81% on a support knowledge base. The cost is ~50-100ms additional latency and self-hosting or API charges for the reranker model.
 
 **Q: Why can't you use a cross-encoder as the primary retriever?**
 A: Cross-encoders require a forward pass for each (query, document) pair — O(N) passes for a corpus of N documents, each taking ~1ms on GPU. For 1M documents: 1M passes × 1ms = 1000 seconds per query — completely impractical. Cross-encoders cannot pre-compute document representations (unlike bi-encoders) because the document representation depends on the specific query. Bi-encoders pre-compute all document embeddings once at index time, then only compute one query embedding at query time + ANN search. The fundamental constraint is that cross-encoder relevance depends on the query, preventing pre-computation.
@@ -494,7 +495,7 @@ A: 50-100 candidates is the standard range. The reranker's value is highest when
 A: Fine-tuning requires relevance-labeled pairs: (query, relevant_document, irrelevant_document) triples. Collect these by: (1) domain expert annotation — 500-2000 triples is usually sufficient; (2) LLM-generated pairs — use GPT-4 to generate (query, relevant passage) pairs from domain documents, and use random passages as negatives; (3) human click feedback — clicks indicate relevance (implicit labeling). Fine-tuning: use a cross-encoder base model (BGE-reranker-base), apply contrastive loss (maximize score for positive, minimize for negative pairs), 2-5 epochs with low learning rate (1e-5). Validate: measure MRR@10 and NDCG@10 on a held-out domain-specific test set.
 
 **Q: How does Cohere Rerank 3 compare to self-hosted cross-encoders?**
-A: Cohere Rerank 3 advantages: best multilingual support (100+ languages), 4096-token context window (vs. 512 for BGE-reranker-large), no GPU infrastructure to manage, consistently strong performance on BEIR benchmark. Disadvantages: $2/1000 queries (becomes significant at high volume), API latency ~100ms, data privacy concerns (sending documents to external API), offline/air-gapped deployments not possible. Self-hosted BGE-reranker-large: free inference on owned GPU (~80ms on A10G), data stays on-premise, can be fine-tuned, 512-token limit. Decision: API if multilingual, long documents, or team lacks GPU; self-hosted if cost at scale, privacy, or fine-tuning is needed.
+A: Cohere Rerank advantages: best multilingual support (100+ languages), a 4,096-token per-document context window on the v3.x models (vs. 512 for BGE-reranker-large), no GPU infrastructure to manage, consistently strong performance on BEIR. Disadvantages: $2.00 per 1K searches on `rerank-v4.0-fast` (becomes significant at high volume), API latency ~100ms, data privacy concerns (sending documents to external API), offline/air-gapped deployments not possible. Self-hosted BGE-reranker-large: free inference on owned GPU (~80ms on A10G), data stays on-premise, can be fine-tuned, 512-token limit. Decision: API if multilingual, long documents, or team lacks GPU; self-hosted if cost at scale, privacy, or fine-tuning is needed.
 
 **Q: When does adding a reranker not improve quality?**
 A: Three scenarios where reranking provides no meaningful improvement. First, the initial retrieval already has >90% precision@5 — the reranker can't improve what's already nearly perfect. Second, all retrieved candidates are highly relevant — the reranker just shuffles excellent results. Third, the candidate pool is too small (under 20-30 docs) — the reranker can't overcome fundamentally poor initial retrieval recall. Additionally, reranking hurts when: (1) the reranker's context window is shorter than the chunk length (relevant content truncated); (2) domain mismatch between reranker training and deployment; (3) reranking adds critical latency in real-time streaming scenarios.
@@ -509,13 +510,13 @@ A: Reranking determines which documents appear in the LLM's context, and context
 A: Reranking introduces a source of improvement that's orthogonal to embedding quality — a weak bi-encoder + strong reranker can outperform a strong bi-encoder without reranker. This complicates evaluation: the question is not just "is this embedding model good?" but "is this embedding model + reranker combination good?" Evaluation must measure the end-to-end pipeline, not just retrieval in isolation. Additionally, evaluation metrics can be misleading: recall@100 (before reranking) matters more than precision@100; the reranker handles the precision-5 optimization. Standard evaluation: measure recall@100 (retrieval quality — are relevant docs in the pool?) and then precision@5 after reranking (does the reranker surface the right ones from the pool?).
 
 **Q: What is the typical latency budget for cross-encoder reranking?**
-A: Cross-encoder reranking on 20 candidates with a 400M parameter model (BGE-reranker-large) takes 100-150ms on a T4 GPU and 50-80ms on an A10G. For a system with a 2-second end-to-end SLO, a representative latency budget allocation is: embedding (10ms) + retrieval/ANN search (30ms) + reranking (100ms) + LLM generation (1.5s) + network and overhead (100ms) = ~1.74s, leaving ~260ms of margin. To reduce reranking latency without sacrificing quality: limit candidates to top-20 instead of top-100 (linear latency reduction), use a smaller reranker model (BGE-reranker-base: ~30ms on T4 at the cost of 5-8% quality), or use ColBERT (~5ms) for latency-sensitive workloads.
+A: Budget it as candidates x per-pair cost — this module uses BGE-reranker-large (an XLM-RoBERTa-large cross-encoder, ~560M params) at ~0.8ms/pair on an A10G, so 20 candidates is ~16ms and 100 candidates ~80ms; an older T4 is roughly 2x slower. For a system with a 2-second end-to-end SLO, a representative latency budget allocation is: embedding (10ms) + retrieval/ANN search (30ms) + reranking (100ms) + LLM generation (1.5s) + network and overhead (100ms) = ~1.74s, leaving ~260ms of margin. To reduce reranking latency without sacrificing quality: limit candidates to top-20 instead of top-100 (linear latency reduction), use a smaller reranker model (BGE-reranker-base: ~30ms on T4 at the cost of 5-8% quality), or use ColBERT (~5ms) for latency-sensitive workloads.
 
 **Q: How does RRF compare to learned score fusion for combining retriever results?**
-A: RRF (Reciprocal Rank Fusion) merges ranked lists by computing a score of 1/(k+rank) for each document across each retriever, then summing. It is simple, requires no training data, no tuning, and performs within 2-3% of optimally tuned learned fusion on most retrieval benchmarks. Learned score fusion trains a small model (logistic regression or a shallow neural network) on retriever scores as features, using labeled relevance data as the target — it can capture non-linear combinations and query-type-specific weights that RRF cannot. However, learned fusion requires 500+ labeled (query, relevant_doc) pairs for training, periodic retraining as the corpus and query distribution shift, and adds a serving dependency. Start with RRF; only consider learned fusion if your eval set shows a consistent 5%+ gap favoring learned fusion and you have the labeled data and retraining infrastructure to support it.
+A: RRF (Reciprocal Rank Fusion) merges ranked lists by computing a score of 1/(k+rank) for each document across each retriever, then summing. It is simple and requires no training data and no tuning — Cormack, Clarke and Buettcher (SIGIR 2009) introduced it precisely because it beat Condorcet Fuse, CombMNZ and every individual learning-to-rank method on LETOR 3 without any tuning. Learned score fusion trains a small model (logistic regression or a shallow neural network) on retriever scores as features, using labeled relevance data as the target — it can capture non-linear combinations and query-type-specific weights that RRF cannot. However, learned fusion requires 500+ labeled (query, relevant_doc) pairs for training, periodic retraining as the corpus and query distribution shift, and adds a serving dependency. Start with RRF; only consider learned fusion if your eval set shows a consistent 5%+ gap favoring learned fusion and you have the labeled data and retraining infrastructure to support it.
 
 **Q: When should you use an LLM as a reranker instead of a cross-encoder?**
-A: Use an LLM as a reranker when: (1) you do not have a fine-tuned cross-encoder for your domain and the general-purpose cross-encoder underperforms; (2) you need explainable relevance scores — the LLM can output a relevance score with a reasoning justification ("this document answers the query because..."); (3) latency budget is generous (500ms+) and the query volume is low enough that LLM API cost is acceptable. Cost comparison: scoring 20 documents with GPT-4o-mini costs approximately $0.001 per query at current pricing; BGE-reranker-large self-hosted costs GPU compute only (~$0.0001 at A10G spot pricing per query). At 100K queries/day: GPT-4o-mini reranking costs ~$100/day; self-hosted cross-encoder costs ~$10/day. Cross-encoders are 10× cheaper and 5× faster at scale — LLM reranking is a domain-adaptation shortcut, not a permanent production architecture.
+A: Use an LLM as a reranker when: (1) you do not have a fine-tuned cross-encoder for your domain and the general-purpose cross-encoder underperforms; (2) you need explainable relevance scores — the LLM can output a relevance score with a reasoning justification ("this document answers the query because..."); (3) latency budget is generous (500ms+) and the query volume is low enough that LLM API cost is acceptable. Cost comparison: scoring 20 documents of ~500 tokens each is ~10K input tokens, which on a cheap current model (for example `gpt-5.6-luna` at $1/1M input) is ~$0.01 per query; BGE-reranker-large self-hosted costs GPU compute only (~$0.0001 at A10G spot pricing per query). At 100K queries/day that is ~$1,000/day of LLM reranking versus ~$10/day self-hosted — recompute this against today's per-token price before quoting it. Cross-encoders are orders of magnitude cheaper and several times faster at scale — LLM reranking is a domain-adaptation shortcut, not a permanent production architecture.
 
 **Q: How do you choose the optimal top-k for reranking?**
 A: Retrieve more candidates than you will ultimately use — the standard pattern is retrieve top-50 to top-100, rerank to top-5. The quality improvement from expanding the candidate pool exhibits diminishing returns: going from top-20 to top-50 candidates improves recall@5 by 3-5%; going from top-50 to top-100 adds only 1-2% more. The optimal candidate count depends on initial retrieval quality: if your retriever achieves recall@20 above 90% (the relevant document is almost always in the top-20), reranking top-20 is sufficient. If recall@20 is below 80%, expand to top-50 or focus on improving the base retriever first — a reranker cannot surface relevant documents that the retriever never retrieved. Reranking latency scales linearly with candidate count; doubling from top-50 to top-100 approximately doubles reranking time.

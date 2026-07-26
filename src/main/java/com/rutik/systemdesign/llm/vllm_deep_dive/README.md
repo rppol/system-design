@@ -4,7 +4,7 @@
 
 > **One-line analogy**: vLLM is to LLM serving what a database's buffer pool manager is to query execution — it reimagines memory management from scratch to eliminate waste and maximize throughput.
 
-**Mental model**: A naive LLM server allocates a fixed KV cache block per request at arrival time, holds it until completion, and serves one batch at a time. GPU memory fragments, utilization drops to 30-40%, and throughput plateaus. vLLM's PagedAttention borrows virtual memory concepts from OS design: KV cache is divided into fixed-size pages; pages are allocated on demand and can be non-contiguous; requests share pages when their prefixes match. The result: 24× higher throughput than Hugging Face Transformers on the same hardware in the original paper.
+**Mental model**: A naive LLM server allocates a fixed KV cache block per request at arrival time, holds it until completion, and serves one batch at a time. GPU memory fragments, utilization drops to 30-40%, and throughput plateaus. vLLM's PagedAttention borrows virtual memory concepts from OS design: KV cache is divided into fixed-size pages; pages are allocated on demand and can be non-contiguous; requests share pages when their prefixes match. The result reported in the SOSP 2023 paper (arXiv 2309.06180) is 2-4× higher throughput at the same latency versus the then state-of-the-art systems FasterTransformer and Orca; the widely quoted "24×" is from vLLM's own June 2023 launch blog, measured against Hugging Face Transformers (LLaMA-7B on an A10G, LLaMA-13B on an A100 40GB), not against a serving system.
 
 **Why it matters**: vLLM is the dominant open-source inference engine. Understanding it means understanding the engineering that makes production LLM serving economically viable — and being able to tune, debug, and architect around it.
 
@@ -84,12 +84,13 @@ flowchart TD
     class gpuN mathOp
 ```
 
-**Key objects:**
-- **`LLMEngine`** — orchestrates scheduling and execution; the central coordinator
-- **`Scheduler`** — decides which sequences to run each step (prefill vs decode, preemption)
-- **`BlockSpaceManager`** — manages KV cache block allocation, mapping logical → physical blocks
-- **`ModelRunner`** — executes the forward pass with paged attention CUDA kernels
-- **`Sampler`** — applies sampling parameters (temperature, top-p, top-k, min-p, penalties) to logits
+**Key objects** (V1 engine — module paths under `vllm/v1/`):
+- **`LLMEngine` / `AsyncLLM`** — orchestrate scheduling and execution; `AsyncLLMEngine` is now just an alias of `AsyncLLM`
+- **`EngineCore`** — the scheduling + model-execution loop, run in its own process so tokenization, detokenization and streaming overlap with it
+- **`Scheduler`** (`v1/core/sched/scheduler.py`) — decides which requests run each step; keeps `waiting` and `running` queues (there is no SWAPPED queue in V1)
+- **`KVCacheManager` / `BlockPool`** (`v1/core/`) — allocate KV cache blocks and map logical → physical blocks (the V0 name `BlockSpaceManager` is gone)
+- **`GPUModelRunner`** (`v1/worker/gpu_model_runner.py`) — executes the forward pass with paged attention kernels
+- **`Sampler`** (`v1/sample/sampler.py`) — applies sampling parameters (temperature, top-p, top-k, min-p, penalties) to logits
 
 ---
 
@@ -225,14 +226,14 @@ averaging 500 tokens of context:
   paged, block_size 16      512 tok      500 tok       12 tok     2.3%     491,520/  512 =  960
 
   memory actually productive
-    contiguous   240 seqs x 500 tok x 128 KB  = 15.4 GB of a 60 GiB pool   -> 24% useful
-    paged        960 seqs x 500 tok x 128 KB  = 61.4 GB of a 60 GiB pool   -> 98% useful
+    contiguous   240 seqs x 500 tok x 128 KiB = 14.7 GiB of a 60 GiB pool  -> 24% useful
+    paged        960 seqs x 500 tok x 128 KiB = 58.6 GiB of a 60 GiB pool  -> 98% useful
 
   concurrency delta        960 / 240          = 4.0x more users, same card, same model
 ```
 
-That 75.6% -> 2.3% collapse is the number to quote. It is also why the headline "2-4× more
-concurrent sequences" appears everywhere in vLLM's literature: the multiplier is just
+That 75.6% -> 2.3% collapse is the number to quote. It is also the mechanism behind the SOSP
+paper's headline "2-4× throughput at the same latency": the concurrency multiplier is just
 `max_model_len / average_used`, so it is largest exactly when your users' answers vary most in
 length. Set `max_model_len` to 32K to accommodate a rare long request and a contiguous allocator
 wastes 98.4% on a 500-token average — paged allocation is unmoved at 2.3%.
@@ -304,11 +305,12 @@ long-tail — output lengths in chat traffic routinely span 20×):
   throughput ratio             = 64,000 / 5,100       = 12.5x
 ```
 
-That 12.5× lands squarely inside the 10-24× range vLLM reports against naive `model.generate()`,
+That 12.5× lands inside the 8.5-24× range vLLM's launch blog reports against Hugging Face
+Transformers' `model.generate()`,
 and note where it came from: not a faster kernel, not a better GEMM — purely from not holding 31
 idle slots hostage. The ratio is exactly `L_max / mean(L)`, so it collapses toward 1× when every
 request produces the same output length, which is why fixed-length classification workloads see
-almost no benefit from continuous batching while open-ended chat sees the full 10-24×.
+almost no benefit from continuous batching while open-ended chat sees the widest gap.
 
 **Why the refill step is the load-bearing part.** Retiring a finished sequence is easy; the hard part
 is that its freed KV blocks must be re-allocatable to a *different-length* new request in the same
@@ -352,26 +354,27 @@ flowchart LR
 
     WAITING --> RUNNING
     RUNNING -- "done" --> Done([completed])
-    RUNNING -- "preempted (KV cache full)" --> SWAPPED
-    SWAPPED -- "memory available" --> RUNNING
+    RUNNING -- "preempted (KV cache full)" --> PREEMPTED
+    PREEMPTED -- "re-queued, KV recomputed" --> WAITING
 
     class WAITING req
     class RUNNING train
-    class SWAPPED lossN
+    class PREEMPTED lossN
     class Done io
 ```
 
 - **WAITING**: requests that have arrived but haven't started
 - **RUNNING**: sequences currently being processed (in GPU KV cache)
-- **SWAPPED**: sequences preempted — KV cache moved to CPU RAM to make room
+- **PREEMPTED**: sequences the scheduler evicted to free blocks — their KV cache is discarded and they go back to the head of the waiting queue
 
 ### Preemption
 
-When GPU KV cache is full and a new high-priority request arrives:
-1. **Recomputation**: drop the lowest-priority running sequence entirely; recompute its KV cache when re-scheduled (wastes compute, saves memory bandwidth vs swap)
+When GPU KV cache is full and a running sequence needs another block, the scheduler frees blocks by preempting the lowest-priority running request. There are two ways an engine can do that:
+
+1. **Recomputation**: drop the preempted sequence's KV cache entirely; recompute it when re-scheduled (wastes compute, saves memory bandwidth vs swap)
 2. **Swapping**: copy KV cache blocks to CPU RAM via PCIe, restore later (saves compute, uses CPU RAM and PCIe bandwidth)
 
-Default: recomputation for short sequences, swapping for long ones.
+**vLLM V1 only does recomputation.** The V1 guide is explicit: "vLLM V1 no longer requires KV cache swapping to handle request preemptions." GPU↔CPU KV swapping, the `SWAPPED` request state and the `--preemption-mode` flag were all V0 features, and V0 was deleted from the codebase in v0.11.0 — so there is no swap path to tune any more. Prefix caching (§6) absorbs much of what swapping used to buy, because a recomputed prefix usually hits the cache. The cost comparison below is still worth understanding, since it explains *why* vLLM dropped swapping and it is what disaggregated designs (§7) pay when they move KV across a fabric:
 
 ```
 swap cost      = 2 x blocks x block_bytes / pcie_bandwidth        (out, then back in)
@@ -382,29 +385,30 @@ recompute cost = tokens / prefill_throughput                       (paid once, o
 get its KV cache back later — PCIe bandwidth plus CPU RAM if you swap it out, or GPU FLOPs if you
 throw it away and re-prefill."
 
-Neither option is free and neither is universally better. The choice hinges on which resource is
-scarce *at that moment*, which is why vLLM picks per sequence rather than per deployment.
+Neither option is free. The choice hinges on which resource is scarce *at that moment* — and
+vLLM's answer, after V1, is that recompute plus prefix caching wins often enough that the swap
+path is not worth its complexity.
 
 | Symbol | What it is |
 |--------|------------|
 | `blocks` | `ceil(tokens / 16)`. The sequence's whole KV footprint |
-| `block_bytes` | 2 MB for LLaMA 3 8B FP16 at block_size 16 (computed above) |
-| pcie_bandwidth | Gen4 x16: 32 GB/s theoretical, ~25 GB/s achieved |
-| prefill_throughput | Prompt tokens/sec on a busy GPU. ~25,000/s for 8B on A100 |
+| `block_bytes` | 2 MiB for LLaMA 3 8B FP16 at block_size 16 (computed above) |
+| pcie_bandwidth | Gen4 x16: ~32 GB/s theoretical, ~25 GB/s achieved |
+| prefill_throughput | Prompt tokens/sec on a busy GPU. ~10,000/s for 8B on an A100 80GB — the roofline bound is 312 TFLOPS / (2 x 8e9 FLOPs per token) = 19,500/s at 100% MFU, so ~50% MFU gives ~10,000/s |
 | the leading `2` | Swapping is a round trip. Cost out is not the whole cost |
 
-**Walk one example.** LLaMA 3 8B, 2 MB blocks, PCIe Gen4 at 25 GB/s effective:
+**Walk one example.** LLaMA 3 8B, 2 MiB blocks, PCIe Gen4 at 25 GB/s effective:
 
 ```
   short sequence, 256 tokens
-    blocks         = ceil(256/16)                = 16 blocks   = 32 MB
-    swap           = 2 x 32 MB / 25 GB/s         =  2.6 ms   + 32 MB of CPU RAM held
-    recompute      = 256 / 25,000                = 10.2 ms   + 0 bytes of CPU RAM
+    blocks         = ceil(256/16)                = 16 blocks   = 32 MiB
+    swap           = 2 x 32 MiB / 25 GB/s        =  2.7 ms   + 32 MiB of CPU RAM held
+    recompute      = 256 / 10,000                = 25.6 ms   + 0 bytes of CPU RAM
 
   long sequence, 4,096 tokens
-    blocks         = ceil(4096/16)               = 256 blocks  = 512 MB
-    swap           = 2 x 512 MB / 25 GB/s        =   41 ms   + 512 MB of CPU RAM held
-    recompute      = 4,096 / 25,000              =  164 ms   + 0 bytes of CPU RAM
+    blocks         = ceil(4096/16)               = 256 blocks  = 512 MiB
+    swap           = 2 x 512 MiB / 25 GB/s       =   43 ms   + 512 MiB of CPU RAM held
+    recompute      = 4,096 / 10,000              =  410 ms   + 0 bytes of CPU RAM
 
   crossover: recompute cost grows linearly with tokens; swap cost grows linearly too,
   but swap ALSO holds CPU RAM for the entire time the sequence stays preempted, and
@@ -413,9 +417,11 @@ scarce *at that moment*, which is why vLLM picks per sequence rather than per de
 
 Read the two columns as different currencies. Recompute spends GPU FLOPs — which are partly idle
 during a bandwidth-bound decode phase — and spends nothing while the sequence sits preempted. Swap
-spends PCIe bandwidth twice and rents CPU RAM for the whole wait. For a 256-token sequence,
-10 ms of recompute is cheaper than complicating the memory hierarchy; for a 4,096-token sequence,
-164 ms is a visible stall and the 512 MB of pinned host memory is worth it.
+spends PCIe bandwidth twice and rents CPU RAM for the whole wait. On raw milliseconds swap wins at
+both sizes here, which is exactly why V0 offered it; what killed it is the second column. Prefix
+caching turns most of that 410 ms recompute into a cache hit costing near zero, while swapping
+still pays the full 43 ms round trip plus 512 MiB of pinned host memory and a second code path
+through the block manager.
 
 **Why preemption *rate* matters more than preemption cost.** A single preemption is a few tens of
 milliseconds; the incident in §21 is a p99 TTFT jump from 600 ms to 8,000 ms. That gap is not one
@@ -430,7 +436,7 @@ oversubscribed and no per-preemption tuning will save you. Lower `max_num_seqs` 
 # FCFS (default)
 --scheduling-policy fcfs
 
-# Priority-based (v0.6+)
+# Priority-based
 --scheduling-policy priority
 # Per-request priority via API:
 # {"priority": 5}  # lower = higher priority
@@ -440,11 +446,13 @@ oversubscribed and no per-preemption tuning will save you. Lower `max_num_seqs` 
 
 ## 5. KV Cache Management
 
-### BlockAllocator
+### BlockPool
 
-Two allocators:
-- **GPU allocator**: manages physical blocks in GPU HBM
-- **CPU allocator**: manages blocks in CPU RAM (for swapped sequences)
+V1 keeps a single **GPU** block pool (`vllm/v1/core/block_pool.py`): a free list of physical
+blocks in GPU HBM plus a hash table of cached blocks. The separate **CPU allocator** that V0 used
+to hold swapped-out sequences no longer exists — see the preemption note in §4. Offloading KV to
+host memory is back as an **opt-in cache extension**, not as the scheduler's preemption path:
+`--kv-offloading-size <GiB>` plus `--kv-offloading-backend native|lmcache`, off by default.
 
 Block states:
 ```
@@ -458,7 +466,7 @@ When prefix caching is active and two sequences share a physical block, writing 
 ### `gpu_memory_utilization`
 
 ```bash
---gpu-memory-utilization 0.9  # use 90% of GPU memory for model + KV cache
+--gpu-memory-utilization 0.9  # use 90% of GPU memory for model + KV cache (default is 0.92)
 ```
 
 vLLM profiles actual model weight memory, then allocates all remaining GPU memory (up to this fraction) for KV cache blocks. More blocks = more concurrent requests = higher throughput.
@@ -481,7 +489,7 @@ and it takes that headroom from CUDA graphs and NCCL buffers that still need it.
 | Symbol | What it is |
 |--------|------------|
 | `vram_total` | Physical capacity. 80 GB on an A100 80GB — before the driver's cut |
-| `gpu_memory_utilization` | Fraction of the card vLLM may claim. Default 0.90 |
+| `gpu_memory_utilization` | Fraction of the card vLLM may claim. Default 0.92 (`CacheConfig`) |
 | `weight_bytes` | `P × bytes_per_element`, divided by TP if sharded. Measured, not guessed |
 | `overhead_bytes` | Activations, CUDA graphs, NCCL buffers. 2-5 GB, grows with TP |
 | `max_num_seqs` | Concurrency cap. The knob that decides whether you preempt |
@@ -497,23 +505,23 @@ and it takes that headroom from CUDA graphs and NCCL buffers that still need it.
   ------------------------------------------------------------
   kv pool        = 72.0 - 16.0 - 4.0               = 52.0 GB
 
-  num_blocks     = 52.0 GB / 2 MB per block        = 26,000 blocks
-  token capacity = 26,000 x 16                     = 416,000 tokens
+  num_blocks     = 52.0e9 B / 2,097,152 B per block = 24,800 blocks
+  token capacity = 24,800 x 16                     = 396,800 tokens
 
   worst-case slots at max_model_len 2048
-                 = 416,000 / 2,048                 = 203 sequences
-  so --max-num-seqs 256   -> oversubscribed by 26%; preemption under full-length load
+                 = 396,800 / 2,048                 = 194 sequences
+  so --max-num-seqs 256   -> oversubscribed by 32%; preemption under full-length load
      --max-num-seqs 192   -> fits with headroom even if every request runs to 2,048
 
   average-case slots at the observed 500-token mean
-                 = 416,000 / 500                   = 832 sequences
+                 = 396,800 / 500                   = 794 sequences
 ```
 
-The gap between 203 and 832 is the whole tuning problem. Size `max_num_seqs` to the average and the
+The gap between 194 and 794 is the whole tuning problem. Size `max_num_seqs` to the average and the
 server is fast until the day a burst of full-length requests arrives, at which point it preempts
 itself into the latency cascade described in §4. Size it to the worst case and you leave 4× of
 throughput unclaimed on ordinary traffic. Production answer: set it near the worst case (192 here),
-then watch `vllm:num_preemptions_total` and `vllm:gpu_cache_usage_perc` and raise it only while
+then watch `vllm:num_preemptions_total` and `vllm:kv_cache_usage_perc` and raise it only while
 preemptions stay at zero.
 
 **Why the overhead term cannot be dropped.** It is the difference between 0.90 and 0.98. Set
@@ -526,11 +534,15 @@ same 78.4 GB, so allocation fails at 95% load rather than at 100%. That is preci
 
 ## 6. Prefix Caching (APC)
 
-**Automatic Prefix Caching** reuses KV cache across requests that share a common prefix (system prompt, few-shot examples, RAG context).
+**Automatic Prefix Caching** reuses KV cache across requests that share a common prefix (system prompt, few-shot examples, RAG context). **Since V1 it is on by default** (`CacheConfig.enable_prefix_caching = True`); turn it off with `--no-enable-prefix-caching`.
 
 ### How It Works
 
-vLLM maintains a **radix tree** (hash trie) indexed by token sequences:
+vLLM maintains a **hash table** from block hash → physical block, giving O(1) prefix lookup. It is
+**not** a radix tree — that is SGLang's RadixAttention (arXiv 2312.07104), compared in the table
+below. vLLM's design doc puts it plainly: "we hash each kv-cache block by the tokens in the block
+and the tokens in the prefix before the block." The default hash is SHA-256
+(`--prefix-caching-hash-algo`):
 
 ```
 System prompt tokens: [1, 2, 3, 4, 5, 6, 7, 8]
@@ -568,7 +580,7 @@ fragile in exactly one way, covered below.
 | `block_hash[i]` | Identity of block i. Includes the parent hash — hence prefix-chained |
 | `cached_tokens` | Tokens whose K/V already exist. Always a multiple of `block_size` |
 | `prompt_tokens` | Full input length, cached portion included |
-| prefill_throughput | Prompt tokens/sec. ~25,000/s for 8B on A100 |
+| prefill_throughput | Prompt tokens/sec. ~10,000/s for 8B on an A100 80GB (roofline, §4) |
 | LRU eviction | Cached blocks are evicted least-recently-used when the pool fills |
 
 **Walk one example.** A 2,000-token system prompt plus few-shot examples, followed by a 200-token
@@ -579,20 +591,20 @@ user turn, LLaMA 3 8B on an A100:
   system prompt blocks = 2,000 / 16                         = 125 blocks (exactly aligned)
 
   cold request (first user of the day)
-    prefill            = 2,200 / 25,000                     = 88.0 ms
+    prefill            = 2,200 / 10,000                     = 220 ms
 
   warm request (blocks 0..124 hit)
     cached_tokens      = 125 x 16                           = 2,000
     prefill_saved      = 2,000 / 2,200                      = 90.9%
     tokens to compute  = 200                                = 13 blocks
-    prefill            = 200 / 25,000                       =  8.0 ms
-    saving             = 88.0 - 8.0                         = 80.0 ms of TTFT
+    prefill            = 200 / 10,000                       =  20 ms
+    saving             = 220 - 20                           = 200 ms of TTFT
 
   memory cost of holding the shared prefix
-    125 blocks x 2 MB                                       = 250 MB, ONCE
+    125 blocks x 2 MiB                                      = 250 MiB, ONCE
     same prefix under no caching, 100 concurrent users
-                       = 100 x 250 MB                       = 25 GB
-    saved                                                   = 24.75 GB of the 52 GB pool
+                       = 100 x 250 MiB                      = 25 GiB
+    saved                                                   = 24.75 GiB of the 52 GB pool
 ```
 
 Note that the table above quotes "40-70% TTFT reduction" while this example shows 91% of *prefill*
@@ -600,6 +612,10 @@ removed. Both are right: TTFT is queue time plus prefill, and prefix caching onl
 term. On an idle server you see nearly the full 91%; on a loaded server where queueing dominates,
 the same cache hit shows up as 40-70%. When a benchmark disappoints, check whether you measured a
 prefill win against a queue-bound baseline.
+
+The block hash also folds in a few non-token ingredients — the LoRA adapter ID, multimodal input
+hashes, and an optional cache salt — so two requests with byte-identical text but different
+adapters correctly miss each other's blocks.
 
 **Why prefix-chaining is the failure mode.** Because `block_hash[i]` folds in `block_hash[i-1]`, a
 single changed token at position 3 changes the hash of block 0 and therefore of every block after
@@ -610,10 +626,10 @@ append all dynamic content after it, so the first 125 blocks always hash the sam
 
 ```
   BAD   [ "Today is 2026-07-20." | 2,000-token static system prompt | user turn ]
-        block 0 differs daily -> chain breaks at block 0 -> 0 blocks hit -> 88 ms every time
+        block 0 differs daily -> chain breaks at block 0 -> 0 blocks hit -> 220 ms every time
 
   GOOD  [ 2,000-token static system prompt | "Today is 2026-07-20." | user turn ]
-        blocks 0..124 identical -> 125 blocks hit -> 8 ms
+        blocks 0..124 identical -> 125 blocks hit -> 20 ms
 ```
 
 ### Enabling APC
@@ -678,6 +694,10 @@ With chunked prefill (chunk=512):
 - Overall system latency distribution becomes more predictable
 
 ### Configuration
+
+Chunked prefill is **enabled by default in V1** — the flag below is only needed to be explicit, and
+`--no-enable-chunked-prefill` is what turns it off. The knob that actually matters is the token
+budget per step:
 
 ```bash
 --enable-chunked-prefill \

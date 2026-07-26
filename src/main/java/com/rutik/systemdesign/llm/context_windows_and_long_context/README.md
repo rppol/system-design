@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-The context window is the maximum number of tokens an LLM can process in a single forward pass — including both input and output. Early LLMs had 2K-4K context; modern models support 128K (LLaMA 3), 200K (Claude), up to 1M (Gemini 1.5 Pro). This expansion has fundamentally changed what LLM systems can do: process entire codebases, hour-long conversations, entire books, or multiple lengthy documents simultaneously.
+The context window is the maximum number of tokens an LLM can process in a single forward pass — including both input and output. Early LLMs had 2K-4K context (GPT-3: 2,048); modern models support 128K (GPT-4o, Llama 3.1 — note plain Llama 3 was 8K), 200K (Claude Haiku 4.5), and 1M (Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line). This expansion has fundamentally changed what LLM systems can do: process entire codebases, hour-long conversations, entire books, or multiple lengthy documents simultaneously.
 
 Long context creates both opportunities (simpler architecture — just put everything in context) and challenges (quadratic attention cost, "lost in the middle" phenomenon, higher token costs, and the ongoing debate: when should you use long context vs. RAG?).
 
@@ -12,9 +12,9 @@ Long context creates both opportunities (simpler architecture — just put every
 
 > **One-line analogy**: The context window is like working memory — the more you can hold in mind at once, the more sophisticated the reasoning you can do, but filling it up gets exponentially expensive.
 
-**Mental model**: An LLM can only "see" what's in its context window. 4K tokens (GPT-3) = a few pages; 200K (Claude) = an entire book. Bigger context enables richer reasoning but costs quadratically more compute (O(n²) attention). The "lost in the middle" effect means models attend less to information buried in the middle of long contexts. Long context is simpler to build with (just stuff everything in) but expensive and imperfect; RAG is efficient but retrieval can miss the right context.
+**Mental model**: An LLM can only "see" what's in its context window. 2K tokens (GPT-3) = a few pages; 1M (Claude Opus 5) = a shelf of books. Bigger context enables richer reasoning but costs quadratically more compute (O(n²) attention). The "lost in the middle" effect means models attend less to information buried in the middle of long contexts. Long context is simpler to build with (just stuff everything in) but expensive and imperfect; RAG is efficient but retrieval can miss the right context.
 
-**Why it matters**: Long context changes what LLM systems can do — entire codebases, full legal contracts, complete conversation histories become accessible. But the cost structure matters: 200K tokens × $0.003/1K = $0.60 per query. For high-frequency applications, that cost is prohibitive and RAG is necessary.
+**Why it matters**: Long context changes what LLM systems can do — entire codebases, full legal contracts, complete conversation histories become accessible. But the cost structure matters: at Claude Sonnet 5's $3/1M input rate ($0.003/1K), a 200K-token prompt costs $0.60 per query. For high-frequency applications, that cost is prohibitive and RAG is necessary.
 
 **Key insight**: Long context and [RAG](../rag_fundamentals/README.md) are not competing approaches but complementary tools — use RAG for large corpora and cost sensitivity, use long context for holistic reasoning, and use both together (retrieve relevant chunks → put them in long context) for the best results.
 
@@ -74,13 +74,14 @@ applies it as a rotation instead of an addition.
     0       0.000            1.0            pos / 1              6.3
    64       0.250           10.0            pos / 10            62.8
   128       0.500          100.0            pos / 100          628
-  255       0.996        ~9,820             pos / 9820      ~61,700
+  255       0.996        ~9,646             pos / 9646      ~60,600
 
   wavelength = 2 * pi * scale, e.g. i=128 -> 2 * 3.1416 * 100 = 628 tokens
+  and         i=255 -> 10000^0.99609 = 9,646, so 2 * 3.1416 * 9,646 = 60,608
 ```
 
 Dimension pair 0 completes a full cycle every ~6 tokens — it says "am I odd or even, roughly
-here". Dimension pair 255 completes a cycle every ~61,700 tokens — it says "am I near the front
+here". Dimension pair 255 completes a cycle every ~60,600 tokens — it says "am I near the front
 or the back of the whole document". Read together, they pin down `pos` exactly.
 
 **Why it still cannot extrapolate.** The sinusoid itself is defined for any `pos`, so you *can*
@@ -369,27 +370,28 @@ on position grounds alone, which is exactly the "long-range dependencies are har
 
 ```mermaid
 timeline
-    title Context window growth — 512 to 1M tokens in six years
+    title Context window growth — 512 to 1M tokens
     2018 : BERT — 512 tokens (classification, embeddings)
-    2020 : GPT-3 — 4,096 tokens (general completion)
-    2023 : GPT-4 — 128,000 tokens (long documents, complex tasks)
-    2024 : Claude 3.5 — 200,000 tokens (very long documents, codebases)
+    2020 : GPT-3 — 2,048 tokens (general completion)
+    2023 : GPT-4 Turbo — 128,000 tokens (long documents, complex tasks)
+    2024 : Claude 3.5 Sonnet — 200,000 tokens (very long documents, codebases)
          : Gemini 1.5 Pro — 1,000,000 tokens (books, movies, large codebases)
+    2026 : Claude Opus 5 / Sonnet 5 / Fable 5 — 1,000,000 tokens (1M is now the frontier default)
 ```
 
-A ~2000× expansion in six years — each jump changed what was buildable: 4K enabled chat, 128K enabled whole-document analysis, 1M enabled whole-codebase and multi-book reasoning.
+A ~2000× expansion (512 → 1M) — each jump changed what was buildable: 4K enabled chat, 128K enabled whole-document analysis, 1M enabled whole-codebase and multi-book reasoning. Note that GPT-4 shipped in March 2023 at 8K/32K; the 128K window arrived with GPT-4 Turbo in November 2023.
 
 ### "Lost in the Middle" Effect
 
 ```mermaid
 xychart-beta
-    title "Retrieval accuracy vs. fact position in a 20-document context (Liu et al. 2023)"
-    x-axis ["Pos 0 (start)", "Pos 5", "Pos 10 (middle)", "Pos 15", "Pos 19 (end)"]
+    title "Accuracy vs. answer-document position, 20 documents, GPT-3.5-Turbo (Liu et al. 2023)"
+    x-axis ["Pos 0 (start)", "Pos 9 (middle)", "Pos 19 (end)"]
     y-axis "Retrieval accuracy %" 0 --> 100
-    bar [92, 70, 54, 69, 90]
+    bar [75.8, 53.8, 63.2]
 ```
 
-Models strongly favor the beginning and end of the context — a fact at position 10 (middle) is recalled at 54% vs. 92%/90% at the extremes. Place critical information at the START or END.
+Models favor the beginning and end of the context — in Liu et al.'s 20-document multi-document-QA setting, GPT-3.5-Turbo scored 75.8% with the answer document first, 63.2% with it last, and 53.8% with it in the middle, which is *below* the same model's 56.1% closed-book baseline. The dip is model-dependent: Claude-1.3 was nearly flat (59.9% / 56.8% / 60.1%) in the same setting. Place critical information at the START or END.
 
 ### Context Rot — Reliability vs. Input Length (Chroma, 2025)
 
@@ -581,9 +583,11 @@ slow interconnect and the GPUs sit idle waiting for chunks, which is exactly why
 below is "single GPU with Flash Attention under 128K tokens" — below that threshold there is not
 enough compute per hop to hide the transfer behind.
 
-**Gemini 1.5 Pro (1M context):**
-- Uses ring attention (or equivalent sequence parallelism) across TPU pods
-- 8 devices handling 128K tokens each → 1M effective context
+**Frontier 1M-token models (illustrative sizing, not a disclosed architecture):**
+- Google has never published the serving topology behind Gemini's 1M window; ring attention or an
+  equivalent sequence parallelism across TPU pods is the standard inference from the public research,
+  not a confirmed design
+- The arithmetic works out at 8 devices × 128K tokens each → ~1M effective context
 - Flash Attention within each device; ring topology across devices
 
 **Requirements for ring attention:**
@@ -713,13 +717,13 @@ only a few hundred fine-tuning steps where linear interpolation needs full conti
 
 ### Context Rot — Non-Uniform Reliability Degradation
 
-Chroma's 2025 "context rot" study measured something the standard "lost in the middle" framing doesn't capture: holding the POSITION of the relevant information fixed at one of the "easy" spots from the diagram above (start or end), reliability still drops as TOTAL input length increases. The effect shows up even on tasks with no retrieval component at all — e.g., "repeat the following sentence back to me" embedded in a longer document still degrades as the document grows, purely because the model has more tokens to process and more opportunities for attention to dilute or for unrelated content to act as a distractor.
+Chroma's "context rot" study (Hong, Troynikov & Huber, published 2025-07-14; 18 models evaluated, including Claude 4, GPT-4.1, Gemini 2.5 and Qwen3 variants) measured something the standard "lost in the middle" framing doesn't capture: holding the POSITION of the relevant information fixed at one of the "easy" spots from the diagram above (start or end), reliability still drops as TOTAL input length increases. The effect shows up even on tasks with no retrieval component at all — e.g., "repeat the following sentence back to me" embedded in a longer document still degrades as the document grows, purely because the model has more tokens to process and more opportunities for attention to dilute or for unrelated content to act as a distractor.
 
 Three findings worth internalizing:
 
 1. **Non-uniform, not linear.** The reliability-vs-length curve isn't a smooth line — some tasks hold a relatively flat region and then drop sharply past a length threshold ("a cliff"), and the threshold differs by task and model. A model that looks "robust to 100K tokens" on one task can fall off sharply on a structurally similar task at 50K.
 2. **Distractors accelerate the drop.** Semantically related-but-irrelevant content (other Q&A pairs about a similar topic, near-duplicate passages) degrades reliability far faster than the same length of unrelated filler — the model has to actively discriminate, not just ignore, the distractors.
-3. **Haystack structure matters, sometimes counterintuitively.** A coherent, logically-structured long document can be HARDER for a model than the same content shuffled into incoherent order, for certain tasks — coherent structure can prime the model to follow a narrative thread that leads it past an out-of-place answer, while shuffled content gives the model fewer competing "narratives" to follow.
+3. **Haystack structure matters, counterintuitively.** A coherent, logically-structured long document is HARDER for a model than the same content shuffled into incoherent order — shuffling improved performance consistently across all 18 models Chroma tested. Coherent structure appears to prime the model to follow a narrative thread that leads it past an out-of-place answer, while shuffled content gives the model fewer competing "narratives" to follow.
 
 The practical consequence: **"fits in the context window" and "reliable at that length" are different claims**, and the gap between them is task-dependent — which is why a long-context deployment needs an eval run at MULTIPLE lengths, not a single smoke test at one size:
 
@@ -782,7 +786,8 @@ Use LONG CONTEXT when:
   ✓ Synthesizing across many documents simultaneously
   ✓ Full codebase reasoning (dependencies, patterns, architecture)
   ✓ Latency is important (no retrieval delay)
-  ✓ Budget allows ($0.01-0.05/1K tokens × 100K tokens = $1-5/query)
+  ✓ Budget allows (100K tokens costs $0.30 at Sonnet 5's $3/1M,
+    $0.50 at Opus 5's $5/1M, $1.00 at Fable 5's $10/1M)
   ✓ Document is small enough: <100K tokens
 
 Use RAG when:
@@ -790,7 +795,7 @@ Use RAG when:
   ✓ Real-time updates (can't put new documents in context)
   ✓ Cost-sensitive (1M documents → RAG is 1000× cheaper than long context)
   ✓ Privacy (don't want entire document in one prompt)
-  ✓ Corpus > 200K tokens (exceeds even the largest context windows)
+  ✓ Corpus > 1M tokens (exceeds today's largest context windows)
 
 Use BOTH (hybrid approach):
   ✓ Primary retrieval: find top-K relevant chunks
@@ -804,20 +809,22 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 
 ## 7. Real-World Examples
 
-### Gemini 1.5 Pro (1M Context)
-- Processed entire Apollo 11 transcript (400K tokens) to find specific quotes
-- Analyzed entire 402-page document without chunking
-- "Needle in a haystack" eval: finds specific fact in 1M random tokens with 98%+ accuracy
+### Gemini 1.5 Pro (1M Context) — the model that opened the 1M era, now retired
+- Analyzed the 402-page Apollo 11 mission transcripts end to end, without chunking, to find
+  specific quotes (Google's Feb 2024 announcement; the token count was not published)
+- "Needle in a haystack" eval: Google reported 1.5 Pro "found the embedded text 99% of the time,
+  in blocks of data as long as 1 million tokens"
+- Note the two-tier rollout: the generally available window was 128K, with 1M behind a preview
 - Used for: long video analysis, codebase understanding, multi-document research
 
-### Claude 3.5 (200K Context)
+### Claude (1M Context on Opus 5 / Sonnet 5 / Fable 5)
 - Processes entire codebases for code review
 - Analyzes complete legal contracts (most <100K tokens)
 - Maintains coherent conversation over long sessions
-- "Project" feature: upload 200K tokens of files → persistent context across sessions
+- "Project" feature: upload files → persistent context across sessions
 
 ### Cursor IDE (Repository Context)
-- LLM with 200K context receives: current file + most relevant files from repo
+- The model's window receives: current file + most relevant files from repo
 - Uses embedding-based retrieval to fill remaining context budget
 - Hybrid: RAG for initial selection + long context for reasoning
 
@@ -860,7 +867,7 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 ## 10. Common Pitfalls
 
 1. **Trusting long context for high-stakes fact retrieval**: "Lost in the middle" is real. For exact fact retrieval from long documents, RAG is more reliable.
-2. **Forgetting token cost**: 100K token context × $0.03/1K = $3 per query. High-frequency applications need RAG.
+2. **Forgetting token cost**: a 100K-token context costs $0.30/query at Claude Sonnet 5's $3/1M input rate and $1.00 at Fable 5's $10/1M — before output tokens. High-frequency applications need RAG.
 3. **Assuming linear quality vs. length**: Quality can degrade non-linearly beyond the model's "effective context window."
 4. **Not tuning for long context**: A 4K-trained model with naive position scaling may have 20% accuracy at 100K. Use proper long-context fine-tuning (YaRN, etc.).
 5. **Ignoring TTFT at long context**: 200K token prefill takes 10-30 seconds even on H100. Users notice.
@@ -877,8 +884,8 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 | **Ring Attention** | Distributed long-context | Distribute sequence across GPUs |
 | **LongBench** | Long-context evaluation | Standardized benchmark |
 | **RULER** | Long-context needle eval | More rigorous than simple needle test |
-| **Gemini 1.5 Pro API** | 1M context | Best long-context managed API |
-| **Claude 3.5 API** | 200K context | Best for long documents |
+| **Gemini API (Pro line)** | 1M context | Google's long-context managed API |
+| **Claude API** | 1M context on Opus 5 / Sonnet 5 / Fable 5; 200K on Haiku 4.5 | Strong on long documents |
 | **Jamba (AI21)** | SSM + Transformer hybrid | Efficient long context |
 | **Mamba** | State Space Model | Linear-time; alternative to attention |
 
@@ -890,7 +897,7 @@ For deciding *what* goes into the window and in what order (compaction, ordering
 A: RoPE (Rotary Position Embedding) encodes position by rotating query and key vectors in the complex plane. The key property: the inner product of rotated vectors depends only on their relative position (m-n), not absolute positions m and n. This enables: (1) better generalization to unseen positions (the model understands "5 tokens apart" regardless of absolute position); (2) graceful extrapolation with scaling techniques (YaRN, LongRoPE); (3) efficient computation (element-wise rotation is fast). Absolute positional encoding fails to extrapolate — position 5000 has no learned embedding if the model was trained on 4096 tokens.
 
 **Q: What is the "lost in the middle" problem?**
-A: Liu et al. (2023) showed that LLMs pay significantly more attention to information at the beginning and end of their context window, with accuracy dropping sharply for information in the middle of a long context. For a 20-document prompt, recall of a fact at position 10 (middle) was ~54% vs. ~92% at position 0 (start). Mitigation: place critical information at the beginning or end of the prompt, not in the middle of many documents.
+A: Liu et al. (2023) showed that LLMs pay significantly more attention to information at the beginning and end of their context window, with accuracy dropping sharply for information in the middle of a long context. In their 20-document multi-document-QA setting, GPT-3.5-Turbo scored 53.8% with the answer document in the middle (position 9) versus 75.8% at position 0 and 63.2% at position 19 — the middle number falls below the same model's 56.1% closed-book baseline. The effect size is model-dependent: Claude-1.3 was nearly flat across positions in the same experiment. Mitigation: place critical information at the beginning or end of the prompt, not in the middle of many documents.
 
 **Q: Why can a model ace a needle-in-a-haystack eval and still fail on your long-context task in production?**
 A: Because vanilla needle-in-a-haystack is the easiest possible long-context test — a lexically distinctive fact planted in unrelated filler, with no distractors and no reasoning required. Chroma's context-rot study showed the same task that looks flat with no distractors falls off a cliff when semantically related-but-irrelevant content is added, because the model must actively discriminate rather than merely ignore; real workloads (contracts full of similar clauses, codebases full of similar functions) are all distractors. Use RULER (multi-needle, aggregation, variable tracking) or LongBench plus a multi-length eval of your own task rather than trusting a single 98%-needle headline number.
@@ -911,22 +918,22 @@ RoPE encodes position information by rotating the query and key vectors in 2D su
 YaRN (Yet another RoPE extensioN) modifies RoPE's rotation frequencies to extend context without retraining, while ALiBi adds a linear attention bias that penalizes distant tokens. YaRN works by partitioning RoPE dimensions into three groups: low-frequency dimensions (interpolated — these encode long-range position), medium-frequency (NTK-interpolated), and high-frequency (unchanged — these encode local position). This allows extending context from 4K to 128K+ with minimal quality loss and only a few hundred steps of fine-tuning. ALiBi takes a different approach: it adds a position-dependent bias to attention scores (slope * |i-j|), causing attention to naturally attend more to nearby tokens. ALiBi advantages: no fine-tuning needed, simple implementation. YaRN advantages: better quality at very long contexts, works with existing RoPE models. In practice, YaRN has become more popular because most models already use RoPE, and YaRN extends them more effectively than ALiBi would require architectural changes.
 
 **Q: What is the "lost in the middle" problem and how do long-context models address it?**
-The "lost in the middle" problem (Liu et al., 2023) shows that LLMs retrieve information less accurately from the middle of long contexts compared to the beginning and end. For a 20-document retrieval context, information placed at positions 5-15 is recalled 10-20% less accurately than positions 1-3 or 18-20. This is a fundamental attention pattern issue — self-attention distribution tends to concentrate on initial tokens (attention sinks) and recent tokens (recency bias). Mitigations: (1) place the most important information at the beginning and end of the context; (2) reduce context size — 5 highly relevant chunks beat 20 mixed-relevance chunks; (3) models trained on long-context data (Claude 200K, Gemini 1M) show reduced but not eliminated middle-loss; (4) explicit instruction like "read all sections carefully before answering" helps marginally; (5) iterative summarization — process long documents in sections, then synthesize. For production RAG: rerank to keep only top-5 most relevant chunks rather than stuffing the context.
+The "lost in the middle" problem (Liu et al., 2023) shows that LLMs retrieve information less accurately from the middle of long contexts compared to the beginning and end. In their 20-document retrieval setting, GPT-3.5-Turbo lost 22 accuracy points moving the answer document from position 0 (75.8%) to position 9 (53.8%), recovering only partially at position 19 (63.2%). This is a fundamental attention pattern issue — self-attention distribution tends to concentrate on initial tokens (attention sinks) and recent tokens (recency bias). Mitigations: (1) place the most important information at the beginning and end of the context; (2) reduce context size — 5 highly relevant chunks beat 20 mixed-relevance chunks; (3) models trained on long-context data (Claude at 1M, Gemini's Pro line at 1M) show reduced but not eliminated middle-loss; (4) explicit instruction like "read all sections carefully before answering" helps marginally; (5) iterative summarization — process long documents in sections, then synthesize. For production RAG: rerank to keep only top-5 most relevant chunks rather than stuffing the context.
 
 **Q: What is "context rot" and how is it different from "lost in the middle"?**
 A: "Context rot" (Chroma, 2025) is the finding that model reliability degrades as input LENGTH increases, even holding the POSITION of the relevant information fixed — a fact placed at the very start of the context (the "easy" position in the lost-in-the-middle diagram) is still recalled less reliably at 100K total tokens than at 10K. "Lost in the middle" (Liu et al., 2023) is a POSITIONAL effect at a FIXED length: where in the context the information sits. Context rot is a LENGTH effect at a (potentially) fixed position: how much surrounding context there is at all. The two compound — a fact buried in the middle of a very long, distractor-heavy context is hit by both effects simultaneously, which is why "the model has a 1M context window" says nothing about reliability at 1M tokens on your specific task; only a multi-length eval (the same task run at several input lengths) shows where the reliability curve actually bends.
 
 **Q: When should you use long context instead of RAG, and vice versa?**
-Use long context when: (1) the entire document set fits in context (<200K tokens) and you need reasoning across all documents simultaneously; (2) the task requires understanding document structure, cross-references, or holistic summarization; (3) you need to answer arbitrary questions about a small, fixed document set (e.g., a single contract). Use RAG when: (1) the corpus is too large for any context window (millions of documents); (2) the corpus changes frequently (new documents added daily); (3) you need to scale to many users with different document access; (4) cost matters — processing 100K tokens per query is expensive ($0.50-$1.50 per query with GPT-4o). Hybrid approach: use RAG to retrieve relevant chunks, then use long context to process them together. Concrete numbers: Claude 3.5 at 200K tokens costs ~$0.60 per query; RAG with 5 chunks of 500 tokens costs ~$0.01. Long context is 60x more expensive but avoids retrieval errors.
+Use long context when: (1) the entire document set fits in context (up to 1M tokens on Claude Opus 5 / Sonnet 5 / Fable 5 and Gemini's Pro line) and you need reasoning across all documents simultaneously; (2) the task requires understanding document structure, cross-references, or holistic summarization; (3) you need to answer arbitrary questions about a small, fixed document set (e.g., a single contract). Use RAG when: (1) the corpus is too large for any context window (millions of documents); (2) the corpus changes frequently (new documents added daily); (3) you need to scale to many users with different document access; (4) cost matters — processing 100K tokens per query costs $0.25 on GPT-4o at $2.50/1M, $0.30 on Claude Sonnet 5 at $3/1M, and $1.00 on Claude Fable 5 at $10/1M, before output. Hybrid approach: use RAG to retrieve relevant chunks, then use long context to process them together. Concrete numbers: Claude Sonnet 5 at 200K input tokens costs $0.60 per query; RAG with 5 chunks of 500 tokens (2,500 tokens) costs $0.0075. Long context is 80x more expensive but avoids retrieval errors.
 
 **Q: How does context window size affect KV cache memory and inference cost?**
-KV cache memory scales linearly with context length: memory = 2 * num_layers * hidden_dim * context_length * bytes_per_param * batch_size. For LLaMA 3 8B (32 layers, 4096 hidden, GQA 8 KV heads) in FP16: each token uses ~0.5MB of KV cache. At 128K context: 128K * 0.5MB = 64GB per sequence — nearly the entire A100 80GB, leaving minimal room for batching. Implications: (1) longer context means fewer concurrent sequences per GPU; (2) prefill cost is quadratic in context length (O(n^2) attention); (3) FP8 KV cache halves memory, doubling effective capacity; (4) techniques like sliding window attention (Mistral) limit KV cache to a fixed window, trading long-range attention for memory efficiency. Cost impact: doubling context length roughly doubles per-query cost (more prefill compute + more KV cache memory = fewer concurrent queries). This is why prompt caching (reuse KV cache for shared prefixes) provides 50-90% cost reduction for repeated system prompts.
+KV cache memory scales linearly with context length: memory = 2 * num_layers * num_kv_heads * head_dim * context_length * bytes_per_param * batch_size. Note it is num_kv_heads * head_dim, not hidden_dim — that is exactly what GQA shrinks. For Llama 3 8B (32 layers, 8 KV heads, head_dim 128) in FP16: 2 * 32 * 8 * 128 * 2 bytes = 131,072 bytes, so ~128KB per token. At 128K context that is 128K * 128KB = 16GB per sequence — a fifth of an A100 80GB, so only a handful of concurrent long sequences fit. Without GQA the same model would use 2 * 32 * 4096 * 2 = 512KB/token and 64GB at 128K, which is where the "one sequence fills the GPU" folklore comes from. Implications: (1) longer context means fewer concurrent sequences per GPU; (2) prefill cost is quadratic in context length (O(n^2) attention); (3) FP8 KV cache halves memory, doubling effective capacity; (4) techniques like sliding window attention (Mistral) limit KV cache to a fixed window, trading long-range attention for memory efficiency. Cost impact: doubling context length roughly doubles per-query cost (more prefill compute + more KV cache memory = fewer concurrent queries). This is why prompt caching (reuse KV cache for shared prefixes) provides 50-90% cost reduction for repeated system prompts.
 
 **Q: What is sliding window attention and how does Mistral use it?**
 Sliding window attention limits each token to attend only to the W most recent tokens (window size W), rather than all previous tokens. Mistral 7B uses W=4096, meaning each token attends to the nearest 4096 tokens. Benefits: (1) KV cache memory is bounded at W instead of growing with sequence length — at W=4096, KV cache stays constant regardless of total context length; (2) prefill compute is O(n*W) instead of O(n^2); (3) enables theoretically unlimited context length with fixed memory. How information propagates beyond the window: through multiple layers — if layer L attends to position P, and layer L+1 attends to layer L's output, information from position P-W can reach the current token through 2 layers. With 32 layers, effective receptive field is 32*4096 = 131K tokens. Limitations: information must be passed indirectly through intermediate layers, which is lossy — long-range dependencies are weaker than full attention. Mistral's approach works well for most tasks but struggles with tasks requiring precise recall of specific information from distant positions.
 
 **Q: How does ring attention enable 1M-token contexts across multiple GPUs?**
-A: Ring attention is sequence parallelism — the sequence is split across N devices (1M tokens on 8 GPUs = 125K tokens each), and each GPU computes attention for its query chunk while KV blocks circulate around a ring topology, one hop per step, until every query chunk has seen every KV chunk after N steps. Communication is overlapped with computation via CUDA streams, so per-GPU memory stays O(seq/N) and per-GPU compute is 1/N of full attention; Gemini 1.5 Pro's 1M context uses this style of sequence parallelism across TPU pods, with Flash Attention inside each device. It only pays off with a fast interconnect (NVLink ≥600 GB/s or fast InfiniBand) — below ~128K tokens a single GPU with Flash Attention 2/3 is simpler and faster.
+A: Ring attention is sequence parallelism — the sequence is split across N devices (1M tokens on 8 GPUs = 125K tokens each), and each GPU computes attention for its query chunk while KV blocks circulate around a ring topology, one hop per step, until every query chunk has seen every KV chunk after N steps. Communication is overlapped with computation via CUDA streams, so per-GPU memory stays O(seq/N) and per-GPU compute is 1/N of full attention; frontier 1M-context models are widely assumed to serve with this style of sequence parallelism plus Flash Attention inside each device, though no vendor has published its serving topology. It only pays off with a fast interconnect (NVLink ≥600 GB/s or fast InfiniBand) — below ~128K tokens a single GPU with Flash Attention 2/3 is simpler and faster.
 
 **Q: What is position interpolation, and why does extending RoPE still need fine-tuning?**
 A: Position interpolation compresses positions by a constant factor — treating position p in the extended context as p × (original_length / new_length) — so every new position maps to a fractional position inside the range the model was actually trained on. The catch is that compression uniformly squeezes ALL RoPE frequency bands, including the high-frequency dimensions that distinguish adjacent tokens, so local position resolution degrades; this is exactly why naive `rope_scaling={"type": "linear", "factor": 32}` without continued training produced hallucinated clause references at 60K-100K tokens in the war story below, and why YaRN scales only the low-frequency (long-range) bands while leaving high-frequency (local) bands untouched. Always follow scaling with a short long-context fine-tune (a few hundred steps suffices for YaRN) and validate with a needle test across depths before shipping.
@@ -943,7 +950,7 @@ A: Because autoregressive models learn to park a large fraction of attention mas
 3. **Benchmark your context extension** — test RULER or LongBench before deploying long-context models.
 4. **Use caching for repeated long contexts** — Anthropic's Prompt Caching, OpenAI's context caching — amortize prefill cost.
 5. **Consider SSMs for very long context** — Mamba and Jamba (hybrid SSM + attention) offer linear-time alternatives.
-6. **Monitor TTFT separately for long inputs** — 200K token prefill takes minutes; alert on TTFT SLA violations.
+6. **Monitor TTFT separately for long inputs** — a 200K-token prefill takes 10-30 seconds on an H100 (§6, §10); alert on TTFT SLA violations.
 
 ---
 
@@ -951,64 +958,71 @@ A: Because autoregressive models learn to park a large fraction of attention mas
 
 **Problem:** Enterprise team wants an AI assistant that understands their entire 500K-token codebase and answers architecture questions, traces data flows, and suggests refactorings.
 
+*Illustrative composite — costs are computed from published July-2026 list prices; the accuracy figures describe a representative deployment, not a published benchmark.*
+
 **Architecture:**
 ```
 Codebase: 500K tokens (2500 files × 200 tokens avg)
+Input list prices used below: Sonnet 5 $3/1M, Opus 5 $5/1M, cache read 0.1x
 
-Option 1: Pure long context (Gemini 1.5 Pro, 1M context)
+Option 1: Pure long context (Claude Opus 5, 1M context)
   Put all 500K tokens in context
-  Cost per query: 500K × $0.007/1K = $3.50 per question
+  Cost per query: 500K × $5/1M = $2.50 per question
   TTFT: 15-20 seconds for 500K prefill
   Quality: excellent for holistic architecture questions
 
 Option 2: RAG only
   Index codebase in vector DB
   Retrieve top-20 relevant files (20K tokens)
-  Cost per query: 20K × $0.015/1K = $0.30
+  Cost per query: 20K × $3/1M = $0.06
   TTFT: 1-2 seconds
   Quality: poor for architecture questions (context too fragmented)
 
 Option 3: Hybrid (chosen approach)
   1. Query analysis: classify as "specific" or "architectural"
   2. Specific queries (e.g., "what does function X do?"):
-     → RAG: retrieve 3-5 relevant files → 10K context → cheap ($0.15)
+     → RAG: retrieve 3-5 relevant files → 10K context (Sonnet 5) → $0.03
   3. Architectural queries (e.g., "explain the payment flow"):
      → Smart selection: dependency graph → select 50 most relevant files
-     → 100K context: Claude 3.5 Sonnet → medium cost ($1.50)
+     → 100K context (Sonnet 5) → $0.30
   4. Full codebase queries (e.g., "identify all god classes"):
-     → Full context: Gemini 1.5 Pro 1M → expensive but necessary ($3.50)
+     → Full context: Opus 5 at 500K → expensive but necessary ($2.50)
 
 Prompt caching:
   Repository stays fairly stable → cache the codebase prefix
-  Anthropic prompt caching: 90% cost reduction on cached tokens
-  Effective cost: ~$0.20 for cached architectural queries
+  Anthropic cache reads are billed at 0.1x base input (a 90% discount)
+  100K cached prefix: 100K × $0.30/1M = $0.03, plus the per-request delta
 
 Result:
-  Specific query cost: $0.15 avg
-  Architecture query cost: $0.35 avg (with caching)
-  Full codebase query: $0.50 (with caching)
-  Architecture accuracy: 91% (vs. 73% with RAG-only)
+  Specific query cost: $0.03 avg
+  Architecture query cost: $0.05 avg (with caching)
+  Full codebase query: $0.30 (500K read at 0.1x, with caching)
+  Architecture accuracy: 91% (vs. 73% with RAG-only) — illustrative
 ```
 
 ---
 
 **Additional war story — RoPE scaling misconfiguration causing hallucinated clause references in legal contract review:**
 
-A legal tech startup used a 128k-context Llama model (with RoPE scaled from 4k to 128k via linear interpolation) to review M&A contracts. On documents between 60k-100k tokens, the model began referencing non-existent clause numbers ("as specified in Section 14.3(b)"). Post-mortem: the team used `rope_scaling={"type": "linear", "factor": 32}` but did not fine-tune the model at the extended length. Linear interpolation without continued pretraining degrades position accuracy at the far end of the extended range.
+A legal tech startup used a 128k-context Llama model (RoPE scaled from Llama 2's native 4,096 to 131,072 via linear interpolation, `factor = 32`) to review M&A contracts. On documents between 60k-100k tokens, the model began referencing non-existent clause numbers ("as specified in Section 14.3(b)"). Post-mortem: the team set `rope_scaling` but did not fine-tune the model at the extended length. Linear interpolation without continued pretraining degrades position accuracy at the far end of the extended range — Chen et al. (2023) needed ~1,000 fine-tuning steps to make interpolation to 32k work at all.
+
+Two notes on the code below. The base model must match the factor: Llama 2's `max_position_embeddings` is 4,096 (so factor 32 reaches 131,072), while Llama 3's is 8,192 (factor 16 reaches the same 131,072). And recent `transformers` releases consolidated RoPE settings under a `rope_parameters` dict on `LlamaConfig`; the `rope_scaling` spelling below matches the widely deployed older releases, so check your installed version before copying.
 
 ```python
 # BROKEN: linear RoPE scaling without extended pretraining
 from transformers import AutoModelForCausalLM
 
 model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3-8B",
+    "meta-llama/Llama-2-7b-hf",                     # native 4,096 context
+    max_position_embeddings=131_072,
     rope_scaling={"type": "linear", "factor": 32},  # extends 4k → 128k
     # BUG: no fine-tuning at 128k means positions 60k-128k are poorly calibrated
 )
 
 # FIX: use YaRN scaling (better extrapolation) + verify with needle-in-haystack test
 model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3-8B",
+    "meta-llama/Llama-2-7b-hf",
+    max_position_embeddings=131_072,
     rope_scaling={
         "type": "yarn",       # YaRN: better accuracy at extended lengths
         "factor": 32,
@@ -1034,7 +1048,7 @@ def needle_in_haystack_test(model, tokenizer, target_depth: float = 0.8) -> floa
 
 **What is the difference between RoPE, ALiBi, and YaRN for positional encoding, and which should you use for 128k context?** RoPE (Rotary Position Embedding) encodes position by rotating query/key vectors in attention; it generalizes to longer sequences but degrades without fine-tuning at extended lengths. ALiBi adds a linear position bias to attention scores (no learned parameters) and extrapolates better than RoPE without retraining, but is less expressive for complex positional patterns. YaRN (Yet Another RoPE extensioN) applies non-uniform scaling across RoPE frequency dimensions and achieves better retrieval accuracy at extended lengths than linear interpolation without requiring full pretraining. For 128k context deployment, YaRN with fine-tuning on long documents is the current best practice.
 
-**What is the "lost in the middle" problem and how do you design around it?** Studies show that LLMs with long context reliably retrieve information near the beginning and end of the context window but miss information buried in the middle (accuracy drops 20-35% for facts at 40-60% depth in a 128k document). Design mitigations: RAG to surface relevant chunks to the beginning of context (structural position), document summarization + structured extraction for critical middle sections, and needle-in-haystack evaluation across depths before production deployment. Do not assume 128k context provides uniform recall across all positions.
+**What is the "lost in the middle" problem and how do you design around it?** Studies show that LLMs with long context reliably retrieve information near the beginning and end of the context window but miss information buried in the middle (Liu et al. 2023 measured a 22-point drop for GPT-3.5-Turbo — 75.8% to 53.8% — moving the answer document from first to middle of 20; the magnitude is model-specific and must be measured on your own model, not assumed). Design mitigations: RAG to surface relevant chunks to the beginning of context (structural position), document summarization + structured extraction for critical middle sections, and needle-in-haystack evaluation across depths before production deployment. Do not assume 128k context provides uniform recall across all positions.
 
 **When should you use long context vs RAG for a document analysis application?** Use long context when: the document is small enough to fit (<50% of context window), the task requires synthesizing information across the entire document (holistic analysis), and latency allows (a 100k-token request costs 10x a 10k-token request). Use RAG when: documents exceed context limits, queries target specific sections (retrieval precision outperforms exhaustive attention), or cost per query is a constraint. Hybrid: use RAG to select top-k chunks, then place them in a structured long-context prompt to allow cross-chunk reasoning.
 
@@ -1058,7 +1072,8 @@ def review_contract(contract_text: str, question: str) -> str:
     # Stuffing entire contract as single context — middle sections get low attention
     prompt = f"Contract:\n{contract_text}\n\nQuestion: {question}"
     return llm.complete(prompt, max_context=128_000)
-    # Evaluation: recall@middle = 41% vs recall@start = 89%, recall@end = 85%
+    # Illustrative eval shape: recall@middle well below recall@start / recall@end.
+    # Measure your own numbers -- the gap is model- and task-specific.
 
 # FIX: chunk contract into sections with metadata; use RAG to retrieve relevant sections
 def review_contract_rag(contract_path: str, question: str) -> str:
@@ -1066,12 +1081,13 @@ def review_contract_rag(contract_path: str, question: str) -> str:
     relevant = retriever.search(question, chunks, top_k=5)
     context = "\n\n".join(c.text for c in relevant)
     return llm.complete(f"Relevant contract sections:\n{context}\n\nQuestion: {question}")
-    # Recall on targeted sections: 91% — matches start-of-context recall
+    # Retrieval moves the clause to the front of a short context, so recall
+    # approaches the start-of-context number instead of the middle one.
 ```
 
-**What is the "lost in the middle" problem and which architectures suffer most?** Research shows that LLMs with standard attention consistently have lower accuracy on relevant information placed in the middle of long contexts versus the beginning or end. This is attributable to attention sink (high attention weight on the first few tokens) and recency bias (high weight on the last few tokens). Models with ALiBi positional encoding tend to have stronger recency bias; RoPE-based models (LLaMA, Mistral) show the same U-shaped recall curve. Mitigation: use RAG to place relevant chunks near the end of the prompt, chunk and retrieve rather than stuff full documents, or use models specifically trained for long-context recall (Gemini 1.5, Claude 3 with long-context training).
+**What is the "lost in the middle" problem and which architectures suffer most?** Research shows that LLMs with standard attention consistently have lower accuracy on relevant information placed in the middle of long contexts versus the beginning or end. This is attributable to attention sink (high attention weight on the first few tokens) and recency bias (high weight on the last few tokens). Models with ALiBi positional encoding tend to have stronger recency bias; RoPE-based models (LLaMA, Mistral) show the same U-shaped recall curve. Mitigation: use RAG to place relevant chunks near the end of the prompt, chunk and retrieve rather than stuff full documents, or use models explicitly trained for long-context recall (the current 1M-window Claude and Gemini Pro generations).
 
-**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.40-1.28 per query at GPT-4-128k pricing vs. $0.01-0.04 with RAG on a retrieved 4k context).
+**When should you choose a 128k-token context window over a RAG pipeline?** Use a long context window when: the entire document must be coherent (a 50-page report where questions span multiple sections), retrieval recall is unacceptably low (< 80%) for the document type, or latency for chunk retrieval adds unacceptable delay. Use RAG when: documents exceed any context window, you need the freshest information (real-time web search), you need source attribution per sentence, or the cost of processing 128k tokens per query is prohibitive ($0.38 at Claude Sonnet 5's $3/1M, $0.64 at Opus 5's $5/1M, versus ~$0.01 with RAG on a retrieved 4k context).
 
 ---
 

@@ -82,7 +82,7 @@ The fan-out is cheap to describe and easy to under-budget. The cost model:
 
 **The idea behind it.** "Splitting one query into `n` sub-queries multiplies everything downstream by `n` — retrieval calls, candidate documents, reranker work — while latency multiplies by `n` only if you forget to run the sub-queries in parallel."
 
-The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you do, but *latency* is a choice. That is why §8 lists multi-query at `~2x` latency and `2x` cost rather than `3x` — the extra decompose and synthesize LLM calls are serial, but the three retrievals are not.
+The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you do, but *latency* is a choice. That is why §8 lists multi-query at `~1.5x` latency and `2x` cost rather than `3x` — the extra decompose and synthesize LLM calls are serial, but the three retrievals are not.
 
 | Symbol | What it is |
 |--------|------------|
@@ -94,7 +94,7 @@ The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you 
 | `latency_par` | Sub-queries issued concurrently — `n_sub` cancels out of the retrieval term |
 | `latency_seq` | Sub-queries issued one after another — the accidental `n_sub x` blowup |
 
-**Walk one example.** The `n_sub = 3` decomposition above, with the §13 recipe of 100 candidates per sub-query reranked to top-5. Standard RAG's `~200ms` from §8 is the baseline:
+**Walk one example.** The `n_sub = 3` decomposition above, with the §13 recipe of 100 candidates per sub-query reranked to top-5. Standard RAG's `~310ms` from §8 is the baseline — one retrieval (50ms) + one 100-pair rerank (78ms) + generation (180ms):
 
 ```
   quantity            standard RAG       multi-query (n_sub = 3)      multiplier
@@ -106,13 +106,20 @@ The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you 
   unique after dedup          100        300 x (1 - 0.40) = 180          1.8x
   reranker pairs              100        180                             1.8x
 
+  Standard RAG baseline, for a like-for-like comparison:
+    retrieve x1          50ms
+    rerank 100 pairs     78ms
+    generate            180ms
+                       ------
+    total               308ms
+
   Latency, run in PARALLEL:
     decompose (LLM)      80ms
     retrieve x3          50ms   <- concurrent, so 50ms not 150ms
     rerank 180 pairs    140ms   <- 1.8x the pairs, roughly 1.8x the 78ms baseline
     generate            180ms
                        ------
-    total               450ms   vs ~200ms standard  =  2.25x
+    total               450ms   vs 308ms standard   =  1.46x
 
   Latency, run SERIALLY (the common mistake):
     decompose            80ms
@@ -120,7 +127,7 @@ The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you 
     rerank              140ms
     generate            180ms
                        ------
-    total               550ms                       =  2.75x
+    total               550ms                       =  1.79x
 ```
 
 **Why `dup_rate` is the term that saves you.** Sub-queries are paraphrases of one question, so their result sets overlap heavily — 40% duplication is typical for a 3-way expansion of a single intent. Ignore deduplication and the reranker processes 300 pairs instead of 180, adding ~90ms and re-scoring the same documents multiple times, which also lets a document win the top-5 merely for having been retrieved three times. Deduplicate *before* reranking, not after.
@@ -272,7 +279,10 @@ Multi-modal retrieval:
   Merge results, provide relevant images AND text to LLM
 
 Generation:
-  Use vision-capable LLM (GPT-4o, Gemini 1.5 Pro, Claude 3.5)
+  Use any vision-capable frontier LLM (the current OpenAI GPT-5.x, Anthropic
+    Claude Opus/Sonnet 5, and Google Gemini 3.x tiers are all natively
+    multimodal; the lineup turns over every few months, so benchmark rather
+    than hard-code a name)
   LLM sees both text context and relevant images
 ```
 
@@ -444,7 +454,7 @@ The middle band is the design insight. A single threshold forces a confident dec
   trusted, one is thrown away entirely. Evaluator noise alone spans more than 0.02.
 ```
 
-Both thresholds are corpus-specific and must be calibrated on a labeled set. `0.30/0.70` are the paper's defaults, not universal constants: a clean, well-curated corpus pushes both cuts up (retrieval is usually right), while a noisy or sparsely-covered corpus pushes them down.
+Both thresholds are corpus-specific and must be calibrated on a labeled set. `0.30/0.70` are illustrative values used consistently throughout this module — they are *not* the CRAG paper's defaults. Yan et al. set both cuts empirically per dataset and their T5-large evaluator is not bounded to `[0, 1]`: the published pairs are `(0.59, -0.99)` for PopQA, `(0.5, -0.91)` for PubHealth and ARC-Challenge, and `(0.95, -0.91)` for Biography. The shape of the rule is what transfers, not the numbers: a clean, well-curated corpus pushes both cuts up (retrieval is usually right), while a noisy or sparsely-covered corpus pushes them down.
 
 ---
 
@@ -617,27 +627,36 @@ Bi-encoder and cross-encoder scores look like the same kind of number and are no
     up to 4.10. The "50/50" blend is really ~90/10 in favor of the cross-encoder.
 ```
 
-Always apply `sigma` before comparing, thresholding, or blending cross-encoder output — and even then, remember that logit scales are *model-specific*. A `+5.0` from `bge-reranker-v2` and a `+5.0` from Cohere Rerank 3 do not mean the same thing, so any threshold must be recalibrated when you swap rerankers. This is the same incomparable-scales problem that pushes hybrid retrieval toward rank-based fusion instead of score blending.
+Always apply `sigma` before comparing, thresholding, or blending cross-encoder output — and even then, remember that logit scales are *model-specific*. A `+5.0` from `bge-reranker-v2` and a `+5.0` from Cohere Rerank 3.5 do not mean the same thing, so any threshold must be recalibrated when you swap rerankers. This is the same incomparable-scales problem that pushes hybrid retrieval toward rank-based fusion instead of score blending.
 
 ### Evaluation with RAGAS
 
 ```python
-from ragas import evaluate
-from ragas.metrics import (
-    faithfulness,         # Is answer supported by context?
-    answer_relevancy,     # Does answer address the question?
-    context_recall,       # Did retrieval find all relevant docs?
-    context_precision,    # Is retrieved context focused?
+from ragas import EvaluationDataset, SingleTurnSample, evaluate
+from ragas.metrics.collections import (
+    Faithfulness,        # Is the answer supported by the context?
+    AnswerRelevancy,     # Does the answer address the question?
+    ContextRecall,       # Did retrieval find all relevant docs?
+    ContextPrecision,    # Is the retrieved context focused?
 )
 
-dataset = Dataset.from_dict({
-    "question": [...],
-    "answer": [...],     # LLM-generated answers
-    "contexts": [...],   # Retrieved contexts
-    "ground_truth": [...]  # Reference answers
-})
+# Field names are user_input / retrieved_contexts / response / reference.
+# The pre-0.2 names (question / contexts / answer / ground_truth) and the
+# lowercase metric singletons are deprecated.
+dataset = EvaluationDataset(samples=[
+    SingleTurnSample(
+        user_input="...",
+        retrieved_contexts=["...", "..."],   # what the retriever returned
+        response="...",                      # LLM-generated answer
+        reference="...",                     # reference answer
+    ),
+    # ... one sample per eval question
+])
 
-result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
+result = evaluate(
+    dataset,
+    metrics=[Faithfulness(), AnswerRelevancy(), ContextRecall(), ContextPrecision()],
+)
 ```
 
 ---
@@ -667,8 +686,8 @@ result = evaluate(dataset, metrics=[faithfulness, answer_relevancy, ...])
 
 | RAG Strategy | Quality | Latency | Cost | Complexity |
 |-------------|---------|---------|------|------------|
-| Standard RAG | Good | ~200ms | Low | Low |
-| Multi-query | Better | ~2× | 2× | Low |
+| Standard RAG | Good | ~310ms | Low | Low |
+| Multi-query | Better | ~1.5× | 2× | Low |
 | HyDE | Better | ~1.5× | 1.5× | Low |
 | Agentic RAG | Best | 5-30× | 5× | High |
 | Graph RAG | Best (global) | 10× query | 100× index | Very High |
@@ -725,7 +744,7 @@ for i in range(MAX_ITERATIONS):
 | **RAGAS** | RAG evaluation | Context recall, faithfulness, answer relevance |
 | **LangGraph** | Agentic RAG flows | Stateful graphs for multi-step retrieval |
 | **DSPy** | Programmatic RAG optimization | Auto-optimize prompts in RAG pipeline |
-| **Cohere Rerank 3** | Semantic reranking | Best managed reranker for multi-lingual |
+| **Cohere Rerank 3.5** | Semantic reranking | Strong managed reranker; 100+ languages, 4096-token context |
 | **Weaviate** | Hybrid search + GraphQL | Built-in hybrid search; good for advanced queries |
 | **TruLens** | RAG evaluation | RAG triad: context relevance, groundedness, answer relevance |
 | **Arize Phoenix** | Observability | Trace RAG pipeline; identify failure modes |
@@ -756,7 +775,7 @@ A: HyDE hurts on factual, entity-specific queries where the generated hypothetic
 Graph RAG excels when your data has rich entity relationships that vector similarity alone cannot capture — for example, organizational hierarchies, citation networks, supply chains, or knowledge graphs. Standard vector RAG finds semantically similar chunks but misses structural relationships ("Who reports to the VP of Engineering?" requires traversing an org graph, not embedding similarity). Graph RAG constructs a knowledge graph from documents (entities as nodes, relationships as edges), then combines graph traversal with vector retrieval. Use Graph RAG when: (1) queries require multi-hop reasoning across entities ("What products does Company X's main competitor sell?"); (2) data has inherent graph structure (legal case citations, medical drug interactions); (3) summarization across many documents is needed (Microsoft's Graph RAG uses community detection to create hierarchical summaries). Avoid Graph RAG for simple factual lookups or when entity extraction quality is poor — garbage-in-garbage-out is amplified in graph construction.
 
 **Q: How does Corrective RAG (CRAG) work and what problem does it solve?**
-CRAG adds a self-correction loop that evaluates retrieval quality before generating an answer, solving the problem of LLMs generating confident but wrong answers from irrelevant retrieved chunks. The workflow: (1) retrieve documents normally; (2) a lightweight evaluator (fine-tuned model or LLM prompt) scores each retrieved document as "Correct," "Incorrect," or "Ambiguous"; (3) if documents are "Correct," proceed to generation; (4) if "Incorrect," trigger a web search or alternative retrieval to find better sources; (5) if "Ambiguous," combine original retrieval with web search results. This is critical because standard RAG has no quality gate — if the retriever returns irrelevant chunks, the LLM hallucinates an answer from them rather than saying "I don't know." CRAG reduces hallucination by 20-30% compared to naive RAG on knowledge-intensive benchmarks. The tradeoff is added latency (100-300ms for the evaluation step) and complexity.
+CRAG adds a self-correction loop that evaluates retrieval quality before generating an answer, solving the problem of LLMs generating confident but wrong answers from irrelevant retrieved chunks. The workflow: (1) retrieve documents normally; (2) a lightweight evaluator (fine-tuned model or LLM prompt) scores each retrieved document as "Correct," "Incorrect," or "Ambiguous"; (3) if documents are "Correct," proceed to generation; (4) if "Incorrect," trigger a web search or alternative retrieval to find better sources; (5) if "Ambiguous," combine original retrieval with web search results. This is critical because standard RAG has no quality gate — if the retriever returns irrelevant chunks, the LLM hallucinates an answer from them rather than saying "I don't know." Yan et al. (2024) report consistent accuracy and factuality gains over standard RAG across PopQA, Biography, PubHealth and ARC-Challenge; the size of the hallucination reduction you see is corpus-specific, so measure it on your own out-of-KB queries rather than assuming a headline number. The tradeoff is added latency (100-300ms for the evaluation step) and complexity.
 
 **Q: What training is required for Self-RAG and is it practical for production?**
 Self-RAG requires training the LLM to generate special reflection tokens ([Retrieve], [IsREL], [IsSUP], [IsUSE]) that control retrieval decisions and quality assessment inline during generation. The model learns when to retrieve (not every query needs it), whether retrieved content is relevant, whether the generation is supported by retrieved evidence, and whether the response is useful. Training requires: (1) a base LLM (7B+), (2) ~150K training examples with reflection token annotations (generated by GPT-4 in the original paper), (3) standard instruction fine-tuning. For production practicality: Self-RAG adds complexity but enables the model to be its own quality controller without external evaluator components. The main challenge is the annotation pipeline — generating reliable reflection token labels requires a capable teacher model. Consider Self-RAG when you need tight integration between retrieval and generation decisions and can afford the fine-tuning investment. For most production cases, CRAG (no training required) provides 80% of Self-RAG's benefit with much less effort.
@@ -768,7 +787,7 @@ Agentic RAG systems that iteratively retrieve, reason, and refine need explicit 
 Query transformation rewrites the user's original query into one or more forms that are better suited for retrieval, addressing the vocabulary mismatch between user language and document language. Techniques: (1) HyDE (Hypothetical Document Embeddings) — generate a hypothetical answer, then embed that answer to find similar real documents (the hypothetical answer's embedding is closer to relevant documents than the question's embedding); (2) query decomposition — split a complex query into sub-queries ("Compare X and Y" becomes "What is X?" and "What is Y?"); (3) step-back prompting — abstract the query to a more general form ("Why did the 2008 financial crisis happen?" becomes "What causes financial crises?"); (4) query expansion — add synonyms and related terms. HyDE improves retrieval recall by 10-25% on average. The cost is one additional LLM call per query (50-100ms). Always evaluate the impact on your specific domain — query transformation can sometimes hurt performance if the LLM's hypothetical answer is misleading.
 
 **Q: How do you handle multimodal documents (text + tables + images) in a RAG pipeline?**
-Multimodal RAG requires separate processing pipelines for each modality, unified indexing, and a multimodal LLM for generation. Approach: (1) document parsing — use layout-aware parsers (Unstructured.io, LlamaParse, Adobe Extract API) to separate text, tables, and images from documents; (2) table handling — convert tables to markdown or structured text, embed as separate chunks with table context (caption, column headers); (3) image handling — generate text descriptions using a VLM (GPT-4o, Claude 3.5), embed the description alongside the image for retrieval; (4) unified index — store all chunk types (text, table-as-text, image-description) in the same vector index with metadata tags for modality type; (5) generation — pass retrieved chunks to a multimodal LLM (GPT-4o, Gemini) that can process both text and images natively. For tables specifically, consider text-to-SQL if the table data is in a database — direct SQL retrieval often outperforms embedding-based retrieval for structured data queries. Main challenge: maintaining alignment between images and their surrounding text context during chunking.
+Multimodal RAG requires separate processing pipelines for each modality, unified indexing, and a multimodal LLM for generation. Approach: (1) document parsing — use layout-aware parsers (Unstructured.io, LlamaParse, Adobe Extract API) to separate text, tables, and images from documents; (2) table handling — convert tables to markdown or structured text, embed as separate chunks with table context (caption, column headers); (3) image handling — generate text descriptions with a vision-capable frontier LLM (any current OpenAI GPT-5.x, Claude Opus/Sonnet 5, or Gemini 3.x tier), embed the description alongside the image for retrieval; (4) unified index — store all chunk types (text, table-as-text, image-description) in the same vector index with metadata tags for modality type; (5) generation — pass retrieved chunks to a natively multimodal LLM that can process both text and images in one prompt (every current frontier tier is). For tables specifically, consider text-to-SQL if the table data is in a database — direct SQL retrieval often outperforms embedding-based retrieval for structured data queries. Main challenge: maintaining alignment between images and their surrounding text context during chunking.
 
 **Q: How does FLARE decide when to retrieve during generation?**
 FLARE (Forward-Looking Active REtrieval) monitors token-level confidence while the LLM generates: when the model predicts a continuation with low probability (below a confidence threshold), that signals a knowledge gap, and FLARE triggers retrieval using the predicted low-confidence continuation as the search query. The retrieved context is injected and the sentence is regenerated. Unlike standard RAG's single up-front retrieval, FLARE retrieves exactly at the points where the model is uncertain — well suited to long-form generation where information needs emerge mid-answer. The cost is regeneration and multiple retrieval rounds, so reserve it for long-form synthesis rather than short factual Q&A.
@@ -1251,9 +1270,10 @@ def identify_affected_communities(new_case_ids: list[str], community_map: dict) 
 
 ```python
 # BROKEN: Sort graph traversal results by citation_count DESC.
-# 1965 case "Dodge v. Ford" has 5,000+ citations — always ranks first.
+# A canonical old case — e.g. Dodge v. Ford Motor Co., 204 Mich. 459 (1919) —
+# accumulates citations for a century and always ranks first.
 # Modern cases applying updated standards are buried or excluded.
-# User asking about 2020+ corporate law gets 1960s-heavy context.
+# User asking about 2020+ corporate law gets a century-old-precedent-heavy context.
 
 # FIX: Recency-weighted ranking: score = α × citation_count + (1-α) × recency_score.
 # α=0.4 balances authority (citations) with recency.

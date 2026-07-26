@@ -15,14 +15,14 @@
 - Maintain multi-turn conversation context (chat history)
 - Support streaming responses (tokens appear as generated)
 - User authentication, conversation management (save, load, delete)
-- Multiple model tiers (GPT-3.5 for free, GPT-4 for paid)
+- Multiple model tiers (a small/fast model for the free tier, the frontier model for paid)
 - Plugin/tool support (browsing, code execution, image generation)
-- Image input support (GPT-4 Vision)
+- Image input support (multimodal model tier)
 
 ### Non-Functional Requirements
 - **Latency**: TTFT (time to first token) < 1s; streaming at human-readable pace (~30 tokens/sec)
 - **Availability**: 99.9% uptime (8.7 hours downtime/year)
-- **Scale**: 100M+ daily active users; 10M concurrent conversations at peak
+- **Scale**: 100M+ daily active users; 10M concurrent conversations at peak (a design target for this exercise; OpenAI publicly reports WEEKLY actives, not daily)
 - **Throughput**: 1B+ tokens generated per day
 - **Cost**: Efficient inference to keep costs manageable at massive scale
 
@@ -65,21 +65,28 @@ Vector embeddings for semantic search:
 
 ### Infrastructure Estimates
 ```
-GPU requirements for inference:
-  GPT-4 (1.76T parameter MoE, ~220B active):
-    1 inference request: ~500ms (A100 80GB)
+GPU requirements for inference. OpenAI has never published parameter counts or
+architectures for its production models; every "1.76T MoE" style figure in
+circulation is unverified rumor. So size against an OPEN model of known shape
+and treat it as a stand-in for the frontier tier:
+
+  Frontier tier (stand-in: a large sparse MoE, ~mid-hundreds-of-billions total,
+  a few tens of billions active per token):
+    1 inference request: ~500ms (A100 80GB, tensor-parallel)
     Need: 17,000 req/sec × 0.5s = 8,500 concurrent requests
+    A100 handles ~50 concurrent requests at this size with continuous batching
+    Total: ~170 A100s for the paid tier (~20% of traffic)
 
-  A100 GPU handles: ~50 concurrent requests with batching
-  Total A100 GPUs: ~170 for GPT-4 (paid tier, ~20% of traffic)
-
-  GPT-3.5 (175B dense):
+  Small/cheap tier (stand-in: a dense model in the low tens of billions):
     1 inference: ~100ms on A100
     For 80% of traffic: 13,600 req/sec × 0.1s = 1,360 concurrent
-    A100 handles ~200 concurrent
-    GPT-3.5 GPUs: ~7 GPUs... but with PagedAttention, batch efficiently
+    A100 handles ~200 concurrent at this size
+    Small-tier GPUs: ~7 by this arithmetic — implausibly low, which is the tell
+    that a pure concurrency model ignores KV-cache memory. Long contexts, not
+    FLOPs, are what actually bound batch size (see the KV cache sizing below).
 
-  Realistic estimate: 1,000+ A100s total (with redundancy, routing, batching)
+  Realistic estimate: 1,000+ A100s total (with redundancy, routing, batching,
+  and KV-cache headroom)
 ```
 
 ---
@@ -186,12 +193,14 @@ vLLM streaming:
 ### 4.3 Model Router
 
 ```
-Routing Logic:
-  - Free tier → GPT-3.5-turbo
-  - Paid tier → GPT-4o (default) or GPT-4 (legacy)
-  - Image in request → GPT-4V
-  - Plugin active → GPT-4 with tools
-  - Code Interpreter active → GPT-4 in sandboxed environment
+Routing Logic (expressed as tiers — the concrete model IDs behind each tier turn
+over every few months, so the router should treat them as configuration, not code):
+  - Free tier → small/fast tier
+  - Paid tier → frontier tier (default)
+  - Image in request → multimodal-capable tier (a separate vision-only model is no
+    longer how this is done; current frontier models are natively multimodal)
+  - Plugin active → frontier tier with tools
+  - Code Interpreter active → frontier tier in sandboxed environment
 
 Load balancing across inference nodes:
   - Consistent hashing by conversation_id (sticky sessions for KV cache reuse)
@@ -220,11 +229,15 @@ Key optimizations:
      - Add new requests when a slot frees
      - Vs. static batching: 23× higher throughput
 
-  3. Speculative decoding (GPT-4 + GPT-3.5 drafter):
-     - Small model (GPT-3.5) drafts 5 tokens ahead
-     - Large model (GPT-4) verifies in parallel
+  3. Speculative decoding (draft model + target model):
+     - A small draft model sharing the target's tokenizer drafts 5 tokens ahead
+     - The large target model verifies all 5 in one forward pass
      - If all verified: skip 5 × decode steps
-     - Net speedup: 2-3× for common token sequences
+     - Net speedup: 2-3× for predictable token sequences
+     - Note the constraint: draft and target MUST share a vocabulary, so the
+       drafter is normally a distilled sibling of the target, not an arbitrary
+       smaller product model. OpenAI has not published its serving stack;
+       this is the standard technique, not a disclosed implementation detail.
 
   4. Tensor parallelism: split GPT-4 across 8 A100 GPUs
      - Each GPU holds 1/8 of each transformer layer
@@ -334,13 +347,17 @@ Prompt injection defense:
 ## 7. Cost Optimization
 
 ```
-Token cost breakdown (GPT-4o, ~$5/1M input tokens, $15/1M output):
+Token cost breakdown at retail API rates (GPT-4o: $2.50/1M input, $10/1M output):
   Average request: 500 input + 300 output tokens
-  Cost per request: (500 × $5 + 300 × $15) / 1M = $0.007
-  Daily: 500M requests × $0.007 = $3.5M/day ... clearly unrealistic for free tier
+  Cost per request: (500 × $2.50 + 300 × $10) / 1M = $0.00425
+  Daily: 500M requests × $0.00425 = $2.1M/day ... still far beyond free-tier viability
 
-  Reality: OpenAI charges $20/month (ChatGPT Plus) to subsidize GPU costs
-  GPT-3.5 costs ~$0.0005/1K tokens — 10× cheaper → used for free tier
+  Two caveats on that number. First, retail API price is not OpenAI's own marginal
+  cost — it is a margin-bearing sticker price, so first-party serving is cheaper
+  than this arithmetic implies. Second, this is the argument for tiering, not the
+  cost itself: the small/cheap tier absorbs free-tier traffic at roughly an order
+  of magnitude less per token, and the paid subscription (ChatGPT Plus, $20/month)
+  subsidizes the frontier-model tier.
 
 Cost optimization strategies:
   1. Semantic caching: cache responses to similar questions
@@ -353,7 +370,7 @@ Cost optimization strategies:
      - Reuse across requests
      - Anthropic prompt caching: 90% cost reduction on cached tokens
 
-  3. Model routing: detect "easy" queries → route to GPT-3.5
+  3. Model routing: detect "easy" queries → route to the small/cheap tier
      - Intent classifier: simple factual → 3.5, complex reasoning → 4
      - Free users always → 3.5 unless capacity allows
 
@@ -416,7 +433,7 @@ SLA: 99.9% = 8.7 hours downtime/year
 Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. [Semantic caching](../llm_caching/README.md) applies only to a subset.
 
 **Q: Follow-up: How would you handle a 10× traffic spike?**
-Short term: queue requests, lower context limits, route more to GPT-3.5. Long term: predictive auto-scaling (expand GPU cluster 30 minutes before expected peak based on historical patterns).
+Short term: queue requests, lower context limits, route more traffic to the small/cheap tier. Long term: predictive auto-scaling (expand GPU cluster 30 minutes before expected peak based on historical patterns).
 
 **Cost vs. quality trade-off:** The fundamental tension is that better models cost more to run. ChatGPT monetizes this gap: free tier subsidizes costs, paid tier generates revenue. The system must correctly route requests to appropriately-tiered models without degrading user experience.
 
@@ -545,9 +562,9 @@ def check_semantic_cache_safe(
     return None
 ```
 
-**War Story 2 — Model routing failure: all traffic sent to GPT-3.5 during GPT-4 outage, CSAT drops 22%:**
+**War Story 2 — Silent quality failover: all traffic shifted to the small tier during a frontier-model outage (illustrative, not a disclosed OpenAI incident):**
 
-During a 45-minute GPT-4 API degradation, the routing system correctly failed over to GPT-3.5-turbo. However, the UI did not indicate the quality difference, and users submitted complex tasks (code generation, long-form writing) that GPT-3.5 handled poorly. Post-incident analysis: 22% CSAT drop during degradation window, with 40% of negative feedback specifically citing "the AI got dumb suddenly." Fix: during degraded routing, show a banner: "We are currently using our standard model due to high demand. Complex tasks may take longer." Also enqueue GPT-4 tasks in a retry queue during degradation and reprocess after recovery.
+During a 45-minute frontier-model degradation, the routing system correctly failed over to the small/cheap tier. However, the UI did not indicate the quality difference, and users submitted complex tasks (code generation, long-form writing) that the small model handled poorly. Post-incident analysis showed a sharp CSAT drop across the degradation window, with much of the negative feedback specifically citing that "the AI got dumb suddenly." The percentages here are illustrative of the pattern rather than measured public figures. Fix: during degraded routing, show a banner: "We are currently using our standard model due to high demand. Complex tasks may take longer." Also enqueue frontier-tier tasks in a retry queue during degradation and reprocess after recovery.
 
 ---
 
@@ -606,7 +623,8 @@ Inference GPU requirements (GPT-4 class, 70B model):
   Throughput on 8×A100 (tensor parallel): ~1,200 output tokens/sec at p99 < 2s
   Required output throughput: 19,290 msg/s × 420 tokens = 8.1M tokens/sec
   GPU pods needed: 8.1M / 1,200 = 6,750 pods × 8 A100 each = 54,000 A100s
-  (OpenAI has reported 30,000+ A100s; ChatGPT uses mixture of model sizes)
+  (Fleet size is not disclosed by OpenAI; treat this as a derived estimate.
+   Real deployments use a mixture of model sizes and newer accelerators.)
 
 Cost implication at $1/A100-hour (hyperscaler negotiated pricing):
   54,000 A100s × $1/hr × 8,760 hr/year = $473M/year on inference alone
@@ -712,7 +730,7 @@ CREATE INDEX idx_messages_conversation_seq
 Conversation state is persisted server-side, not in browser local storage. Each conversation has a UUID stored in the user's account. When the user opens ChatGPT in a new browser or device, the client fetches the conversation list via REST API and resumes the selected conversation by fetching its messages. This is why ChatGPT requires login — conversations are tied to user accounts, not browser sessions. The local browser cache only stores the last 10 messages for fast initial render; the full history is fetched from the server on demand when the user scrolls up. WebSocket connections are stateless per session — reconnection fetches the current conversation state fresh from the database.
 
 **Q: How does the system handle very long conversations that exceed the model's context window?**
-Sliding window with summarization: when the conversation exceeds 80% of the context window, the oldest messages are summarized by a smaller model (GPT-3.5-turbo) into a compact "conversation memory" block (~500 tokens). The full message history is maintained in the database, but only the summary + recent N messages are passed to the inference model. Users can explicitly view the full history (fetched from DB) but the model only sees the summarized version. Quality degradation: 8-12% drop in response quality on conversations > 50 turns based on internal eval. Alternative not yet in production: retrieval-augmented conversation memory (embed all past messages, retrieve relevant ones per query).
+Sliding window with summarization: when the conversation exceeds 80% of the context window, the oldest messages are summarized by a smaller, cheaper model into a compact "conversation memory" block (~500 tokens). The full message history is maintained in the database, but only the summary + recent N messages are passed to the inference model. Users can explicitly view the full history (fetched from DB) but the model only sees the summarized version. Quality degradation: expect a single-digit-to-low-double-digit percentage drop in response quality on conversations beyond ~50 turns; measure this on your own eval set rather than assuming a published number, since it depends entirely on the summarizer and the domain. Alternative not yet in production: retrieval-augmented conversation memory (embed all past messages, retrieve relevant ones per query).
 
 ---
 
@@ -758,18 +776,21 @@ Tool errors are handled at three levels: (1) timeout (5 seconds): the LLM receiv
 
 ### Final Metrics Summary
 
+Only the first row is a figure OpenAI itself has published. Everything below it is
+a design-exercise estimate derived from the capacity math in this document — useful
+for reasoning about shape and ratios, not citable as fact about OpenAI.
+
 | Metric | Value | Notes |
 |---|---|---|
-| Daily active users | 100M+ | As of 2024 |
-| Messages per day | 10B+ | Estimated |
-| Peak inference throughput | 19,000+ requests/sec | |
-| p50 TTFT (GPT-4o) | 600ms | streaming start |
-| p99 TTFT (GPT-4o) | 1,800ms | |
-| Uptime SLA | 99.5% | ~43h downtime/year |
-| A100 GPUs (estimated) | 30,000–54,000 | Model mix dependent |
-| Annual GPU cost (estimated) | $200M–$470M | At $1/A100-hr negotiated |
-| Revenue (2024 estimate) | $2B+ annualized | Including API |
-| Inference cost as % revenue | 15–25% | Typical LLM SaaS |
+| Weekly active users | Hundreds of millions | OpenAI has publicly reported ChatGPT weekly actives in the high hundreds of millions; it reports WEEKLY, not daily, actives — do not restate this as a DAU figure |
+| Messages per day | 10B+ | Estimate, not disclosed |
+| Peak inference throughput | 19,000+ requests/sec | Derived from the capacity math above |
+| p50 TTFT | 600ms | Design target for streaming start |
+| p99 TTFT | 1,800ms | Design target |
+| Uptime SLA | 99.9% | ~8.7h downtime/year (matches the requirement in section 1) |
+| A100-class GPUs | 30,000–54,000 | Estimate; fleet composition is not public and has shifted to newer accelerators |
+| Annual GPU cost | $200M–$470M | Estimate at $1/GPU-hr assumed negotiated rate |
+| Inference cost as % revenue | 15–25% | Typical for LLM SaaS; not an OpenAI disclosure |
 
 **Key architectural principles that made ChatGPT scalable:**
 - Streaming from token 1 eliminates "wall of text" UX — perceived latency drops 70% vs. waiting for full response

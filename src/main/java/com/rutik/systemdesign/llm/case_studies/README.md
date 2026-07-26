@@ -114,7 +114,7 @@ These nine files live in `cross_cutting/` and are referenced by multiple case st
 | Phase 2 | [tenant_isolation_patterns.md](./cross_cutting/tenant_isolation_patterns.md) | Per-tenant vector DB namespacing vs collections vs clusters, ACL pushdown into retrieval, noisy-neighbor mitigation, cross-tenant injection defenses |
 | Phase 3 | [red_team_eval_harness.md](./cross_cutting/red_team_eval_harness.md) | Adversarial dataset construction, jailbreak scoring, prompt-injection corpora, model card generation, continuous red-team CI |
 | Phase 4 | [agent_durability_patterns.md](./cross_cutting/agent_durability_patterns.md) | Checkpointing, mid-task interruption + resume, replay determinism, idempotent tool calls, Temporal/LangGraph integration — read before any agent case study |
-| Phase 5 | [gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md) | H100/H200/B200 utilization math (MFU/MBU), spot/preemptible blending, cold-start optimization, prefill/decode disaggregation cost accounting |
+| Phase 5 | [gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md) | A100/H100/H200/B200 utilization math (MFU/MBU, dense vs sparsity FLOPS), spot/preemptible blending, cold-start optimization, prefill/decode disaggregation cost accounting |
 | Phase 5 | [training_loop_internals.md](./cross_cutting/training_loop_internals.md) | Forward/backward/optimizer step code, gradient accumulation, FSDP wrap policy, async checkpoint manager, loss-spike detection |
 
 ---

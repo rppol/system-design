@@ -13,7 +13,7 @@
 ### Functional Requirements
 - Accept a research question in natural language and produce a structured, fully cited report
 - Decompose the research question into sub-questions with priority ordering before beginning retrieval
-- Search real-time web (Bing, Brave, Exa), academic sources (Semantic Scholar, arXiv API), and optionally user-uploaded documents
+- Search real-time web (Exa, Brave, SerpApi), academic sources (Semantic Scholar, arXiv API), and optionally user-uploaded documents
 - Fetch and extract content from 50-200 URLs per research task, handling both static and JavaScript-rendered pages
 - Track source provenance for every factual claim; every statement in the final report must cite at least one source
 - Produce a structured report: executive summary, section-by-section body, inline citations, source list with quality scores
@@ -70,9 +70,11 @@ Per task token budget:
 
 Daily token demand:           50,000 x 90,000 = 4.5B tokens/day
 Daily LLM spend (blended):
-  Planning + synthesis at GPT-4o ($2.50/M input, $10/M output): ~$2,200/day
-  Summarization + verification at GPT-4o-mini ($0.15/M, $0.60/M): ~$375/day
-  Total daily LLM spend:      ~$2,575/day; per-task LLM cost: ~$0.052
+  Planning + gap detection + synthesis at GPT-4o ($2.50/M input, $10/M output):
+    22,000 in x $2.50/M + 6,500 out x $10/M = $0.120/task -> $6,000/day
+  Summarization + verification at GPT-4o-mini ($0.15/M in, $0.60/M out):
+    50,000 in x $0.15/M + 10,500 out x $0.60/M = $0.0138/task -> $690/day
+  Total daily LLM spend:      ~$6,690/day; per-task LLM cost: ~$0.134
 
 URL fetch infrastructure:
   50 crawler pods x t3.xlarge @ $0.166/hr x 24hr = $199/day
@@ -139,7 +141,7 @@ Phase 1 — Plan:
 
 Phase 2 — Retrieve:
   For each sub-question (top priority first):
-    → Web search API (Exa / Bing) → 10-20 candidate URLs
+    → Web search API (Exa / Brave) → 10-20 candidate URLs
     → ParallelCrawler fetches all URLs (asyncio, semaphore 100)
     → SourceEvaluator scores and deduplicates
     → Top 5 sources per sub-question stored in session cache
@@ -781,10 +783,10 @@ class GapDetector:
 |---|---|---|---|
 | Sub-question traversal order | Priority-first, then breadth-across-priorities | Pure breadth-first | High-priority sub-questions answered first ensures a complete report even if time budget runs out before all sub-questions are covered |
 | LLM model assignment | GPT-4o for planning/synthesis; GPT-4o-mini for summarization and NLI verification | Single GPT-4o for all steps | Small model for per-source summarization reduces per-task LLM cost by ~60% (40K summarization tokens x $0.15/M vs $2.50/M); quality difference negligible for extractive summarization |
-| Web data freshness | Real-time web search (Exa, Bing) per task | Pre-indexed proprietary web crawl | Real-time search provides freshness within hours; academic topics require citing papers published this month; indexed crawls would lag 2-4 weeks on breaking research |
+| Web data freshness | Real-time web search (Exa, Brave) per task | Pre-indexed proprietary web crawl | Real-time search provides freshness within hours; academic topics require citing papers published this month; indexed crawls would lag 2-4 weeks on breaking research |
 | Synthesis strategy | Section-by-section sequential with rolling source context | Single-pass synthesis of all sources | Single-pass: 50 sources x 5KB = 250KB exceeds 128K token context limit; section-by-section allows selective source injection per section, reducing hallucination and token cost |
 | Gap detection stopping criterion | Max 3 iterations plus token ceiling plus threshold relaxation | Fixed time budget only | Pure time budget causes variable quality; adding threshold relaxation (0.70 → 0.60 → 0.50) ensures convergence; token ceiling enforces hard cost cap |
-| Citation verification | NLI entailment per claim using GPT-4o-mini judge | RAGAs faithfulness metric | GPT-4o-mini judge at $0.15/M input tokens costs ~$0.006 per 1,000 claims verified; RAGAs is equivalent quality but requires self-hosting a cross-encoder model; judge approach is zero-ops |
+| Citation verification | NLI entailment per claim using GPT-4o-mini judge | RAGAs faithfulness metric | GPT-4o-mini judge at $0.15/M input, $0.60/M output costs ~$0.008 per task (about 50 claims verified, ~450 input + 150 output tokens each); RAGAs is equivalent quality but requires self-hosting a cross-encoder model; judge approach is zero-ops |
 | Per-domain rate limiting | Redis sorted-set per domain, max 5 req/min shared across all tasks | Per-task rate limiting only | Per-task: each task independently limits itself, still allowing 10,000 tasks x 5 req/min = 50,000 req/min to a single domain simultaneously — enough to get IP-blocked; Redis shared rate limiter coordinates across all concurrent tasks |
 
 ### Breadth vs Depth Dial Impact
@@ -799,21 +801,24 @@ class GapDetector:
 
 ## 6. Real-World Implementations
 
-**OpenAI Deep Research (Feb 2025)**: Uses the o3 reasoning model as the backbone, which applies chain-of-thought reasoning before each retrieval decision — effectively the model plans what to search next based on what it has already found. Runs for 5-30 minutes depending on task complexity. Generates reports with inline citations. Achieved 26.7% on Humanity's Last Exam benchmark (vs GPT-4o's 3.3%), demonstrating the gap that multi-step iterative retrieval opens over single-pass generation. Estimated per-task cost based on o3 token pricing ($15/M input, $60/M output) is $8-25 depending on depth. Available to ChatGPT Pro subscribers ($200/month) with a usage limit of 100 research tasks per month. Architecture is not public, but OpenAI's blog describes a specialized browser tool that the o3 model calls to navigate the web — the model decides which URLs to fetch based on reasoning traces, rather than executing a predetermined crawl plan.
+**OpenAI Deep Research (launched Feb 2025)**: At launch it used the then-new o3 reasoning model as the backbone, applying chain-of-thought reasoning before each retrieval decision — effectively the model plans what to search next based on what it has already found. Runs for 5-30 minutes depending on task complexity. Generates reports with inline citations. OpenAI reported roughly 26% on the Humanity's Last Exam benchmark at launch, well above the single-pass GPT-4o baseline, demonstrating the gap that multi-step iterative retrieval opens over single-pass generation. Architecture is not public, but OpenAI's blog describes a specialized browser tool that the reasoning model calls to navigate the web — the model decides which URLs to fetch based on reasoning traces, rather than executing a predetermined crawl plan. The backbone has since moved on: o3 is deprecated (OpenAI lists a December 2026 shutdown, with the GPT-5.x family as the replacement) and the standalone Deep Research API model variants were retired in July 2026, so treat the o3-specific cost and quota figures from the launch announcement as historical rather than current. Deep Research itself remains available in ChatGPT, gated by subscription tier with a monthly task quota.
 
 **Perplexity Deep Research (Feb 2025)**: Built on top of Perplexity's existing real-time web search infrastructure, which already indexed billions of pages for Pro Search. Deep Research extends this by running 5-10 minutes of iterative search-and-synthesis rather than the single-shot retrieval of Pro Search. Produces shorter reports (typically 2-4 pages vs OpenAI's 10-15 pages) but finishes 3-5x faster. Exports to PDF and Markdown directly. Available to Pro users at no additional cost (bundled into $20/month subscription). Focused on consumer research tasks: product comparisons, news summaries, travel research.
 
-**Google Gemini Deep Research (Dec 2024)**: Distinctive UX: generates and shows the research plan to the user for approval before executing. The user sees the list of sub-topics Gemini intends to research and can add, remove, or reorder them before execution begins. This is a significant UX advantage — users feel in control and the final report better matches their intent. Uses Gemini 1.5 or 2.0 with the 1M token context window, which means Gemini can hold all retrieved sources in a single context rather than chunking synthesis. Google Search integration gives breadth coverage not available to OpenAI or Perplexity. Available in Google One AI Premium plan ($19.99/month).
+**Google Gemini Deep Research (launched Dec 2024)**: Distinctive UX: generates and shows the research plan to the user for approval before executing. The user sees the list of sub-topics Gemini intends to research and can add, remove, or reorder them before execution begins. This is a significant UX advantage — users feel in control and the final report better matches their intent. It rides whatever the current Gemini Pro-tier model is (Gemini 1.5 and 2.0 have both since been retired — 2.0 Flash was shut down 1 June 2026 — and the current Pro tier is Gemini 3.x), all of which carry a 1M-token context window, which means Gemini can hold all retrieved sources in a single context rather than chunking synthesis. Google Search integration gives breadth coverage not available to OpenAI or Perplexity. Available in Google's consumer AI subscription (the plan formerly branded Google One AI Premium, now Google AI Pro).
 
-**Elicit (academic-focused, Y Combinator 2021)**: Specialized for scientific literature rather than general web research. Integrates the Semantic Scholar API and PubMed for source retrieval. Models are specifically fine-tuned for academic paper extraction: identify methodology, extract results tables, summarize limitations. Outputs structured evidence tables rather than prose — a row per paper with columns for sample size, effect size, confidence interval. Used by researchers at Pfizer, Genentech, and academic institutions. Charges per-task ($2-10 per research task) rather than subscription. Citation verification is stronger than consumer tools: every DOI is verified against Semantic Scholar's live index before inclusion.
+**Elicit (academic-focused)**: Specialized for scientific literature rather than general web research. Integrates the Semantic Scholar API and PubMed for source retrieval. Models are tuned for academic paper extraction: identify methodology, extract results tables, summarize limitations. Outputs structured evidence tables rather than prose — a row per paper with columns for sample size, effect size, confidence interval. Sold to research teams in pharma and academia, on a credit-based plan rather than a flat seat subscription. Citation verification is stronger than consumer tools: DOIs are checked against a live index before inclusion, which is the architectural point worth borrowing — verify the identifier, do not trust the model to have produced a real one.
 
-**You.com ARI — Automated Research Intelligence (enterprise)**: Targets business intelligence use cases: competitive analysis, market research, regulatory monitoring. Integrates proprietary data sources (Crunchbase, Statista, court filings) alongside web search, providing data that is not publicly indexed. Produces PowerPoint-ready output and Excel-format evidence tables in addition to Markdown. Sells as an enterprise SaaS at $50K-500K/year per seat, competing with McKinsey Knowledge Centre and Gartner research subscriptions.
+**You.com ARI — Advanced Research and Insights (enterprise)**: Targets business intelligence use cases: competitive analysis, market research, regulatory monitoring. Integrates licensed data sources alongside web search, providing data that is not publicly indexed. Produces presentation-ready output and spreadsheet-format evidence tables in addition to Markdown. Sold as an enterprise contract (pricing is negotiated and not published) competing with traditional analyst-research subscriptions rather than with per-seat consumer tools.
 
 ---
 
 ## 7. Technologies and Tools
 
 ### Web Crawling Options
+
+Costs below are planning-grade order-of-magnitude figures for sizing the fetch budget, not vendor
+quotes; crawl-vendor pricing changes frequently and is often credit- rather than request-denominated.
 
 | Tool | JS Rendering | Speed (per URL) | Cost | Anti-Bot Handling | Best For |
 |---|---|---|---|---|---|
@@ -825,13 +830,16 @@ class GapDetector:
 
 ### Search APIs
 
-| API | Freshness | Academic Coverage | Cost per 1K Queries | Rate Limit | Best For |
-|---|---|---|---|---|---|
-| Exa | Hours (neural search) | Good (indexes arXiv) | $5 | 1,000 req/min | AI/tech research topics |
-| Bing Search API | Hours | Poor | $7 | 250 req/sec | General web coverage |
-| Brave Search API | Hours | Moderate | $3 | 100 req/sec | Privacy-sensitive, no tracking |
-| SerpApi | Hours (scrapes Google) | Moderate | $15 | 100 req/min | Google SERP coverage |
-| Semantic Scholar API | Days (indexing lag) | Excellent (200M+ papers) | Free (rate-limited) | 100 req/5min | Academic research tasks |
+Pricing and rate limits below are order-of-magnitude planning figures, not quotes — every vendor here
+reprices and retiers regularly, so confirm against the live pricing page before you budget against them.
+
+| API | Freshness | Academic Coverage | Cost per 1K Queries | Best For |
+|---|---|---|---|---|
+| Exa | Hours (neural search) | Good (indexes arXiv) | Single-digit dollars | AI/tech research topics |
+| Brave Search API | Hours | Moderate | Low single-digit dollars | Privacy-sensitive, no tracking |
+| SerpApi | Hours (scrapes Google) | Moderate | Low tens of dollars | Google SERP coverage |
+| Semantic Scholar API | Days (indexing lag) | Excellent (200M+ papers) | Free (rate-limited) | Academic research tasks |
+| Bing Search API | — | — | **Retired** | Microsoft retired the Bing Search APIs in 2025 and archived the docs; do not design against it. Migrate to Exa/Brave/SerpApi, or to a grounded-search LLM endpoint |
 
 ### NLI and Faithfulness Verification
 
@@ -938,19 +946,19 @@ Resolution: root cause the new model version's failure mode (increased hallucina
 
 Symptoms: more than 20% of tasks exceeding the 20-minute SLA; `research_task_duration_p99` metric spiking to 32 minutes; crawler spans showing `p99_fetch_ms=9800` (normal is 4800ms).
 
-Diagnosis: check external search API latency — Exa or Bing may be degraded. Check crawler pod CPU and memory — Playwright sessions may be leaking. Check if a spike in JS-heavy domains is routing too many URLs through Playwright (which is 3-5x slower than httpx).
+Diagnosis: check external search API latency — the primary or secondary search provider may be degraded. Check crawler pod CPU and memory — Playwright sessions may be leaking. Check if a spike in JS-heavy domains is routing too many URLs through Playwright (which is 3-5x slower than httpx).
 
 Mitigation (within 10 minutes): reduce URL budget per task from 150 to 80 (feature flag); this reduces crawler duration by ~45%. If Playwright is the bottleneck, temporarily route all JS-heavy domains to Jina API instead.
 
-Resolution: scale crawler pod count from 50 to 80 pods if load has permanently increased. Add circuit breaker on external search APIs: if Exa p99 latency exceeds 3s, fall back to Bing automatically.
+Resolution: scale crawler pod count from 50 to 80 pods if load has permanently increased. Add circuit breaker on external search APIs: if the primary provider's p99 latency exceeds 3s, fall back to the secondary provider automatically. Keep at least two independent search vendors wired up at all times — the retirement of the Bing Search APIs in 2025 stranded every agent that had only one.
 
 ---
 
 ## 9. Common Pitfalls and War Stories
 
-**Perplexity Plagiarism Controversy (Jun 2024)**: Perplexity's research feature was found to reproduce Forbes article content near-verbatim without adequate transformation. The specific content from a Forbes article about a Wired journalist's reporting was reproduced with minimal paraphrasing. Root cause: the synthesis prompt did not explicitly instruct the model to paraphrase and synthesize rather than extract; the citation system added the Forbes link but did not prevent verbatim string reproduction. Impact: Forbes sent a cease-and-desist; significant press coverage (The Verge, Wired) with quantified reputational damage across the week; Perplexity deployed a synthesis prompt update within 48 hours that added an explicit "do not reproduce verbatim; synthesize and paraphrase" instruction. The lesson: citation systems and synthesis prompts must be co-designed — adding a link does not make verbatim reproduction acceptable.
+**Perplexity Plagiarism Controversy (Jun 2024)**: Perplexity's research feature was found to reproduce Forbes article content near-verbatim without adequate transformation. The specific content from a Forbes article about a Wired journalist's reporting was reproduced with minimal paraphrasing. Root cause: the synthesis prompt did not explicitly instruct the model to paraphrase and synthesize rather than extract; the citation system added the Forbes link but did not prevent verbatim string reproduction. Impact: Forbes publicly accused Perplexity of plagiarism and sent a legal demand, and the episode drew sustained coverage in the technology press (Forbes, Wired, The Verge). The remediation attributed to Perplexity below is the obvious engineering response rather than a disclosed one — the company did not publish a post-mortem, so treat the specific fix and its timeline as inferred: instruct the synthesizer explicitly to paraphrase and synthesize rather than extract, and add a verbatim-overlap check between generated text and source text. The lesson: citation systems and synthesis prompts must be co-designed — adding a link does not make verbatim reproduction acceptable.
 
-**Citation Hallucination at Scale — Elicit (2023 independent audit)**: An independent audit of Elicit's citation system found that approximately 8% of citations in a sample of 500 research tasks referenced DOIs that did not exist or did not support the cited claim. The LLM was fabricating plausible-looking DOI strings (format: 10.1038/s41591-023-XXXXX). The fix deployed by Elicit: verify every DOI against the Semantic Scholar live API before including it in the report; DOIs that return 404 are flagged and excluded. Post-fix citation accuracy improved from 92% to 99.3% (Elicit blog, Nov 2023). The lesson: LLMs produce plausible-sounding citations with exactly the right format — format compliance is not evidence of accuracy.
+**Citation Hallucination at Scale (illustrative composite, not a published incident)**: Fabricated citations are the best-documented failure mode of LLM-generated research — courts have sanctioned lawyers over briefs citing non-existent cases, and multiple peer-reviewed studies have measured double-digit fabricated-reference rates in unconstrained LLM bibliographies. The mechanism is always the same: the model emits a DOI with exactly the right shape (`10.1038/s41591-023-XXXXX`) for a paper that does not exist, because DOI format is trivially learnable and DOI existence is not. The composite scenario worth designing against: an academic research agent ships without identifier verification, and a single-digit percentage of its citations point at DOIs that either 404 or resolve to a paper that does not support the claim. Fix: resolve every DOI against a live index (Semantic Scholar, Crossref) before it enters the report, and drop or flag anything that fails to resolve. The lesson: LLMs produce plausible-sounding citations with exactly the right format — format compliance is not evidence of existence, let alone of support. Specific per-vendor accuracy percentages circulate widely for this failure mode; treat them as unsourced unless you can find the primary measurement.
 
 **Crawler Feedback Loop — IP Block Cascade**: A production deep research agent sent 1,200 requests to a single news site (Reuters) within 90 seconds because 12 concurrent tasks simultaneously searched for the same news topic and all received Reuters URLs in their search results. Reuters' WAF rate-limited the entire IP range. All 12 concurrent tasks received empty content from Reuters URLs for the next 15 minutes, causing 12 incomplete reports. The failure cascade: empty Reuters content → low-quality sources used instead → completeness scores dropped below threshold → gap detector triggered extra iterations → more Reuters requests → deeper rate-limiting. Fix: implement a per-domain rate limiter shared across all concurrent tasks in Redis: sorted set keyed by `rate_limit:{domain}`, max 5 requests per minute per domain across all tasks. The fix reduced domain-level request density by 240x for popular domains.
 
@@ -991,22 +999,31 @@ Peak URL demand at 10,000 concurrent tasks:
 ### Cost at Scale and Scaling Headroom
 
 ```
-Monthly infrastructure (50K tasks/day baseline):
+Monthly infrastructure (50K tasks/day baseline; 730 hr/month):
   50 crawler pods (t3.xlarge, $0.166/hr):            $6,059
   10 Playwright pods (c5.2xlarge, $0.34/hr):         $2,482
   Redis cluster 3-node (r6g.2xlarge, $0.40/hr):        $876
-  LLM API (blended $2,575/day x 30):               $77,250
-  Total monthly:                                    $86,667
+  LLM API (blended $6,690/day x 30):              $200,700
+  Total monthly:                                   $210,117
 
-Revenue model (10K consumer users x $10/mo + 200 enterprise x $500/mo):
-  $100,000 + $100,000 = $200,000/month
-  Gross margin: ($200K - $87K) / $200K = 56%
+  Note the shape: LLM tokens are 96% of spend. Crawler fleet sizing is what governs
+  latency; token routing is what governs the P&L. Optimize them separately.
+
+Revenue model (10K consumer users x $30/mo + 400 enterprise x $500/mo):
+  $300,000 + $200,000 = $500,000/month
+  Gross margin: ($500K - $210K) / $500K = 58%
+
+  Sanity check against per-task economics: 50K tasks/day is 1.5M tasks/month
+  against $500K revenue = $0.33 revenue/task vs $0.14 fully-loaded cost/task.
+  A $10/mo consumer tier does NOT cover 5 tasks/day at this token budget — the
+  price floor is set by the token budget, not by competitor pricing.
 
 Scaling headroom:
   Max concurrent sessions (crawl phase) = (50 pods x 100 conn/pod / 1.90s avg) / (150 URL/720s)
                                         = 2,632 / 0.208 = 12,654 sessions
   Current target: 10,000 (26% headroom).
-  To support 20,000 sessions: 80 crawler pods ($9,695/month marginal cost).
+  To support 20,000 sessions: 80 crawler pods ($9,694/month total, i.e. $3,635
+  marginal over today's 50-pod fleet).
 ```
 
 ---
@@ -1043,7 +1060,7 @@ A token budget counter is passed through the entire task graph. Every LLM call d
 
 **Q: When should you use a single large LLM for all steps vs specialized models for each step?**
 
-Specialized models win on cost for extractive, repetitive steps. Summarizing 50 web pages is repetitive and extractive — GPT-4o-mini is adequate and costs 16x less than GPT-4o per token ($0.15 vs $2.50 per million input tokens). Planning (deciding what to research) and synthesis (integrating contradictory sources into coherent prose) are reasoning-intensive — GPT-4o or o3 quality is necessary. NLI verification is binary classification — a cross-encoder or small judge model works. In practice: planning 5% of tokens at $2.50/M + summarization 55% of tokens at $0.15/M + synthesis 20% at $2.50/M + verification 20% at $0.15/M = blended rate of $0.72/M vs $2.50/M single-model. Blended model routing reduces per-task LLM cost by 71%.
+Specialized models win on cost for extractive, repetitive steps. Summarizing 50 web pages is repetitive and extractive — GPT-4o-mini is adequate and costs 16x less than GPT-4o per token ($0.15 vs $2.50 per million input tokens). Planning (deciding what to research) and synthesis (integrating contradictory sources into coherent prose) are reasoning-intensive — GPT-4o or o3 quality is necessary. NLI verification is binary classification — a cross-encoder or small judge model works. In practice: planning 5% of tokens at $2.50/M + summarization 55% of tokens at $0.15/M + synthesis 20% at $2.50/M + verification 20% at $0.15/M = blended input rate of $0.74/M vs $2.50/M single-model — a 70% reduction on the input side.
 
 **Q: How do you handle contradictory sources? Two sources say opposite things about the same claim.**
 

@@ -14,7 +14,7 @@ ReAct interleaves thought and action in a Thought-Action-Observation loop. Refle
 
 **Mental model**: A standard LLM prompt is like an exam question answered under time pressure — the model compresses all reasoning into the output. ReAct separates thinking from acting: the "Thought" field is scratch space where the model reasons; the "Action" field commits to a tool call; "Observation" is the tool result. This separation makes reasoning visible, debuggable, and steerable. Reflexion extends this by adding a loop where the model evaluates its own performance after a task and stores lessons for next time.
 
-**Why it matters**: Explicit reasoning traces improve accuracy on multi-step tasks by 10-30% compared to direct answers. They also make agent behavior understandable — you can read the Thought field to understand why the agent took a particular action.
+**Why it matters**: Interleaving reasoning with actions measurably beats acting alone on multi-step tasks — in the ReAct paper, 71% vs 45% success on ALFWorld and 40.0% vs 30.1% on WebShop against act-only prompting. They also make agent behavior understandable — you can read the Thought field to understand why the agent took a particular action.
 
 **Key insight**: LLMs think better when they write their thinking down. Chain-of-thought, ReAct, and all related patterns exploit the fact that each generated token attends to all previous tokens — "writing it out" expands the effective reasoning capacity of the model.
 
@@ -213,7 +213,9 @@ Self-consistency:
     Diminishing returns beyond N=20
 
   Cost: N × single_call_cost
-  Gain: ~5-15% accuracy improvement on math and reasoning benchmarks
+  Gain: +3.9 to +17.9 points on math and reasoning benchmarks
+        (Wang et al. 2022, 40 sampled paths: ARC-c +3.9, StrategyQA +6.4,
+         SVAMP +11.0, AQuA +12.2, GSM8K +17.9)
   No gain: factual lookup tasks (voting doesn't help if the fact is wrong)
 ```
 
@@ -295,13 +297,18 @@ Format:
 [then your tool call]
 """
 
-# For Anthropic's extended thinking feature (claude-3-7-sonnet):
+# For Anthropic's native thinking. On Claude 4.7 and later (Opus 5, Sonnet 5,
+# Fable 5) the old manual budget form -- thinking={"type": "enabled",
+# "budget_tokens": N} -- returns a 400 error; use adaptive thinking instead
+# and control depth with output_config.effort.
 response = client.messages.create(
-    model="claude-3-7-sonnet-20250219",
-    thinking={"type": "enabled", "budget_tokens": 10000},
+    model="claude-sonnet-5",
+    max_tokens=16000,
+    thinking={"type": "adaptive"},
+    output_config={"effort": "high"},   # "high" is the API default
     messages=[{"role": "user", "content": task}]
 )
-# model.thinking blocks are separate from text blocks
+# thinking blocks are separate from text blocks in response.content
 # shows chain-of-thought before response
 ```
 
@@ -410,13 +417,12 @@ Claude Code uses an implicit ReAct loop for every engineering task:
 
 ### Reflexion in Research Agents
 
-Anthropic's multi-agent research systems use Reflexion-style memory:
-- Agent attempts a week-long research task
-- At each major failure checkpoint (dead-end search, contradictory sources), the supervisor agent writes a reflection
+Anthropic's published multi-agent research system uses an orchestrator that spawns 3-5 subagents in parallel (more than 10 for complex research) and reports outperforming single-agent Claude Opus 4 by 90.2% on its internal research eval. Layering Reflexion-style memory on top of that shape is a common production pattern, illustrated here (not an Anthropic-reported result):
+- At each major failure checkpoint (dead-end search, contradictory sources), the orchestrator writes a reflection
 - Subsequent sub-agents receive the reflection in their context
-- Observed: ~30% improvement in task completion rate with reflection vs without
+- The reflection is what stops the next subagent from repeating the dead-end query
 
-### Self-Consistency in Medical Q&A
+### Self-Consistency in Medical Q&A (illustrative composite)
 
 A healthcare AI system uses N=7 self-consistency for clinical decision support:
 - 7 reasoning chains generated at temperature=0.7
@@ -496,7 +502,7 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 |------|---------|-------|
 | **LangGraph** | ReAct agent loop | Built-in `create_react_agent` helper |
 | **LangChain agents** | ReAct + tool execution | Legacy `AgentExecutor`; prefer LangGraph |
-| **Reflexion (GitHub)** | Reflexion implementation | Princeton; reference implementation |
+| **Reflexion (GitHub)** | Reflexion implementation | Shinn et al. (Northeastern/Princeton/MIT); reference code, not a packaged library |
 | **LangMem** | Long-term agent memory | Reflection storage + retrieval |
 | **Mem0** | Agent memory platform | Persistent memory across sessions |
 | **DSPy** | Programmatic prompting | Self-optimizing prompts including CoT |
@@ -508,7 +514,7 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 ## Interview Questions with Answers
 
 **Q: What is the ReAct pattern and why does it outperform direct LLM calls for agentic tasks?**
-A: ReAct (Reasoning + Acting) prompts the LLM to alternate between a Thought (reasoning about what to do), an Action (tool call), and an Observation (tool result), repeating until the task is complete. It outperforms direct calls for three reasons: (1) explicit thinking causes the model to reason through the task before committing to an action, reducing impulsive wrong tool selections; (2) grounding in tool observations prevents the model from hallucinating intermediate facts; (3) the iterative loop allows the model to observe whether its hypothesis was correct and adjust. The 2022 ReAct paper showed 10-30% improvement over chain-of-thought-only prompting on knowledge-intensive multi-step tasks.
+A: ReAct (Reasoning + Acting) prompts the LLM to alternate between a Thought (reasoning about what to do), an Action (tool call), and an Observation (tool result), repeating until the task is complete. It outperforms direct calls for three reasons: (1) explicit thinking causes the model to reason through the task before committing to an action, reducing impulsive wrong tool selections; (2) grounding in tool observations prevents the model from hallucinating intermediate facts; (3) the iterative loop allows the model to observe whether its hypothesis was correct and adjust. The 2022 ReAct paper (Yao et al.) reported absolute success-rate gains of 34 points on ALFWorld and 10 points on WebShop over imitation and RL baselines. Note what it did NOT show: on the knowledge-intensive benchmarks, ReAct alone slightly underperformed chain-of-thought (HotpotQA exact match 27.4 vs 29.4; Fever 60.9 vs 56.3 was the one win), and only the combined ReAct + CoT-SC variants beat both (35.1 on HotpotQA, 64.6 on Fever).
 
 **Q: What is Reflexion and how does it differ from standard ReAct?**
 A: Reflexion (Shinn et al., 2023) adds a self-reflection loop after task failure. After an unsuccessful ReAct attempt, a separate "reflection" prompt asks the model what went wrong and what it would do differently. This verbal self-critique is stored in an episodic memory buffer and injected into the context of subsequent attempts. Unlike ReAct (single attempt, no learning from failure), Reflexion converges over multiple attempts — it's like a test student reviewing their mistakes before retaking the exam. The key limitation: Reflexion requires a verifiable success signal (tests pass/fail, factual answer is correct/wrong) to trigger the reflection; it cannot reflect on subjective tasks without an external evaluator.
@@ -517,7 +523,7 @@ A: Reflexion (Shinn et al., 2023) adds a self-reflection loop after task failure
 A: Tree of Thoughts (Yao et al., 2023) generates multiple candidate thoughts at each reasoning step, evaluates them (with an LLM scorer), expands the most promising branches, and prunes low-scoring ones — essentially beam search over a reasoning tree. Cost: B (branching factor) × D (depth) × LLM calls minimum. This is only worthwhile for problems where: (1) early reasoning choices significantly affect the outcome; (2) there is a way to evaluate partial progress; (3) the task has no simple greedy solution. Examples: 24-game math puzzle, multi-step planning, code debugging with multiple candidate fixes. For straightforward tasks, standard ReAct or CoT is sufficient and far cheaper.
 
 **Q: How does self-consistency work and when does it improve accuracy?**
-A: Self-consistency (Wang et al., 2022) generates N independent reasoning chains at temperature > 0, extracts the final answer from each, and takes the majority vote. It exploits the fact that multiple chains making different errors will produce different wrong answers, but multiple chains reaching the correct answer via different reasoning will converge. Improvement is largest on: arithmetic, multi-step math, and logical reasoning — tasks with a single correct answer that can be reached by multiple valid reasoning paths. It does NOT help on: tasks where the model lacks the knowledge (all chains hallucinate the same wrong fact), open-ended generation, or tasks without a discrete final answer. Typical gain: 5-15% on GSM8K math benchmarks with N=5-10.
+A: Self-consistency (Wang et al., 2022) generates N independent reasoning chains at temperature > 0, extracts the final answer from each, and takes the majority vote. It exploits the fact that multiple chains making different errors will produce different wrong answers, but multiple chains reaching the correct answer via different reasoning will converge. Improvement is largest on: arithmetic, multi-step math, and logical reasoning — tasks with a single correct answer that can be reached by multiple valid reasoning paths. It does NOT help on: tasks where the model lacks the knowledge (all chains hallucinate the same wrong fact), open-ended generation, or tasks without a discrete final answer. Reported gain in the original paper: +17.9 points on GSM8K with 40 sampled paths, and +3.9 to +12.2 points on ARC-challenge, StrategyQA, SVAMP and AQuA; the curve saturates quickly, so N=5-10 captures most of it.
 
 **Q: What is scratchpad prompting and how does it differ from ReAct's Thought field?**
 A: Scratchpad prompting gives the model free-form scratch space to write interim calculations, false starts, and corrections before committing to a final answer — like scrap paper. ReAct's Thought field is more structured: it's part of the agentic loop, each Thought must directly motivate the subsequent Action, and it's observable by the application. Scratchpad is typically enclosed in `<scratchpad>` tags and may be stripped from the final output; Thought fields are logged and used for debugging. Scratchpad is better for pure reasoning tasks (math, logic) where intermediate steps shouldn't be exposed; ReAct Thoughts are better for agent tasks where reasoning transparency is required.
@@ -531,8 +537,8 @@ A: ReAct: default choice for all agentic tool-use tasks; good balance of quality
 **Q: What is chain-of-thought (CoT) prompting and how does it relate to ReAct?**
 A: Chain-of-thought prompting adds reasoning steps to the LLM's output before the final answer — "Let me think step by step..." — without any tool calls. ReAct extends CoT by interleaving reasoning with actions (tool calls) and observations (results). CoT is a pure in-context reasoning enhancement; ReAct is CoT embedded in an agent loop with real-world grounding. CoT improves reasoning on self-contained tasks (math, logic); ReAct is CoT plus external verification (actual search results, code execution outputs). In practice, the "Thought" field in ReAct IS chain-of-thought applied per action step.
 
-**Q: How does Anthropic's extended thinking feature relate to these patterns?**
-A: Anthropic's extended thinking (`thinking` parameter in the Claude API) enables the model to produce a private, extensive reasoning trace before the visible response. This is built-in CoT at the model level rather than prompted CoT — the model uses its native reasoning capacity in a hidden scratch space, then produces a final answer. Unlike ReAct's Thought field (which is prompted and visible), extended thinking tokens are generated at a different inference cost, can be much longer (budget up to tens of thousands of tokens), and are not constrained to follow a human-readable format. Extended thinking significantly improves performance on hard math, coding, and multi-step reasoning tasks — equivalent to adding ToT-like depth without the multiple-call overhead.
+**Q: How does Anthropic's native thinking feature relate to these patterns?**
+A: Anthropic's `thinking` parameter lets the model produce an extensive reasoning trace before the visible response. This is built-in CoT at the model level rather than prompted CoT — the model uses its native reasoning capacity in a separate scratch space, then produces a final answer. There are two modes: manual extended thinking (`{"type": "enabled", "budget_tokens": N}`), which is deprecated on the Claude 4.6 generation and returns a 400 error on Claude 4.7 and later; and adaptive thinking (`{"type": "adaptive"}` plus `output_config.effort`), where the model decides whether and how much to think per request. Unlike ReAct's Thought field (which is prompted and visible to the application), thinking blocks are summarized and encrypted and are not constrained to a human-readable format. Native thinking improves performance on hard math, coding, and multi-step reasoning tasks — adding ToT-like depth without the multiple-call overhead.
 
 **Q: Why does the order of reasoning matter — Thought before Action vs. Action before Thought?**
 A: Thought before Action (standard ReAct) forces the model to explicitly reason about what to do before committing to a tool call. This activates the model's planning capacity via chain-of-thought and reduces "reflex actions" — selecting the first plausible tool. Action before Thought would produce lower-quality decisions because the model generates the action token before articulating its reasoning, losing the benefit of explicit deliberation. Empirically, models that output a Thought field select the correct tool more often and use better search queries. The mechanism: each token the model generates attends to all previous tokens — writing a complete Thought first makes that reasoning available when generating the Action's arguments.
@@ -550,7 +556,7 @@ A: ReAct's latency is N_steps × LLM_call_latency, where each step adds 1-3 seco
 A: Structured observations (JSON with explicit field names) dramatically outperform prose observations in ReAct because the model extracts facts reliably from labeled fields rather than parsing natural language. Instead of returning "Apple stock is trading at $189.50, up 1.2% today", return `{"symbol": "AAPL", "price_usd": 189.50, "change_pct": 1.2, "as_of": "2025-05-15T14:30:00Z"}`. This enables the model's Thought to reference `price_usd` explicitly: "The observation shows price_usd=189.50, which is above the user's $180 threshold." Beyond reliability, structured observations support programmatic parsing — you can extract specific fields from observations for logging, alerting, or downstream processing without re-parsing the model's Thought. For tools returning large results, add a `summary` field with a one-sentence digest so the Thought field can remain concise.
 
 **Q: How do you measure ReAct reasoning faithfulness — whether the model's Thought actually predicts its Action?**
-A: Faithfulness measures whether the stated Thought causally determines the Action, or whether the Action was chosen first and the Thought post-hoc rationalized. Measurement approach: (1) Prediction test — have an independent LLM read only the Thought field and predict what Action it implies; compare to actual Action taken; agreement rate measures faithfulness; (2) Counterfactual test — modify the Thought to imply a different action ("I should search for X instead of Y") and check if the Action changes accordingly; a faithful model changes its action; an unfaithful one ignores the Thought change; (3) Ablation — run the agent with Thought fields stripped from context; if task success rate is unchanged, the Thoughts were not influencing decisions. In practice, faithfulness varies by model: Claude and GPT-4o show ~70-80% Thought-Action faithfulness on standard tasks; smaller models show lower faithfulness, especially when the task becomes complex. Log Thought and Action separately for analysis.
+A: Faithfulness measures whether the stated Thought causally determines the Action, or whether the Action was chosen first and the Thought post-hoc rationalized. Measurement approach: (1) Prediction test — have an independent LLM read only the Thought field and predict what Action it implies; compare to actual Action taken; agreement rate measures faithfulness; (2) Counterfactual test — modify the Thought to imply a different action ("I should search for X instead of Y") and check if the Action changes accordingly; a faithful model changes its action; an unfaithful one ignores the Thought change; (3) Ablation — run the agent with Thought fields stripped from context; if task success rate is unchanged, the Thoughts were not influencing decisions. In practice, faithfulness varies by model and degrades as the task gets harder; there is no published cross-model faithfulness number to quote, so measure it on your own trajectories with the three tests above rather than assuming a headline rate. Log Thought and Action separately for analysis.
 
 ---
 
@@ -601,7 +607,7 @@ Analyst Question
 
 **Key Design Decisions**:
 
-1. Concise Thoughts enforced: system prompt limits Thoughts to 2 sentences. Without this, the model generates 5-sentence Thoughts adding 200+ extra output tokens per step — on a 10-step task that is 2,000 extra tokens at $0.015/1K = $0.03 wasted per question.
+1. Concise Thoughts enforced: system prompt limits Thoughts to 2 sentences. Without this, the model generates 5-sentence Thoughts adding 200+ extra output tokens per step — on a 10-step task that is 2,000 extra tokens at GPT-4o's $10/1M output rate = $0.02 wasted per question.
 
 **Put simply.** "Tokens written at step 3 are not paid for once — they are re-sent as input on step 4, and step 5, and every step after, so a ReAct transcript costs quadratically in the step count even though it only grows linearly."
 
@@ -634,7 +640,7 @@ Analyst Question
                  = 9,000 extra INPUT tokens, on top of the 2,000 output tokens
 ```
 
-So verbose Thoughts cost 4.5x more in re-sent input than in the output that produced them. This is also the real argument for the step countdown in decision 3 and the repetition detector in decision 4: every wasted step does not just add its own cost, it inflates the price of every step that follows it.
+So verbose Thoughts generate 4.5x more re-sent input tokens than the output tokens that produced them. (In dollars the two legs are closer, because GPT-4o output at $10/1M is 4x the $2.50/1M input rate: $0.020 of output against $0.0225 of re-read input.) This is also the real argument for the step countdown in decision 3 and the repetition detector in decision 4: every wasted step does not just add its own cost, it inflates the price of every step that follows it.
 
 2. Structured SQL results: `run_sql` returns `{"rows": [...], "row_count": N, "columns": [...], "truncated": bool, "query_time_ms": T}` — never raw psycopg2 output. The `truncated` flag tells the model to add a `LIMIT` or aggregate when the result was cut.
 

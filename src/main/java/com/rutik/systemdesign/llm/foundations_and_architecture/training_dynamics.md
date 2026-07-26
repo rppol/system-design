@@ -29,7 +29,7 @@ One-line analogy: Training a 70B model is like tuning a formula one car: tiny se
 
 Mental model: At small scale (7M parameters), training is forgiving — wrong hyperparameters produce suboptimal models. At large scale (70B), wrong hyperparameters produce diverged runs that waste millions of dollars. Every hyperparameter decision must be made with the failure mode in mind.
 
-Why it matters: Google's LaMDA, Meta's LLaMA, and Anthropic's Claude all had training runs that diverged due to issues covered in this module. Understanding these prevents repeating expensive mistakes.
+Why it matters: publicly documented large runs hit exactly these failure modes — Meta's OPT-175B logbook records repeated loss divergences, hardware failures and restarts; Google's PaLM paper reports roughly 20 loss spikes handled by rolling back and skipping data batches; BLOOM's team published similar instability notes. Understanding these prevents repeating expensive mistakes.
 
 Key insight: muP (Maximal Update Parametrization) is the most important practical advance in LLM training efficiency post-2021. It enables running all hyperparameter searches at a small proxy model and transferring results directly to the production scale — reducing the cost of hyperparameter tuning from millions of dollars to thousands.
 
@@ -41,7 +41,7 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 
 **Critical batch size:** There exists a batch size beyond which additional parallelism yields diminishing returns — increasing batch further doesn't help (and may hurt) convergence. Below the critical batch size, gradient noise from mini-batching is "useful" — it acts as implicit regularization. Above it, the gradient is essentially a noise-free estimate of the true gradient, and the model learns the same amount per gradient update regardless of further batch size increase.
 
-**BF16 vs FP16:** BF16 uses 1 sign bit + 8 exponent bits + 7 mantissa bits (same exponent range as FP32). FP16 uses 1 + 5 + 10. The exponent range determines the maximum representable value. FP16 max: ~65,504. BF16 max: ~3.39×10^38. A single attention score computation with d_k=128 can produce values of magnitude ~10, whose squared norm ~1000 — within BF16 range but can overflow FP16 without loss scaling.
+**BF16 vs FP16:** BF16 uses 1 sign bit + 8 exponent bits + 7 mantissa bits (same exponent range as FP32). FP16 uses 1 + 5 + 10. The exponent range determines the maximum representable value. FP16 max: ~65,504; BF16 max: ~3.39×10^38. FP16's narrow range bites at both ends: the *underflow* side is the more common failure (small gradients flush to zero, which is why FP16 needs dynamic loss scaling at all), and the overflow side shows up in unscaled dot-product accumulations and in growing weight/activation magnitudes late in training. BF16 has the same dynamic range as FP32, so neither happens; the price is 3 fewer mantissa bits.
 
 **muP (Maximal Update Parametrization):** Standard initialization and learning rate parametrization causes features and weights to scale with model width — hyperparameters that work for a 100M model don't work for a 7B model. muP reparametrizes so that updates are of the same magnitude at any width, enabling hyperparameter transfer across model scales.
 
@@ -57,7 +57,7 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 |----------|-------------|---------|---------|
 | **Linear warmup + cosine decay** | Warm up to peak LR over W steps, cosine decay to η_min | GPT-3, most LLMs | Standard choice, predictable |
 | **Linear warmup + linear decay** | Simpler but less smooth | Some small models | Simplicity |
-| **WSD (Warmup-Stable-Decay)** | Warmup → long stable phase → sharp decay | Mistral, LLaMA 3, MiniCPM | Continual pre-training |
+| **WSD (Warmup-Stable-Decay)** | Warmup → long stable phase → sharp decay | MiniCPM (which introduced it); widely adopted for open continual pre-training. Note LLaMA 3 used cosine decay, not WSD | Continual pre-training |
 | **Cyclical LR** | Periodic spikes in LR | Some research models | Finding flat minima |
 | **Constant LR (research)** | Fixed LR throughout | Some ablation studies | Comparing models at fixed compute |
 
@@ -135,11 +135,12 @@ muP:
   Width w_2: automatically scaled (no change to η needed)
   → transfer LR from small proxy to large model
 
-muP Scaling Rules (simplified):
-  Embedding LR:    η_embed = η / width_factor
+muP Scaling Rules with Adam (simplified):
+  Embedding LR:    η_embed  = η              (unchanged)
+  Hidden LR:       η_hidden = η / width_factor
   Output LR:       η_output = η / width_factor
-  Hidden LR:       η_hidden = η  (unchanged — the "maximal" update)
-  Initialization:  scale by 1/sqrt(width_factor) for hidden layers
+  Initialization:  hidden std proportional to 1/sqrt(fan_in);
+                   output std proportional to 1/fan_in
 ```
 
 ---
@@ -538,7 +539,7 @@ spike        = grad_norm > rolling_mean * spike_threshold_factor
 Both rules fire, and that is the design intent: a real data spike is 8x or 28-sigma out, not a
 borderline `3.1x`. The factor of `3.0` is set loose *on purpose* — a tighter threshold like `2.0`
 would page on-call for ordinary batch-to-batch variance (`0.6 + 4 x 0.15 = 1.2` is still only `2.0x`
-the mean), and an alarm that cries wolf gets muted, which is how a $200K divergence goes unnoticed.
+the mean), and an alarm that cries wolf gets muted, which is how a six-figure divergence goes unnoticed.
 
 ### BF16 vs FP16 Numerical Analysis
 
@@ -559,40 +560,36 @@ def compare_floating_point_formats() -> None:
     BF16 max value: 2^127 × (2 - 2^{-7}) ≈ 3.39×10^38  (same as FP32)
 
     Production implications:
-    - LLM attention scores: Q·K^T can reach values of 50-100 for long sequences
-      Squared: 2500-10000. Well within BF16 range, overflows FP16!
-    - Weight matrices at 70B scale: some parameters grow during training
-      FP16 clips any value > 65504 to inf → silent NaN propagation
+    - Unscaled dot products grow with d_k. A pathological pre-softmax
+      accumulation can leave FP16's 65,504 ceiling; BF16 cannot overflow
+      anywhere FP32 would not.
+    - Underflow is the more common FP16 failure: small gradients flush to
+      zero, which is exactly why FP16 needs dynamic loss scaling and BF16
+      does not.
     """
-    # Simulate an attention score overflow scenario
+    # Illustrate the range gap on an unscaled dot product
     d_k = 128
-    # After several thousand training steps, some Q, K values can grow to ~5-10
-    q_element = torch.tensor(7.0)  # representative large Q value
-    k_element = torch.tensor(7.0)  # representative large K value
-    score = q_element * k_element  # = 49.0 per dimension
-
-    # Sum over d_k dimensions (dot product)
-    total_score = score * d_k  # 49 * 128 = 6272 before scaling
+    q_element = torch.tensor(7.0)  # representative large Q component
+    k_element = torch.tensor(7.0)  # representative large K component
+    per_dim = q_element * k_element              # 49.0 per dimension
+    total_score = per_dim * d_k                  # 49 * 128 = 6272, unscaled
 
     print(f"Raw attention score (before sqrt(d_k) scaling): {total_score}")
     print(f"FP16 max: 65504")
     print(f"BF16 max: ~3.39e38")
 
-    # After scaling: 6272 / sqrt(128) ≈ 554 — within both ranges
-    # But during intermediate computation, exp(6272) is computed in softmax
-    # exp(6272) = infinity in both FP16 and FP32 → NaN via 0/0 in softmax
+    # 6272 still fits in FP16. It is the SCALED score that reaches softmax:
+    #   6272 / sqrt(128) = 554.4
+    # And softmax is always implemented max-subtracted -- exp(s - max(s)) --
+    # so exp() never sees 554. The real numeric danger is not this path; do
+    # NOT claim "exp(6272) overflows in softmax", because a correct softmax
+    # never evaluates it.
 
-    # In practice: gradient accumulation in AllReduce is the key BF16 issue
-    # 1000 ranks × gradient_element can overflow FP16 accumulation buffer
-    # BF16 accumulation: sum 1000 values of magnitude 0.1 → 100 → safe
-    # FP16 accumulation: same → 100 → also safe for this example
-    # BUT: intermediate accumulations at layer boundaries can exceed 65K
-
-    # Real production failure (from Google PaLM training notes):
-    # FP16 AllReduce on 1024 GPUs, gradient norm 50 → per-element grad ~0.05
-    # AllReduce sum: 1024 × 0.05 = 51.2 → safe
-    # BUT: variance terms computed during AllReduce: (x_i - mean)^2 can reach
-    # (50 - 0.05)^2 ≈ 2499 → 1024 × 2499 = 2.56M → overflows FP16
+    # The genuine precision issue is reduction accuracy, not overflow:
+    # BF16 carries 7 mantissa bits, so summing many small contributions
+    # (gradient AllReduce across hundreds of ranks, or a long accumulation
+    # chain) loses low-order bits. The fix is to accumulate in FP32 --
+    # see Pitfall 2 -- not to switch back to FP16.
 
 
 def mixed_precision_recipe(model: torch.nn.Module) -> dict:
@@ -607,14 +604,15 @@ def mixed_precision_recipe(model: torch.nn.Module) -> dict:
 
     Returns training configuration.
     """
-    from torch.cuda.amp import GradScaler
+    # torch.amp.GradScaler is only needed for FP16; BF16 does not use it.
+    # (torch.cuda.amp.GradScaler is the deprecated spelling.)
 
     config = {
         "model_dtype": torch.bfloat16,       # Forward/backward pass
         "optimizer_dtype": torch.float32,    # Adam states in FP32
         "grad_dtype_for_allreduce": torch.float32,  # Upcasts before AllReduce
         "loss_scaler": None,                 # Not needed for BF16
-        "autocast": True,                    # torch.cuda.amp.autocast(dtype=torch.bfloat16)
+        "autocast": True,                    # torch.amp.autocast("cuda", dtype=torch.bfloat16)
     }
 
     # Verify GPU supports BF16
@@ -750,21 +748,20 @@ def mup_hyperparameter_transfer_workflow() -> None:
     Constraint: same architecture, different width
 
     Step 2: Grid search hyperparameters on proxy model
-    Grid: lr ∈ {1e-4, 3e-4, 1e-3}, batch ∈ {256, 512, 1024}
-    Cost: 10 runs × proxy_model (100M) × 50B tokens ≈ $2K
+    Grid: lr in {1e-4, 3e-4, 1e-3}, batch in {256, 512, 1024}
 
     Step 3: Transfer best hyperparameters to target model
-    - LR: same value (muP guarantees scale-invariance)
-    - Batch: same (critical batch size is architecture-independent in muP)
+    - LR: same value (muP's zero-shot transfer claim)
+    - Batch: same
     - Warmup steps: scale proportionally to data size
-    Cost: 1 run × target_model (7B) × 1T tokens ≈ $500K
 
-    muP result: <5% final loss difference between best proxy hyperparams
-    and optimal target hyperparams.
-
-    Without muP: typical loss from wrong hyperparams at 7B = 5-15%
-    → equivalent to training for 5-15% fewer tokens
-    → waste of $25K-75K per training run at this scale
+    The economic argument is structural rather than a fixed number: the
+    proxy sweep costs orders of magnitude less than a single target-scale
+    run, so any transfer that lands near-optimal pays for itself. The
+    muTransfer paper (Yang et al., 2022) demonstrates the transfer
+    empirically on GPT-3-scale models; the dollar figures depend entirely
+    on your token budget and GPU rate, so compute them for your own run
+    rather than quoting one.
     """
     print("muP workflow:")
     print("1. Define proxy: width_factor = 1x, depth = target depth")
@@ -787,12 +784,13 @@ class DataMixConfig:
     """
     Data mixing configuration for LLM pretraining.
 
-    LLaMA 3 training data mix (approximate):
-    - General web: 82% (CommonCrawl processed)
-    - Code: 8% (GitHub, Stack Overflow)
-    - Math: 4.5% (arXiv, Khan Academy, textbooks)
-    - Books: 3% (Gutenberg, curated books)
-    - Multilingual: 2.5% (non-English web)
+    LLaMA 3 final pre-training mix, as stated in the paper:
+    - General knowledge:     ~50%
+    - Math and reasoning:    ~25%
+    - Code:                  ~17%
+    - Multilingual:           ~8%
+    Note how much heavier this is on math/reasoning and code than the
+    "mostly web" intuition suggests.
 
     Capability impact of mix ratios:
     - More code → stronger at code completion, structured output, reasoning
@@ -816,24 +814,25 @@ class DataMixConfig:
 
 
 LLAMA3_MIX = DataMixConfig(
+    # Weights are the Llama 3 paper's stated final mix.
     domain_weights={
-        "web": 0.82,
-        "code": 0.08,
-        "math": 0.045,
-        "books": 0.03,
-        "multilingual": 0.025,
+        "general_knowledge": 0.50,
+        "math_and_reasoning": 0.25,
+        "code": 0.17,
+        "multilingual": 0.08,
     },
+    # Epoch budgets below are a generic illustration of the repetition
+    # tradeoff, not Meta's published values -- they did not disclose these.
     epoch_budget={
-        "web": 1,      # Most web data: single epoch to avoid memorization
-        "code": 4,     # Code data: smaller, repeat 4x
-        "math": 8,     # Math data: very small, repeat 8x
-        "books": 2,    # Books: 2x
+        "general_knowledge": 1,   # abundant: single epoch avoids memorization
+        "math_and_reasoning": 8,  # scarce: repeated
+        "code": 4,
         "multilingual": 2,
     },
     quality_filters={
-        "web": ["perplexity_filter", "dedup_minhash", "toxicity_filter"],
+        "general_knowledge": ["perplexity_filter", "dedup_minhash", "toxicity_filter"],
         "code": ["syntax_valid", "license_permissive"],
-        "math": ["latex_parseable", "solution_verifiable"],
+        "math_and_reasoning": ["latex_parseable", "solution_verifiable"],
     }
 )
 
@@ -864,13 +863,15 @@ def compute_effective_epochs(
 
 ## 7. Real-World Examples
 
-**LLaMA 3 training (Meta, 2024):** 15T token training run for LLaMA 3 405B. Loss spike at step ~800K attributed to a data batch containing binary-encoded files from a web crawl (PDFs embedded as raw bytes). Recovery: rolled back 200 steps, skipped the problematic shard, resumed with gradient norm threshold increased from 1.0 to 1.5 temporarily. WSD schedule used: stable phase extended when additional high-quality data was added partway through training.
+**LLaMA 3 training (Meta, 2024):** 15T-token run; the 405B model used a **cosine** schedule (8,000-step linear warmup, peak LR 8e-5, decaying to 8e-7 over 1.2M steps) — not WSD. The paper's stability story is operational rather than optimization-level: 466 job interruptions over the run, overwhelmingly hardware, with only a handful requiring significant manual intervention. It does **not** describe a binary-data loss spike or a rollback; do not attribute one to it.
 
-**GPT-4 training (OpenAI, 2023, inferred):** The training run reportedly used a smaller proxy model (estimated 7-13B) to search hyperparameters before scaling. This is consistent with muP — the hyperparameter transfer would have saved weeks of 7B-scale HPO. Multiple loss spikes were reported and addressed by batch skip + checkpoint rollback.
+**PaLM training (Google, 2022):** the paper is the canonical public account of loss spikes at scale — roughly 20 spikes during the 540B run, handled by restarting from a checkpoint ~100 steps before the spike and skipping the intervening data batches. Notably, re-running the *same* batches from an earlier checkpoint did not reproduce the spike, implicating the interaction of a specific batch with a specific optimizer state rather than "bad data" alone.
 
-**DeepSeek-V3 training (2024):** Trained 671B MoE model for ~$5.5M by aggressive use of BF16 throughout (including optimizer states) with FP32 accumulation only at AllReduce boundaries. Used custom FP8 training for some layers (experimental), reducing compute cost. Reported loss spikes from MoE load imbalance (some experts receiving too many tokens) — fixed by adding auxiliary load-balancing loss.
+**OPT-175B (Meta, 2022):** the released training logbook documents divergences, dozens of restarts, hardware failures and LR adjustments in the raw — the most detailed public record of what a large run actually looks like.
 
-**MiniCPM (ModelBest, 2024):** Demonstrated muP in production: trained a suite of models from 1.2B to 4B with identical hyperparameters found on a 60M proxy. Loss curves matched within 3%. WSD schedule enabled adding new data batches mid-training (during the stable phase) without restarting, an important operational flexibility.
+**DeepSeek-V3 (2024):** 671B MoE trained on 2.788M H800 GPU-hours (~$5.6M at an assumed $2/GPU-hour, covering only the official run). Notable choices: **FP8 mixed precision** across most GEMMs, and AdamW's first and second moments stored in **BF16 rather than FP32**. Load balancing uses an **auxiliary-loss-free** strategy — per-expert bias terms adjusted from observed load — precisely to avoid the quality cost of an auxiliary loss. And the headline stability claim: "Throughout the entire training process, we did not experience any irrecoverable loss spikes or perform any rollbacks."
+
+**MiniCPM (ModelBest, 2024):** introduced the WSD schedule and used muP-style "model wind tunnel" experiments — hyperparameters searched on small proxies and transferred to the 1.2B/2.4B models. The operationally important result is the schedule: new data can be added during the stable phase without restarting, and only then is the sharp decay applied.
 
 ---
 
@@ -1126,7 +1127,7 @@ def batch_size_schedule(
 | `mup` (Microsoft Research) | muP implementation | pip install mup; MuAdamW, make_base_shapes |
 | `wandb` | Training monitoring | Real-time loss, grad_norm, LR plots |
 | DeepSpeed | Mixed precision, ZeRO, gradient clipping | BF16 + FP32 optim states |
-| `torch.cuda.amp` | Autocast for BF16/FP16 | `autocast(dtype=torch.bfloat16)` |
+| `torch.amp` | Autocast for BF16/FP16 | `torch.amp.autocast("cuda", dtype=torch.bfloat16)`; the `torch.cuda.amp` spelling is deprecated |
 | `megatron-lm` | Production LLM training | Mixed precision, gradient monitor |
 | `llm-foundry` (MosaicML) | LLM training with WSD | Built-in WSD schedule, monitoring |
 | `axolotl` | Fine-tuning with schedule options | YAML-configurable training |
@@ -1137,7 +1138,7 @@ def batch_size_schedule(
 ## 12. Interview Questions with Answers
 
 **Q: Why does transformer training require learning rate warmup but CNN training typically does not?**
-Transformers have strong inter-layer interactions at initialization that make early training unstable without warmup. The Q/K/V projection matrices are initialized randomly, causing attention patterns to be essentially uniform (all positions weighted equally) at step 0. Large gradient updates applied immediately can cause these patterns to collapse (one head attends to only one position) or diverge. Warmup allows gradient magnitudes to start small, giving attention heads time to converge to meaningful patterns before large updates are applied. CNNs have a different inductive bias: convolutional filters are relatively independent of each other at initialization (they process local patches in parallel). There is no equivalent attention-collapse failure mode. Additionally, transformers trained without warmup at the billion-parameter scale show empirically 5-15x higher early-training gradient norm variance than CNNs of comparable parameter count.
+Transformers have strong inter-layer interactions at initialization that make early training unstable without warmup. The Q/K/V projection matrices are initialized randomly, causing attention patterns to be essentially uniform (all positions weighted equally) at step 0. Large gradient updates applied immediately can cause these patterns to collapse (one head attends to only one position) or diverge. Warmup allows gradient magnitudes to start small, giving attention heads time to converge to meaningful patterns before large updates are applied. CNNs have a different inductive bias: convolutional filters are relatively independent of each other at initialization (they process local patches in parallel). There is no equivalent attention-collapse failure mode. The clearest public evidence is indirect but consistent: every published billion-parameter transformer recipe (GPT-3, PaLM, LLaMA, OPT) specifies a warmup phase, and the Post-LN/Pre-LN literature attributes the requirement specifically to gradient magnitudes at early layers.
 
 **Q: What is the critical batch size and why does batch scaling above it fail?**
 The critical batch size is the point at which increasing batch size no longer improves convergence per gradient update. Below the critical batch, stochastic gradient estimates are noisy — each mini-batch gives a different gradient direction. Averaging more samples (larger batch) gives a better gradient estimate, and each step makes more progress. Above the critical batch, the gradient estimate is essentially noise-free — it closely approximates the true full-batch gradient. Additional samples provide redundant signal; doubling the batch from 1M tokens to 2M tokens doubles the compute cost per step but provides no additional gradient information per step. The linear scaling rule (double batch → double LR) is valid below and at the critical batch but fails above it (the LR increase is not justified by noise reduction). For GPT-3-class models, the critical batch is approximately 1-3 million tokens; for 70B models, ~2-5 million tokens. LAMB addresses this by adjusting LR per layer based on gradient-to-weight ratio, enabling effective training at larger batches.
@@ -1146,7 +1147,7 @@ The critical batch size is the point at which increasing batch size no longer im
 BF16 (brain floating point 16) and FP16 both use 16 bits but allocate exponent bits differently. BF16: 1 sign + 8 exponent + 7 mantissa bits. FP16: 1 sign + 5 exponent + 10 mantissa bits. The exponent determines the maximum representable value: FP16 max ≈ 65,504; BF16 max ≈ 3.39×10^38 (identical to FP32). LLM training produces numerical values that can exceed FP16's range in several places: (1) attention logits before scaling can reach 50-100 per element, and exp(logit) overflows; (2) gradient AllReduce across 1024+ GPUs accumulates values that can exceed 65K; (3) some model weights grow during training beyond FP16 range. BF16 never overflows for any value that FP32 would handle. The cost: BF16 has 7 mantissa bits vs FP16's 10 — lower precision in the significant digits. In practice, this precision difference does not matter for training because the important quantity (gradient direction) is determined by the exponent, not the mantissa. FP16 also requires dynamic loss scaling (multiplying loss by 128-512 before backward, dividing gradients after) to prevent underflow — this adds complexity and can fail silently. BF16 requires no loss scaling.
 
 **Q: What is muP and how does it enable hyperparameter transfer across model scales?**
-muP (Maximal Update Parametrization, Yang et al., 2022) is a reparametrization of neural network training that ensures feature and weight updates are the same order of magnitude regardless of model width. In standard parametrization (SP), increasing width increases the variance of feature activations (more neurons contribute to each sum), which means LR must be adjusted when scaling. In muP, initialization scales inversely with width (`std ∝ 1/sqrt(fan_in)`) and learning rate also scales inversely with width for hidden layers. The result: the "maximal update" — the largest update that doesn't cause feature collapse — is the same across all widths. This means hyperparameters (LR, weight decay, batch size, warmup) found optimal for a 100M proxy model are directly transferable to a 7B target model with less than 5% final loss deviation. Practical impact: finding the optimal LR at 7B requires 10-20 expensive training runs ($50K+ each); with muP, finding optimal LR at 100M ($500 each) and transferring costs 1-2% of non-muP HPO.
+muP (Maximal Update Parametrization, Yang et al., 2022) is a reparametrization of neural network training that ensures feature and weight updates are the same order of magnitude regardless of model width. In standard parametrization (SP), increasing width increases the variance of feature activations (more neurons contribute to each sum), which means LR must be adjusted when scaling. In muP, initialization scales inversely with width (`std ∝ 1/sqrt(fan_in)`) and learning rate also scales inversely with width for hidden layers. The result: the "maximal update" — the largest update that doesn't cause feature collapse — is the same across all widths. This means hyperparameters (LR, weight decay, batch size, warmup) found optimal for a small proxy model transfer to a much larger target without re-tuning — the paper calls it zero-shot hyperparameter transfer and demonstrates it up to GPT-3 scale. Practical impact: a hyperparameter sweep at the proxy scale costs orders of magnitude less than a single run at target scale, which is what makes tuning affordable at all above a few billion parameters. Quantify the saving from your own token budget and GPU rate rather than a quoted figure.
 
 **Q: Describe the WSD learning rate schedule and explain its advantage for continual pre-training.**
 Warmup-Stable-Decay (WSD) consists of three phases: (1) Linear warmup from 0 to peak LR over W steps; (2) Stable phase at peak LR for an indefinite number of steps; (3) Sharp cosine decay from peak to min LR over D steps (typically 10-20% of total steps). The key advantage over cosine-with-warmup: the stable phase can be extended by simply continuing training on new data — the model is at a predictable, stable optimization state throughout the stable phase. With cosine schedule, the learning rate is continuously decaying and the model is committed to finishing at a specific step count. If you want to add more data partway through training, you must either restart or continue at a very low LR (poor for learning new information). WSD allows adding a new data domain (e.g., adding 100B tokens of math data) during the stable phase, then performing a final decay that consolidates all learned representations. MiniCPM demonstrated that models trained with WSD can be continuously updated with new capabilities without full retraining.
@@ -1158,10 +1159,10 @@ Diagnosis — 5-step process: (1) Check if loss_spike is NaN/Inf (numerical over
 Goyal et al. (2017) showed that if you double the batch size, you should double the learning rate to maintain the same convergence behavior. Intuition: a larger batch gives a lower-variance gradient estimate; a higher LR compensates by taking larger steps in the more accurate gradient direction. Formally, the linear scaling rule maintains the "gradient noise scale" — the ratio of gradient variance to gradient magnitude. Breakdowns: (1) Near and above the critical batch size — gradient variance is already near zero; further LR increase causes instability. (2) Early training with warmup — apply linear scaling only after warmup completes; during warmup, LR is intentionally small. (3) Very large scale (batch >64K examples) — use LAMB/LARS instead, which compute layer-wise adaptive LRs: `lr_layer = lr_base × ||weights|| / ||gradients||`. LAMB prevents any single layer from updating too aggressively relative to its weight magnitude.
 
 **Q: How does data mixing ratio affect model capabilities? Walk through a concrete example.**
-Each domain in the training data teaches different capabilities. Example: changing code fraction from 4% to 15% in a 7B model training run produces measurable capability shifts: HumanEval pass@1 increases from 12% to 28%; MMLU science questions improve by 2-3 points (structured reasoning transfers); GSM8K (math word problems) improves by 4-5 points (code teaches step-by-step reasoning); BUT general knowledge questions (TriviaQA) drop by 1-2 points (proportionally less world-knowledge text). The data mixing is effectively a "capability allocation" decision. Practical constraints: math data is scarce (~10-50B tokens of quality math vs petabytes of web text), so it must be repeated 8-16x to get meaningful capability. Repetition beyond 8x starts memorization (model recites specific problems rather than generalizing). The Llama 3 team used web:82%, code:8%, math:4.5% — reflecting a general-purpose model design prioritizing knowledge breadth over specialized capability depth.
+Each domain in the training data teaches different capabilities, so the mix is effectively a "capability allocation" decision. Raising the code fraction reliably raises HumanEval pass@1 and tends to transfer to structured-reasoning benchmarks (GSM8K, MMLU STEM), while displacing world-knowledge text and costing a little on trivia-style recall — that direction of effect is robust, but the exact deltas are model- and corpus-specific, so do not quote a number you have not measured. Practical constraints: high-quality math is scarce relative to web text, so it gets repeated many times per run, and heavy repetition eventually flips from generalization to memorization of specific problems. For a real published mix, the Llama 3 paper states roughly 50% general knowledge, 25% math and reasoning, 17% code, 8% multilingual — much heavier on reasoning and code than the "mostly web" intuition.
 
 **Q: What causes BF16 accumulation errors in gradient AllReduce and how do you fix them?**
-In data-parallel training, each GPU computes gradients for its mini-batch, then all GPUs aggregate gradients via AllReduce. If gradients are in BF16 during AllReduce, the accumulation has low precision. BF16 has 7 mantissa bits — only 128 distinct values between adjacent powers of 2. When summing 1024 GPU gradients, many values round to the same BF16 representation, introducing systematic bias in the aggregate gradient. The error magnitude: for gradients of magnitude ~0.01 accumulated across 1024 GPUs, the BF16 quantization error is ~0.01/128 × 1024 ≈ 0.08 — an 8% relative error in the aggregate gradient. Fix: upcast gradients to FP32 before AllReduce (NCCL supports FP32 AllReduce), then downcast back to BF16. Framework handling: PyTorch FSDP automatically upcasts during AllReduce; DeepSpeed handles this in its ZeRO stages. Manual implementation: call `.float()` on gradients before `dist.all_reduce`, then `.bfloat16()` after.
+In data-parallel training, each GPU computes gradients for its mini-batch, then all GPUs aggregate gradients via AllReduce. If gradients are in BF16 during AllReduce, the accumulation has low precision. BF16 has 7 mantissa bits — only 128 distinct values between adjacent powers of 2. When summing 1024 GPU gradients, many values round to the same BF16 representation, introducing systematic bias in the aggregate gradient. The error magnitude: for gradients of magnitude ~0.01 accumulated across 1024 GPUs, worst-case rounding is ~0.01/128 per add, so ~0.08 absolute against a sum of 0.01 × 1024 = 10.24 — a ~0.8% relative error in the aggregate gradient, and it compounds across every layer and step. Fix: upcast gradients to FP32 before AllReduce (NCCL supports FP32 AllReduce), then downcast back to BF16. Framework handling: PyTorch FSDP automatically upcasts during AllReduce; DeepSpeed handles this in its ZeRO stages. Manual implementation: call `.float()` on gradients before `dist.all_reduce`, then `.bfloat16()` after.
 
 **Q: How would you design the training monitoring system for a billion-parameter training run?**
 Five monitoring tiers: (1) Real-time metrics (every step): loss, gradient norm, learning rate, throughput (tokens/second). Alert on: loss NaN/Inf, grad_norm > 3x rolling average, throughput drop > 10%. (2) Short-window metrics (every 100 steps): rolling average loss (smoothed), gradient norm percentiles (p95, p99), GPU memory utilization per device. Alert on: sustained gradient norm spike (>2x average for 50 steps), memory fragmentation. (3) Checkpoint validation (every 1000 steps): evaluate on held-out validation set (~1B tokens), compute PPL, compare to expected PPL curve from scaling law projection. Alert on: PPL > 5% above expected. (4) Data quality monitoring (every 10K steps): check data batch statistics — mean token count, fraction of long sequences, vocabulary distribution. Alert on: sudden shift in distribution (could indicate data pipeline corruption). (5) Hardware health (every step): GPU temperature, ECC errors, NVLink bandwidth. Alert on: repeated ECC errors on one GPU (precursor to GPU failure that causes NaN).
@@ -1173,7 +1174,7 @@ Cosine decay continuously decreases the learning rate from peak to minimum over 
 The critical batch size (S_crit) is the batch size at which the gradient noise scale equals 1 — meaning the noise in the gradient estimate is as large as the gradient itself. Below S_crit, larger batches reduce noise and improve convergence per step. Above S_crit, batches are redundant. For GPT-3-class models (Kaplan et al., 2020), S_crit ≈ 1-2M tokens early in training and grows to ~4-8M tokens as training progresses (as the loss landscape becomes smoother). Relationship to compute budget: if you have a fixed compute budget C and a batch size B, total gradient steps = C / (B × cost_per_step). If B >> S_crit, you're wasting compute on redundant gradient computations. Optimal batch size: start at S_crit and increase it as the model trains and the loss landscape smoothens. In practice: most production LLM training uses 4-8M tokens per batch (gradient step), which is near S_crit for 7-70B models. Going above 16M tokens per batch shows diminishing returns for standard Adam.
 
 **Q: How does muP's width scaling interact with depth? Can you transfer hyperparameters across both?**
-muP addresses width scaling (hidden dimension, number of heads) but the original paper does not provide a complete depth scaling recipe. Width scaling with muP: LR, initialization scale as derived. Depth scaling (more layers): there is no validated scaling rule from the original muP paper. Empirically: doubling depth from 24 to 48 layers at fixed width requires reducing LR by ~30-50% (not a clean formula). In practice: muP is used for width transfer (e.g., 256 hidden → 4096 hidden at same depth), while depth is matched between proxy and target. The proxy model has the same number of layers as the target but smaller hidden dim. Example (LLaMA 3 setup): proxy = 32 layers, 512 hidden; target = 32 layers, 4096 hidden. This approach captures width scaling (which muP handles) while avoiding the unvalidated depth scaling. If both width and depth differ, some empirical correction is needed — teams typically run 2-3 validation runs at intermediate sizes to verify the transfer quality.
+muP addresses width scaling (hidden dimension, number of heads) but the original paper does not provide a complete depth scaling recipe. Width scaling with muP: LR, initialization scale as derived. Depth scaling (more layers): there is no validated scaling rule from the original muP paper. Empirically: doubling depth from 24 to 48 layers at fixed width requires reducing LR by ~30-50% (not a clean formula). In practice: muP is used for width transfer (e.g., 256 hidden → 4096 hidden at same depth), while depth is matched between proxy and target. The proxy model has the same number of layers as the target but smaller hidden dim — for example proxy = 32 layers, 512 hidden; target = 32 layers, 4096 hidden. (This is the generic recipe, not a description of any particular vendor's setup; Meta's Llama 3 paper does not mention muP.) This approach captures width scaling (which muP handles) while avoiding the unvalidated depth scaling. If both width and depth differ, some empirical correction is needed — teams typically run 2-3 validation runs at intermediate sizes to verify the transfer quality.
 
 **Q: What data quality issues cause training loss spikes and how do you prevent them?**
 Three categories of data quality issues that cause training spikes: (1) Binary-encoded content — PDFs, images, or executables stored as bytes in web crawl data. The model encounters tokens with completely different statistical properties from natural language. Fix: binary content detector in preprocessing pipeline (check for high entropy, non-printable character fraction > 10%). (2) Encoding corruption — documents where character encoding conversion failed (UTF-8 → Latin-1 → back to UTF-8), producing sequences of replacement characters. Fix: unicode normalization pass + replacement character filter. (3) Repeated sequences — documents where copy-paste artifacts create 50+ repetitions of the same sentence. The model sees a gradient signal pushing toward high probability on repetition. Fix: local deduplication within documents (remove runs of identical n-grams). Detection pipeline: run all documents through a PPL-based filter using a small pretrained language model — documents with PPL < 10 or PPL > 1000 (relative to corpus average ~50-100) are outliers worth inspecting. The binary-content bug specifically causes PPL to spike to 10^6+ for that batch.
@@ -1198,13 +1199,13 @@ A: Global-norm clipping computes the L2 norm over ALL parameters' gradients conc
 
 ### Problem: Training a 7B Model — Surviving Loss Spikes
 
-**Context:** A team trains a LLaMA-3-7B architecture from scratch on a 1T token dataset (80% web, 8% code, 7% books, 5% math). Infrastructure: 64 × A100 80GB GPUs, 3D parallelism (tensor=8, pipeline=2, data=4).
+**Context:** A team trains a LLaMA-3-8B-class architecture from scratch on a 1T token dataset (illustrative mix: 80% web, 8% code, 7% books, 5% math -- not Meta's, which was 50/25/17/8 general/math/code/multilingual). Infrastructure: 64 × A100 80GB GPUs, 3D parallelism (tensor=8, pipeline=2, data=4).
 
 **Training configuration:**
 
 ```python
 config = {
-    "model": "LLaMA-3-7B",          # 32 layers, 4096 hidden, 32 Q heads, 8 KV heads
+    "model": "LLaMA-3-8B-class",     # 32 layers, 4096 hidden, 32 Q heads, 8 KV heads
     "training_tokens": 1e12,
     "batch_size_tokens": 4_194_304,  # 4M tokens per step
     "total_steps": int(1e12 / 4_194_304),  # ~238K steps
@@ -1249,7 +1250,8 @@ for i, doc in enumerate(batch['documents']):
 
 **Recovery:**
 
-1. Roll back to checkpoint at step 51200 (200 steps lost, 200 seconds of training)
+1. Roll back to checkpoint at step 51200 (200 steps lost. At 6 x 7e9 x 4.19e6 = 1.76e17 FLOPs
+   per step and 64 A100s delivering ~9.0e15 FLOPS at 45% MFU, that is ~20s/step, so ~1.1 hours)
 2. Block document from training: `filtered_shards.add("shard_0847.jsonl:doc_91234")`
 3. Resume with LR at 50% for 200 steps then return to schedule
 4. Add binary content filter: `is_binary = sum(ord(c) > 127 for c in doc) / len(doc) > 0.3`
@@ -1284,7 +1286,8 @@ def data_quality_filter(doc: str, ppl_model) -> bool:
 - No further spikes in remaining 185K steps
 - Final loss: 2.31 (vs expected 2.28 from scaling law projection)
 - Loss gap attributable to: ~200 wasted steps + LR disruption = 0.03 loss units
-- Total cost of incident: $800 GPU compute (200 steps × 64 A100s × $3/h)
-- Cost if not caught early (run diverged to step 200K): $200K
+- Total cost of incident: ~$210 GPU compute (200 steps × 20s = 1.1h × 64 A100s × $3/h)
+- Cost if not caught early (run diverged and had to be redone from step 200K):
+  200,000 steps × 20s = 1,111 h × 64 × $3/h ≈ $213K
 
-**Key lesson:** Gradient norm monitoring with automated alerting is the highest-ROI investment in billion-parameter training infrastructure. It caught a $200K problem at $800 cost.
+**Key lesson:** Gradient norm monitoring with automated alerting is the highest-ROI investment in billion-parameter training infrastructure. It caught a ~$210K problem at ~$210 cost — a thousand-to-one return.

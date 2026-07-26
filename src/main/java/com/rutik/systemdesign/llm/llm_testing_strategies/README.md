@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-Testing LLM applications differs fundamentally from testing conventional software. Traditional software has deterministic behavior: given the same input, the output is always the same, and correctness is binary (pass/fail). LLM applications are non-deterministic (temperature > 0 produces different outputs), have no single ground truth (multiple valid answers exist), and are extremely sensitive to prompt changes (rewording a prompt can change behavior significantly).
+Testing LLM applications differs fundamentally from testing conventional software. Traditional software has deterministic behavior: given the same input, the output is always the same, and correctness is binary (pass/fail). LLM applications are non-deterministic (sampling produces different outputs run to run — and note that turning the knob down does not fix it: Anthropic's API reference states that "even with `temperature` of `0.0`, the results will not be fully deterministic", and Claude Opus 4.7 and later reject the parameter entirely), have no single ground truth (multiple valid answers exist), and are extremely sensitive to prompt changes (rewording a prompt can change behavior significantly).
 
 LLM testing requires a different philosophy: instead of verifying exact outputs, we verify that outputs satisfy a set of quality criteria along multiple dimensions (relevance, faithfulness, safety, format). This means probabilistic evaluation over distributions of outputs, rubric-based scoring instead of string matching, and continuous monitoring rather than one-time verification.
 
@@ -295,6 +295,11 @@ def qa_chain():
 @pytest.fixture(scope="session")
 def judge_model():
     from langchain_anthropic import ChatAnthropic
+    # Pin a specific snapshot ID, never a floating alias, or the grader moves under you.
+    # NOTE: temperature=0 is valid on Claude Opus 4.6 and earlier. Anthropic removed the
+    # sampling parameters from Claude Opus 4.7 onward (including Opus 4.8, Opus 5, Sonnet 5
+    # and Fable 5): setting temperature, top_p or top_k to a non-default value returns HTTP
+    # 400. When you upgrade the judge, DROP this argument rather than retuning it.
     return ChatAnthropic(model="claude-opus-4-6", temperature=0)
 
 def evaluate_response(judge, question, context, response, reference, criteria) -> dict:
@@ -659,10 +664,10 @@ jobs:
   regression-eval:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -685,7 +690,7 @@ jobs:
         run: python scripts/check_eval_regression.py --threshold 0.05
 
       - name: Post eval results to PR
-        uses: actions/github-script@v6
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
@@ -708,13 +713,13 @@ jobs:
 
 ## 7. Real-World Examples
 
-**Anthropic's Eval Harness**: Anthropic evaluates Claude models against a suite of benchmarks (MMLU, HumanEval, MT-Bench — see [Evaluation & Benchmarks](../evaluation_and_benchmarks/README.md)) and internal evals (safety, helpfulness, harmlessness) before each release. Internal evals use LLM-as-judge with Claude-3-Opus as the judge — an instance of using a stronger model to evaluate a weaker one. Safety evals focus on refusal rates for known harmful prompts and false positive rates (refusing legitimate requests).
+**Vendor release evaluation**: Frontier labs publish a system card or model card with each release covering capability benchmarks (MMLU, HumanEval, MT-Bench — see [Evaluation & Benchmarks](../evaluation_and_benchmarks/README.md)) alongside safety evaluations. The pattern worth copying is the two-sided safety metric: refusal rate on known-harmful prompts *and* over-refusal rate on legitimate requests, since optimizing either alone is trivial and useless. The details of any lab's internal judge configuration are not published, so do not assume a particular judge model is used.
 
 **OpenAI Evals Framework** (`openai/evals`): Open-source framework for running standardized evaluations. Supports: "model-graded" evals (LLM as judge), "code-graded" evals (programmatic scoring), and "human-graded" baselines. Each eval is a JSONL dataset + a grading function. Teams can contribute custom evals to the public registry. The framework logs all results to a local or remote database for comparison across model versions.
 
 **Honeyhive and Braintrust**: Commercial evaluation platforms that integrate with LangChain and LangSmith. Honeyhive specializes in structured evaluation pipelines with multi-dimensional rubrics and annotation queues. Braintrust provides dataset versioning, A/B experiment tracking, and prompt playground with built-in evaluation. Both support LLM-as-judge with configurable rubrics and provide dashboards for quality trends.
 
-**Promptfoo**: Open-source CLI tool for testing prompts against multiple providers simultaneously. Define test cases in YAML, run against GPT-4o + Claude + Llama, compare outputs side-by-side. Useful for model selection: "which model produces better outputs for my specific prompt and dataset?" Supports regex, LLM-as-judge, and custom JavaScript evaluation functions.
+**Promptfoo**: Open-source CLI tool for testing prompts against multiple providers simultaneously. Define test cases in YAML, run against GPT + Claude + Gemini + Llama, compare outputs side-by-side. Useful for model selection: "which model produces better outputs for my specific prompt and dataset?" Supports regex, LLM-as-judge, and custom JavaScript evaluation functions.
 
 ---
 
@@ -723,7 +728,7 @@ jobs:
 | Evaluation Method | Cost | Speed | Accuracy vs Human | Scalability |
 |------------------|------|-------|------------------|-------------|
 | Human evaluation | High ($5-50/example) | Slow (days) | Ground truth | Limited |
-| LLM-as-judge | Medium ($0.01-0.10/example) | Fast (seconds) | 80-90% agreement | Unlimited |
+| LLM-as-judge | Medium ($0.01-0.10/example) | Fast (seconds) | ~80% agreement (MT-Bench) | Unlimited |
 | Automated metrics (BLEU, ROUGE) | Very low | Instant | Low (for open-ended) | Unlimited |
 | Heuristic checks (format, length) | ~$0 | Instant | Medium (for constrained) | Unlimited |
 | pytest with mocked LLM | ~$0 | Instant | Low (verifies structure) | Unlimited |
@@ -735,7 +740,7 @@ jobs:
 | Synthetic data | Cheap, scalable | Distribution mismatch; may test wrong things |
 | A/B testing | Ground truth from users | Slow; requires production traffic |
 
-**LLM-as-judge limitations**: Judge models have their own biases (verbosity bias: prefers longer answers; sycophancy bias: prefers answers similar to its training). Validate your judge by checking agreement with human labels on a sample (target: >80% correlation). Use a different model family as judge than the model being evaluated (use Claude to judge GPT outputs and vice versa) to reduce systematic bias.
+**LLM-as-judge limitations**: Zheng et al. (MT-Bench / Chatbot Arena, arXiv 2306.05685) found a strong GPT-4 judge reaches "over 80% agreement" with human preferences — the same level humans agree with each other — while documenting three failure modes by name: position bias (the first-listed answer wins more often), verbosity bias (longer answers win), and self-enhancement bias (a judge favours outputs from its own model family). Validate your judge by checking agreement with human labels on a sample, and use a different model family as judge than the model being evaluated (use Claude to judge GPT outputs and vice versa) to blunt the self-enhancement effect.
 
 ---
 
@@ -759,14 +764,17 @@ jobs:
 
 ## 10. Common Pitfalls
 
+The "a team did X" narratives below are illustrative composites of failure patterns, not reports of
+specific verifiable public incidents; the percentages in them are worked examples, not measurements.
+
 **Pitfall 1: Data contamination and eval set leakage**
 Production incident: team used a publicly available benchmark (TruthfulQA) as their evaluation dataset. The model they were evaluating had been fine-tuned on data that included TruthfulQA questions and answers. Evaluation scores were 20% higher than real-world quality because the model had memorized the eval set. Fix: use private, proprietary evaluation datasets that cannot be in any training data. Rotate the dataset periodically.
 
 **Pitfall 2: Overfitting to the golden set**
 A team iteratively improved their chain by running the golden dataset, finding failures, and adding examples from failures to the golden dataset. After 10 iterations, the golden dataset consisted entirely of cases the chain had been explicitly tuned to handle. The chain scored 95% on the golden set but performed poorly on new inputs. Fix: hold out 20% of the golden dataset as a final test set that is NEVER used for development decisions.
 
-**Pitfall 3: LLM-as-judge sycophancy**
-Teams using GPT-4o as both the production model and the judge discovered that the judge consistently gave higher scores to GPT-4o outputs than to Claude or Gemini outputs, even when human raters preferred the alternatives. This is model-family sycophancy. Fix: use a judge from a different model family than the model being evaluated. If production uses GPT-4o, use Claude as judge. Run a calibration check: correlate judge scores with human labels on 50 examples; if Spearman correlation < 0.7, the judge is not reliable for your use case.
+**Pitfall 3: LLM-as-judge self-enhancement bias**
+Using one model as both the production model and the judge means the judge scores its own family's outputs higher than human raters do. This is not folklore: Zheng et al. named and measured it as *self-enhancement bias* in the MT-Bench paper (arXiv 2306.05685). Fix: use a judge from a different model family than the model being evaluated — if production runs on GPT, judge with Claude, and vice versa. Run a calibration check: correlate judge scores with human labels on 50 examples; if Spearman correlation < 0.7, the judge is not reliable for your use case.
 
 **Pitfall 4: Flaky tests masking real regressions**
 A team had 40 flaky test cases in their golden dataset (high score variance due to ambiguous prompts). When a model upgrade degraded performance on 20 stable examples by 15%, the overall score change was masked by flaky test variance. Fix: separate golden examples into "stable" and "volatile" sets. Run regression checks only on stable examples. Treat volatile examples as a signal to fix the prompts, not as regression data.
@@ -775,7 +783,7 @@ A team had 40 flaky test cases in their golden dataset (high score variance due 
 A RAG system was tested on 200 examples where the relevant document was always in the index. In production, 30% of queries had no relevant document. The system hallucinated answers for these cases (inventing plausible but incorrect answers instead of saying "I don't know"). Fix: explicitly include "no-answer" cases in the golden dataset — inputs where the correct output is to acknowledge ignorance. Evaluate refusal quality separately from answer quality.
 
 **Pitfall 6: Evaluating on synthetic data generated by the same model**
-A team generated evaluation examples with GPT-4o and used GPT-4o as the judge. The judge was biased toward responses that sounded like GPT-4o outputs, and the evaluation set over-represented GPT-4o's natural output style. Any model that sounded like GPT-4o scored high, regardless of actual quality. Fix: human-curate evaluation examples or use a more diverse generation process (multiple models + human editing).
+A team generated evaluation examples with one model and used that same model as the judge. The judge was biased toward responses that sounded like its own outputs, and the evaluation set over-represented that model's natural output style. Any model that sounded like it scored high, regardless of actual quality. This is Pitfall 3's self-enhancement bias compounded — it is now baked into the dataset as well as the grader. Fix: human-curate evaluation examples or use a more diverse generation process (multiple models + human editing).
 
 ---
 
@@ -783,8 +791,8 @@ A team generated evaluation examples with GPT-4o and used GPT-4o as the judge. T
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| `RAGAS` | RAG evaluation | Faithfulness, answer relevance, context precision; built for RAG pipelines |
-| `DeepEval` | General evaluation | 14+ metrics, pytest integration, LLM-as-judge, toxicity, hallucination |
+| `RAGAS` | RAG evaluation | Faithfulness, response relevancy, context precision/recall; built for RAG pipelines |
+| `DeepEval` | General evaluation | 50+ metrics, pytest integration, LLM-as-judge, toxicity, hallucination |
 | `Braintrust` | Eval platform | Dataset versioning, A/B experiments, LLM-as-judge, prompt playground |
 | `Promptfoo` | CLI eval tool | Multi-model comparison, YAML test cases, regex + LLM graders |
 | `LangSmith` | Tracing + eval | Datasets, evaluators, regression tracking, production sampling |
@@ -794,14 +802,21 @@ A team generated evaluation examples with GPT-4o and used GPT-4o as the judge. T
 | `vcrpy` | HTTP recording | Record/replay API calls for deterministic integration tests |
 | `pytest-asyncio` | Async testing | Required for async LangChain/LangGraph chains in pytest |
 
-**Concrete evaluation cost reference (GPT-4o as judge):**
-- 200-example regression eval: ~$0.50-2.00 (depending on context length)
+**Concrete evaluation cost reference — judge calls only, with a cheap current judge**
+(worked at Claude Haiku 4.5 list pricing, $1/$5 per MTok, and ~2,000 input + 200 output tokens per
+judgement: `2000 x $1/1M + 200 x $5/1M = $0.003`):
+- LLM-as-judge for one example: ~$0.002-0.010 (context length is the driver)
+- 200-example regression eval: ~$0.50-2.00
 - 1000-example full eval: ~$3-10
-- LLM-as-judge for one example: ~$0.002-0.010
 
-**RAGAS metrics explained:**
+These cover the *grading* only. Running the system under test — retrieval, generation, any agent
+loop — is billed on top and usually dominates, which is why the case study in Section 14 budgets
+~$2/PR all-in against $0.80 of judge calls. Re-derive both after any repricing.
+
+**RAGAS metrics explained** (Ragas renamed `answer_relevancy` to Response Relevancy /
+`ResponseRelevancy`; the old name survives as an alias):
 - `faithfulness`: does the answer use only information from the retrieved context?
-- `answer_relevancy`: does the answer address the original question?
+- `response_relevancy`: does the answer address the original question?
 - `context_precision`: are the retrieved chunks relevant to the question?
 - `context_recall`: does the retrieved context contain all information needed to answer?
 
@@ -813,13 +828,13 @@ A team generated evaluation examples with GPT-4o and used GPT-4o as the judge. T
 Three fundamental differences: (1) non-determinism — the same input produces different outputs on repeated calls; conventional software is deterministic; (2) no exact ground truth — for open-ended tasks, many valid outputs exist; conventional software has a single correct output; (3) prompt sensitivity — rewording a prompt by a few words can dramatically change model behavior, while changing a function signature has no equivalent effect in conventional software. These differences require probabilistic evaluation (run N times, check distribution), rubric-based scoring (grade on quality dimensions, not exact string match), and regression testing against a golden dataset rather than unit test assertions.
 
 **Q: What is LLM-as-judge evaluation and what are its limitations?**
-LLM-as-judge uses a capable LLM (typically GPT-4o or Claude-3-Opus) to score outputs from the system under test against a rubric. The judge receives the input, the system output, optionally a reference answer, and a scoring rubric; it returns dimension-wise scores (0-5) with reasoning. Advantages: fast, cheap, scalable, handles open-ended tasks. Limitations: (1) verbosity bias — judges favor longer, more detailed responses even when concise is better; (2) sycophancy bias — judges favor outputs similar to their own training style; (3) error in the judge — the judge itself can be wrong; validate against human labels (target: >80% correlation). Mitigation: use a different model family as judge than the system under test; calibrate the judge's accuracy on labeled examples before trusting its scores.
+LLM-as-judge uses a capable LLM to score outputs from the system under test against a rubric. The judge receives the input, the system output, optionally a reference answer, and a scoring rubric; it returns dimension-wise scores (0-5) with reasoning. Advantages: fast, cheap, scalable, handles open-ended tasks. Limitations, all three named in the MT-Bench paper (Zheng et al., arXiv 2306.05685): (1) verbosity bias — judges favor longer, more detailed responses even when concise is better; (2) self-enhancement bias — judges favor outputs from their own model family; (3) position bias in pairwise mode — the first-listed answer wins more often. That paper also gives the calibration target: a strong judge reached over 80% agreement with human preferences, which is the same rate humans agree with each other, so above roughly 80% you are at the ceiling. Mitigation: use a different model family as judge than the system under test; calibrate on labeled examples before trusting its scores.
 
 **Q: A PR shows a 4% score drop on your 200-example eval. How do you know it is a real regression and not noise?**
 You cannot tell from a single aggregate number — both the system under test (temperature > 0) and the LLM judge introduce run-to-run variance, and on 200 examples a 4% swing is often within noise. First, compare per-example paired deltas instead of aggregates: if the drop is spread thinly across many examples it is more likely judge noise; if 8 specific examples flipped from 5 to 1, inspect those transcripts directly. Second, re-run the eval 3 times on both baseline and candidate — if the candidate's score range overlaps the baseline's range, the difference is not actionable; and exclude known-flaky examples (score stdev > 0.15) from the gate entirely, since they inflate variance without signal. Practical guidance: set the regression threshold above your measured run-to-run noise floor (measure it once by evaluating the same commit 5 times), and gate on stable examples only.
 
 **Q: Your eval scores jumped 3 points overnight with no code or prompt change. What happened?**
-The most common cause is that the judge changed underneath you — using a floating model alias (e.g., a provider alias that silently moves to a new snapshot) means the grader's rubric interpretation shifts even though your system did not. Other causes in rough likelihood order: someone edited or appended to the golden dataset without versioning it, the judge temperature was nonzero, or an upstream dependency (retriever index, knowledge base) changed. This matters because a scoring discontinuity destroys trend comparability — every score before the change is now measured on a different ruler. Fix: pin the judge to a specific dated snapshot, version the dataset file (hash it in CI), and when you deliberately upgrade the judge, re-score the historical baseline with the new judge before comparing anything across the boundary.
+The most common cause is that the judge changed underneath you — using a floating model alias (e.g., a provider alias that silently moves to a new snapshot) means the grader's rubric interpretation shifts even though your system did not. Other causes in rough likelihood order: someone edited or appended to the golden dataset without versioning it, the judge temperature was nonzero, or an upstream dependency (retriever index, knowledge base) changed. This matters because a scoring discontinuity destroys trend comparability — every score before the change is now measured on a different ruler. Fix: pin the judge to a specific snapshot ID rather than a floating alias — note that a dateless ID is not automatically a floating one, Anthropic's IDs from the Claude 4.6 generation onward are dateless but still pinned snapshots — version the dataset file (hash it in CI), and when you deliberately upgrade the judge, re-score the historical baseline with the new judge before comparing anything across the boundary.
 
 **Q: How do you build a golden evaluation dataset and what makes it high quality?**
 A golden evaluation dataset is a curated set of (input, expected criteria) pairs that represents the full distribution of production inputs. Construction steps: (1) sample 200-1000 queries from production logs (representative distribution); (2) include 50% typical, 30% edge cases, 10% adversarial, 10% boundary conditions; (3) have domain experts write reference answers for each query; (4) write explicit evaluation criteria per example (not just the answer — the rubric for judging answers); (5) hold out 20% as a final test set (never used for development decisions). Quality indicators: dataset covers all user intents; adversarial examples exercise safety properties; "no-answer" examples are included for RAG systems; the dataset is reviewed and updated quarterly as production queries evolve.
@@ -831,7 +846,7 @@ Regression testing verifies that a change (prompt edit, model upgrade, config ch
 Evaluate [RAG](../rag_fundamentals/README.md) in two separate stages: (1) retrieval evaluation — given a query, does the retriever return chunks that contain the answer? Metrics: recall@K (fraction of relevant chunks in top-K), MRR (mean reciprocal rank), context precision. Evaluated with a labeled dataset of (query, relevant_doc_ids) pairs; (2) generation evaluation — given the retrieved chunks, does the LLM produce a correct, faithful answer? Metrics: faithfulness (answer only uses info from context), relevance (answer addresses the question), completeness. Use RAGAS framework for automated RAG evaluation: it measures all four metrics automatically given (question, retrieved_context, answer, reference_answer). A common pitfall: blaming the LLM for bad answers when retrieval is the failure. Always diagnose retrieval and generation separately.
 
 **Q: How do you detect prompt flakiness and what should you do about it?**
-Flakiness measures how consistently a prompt produces quality outputs. Detection: run the same input 5 times with temperature 0.7 (or production temperature), compute the standard deviation of LLM-as-judge scores. Flag examples where stdev > 0.15 as flaky. Root causes: (1) ambiguous instructions — the model interprets the prompt differently each time; fix: add explicit format instructions, examples, or constraints; (2) temperature too high — reduce temperature for the production prompt; (3) underdetermined output — the task genuinely has multiple valid outputs; add a preference statement ("prefer concise answers over comprehensive ones"); (4) context-sensitive behavior — output quality depends on which chunks are retrieved; fix: improve retrieval consistency. High flakiness means unpredictable user experience; address before production deployment.
+Flakiness measures how consistently a prompt produces quality outputs. Detection: run the same input 5 times under the exact production sampling configuration, compute the standard deviation of LLM-as-judge scores. Flag examples where stdev > 0.15 as flaky. Root causes: (1) ambiguous instructions — the model interprets the prompt differently each time; fix: add explicit format instructions, examples, or constraints; (2) sampling set too loose — lower the temperature where the model still exposes it (Claude Opus 4.7 and later do not, so tighten the prompt instead); (3) underdetermined output — the task genuinely has multiple valid outputs; add a preference statement ("prefer concise answers over comprehensive ones"); (4) context-sensitive behavior — output quality depends on which chunks are retrieved; fix: improve retrieval consistency. High flakiness means unpredictable user experience; address before production deployment.
 
 **Q: How do you integrate LLM evaluation into CI/CD?**
 Run a tiered evaluation pipeline: (1) on every commit — unit tests with mocked LLM (format, schema, refusal checks); runs in <30 seconds at near-zero cost; (2) on PRs affecting prompts/chains/model configs — regression eval against 200-example golden dataset; runs in 5-10 minutes, costs ~$1; fails PR if primary metric drops >5%; posts score comparison as PR comment; (3) nightly — full evaluation suite (1000 examples, adversarial, flakiness detection); alerts on trends; (4) weekly — human review of 50 sampled production traces from LangSmith; catch issues automated evaluation misses. The key is gates: only PRs that touch evaluation-relevant code run the eval step; others skip it for speed.
@@ -864,7 +879,7 @@ Evaluation dimensions: (1) intent resolution rate — fraction of conversations 
 1. **Build the evaluation dataset before building the product** — define "good" before you start building; this prevents scope creep and ensures you can measure progress.
 2. **Hold out 20% of the golden dataset as a final test set** — never use it for development decisions; it is your unbiased measure of real quality.
 3. **Validate your LLM judge before trusting it** — correlate judge scores with human labels on 50 examples; if Spearman correlation < 0.7, recalibrate the judge prompt.
-4. **Use a different model family as judge** — if production uses GPT-4o, use Claude as judge; eliminates model-family sycophancy bias.
+4. **Use a different model family as judge** — if production runs on GPT, judge with Claude; blunts the self-enhancement bias measured in the MT-Bench paper.
 5. **Fail PRs on regression, not on absolute score** — the regression threshold (5% drop) is actionable; "score > 0.8" is not, because baselines shift over time.
 6. **Include adversarial and no-answer examples in every dataset** — happy-path-only datasets miss the most important failure modes.
 7. **Separate retrieval and generation evaluation in RAG** — never aggregate them; a high generation score can hide a retrieval failure.
@@ -876,7 +891,7 @@ Evaluation dimensions: (1) intent resolution rate — fraction of conversations 
 
 ## 14. Case Study: Testing Pipeline for a Customer Support Bot
 
-**Scenario**: A SaaS company builds a customer support bot that handles 3 intent categories: billing questions (40% of traffic), technical troubleshooting (35%), and general product questions (25%). The bot uses RAG over a knowledge base of 5000 articles and Anthropic's Claude claude-sonnet-4-6.
+**Scenario**: A SaaS company builds a customer support bot that handles 3 intent categories: billing questions (40% of traffic), technical troubleshooting (35%), and general product questions (25%). The bot uses RAG over a knowledge base of 5000 articles and Claude Sonnet 4.6 (`claude-sonnet-4-6`).
 
 ### Test Architecture
 
@@ -916,7 +931,8 @@ Each example includes:
 
 ### Regression Test Results (before and after model upgrade)
 
-`claude-sonnet-4-6 → claude-opus-4-6` upgrade evaluation:
+`claude-sonnet-4-6 → claude-opus-4-6` upgrade evaluation (scores below are an illustrative
+worked example, not measured results):
 
 | Metric              | Baseline (Sonnet) | New (Opus) | Delta  |
 |---------------------|-------------------|-----------|--------|
@@ -940,8 +956,9 @@ Action: Tone prompt tuning before deployment + monitor no-answer rate.
 - Regressions caught before production: 7 in 6 months (3 prompt changes, 2 model upgrades, 2 knowledge base updates)
 - Average time to detect regression: 8 minutes (PR evaluation step)
 - Average time to detect regression without CI eval: ~3 days (user complaints)
-- Evaluation cost per PR: ~$0.80 (200 examples × $0.004/example)
-- Monthly evaluation cost: ~$50 (60 PRs/month × $0.80 + weekly full evals)
+- Judge cost per PR: ~$0.80 (200 examples × ~$0.004/example of grading)
+- All-in cost per PR: ~$2 (judge calls plus running the RAG chain itself for all 200 examples)
+- Monthly evaluation cost: ~$140 (60 PRs/month × ~$2, plus 4 weekly full evals × ~$5)
 
 ### Production Monitoring
 
@@ -1000,9 +1017,9 @@ def create_eval_split(problems: list[dict], held_out_fraction: float = 0.15) -> 
 
 **Additional interview Q&As:**
 
-**What is the difference between online evaluation (LLM-as-judge) and offline evaluation (golden datasets), and when should you use each?** Offline evaluation on golden datasets is fast (<5 minutes for 1,000 examples), reproducible, and cheap — it is the right gate for CI/CD pipelines where you need a pass/fail decision before deployment. Online evaluation with LLM-as-judge samples 5-10% of production traffic, measures quality on real-world queries (not curated problems), and catches distribution shift — it is the right instrument for ongoing production monitoring. Use offline evaluation to prevent regressions; use online evaluation to detect drift. Never rely on one alone: offline can miss real-world quality gaps (golden set may not represent production distribution); online is too slow for pre-deployment gates.
+**What is the difference between online evaluation (LLM-as-judge) and offline evaluation (golden datasets), and when should you use each?** Offline evaluation on golden datasets is fast (~5 minutes for a 200-example regression suite, ~30 minutes for 1,000 examples with parallel workers), reproducible, and cheap — it is the right gate for CI/CD pipelines where you need a pass/fail decision before deployment. Online evaluation with LLM-as-judge samples 5-10% of production traffic, measures quality on real-world queries (not curated problems), and catches distribution shift — it is the right instrument for ongoing production monitoring. Use offline evaluation to prevent regressions; use online evaluation to detect drift. Never rely on one alone: offline can miss real-world quality gaps (golden set may not represent production distribution); online is too slow for pre-deployment gates.
 
-**How do you detect flaky LLM evaluations where the same input produces different scores on repeated runs?** Measure score variance over 5-10 repeated evaluations of the same prompt-response pair with the same judge LLM. For binary (pass/fail) judgments, flakiness rate = fraction of pairs where the judgment differs across runs. Target flakiness rate < 5% for reliable CI gates. Mitigation: use temperature=0 for judge LLM calls; include explicit scoring rubrics with examples in the judge prompt (reduces inter-run variance from 12% to 3% in practice); use ensemble judging (3 independent LLM calls, majority vote) for high-stakes evals. Track flakiness rate as a first-class metric alongside accuracy.
+**How do you detect flaky LLM evaluations where the same input produces different scores on repeated runs?** Measure score variance over 5-10 repeated evaluations of the same prompt-response pair with the same judge LLM. For binary (pass/fail) judgments, flakiness rate = fraction of pairs where the judgment differs across runs. Target flakiness rate < 5% for reliable CI gates. Mitigation: request greedy decoding on judge calls where the model still exposes it (Claude Opus 4.7 and later reject `temperature` outright — omit it and steer with the prompt instead); include explicit scoring rubrics with worked examples in the judge prompt, which is the single largest lever on inter-run variance; use ensemble judging (3 independent LLM calls, majority vote) for high-stakes evals. Track flakiness rate as a first-class metric alongside accuracy.
 
 **How do you integrate LLM evaluation into CI/CD without making every PR deployment take 30 minutes?** Use a tiered evaluation strategy: (1) fast tier (<2 minutes): run 50-100 representative golden examples on every PR; block merge if score drops >3%; (2) medium tier (<10 minutes): run full 1,000-example golden set on every merge to main; alert but don't block; (3) slow tier (<60 minutes): run full production eval including LLM-as-judge on 5% sample before every production deployment. Cache embedding computations for retrieval-dependent evals to cut tier-1 time by 40%. Use parallel evaluation workers (10 concurrent eval requests to judge LLM) to reduce wall clock time.
 
@@ -1043,6 +1060,6 @@ def refresh_golden_dataset(prod_logs: list[ConversationLog],
     return current_dataset + filtered   # append, never replace
 ```
 
-**How do you implement LLM-as-judge for automated evaluation at scale?** Use a stronger model (GPT-4o, Claude-3-Opus) to evaluate a weaker model's outputs against criteria: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison; (3) calibrate judge against human labels — judge accuracy should be > 85% correlation with human scores on 200 calibration examples; (4) run judge on a separate judge model from the one being evaluated — never self-evaluate. Cost: ~$0.002 per evaluation with GPT-4o-mini at 95% human-correlation for simple criteria.
+**How do you implement LLM-as-judge for automated evaluation at scale?** Use a model at least as capable as the one under test to evaluate its outputs against criteria: `judge_prompt = f"Criterion: {criterion}\nResponse: {response}\nScore 1-5 with reasoning"`. Key practices: (1) multi-criteria scoring (accuracy, helpfulness, safety, conciseness) with separate rubrics; (2) position bias mitigation — randomize the order of A/B responses when doing pairwise comparison, or score both orders and average; (3) calibrate against human labels on a fixed calibration set before trusting any score, using the MT-Bench result (a strong judge reaching over 80% human agreement, the same as human-human agreement) as the realistic ceiling rather than a 95%+ target; (4) run the judge on a different model family from the one being evaluated — never self-evaluate. Cost: roughly $0.003 per judgement with a cheap current model such as Claude Haiku 4.5 at $1/$5 per MTok on a ~2,000-token rubric.
 
-**What is flakiness in LLM tests and how do you detect and fix it?** A flaky test passes sometimes and fails sometimes on the same model and prompt — caused by non-zero temperature sampling. Detection: run each test case 5× and flag tests where pass rate is 2/5 to 4/5 (not deterministically passing or failing). Fix: (1) set temperature=0 for deterministic evaluation of factual tasks; (2) for creative tasks that require non-zero temperature, switch from exact-match assertions to LLM-as-judge assertions that are robust to paraphrasing; (3) use `n=3` completions and require 2/3 to pass (majority vote) before marking the test as failed — reduces false failures from lucky/unlucky samples.
+**What is flakiness in LLM tests and how do you detect and fix it?** A flaky test passes sometimes and fails sometimes on the same model and prompt — caused by stochastic sampling. Detection: run each test case 5× and flag tests where pass rate is 2/5 to 4/5 (not deterministically passing or failing). Note that no current frontier model is fully deterministic even at temperature 0, and the newest ones do not expose the parameter at all (Claude Opus 4.7 and later return HTTP 400 for any non-default `temperature`, `top_p` or `top_k`), so "just set temperature=0" is no longer a general fix. Fix: (1) where the knob still exists, request greedy decoding for factual tasks; (2) for creative tasks that require non-zero temperature, switch from exact-match assertions to LLM-as-judge assertions that are robust to paraphrasing; (3) use `n=3` completions and require 2/3 to pass (majority vote) before marking the test as failed — reduces false failures from lucky/unlucky samples.

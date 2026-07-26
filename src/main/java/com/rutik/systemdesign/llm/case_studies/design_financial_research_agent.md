@@ -26,7 +26,7 @@ The system is not a chatbot with financial knowledge bolted on. It is a citation
 - Citation accuracy >= 99%: every number in a response must be traceable to a source chunk
 - SOC 2 Type II compliance; FINRA/SEC data handling procedures
 - Per-firm data residency: documents from Firm A are never retrievable by Firm B
-- 500 concurrent enterprise users across 50 firms (100 users/firm)
+- 5,000 named enterprise users across 50 firms (100 users/firm); ~500 concurrent at peak
 - 99.9% uptime (8.7 hours downtime/year)
 
 ### Out of Scope
@@ -55,7 +55,8 @@ Chunking (512 tokens/chunk, 64-token overlap):
   Chunks per doc:         ~170
   Total chunks:           250,000 x 170 = 42.5M chunks
 
-Vector storage:
+Vector storage (text-embedding-3-large truncated to 1536 dims via `dimensions`;
+its native output is 3072 dims, which would double every figure below):
   42.5M chunks x 1536 dims x 4 bytes = 261 GB
   Per-tenant avg: 261 GB / 50 firms = 5.2 GB/firm
 ```
@@ -73,10 +74,10 @@ Multi-doc queries (avg 10 docs):
   Tokens in LLM context:  200 chunks x 512 tokens = ~102,400 tokens raw
   After reranking top-40: ~20,000 tokens input to LLM
 
-LLM cost (GPT-4o pricing: $2.50/1M input, $10/1M output):
+LLM cost (GPT-5.4 pricing, July 2026: $2.50/1M input, $15/1M output):
   Input:  50,000 x 20,000 x $0.0000025 = $2,500/day
-  Output: 50,000 x  2,000 x $0.0000100 = $1,000/day
-  Total LLM cost:                        $3,500/day
+  Output: 50,000 x  2,000 x $0.0000150 = $1,500/day
+  Total LLM cost:                        $4,000/day
 
 XBRL lookup (PostgreSQL, fast path):
   Hits ~60% of queries for standard GAAP metrics
@@ -156,7 +157,7 @@ flowchart LR
     pdfp["PDF Parser<br/>(pdfplumber)"]
     xbrlx["XBRL iXBRL Extractor<br/>(EDGAR download)"]
     chunks["Section / Table Chunks<br/>(filing_id, page,<br/>table_type, text)"]
-    embed["Embedding Service<br/>(text-embedding-3-large,<br/>1536 dims)"]
+    embed["Embedding Service<br/>(text-embedding-3-large,<br/>dimensions=1536)"]
     qdrant["Qdrant<br/>(per-tenant collection)<br/>upsert chunks + metadata"]
     pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>chunk_metadata +<br/>xbrl_facts tables", pos: "b", h: 44 }
 
@@ -268,10 +269,15 @@ class FinancialDocumentParser:
         )
 
         with pdfplumber.open(pdf_path) as pdf:
+            untagged_landscape: list[int] = []
             for page_num, page in enumerate(pdf.pages, start=1):
-                # Handle rotated pages (landscape orientation for wide tables)
-                if page.width > page.height:
-                    page = page.rotate(90)
+                # pdfplumber has no Page.rotate(); it honours the PDF's own /Rotate
+                # attribute (exposed as page.rotation) automatically. A page that is
+                # physically landscape but declares no rotation must be pre-rotated
+                # with pypdf BEFORE pdfplumber.open() — record it rather than parsing
+                # a sideways table into garbage.
+                if page.width > page.height and page.rotation == 0:
+                    untagged_landscape.append(page_num)
 
                 extracted = self._extract_tables_from_page(page, doc.filing_id, page_num)
                 doc.tables.extend(extracted)
@@ -287,6 +293,8 @@ class FinancialDocumentParser:
                         char_offset=0,  # computed in post-processing
                     ))
 
+        if untagged_landscape:
+            doc.xbrl_facts["_untagged_landscape_pages"] = untagged_landscape
         return doc
 
     def _extract_tables_from_page(
@@ -381,7 +389,7 @@ class FinancialDocumentParser:
 
 ### 4b. XBRLFactExtractor — Authoritative GAAP Metrics
 
-SEC has required machine-readable XBRL tags alongside PDF filings since 2009. XBRL is the authoritative source for standard GAAP line items and should always be queried before falling back to LLM extraction.
+SEC has required machine-readable XBRL tags alongside the filed HTML documents since 2009 (phased in by filer size through 2011; inline XBRL mandated from 2019). XBRL is the authoritative source for standard GAAP line items and should always be queried before falling back to LLM extraction.
 
 ```python
 from __future__ import annotations
@@ -691,7 +699,13 @@ def fiscal_to_calendar_quarter(ticker: str, fiscal_q: int, fiscal_year: int) -> 
     # Each fiscal quarter starts 3 months after the previous one ends
     fiscal_q1_start_month = (fy_end_month % 12) + 1
     cal_start_month = ((fiscal_q1_start_month - 1 + (fiscal_q - 1) * 3) % 12) + 1
-    cal_year = fiscal_year if cal_start_month >= fiscal_q1_start_month else fiscal_year - 1
+    # Fiscal year Y *ends* in calendar year Y. When FY != CY, every month after the
+    # fiscal year end falls in calendar year Y-1 (NVDA FY2024 Q1 starts Feb 2023).
+    cal_year = (
+        fiscal_year - 1
+        if fy_end_month != 12 and cal_start_month > fy_end_month
+        else fiscal_year
+    )
     cal_q = (cal_start_month - 1) // 3 + 1
     return f"CQ{cal_q}-{cal_year}"
 
@@ -763,7 +777,7 @@ Context:
 {context}
 """
         response = await self._llm.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.4",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.0,
@@ -868,7 +882,7 @@ class PrivilegeAwareAccessController:
 |----------|-------------|-------------|-----------|-------------|
 | GAAP metric source | XBRL from SEC EDGAR (authoritative) | LLM extraction from PDF | XBRL is machine-readable, exact, zero hallucination risk for standard concepts | XBRL coverage is ~80% of needed metrics; non-GAAP items still need LLM extraction |
 | Vector index isolation | Per-tenant Qdrant collection | Shared collection with metadata filter | Complete data isolation; no risk of filter bypass; simpler compliance story | Higher operational overhead; 50 collections vs 1 |
-| Long-context vs RAG for 10-K | RAG default; long-context on demand | Always use Gemini 1.5 Pro 1M context | RAG: $0.05/query, 8s latency; long-context: $3.75/query, 45s latency — 75× cost difference | First-pass analysis can use long-context; follow-up queries use cached RAG chunks |
+| Long-context vs RAG for 10-K | RAG default; long-context on demand | Always use Gemini 3.1 Pro 1M context | RAG: $0.05/query (20K tokens), 8s latency; long-context: $0.30/query (150K tokens at $2/1M input), 45s latency — 6× cost difference | First-pass analysis can use long-context; follow-up queries use cached RAG chunks |
 | Extraction mode | [Structured JSON output](../inference_and_decoding/constrained_decoding_and_structured_outputs.md) (strict schema) | Free-form prose with embedded numbers | JSON schema forces the LLM to separate field names from values; citation verifier can match fields precisely | LLM occasionally refuses complex multi-metric extractions; requires fallback prompt |
 | XBRL-first query routing | Route to XBRL if query contains known GAAP concept | Always do vector retrieval first | XBRL lookup: 8ms, zero hallucination; vector retrieval: 800ms avg | If XBRL concept mapping is wrong, wrong data is returned silently; need concept normalization layer |
 | Chunk size for financial docs | 512 tokens with 64-token overlap, table-aware | Fixed 256 or 1024 tokens | Tables must not be split mid-row; 512 tokens fits most financial table rows in a single chunk | Overlap increases storage by ~12%; worth it for citation precision |
@@ -877,13 +891,13 @@ class PrivilegeAwareAccessController:
 
 ## 6. Real-World Implementations
 
-**Hebbia** (founded 2020, raised $130M at $700M valuation, 2024) deployed a matrix-style UI where rows are documents and columns are extracted fields. Instead of a chat interface that returns one answer, users define an extraction schema and Hebbia fills in the N×M grid across a document corpus. Goldman Sachs and Centerview Partners (M&A advisory) are named customers. Hebbia's key proprietary innovation is a chunking strategy that treats financial tables as atomic units — a table is never split across chunks, and the row/column headers are always prepended to each chunk that contains numeric cells.
+**Hebbia** (founded 2020; $130M Series B led by a16z at a $700M valuation, July 2024) deployed a matrix-style UI where rows are documents and columns are extracted fields. Instead of a chat interface that returns one answer, users define an extraction schema and Hebbia fills in the N×M grid across a document corpus. Centerview Partners (M&A advisory) is a publicly named customer. Hebbia's stated differentiator is a chunking strategy that treats financial tables as atomic units — a table is never split across chunks, and the row/column headers are always prepended to each chunk that contains numeric cells.
 
-**Rogo** (founded 2023, $30M Series B) targets investment banking workflows specifically. Every response cites the exact filing, page, and paragraph. Rogo's evaluation suite uses citation recall as the primary metric: what percentage of numbers in the response can be traced to a specific page of a specific filing? They report 99.3% citation recall in production across Goldman Sachs and Lazard deployments.
+**Rogo** ($160M Series D at a $2B valuation, April 2026; >$300M raised in total) targets investment banking workflows specifically. Every response cites the exact filing, page, and paragraph. Rogo's evaluation suite uses citation recall as the primary metric: what percentage of numbers in the response can be traced to a specific page of a specific filing? Rogo does not publish a production citation-recall figure; treat any specific number you see quoted as vendor marketing until it appears in an audited disclosure.
 
-**AlphaSense** (founded 2011, $4.9B valuation 2024) took a different path: 20+ years of structured financial search built a proprietary index of filings, broker reports, and earnings calls. AlphaSense Mercury adds an LLM query layer on top of this structured index rather than building RAG from scratch. Their moat is data breadth (broker research, private company data) and enterprise relationships, not LLM architecture.
+**AlphaSense** (founded 2011; $350M round at a $7.5B valuation, June 2026, on >$600M ARR) took a different path: 15+ years of structured financial search built a proprietary index of filings, broker reports, and earnings calls. Its Generative Search / Assistant layer adds an LLM query layer on top of this structured index rather than building RAG from scratch. Their moat is data breadth (broker research, private company data) and enterprise relationships, not LLM architecture.
 
-**FactSet** (public, $2B+ ARR) announced FactSet Mercury in 2024 as a natural language query layer over their existing structured financial data platform. Like AlphaSense, they are wrapping LLM capabilities around a structured data foundation rather than treating unstructured PDF retrieval as the primary path. This validates the XBRL-first architecture: incumbent financial data vendors already have structured data; the LLM layer is an interface, not the source of truth.
+**FactSet** (public, ~$2.2B annual revenue) launched FactSet Mercury, an LLM-based knowledge agent aimed at junior-banker workflows, on top of their existing structured financial data platform, and has since folded it into a broader "Intelligent Platform" assistant. Like AlphaSense, they are wrapping LLM capabilities around a structured data foundation rather than treating unstructured PDF retrieval as the primary path. This validates the XBRL-first architecture: incumbent financial data vendors already have structured data; the LLM layer is an interface, not the source of truth.
 
 ---
 
@@ -895,8 +909,8 @@ class PrivilegeAwareAccessController:
 |------|------------------------------|------|------------|--------------|---------------------------|
 | pdfplumber | High (lattice + stream detection) | Free (OSS) | ~5 pages/s | No | Good; struggles with rotated pages |
 | PyMuPDF (fitz) | Medium (text block extraction) | Free (OSS) | ~50 pages/s | No | Fair; fast but loses column alignment |
-| Adobe PDF Extract API | Very High (ML-based layout) | $0.015/page | Cloud API | No | Excellent; best for complex layouts |
-| Amazon Textract | High (ML-based) | $0.015/page | Cloud API | No | Excellent; handles scanned/rotated |
+| Adobe PDF Extract API | Very High (ML-based layout) | Usage-based, per document transaction | Cloud API | No | Excellent; best for complex layouts |
+| Amazon Textract | High (ML-based) | $0.015/page (Tables, first 1M pages/mo) | Cloud API | No | Excellent; handles scanned/rotated |
 | SEC EDGAR XBRL API | N/A (structured data) | Free | 10 req/s public | Native | Perfect for GAAP line items |
 
 ### Vector Database Comparison
@@ -980,19 +994,19 @@ financial_query (root span)
 ## 9. Common Pitfalls & War Stories
 
 **1. Rotated PDF table extraction failure**
-A bulge-bracket bank's associate ran a gross margin comparison across 12 industrials companies. Three of the 12 had landscape-oriented tables (rotated 90 degrees for wide multi-year comparisons). PyPDF2 extracted the rotated tables as a single-column stream of numbers where the "first column" was actually the page numbers running down the left margin. The LLM assigned page numbers (12, 13, 14...) as revenue figures. The output showed $12M revenue for a $40B company. The associate caught it during peer review, but the incident triggered an audit of all landscape-table filings in the corpus — 340 documents required re-ingestion. Fix: detect `page.width > page.height` before extraction and apply 90-degree rotation. Added as a regression test in the eval pipeline.
+A bulge-bracket bank's associate ran a gross margin comparison across 12 industrials companies. Three of the 12 had landscape-oriented tables (rotated 90 degrees for wide multi-year comparisons). PyPDF2 extracted the rotated tables as a single-column stream of numbers where the "first column" was actually the page numbers running down the left margin. The LLM assigned page numbers (12, 13, 14...) as revenue figures. The output showed $12M revenue for a $40B company. The associate caught it during peer review, but the incident triggered an audit of all landscape-table filings in the corpus — 340 documents required re-ingestion. Fix: flag pages where `page.width > page.height` and `page.rotation == 0`, and pre-rotate those pages with pypdf before handing the file to pdfplumber (pdfplumber exposes no rotate method — it only honours the PDF's own `/Rotate` attribute). Added as a regression test in the eval pipeline. This war story is an illustrative composite, not a reported public incident.
 
-**2. XBRL concept mismatch — $50B error in comparison table**
+**2. XBRL concept mismatch — $50B error in comparison table** (illustrative composite)
 Apple reports revenue as `us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax`. Google reports `us-gaap:Revenues`. Both normalized to "revenue" in the concept map, but the periods and the segment definitions differ subtly. A side-by-side comparison of "revenue growth" for Apple vs. Alphabet in Q4-2023 showed Alphabet's revenue as ~$86B and Apple's as ~$119B — plausible. But the comparison for Q4-2022 inverted them due to a period boundary error in the concept mapping that treated Apple's FY (ends September) as if it ended December. The error was $50B in the comparison table and went undetected for 3 days because both numbers were within XBRL-verified bounds individually. Fix: normalize to calendar quarter before comparing; add cross-ticker period alignment as a mandatory step in `MultiDocumentOrchestrator`.
 
-**3. Fiscal year calendar mismatch undetected for 2 weeks**
-NVIDIA's fiscal year 2024 ended January 28, 2024. Most peers' fiscal year 2023 ended December 31, 2023. A "FY2023 peer comparison" included NVIDIA's FY2024 data (ending Jan 2024) alongside peers' FY2023 data (ending Dec 2023). This is an 11-month offset. NVIDIA's GPU revenue had surged dramatically in that period. The comparison made NVIDIA appear to have grown 200% YoY while peers grew 5-8%. Analysts at the firm published a draft memo with this conclusion before a partner caught the calendar mismatch. Impact: significant reputational risk for the firm; mandatory calendar normalization added to all comparison queries.
+**3. Fiscal year label mismatch undetected for 2 weeks**
+NVIDIA's fiscal year 2023 ran February 2022 to January 29, 2023; its fiscal year 2024 ran January 30, 2023 to January 28, 2024. Most peers' "fiscal year 2023" is calendar 2023. A "FY2023 peer comparison" that matched on the fiscal-year *label* paired NVIDIA's FY2023 (ending January 2023) with peers' calendar-2023 results — an 11-month offset that lands almost entirely before NVIDIA's data-center revenue surge. NVIDIA's FY2023 revenue was essentially flat year over year (~$27.0B vs ~$26.9B), so the table showed NVIDIA at roughly 0% growth against peers at 5-8%, and a draft memo concluded NVIDIA was losing share in accelerators. A partner caught the calendar mismatch before publication. Impact: significant reputational risk for the firm; mandatory calendar normalization added to all comparison queries. Illustrative composite; the NVIDIA fiscal-calendar facts are real, the firm and memo are not a reported public incident.
 
-**4. Stale document corpus causing confident wrong answers**
+**4. Stale document corpus causing confident wrong answers** (illustrative composite)
 A PE firm uploaded 2022 10-Ks during initial onboarding and began using the system in mid-2023. When analysts asked about 2023 performance, the system answered from 2022 filings without flagging recency. The answers were internally consistent (all numbers verified against 2022 source chunks) but factually wrong for 2023 queries. Analysts noticed when a company's "current revenue" from the system was lower than a number they had seen in the press. Root cause: no document staleness warning in the response. Fix: add `last_filing_date` to every response; if the most recent filing for a ticker is more than 120 days old, prepend a staleness warning to the response. Number of queries served with stale data before fix: approximately 2,400 over 6 weeks.
 
 **5. Long-context latency mistaken for system outage**
-After switching to Gemini 1.5 Pro for full 10-K analysis (150K token input), query latency increased from 8s to 45s median. No progress indicator was shown during the 45s wait. Three enterprise firms opened support tickets in the first week reporting "the system is broken / stuck loading." One firm's IT department blocked the service at the network firewall assuming a connection hang. Churn risk was flagged for 2 of the 3 firms. Fix: implement streaming extraction — emit intermediate structured results every 5s as the LLM processes sections of the document. Show a progress bar with "Analyzing section 3 of 8 (Risk Factors)..." User-perceived latency dropped from 45s to "first result in 5s."
+After switching to a 1M-context model for full 10-K analysis (150K token input), query latency increased from 8s to 45s median. No progress indicator was shown during the 45s wait. Three enterprise firms opened support tickets in the first week reporting "the system is broken / stuck loading." One firm's IT department blocked the service at the network firewall assuming a connection hang. Churn risk was flagged for 2 of the 3 firms. Fix: implement streaming extraction — emit intermediate structured results every 5s as the LLM processes sections of the document. Show a progress bar with "Analyzing section 3 of 8 (Risk Factors)..." User-perceived latency dropped from 45s to "first result in 5s."
 
 ---
 
@@ -1014,26 +1028,26 @@ Daily LLM cost formula:
     P_in   = price per token (input)
     P_out  = price per token (output)
 
-Current baseline (GPT-4o, May 2026 pricing):
+Current baseline (GPT-5.4, July 2026 pricing):
   Q      = 50,000
   T_in   = 20,000 tokens  (top-40 chunks × 512 tokens, minus overlap)
   T_out  = 2,000 tokens   (structured JSON extraction + memo)
   P_in   = $2.50 / 1M tokens = $0.0000025/token
-  P_out  = $10.00 / 1M tokens = $0.0000100/token
+  P_out  = $15.00 / 1M tokens = $0.0000150/token
 
   Input cost:   50,000 × 20,000 × $0.0000025 = $2,500/day
-  Output cost:  50,000 × 2,000  × $0.0000100 = $1,000/day
-  Total:                                        $3,500/day = $105,000/month
+  Output cost:  50,000 × 2,000  × $0.0000150 = $1,500/day
+  Total:                                        $4,000/day = $120,000/month
 
 XBRL fast-path savings:
   60% of queries hit XBRL for primary metric → skip LLM extraction entirely for that metric
   Estimated savings: 60% × 50,000 × 5,000 tokens avg saved × $0.0000025 = $375/day
-  Effective daily cost after XBRL: ~$3,125/day
+  Effective daily cost after XBRL: ~$3,625/day
 
 Revenue model sanity check:
   Revenue: 5,000 users × $500/user/month = $2,500,000/month
-  LLM + infra cost: $105,000/month LLM + $45,000/month infra = $150,000/month
-  Gross margin: ($2.5M - $150K) / $2.5M = 94%
+  LLM + infra cost: $120,000/month LLM + $45,000/month infra = $165,000/month
+  Gross margin: ($2.5M - $165K) / $2.5M = 93%
 ```
 
 ### Scaling to 10× Query Volume
@@ -1041,18 +1055,28 @@ Revenue model sanity check:
 At 500,000 queries/day (10× growth):
 
 ```
-LLM cost: ~$31,250/day without optimization
+Gross LLM cost: input $25,000/day + output $15,000/day = $40,000/day
+                minus XBRL fast path (−$3,750/day)      = $36,250/day
 
-Optimization levers:
-  1. Prompt caching:    system prompt + filing headers are identical across queries
-                        20% of input tokens are cacheable → save $6,250/day
-  2. Smaller model for simple queries: route single-ticker, single-metric queries
-                        to GPT-4o-mini ($0.15/1M input vs $2.50); ~40% of queries qualify
-                        save: 40% × 500,000 × 20,000 × ($0.0000025 - $0.00000015) = $21,000/day
-  3. Better reranking:  cut top-k from 40 chunks to 20 chunks via ColBERT reranker
-                        50% token reduction for 80% of queries → save $9,375/day
+Optimization levers — applied IN SEQUENCE. The savings are NOT additive: each
+lever shrinks the base the next one acts on, so summing standalone estimates
+is the classic way to "prove" a negative cost.
 
-Effective daily cost at 10×: ~$31,250 - $6,250 - $21,000 - $9,375 ≈ -$5,375 (net savings)
+  1. Better reranking:  cut top-k from 40 chunks to 20 via a ColBERT reranker
+                        50% fewer input tokens on 80% of queries = 40% less
+                        input volume overall
+                        $36,250 → $26,250/day
+  2. Smaller model for simple queries: route single-ticker, single-metric
+                        queries to a mini tier ($0.75/1M in, $4.50/1M out —
+                        ~30% of flagship rates); ~40% of queries qualify
+                        $26,250 → $17,850/day
+  3. Prompt caching:    system prompt + filing headers repeat across queries;
+                        ~20% of the remaining input tokens are cacheable, and a
+                        cache read is assumed to cost 50% of a fresh input token
+                        $17,850 → $16,800/day
+
+Effective daily cost at 10×: ~$16,800/day — 4.6× the 1× cost for 10× the
+volume. Sub-linear, not negative: no stack of optimizations makes inference free.
 ```
 
 For GPU pool economics and hosted inference cost modeling, see `./cross_cutting/gpu_pool_economics.md`.
@@ -1072,13 +1096,13 @@ After the LLM produces a response, the verifier scans it for all numeric tokens 
 Financial firms operate under strict data segregation requirements. A private equity firm's deal flow documents, if retrievable by another firm due to a metadata filter bug, is a catastrophic compliance failure. Metadata filters in shared collections are a software control; per-collection isolation is a system boundary. In a SOC 2 audit, per-collection isolation is demonstrably stronger than a filter — you can show that firm A's collection literally does not contain firm B's data, versus asserting that a WHERE clause always runs correctly. Financial AI buyers require this assurance as a contract term.
 
 **Q: How does fiscal year misalignment break multi-company comparisons, and how do you fix it?**
-Most US companies end their fiscal year December 31, but major exceptions include NVIDIA (January), Microsoft (June), and Apple (September). A naive query for "FY2023 gross margin" across these companies would include NVIDIA's FY2024 data (ending Jan 2024) alongside Microsoft's FY2023 data (ending June 2023) and Apple's FY2023 data (ending September 2023). These three "FY2023" figures cover periods that differ by up to 9 months. The fix is calendar normalization: convert every fiscal quarter to a calendar quarter (CQ1-2024, CQ2-2024, etc.) using the company's known fiscal year end month, then align comparisons on calendar quarter. This is stored in a `FISCAL_CALENDARS` lookup table and applied in the `MultiDocumentOrchestrator` before assembling comparison tables.
+Most US companies end their fiscal year December 31, but major exceptions include NVIDIA (January), Microsoft (June), and Apple (September). A naive query for "FY2023 gross margin" across these companies would include NVIDIA's FY2023 data (ending January 2023) alongside Microsoft's FY2023 data (ending June 2023) and Apple's FY2023 data (ending September 2023). These three "FY2023" figures end up to 8 months apart. The fix is calendar normalization: convert every fiscal quarter to a calendar quarter (CQ1-2024, CQ2-2024, etc.) using the company's known fiscal year end month, then align comparisons on calendar quarter. This is stored in a `FISCAL_CALENDARS` lookup table and applied in the `MultiDocumentOrchestrator` before assembling comparison tables.
 
 **Q: What makes PDF table extraction hard in financial documents, and why is pdfplumber better than PyPDF2 for this?**
 Financial PDFs contain tables as visual layouts (positioned text elements and drawn lines) rather than semantic table structures. PyPDF2 extracts text in reading order (left-to-right, top-to-bottom) which destroys column alignment: a 5-column income statement becomes a flat stream where column headers and values are interleaved with no structural signal. pdfplumber uses two strategies: lattice (detects table grid lines as drawn objects) and stream (infers columns from whitespace gaps between text runs). This preserves row/column relationships. The remaining challenge is rotated pages (landscape orientation for wide tables) — pdfplumber reads these as garbled single columns unless you apply a 90-degree page rotation before extraction.
 
-**Q: When is using Gemini 1.5 Pro with a 1M token context window worse than RAG for 10-K analysis?**
-Long-context is worse on two dimensions: cost ($3.75/query vs $0.05/query — 75× more expensive) and latency (45s vs 8s median). For most follow-up queries where the user is drilling into a specific section the system has already processed, RAG can reuse cached chunk embeddings and serve answers in 8s at a fraction of the cost. The optimal pattern is hybrid: use long-context for the first comprehensive analysis of a new filing to build a structured extraction cache, then serve follow-up queries from the RAG index. Long-context also has practical limits: LLMs exhibit ["lost in the middle"](../context_windows_and_long_context/README.md) degradation for very long inputs — performance on questions about content in the middle of a 150K token document is measurably worse than on content near the beginning or end.
+**Q: When is using Gemini 3.1 Pro with a 1M token context window worse than RAG for 10-K analysis?**
+Long-context is worse on two dimensions: cost ($0.30/query vs $0.05/query — 6× more expensive) and latency (45s vs 8s median). For most follow-up queries where the user is drilling into a specific section the system has already processed, RAG can reuse cached chunk embeddings and serve answers in 8s at a fraction of the cost. The optimal pattern is hybrid: use long-context for the first comprehensive analysis of a new filing to build a structured extraction cache, then serve follow-up queries from the RAG index. Long-context also has practical limits: LLMs exhibit ["lost in the middle"](../context_windows_and_long_context/README.md) degradation for very long inputs — performance on questions about content in the middle of a 150K token document is measurably worse than on content near the beginning or end.
 
 **Q: How do you measure citation accuracy in production, not just in offline eval?**
 Three metrics: citation recall (what fraction of numeric claims in the response have a verified source?), citation precision (what fraction of the cited sources actually contain the claimed information on the stated page?), and hallucination rate (what fraction of complete responses contain at least one unverified number?). In production, recall and hallucination rate are measured automatically by the `CitationVerifier` for every response. Precision requires a sample-based human review process: a weekly sample of 200 responses is reviewed by a financial analyst who clicks through each citation to verify it points to the right page and table. Both metrics feed into the eval harness described in `./cross_cutting/llm_eval_harness_in_production.md`.

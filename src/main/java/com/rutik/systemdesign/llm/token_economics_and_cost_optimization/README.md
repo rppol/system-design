@@ -4,26 +4,43 @@
 
 LLM costs are primarily token-based, making token economics critical for production viability. Every
 API call incurs a charge proportional to the number of tokens consumed (input) and generated
-(output), and these costs compound rapidly at scale. A system processing 10 million tokens per day
-at GPT-4o rates spends over $150/day on output alone.
+(output), and these costs compound rapidly at scale. A system generating 10 million output tokens
+per day at Claude Sonnet 5's $15/1M output rate spends $150/day on output alone.
 
 Understanding the full cost picture — API pricing tiers, prompt caching discounts, batch API
 savings, and the break-even math for self-hosting — enables engineering teams to achieve 5-10x cost
 reduction without meaningful quality loss.
 
-**2025 reference prices (approximate, subject to change):**
+**Reference list prices, July 2026 (per 1M tokens; always re-check the provider's pricing page
+before putting a number in a spreadsheet — these move several times a year):**
 
 | Model | Input ($/1M tokens) | Output ($/1M tokens) |
 |---|---|---|
-| GPT-4o | $2.50 | $10.00 |
-| GPT-4o with cache hit | $1.25 | $10.00 |
-| GPT-4o-mini | $0.15 | $0.60 |
-| Claude 3.5 Sonnet | $3.00 | $15.00 |
-| Claude 3.5 Sonnet cache hit | $0.30 | $15.00 |
-| Claude 3 Haiku | $0.25 | $1.25 |
-| Gemini 1.5 Pro | $1.25 | $5.00 |
-| Self-hosted LLaMA 3 8B (A10G) | ~$0.05 | ~$0.20 |
-| Self-hosted LLaMA 3 70B (A100x4) | ~$0.15 | ~$0.60 |
+| gpt-5.6-sol (OpenAI flagship) | $5.00 | $30.00 |
+| gpt-5.6-terra | $2.50 | $15.00 |
+| gpt-5.6-luna | $1.00 | $6.00 |
+| gpt-5.4-mini | $0.75 | $4.50 |
+| gpt-5.4-nano | $0.20 | $1.25 |
+| GPT-4o (legacy, still served) | $2.50 | $10.00 |
+| GPT-4o cached input (50% off) | $1.25 | $10.00 |
+| GPT-4o-mini (legacy, still served) | $0.15 | $0.60 |
+| Claude Opus 5 | $5.00 | $25.00 |
+| Claude Sonnet 5 | $3.00 | $15.00 |
+| Claude Sonnet 5 cache read (0.1x input) | $0.30 | $15.00 |
+| Claude Haiku 4.5 | $1.00 | $5.00 |
+| Gemini 3.1 Pro (prompts <= 200K) | $2.00 | $12.00 |
+| Gemini 3.5 Flash | $1.50 | $9.00 |
+| Self-hosted LLaMA 3 8B (A10G) | illustrative | illustrative |
+| Self-hosted LLaMA 3 70B (A100x4) | illustrative | illustrative |
+
+Claude Sonnet 5 carries introductory pricing of $2/$10 through 2026-08-31; the $3/$15 list rate is
+used throughout this module so the arithmetic stays valid after that date. The self-hosted rows have
+no list price at all — a self-hosted per-token cost is an *output* of the TCO and utilization model
+in Section 4, not an input, which is exactly the mistake that section exists to prevent.
+
+The worked examples below are priced on GPT-4o / GPT-4o-mini. Those are legacy models, but they are
+still served at the rates above, and holding one rate pair fixed keeps every derived number in this
+file checkable. Substitute your own model's two rates; the arithmetic is identical.
 
 The gap between expensive frontier models and cheap small models, combined with caching and routing
 strategies, is where most cost optimization opportunity lives.
@@ -90,33 +107,43 @@ length (how much you send in). The second is output length (how much you ask for
 model selection (which tier you use). The fourth is caching (do you pay for the same prefix
 repeatedly). Each valve can be partially closed independently.
 
-**Why it matters:** At 10M tokens/day, moving from GPT-4o to GPT-4o-mini for 70% of queries saves
-approximately $2,500/day — $912,500/year — without changing the remaining 30% of complex queries
-that genuinely need the frontier model.
+**Why it matters:** At 10M tokens/day on a 60/40 input/output split, GPT-4o blends to $5.50/1M and
+GPT-4o-mini to $0.33/1M, so routing 70% of that volume to the cheaper model saves about $36/day —
+roughly $13,200/year. The same 70% shift at 1B tokens/day saves about $3,620/day, or $1.3M/year.
+The lever is exactly linear in volume, so a routing saving quoted without its volume is meaningless.
 
 **Key insight:** The most expensive token is the one you don't need to send. Prompt compression,
 prompt caching, and intelligent routing save more than any infrastructure optimization. You can tune
-Kubernetes all you like; removing 500 tokens from a system prompt that runs a million times saves
-$0.75 to $7.50 depending on the model, every single day.
+Kubernetes all you like; removing 500 tokens from a system prompt that runs a million times a day
+strips 500M input tokens off the bill — $75/day at GPT-4o-mini's $0.15/1M, $1,250/day at GPT-4o's
+$2.50/1M, $2,500/day at Claude Opus 5's $5.00/1M — every single day.
 
 ---
 
 ## 3. Core Principles
 
-**Input tokens cost less than output tokens.** The ratio is typically 3-5x across providers.
-GPT-4o charges $2.50/1M input vs $10.00/1M output. This means long outputs (essays, code
+**Input tokens cost less than output tokens.** The ratio is typically 4-6x across providers and has
+widened over time: GPT-4o is 4x ($2.50 in vs $10.00 out), Claude Sonnet 5 and Opus 5 are both 5x
+($3/$15 and $5/$25), and OpenAI's GPT-5.6 family is 6x ($2.50/$15.00 on gpt-5.6-terra).
+This means long outputs (essays, code
 generation, chain-of-thought reasoning) are disproportionately expensive. Constraining output
 length, using structured extraction instead of free-form generation, and streaming with early
 termination all target the expensive side of the ratio.
 
-**Prompt caching provides 50-90% discount on repeated prefixes.** Anthropic caches automatically
-once a prefix exceeds 1,024 tokens and offers a 90% discount on cache hits. OpenAI caches prefixes
-automatically for contexts over 1,024 tokens and offers a 50% discount. For RAG systems where the
+**Prompt caching provides 50-90% discount on repeated prefixes.** Anthropic requires you to opt in
+with a `cache_control` breakpoint — it is not on by default — and the minimum cacheable prefix is
+per-model and non-monotonic: 512 tokens on Opus 5 and Fable 5, 1,024 on Sonnet 5 and Opus 4.8,
+2,048 on Opus 4.7, 4,096 on Opus 4.6/4.5 and Haiku 4.5. Cache reads are billed at 0.1x the input
+rate (90% off) and the 5-minute cache write at 1.25x. OpenAI caches prefixes automatically for
+prompts of 1,024 tokens or more, but the cached-input discount is model-dependent — 50% on GPT-4o,
+90% on the GPT-5.x family. For RAG systems where the
 system prompt and retrieved context are largely stable, caching eliminates most input token costs.
 Mechanics and the full multi-layer cache taxonomy live in [LLM Caching](../llm_caching/README.md).
 
-**Batch APIs offer 50% discount for non-real-time workloads.** OpenAI Batch API and Anthropic
-Message Batches both offer 50% off standard rates with a 24-hour SLA. Offline pipelines —
+**Batch APIs offer 50% discount for non-real-time workloads.** OpenAI Batch API (up to 50,000
+requests or 200 MB per job) and Anthropic Message Batches (up to 100,000 requests or 256 MB) both
+offer 50% off standard rates within a 24-hour window; most batches finish far sooner, but the SLA
+you can rely on is 24 hours and un-processed requests expire at that point. Offline pipelines —
 classification jobs, document processing, overnight report generation — should always use batch.
 
 **Self-hosting break-even depends on volume.** The crossover point where self-hosting becomes
@@ -222,9 +249,11 @@ on every response so clients can self-throttle before hitting the limit.
 
 Self-hosting cost analysis requires accounting for all cost components, not just GPU rental.
 
-**Hardware costs:** An 8x A100 80GB node costs approximately $200K to purchase outright or ~$15K/
-month on a cloud lease (1-year reserved). A single A100 at on-demand rates runs ~$2-3/hour
-(~$1,500-$2,200/month). Reserved pricing drops this 30-60%.
+**Hardware costs:** An 8x A100 80GB node was list-priced around $200K when the generation launched;
+street and cloud-lease prices for A100-class hardware have fallen substantially since, so treat any
+figure in this section as an illustrative model to re-price against a live quote, not a current
+market rate. The structure is what generalizes: on-demand GPU-hours are the most expensive way to
+buy the same silicon, and reserved pricing typically drops it 30-60%.
 
 **Infrastructure overhead:** Networking (InfiniBand for multi-node, 10-25Gbps for single node),
 NVMe storage for model weights and KV cache spill, and cooling (on-premises only) add 20-30%
@@ -263,9 +292,10 @@ Monthly TCO = GPU lease
 | 10-50M tokens/day | Hybrid | Route high-volume, latency-tolerant tasks to self-hosted; keep real-time on API |
 | > 50M tokens/day | Self-host primary workloads | Self-hosting cost per token drops well below API rates at this scale |
 
-The break-even point for a 70B model on 4x A100 (reserved) at $28,700/month TCO versus a
-commercial API at $7.80/1M blended token cost falls at approximately 120M tokens/day. Below this,
-the API is cheaper when all costs are honestly included.
+The break-even point for a 70B model on 4x A100 (reserved) at an illustrative $28,700/month TCO
+versus a commercial API at $7.80/1M blended token cost falls at approximately 123M tokens/day
+(`$28,700 / $7.80 = 3,679M tokens/month`, over 30 days). Below this, the API is cheaper when all
+costs are honestly included.
 
 **Stated plainly.** "A self-hosted GPU bills you for wall-clock time, not for work done
 — so your real cost per token is the fixed monthly bill divided by however many tokens you actually
@@ -295,7 +325,7 @@ tokens/day (= 6.0B tokens/month), measured against the `$7.80/1M` Sonnet blended
       30%       1.80B = 1,800M            $28,700 / 1,800 = $15.94
       10%       0.60B =   600M            $28,700 /   600 = $47.83
 
-  API reference line (Claude 3.5 Sonnet, 60/40 blend)         $ 7.80
+  API reference line (Claude Sonnet 5, 60/40 blend)           $ 7.80
 
   Read the crossover straight off the table:
     at 100% utilization self-hosting costs 61% of the API     ($4.78 vs $7.80)
@@ -352,7 +382,7 @@ flowchart TD
     Req([Request]) --> Split
     Split["Prompt structure\n──────────────────────────────────────\nCacheable prefix (static)\nSystem prompt + few-shot examples\n1,000–10,000 tokens — cached after first call\n──────────────────────────────────────\nDynamic suffix (per request)\nUser query + retrieved docs\n200–2,000 tokens — always billed at full rate\n──────────────────────────────────────"] --> Lookup
     Lookup["Provider cache lookup"] --> Hit{"prefix\ncached?"}
-    Hit -- YES --> Discount["Read from KV cache\nAnthropic: 90% discount, TTL ~5 min\nOpenAI: 50% discount, TTL ~5–10 min"] --> Response([Response])
+    Hit -- YES --> Discount["Read from KV cache\nAnthropic: 90% discount, TTL 5 min (1h option)\nOpenAI: 50% on GPT-4o, 90% on GPT-5.x"] --> Response([Response])
     Hit -- NO --> Full["Full prefix processing\n(first call — caches prefix for next requests)"] --> Response
 
     classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
@@ -370,31 +400,36 @@ flowchart TD
 ### Self-Hosting Cost Model
 
 ```
-Monthly cost breakdown for self-hosted LLaMA 3 70B (4x A100 80GB, AWS p4d.24xlarge):
+Illustrative monthly cost breakdown for a self-hosted LLaMA 3 70B deployment
+(4x A100 80GB on a 1-year cloud lease -- a modelled configuration, not a quote
+for a specific SKU; note p4d.24xlarge is 8x A100 40GB and p4de.24xlarge is
+8x A100 80GB, so neither is a 4x node):
 
 +-----------------------+------------------+
 | Cost Component        | Monthly (USD)    |
 +-----------------------+------------------+
-| GPU instance (on-demand)| $32,000        |
-| GPU instance (1yr res.) | $20,000        |
+| GPU lease (1yr res.)  | $20,000          |
 | Electricity/cooling   | Included in cloud|
-| Storage (model + logs)| $200            |
-| Engineering FTE (0.5) | $8,000          |
-| Monitoring / observ.  | $500            |
+| Storage (model + logs)| $200             |
+| Engineering FTE (0.5) | $8,000           |
+| Monitoring / observ.  | $500             |
 +-----------------------+------------------+
-| Total (reserved)      | ~$28,700/month   |
+| Total (reserved)      | $28,700/month    |
 +-----------------------+------------------+
 
-Break-even vs Claude 3.5 Sonnet ($3/$15 per 1M tokens):
+Break-even vs Claude Sonnet 5 ($3/$15 per 1M tokens):
 Assume 60/40 input/output split, avg 1,500 tokens total per request.
-  API cost per 1M requests: $3 * 0.6 + $15 * 0.4 = $7.80 / 1M tokens
-  Self-hosted cost per 1M requests: $28,700 / (monthly token throughput)
+  API cost per 1M tokens:  $3 * 0.6 + $15 * 0.4 = $7.80 / 1M tokens
+  Self-hosted cost per 1M tokens: $28,700 / (monthly tokens, in millions)
 
-  At 50M tokens/day = 1.5B tokens/month:
+  At  50M tokens/day = 1.5B tokens/month:
     API cost:         1,500 * $7.80 = $11,700/month
     Self-hosted:      $28,700/month   <-- API wins
+  At 123M tokens/day = 3.68B tokens/month:
+    API cost:         3,679 * $7.80 = $28,700/month  <-- break-even
+    Self-hosted:      $28,700/month
   At 200M tokens/day = 6B tokens/month:
-    API cost:         $46,800/month
+    API cost:         6,000 * $7.80 = $46,800/month
     Self-hosted:      $28,700/month   <-- self-hosting wins
 ```
 
@@ -416,7 +451,7 @@ is at 123M, so revisit in two quarters."
 | `B` | `TCO_month / C_blend` — tokens per month at which the two bills are equal |
 | `x1M` | Every rate is quoted per 1M tokens, so volumes must be expressed in millions before dividing |
 
-**Walk one example.** The 4x A100 node above, against Claude 3.5 Sonnet:
+**Walk one example.** The 4x A100 node above, against Claude Sonnet 5:
 
 ```
 Step 1 -- collapse two API prices into one blended rate for a 60/40 split:
@@ -487,8 +522,13 @@ def count_chat_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
     return total
 ```
 
-For Anthropic models, use the `anthropic` SDK's `count_tokens` method or the dedicated token
-counting endpoint. Rules of thumb: 1 token ≈ 0.75 English words; 1 token ≈ 3-4 characters.
+For Anthropic models, use the `anthropic` SDK's `client.messages.count_tokens()` method (the
+dedicated token-counting endpoint). Rules of thumb — 1 token ≈ 0.75 English words, 1 token ≈ 3-4
+characters — hold for OpenAI's `cl100k_base`/`o200k_base` era tokenizers, but they are properties of
+a specific tokenizer, not of English. Claude Opus 4.7 introduced a new tokenizer that emits roughly
+30% more tokens for the same text than earlier Claude models, so a forecast calibrated on a
+pre-4.7 model under-counts by about a third on 4.7-and-later. Re-measure the ratio per model family
+with that family's own counter; never carry a rule of thumb across a tokenizer change.
 
 ### Prompt Compression
 
@@ -528,9 +568,12 @@ def deduplicate_chunks(chunks: list[str], embeddings: np.ndarray, threshold: flo
 
 ### Prompt Caching — Anthropic
 
-Anthropic caches prefixes automatically once they exceed 1,024 tokens. The cache TTL is 5 minutes,
-refreshed on each access. You pay $0.30/1M tokens for cache writes (slightly higher than standard
-input), then $0.30/1M for cache reads (90% off the $3.00 standard rate). For a RAG system with a
+Anthropic caching is opt-in: you mark a `cache_control` breakpoint on the content you want cached.
+The minimum cacheable prefix is per-model — 1,024 tokens on Sonnet 5, 512 on Opus 5, 4,096 on
+Haiku 4.5 — and an undersized prefix fails **silently**, with no error and no caching. The default
+cache TTL is 5 minutes, refreshed on each access; a 1-hour TTL is available at a higher write price.
+You pay $3.75/1M tokens for a 5-minute cache write (1.25x the standard input rate), then $0.30/1M
+for cache reads (0.1x, i.e. 90% off the $3.00 standard Sonnet 5 rate). For a RAG system with a
 2,000-token system prompt queried 10,000 times/day:
 
 ```
@@ -554,8 +597,8 @@ and inside the TTL window.
 | `$3.00 / 1M` | Standard Anthropic input rate — what an uncached prefix costs every single time |
 | `$3.75 / 1M` | Cache-write rate. `1.25 x` standard — the surcharge for storing the prefix |
 | `$0.30 / 1M` | Cache-read rate. `0.10 x` standard — the 90% discount |
-| prefix | The leading span of tokens that is byte-identical across requests. Must exceed 1,024 tokens to cache at all |
-| TTL | 5 minutes, refreshed on each hit. A gap longer than this forces a re-write |
+| prefix | The leading span of tokens that is byte-identical across requests. Must reach the model's minimum (1,024 on Sonnet 5) to cache at all |
+| TTL | 5 minutes by default, refreshed on each hit. A gap longer than this forces a re-write. A 1-hour TTL costs 2.0x on write |
 | hit rate | Fraction of requests that find the prefix still cached. `9,999 / 10,000` in the example above |
 
 **Walk one example.** The 2,000-token prefix, priced three ways:
@@ -597,8 +640,13 @@ boundary is at the end of the longest repeated prefix.
 
 ### Prompt Caching — OpenAI
 
-OpenAI caches automatically for prompts over 1,024 tokens with no explicit API changes required.
-Cache hits on input tokens are billed at 50% of standard input rate. The cache operates at the
+OpenAI caches automatically for prompts of 1,024 tokens or more, with no explicit API changes
+required. The cached-input rate is model-dependent: 50% of standard input on GPT-4o ($1.25 vs
+$2.50), but 10% of standard input — a 90% discount — across the GPT-5.x family (for example
+$0.25 vs $2.50 on gpt-5.6-terra). GPT-5.6 and later also charge a 1.25x cache write, where earlier
+models wrote for free, and retain a prefix for at least 30 minutes rather than the 5-10 minutes of
+inactivity typical of the earlier in-memory cache. On GPT-5.6 and later, set `prompt_cache_key` to
+get reliable cache matching. The cache operates at the
 message array level; prefix stability matters. System messages followed by static assistant turns
 followed by the user message maximize cache hit rate.
 
@@ -798,7 +846,7 @@ $800/month to run.
 
 **RAG system, prompt caching saving $50K/month.** A legal document analysis platform used a 3,000-
 token system prompt (role definition, citation rules, output format) on every query. Without
-caching, at 500,000 queries/month on Claude 3.5 Sonnet: 3,000 * 500,000 * $3.00/1M = $4,500/month
+caching, at 500,000 queries/month on Claude Sonnet 5: 3,000 * 500,000 * $3.00/1M = $4,500/month
 on system prompt alone. With Anthropic prompt caching (90% discount on reads): ~$450/month. Across
 multiple similar deployments, total savings exceeded $50K/month.
 
@@ -807,12 +855,14 @@ multiple similar deployments, total savings exceeded $50K/month.
 API (50% discount) reduced this to $2,100/night, saving $63,000/month with no change in output
 quality and acceptable 6-hour latency.
 
-**Self-hosting LLaMA 3 70B, $200K/year savings.** A content moderation platform processing 50
-million tokens/day switched from a commercial API ($7.80/1M blended) to self-hosted LLaMA 3 70B
-on 4x reserved A100 instances ($28,700/month). API cost: 50M * 30 * $7.80/1M = $11,700/month.
-Self-hosted: $28,700/month. At 50M tokens/day they break even. They were at 200M tokens/day:
-API would be $46,800/month vs $28,700 self-hosted. Annual saving: ~$218,000, with 3 months
-engineering time to set up and ongoing 0.5 FTE maintenance factored in.
+**Self-hosting LLaMA 3 70B, ~$218K/year savings at 200M tokens/day.** A content moderation platform
+switched from a commercial API ($7.80/1M blended) to self-hosted LLaMA 3 70B on 4x reserved A100
+instances ($28,700/month). The break-even is 123M tokens/day: at 50M tokens/day the API costs
+50M * 30 * $7.80/1M = $11,700/month against $28,700 self-hosted, so the API wins by a wide margin.
+Only above 123M does the flat bill pay off. They were at 200M tokens/day, where the API would be
+$46,800/month vs $28,700 self-hosted — an annual saving of ($46,800 - $28,700) * 12 = ~$218,000,
+with 3 months engineering time to set up and ongoing 0.5 FTE maintenance already factored into the
+$28,700.
 
 ---
 
@@ -849,7 +899,7 @@ engineering time to set up and ongoing 0.5 FTE maintenance factored in.
 ## 9. When to Use / When NOT to Use
 
 ### Use prompt caching when:
-- System prompt exceeds 1,024 tokens and is reused across requests
+- System prompt exceeds the provider's per-model minimum (1,024 tokens on OpenAI and Claude Sonnet 5; 512 on Opus 5; 4,096 on Haiku 4.5) and is reused across requests
 - RAG system has a stable context prefix
 - Few-shot examples are the same across users
 - You are using Anthropic or OpenAI (the two providers with automatic caching)
@@ -886,7 +936,7 @@ engineering time to set up and ongoing 0.5 FTE maintenance factored in.
 ### Do NOT self-host when:
 - Volume is below break-even threshold
 - Team lacks GPU cluster operational experience
-- Frontier model capabilities (GPT-4o, Claude 3.5) are required and no open-weight equivalent exists
+- Frontier model capabilities (gpt-5.6-sol, Claude Opus 5) are required and no open-weight equivalent exists
 
 ---
 
@@ -956,8 +1006,9 @@ not after the bill arrives.
 ## 12. Interview Questions with Answers
 
 **Q: How do input and output token costs differ, and what does this imply for prompt design?**
-Output tokens cost 3-5x more than input tokens across all major providers. GPT-4o charges $2.50/1M
-input vs $10.00/1M output. This means generation length is the dominant cost driver, not prompt
+Output tokens cost 4-6x more than input tokens across all major providers. GPT-4o charges $2.50/1M
+input vs $10.00/1M output (4x); Claude Sonnet 5 is $3/$15 (5x) and OpenAI's gpt-5.6-terra is
+$2.50/$15.00 (6x). This means generation length is the dominant cost driver, not prompt
 length. Concise output instructions ("respond in under 150 words"), structured extraction instead
 of free-form prose, and explicit max_tokens limits all target the expensive side. Do not over-index
 on prompt compression at the expense of ignoring output verbosity.
@@ -982,24 +1033,29 @@ history beyond a window (keep the last 10 turns verbatim plus a rolling summary)
 session length. Monitor cost-per-conversation, not just cost-per-request, or this effect stays
 invisible.
 
-**Explain prompt caching mechanics for both Anthropic and OpenAI. What must you do to maximize
+**Q: Explain prompt caching mechanics for both Anthropic and OpenAI. What must you do to maximize
 cache hit rate?**
-Both providers cache prompt prefixes automatically once the prompt exceeds 1,024 tokens. Anthropic
-offers a 90% discount on cache reads; OpenAI offers 50%. The cache TTL is approximately 5-10
-minutes, refreshed on access. To maximize hit rate, place all static content (system prompt,
+The two providers differ in who opts in and how big the discount is. OpenAI caches automatically for
+prompts of 1,024 tokens or more; Anthropic requires an explicit `cache_control` breakpoint and
+enforces a per-model minimum (512 on Opus 5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5) that fails
+silently when unmet. Anthropic discounts cache reads by 90% (0.1x input) and charges 1.25x on a
+5-minute write; OpenAI's cached-input discount is 50% on GPT-4o and 90% on the GPT-5.x family. The
+Anthropic TTL is 5 minutes by default (1 hour available at a 2.0x write), and OpenAI retains a
+prefix for 5-10 minutes of inactivity on pre-5.6 models and at least 30 minutes on 5.6 and later,
+refreshed on access. To maximize hit rate, place all static content (system prompt,
 few-shot examples, static instructions) at the beginning of the message array, and all dynamic
 content (user query, retrieved documents) at the end. The cache key is the exact byte sequence of
 the prefix, so any variation in the static portion breaks the cache. In a RAG system, this means
 retrieved documents should come after the system prompt, not interleaved with it.
 
 **Q: Walk through the break-even analysis for self-hosting a 70B model versus using a cloud API.**
-Start with total monthly cost of self-hosting: GPU reservation ($20K for 4x A100 on AWS 1yr),
-storage ($200), and engineering maintenance ($8,000 for 0.5 FTE) = ~$28,700/month. Then calculate
-API cost per token at your expected volume with your input/output mix. At a blended $7.80/1M tokens
-and 200M tokens/day (6B/month), API cost = $46,800/month. Self-hosting saves ~$18,100/month.
-At 50M tokens/day, API = $11,700/month — self-hosting is more expensive. The break-even point
-here is approximately 110M tokens/day. Always include engineering FTE in the self-hosting total;
-this is the most commonly omitted factor.
+Start with total monthly cost of self-hosting: GPU lease ($20,000 for a 4x A100 1-year reservation),
+storage ($200), engineering maintenance ($8,000 for 0.5 FTE), and monitoring ($500) = $28,700/month.
+Then calculate API cost per token at your expected volume with your input/output mix. At a blended
+$7.80/1M tokens and 200M tokens/day (6B/month), API cost = $46,800/month. Self-hosting saves
+$18,100/month. At 50M tokens/day, API = $11,700/month — self-hosting is more expensive. The
+break-even point here is $28,700 / $7.80 = 3,679M tokens/month, about 123M tokens/day. Always
+include engineering FTE in the self-hosting total; this is the most commonly omitted factor.
 
 **Q: What is the OpenAI Batch API and when should it be used?**
 The OpenAI Batch API accepts a JSONL file of up to 50,000 requests and processes them
@@ -1085,7 +1141,7 @@ response normalization, retry logic, and fallback routing. For cost optimization
 cost logging with per-call USD attribution. The key advantage is that routing logic is centralized
 in LiteLLM configuration rather than scattered across application code.
 
-**What are the tradeoffs of fine-tuning a smaller model for cost reduction versus using a
+**Q: What are the tradeoffs of fine-tuning a smaller model for cost reduction versus using a
 larger model with prompt engineering?**
 Fine-tuning a smaller model (e.g., LLaMA 3 8B or GPT-4o-mini) on domain-specific data can match
 or exceed frontier model quality for narrow tasks at 10-50x lower inference cost. The tradeoffs
@@ -1101,7 +1157,7 @@ task stability (stable, narrow tasks are better fine-tuning candidates).
 A multi-tenant platform needs layered rate limiting across three dimensions: per-user RPM and TPM limits (prevent individual abuse), per-organization monthly token budgets (cost control), and global capacity limits (prevent infrastructure overload). Implementation uses token bucket algorithm with Redis + Lua scripts for atomic counting — the bucket fills at quota/period rate and drains by estimated token count per request. Sliding window rate limiting is preferred over fixed windows to prevent the boundary-burst problem where clients hit 2x the limit by straddling two fixed windows. Return HTTP 429 with Retry-After header and include X-RateLimit-Remaining in every response so clients can self-throttle. For overflow handling, queue lower-priority requests (free tier) rather than rejecting immediately, while high-priority requests (paid, SLA-bound) bypass the queue. Budget enforcement: warn at 80% of monthly allocation, soft-cap at 100% with a 10% grace period, hard-cap at 110%. The key production lesson is to enforce limits at the API gateway layer (not the application layer) to catch all traffic uniformly.
 
 **Q: When does self-hosting LLMs become cost-effective versus using commercial APIs?**
-The break-even depends on daily token volume and whether all costs are honestly accounted for. For a 70B model on 4x A100 80GB reserved instances, the all-in monthly TCO is approximately $28,700 (GPU lease $15K + infrastructure overhead $4K + personnel share $6K + monitoring/tooling $3.7K). Against a commercial API at ~$7.80/1M blended token cost, this breaks even at approximately 120M tokens/day. Below 10M tokens/day, the API is almost always cheaper because self-hosting overhead (personnel, infrastructure, maintenance) exceeds any per-token savings. Between 10M and 50M tokens/day, a hybrid approach works: route high-volume, latency-tolerant tasks (batch processing, embeddings) to self-hosted infrastructure while keeping real-time, user-facing queries on the API. Above 50M tokens/day, self-hosting primary workloads becomes clearly cost-effective. The most commonly underestimated costs are personnel (0.5-1.0 FTE ML engineer for maintenance), GPU failure rates (2-5% annually, requiring spare capacity), and inference framework tuning (vLLM/TensorRT-LLM configuration is not set-and-forget). Revisit the analysis every 6 months because API prices are declining 30-50% per year.
+The break-even depends on daily token volume and whether all costs are honestly accounted for. For a 70B model on 4x A100 80GB reserved instances, the illustrative all-in monthly TCO used throughout this module is $28,700 (GPU lease $20,000 + storage $200 + 0.5 FTE personnel $8,000 + monitoring/tooling $500). Against a commercial API at ~$7.80/1M blended token cost, this breaks even at $28,700 / $7.80 = 3,679M tokens/month, about 123M tokens/day. Below 10M tokens/day, the API is almost always cheaper because self-hosting overhead (personnel, infrastructure, maintenance) exceeds any per-token savings. Between 10M and 50M tokens/day, a hybrid approach works: route high-volume, latency-tolerant tasks (batch processing, embeddings) to self-hosted infrastructure while keeping real-time, user-facing queries on the API. Above 50M tokens/day, self-hosting primary workloads becomes clearly cost-effective. The most commonly underestimated costs are personnel (0.5-1.0 FTE ML engineer for maintenance), GPU failure rates (2-5% annually, requiring spare capacity), and inference framework tuning (vLLM/TensorRT-LLM configuration is not set-and-forget). Revisit the analysis every 6 months: providers reprice and retire model tiers several times a year, and a break-even computed against a rate that has since moved is worse than no analysis at all.
 
 ---
 
@@ -1381,9 +1437,9 @@ always wrong at sub-200M tokens/day, and always wrong without first exhausting A
 
 ---
 
-**Additional war story — Prompt caching cache miss spike after system prompt update causing 3x cost overrun:**
+**Additional war story — Prompt caching cache miss spike after system prompt update causing a 10x cost spike on the affected window:**
 
-A RAG product with a static 2,000-token system prompt relied on Anthropic's prompt caching to reduce costs by 90% (cache hit rate was 97%). An engineer updated the system prompt to add a disclaimer sentence. Because the new prompt differed in the first 2,000 tokens, all cached prefixes were invalidated simultaneously — every request was a cache miss for the next 5 minutes (until the cache warmed up again). During those 5 minutes, 10,000 requests × 2,000 tokens × $3/MTok = $60 in un-cached input costs (vs $6 with cache). Over a full week of prompt updates (3 updates per week), un-cached costs added $180/week — invisible in the monthly bill but attributable to the practice of updating system prompts without cache warmup strategy.
+A RAG product with a static 2,000-token system prompt relied on Anthropic's prompt caching to reduce costs by 90% (cache hit rate was 97%). An engineer updated the system prompt to add a disclaimer sentence. Because the new prompt differed in the first 2,000 tokens, all cached prefixes were invalidated simultaneously — every request was a cache miss for the next 5 minutes (until the cache warmed up again). During those 5 minutes, 10,000 requests × 2,000 tokens × $3/MTok = $60 in un-cached input costs, against $6 for the same window at the cache-read rate — a 10x spike on that window. Over a full week of prompt updates (3 updates per week), those windows cost $180 instead of $18, or $162/week of avoidable spend — invisible in the monthly bill but attributable to the practice of updating system prompts without cache warmup strategy.
 
 ```python
 # BROKEN: system prompt updated without cache warmup — spike in un-cached costs
@@ -1400,7 +1456,7 @@ def warm_prompt_cache(new_prompt: str, n_warmup_requests: int = 10) -> None:
     """Pre-warm the cache for new_prompt before routing live traffic to it."""
     for i in range(n_warmup_requests):
         client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-5",
             max_tokens=1,  # minimal output — just warming the cache
             system=[{
                 "type": "text",
@@ -1427,7 +1483,7 @@ def get_cache_hit_rate_from_logs(traces: list[dict]) -> float:
 
 **Additional interview Q&As:**
 
-**How do you calculate the break-even point for using the Anthropic Batch API vs real-time API for a RAG product with 1M requests/day?** Batch API pricing is 50% of real-time API pricing but requires 24-hour turnaround. For a RAG product with 1M requests/day at average 1,500 input + 200 output tokens: real-time cost = 1M × (1,500 × $3/MTok + 200 × $15/MTok) = $4,500 + $3,000 = $7,500/day. Batch cost = $3,750/day, saving $3,750/day ($1.37M/year). The break-even analysis is straightforward: if ANY requests can tolerate 24-hour latency (e.g., nightly report generation, batch document analysis, training data generation), use Batch API for those. For a RAG product, 30-40% of requests are typically batch-eligible (back-office workflows, scheduled reports), yielding $1,000-1,500/day in savings.
+**Q: How do you calculate the break-even point for using the Anthropic Batch API vs real-time API for a RAG product with 1M requests/day?** Batch API pricing is 50% of real-time API pricing within a 24-hour window (most batches finish in under an hour, but requests that have not completed at 24 hours expire). For a RAG product with 1M requests/day at average 1,500 input + 200 output tokens on Claude Sonnet 5: real-time cost = 1M × (1,500 × $3/MTok + 200 × $15/MTok) = $4,500 + $3,000 = $7,500/day. Batch cost = $3,750/day, saving $3,750/day ($1.37M/year). The break-even analysis is straightforward: if ANY requests can tolerate 24-hour latency (e.g., nightly report generation, batch document analysis, training data generation), use Batch API for those. For a RAG product, 30-40% of requests are typically batch-eligible (back-office workflows, scheduled reports), yielding $1,000-1,500/day in savings.
 
 **What is the optimal chunking strategy to maximize prompt cache hit rate in a RAG system?** Maximize the static portion of the prompt (system prompt + boilerplate context) and minimize the dynamic portion (user query + retrieved chunks). Structure: static system prompt (2,000+ tokens, always cached) → optional static RAG preamble (500 tokens, cached) → dynamic retrieved chunks (varies per query, not cached) → user message. Ensure retrieved chunks are appended after the cached prefix, not interleaved within it, because any modification to the cached prefix invalidates it. With this structure, 60-70% of total input tokens are in the cached prefix, reducing effective input cost by 60-70%.
 

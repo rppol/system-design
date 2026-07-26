@@ -4,7 +4,7 @@
 
 Parameter-Efficient Fine-Tuning (PEFT) is a family of techniques that fine-tune large pre-trained models by training only a small fraction of parameters (0.001-1%) while keeping most of the model frozen. This contrasts with full fine-tuning, which updates all parameters. PEFT methods enable adapting large models on limited hardware while preserving the majority of pre-trained knowledge.
 
-The core problem PEFT solves: a 70B model has 70B × 2 bytes × 3 (weights + gradients + optimizer states) ≈ 420GB of training memory requirements. Full fine-tuning of 70B models requires 6-8× A100 80GB GPUs. PEFT makes this same model trainable on 1-2 GPUs by training only 0.1-1% of parameters.
+The core problem PEFT solves: a 70B model has 70B × 2 bytes × 3 (weights + gradients + optimizer states) ≈ 420GB of training memory requirements — and that is the floor, since fp32 Adam moments alone cost 8 bytes per parameter. Full fine-tuning of a 70B model therefore needs at least 6-8× A100 80GB GPUs, and more once the optimizer runs in fp32. PEFT makes this same model trainable on 1-2 GPUs by training only 0.1-1% of parameters.
 
 **What this actually says.** "Training a model costs about three copies of it, not one — so the model you can *load* is far bigger than the model you can *train*."
 
@@ -14,7 +14,7 @@ That factor of 3 is the whole reason fine-tuning is a different hardware problem
 |--------|------------|
 | `70B` | Total parameter count of the base model |
 | `× 2 bytes` | BF16/FP16 storage — 2 bytes per parameter |
-| `× 3` | Weights + gradients + optimizer state, each roughly one full copy |
+| `× 3` | Weights + gradients + optimizer state, each roughly one full copy at 2 bytes. This is the optimistic case: fp32 Adam moments alone are 8 bytes/param, which pushes a real 70B full fine-tune past 1TB |
 | `420GB` | Resulting training-time footprint, before activations are counted |
 | `0.1-1%` | Fraction of parameters PEFT actually leaves trainable |
 
@@ -249,7 +249,7 @@ Summary:
   Key advantage: CAN BE MERGED after training (zero inference overhead)
   Best balance of quality, memory, and mergeability
 
-  Trainable params (7B, r=16, all-attn+FFN): ~0.5%
+  Trainable params (7B, r=16, all-attn+FFN): ~0.6%
 ```
 
 **The idea behind it.** "Leave the original matrix alone and learn a thin correction beside it — then, once training is done, just add the correction in and throw the scaffolding away."
@@ -275,10 +275,14 @@ The reason LoRA merges and adapters do not is visible right in the formula: `B �
   vs the module itself    4096 x 4096        = 16,777,216     ->  128x smaller
 
   target q,k,v,o only     131,072 x 4 x 32   = 16,777,216     ->  0.240% of 7B
-  target attn + FFN (7)   131,072 x 7 x 32   = 29,360,128     ->  0.419% of 7B
+
+  the FFN matrices are NOT square -- d_ff = 11008, so each FFN adapter costs
+    16 x (4096 + 11008) = 241,664, i.e. 1.84x an attention adapter
+  target attn + FFN (7)   (131,072 x 4 + 241,664 x 3) x 32
+                                             = 39,976,960     ->  0.571% of 7B
 ```
 
-That bracket, 0.24% to 0.42%, is the `0.2-0.5%` the comparison table quotes — the spread is not rank, it is *which modules you target*.
+That bracket, 0.24% to 0.57%, is the `0.2-0.6%` the comparison table quotes — the spread is not rank, it is *which modules you target*.
 
 **Reading the `alpha/r` scale.** Its only job is to decouple two knobs that would otherwise be tangled. `B × A` grows with `r` simply because more rank means more terms in the sum, so without the divisor, raising `r` would silently raise the effective learning rate too. Dividing by `r` cancels that, letting you sweep rank without re-tuning anything else:
 
@@ -430,8 +434,8 @@ Method           Trainable %  Merge   Inference  Best For
 Adapter (r=8)    0.06%        No      +5-10%     NLP classification
 Prefix (l=10)    0.03%        No      +ctx window Pre-generation conditioning
 Prompt tuning    ~0.001%      No      +ctx window Very large models only (>10B)
-LoRA (r=16)      0.2-0.5%     Yes     0% merged   Most tasks; gold standard
-QLoRA (r=16)     0.2-0.5%     Yes*    0% merged*  Memory-constrained training
+LoRA (r=16)      0.2-0.6%     Yes     0% merged   Most tasks; gold standard
+QLoRA (r=16)     0.2-0.6%     Yes*    0% merged*  Memory-constrained training
 BitFit           <0.1%        Yes     0%          Simple classification
 DoRA (r=8)       ~0.12%       Yes     0% merged   LoRA quality at lower rank
 (*QLoRA merged requires dequantize first)
@@ -454,19 +458,19 @@ Percentages alone hide the structure. Written as absolute counts against one fix
 ```
   method                 per-site x sites x layers            absolute      % of 7B
   -------------------------------------------------------------------------------
-  IA3 (k,v,ffn)          4,096  x  3  x  32                    393,216       0.0056
   Prompt tuning k=100    100 x 4096   (no depth term)          409,600       0.0059
+  IA3 (k,v,ffn)          (4096 + 4096 + 11008) x 32            614,400       0.0088
   BitFit (biases only)   39,680 per layer x 32               1,269,760       0.0181
   Prefix l=10            10 x 4096 x 2  x  32                2,621,440       0.0374
   Adapter r=8            2 x 4096 x 8  x  2  x  32           4,194,304       0.0599
   DoRA r=8   (q,k,v,o)   8 x 8192 x 4 x 32  + 4096 x 4 x 32  8,912,896       0.1273
   LoRA r=16  (q,k,v,o)   16 x 8192  x  4  x  32             16,777,216       0.2397
-  LoRA r=16  (attn+FFN)  16 x 8192  x  7  x  32             29,360,128       0.4194
+  LoRA r=16  (attn+FFN)  (16x8192 x4 + 16x15104 x3) x 32   39,976,960       0.5711
   -------------------------------------------------------------------------------
-  span, cheapest to dearest:  29,360,128 / 409,600  =  71.7x
+  span, cheapest to dearest:  39,976,960 / 409,600  =  97.6x
 ```
 
-Three readings fall straight out of that column. **IA3 undercuts LoRA by 32× per site** because a scaling vector costs `d = 4096` where a rank-16 update costs `16 × 8192 = 131,072` — the file's "roughly 32× fewer" is exactly `131,072 / 4,096`. **Prompt tuning is the only row with no `× 32`**, which is simultaneously why it is cheapest and why it needs an enormous frozen model to work. And **every method above 0.1% is a mergeable one** — LoRA and DoRA — which is the real pattern in the table: the methods that buy the most capacity are also the ones that cost nothing at inference.
+Three readings fall straight out of that column. **IA3 undercuts LoRA by 32× per attention site** because a scaling vector costs `d = 4096` where a rank-16 update costs `16 × 8192 = 131,072` — the file's "roughly 32× fewer" is exactly `131,072 / 4,096`. (Its third vector, `l_ff`, is `d_ff`-sized — 11008 here — because it rescales the FFN's *inner* activations.) **Prompt tuning is the only row with no `× 32`**, which is simultaneously why it is cheapest and why it needs an enormous frozen model to work. And **every method above 0.1% is a mergeable one** — LoRA and DoRA — which is the real pattern in the table: the methods that buy the most capacity are also the ones that cost nothing at inference.
 
 The BitFit row assumes a GPT-style 7B that has bias terms at all; on a LLaMA-style model with `bias=False` everywhere, that row is zero and the method does not apply.
 
@@ -479,14 +483,15 @@ Prefix (l=10)   ~0.03% │███
 Adapter (r=8)    0.06% │████
 BitFit           <0.1% │████
 DoRA (r=8)      ~0.12% │█████
-LoRA (r=16)   0.2-0.5% │███████  ◄ most trainable params, highest quality
-QLoRA (r=16)  0.2-0.5% │███████    (same param count as LoRA; frozen base is 4-bit)
+LoRA (r=16)   0.2-0.6% │███████  ◄ most trainable params, highest quality
+QLoRA (r=16)  0.2-0.6% │███████    (same param count as LoRA; frozen base is 4-bit)
                        └──────────────────────────
                         fewer params ──► more adaptation capacity
 ```
-The spread spans ~500× (0.001% to 0.5%). Prompt/prefix tuning sit at the extreme-thin
-end and only reach LoRA-level quality at very large model scales; LoRA's slightly
-higher parameter budget is what buys its reliable quality across model sizes.
+The spread spans ~500× (0.001% to 0.57%). Prompt and prefix tuning sit at the
+extreme-thin end; prompt tuning in particular only reaches full-fine-tuning quality at
+very large model scales. LoRA's higher parameter budget is what buys its reliable
+quality across model sizes.
 
 ---
 
@@ -558,7 +563,7 @@ Prefix (at inference):
 
 | Dimension | Adapter | Prefix | Prompt | LoRA | BitFit | DoRA |
 |-----------|---------|--------|--------|------|--------|------|
-| Trainable % | 0.06% | 0.03% | 0.001% | 0.2-0.5% | <0.1% | ~0.12% |
+| Trainable % | 0.06% | 0.03% | 0.001% | 0.2-0.6% | <0.1% | ~0.12% |
 | Quality | Good | Moderate | Good (large) | Best | Low | Very good |
 | Inference overhead | +5-10% | Context | Minimal | 0% (merged) | 0% | 0% (merged) |
 | Mergeability | No | No | No | Yes | Yes | Yes |
@@ -602,9 +607,9 @@ Prefix (at inference):
 Adapter layers add 5-10% latency on every inference call. At high QPS, this adds up.
 Fix: Prefer merged LoRA over adapters for production deployments where latency is measured.
 
-**2. Prefix tuning on small models**
-Prefix tuning achieves full fine-tuning quality only at large scales (>10B parameters). At smaller scales, it underperforms LoRA significantly.
-Fix: Use LoRA for models under 10B. Only consider prefix tuning for very large models where even LoRA memory is a concern.
+**2. Assuming prefix tuning has prompt tuning's scaling curve**
+The ">10B parameters or it doesn't work" result belongs to *prompt* tuning (Lester et al. 2021), not prefix tuning: Li and Liang reported prefix tuning matching full fine-tuning on table-to-text at GPT-2 medium/large scale. What is true is that prefix tuning generally trails LoRA on task adaptation at every scale, and its KV-cache cost never goes away.
+Fix: Default to LoRA. Reach for prefix tuning when you want generation-style conditioning without touching weights, and reserve prompt tuning for very large models.
 
 **3. Prompt tuning with improper initialization**
 Randomly initialized soft prompt tokens learn slowly and may not converge to good solutions.
@@ -635,10 +640,10 @@ Fix: Evaluate each adapter independently before stacking. Check that adapter com
 ## 10. Interview Questions with Answers
 
 **Q: What is PEFT and why is it used instead of full fine-tuning?**
-A: Parameter-Efficient Fine-Tuning (PEFT) trains only a small fraction of model parameters (0.001-1%) while freezing the rest. Full fine-tuning of a 70B model requires ~420GB GPU memory (weights + gradients + optimizer states) — six to eight A100 80GB GPUs. PEFT reduces this to under 40GB by training only adapter matrices or low-rank updates. The quality loss is typically 1-3% compared to full fine-tuning, which is acceptable for most applications. Additional benefits: frozen base weights prevent catastrophic forgetting; small adapter files (50-200MB) can be versioned and deployed separately from the 140GB base model; multiple task-specific adapters can be maintained without duplicating the base model.
+A: Parameter-Efficient Fine-Tuning (PEFT) trains only a small fraction of model parameters (0.001-1%) while freezing the rest. Full fine-tuning of a 70B model requires at least ~420GB of GPU memory (weights + gradients + optimizer states at 2 bytes each; fp32 Adam moments push it past 1TB) — six to eight A100 80GB GPUs at minimum. PEFT reduces this to under 40GB by training only adapter matrices or low-rank updates. The quality loss is typically 1-3% compared to full fine-tuning, which is acceptable for most applications. Additional benefits: frozen base weights prevent catastrophic forgetting; small adapter files (50-200MB) can be versioned and deployed separately from the 140GB base model; multiple task-specific adapters can be maintained without duplicating the base model.
 
 **Q: Compare adapter layers, prefix tuning, prompt tuning, and LoRA — when would you choose each?**
-A: LoRA is the correct default for most production fine-tuning: good quality, merges to zero inference overhead, works well at any model scale, supported by all major training frameworks. Choose adapters when you need modular compositionality — stacking language adapters with task adapters for cross-lingual, cross-task generalization; the inference overhead (~5-10%) is acceptable. Choose prefix tuning when you need to condition generation behavior (writing style, domain register) without changing weights; works well at large scales (>10B). Choose prompt tuning only for very large models (>10B) and scenarios with minimal training capacity — soft prompts at GPT-3 scale achieve full fine-tuning quality; at smaller scales, LoRA is significantly better. Choose BitFit only for simple classification tasks as a minimal baseline.
+A: LoRA is the correct default for most production fine-tuning: good quality, merges to zero inference overhead, works well at any model scale, supported by all major training frameworks. Choose adapters when you need modular compositionality — stacking language adapters with task adapters for cross-lingual, cross-task generalization; the inference overhead (~5-10%) is acceptable. Choose prefix tuning when you need to condition generation behavior (writing style, domain register) without changing weights — it matched full fine-tuning on table-to-text at GPT-2 scale in the original paper, so it is not gated on model size the way prompt tuning is. Choose prompt tuning only for very large models (>10B) and scenarios with minimal training capacity — soft prompts at GPT-3 scale achieve full fine-tuning quality; at smaller scales, LoRA is significantly better. Choose BitFit only for simple classification tasks as a minimal baseline.
 
 **Q: What is DoRA and how does it improve on LoRA?**
 A: DoRA (Weight-Decomposed Low-Rank Adaptation) decomposes weight matrices W into magnitude m and direction V/||V|| components, then applies LoRA to the direction component while separately training the magnitude. This decomposition mirrors how the model makes "how much" (magnitude) and "in what direction" (direction) decisions — updating them separately with appropriate parameterizations produces more expressive updates per parameter. Empirically: DoRA at rank r=8 often matches or exceeds LoRA at rank r=16 on downstream tasks, providing the same quality with 2× fewer trainable parameters. Like LoRA, DoRA adapters can be merged post-training for zero inference overhead.
@@ -653,7 +658,7 @@ A: Yes, PEFT methods can be combined, with important caveats. Additive combinati
 A: Merged LoRA: zero overhead — merged weights are a single matrix, identical to running the base model. Adapters: 5-10% latency increase per forward pass — two extra matmuls per layer (down + up projection) always execute, regardless of whether the adapter is "active." Prefix tuning: memory overhead (larger KV cache) but minimal compute overhead — the KV cache must store extra prefix entries. Prompt tuning: k extra tokens in the input, propagated as full context through all layers — effectively reduces effective context window by k tokens. For production inference: LoRA (merged) is the only PEFT method with truly zero overhead. Adapters should be avoided in latency-sensitive applications unless the 5-10% overhead is acceptable.
 
 **Q: How does LoRA rank relate to full fine-tuning expressiveness?**
-A: LoRA at rank r restricts the weight update ΔW to rank ≤ r. Full fine-tuning has no rank restriction — ΔW can be any arbitrary matrix. The relationship: at r=d (where d is the weight dimension), LoRA has the same expressiveness as full fine-tuning but loses the efficiency benefit. In practice, fine-tuning updates empirically have low rank (the intrinsic dimensionality hypothesis), so r=16 to r=64 captures 90-98% of the expressiveness of full fine-tuning. The remaining 2-10% quality gap matters most for: tasks requiring significant distributional shift, very complex task learning, or scenarios where the fine-tuning objective changes many layers' representations simultaneously. For these, higher rank (r=64 to r=128) or full fine-tuning is justified.
+A: LoRA at rank r restricts the weight update ΔW to rank ≤ r. Full fine-tuning has no rank restriction — ΔW can be any arbitrary matrix. The relationship: at r=d (where d is the weight dimension), LoRA has the same expressiveness as full fine-tuning but loses the efficiency benefit. In practice, fine-tuning updates empirically have low rank (the intrinsic dimensionality hypothesis), and the LoRA paper found ranks from 1 to 64 statistically indistinguishable on its GPT-3 tasks. The gap that does exist shows up on tasks demanding real new capability: Biderman et al. (2024) measured LoRA trailing full fine-tuning on code and math, in both instruction tuning and continued pre-training, while forgetting less outside the target domain. For these, higher rank (r=64 to r=128) or full fine-tuning is justified.
 
 **Q: What are the key differences between PEFT for fine-tuning LLMs vs. fine-tuning smaller models like BERT?**
 A: Scale differences drive significant practical differences. For BERT-scale models (110M-400M params): PEFT offers modest memory savings (full FT requires ~1-2GB; PEFT reduces to hundreds of MB — not the critical bottleneck); training latency is not the primary concern; even BitFit can be practical. For LLM-scale models (7B-70B+ params): PEFT is essential — without it, training requires multi-GPU or unavailable hardware; memory savings of 10-100× are the key enabler; adapter inference overhead matters because serving at scale amplifies small per-call costs. The quality-efficiency tradeoff also differs: for BERT, full fine-tuning is routine and PEFT is mainly for serving flexibility; for LLMs, PEFT with minimal quality loss is the production standard.
@@ -695,6 +700,8 @@ A: Switching PEFT methods (e.g., from LoRA to prefix tuning) costs primarily in 
 
 ## 12. Case Study: Multi-Task Customer Service Platform Using Adapter Composition
 
+*Illustrative worked example — the configs and parameter counts are real, but the company, accuracy figures and cost savings are a composite, not a published deployment.*
+
 **Problem Statement**: A large e-commerce company runs a customer service platform handling three distinct query types: billing disputes, technical product support, and returns/refunds. Each domain has different vocabulary, reasoning patterns, and output structures. A single generalist fine-tuned model performs at 81% average accuracy across all three domains. Domain-specific full fine-tuned models each achieve 91-93% accuracy but require three separate 14GB model deployments — 42GB total just for model weights, plus separate serving infrastructure per domain. The team needs to serve all three domains from a single GPU instance while achieving per-domain accuracy comparable to single-task fine-tuned models.
 
 **Architecture Overview**:
@@ -703,10 +710,10 @@ Training Phase (independent, parallel):
 
 Base Model: Mistral 7B Instruct (shared across all adapters)
 
-Task-Specific LoRA Adapters:
-  billing_adapter     (r=16, q+k+v+o, 50MB)
-  technical_adapter   (r=16, q+k+v+o+FFN, 80MB)
-  returns_adapter     (r=8,  q+v, 30MB)
+Task-Specific LoRA Adapters (Mistral-7B uses GQA, so k/v_proj are 4096x1024):
+  billing_adapter     (r=16, q+k+v+o,      13.6M params,  27MB bf16)
+  technical_adapter   (r=16, q+k+v+o+FFN,  41.9M params,  84MB bf16)
+  returns_adapter     (r=8,  q+v,           3.4M params,   7MB bf16)
 
 (Technical adapter targets FFN because product troubleshooting
  requires domain-specific factual associations; billing and returns
@@ -727,7 +734,7 @@ Inference Routing:
 
 vLLM Multi-Adapter Serving:
   Base model (Mistral 7B, 14GB BF16) loaded once
-  Adapter pool: 3 adapters in GPU memory simultaneously (160MB total)
+  Adapter pool: 3 adapters in GPU memory simultaneously (~118MB total)
   Adapter hot-swap: <5ms P99 (adapter already in GPU pool)
 ```
 
@@ -767,6 +774,7 @@ returns_config = LoraConfig(
 
 # Serving with vLLM multi-adapter support
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 
 llm = LLM(
     model="mistralai/Mistral-7B-Instruct-v0.3",
@@ -778,12 +786,15 @@ llm = LLM(
 # Route and serve
 def handle_request(query: str) -> str:
     domain = intent_classifier.predict(query)   # billing/technical/returns
+    # LoRARequest's second argument is a GLOBALLY UNIQUE int id — reusing one id
+    # for different adapters makes vLLM serve whichever it cached first.
     adapter_map = {
-        "billing": "./billing_adapter",
-        "technical": "./technical_adapter",
-        "returns": "./returns_adapter"
+        "billing":   (1, "./billing_adapter"),
+        "technical": (2, "./technical_adapter"),
+        "returns":   (3, "./returns_adapter"),
     }
-    request = LoRARequest(domain, 1, adapter_map[domain])
+    lora_id, lora_path = adapter_map[domain]
+    request = LoRARequest(domain, lora_id, lora_path)
     outputs = llm.generate([query], SamplingParams(max_tokens=512),
                             lora_request=request)
     return outputs[0].outputs[0].text
@@ -793,7 +804,7 @@ def handle_request(query: str) -> str:
 - Billing domain accuracy: 88.4% (vs. 93% single-task full FT; vs. 81% single mixed adapter)
 - Technical domain accuracy: 91.2% (vs. 93% single-task full FT; best result across domains due to FFN targeting)
 - Returns domain accuracy: 87.1% (vs. 91% single-task full FT; r=8 adapter sufficient for templated task)
-- GPU memory: 14GB (base) + 0.16GB (3 adapters) = 14.16GB — single A100 40GB handles production load
+- GPU memory: 14GB (base) + 0.12GB (3 adapters) = 14.12GB — single A100 40GB handles production load
 - Inference latency P50: 340ms (vs. 330ms with single generalist adapter — 10ms overhead for intent classification)
 - Infrastructure savings: 1 GPU instance vs. 3 separate instances; 68% cost reduction in serving infrastructure
 - Total adapter training time: 6 hours across 3 adapters (parallel training on 3 GPUs — 2 hours each)

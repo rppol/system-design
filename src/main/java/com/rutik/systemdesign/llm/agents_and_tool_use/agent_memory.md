@@ -14,7 +14,7 @@ Memory for LLM agents has four distinct types, each with different storage mecha
 
 **Mental model**: The context window is a desk with limited space. Long conversations and accumulated tool results fill it up. Evicting older content saves space but loses information. MemGPT solves this like an OS: the context window is RAM; external databases are disk; the agent itself manages paging — deciding what to move to disk (store externally) and what to load from disk (retrieve). This OS metaphor clarifies why memory management for agents is structurally similar to memory management in operating systems.
 
-**Why it matters**: A 128K context window seems large until you account for a system prompt (2K), conversation history (50K), and multiple tool results (10K each). After ~10 tool calls in a long session, the context is full. Without memory management, either the agent crashes (context overflow) or loses critical earlier information (truncation).
+**Why it matters**: Even a large window fills fast once you account for a system prompt (2K), conversation history (50K), and multiple tool results (10K each) — and cost, not capacity, is usually what bites first, since every token in the window is re-billed on every call. After ~10 tool calls in a long session, a 128K working budget is exhausted. Without memory management, either the agent crashes (context overflow) or loses critical earlier information (truncation).
 
 **Key insight**: The context window is the agent's working memory, and it is finite. All non-trivial agents need some mechanism to handle context overflow — whether compression, summarization, or retrieval-augmented memory injection.
 
@@ -37,7 +37,7 @@ Memory for LLM agents has four distinct types, each with different storage mecha
 ```
 1. WORKING MEMORY (In-Context)
    Storage: current context window
-   Capacity: 8K-2M tokens (model-dependent)
+   Capacity: 200K-1M tokens on current frontier models (model-dependent)
    Latency: 0ms (already in context)
    Persistence: session only (cleared when context resets)
    Contents: system prompt, conversation history, tool call/results, scratch notes
@@ -215,15 +215,18 @@ Every compression strategy above is the same trade in different clothing: buy co
 ### Token Budget Management
 
 ```python
-# Concrete token cost model (GPT-4o as of 2025)
-# Input: $5.00/1M tokens   Output: $15.00/1M tokens
+# Concrete token cost model. Prices below are an illustrative $5/1M-input tier
+# (Claude Opus 5 and gpt-5.6-sol both list at $5.00/1M input as of July 2026);
+# every dollar figure downstream in this file is derived from these two constants,
+# so swap them for your model's real rates before reusing the arithmetic.
 
 MODEL_INPUT_PRICE_PER_TOKEN = 5.00 / 1_000_000    # $0.000005/token
-MODEL_OUTPUT_PRICE_PER_TOKEN = 15.00 / 1_000_000  # $0.000015/token
+MODEL_OUTPUT_PRICE_PER_TOKEN = 25.00 / 1_000_000  # $0.000025/token (Opus 5 output)
 
-# Context window: 128,000 tokens
-# Full context fill cost: 128K × $0.000005 = $0.64 per call (input only)
-# 10 calls with full context: $6.40
+# Working context budget used in this example: 128,000 tokens
+# (a self-imposed ceiling — current frontier models expose 200K-1M)
+# Full budget fill cost: 128K × $0.000005 = $0.64 per call (input only)
+# 10 calls with a full 128K context: $6.40
 
 # Memory-efficient agent loop with budget tracking
 class BudgetedAgentMemory:
@@ -322,8 +325,12 @@ m.add(messages, user_id="alice")
 
 # Retrieve relevant memories for next session
 query = "Help me with my web project"
-memories = m.search(query, user_id="alice")
-# Returns: ["User works on Python FastAPI", "User prefers async endpoints"]
+result = m.search(query, user_id="alice")
+# search() returns a DICT, not a list of strings:
+#   {"results": [{"id": "mem_...", "memory": "User works on Python FastAPI",
+#                 "user_id": "alice", "score": 0.89, "created_at": "..."}, ...]}
+# Joining the return value directly is a common bug — pull the "memory" field.
+memories = [m_["memory"] for m_ in result["results"]]
 
 # Inject into new conversation
 context = f"Relevant user context: {'; '.join(memories)}\n\n{user_query}"
@@ -406,7 +413,7 @@ flowchart TD
 - Conversation history in project: last N turns retained
 - Use case: a coding project always has access to the codebase README and coding conventions
 
-### Replit Ghostwriter Agent Memory
+### Replit Agent Memory (the assistant formerly branded Ghostwriter)
 
 - Codebase index: all files embedded; retrieved on demand per query
 - User preferences: preferred libraries, code style extracted from recent edits
@@ -479,7 +486,7 @@ flowchart TD
 ## Interview Questions with Answers
 
 **Q: What are the four types of agent memory and what is each used for?**
-A: Working memory: the current context window — everything the agent can see right now; limited to the context window size (typically 128K-200K tokens); cleared between sessions. Episodic memory: a record of past events and interactions stored in an external database; retrieved by semantic similarity or temporal query; enables the agent to remember what happened in past conversations. Semantic memory: factual knowledge about the world and the user stored in a knowledge base; includes user preferences, domain facts, entity information; retrieved by semantic similarity. Procedural memory: templates and patterns for successful task execution — successful code patterns, search strategies, debug sequences; retrieved when a similar task type is encountered.
+A: Working memory: the current context window — everything the agent can see right now; limited to the context window size (200K-1M tokens on current frontier models); cleared between sessions. Episodic memory: a record of past events and interactions stored in an external database; retrieved by semantic similarity or temporal query; enables the agent to remember what happened in past conversations. Semantic memory: factual knowledge about the world and the user stored in a knowledge base; includes user preferences, domain facts, entity information; retrieved by semantic similarity. Procedural memory: templates and patterns for successful task execution — successful code patterns, search strategies, debug sequences; retrieved when a similar task type is encountered.
 
 **Q: What is the MemGPT architecture and how does it solve context overflow?**
 A: MemGPT (Memory GPTs) treats the context window like OS RAM with virtual memory. The model maintains a fixed core memory (always in context: persona, user profile, current task). Recent conversation is in recall storage (last N turns in context, FIFO). Older content is in archival storage (external vector database). The novel part: the model itself manages paging — it calls `memory_append(content)` to archive information and `memory_search(query)` to retrieve relevant content from the archive. This enables effectively unlimited conversation length because the model actively manages what stays in "RAM" based on current relevance. Cost: additional tool call overhead per turn; retrieval latency 20-100ms per search.
@@ -491,7 +498,7 @@ A: Sliding window simply drops the oldest messages when the context overflows �
 A: After each conversation, extract user-stated preferences via an LLM call: "Extract any explicit user preferences, constraints, or facts stated in this conversation as structured JSON." Store each extracted fact in a vector database with user_id metadata and a timestamp. At the start of each new conversation, run a semantic search against the user's memory using the current query: `memories = vector_db.search(query, filter={"user_id": user_id}, top_k=5)`. Inject the top-K results into the system prompt: "Known user preferences: [memories]." Add recency weighting to prefer recent facts over stale ones. Provide a mechanism for users to view, edit, and delete their stored memories for privacy compliance.
 
 **Q: How does token budget affect memory architecture decisions?**
-A: Token budget is the primary constraint driving every memory decision. At $5/1M input tokens (GPT-4o): a 128K context filled completely costs $0.64/call. Run 10 agents simultaneously making 20 calls each = $128/run — unsustainable. Token budget forces: (1) selective memory injection — retrieve top-K by relevance, not all memories; (2) summarization before storage — store 50-word summaries, not raw 500-word exchanges; (3) tiered memory — not all memory types need injection every call; (4) model routing — use cheaper models for memory-heavy steps. Rule of thumb: allocate ~20% of context to memory injection (semantic + episodic), 30% to conversation history, 50% to current task context and tool results.
+A: Token budget is the primary constraint driving every memory decision. At $5/1M input tokens (Claude Opus 5 / gpt-5.6-sol tier): a 128K context filled completely costs $0.64/call. Run 10 agents simultaneously making 20 calls each = $128/run — unsustainable. Token budget forces: (1) selective memory injection — retrieve top-K by relevance, not all memories; (2) summarization before storage — store 50-word summaries, not raw 500-word exchanges; (3) tiered memory — not all memory types need injection every call; (4) model routing — use cheaper models for memory-heavy steps. Rule of thumb: allocate ~20% of context to memory injection (semantic + episodic), 30% to conversation history, 50% to current task context and tool results.
 
 **Q: What is the "lost in the middle" problem and how does it affect memory injection?**
 A: LLM attention degrades for information placed in the middle of a long context — models tend to focus on the beginning (recency to the system prompt) and the end (recency to the current query). Information placed in the middle of a 100K context window is recalled less reliably. For memory injection: place the most critical memories at the END of the system context (just before the conversation begins) rather than the middle. Structure injected memory as a concise summary immediately preceding the conversation history, not buried in a long system prompt. Avoid injecting large blocks of memory that push the current task far from the beginning or end of context. See [Context Windows & Long Context](../context_windows_and_long_context/README.md) for the underlying attention behavior.
@@ -518,10 +525,10 @@ A: A production memory retrieval system should score candidate memories on three
 A: Three practical strategies in increasing sophistication: (1) Sliding window with system prompt pinning — keep the last N turns plus always pin the first 2-3 turns (which contain task context and user constraints); fast, zero LLM cost, but loses middle conversation context; (2) Summarize-and-replace — when the context exceeds a threshold (e.g., 80K tokens), call an LLM to compress the middle 70% into a 500-token summary and replace it; costs one extra LLM call but preserves key information; (3) Hierarchical chunking — maintain summaries at multiple granularities: per-turn summary (30 words), per-task-phase summary (100 words), session summary (200 words); inject the appropriate granularity based on how far back the information is. In production, a 10-step agent task generates ~15K tokens of intermediate context; summarize-and-replace brings this down to ~2K while retaining all key facts for the synthesis step.
 
 **Q: How do you persist agent memory across sessions in a multi-user system?**
-A: Cross-session memory requires: (1) user scoping — every memory is tagged with `user_id` (or `session_id` for anonymous users); retrieval always filters by `user_id` to prevent cross-user leakage; (2) persistence layer — a vector database (Pinecone, Qdrant, pgvector) stores memory embeddings; a relational table stores metadata (user_id, content, created_at, importance, source_session_id); (3) session boundary triggers — at conversation end, an extraction job runs: summarize the session, extract facts, write to the persistent store; at session start, retrieve top-K memories and inject into the system prompt; (4) versioning — when a user states a fact that contradicts an existing memory ("I switched from Python to Go"), mark the old memory as `superseded` and create a new one; never delete the old one (audit trail); (5) TTL and deletion — honor user deletion requests by removing the vector and the metadata row; GDPR requires this within 30 days of request. LangGraph checkpointing + a vector store is the most common production pattern for this.
+A: Cross-session memory requires: (1) user scoping — every memory is tagged with `user_id` (or `session_id` for anonymous users); retrieval always filters by `user_id` to prevent cross-user leakage; (2) persistence layer — a vector database (Pinecone, Qdrant, pgvector) stores memory embeddings; a relational table stores metadata (user_id, content, created_at, importance, source_session_id); (3) session boundary triggers — at conversation end, an extraction job runs: summarize the session, extract facts, write to the persistent store; at session start, retrieve top-K memories and inject into the system prompt; (4) versioning — when a user states a fact that contradicts an existing memory ("I switched from Python to Go"), mark the old memory as `superseded` and create a new one; never delete the old one (audit trail); (5) TTL and deletion — honor user deletion requests by removing the vector and the metadata row; GDPR (Art. 17, with the Art. 12(3) deadline) requires action without undue delay and in any event within one month of the request. LangGraph checkpointing + a vector store is the most common production pattern for this.
 
 **Q: What privacy concerns arise with agent memory and how do you address them?**
-A: Agent memory creates persistent profiles of user behavior, preferences, and sensitive disclosures. Key risks: (1) accidental storage of sensitive data — a user mentions their salary, medical condition, or password in passing; the extraction LLM stores it as a "fact"; mitigation: add a classifier to the extraction step that blocks storage of PII categories (financial, medical, credential data) and flags them for review rather than auto-storing; (2) cross-user data leakage — a bug in user_id scoping causes Alice's memories to be retrieved for Bob; mitigation: row-level security in the database enforced at query time, not just application level; (3) right to erasure — GDPR Article 17 requires full deletion within 30 days; ensure deletion cascades across all storage layers (vector index, relational metadata, backup snapshots); (4) purpose limitation — memories collected for task A should not be used for task B without consent; scope memories by application context. Best practice: give users a memory management UI showing all stored facts, with the ability to edit or delete individual entries.
+A: Agent memory creates persistent profiles of user behavior, preferences, and sensitive disclosures. Key risks: (1) accidental storage of sensitive data — a user mentions their salary, medical condition, or password in passing; the extraction LLM stores it as a "fact"; mitigation: add a classifier to the extraction step that blocks storage of PII categories (financial, medical, credential data) and flags them for review rather than auto-storing; (2) cross-user data leakage — a bug in user_id scoping causes Alice's memories to be retrieved for Bob; mitigation: row-level security in the database enforced at query time, not just application level; (3) right to erasure — GDPR Article 17 requires erasure without undue delay, and Article 12(3) caps the response at one month; ensure deletion cascades across all storage layers (vector index, relational metadata, backup snapshots); (4) purpose limitation — memories collected for task A should not be used for task B without consent; scope memories by application context. Best practice: give users a memory management UI showing all stored facts, with the ability to edit or delete individual entries.
 
 ---
 
@@ -568,7 +575,7 @@ Student Session Start
       |
       v
 ┌──────────────────────────────────────────────────────────────┐
-│  TUTORING SESSION (GPT-4o)                                   │
+│  TUTORING SESSION (frontier chat model)                      │
 │  System: [student profile + memory injection]                │
 │  Conversation: multi-turn tutoring interaction               │
 │  Tools: submit_problem, check_answer, show_hint, grade_work  │
@@ -790,6 +797,6 @@ Two separate numbers are doing two separate jobs here, and conflating them is a 
     saved                              $81,600 / week
 ```
 
-Note the first line: 240,000 tokens does not fit in a 128,000-token window at all. At 50+ sessions the full-history approach is not merely expensive, it is **impossible** in one call — it silently becomes multiple calls or a truncation, which is why it was abandoned rather than merely budgeted for. This is the same wall the token-budget code above is built to stay behind.
+Note the first line: 240,000 tokens is nearly 2x the 128,000-token working budget this module has been costing against, and would not fit in a single call on a 200K-window model at all. At 50+ sessions the full-history approach is not merely expensive — past the budget it silently becomes multiple calls or a truncation, which is why it was abandoned rather than merely budgeted for. A 1M-token model would technically hold it, at roughly $1.20 of input **per call**, which is the same wall arriving as a bill instead of an error. This is what the token-budget code above is built to stay behind.
 
 **Why splitting the index moved precision 18 points.** The single-store version put "struggled with factoring trinomials" and "prefers visual examples" in one embedding space, so an algebra query retrieved learning-style facts and vice versa — 71% precision means roughly 3 of every 10 retrieved memories were off-type. Separating episodic, semantic, and procedural stores does not improve any embedding; it removes the competition, lifting precision to 89% (a 25% relative gain) purely by narrowing what each query is allowed to match. The mastery map goes further and abandons similarity search entirely for a keyed lookup, because "quadratic_equations" is too short a string for cosine similarity to rank reliably.

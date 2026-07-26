@@ -26,7 +26,7 @@
 ### Non-Functional Requirements
 - **Latency**: Complete review within 60 seconds for PRs under 500 changed lines; 120 seconds for PRs up to 2,000 lines
 - **Accuracy**: > 70% precision on flagged issues (< 30% false positive rate); > 50% acceptance rate on suggestions
-- **Scale**: 50,000 PRs/day; peak 2,000 PRs/hour during US business hours
+- **Scale**: 50,000 PRs/day; peak ~8,300 PRs/hour during US business hours (see Section 2)
 - **Availability**: 99.9% uptime (missing a review is tolerable; repeated failures erode trust)
 - **Privacy**: Repository code processed for review only; never stored beyond review lifecycle; never used for model training
 - **Cost**: < $0.50 per PR review on average (viable for team/org billing)
@@ -65,11 +65,11 @@ Token budget per review:
 
 Daily token usage:
   50,000 PRs x 17,000 tokens = 850M tokens/day
-  At $3/M input + $15/M output (GPT-4o pricing):
-    Input cost: 750M x $3/M = $2,250/day
+  At $2.50/M input + $15/M output (gpt-5.4, July 2026 list pricing):
+    Input cost: 750M x $2.50/M = $1,875/day
     Output cost: 100M x $15/M = $1,500/day
-    Total: $3,750/day = ~$0.075/PR average
-  With multi-pass (3 passes average): $0.075 x 3 = $0.225/PR
+    Total: $3,375/day = ~$0.0675/PR average
+  With multi-pass (3 passes average): $0.0675 x 3 = $0.203/PR
 ```
 
 ### Latency Budget
@@ -477,7 +477,7 @@ Convention detection (runs once per repo, cached):
         - "**/test/**"
 
 Style analysis is cheaper than security/performance:
-  Uses smaller model (GPT-4o-mini or Claude Haiku): $0.25/M input tokens
+  Uses a small model (gpt-5.4-nano at $0.20/M input, or Claude Haiku 4.5 at $1/M)
   Lower token budget: 8,000 tokens (conventions + diff only)
   Latency: 5-8 seconds
 
@@ -668,19 +668,29 @@ Webhook-based integration (provider-agnostic):
     System fetches diff, runs review, posts comments via provider API
 
 Rate limiting against Git provider APIs:
-  GitHub: 5,000 requests/hour per installation
+  GitHub App installation: 5,000 requests/hour baseline. It scales up by
+    50 req/hr per repository beyond 20 repos and 50 req/hr per user beyond
+    20 users, capped at 12,500 req/hr; installations on GitHub Enterprise
+    Cloud start at 15,000 req/hr.
   Budget per review: ~10 API calls (fetch diff, fetch files, post review)
-  Max concurrent reviews per GitHub App installation: 500/hour
+  So a baseline installation supports ~500 reviews/hour; a large org near
+    the 12,500 cap supports ~1,250/hour.
   Backpressure: if approaching rate limit, queue reviews with delay
 ```
 
 #### Webhook-to-review pipeline
 
-BROKEN: synchronous review in the webhook handler causes GitHub's 10-second timeout → 3 retries
-→ 3 duplicate review comment sets on every PR.
+BROKEN: synchronous review in the webhook handler blows GitHub's 10-second delivery timeout.
+GitHub's documented contract is "respond with a 2XX response within 10 seconds"; past that it
+terminates the connection and marks the delivery failed. GitHub does **not** automatically retry
+— redelivery is manual, from the webhook UI or the redelivery API. So the failure mode is not
+duplicate comments from auto-retry; it is *silently dropped reviews* plus duplicate comments when
+an operator hits "Redeliver" on a batch of failed events and the worker has meanwhile completed
+the original run. Both halves need fixing: return fast so deliveries succeed, and make the post
+idempotent so a manual redelivery cannot double-comment.
 
 ```python
-# BROKEN — blocks 15-45s; GitHub retries 3x after 10s
+# BROKEN — blocks 15-45s; GitHub cuts the connection at 10s and marks delivery failed
 async def broken(req): await run_full_review(await req.json()); return {"status": "done"}
 # FIX: HMAC-SHA256 verify, enqueue to Redis, return job_id in <2s
 import hashlib, hmac, json, uuid
@@ -704,19 +714,29 @@ async def handle_pr_event(payload: dict) -> str:
     await _redis.rpush("review:jobs", json.dumps(job.__dict__))
     return job.job_id
 async def post_review_comment(job: ReviewJob, findings: list[dict]) -> None:
-    """POST findings as a single GitHub PR review; X-Idempotency-Key prevents duplicates."""
+    """POST findings as a single GitHub PR review.
+
+    NOTE: the GitHub REST API has no idempotency-key header — sending one is a
+    no-op. Idempotency must be enforced on our side: claim a Redis key derived
+    from (pr_number, head_sha) with SET NX before posting, and only post if the
+    claim succeeds.
+    """
     idem = hashlib.sha256(f"{job.pr_number}:{job.head_sha}".encode()).hexdigest()[:16]
+    if not await _redis.set(f"review:posted:{job.owner}:{job.repo}:{idem}",
+                            job.job_id, nx=True, ex=86400):
+        return  # a previous delivery of this same head SHA already posted
     comments = [{"path": f["file"], "line": f["line"], "side": "RIGHT",
                  "body": f"**[{f['severity'].upper()}] {f['type']}**\n\n{f['explanation']}"}
                 for f in findings]
     async with httpx.AsyncClient() as c:
         await c.post(f"{GITHUB_API}/repos/{job.owner}/{job.repo}/pulls/{job.pr_number}/reviews",
-                     headers={"Authorization": f"Bearer {job.token}", "X-Idempotency-Key": idem},
+                     headers={"Authorization": f"Bearer {job.token}"},
                      json={"event": "COMMENT", "comments": comments}, timeout=15)
 ```
 
-Webhook responds in <2s; full review takes 15-45s; Redis bridges the gap.
-`X-Idempotency-Key = sha256(pr_number+head_sha)[:16]` prevents duplicates on worker retry.
+Webhook responds in <2s so GitHub never marks the delivery failed; the full review takes 15-45s
+out of band; Redis bridges the gap. The `SET NX` claim on `sha256(pr_number+head_sha)[:16]` is
+the actual duplicate guard — GitHub will happily accept the same review body twice if you ask it to.
 
 ### 4.8 Learning from Feedback
 
@@ -929,7 +949,7 @@ Action on secret detection:
 | Comment cap | 25 per review | Unlimited | Developer research shows > 25 comments ignored; prioritize high-value |
 | Style detection | Detect conventions from codebase | Require explicit config | Lower friction for onboarding; config file overrides detection |
 | Review verdict | Configurable blocking | Always block on critical | Enterprise teams have different risk tolerance; default: comment only |
-| Model selection | GPT-4o for security/logic, mini for style | Single model for all | Cost optimization: style pass is 10x cheaper with smaller model |
+| Model selection | Frontier model (gpt-5.4 class) for security/logic, nano/Haiku for style | Single model for all | Cost optimization: the style pass is ~12x cheaper per input token on gpt-5.4-nano ($0.20/M) than gpt-5.4 ($2.50/M) |
 | Feedback learning | Daily batch recalibration | Real-time update | Batch is simpler, debuggable; real-time risks feedback loops |
 | Confidence scoring | Platt-scaled calibration | Raw LLM confidence | Raw LLM scores are poorly calibrated; Platt scaling maps to true probability |
 
@@ -940,33 +960,38 @@ Action on secret detection:
 ```
 Cost per review breakdown (average PR: 300 lines, 5 files):
 
+  All prices are July 2026 list rates: gpt-5.4 $2.50/M input, $15/M output;
+  gpt-5.4-nano $0.20/M input, $1.25/M output.
+
   LLM costs (3 analysis passes):
     Security pass: 12,000 input + 1,500 output tokens
-      GPT-4o: 12K x $2.50/M + 1.5K x $10/M = $0.030 + $0.015 = $0.045
+      gpt-5.4: 12K x $2.50/M + 1.5K x $15/M = $0.0300 + $0.0225 = $0.0525
     Performance pass: 12,000 input + 1,500 output tokens
-      GPT-4o: same = $0.045
+      gpt-5.4: same = $0.0525
     Logic/bug pass: 12,000 input + 1,500 output tokens
-      GPT-4o: same = $0.045
+      gpt-5.4: same = $0.0525
     Style pass: 8,000 input + 800 output tokens
-      GPT-4o-mini: 8K x $0.15/M + 0.8K x $0.60/M = $0.0012 + $0.0005 = $0.002
+      gpt-5.4-nano: 8K x $0.20/M + 0.8K x $1.25/M = $0.0016 + $0.0010 = $0.0026
     Comment generation: 3,000 input + 1,000 output tokens
-      GPT-4o-mini: $0.0005 + $0.0006 = $0.001
+      gpt-5.4-nano: 3K x $0.20/M + 1K x $1.25/M = $0.0006 + $0.0013 = $0.0019
 
-  Total LLM cost per review: $0.138
+  Total LLM cost per review: 3 x $0.0525 + $0.0026 + $0.0019 = $0.162
 
   Infrastructure costs per review:
     Compute (worker time): $0.005
     Git API calls: $0.000 (free within rate limits)
     Storage (review results): $0.0001
     Queue/orchestration: $0.001
+    Infrastructure subtotal: $0.0061
 
-  Total cost per review: ~$0.145
-  With overhead (20%): ~$0.175 per review
+  Total cost per review: $0.162 + $0.0061 = ~$0.168
+  With overhead (20%): ~$0.202 per review
 
 Daily cost at 50,000 PRs:
-  LLM: 50,000 x $0.138 = $6,900/day
-  Infrastructure: 50,000 x $0.037 = $1,850/day
-  Total: $8,750/day = ~$262,500/month
+  LLM: 50,000 x $0.162 = $8,100/day
+  Infrastructure + 20% overhead: 50,000 x ($0.0061 + $0.0336) = $1,985/day
+  Total: ~$10,085/day = ~$303,000/month (30-day)
+  Still 2.5x inside the < $0.50/PR budget from Section 1.
 
 Cost optimization levers:
   1. Skip analysis passes based on file type:
@@ -976,12 +1001,18 @@ Cost optimization levers:
      Identical diff hunks across repos (boilerplate): cache findings
      Cache hit rate: ~5% (low, but free savings)
   3. Use smaller models where possible:
-     Style + comment generation on GPT-4o-mini: 10x cheaper
+     Style + comment generation on gpt-5.4-nano: ~12x cheaper per input token
      Security must stay on capable model (cost of missing a vuln >> LLM cost)
-  4. Prompt caching (Anthropic/OpenAI):
-     System prompts are identical across reviews
-     Cached prompt tokens: 50% discount
-     Saves ~15% on input token costs
+  4. Prompt caching (OpenAI / Anthropic):
+     System prompts are identical across reviews.
+     Cached input tokens bill at 0.1x the standard input rate on both
+     providers (a 90% discount, not 50%). The 800-token system prompt is
+     ~6.7% of a 12,000-token pass, so caching it saves ~6% of input cost —
+     real, but an order of magnitude smaller than the headline discount
+     suggests, because the diff itself is never cacheable.
+     To move the needle, make the *repository context* cacheable too: pin
+     type definitions and convention fingerprints ahead of the diff in the
+     prompt so a stable 5-6K-token prefix qualifies for the cache hit rate.
 ```
 
 ---
@@ -1043,27 +1074,31 @@ with spans: `diff_parse` [200-400ms], `context_build` [800-1800ms, budget_tokens
 input_tokens, output_tokens, findings_count], `comment_post` [500-1500ms, idempotency_key]. P95
 SLO 60,000ms; `llm_review` spans aggregate `cost_usd` per review for billing. See
 [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_apps.md).
-**Incident Runbooks.** Runbook 1 — Duplicate comments storm. Symptom: 3 identical comments per PR
-line. Root cause: webhook retry (handler >10s) + missing idempotency key. Fix: confirm
-`handle_pr_event` returns in <2s; set `X-Idempotency-Key: sha256(pr_number+head_sha)[:16]`.
+**Incident Runbooks.** Runbook 1 — Duplicate comments storm. Symptom: identical comments repeated
+on a PR line. Root cause: an operator bulk-redelivered webhook events that had already been
+processed (GitHub does not auto-retry, so this is always operator- or worker-initiated), with no
+server-side dedup. Fix: confirm `handle_pr_event` returns in <2s so deliveries stop failing in the
+first place, and confirm the `review:posted:*` Redis `SET NX` claim is in the post path.
 Runbook 2 — False positive spike. Symptom: FP rate >15% on golden set. Root cause: prompt
-regression or silent model upgrade (check `x-model-version` header). Fix: roll back prompt alias;
-pin model (`model="gpt-4o-2024-05-13"`); re-run golden eval; fire `alert.fp_rate_spike`.
+regression or a silent model upgrade behind a floating alias. Fix: roll back the prompt alias; pin
+an explicit dated model snapshot rather than a floating alias; re-run golden eval; fire
+`alert.fp_rate_spike`.
 Runbook 3 — Latency SLA breach. Symptom: P95 `pr_review` >90,000ms for >5 minutes. Root cause:
-LLM rate limit (429) or insufficient workers (>2,000 PRs/hour needs >40). Fix: token-bucket queue
-per org tier, failover to Claude Sonnet; scale worker replicas 20→60; target queue depth <50.
+LLM rate limit (429) or insufficient workers (the 8,300 PRs/hour peak from Section 2 needs
+~170 concurrent workers at 45s/review). Fix: token-bucket queue per org tier, failover to a
+second provider (Claude Sonnet 5); scale worker replicas; target queue depth <50.
 
 ---
 
 ## 10. Interview Discussion Points
 
-**Why multi-pass beats single-pass for code review.** A single LLM call with "review this code for all issues" produces shallow, generic comments. Each analysis domain (security, performance, style) has different detection patterns, different context needs, and different severity calibration. A focused security prompt with OWASP examples in the system message catches 2-3x more real vulnerabilities than a generic review prompt. The trade-off is 3x more LLM calls and cost, but at $0.14 per review the absolute cost is trivial compared to the value of catching a SQL injection.
+**Why multi-pass beats single-pass for code review.** A single LLM call with "review this code for all issues" produces shallow, generic comments. Each analysis domain (security, performance, style) has different detection patterns, different context needs, and different severity calibration. A focused security prompt with OWASP examples in the system message catches 2-3x more real vulnerabilities than a generic review prompt. The trade-off is 3x more LLM calls and cost, but at ~$0.17 per review the absolute cost is trivial compared to the value of catching a SQL injection.
 
 **The context loading problem is the hardest engineering challenge.** Reviewing a diff without surrounding context is like reading one paragraph of a novel -- you miss the plot. But loading the entire repository (500K+ tokens) is impractical and expensive. The solution is a priority-based context loading strategy: changed file full content first, then direct imports, then type definitions, then tests. This mirrors how a human reviewer reads a PR: look at the diff, then check what the referenced classes look like. The 2-second budget for context loading forces efficient API usage (parallel batch fetches, caching file content across reviews in the same repo).
 
 **Confidence calibration separates useful tools from noisy ones.** Raw LLM confidence scores are notoriously poorly calibrated -- a model might say "95% confident" on 60% of its findings, even when only 70% are correct. Platt scaling (logistic regression on historical outcomes) maps raw scores to true acceptance probabilities. Without calibration, you either show too many false positives (eroding trust) or filter too aggressively (missing real issues). The feedback loop matters: every accepted/dismissed finding improves the calibration model.
 
-**Why 25 comments maximum per review.** Developer psychology research (Microsoft, Google code review studies) shows that review effectiveness drops sharply beyond 20-30 comments. Developers experience "comment fatigue" and start dismissing findings without reading them. Showing the top 25 by severity times confidence maximizes the chance that critical findings get attention. For teams that want completeness, the "/review-all" escape hatch provides the full list on demand.
+**Why 25 comments maximum per review.** The cap is a product judgement calibrated on this system's own dismissal telemetry, not a published finding — be careful not to cite it as one in an interview. What the code-review literature does establish is a ceiling on *review size*: the long-cited Cisco/SmartBear study found defect-detection efficacy falls off past roughly 200-400 changed lines per review and past ~60 minutes of continuous reviewing. The comment-count cap is the analogous idea applied to output volume: past a couple dozen comments, developers experience "comment fatigue" and start dismissing findings without reading them, which is measurable in this system as a falling accept rate on comments ranked 25+. Showing the top 25 by severity times confidence maximizes the chance that critical findings get attention. For teams that want completeness, the "/review-all" escape hatch provides the full list on demand.
 
 **Secret scanning must be deterministic, not probabilistic.** A leaked AWS key costs $10K-$100K+ in unauthorized compute charges. The consequence of a false negative (missed secret) is orders of magnitude worse than a false positive (flagging a non-secret). Regex-based detection with known patterns provides near-perfect recall on known secret formats. The LLM layer adds coverage for novel patterns (e.g., a variable named "db_password" assigned a literal string) that regex cannot catch. This defense-in-depth approach -- deterministic layer plus probabilistic layer -- is standard in security tooling.
 
@@ -1071,8 +1106,8 @@ per org tier, failover to Claude Sonnet; scale worker replicas 20→60; target q
 
 **The blocking gate trade-off in CI/CD.** Blocking PRs on critical findings prevents security issues from reaching production but creates friction: a false positive on a Friday afternoon blocks a hotfix deployment. The production-safe default is "comment only" (never block). Teams that enable blocking should set a high confidence threshold (0.9+) for blocking findings and maintain a fast manual override process (security team can dismiss within minutes). The escalation path matters more than the gate itself.
 
-**Cost scales linearly with PR volume but optimization is sublinear.** At 50,000 PRs/day the LLM cost is $6,900/day. Doubling to 100,000 PRs/day doubles cost to $13,800/day -- there is no economy of scale on per-token LLM pricing. However, optimizations compound: skipping unnecessary analysis passes based on file type saves 20-30%, [prompt caching](../llm_caching/README.md) saves 15%, and the style pass on a cheaper model saves 10x for that pass. The architecture decision to use different models for different passes (GPT-4o for security, GPT-4o-mini for style) is a direct reflection of this cost reality. A single-model architecture would either overpay for style analysis or underperform on security detection.
+**Cost scales linearly with PR volume but optimization is sublinear.** At 50,000 PRs/day the LLM cost is $8,100/day. Doubling to 100,000 PRs/day doubles cost to $16,200/day -- there is no economy of scale on per-token LLM pricing. However, optimizations compound: skipping unnecessary analysis passes based on file type saves 20-30%, [prompt caching](../llm_caching/README.md) saves ~6% on a diff-dominated prompt (the cached-input rate is 0.1x standard input on both major providers, but only the ~800-token system prompt is stably cacheable), and the style pass on a nano-class model is ~12x cheaper per input token. The architecture decision to use different models for different passes (a gpt-5.4-class model for security, gpt-5.4-nano for style) is a direct reflection of this cost reality. A single-model architecture would either overpay for style analysis or underperform on security detection.
 
-**Handling rapid force-pushes without wasted reviews.** A developer force-pushing five times in two minutes would naively trigger five full reviews at ~$0.14 each, with the first four obsolete on arrival. Two mechanisms prevent this: the queue deduplicates on (repo, PR, head SHA) with a 5-minute NX lock, so identical heads never enqueue twice, and a short debounce window (30-60 seconds) on `synchronize` events collapses rapid successive pushes into one review of the final SHA. The idempotency key `sha256(pr_number + head_sha)` is the last line of defense: even if a worker retries, GitHub sees one review. The follow-up worth raising in an interview: cancel in-flight reviews when a newer head SHA arrives — posting comments on stale code erodes trust faster than a slow review does.
+**Handling rapid force-pushes without wasted reviews.** A developer force-pushing five times in two minutes would naively trigger five full reviews at ~$0.17 each, with the first four obsolete on arrival. Two mechanisms prevent this: the queue deduplicates on (repo, PR, head SHA) with a 5-minute NX lock, so identical heads never enqueue twice, and a short debounce window (30-60 seconds) on `synchronize` events collapses rapid successive pushes into one review of the final SHA. A second `SET NX` claim on `sha256(pr_number + head_sha)` at post time is the last line of defense: even if a worker retries or an operator redelivers the webhook, only one review is posted. Note that this guard must live in our own store — GitHub's REST API has no idempotency-key header to lean on. The follow-up worth raising in an interview: cancel in-flight reviews when a newer head SHA arrives — posting comments on stale code erodes trust faster than a slow review does.
 
 **Privacy constraints shape the architecture more than scale does.** The "never stored beyond review lifecycle, never used for training" requirement is a hard commercial constraint — enterprises will not adopt a tool that retains their source code. It forces: stateless review workers that discard code after posting comments, a repository context cache holding derived artifacts (symbol indexes, convention fingerprints) rather than raw source where possible, and a feedback learning pipeline that trains on finding metadata (category, confidence, accept/dismiss outcomes) rather than code content. The 91GB/year of stored review results contains comments and outcomes, not diffs. This is why the learning pipeline improves confidence calibration (Platt scaling on outcomes) instead of fine-tuning a model on customer code.

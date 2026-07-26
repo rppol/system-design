@@ -396,9 +396,13 @@ Benefits:
 A small draft model proposes K tokens; the large target model verifies all K in a single forward pass (parallel, like prefill) and accepts the matching prefix, generating a correction at the first mismatch. Net: 2-4 tokens produced per target forward pass instead of 1 — and because the accepted/corrected tokens are chosen via rejection sampling, the output distribution is **provably identical** to pure target decoding (no quality tradeoff, only throughput).
 
 ```
-Acceptance rate α (probability draft token matches target) drives the speedup:
-  α=0.90 → E[accepted]≈3.5 tokens/pass | α=0.75 → ≈2.6 | α=0.60 → ≈2.1 | α=0.50 → ≈1.7
-  Break-even ≈ α=0.45 for K=4 draft tokens (below this, draft overhead exceeds gains)
+Acceptance rate α (probability draft token matches target) drives the speedup.
+Geometric upper bound at K=4, E[tokens] = (1 - α^5)/(1 - α):
+  α=0.90 → 4.10 tokens/pass | α=0.75 → 3.05 | α=0.60 → 2.31 | α=0.50 → 1.94
+Real systems land below this because acceptance decays with draft depth — the deep-dive
+quotes ~3.5 / 2.6 / 2.1 / 1.7 as the measured end-to-end equivalents.
+Break-even ≈ α=0.45 for K=4 at a *measured* wall-clock draft cost of ~0.2 target passes
+per draft token (below this, draft overhead exceeds gains)
 
 Practical: code α≈0.75-0.90 (use it) | chat α≈0.60-0.75 (marginal) | creative writing α≈0.40-0.55 (usually not worth it)
 ```
@@ -455,7 +459,7 @@ That framing explains the shape of every number in the table above. Streaks are 
 
 Read the two right-hand columns against each other. `E[tokens]` climbs 1.70 → 2.77 → 3.06 and is already 83% of its ceiling by γ=4, while cost climbs 1.1 → 1.4 → 1.6 without ever slowing down. Their ratio peaks at γ=4 and decays after. This is why production configs cluster at K=4-5 (the case study uses K=5) rather than K=20 — γ is not "more is better," it has an optimum that moves with α.
 
-**Where break-even comes from.** Speedup > 1 requires `E[tokens] > 1 + γc`. At γ=4, c=0.1 the bar is 1.4 tokens per pass, and solving `(1 - α^5)/(1 - α) = 1.4` lands near α ≈ 0.45 — precisely the break-even quoted above. Below that, the draft model is burning GPU on tokens the target throws away.
+**Where break-even comes from.** Speedup > 1 requires `E[tokens] > 1 + γc`, so break-even moves with the draft cost `c`. At γ=4 and the optimistic `c = 0.1` used above, the bar is only 1.4 tokens per pass and `(1 - α^5)/(1 - α) = 1.4` solves at α ≈ 0.29. The α ≈ 0.45 figure quoted earlier corresponds to a *measured* wall-clock draft cost of `c ≈ 0.2` (bar = 1.8 tokens per pass) — kernel launches, sampling, and scheduling do not shrink with the draft model, so real draft cost runs far above its FLOPs ratio. Below break-even, the draft model is burning GPU on tokens the target throws away.
 
 **Why α is not a knob you can turn.** Nothing in your config sets α; it emerges from how closely the draft's distribution tracks the target's on *this* traffic. Code is templated and predictable (α ≈ 0.75-0.90), open-ended creative text is not (α ≈ 0.40-0.55), and the same deployment therefore sees different speedups per route. It also collapses if you break the match — a T=0 draft against a T=0.7 target drops α to ~0.35 (Section 14), which the formula turns into `(1 - 0.35^5)/0.65 / 1.4 = 1.09×`, essentially nothing for the extra GPU. Monitor α in production the way you monitor cache hit rate; it is the same kind of number.
 
@@ -513,8 +517,8 @@ With prompt caching (Anthropic Claude):
 
 **How it works in the API:**
 - Mark cache breakpoints in your prompt with `cache_control: {type: "ephemeral"}`
-- Cache persists for ~5 minutes (Anthropic) or up to 1 hour with refreshes
-- Cached tokens billed at 10% of base cost; cache reads at ~10% latency
+- Two TTLs: 5 minutes (default) and 1 hour via `cache_control: {type: "ephemeral", ttl: "1h"}`. Each hit refreshes the entry at no extra cost, so a continuously used prefix outlives its nominal TTL
+- Cache *reads* are billed at 0.1× base input price; the *write* costs 1.25× (5-min TTL) or 2.0× (1-hour TTL). Anthropic reports improved time-to-first-token for long cached documents but publishes no latency percentage
 
 **Practical savings:**
 ```
@@ -589,7 +593,7 @@ Production numbers (LLaMA 3 70B, 128K context, full KV cache ~40 GB/request):
 
 | Method | Memory kept | Quality loss | Overhead | Adaptive? |
 |---|---|---|---|---|
-| H2O | ~3% (~10GB) | <1% | 5-10% per step | Yes (dynamic) |
+| H2O | ~20-25% (~8-10GB) | <1% | 5-10% per step | Yes (dynamic) |
 | SnapKV | ~20% (~8GB) | <1% | 2-5% one-time | No (static) |
 | StreamingLLM | ~5-20% | 2-5% | ~0% | No (fixed sink+window) |
 
@@ -642,7 +646,7 @@ vllm serve llama3-70b \
   --max-num-batched-tokens 512   # chunk size
 ```
 
-Chunked prefill is enabled by default in vLLM >= 0.4.0 for models above 7B. SGLang also implements chunked prefill with similar semantics.
+Chunked prefill landed in vLLM 0.4.x as the opt-in `--enable-chunked-prefill` flag; in vLLM's V1 engine it is **enabled by default whenever possible**, with the chunk size taken from `--max-num-batched-tokens` (recent releases default this to 8192 for online serving, not 512). SGLang also implements chunked prefill with similar semantics.
 
 ### 4.12 Request Scheduling Strategies
 
@@ -699,7 +703,9 @@ Options:
                 (fast resume start, but wastes the prefill compute already done)
   3. Queue: reject new request if KV cache full (simplest, but poor user experience)
 
-vLLM default: swap to CPU. Recompute is better when prefill is cheap (short inputs).
+vLLM V1 default: RECOMPUTE (recomputation has lower overhead in the V1 architecture);
+        SWAP is the alternative and wins mainly on very long sequences, where
+        re-running prefill costs more than a PCIe round trip.
 ```
 
 **Production systems combine all strategies:**
@@ -960,7 +966,7 @@ Without speculative decoding (large model only):
 With speculative decoding:
   Small model: |---draft 4 tokens fast---|
   Large model: |-------verify all 4 in one pass + correct---------|
-  Net: ~4 tokens per large model pass → 3-4× speedup
+  Net: 2-3 tokens per large model pass at realistic acceptance rates → ~2-3× speedup
 ```
 
 ### Streaming Delivery: SSE vs WebSocket
@@ -1133,7 +1139,7 @@ The trick is that batching moves *your* intensity without changing the *hardware
 
 Every token from B=1 to B=156 is free throughput — the weight bytes were being loaded anyway. Past 156 you are paying real compute per added request and step time starts to stretch, so throughput flattens while latency climbs.
 
-**Why you almost never reach the ridge point.** Serving B=156 concurrent 8K requests on LLaMA 3 70B needs `156 × 8,192 × 320 KB ≈ 409 GB` of KV cache by the Section 4.3 formula — five H100s of KV alone, on top of the 140 GB of weights. You hit KV OOM around B=30-40 and stop there. This is the punchline that ties the whole module together: the *compute* crossover is theoretical, the *memory* wall is what you actually operate against, and that is why PagedAttention, GQA, KV quantization, and eviction all attack the same term.
+**Why you almost never reach the ridge point.** Serving B=156 concurrent 8K requests on LLaMA 3 70B needs `156 × 8,192 × 320 KB ≈ 399 GB` of KV cache by the Section 4.3 formula — five H100s of KV alone, on top of the 140 GB of weights. You hit KV OOM around B=30-40 and stop there. This is the punchline that ties the whole module together: the *compute* crossover is theoretical, the *memory* wall is what you actually operate against, and that is why PagedAttention, GQA, KV quantization, and eviction all attack the same term.
 
 ### Latency vs Throughput Optimization
 
@@ -1257,19 +1263,18 @@ Production gotchas:
 
 ### vLLM (UC Berkeley, 2023)
 - PagedAttention + continuous batching
-- 24× higher throughput than naive serving
+- The vLLM launch blog (2023-06-20) reported up to **24× higher throughput than HuggingFace Transformers** and up to 3.5× over HuggingFace TGI; the SOSP'23 PagedAttention paper reports **2-4×** against FasterTransformer and Orca. Quote whichever baseline you mean — they are different comparisons
 - Used by Anyscale, Scale AI, Together AI, and thousands of self-hostings
 - Open source; de facto standard for open-source model serving
 
 ### OpenAI API
 - Continuous batching across thousands of users
-- Speculative decoding for common patterns
-- Dynamic model routing (easy → gpt-4o-mini, hard → gpt-4o)
-- Custom CUDA kernels for attention and matmul
+- Dynamic model routing across a tiered family (a cheaper small model for easy queries, the flagship for hard ones)
+- Serving internals (kernels, speculative decoding, batching policy) are not published — treat descriptions of them as inference, not fact
 
 ### Anthropic Claude
-- Flash Attention 2/3 for long context (200K)
-- Custom inference stack (not public)
+- Custom inference stack; internals not public, so no specific attention kernel can be attributed
+- Current Claude models (Opus 5, Sonnet 5, Fable 5) expose a 1M-token context window
 - Streaming response delivery; tokens arrive in real-time
 
 ---
@@ -1355,16 +1360,16 @@ A: Temperature scales logits before softmax: logits_scaled = logits / T. T=0 (gr
 A: Top-k keeps exactly k tokens regardless of probability gaps — poor when the true distribution has 3 dominant tokens (wastes budget on long tail) or 100 plausible tokens (k=50 misses valid options). Top-p dynamically chooses the smallest set of tokens with cumulative probability >= p — adaptive, but can include very low-probability tokens when the distribution is flat. Min-p keeps tokens with probability >= min_p × max_token_probability — scales the threshold relative to the most likely token, naturally handling both peaked and flat distributions. With min_p=0.05: in a peaked distribution, only the top 2-3 tokens survive; in a flat distribution, a wider set survives proportionally. Min-p tends to outperform top-p on creative tasks empirically and is the default in many llama.cpp builds. Top-p with p=0.9 remains the most widely used default in production APIs.
 
 **Q: Explain PagedAttention. What problem does it solve that continuous batching alone does not?**
-A: Continuous batching solves GPU utilization — requests fill slots as others complete, eliminating idle time between requests. PagedAttention solves KV cache memory fragmentation within the GPU. Without paging, each sequence pre-allocates a contiguous memory block for max_seq_len tokens — a sequence using 1,024 of 4,096 allocated tokens wastes 75%. At high concurrency, this fragmentation can waste 60-80% of KV cache memory, limiting the number of concurrent users. PagedAttention manages KV cache like OS virtual memory: fixed-size physical blocks (default 16 tokens), allocated on demand, non-contiguous in physical memory, shared across sequences with the same prefix via copy-on-write. Fragmentation drops to below 4%. The combined effect of continuous batching plus PagedAttention is the 24× throughput improvement reported in the vLLM paper vs. HuggingFace naive serving.
+A: Continuous batching solves GPU utilization — requests fill slots as others complete, eliminating idle time between requests. PagedAttention solves KV cache memory fragmentation within the GPU. Without paging, each sequence pre-allocates a contiguous memory block for max_seq_len tokens — a sequence using 1,024 of 4,096 allocated tokens wastes 75%. At high concurrency, this fragmentation can waste 60-80% of KV cache memory, limiting the number of concurrent users. PagedAttention manages KV cache like OS virtual memory: fixed-size physical blocks (default 16 tokens), allocated on demand, non-contiguous in physical memory, shared across sequences with the same prefix via copy-on-write. The vLLM launch blog reports the resulting waste as "under 4%". The combined effect of continuous batching plus PagedAttention is the up-to-24× throughput figure that same blog reports against HuggingFace Transformers; the SOSP'23 paper's own headline is 2-4× against FasterTransformer and Orca.
 
 **Q: How does speculative decoding maintain output distribution equivalence with the target model?**
 A: The draft model generates K tokens with its own distribution p_draft. The target model verifies each draft token t_i and accepts with probability min(1, p_target(t_i) / p_draft(t_i)). If the draft token is very likely under the target model, it is accepted with high probability. If rejected, a correction token is sampled from the residual distribution max(0, p_target - p_draft) normalized, guaranteeing the final output matches exactly what the target model would have produced independently. This acceptance-rejection scheme is mathematically proven to produce the identical distribution as pure target model decoding — there is no quality tradeoff, only a throughput benefit. The speedup comes solely from fewer serial target model passes.
 
 **Q: How does speculative decoding work and what are its requirements?**
-A: A small draft model quickly generates K tokens. The large target model verifies all K tokens in a single forward pass (parallel, like prefill). Tokens matching the draft distribution are accepted; at the first rejection, the target's correction token is used and the process restarts. Requirements: (1) draft and target must share the same tokenizer; (2) draft must approximate the target's distribution well (similar model family) for high acceptance rate; (3) acceptance rate must exceed roughly 0.5 for K=4 to break even on overhead. Best speedup on predictable outputs (code, boilerplate, structured text): 2-3×. Falls below break-even for creative writing where the draft and target diverge frequently.
+A: A small draft model quickly generates K tokens. The large target model verifies all K tokens in a single forward pass (parallel, like prefill). Tokens matching the draft distribution are accepted; at the first rejection, the target's correction token is used and the process restarts. Requirements: (1) draft and target must share the same tokenizer; (2) draft must approximate the target's distribution well (similar model family) for high acceptance rate; (3) acceptance rate must exceed roughly 0.45 for K=4 at realistic measured draft cost, or speculation is a net slowdown. Best speedup on predictable outputs (code, boilerplate, structured text): 2-3×. Falls below break-even for creative writing where the draft and target diverge frequently.
 
 **Q: What is prompt caching (Anthropic-style) and how does it differ from vLLM's prefix caching?**
-A: Anthropic prompt caching: the user explicitly marks cache breakpoints in the API request using `cache_control: {type: "ephemeral"}`. The server stores KV tensors for the marked prefix and reuses them for subsequent requests within a ~5-minute TTL. Benefit: 90% cost reduction on cached tokens, approximately 10% latency reduction. vLLM prefix caching and SGLang RadixAttention: automatic and fine-grained — the inference engine maintains a radix tree of KV blocks indexed by token sequences; any matching prefix automatically reuses cached blocks without user annotation. vLLM's approach is transparent to users and works at block granularity (16 tokens per block); Anthropic's requires explicit API integration. Use Anthropic-style caching for shared system prompts in production APIs. Use RadixAttention for inference engines serving structured workloads like multi-turn chat with common prefixes or RAG with shared document context.
+A: Anthropic prompt caching: the user explicitly marks cache breakpoints in the API request using `cache_control: {type: "ephemeral"}`. The server stores KV tensors for the marked prefix and reuses them for subsequent requests within a 5-minute TTL (or 1 hour with `ttl: "1h"`), refreshed at no cost on every hit. Benefit: cache reads bill at 0.1× base input price — a 90% cost reduction on cached tokens; Anthropic reports improved time-to-first-token on long cached prefixes but publishes no latency percentage. vLLM prefix caching and SGLang RadixAttention: automatic and fine-grained — the inference engine maintains a radix tree of KV blocks indexed by token sequences; any matching prefix automatically reuses cached blocks without user annotation. vLLM's approach is transparent to users and works at block granularity (16 tokens per block); Anthropic's requires explicit API integration. Use Anthropic-style caching for shared system prompts in production APIs. Use RadixAttention for inference engines serving structured workloads like multi-turn chat with common prefixes or RAG with shared document context.
 
 **Q: A production LLM service is experiencing high P99 latency but median latency is fine. What are the likely causes?**
 A: P99 latency outliers typically come from three sources: (1) Long prefill blocking short requests — one 32K-token request monopolizes the GPU for seconds while short requests queue behind it. Diagnose: plot TTFT distribution against input length; outlier TTFT values correlate with long inputs. Fix: chunked prefill, request timeout limits. (2) KV cache pressure causing preemption — when GPU KV cache fills, vLLM preempts low-priority requests (swaps to CPU), then resumes — causing latency spikes. Diagnose: monitor vLLM's `gpu_cache_usage_perc` metric; P99 spikes correlate with cache usage approaching 100%. Fix: reduce max concurrent requests or add KV cache quantization. (3) HBM bandwidth saturation at high batch sizes — too many concurrent decode requests causes memory bandwidth contention. Fix: reduce batch size ceiling and accept lower throughput.
@@ -1376,7 +1381,7 @@ A: Per-token KV cache = 2 (K+V) × num_layers × num_kv_heads × head_dim × byt
 A: Beam search maintains k candidate sequences simultaneously, expanding each at every step and keeping the k highest-probability partial sequences. It guarantees a higher-probability final sequence than greedy decoding. Problems for production: (1) k× KV cache memory — beam width 5 needs 5× the KV cache of greedy; (2) k× compute per step; (3) empirically produces lower-quality outputs than sampling for open-ended generation — beam search tends toward repetitive, high-confidence but generic text; (4) incompatible with continuous batching because all k beams must complete together, holding a GPU slot until the longest beam finishes. Reserved for: offline batch translation, speech recognition transcription, or structured generation where maximizing sequence log-probability is the correct objective and memory is not a constraint.
 
 **Q: What is continuous batching and why does it improve throughput?**
-A: Naive batching waits for all requests in a batch to complete before accepting new ones. Short requests finish early but hold their GPU slot until the longest request in the batch completes. Continuous batching (iteration-level scheduling) adds new requests to the batch as soon as any request finishes. This eliminates the GPU idle time caused by waiting for slow requests before starting fast new ones. For a realistic workload with output lengths ranging from 50 to 2,000 tokens, continuous batching increases GPU utilization from roughly 30% to 90%, which translates to the 24× throughput improvement vLLM demonstrated over HuggingFace's generate() API.
+A: Naive batching waits for all requests in a batch to complete before accepting new ones. Short requests finish early but hold their GPU slot until the longest request in the batch completes. Continuous batching (iteration-level scheduling) adds new requests to the batch as soon as any request finishes. This eliminates the GPU idle time caused by waiting for slow requests before starting fast new ones. For a realistic workload with output lengths ranging from 50 to 2,000 tokens, continuous batching increases GPU utilization from roughly 30% to 90%. That scheduling win is only part of the up-to-24× vLLM's launch blog reported over HuggingFace's generate() API — the rest comes from PagedAttention raising the achievable batch size.
 
 ---
 
@@ -1410,9 +1415,9 @@ A: Naive batching waits for all requests in a batch to complete before accepting
 | Cost reduction (same GPU count) | — | 65% | 68% |
 
 **Key lessons:**
-- **Match draft and target sampling configuration.** A greedy (T=0) draft against a T=0.7 sampling target collapses acceptance to ~0.35 — unprofitable. vLLM passes the target's temperature to the draft automatically when `draft_temperature=None`.
+- **Know how your engine samples the draft.** vLLM's `draft_sample_method` defaults to `"greedy"` — the draft always takes its argmax and its probabilities are treated as one-hot in the rejection test. That is still exact, but against a high-temperature target the drafted mode is often not what the target would have drawn, so acceptance falls; `"probabilistic"` samples from the full draft distribution instead, at extra GPU memory cost.
 - **Disable speculative decoding for requests carrying logit processors.** Repetition/presence/frequency penalties and `logit_bias` create history-dependent state that diverges between draft and target after the first rejection, subtly corrupting the accepted-token distribution.
-- **Disable for short outputs and high concurrency.** Below ~50 expected output tokens, draft overhead exceeds the benefit; above batch size ~32-64, draft-model batching overhead outweighs the per-request acceptance gain (`speculative_disable_by_batch_size` in vLLM).
+- **Disable for short outputs and high concurrency.** Below ~50 expected output tokens, draft overhead exceeds the benefit; above batch size ~32-64, draft-model batching overhead outweighs the per-request acceptance gain (in current vLLM this is expressed as a `num_speculative_tokens_per_batch_size` schedule, which can taper K to 0 at high batch sizes).
 - **Acceptance rate is task-dependent and must be monitored per route, not globally** — code (~0.7-0.9) and chat (~0.5-0.6) populations mixed in one batch drag the effective speedup toward the lower-acceptance task's rate.
 
 → **Full case study** — architecture diagram, vLLM engine configuration, a production `SpeculativeDecodingMonitor` (rolling acceptance rate, adaptive K, auto-disable), three broken→fix pairs (temperature mismatch, logit-processor incompatibility, short-output gating), and dedicated interview Q&As for this deployment: [Speculative Decoding §14](speculative_decoding.md#14-case-study).

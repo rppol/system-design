@@ -469,12 +469,16 @@ def no_repeat_ngram_mask(logits, generated_ids, n: int = 3):
     return logits
 
 
-def dry_penalty(logits, generated_ids, base: float = 1.75, allowed_length: int = 2):
+def dry_penalty(logits, generated_ids, multiplier: float = 0.8,
+                base: float = 1.75, allowed_length: int = 2):
     """DRY (Don't Repeat Yourself): if the token x, appended to the
     sequence, would create a suffix that EXACTLY matches a substring
-    seen earlier (length >= allowed_length), apply a penalty that
-    grows EXPONENTIALLY with the length of the repeated run:
-        penalty(x) = base ^ (repeat_length - allowed_length)
+    seen earlier (length >= allowed_length), SUBTRACT from its logit
+    a penalty that grows EXPONENTIALLY with the length of that run:
+        penalty(x) = multiplier * base ** (repeat_length - allowed_length)
+        logits[x]  -= penalty(x)
+    (This is llama.cpp's `llama_sampler_dry` rule verbatim: it is an
+    ADDITIVE penalty in logit units, not a multiplicative factor.)
     Unlike no-repeat-ngram (hard ban at fixed n), DRY only fires on
     genuinely LONG verbatim repeats and scales severity with length --
     a 2-token coincidental repeat is barely penalized; an 8-token
@@ -529,43 +533,46 @@ Presence and repetition penalties barely distinguish a word used once from a wor
 ```
   ochre, logit -1.0, penalty 1.15
     correct (multiply) : -1.0 x 1.15 = -1.150   p = 0.00360
-    buggy   (divide)   : -1.0 / 1.15 = -0.870   p = 0.00476   <- 1.38x MORE likely
+    buggy   (divide)   : -1.0 / 1.15 = -0.870   p = 0.00476   <- 1.32x MORE likely
 
-  A penalty that makes a repeated token 38% more likely to be chosen again.
+  A penalty that makes a repeated token 32% more likely to be chosen again
+  than the correct rule leaves it -- and 38% more likely than no penalty at all.
 ```
 
 The bug is self-reinforcing: the tokens with negative logits are the unlikely ones, and each time one slips through it gets "penalized" into being even more attractive. This is a genuine class of implementation bug in hand-rolled samplers, and knowing *why* the branch is there — logits are unbounded in both directions, so "shrink toward zero" and "make less likely" are the same operation only on the positive side — is a common interview follow-up.
 
 **Why DRY exists despite repetition/frequency penalties already existing**: those penalties operate per-*token*, uniformly. A model stuck in a loop repeating an entire 12-token sentence has each individual token only modestly penalized (each token also appears in normal text) — the *loop* isn't punished, only common words are. DRY detects the *structural* repetition (an exact long substring recurrence) and penalizes it specifically, regardless of whether the individual tokens are common.
 
-**The idea behind it.** "Charge nothing for a repeat short enough to be a coincidence, then make every additional token of verbatim match multiply the bill by `1.75`."
+**The idea behind it.** "Charge nothing for a repeat too short to be worth noticing, then make every additional token of verbatim match multiply the bill by `1.75`."
 
 The exponent is a *length*, not a count — that is the design choice that separates DRY from every other penalty in Section 6.4. DRY does not care how often a token was used; it cares how long the matching run would become.
 
 | Symbol | What it is |
 |--------|------------|
-| `penalty(x)` | Multiplier applied against the candidate token's logit. `1.0` = untouched |
+| `penalty(x)` | Amount **subtracted** from the candidate token's logit. In logit units, like presence/frequency — not a multiplicative factor |
+| `multiplier` | Overall strength, `dry_multiplier`. `0.0` disables DRY entirely (llama.cpp's default); `0.8` is the common enabled setting |
 | `base` | Growth rate per extra token of match, default `1.75` |
 | `repeat_length` | How long a verbatim run choosing `x` would create |
-| `allowed_length` | Free allowance, default `2`. Runs at or under this cost nothing |
+| `allowed_length` | Free allowance, default `2`. Runs *shorter* than this are never scored at all |
 | `repeat_length - allowed_length` | The exponent. Zero at the allowance, then one per extra token |
 
-**Walk one example.** `base = 1.75`, `allowed_length = 2`:
+**Walk one example.** `multiplier = 0.8`, `base = 1.75`, `allowed_length = 2`:
 
 ```
-  repeat_length   exponent   penalty = 1.75^exponent
-  ---------------------------------------------------
-        2            0                1.0      free -- coincidence
-        3            1                1.75     mild nudge
-        5            3                5.36     clearly discouraged
-        8            6               28.72     effectively banned
-       12           10              269.39     annihilated
+  repeat_length   exponent   penalty = 0.8 x 1.75^exponent  (subtracted from logit)
+  ----------------------------------------------------------------------------------
+      0 or 1        n/a         0.00     never scored -- below the allowance
+        2            0          0.80     flat floor charge at the allowance
+        3            1          1.40     mild nudge
+        5            3          4.29     clearly discouraged
+        8            6         22.98     effectively banned
+       12           10        215.51     annihilated
 
   Each extra token of verbatim match multiplies the penalty by 1.75.
-  From a 3-token to a 12-token run: 1.75 -> 269.39, a 154x increase.
+  From a 3-token to a 12-token run: 1.40 -> 215.51, a 154x increase.
 ```
 
-Compare that curve against `no_repeat_ngram_size=3`, which is a step function: penalty `0` at length 2, penalty `infinity` at length 3, forever. DRY at length 3 charges `1.75` — a nudge the model can overrule if the continuation is genuinely correct — while still reaching `28.72` by length 8, where nothing legitimate lives. The exponential is doing the job the hard ban cannot: being wrong about a short repeat is cheap, and being wrong about a long one is impossible. This is why the case study in Section 14 could set `dry_allowed_length=3` and still leave a user's name or a recurring topic noun untouched.
+Compare that curve against `no_repeat_ngram_size=3`, which is a step function: penalty `0` at length 2, penalty `infinity` at length 3, forever. DRY at length 3 subtracts `1.40` from the logit — a nudge the model can overrule if the continuation is genuinely correct — while still reaching `22.98` by length 8, which is far beyond any logit gap and therefore a de facto ban. The exponential is doing the job the hard ban cannot: being wrong about a short repeat is cheap, and being wrong about a long one is impossible. This is why the case study in Section 14 could set `dry_allowed_length=3` and still leave a user's name or a recurring topic noun untouched.
 
 ### 6.5 Contrastive search and contrastive decoding
 
@@ -693,10 +700,12 @@ Mirostat (v1/v2):
      generation where static cutoffs drift over thousands of tokens.
 
 XTC (Exclude Top Choices):
-  With probability p_xtc, REMOVE all tokens with probability above a
-  threshold (except the single most-probable token is sometimes
-  exempted to preserve coherence on "obvious" continuations) BEFORE
-  the rest of the sampler runs.
+  With probability xtc_probability, find every token whose probability
+  is at or above xtc_threshold (llama.cpp default 0.1) and REMOVE all
+  of them EXCEPT THE LEAST PROBABLE ONE, before the rest of the
+  sampler runs. Keeping the *lowest* survivor above the threshold --
+  not the highest -- is what stops the output going incoherent: on a
+  peaked step only one token clears the threshold, so nothing is cut.
   -> Counter-intuitive: instead of cutting the TAIL (every other
      method here), XTC occasionally cuts the HEAD -- forcing the
      model to choose among its "second-best" continuations. Designed
@@ -743,7 +752,7 @@ The move that makes typical sampling unusual is that it sorts by `|distance from
   off by only 0.0944 nats.
 ```
 
-`blue`, the single most likely token, ranks *fourth*. It is too predictable: its surprise of `1.0708` sits `0.7056` nats below what the model expects to feel here. Typical sampling still keeps it at `tau=0.9` (it enters at cumulative `0.8297`), but it has been stripped of its privileged position — it is now one candidate among six rather than the token holding `34%` of the mass. Tighten `tau` to `0.5` and `blue` is cut entirely while `red`, `green`, and `purple` survive, which is the configuration that makes typical sampling's "never say the obvious thing" character most visible.
+`blue`, the single most likely token, ranks *fourth*. It is too predictable: its surprise of `1.0708` sits `0.7056` nats below what the model expects to feel here. Typical sampling still keeps it at `tau=0.9` (it enters at cumulative `0.8297`), but it has been stripped of its privileged position — it is now one candidate among six rather than the token holding `34%` of the mass. Tighten `tau` to `0.45` and `blue` is cut entirely while `red`, `green`, and `purple` survive (their running total reaches `0.4870`, crossing `0.45` before `blue` is ever reached), which is the configuration that makes typical sampling's "never say the obvious thing" character most visible. Note `tau=0.5` is *not* tight enough: `0.4870` falls short of `0.50`, so `blue` becomes the crossing token and is kept.
 
 #### Decoding eta sampling
 
@@ -902,9 +911,9 @@ not a sampler issue.
 ## 7. Real-World Examples
 
 - **OpenAI API** — `temperature` (0-2), `top_p`, `presence_penalty` and `frequency_penalty` (-2.0 to 2.0), `logit_bias` (token-id → -100..100 offset map), `seed` (best-effort reproducibility, with the batching caveat from Section 6.8).
-- **Anthropic API** — `temperature` (0-1), `top_p`, `top_k`; deliberately a smaller surface than OpenAI's, reflecting a preference for fewer, well-understood knobs.
-- **llama.cpp** — the most feature-complete open sampler chain: `top_k`, `top_p`, `min_p`, `typical_p`, `tfs_z` (tail-free), `mirostat` (v1/v2 with `mirostat_tau`/`mirostat_eta`), DRY (`dry_multiplier`, `dry_base`, `dry_allowed_length`), and XTC (`xtc_probability`, `xtc_threshold`) — and an explicit, documented sampler *order* configuration (`--samplers` flag lists the chain order).
-- **vLLM `SamplingParams`** — `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, plus `guided_*` parameters for constrained decoding (composed per Section 6.9).
+- **Anthropic API** — `temperature` (0-1, default 1.0), `top_p`, `top_k` — deliberately a smaller surface than OpenAI's. **These are removed from the newest generation**: setting `temperature`, `top_p` or `top_k` to any non-default value on Claude Opus 4.7 or later (including Opus 5, Fable 5, Mythos 5) returns a 400 error, and Anthropic's migration guide says to omit them entirely and steer behaviour by prompting instead. Sampler tuning is simply not a lever on those models.
+- **llama.cpp** — the most feature-complete open sampler chain: `top_k` (default 40), `top_p` (0.95), `min_p` (0.05), `typical_p` (1.0 = off), `top_n_sigma`, `mirostat` (v1/v2 with `mirostat_tau`/`mirostat_eta`), DRY (`dry_multiplier`, `dry_base` 1.75, `dry_allowed_length` 2), and XTC (`xtc_probability`, `xtc_threshold` 0.1) — plus an explicit, documented sampler *order* configuration (`--samplers`). Tail-free sampling (`tfs_z`) was **removed** in October 2024 (PR #10071) as redundant against min-p. Note the shipped default order is `dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature` — temperature runs **last**, i.e. after truncation, which is exactly Order B in Section 6.3.
+- **vLLM `SamplingParams`** — `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, plus `structured_outputs` / `StructuredOutputsParams` for constrained decoding (composed per Section 6.9). The older `guided_json`/`guided_regex`/`guided_choice`/`guided_grammar`/`guided_decoding_backend` parameters were removed in vLLM v0.12.0.
 - **HuggingFace `transformers` `GenerationConfig`** — the reference implementation; includes `penalty_alpha`/`top_k` for contrastive search, `typical_p`, `no_repeat_ngram_size`, and beam search (`num_beams`, `length_penalty`, `early_stopping`).
 
 ---
@@ -1000,7 +1009,7 @@ Both have "contrastive" in the name and both aim to reduce generic/repetitive ou
 Mirostat is a feedback-controlled sampler that targets a constant "surprise" value (≈ desired perplexity) over the course of generation. At each step it samples from a top-k window, measures the actual surprise of the sampled token, computes the error against the target, and adjusts `k` for the next step via a control-loop update — if generation drifts toward repetition (surprise too low), `k` grows to inject more diversity; if it drifts toward incoherence (surprise too high), `k` shrinks. Static top-p/min-p apply the *same* cutoff rule at token 10 and token 2,000, but a model's "comfortable" distribution shape can drift over a long generation — Mirostat's dynamic adjustment is specifically designed to counteract that drift, making it popular for multi-page creative generation where static cutoffs tend to degrade into either loops or rambling over length.
 
 **Q10: What is XTC and why is "removing the most likely tokens" a sensible sampling strategy?**
-XTC (Exclude Top Choices) probabilistically removes tokens *above* a probability threshold before the rest of the sampler runs — the opposite of every other method in this file, which cut the *tail*. The motivation: models often have a strong, "safe" default continuation (the most probable token) that is technically correct but generic — and if it's always chosen, output becomes formulaic ("the model always says the same thing"). By occasionally removing that top choice (with some probability, often exempting only the single best token to preserve coherence on genuinely unambiguous continuations), the model is forced to articulate its *second-best* idea, which is often more interesting without being incoherent — XTC never touches the incoherent tail, only the over-represented head.
+XTC (Exclude Top Choices) probabilistically removes tokens *above* a probability threshold before the rest of the sampler runs — the opposite of every other method in this file, which cut the *tail*. The motivation: models often have a strong, "safe" default continuation (the most probable token) that is technically correct but generic — and if it's always chosen, output becomes formulaic ("the model always says the same thing"). The mechanism detail interviewers probe: XTC keeps the *least* probable token that still clears `xtc_threshold` and deletes the ones above it, so the head is trimmed but never emptied — and on a genuinely peaked step where only one token clears the threshold, nothing is removed at all. That is what forces the model to articulate its *second-best* idea without letting the incoherent tail win, since XTC never touches the tail.
 
 **Q11: Why is beam search rarely used in production LLM serving despite guaranteeing higher sequence probability than greedy decoding?**
 Three reasons. First, memory: beam width `k` requires `k×` the KV cache of a single sequence — at `k=5`, 5× the memory footprint per request. Second, scheduling: beam search is incompatible with continuous batching's iteration-level scheduling, because all `k` beams for a request typically must complete together, holding a slot until the longest beam finishes — exactly the head-of-line problem continuous batching exists to solve. Third, and most subtly, quality: for *open-ended* generation, maximizing joint sequence probability empirically produces more generic, repetitive, "safe-at-every-step" text than sampling — beam search is the right objective for translation/ASR (where the evaluation metric directly rewards likelihood) but the wrong objective for creative or conversational generation.

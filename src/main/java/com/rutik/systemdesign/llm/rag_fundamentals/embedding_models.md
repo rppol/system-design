@@ -16,7 +16,7 @@ The choice of embedding model determines what "semantically similar" means in yo
 
 **Why it matters**: Embedding model selection is often the highest-impact architectural decision in a RAG pipeline. The difference between the best and worst embedding model for a specific domain can be 20-30% retrieval recall@10 — a gap no other component can bridge.
 
-**Key insight**: MTEB (Massive Text Embedding Benchmark) provides standardized recall and retrieval metrics across 58 tasks — use it to compare models, but always validate on your specific domain and query distribution, because MTEB may not represent your use case.
+**Key insight**: MTEB (Massive Text Embedding Benchmark) provides standardized recall and retrieval metrics across 8 task types and 58 datasets — use it to compare models, but always validate on your specific domain and query distribution, because MTEB may not represent your use case.
 
 ---
 
@@ -145,7 +145,7 @@ BAAI/bge-base-en-v1.5          768    512      63.6      Best open source (compa
 BAAI/bge-large-en-v1.5         1024   512      64.2      Best open source (quality)
 BAAI/bge-m3                    1024   8192     -         Multilingual; long context
 nomic-embed-text-v1.5          768    8192     62.4      Open source; long context
-E5-large-v2                    1024   512      62.8      Good general purpose
+E5-large-v2                    1024   512      62.3      Good general purpose
 Cohere embed-english-v3.0      1024   512      64.5      Managed; strong multilingual
 ```
 
@@ -190,9 +190,9 @@ The reason this is worth memorising is that dimension is the one model attribute
   text-embedding-3-large   3072   3072  x 4 = 12288 B     122.88 GB
 
   3-large vs bge-base : 122.88 / 30.72 = 4.0x the storage
-  quality bought      :  56.0  -  53.3  = 2.7 MTEB Retrieval points
+  quality bought      :  55.4  -  53.3  = 2.1 MTEB Retrieval points
 
-  So the last 2.7 points of retrieval score cost 4x the index. Whether that
+  So the last 2.1 points of retrieval score cost 4x the index. Whether that
   is a good trade is exactly the question Section 6's table exists to answer.
 ```
 
@@ -220,9 +220,9 @@ def embed_batch(texts: list[str], model: str = "text-embedding-3-small",
         embeddings.extend([item.embedding for item in response.data])
     return embeddings
 
-# Pricing (as of 2024):
+# Pricing (confirmed against OpenAI docs, July 2026):
 # text-embedding-3-small: $0.02/1M tokens
-# text-embedding-3-large: $0.13/1M tokens
+# text-embedding-3-large: $0.13/1M tokens  (Batch API is 50% of these rates)
 # For 10M chunks of 400 tokens: 4B tokens
 #   small: $80 one-time indexing cost
 #   large: $520 one-time indexing cost
@@ -300,7 +300,7 @@ doc_embedding = model.encode(chunk_text, normalize_embeddings=True)
 
 ### 3.5 MTEB Benchmark
 
-MTEB (Massive Text Embedding Benchmark) evaluates models across 58 tasks in 8 categories:
+MTEB (Massive Text Embedding Benchmark) evaluates models across 8 task types spanning 58 datasets and 112 languages (Muennighoff et al., 2022):
 ```
 Categories:
   Retrieval:       Given query, find relevant documents (most important for RAG)
@@ -463,8 +463,9 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 
 ## 5. Real-World Examples
 
-### OpenAI's Embedding in ChatGPT File Upload
-- text-embedding-ada-002 → text-embedding-3-small for retrieval over user files
+### OpenAI Embeddings API (the managed option, as used for file-retrieval features)
+- text-embedding-3-small superseded text-embedding-ada-002 as the default managed model
+  (OpenAI does not publish which model backs ChatGPT's own file retrieval)
 - 1536-dim embeddings, 8191-token context window
 - Managed endpoint: no infrastructure; pay-per-use
 
@@ -487,10 +488,16 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 | bge-base-en-v1.5 | 53.3 | 768 | 512 tok | Self | Free |
 | bge-large-en-v1.5 | 54.3 | 1024 | 512 tok | Self | Free |
 | bge-m3 | 54.7 | 1024 | 8192 tok | Self | Free |
-| text-embedding-3-small | 55.0 | 1536 | 8191 tok | API | $0.02/M tok |
-| text-embedding-3-large | 56.0 | 3072 | 8191 tok | API | $0.13/M tok |
-| Cohere embed-v3 | 55.5 | 1024 | 512 tok | API | ~$0.10/M tok |
+| text-embedding-3-small | 51.1 | 1536 | 8191 tok | API | $0.02/M tok |
+| text-embedding-3-large | 55.4 | 3072 | 8191 tok | API | $0.13/M tok |
+| Cohere embed-english-v3.0 | 55.9 (BEIR) | 1024 | 512 tok | API | $0.10/M tok |
 | nomic-embed-v1.5 | 53.0 | 768 | 8192 tok | Self | Free |
+
+Note the ordering: on MTEB Retrieval nDCG@10, `text-embedding-3-small` (51.08) sits *below*
+both self-hosted BGE models — its appeal is the managed endpoint and 8k context, not raw
+retrieval quality. Cohere also ships `embed-v4.0` (1536-dim, multimodal, $0.12/M text tokens)
+alongside the v3 line. The bge-m3 figure is the one row here not confirmed against a primary
+source this pass; treat it as indicative.
 
 ---
 
@@ -586,19 +593,19 @@ A: Four strategies. First, chunking: split the document into chunks that fit wit
 A: Measure recall@10 on a labeled retrieval test set: 100-200 (query, expected_document_ids) pairs created by domain experts. Run both the base model and fine-tuned model on this test set. Record recall@10: fraction of queries where the expected document appears in top-10 retrieved results. Also measure: (1) MRR@10 (Mean Reciprocal Rank) — measures average rank of the first relevant document; (2) NDCG@10 — weighted rank measure. A fine-tuned model should show >5% recall@10 improvement to justify the fine-tuning effort and maintenance overhead. If improvement is less, the base model is already well-calibrated for the domain, or the training data isn't high quality.
 
 **Q: What are the cost implications of embedding model choice at scale?**
-A: Cost comparison for 10M documents × 400 tokens average = 4B tokens indexing: OpenAI text-embedding-3-small: $0.02/1M tokens × 4B = $80 one-time indexing cost. OpenAI text-embedding-3-large: $0.13/1M tokens × 4B = $520 one-time indexing. BAAI/bge-base self-hosted: GPU cost only — on an A10G GPU at $1/hr, embedding 4B tokens takes ~8 hours = $8. Re-embedding for model updates is a major cost: switching from ada-002 to text-embedding-3 requires re-embedding the entire corpus. At 10M documents with monthly refresh rate: bge self-hosted cost approaches 0; API cost can be $80-520/month. Above ~50M documents, self-hosted embedding becomes cheaper than the OpenAI API.
+A: Cost comparison for 10M documents × 400 tokens average = 4B tokens indexing: OpenAI text-embedding-3-small: $0.02/1M tokens × 4B = $80 one-time indexing cost. OpenAI text-embedding-3-large: $0.13/1M tokens × 4B = $520 one-time indexing. BAAI/bge-base self-hosted: GPU cost only — on an A10G GPU at $1/hr, embedding 4B tokens takes ~8 hours = $8. Re-embedding for model updates is a major cost: switching from ada-002 to text-embedding-3 requires re-embedding the entire corpus. At 10M documents with monthly refresh rate: bge self-hosted cost approaches 0; API cost can be $80-520/month. Note the marginal cost already favours self-hosting at this 10M-document scale ($8 of GPU time versus $80 of API spend); the real break-even is not a document count but whether you already operate GPUs — if the fixed cost of running and maintaining inference hardware has to be created from scratch, the API stays cheaper for far longer.
 
 **Q: What is the asymmetric nature of query-document embedding and how does BGE handle it?**
-A: In retrieval, queries are short (5-20 words) and documents are longer (100-500 tokens). Bi-encoders trained symmetrically (where query and document encoders are identical) underperform on this asymmetry because the model wasn't explicitly trained to bridge the length gap. BGE addresses this by requiring a query-specific prefix: "Represent this sentence for searching relevant passages: [query]" for queries, and no prefix for documents. The prefix trains the model to encode queries in "retrieval mode" — producing vectors aligned with document vectors rather than symmetric sentence vectors. Critically: you must use this prefix consistently at query time; forgetting it degrades retrieval quality by ~3-5% on BGE models.
+A: In retrieval, queries are short (5-20 words) and documents are longer (100-500 tokens). Bi-encoders trained symmetrically (where query and document encoders are identical) underperform on this asymmetry because the model wasn't explicitly trained to bridge the length gap. BGE addresses this by requiring a query-specific prefix: "Represent this sentence for searching relevant passages: [query]" for queries, and no prefix for documents. The prefix trains the model to encode queries in "retrieval mode" — producing vectors aligned with document vectors rather than symmetric sentence vectors. Critically: you must use this prefix consistently at query time — BAAI's own model card instructs adding it for short query-to-passage retrieval, and omitting it measurably degrades retrieval on those models.
 
 **Q: When should you choose dense vs sparse retrieval from an embedding model perspective?**
 A: Dense (embedding) retrieval excels at semantic similarity and paraphrase matching — queries phrased differently from the document still retrieve correctly because the embedding captures meaning, not words. Sparse (BM25) retrieval excels at exact keyword matching, rare terms, and entity names — product SKUs, regulation numbers, error codes, and proper nouns that the embedding model may not have seen frequently during training. Use dense for conversational semantic queries ("explain how X works"), use sparse for keyword-heavy queries (error codes, product names, regulation IDs), and use hybrid for production systems serving real users with a mixed query distribution (see [retrieval_methods.md](retrieval_methods.md) for hybrid fusion). The embedding model choice is irrelevant for BM25 — sparse retrieval operates on raw tokenized text.
 
 **Q: How do you fine-tune an embedding model with hard negatives?**
-A: Hard negatives are passages that are superficially similar to the query but do not contain the answer — they are semantically adjacent but factually incorrect. Standard random negatives (random passages from the corpus) are too easy; the model quickly learns to distinguish them and stops improving. Hard negative mining: retrieve the top-50 candidates for each training query using BM25 or the base embedding model, filter out confirmed true positives using ground-truth labels, and treat the remaining high-scoring non-relevant passages as hard negatives. Use these in contrastive training via MultipleNegativesRankingLoss or TripletLoss. Hard negative mining improves fine-tuned model recall@10 by 15-25% over random-negative training because the model must learn the subtle distinctions that matter in your domain.
+A: Hard negatives are passages that are superficially similar to the query but do not contain the answer — they are semantically adjacent but factually incorrect. Standard random negatives (random passages from the corpus) are too easy; the model quickly learns to distinguish them and stops improving. Hard negative mining: retrieve the top-50 candidates for each training query using BM25 or the base embedding model, filter out confirmed true positives using ground-truth labels, and treat the remaining high-scoring non-relevant passages as hard negatives. Use these in contrastive training via MultipleNegativesRankingLoss or TripletLoss. Hard negative mining reliably beats random-negative training because the model must learn the subtle distinctions that matter in your domain; the size of the gain depends entirely on how confusable your corpus is, so measure it against a random-negative baseline instead of assuming a headline percentage.
 
 **Q: How does Matryoshka truncation affect retrieval quality at different dimensions?**
-A: Truncating a Matryoshka-trained embedding from 768 to 256 dimensions retains approximately 95% of retrieval quality (recall@10) for most general-purpose tasks. Below 128 dimensions, quality drops sharply to 80-85% of the full-dimension baseline — the model can no longer represent the full range of semantic distinctions needed for retrieval. The exact breakpoint depends on domain: tasks with high lexical similarity between relevant and irrelevant documents (legal, medical) need more dimensions to capture fine-grained distinctions; simpler semantic tasks tolerate more aggressive truncation. Practical approach: test recall@10 at 64, 128, 256, 512 dimensions on your labeled eval set and pick the smallest dimension that stays within 3% of the full-dimension baseline — this minimizes storage and ANN search cost.
+A: Quality degrades gracefully rather than falling off a cliff, because MRL training front-loads information into the leading dimensions. OpenAI's published anchor point: `text-embedding-3-large` truncated to 256 dimensions still scores higher on MTEB than the full 1536-dimension `text-embedding-ada-002`. Push the prefix far enough down and quality does collapse — the model can no longer represent the full range of semantic distinctions needed for retrieval — but where that happens is corpus-specific, so find your own knee rather than trusting a published cutoff. The exact breakpoint depends on domain: tasks with high lexical similarity between relevant and irrelevant documents (legal, medical) need more dimensions to capture fine-grained distinctions; simpler semantic tasks tolerate more aggressive truncation. Practical approach: test recall@10 at 64, 128, 256, 512 dimensions on your labeled eval set and pick the smallest dimension that stays within 3% of the full-dimension baseline — this minimizes storage and ANN search cost.
 
 **Q: What are the challenges of multilingual embedding models?**
 A: Multilingual models must align representations across languages so that "machine learning" (English) and its translations in French, German, and Japanese cluster together in embedding space — a much harder training objective than monolingual alignment. Challenges: (1) lower-resource languages receive weaker embeddings because training data is sparse; cross-lingual retrieval accuracy for low-resource language queries drops 10-20% vs. high-resource languages; (2) cross-lingual retrieval (query in English, documents in French) accuracy drops 10-20% vs. monolingual retrieval even for well-resourced language pairs; (3) vocabulary coverage varies — the tokenizer may break low-resource language words into many sub-word tokens, reducing effective context window. Models like multilingual-e5-large and Cohere embed-multilingual-v3.0 handle 100+ languages and are the correct defaults for multilingual RAG.
@@ -676,7 +683,8 @@ User Query (any language)
     |   country_availability includes user.country
     |   product_status = "active"
     |
-    +-- Reranker (Cohere rerank-multilingual-v3.0)
+    +-- Reranker (Cohere managed rerank; the v3.x line was deprecated
+    |   2026-07-01 and now routes to cohere-rerank-4-fast)
     |   Top-200 → Top-20 for display
     |
     +-- Results Ranked by (rerank_score × 0.7 + popularity_score × 0.3)
@@ -721,7 +729,9 @@ args = SentenceTransformerTrainingArguments(
     learning_rate=1e-5,               # low LR to preserve multilingual alignment
     warmup_ratio=0.1,
     fp16=True,
-    evaluation_strategy="epoch",
+    # `evaluation_strategy` was removed in transformers 4.46 — the arg is now
+    # `eval_strategy`, and it requires an eval_dataset= on the trainer.
+    eval_strategy="epoch",
 )
 
 trainer = SentenceTransformerTrainer(

@@ -34,7 +34,7 @@ The key insight: **more test-time compute = better answers**, at least for tasks
 
 ### 4.1 OpenAI o1 / o3
 
-OpenAI's reasoning model series (2024). Uses a hidden "thinking" phase before responding:
+OpenAI's original reasoning model series (2024-2025). Uses a hidden "thinking" phase before responding. **Status check (July 2026):** the o-series is being retired — `o1-preview` shut down 2025-07-28, `o1-mini` 2025-10-27, `o1` and `o3-mini` shut down 2026-10-23, `o3` on 2026-12-11. OpenAI's current reasoning line is the GPT-5.6 series (`gpt-5.6-sol` $5/$30 per 1M, `gpt-5.6-terra` $2.50/$15, `gpt-5.6-luna` $1/$6), where `reasoning.effort` replaces a raw token budget and defaults to `medium`. The o1/o3 results below are kept because they are the published record of the test-time-compute result, not because those endpoints are still the ones to build on.
 
 ```
 User: Prove that √2 is irrational.
@@ -64,33 +64,43 @@ xychart-beta
     title "AIME 2024 accuracy"
     x-axis ["GPT-4o", "o1", "o3"]
     y-axis "Accuracy (%)" 0 --> 100
-    bar [13, 74, 99.3]
+    bar [12, 74, 96.7]
 ```
 
-o3's 99.3% is best in the world and surpasses expert human competitors (~85%); the jump from GPT-4o's 13% comes entirely from test-time thinking, not model scale.
+Read the split and scaffold before the number. GPT-4o's 12% and o1's 74% are both **single-sample pass@1** on AIME 2024, from OpenAI's "Learning to Reason with LLMs" (Sept 2024) — the same post reports o1 at 83% with consensus over 64 samples and 93% when re-ranking 1,000 samples, so "o1 scores 74 or 83 or 93" are three different scaffolds, not three measurements. o3's 96.7% is from the December 2024 *preview* announcement; the o3 that actually shipped in April 2025 scored **91.6% on AIME 2024 without tools**. The jump from GPT-4o comes from test-time thinking rather than model scale, but no public figure exists for "expert human competitors" on AIME as a percentage, so do not quote one.
 
 ### 4.2 DeepSeek-R1
 
-Open-source reasoning model (2025) trained entirely with RL:
+Open-weights reasoning model (2025). Two artefacts, and conflating them is the
+most common error in write-ups of this paper:
 
 ```
-Training approach (surprising — no SFT warm-up initially):
-  Stage 1: GRPO (Group Relative Policy Optimization) with:
-    - Correctness reward: +1 if final answer is correct, 0 otherwise
-    - Format reward: +0.1 if <think>...</think><answer>...</answer> format followed
-  No human-labeled reasoning data!
+DeepSeek-R1-Zero — the pure-RL one, no SFT at all:
+  GRPO (Group Relative Policy Optimization) with rule-based rewards only:
+    - Accuracy reward: is the final answer correct (math answer / code tests)
+    - Format reward: was the <think>...</think><answer>...</answer> structure used
+  The paper does not publish numeric reward magnitudes for these terms.
+  No human-labeled reasoning data, no reward model, no MCTS.
 
-What emerged:
+What emerged in R1-Zero:
   - Model spontaneously developed "aha moments" (self-correction)
   - Extended chain-of-thought
   - Reflection and verification behaviors
+  Also emerged: poor readability and language mixing — the reason R1 exists.
 
-Stage 2: SFT warm-up + GRPO (improved version)
-  Better instruction following + strong reasoning
+DeepSeek-R1 — the shipped model, a FOUR-stage pipeline, not pure RL:
+  1. Cold-start SFT on a few thousand curated, readable CoT examples
+  2. Reasoning-oriented RL (GRPO; accuracy + format + language-consistency reward)
+  3. Rejection sampling from that checkpoint (~600k reasoning samples kept)
+     mixed with non-reasoning data (~800k total) -> SFT again
+  4. All-scenario RL: rule-based rewards for reasoning plus model-based
+     preference rewards for helpfulness and harmlessness
 ```
 
 DeepSeek-R1 performance: comparable to o1 on many benchmarks.
-Impact: proved that reasoning can emerge from pure RL without supervised reasoning data.
+Impact: R1-Zero proved that reasoning behaviours can emerge from pure RL with no
+supervised reasoning data; R1 showed that a small SFT cold start plus more RL
+stages is what makes that usable.
 For PPO vs GRPO fundamentals and reward-model training, see [Alignment & RLHF](../alignment_and_rlhf/README.md).
 
 ### 4.3 Process Reward Models (PRM)
@@ -211,11 +221,11 @@ So `0.600 -> 0.633` — a 3.3-point gain, not a miracle. Now sweep `p` and `N` a
   0.40    10        0.166      -23.4   voting AMPLIFIES the error; below 50% it hurts
   0.60    10        0.633       +3.3   real but small; the module's low end
   0.80    10        0.967      +16.7   the sweet spot the 5-15% claim comes from
-  0.60    40        0.871      +27.1   more chains buy a lot while p is mid-range
-  0.80    40        0.9996     +19.9   saturated; N=10 already captured the gain
+  0.60    40        0.870      +27.0   more chains buy a lot while p is mid-range
+  0.80    40        0.99998    +20.0   saturated; N=10 already captured the gain
 ```
 
-**Where it saturates, and why.** Each extra chain shrinks the error, but it shrinks a quantity that is already small — going `N = 10 -> 40` at `p = 0.80` moves accuracy from 96.7% to 99.96%, buying 3.3 points for 4x the cost, while the same jump at `p = 0.60` buys 23.8 points. The cost is linear in `N`; the benefit decays exponentially. That is the whole reason the rule of thumb is "worth it between 40% and 80% single-chain accuracy" — above it there is nothing left to win, and below 50% the majority is voting for the *wrong* answer.
+**Where it saturates, and why.** Each extra chain shrinks the error, but it shrinks a quantity that is already small — going `N = 10 -> 40` at `p = 0.80` moves accuracy from 96.7% to 99.998%, buying 3.3 points for 4x the cost, while the same jump at `p = 0.60` buys 23.7 points. The cost is linear in `N`; the benefit decays exponentially. That is the whole reason the rule of thumb is "worth it between 40% and 80% single-chain accuracy" — above it there is nothing left to win, and below 50% the majority is voting for the *wrong* answer.
 
 **Why the `p < 0.5` row is worse than useless.** With `p = 0.40` a single sample is right 40% of the time, but the majority of ten samples is right only 16.6% of the time. Voting is a *sharpening* operator: it drives the outcome toward whatever the model believes most often, so when the model's favourite answer is wrong, voting removes the lucky correct samples that would otherwise have shown up. In production this is the trap — self-consistency reports look great on easy benchmarks and silently degrade the hardest slice of traffic, the exact slice you deployed it for.
 
@@ -262,7 +272,12 @@ Rollout: complete a reasoning chain from a node → get reward
 UCB selection: balance exploration vs exploitation
 Backprop: update node values with rollout rewards
 
-Used in: AlphaCode 2, AlphaProof (Google DeepMind math reasoning)
+Used in: AlphaProof (DeepMind) — a pre-trained LM coupled to the AlphaZero RL
+  algorithm, searching over proof steps in Lean
+Not MCTS: AlphaCode 2 is often miscited here. It samples up to ~1M C++ programs
+  per problem with Gemini Pro, then prunes to 10 submissions by test-based
+  filtering, behavioural clustering and a fine-tuned scoring model — massive
+  sampling plus reranking, with no tree search
 Limitation: slow — requires many forward passes (10-1000× base inference)
 ```
 
@@ -314,18 +329,18 @@ The reason it is a *sum of two terms* rather than a rule with an if-statement is
 
 **Node B wins despite being the worse-looking branch.** On raw value A is far ahead — 0.800 versus 0.600 — but A's opinion rests on 30 rollouts while B's rests on 5. The exploration term prices that gap: B's bonus is 1.353 against A's 0.552, more than covering the 0.200 value deficit. MCTS is saying "your evidence that B is worse is too thin to act on."
 
-Now spend 25 more rollouts on B, which confirm B really is a 0.600 branch. The parent is now at 130:
+Now spend 25 more rollouts on B, which confirm B really is a 0.600 branch. The parent is now at 125:
 
 ```
                      Q      n     exploitation      exploration                 UCT
-  node A           24.0     30       0.800          1.41 x sqrt(4.868/30)     1.368
-                                                  = 1.41 x 0.4028  = 0.568
-  node B           18.0     30       0.600          1.41 x sqrt(4.868/30)     1.168
-                                                  = 1.41 x 0.4028  = 0.568
+  node A           24.0     30       0.800          1.41 x sqrt(4.828/30)     1.366
+                                                  = 1.41 x 0.4012  = 0.566
+  node B           18.0     30       0.600          1.41 x sqrt(4.828/30)     1.166
+                                                  = 1.41 x 0.4012  = 0.566
 
-  ln N(parent) = ln 130 = 4.868
+  ln N(parent) = ln 125 = 4.828
 
-  MCTS now picks node A  (1.368 > 1.168)
+  MCTS now picks node A  (1.366 > 1.166)
 ```
 
 Once the two children have equal visit counts their bonuses are identical and cancel exactly, so the decision collapses to pure value — and A wins on merit. The exploration term did its whole job and then got out of the way. This self-cancelling property is why MCTS converges: every child's bonus shrinks as `1/sqrt(n)` while `ln N(parent)` grows only logarithmically, so the bonus is guaranteed to lose to the value term eventually, for every node, no matter how the search started.
@@ -357,9 +372,12 @@ Types of reward hacking in reasoning training:
    Model learns to output high-confidence final answers regardless of actual
    certainty — catastrophic for high-stakes deployments
 
-Real example: DeepSeek-R1 early training showed "verbosity hacking" where
-models generated long but low-quality reasoning chains to exploit the
-format reward before the correctness signal dominated.
+Documented example: DeepSeek-R1-Zero, trained with pure RL and rule-based
+rewards, developed poor readability and mixed languages mid-chain. That is
+what the R1 paper actually reports, and it is why R1 adds a cold-start SFT
+stage and a language-consistency reward. "Verbosity hacking" is a plausible
+sibling failure but is not a published finding of that paper — treat it as an
+illustrative pattern, not a citation.
 ```
 
 **Mitigations:**
@@ -396,17 +414,22 @@ Observed pattern:
 The model's thinking budget allocation is poorly calibrated without intervention.
 ```
 
-**s1 paper "Wait" token technique (Stanford, 2025):**
+**s1 paper "Wait" token technique (Muennighoff et al., 2025, arXiv 2501.19393):**
 ```
-During RL training, when the model attempts to end its thinking early,
-insert a "Wait" token to force continuation:
+"Budget forcing" is a DECODING-time intervention, not a training one. When the
+model tries to end its thinking early, suppress the end-of-thinking token and
+append "Wait" to force continuation:
 
   Model: "...so the answer is 42. </think>"
-  Intervention: replace </think> with "Wait, let me verify this..."
+  Intervention: suppress </think>, append "Wait"
   Model continues: "Actually, I should check by substituting back..."
 
-This trains the model to use its full allocated budget before concluding,
-especially on problems that warrant extended thinking.
+The same knob truncates in the other direction: force </think> to cap the budget.
+
+Note what s1 did NOT use: there is no RL in the paper. s1-32B was produced by
+plain SFT on s1K — 1,000 questions with reasoning traces, selected for
+difficulty, diversity and quality. Budget forcing then lifted AIME24 from
+50% to 57% at inference time, on the already-trained model.
 ```
 
 **Budget forcing at inference:**
@@ -418,13 +441,18 @@ max_thinking_tokens parameter controls how long the model can think:
 
 Cost model:
   Reasoning token cost = thinking_tokens × price_per_token
-  o1 bills thinking tokens at the output rate: $60/1M (input: $15/1M)
-  A 10,000-token thinking chain costs $0.60 — 50-100× a standard short response
+  Reasoning tokens are NOT returned to you, but they ARE billed as output tokens.
+  o1 (deprecated, shutdown 2026-10-23): $15/1M input, $60/1M output
+    A 10,000-token thinking chain costs 10,000 × $60/1M = $0.60
+    — 50-100× a standard 100-200 token response at the same rate
+  Current OpenAI reasoning line: gpt-5.6-sol $5/$30, gpt-5.6-terra $2.50/$15,
+    gpt-5.6-luna $1/$6 per 1M. Same rule: thinking bills at the output rate.
+  Budget 3-5× the expected VISIBLE output when sizing max_completion_tokens.
 
 Routing strategy to control cost:
   Use difficulty classifier (fast, cheap LLM call) to estimate query difficulty
-  → Easy: route to GPT-4o/Sonnet (no thinking), 80% of queries
-  → Hard: route to o1/R1 with thinking budget, 20% of queries
+  → Easy: route to a non-reasoning model or minimal reasoning effort, ~80% of queries
+  → Hard: route to a full reasoning model with a thinking budget, ~20% of queries
   This architecture serves 80% of traffic cheaply, reserves reasoning for hard cases
 ```
 
@@ -566,9 +594,11 @@ These signals are cheap, scalable, and accurate
 Allocate more or less thinking compute based on problem difficulty:
 
 ```
-s1 paper (Stanford, 2025): "Wait" token
-  During RL training, force the model to think longer by inserting "Wait" tokens
+s1 paper (Muennighoff et al., 2025): "Wait" token
+  At DECODING time, force the model to think longer by suppressing the
+  end-of-thinking token and appending "Wait"
   This extends the reasoning chain even when the model wants to conclude early
+  (the model itself was trained by SFT on 1,000 examples; no RL involved)
 
 Budget allocation:
   Easy problems: 100-500 thinking tokens
@@ -600,33 +630,51 @@ This self-correction behavior was NOT explicitly trained —
 ## 7. Real-World Examples
 
 ### OpenAI o1/o3 Achievements
-- AIME 2024: 99.3% (o3) vs human ~85% (competition math)
-- GPQA Diamond (graduate science): o3 scores 87.7% vs human experts 81%
-- SWE-bench verified (software engineering): o3 solves 71.7% of GitHub issues
-- FrontierMath (new, harder math benchmark): o3 solves 25.2% (humans: <2%)
+
+Every number below is a *preview-announcement* figure from December 2024 unless
+marked otherwise — quote them with their split and scaffold or they mislead.
+
+- AIME 2024: o3 **96.7%** (Dec 2024 preview, "missed one question"); the o3 that
+  shipped April 2025 scored **91.6% without tools**. o1 pass@1 74%; GPT-4o 12%
+- GPQA Diamond (graduate science, 198 questions): o3 **87.7%** preview / **83.3%**
+  as shipped, against OpenAI's own recruited PhD-expert baseline of **69.7%**
+- SWE-bench Verified (software engineering): o3 **71.7%** preview / **69.1%** as
+  shipped — an agentic scaffold score, not a single-shot one
+- FrontierMath: o3 solves **25.2%**. The "<2%" often quoted next to it is the
+  ceiling of *other models* at the time, not a human score — FrontierMath is
+  designed so that expert mathematicians need hours per problem
 
 ### DeepSeek-R1 Impact
-- First open-source model to match o1 on reasoning benchmarks
-- Released weights for 7B, 14B, 32B, 70B, and 671B variants
+- First open-weights model to match o1 on published reasoning benchmarks
+- Released weights: R1-Zero and R1 (671B MoE) plus six distilled checkpoints —
+  1.5B, 7B, 14B, 32B (Qwen 2.5 bases) and 8B, 70B (Llama bases)
 - Reasoning traces are visible (unlike o1 which hides thinking)
-- Distilled from R1 into smaller models: 7B R1 outperforms many 70B base models
+- The distills punch above their size class on math/code, but "7B beats 70B" is
+  benchmark-specific, not a general capability claim
 
 ### AlphaProof (Google DeepMind, 2024)
-- Used MCTS over formal proof steps (Lean 4 language)
-- Solved 4/6 problems from 2024 International Mathematical Olympiad
-- Silver medal level performance
+- Couples a pre-trained language model to the AlphaZero RL algorithm, searching
+  over proof steps in Lean
+- **AlphaProof solved 3 of 6** 2024 IMO problems (two algebra, one number
+  theory); **AlphaGeometry 2** solved the geometry problem. The two systems
+  together reached 4/6 and **28/42 points — silver-medal standard**
+  (the gold cutoff that year was 29). Neither system solved the two combinatorics
+  problems
 
 ---
 
 ## 8. Tradeoffs
 
+Cost column is a **rough multiple of a non-reasoning baseline call on the same
+prompt**, not a vendor-published ratio; latency bands are order-of-magnitude.
+
 | Approach | Accuracy | Latency | Cost | Best For |
 |----------|---------|---------|------|---------|
-| Standard GPT-4o | Good | 2-5s | Low | General tasks |
+| Non-reasoning chat model | Good | 2-5s | 1× | General tasks |
 | CoT prompting | Better | 3-8s | 1.5× | Medium reasoning |
-| o1-mini | Very good | 5-20s | 3× | Code, math |
-| o1 | Excellent | 10-60s | 10× | Hard reasoning |
-| o3 | SOTA | 30-300s | 50× | Expert-level problems |
+| Reasoning model, low effort / small budget | Very good | 5-20s | 3× | Code, math |
+| Reasoning model, medium effort | Excellent | 10-60s | 10× | Hard reasoning |
+| Reasoning model, high/max effort | SOTA | 30-300s | 50× | Expert-level problems |
 | Self-consistency (N=10) | Better | 10× | 10× | High-stakes |
 
 ---
@@ -663,11 +711,11 @@ This self-correction behavior was NOT explicitly trained —
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **OpenAI o1/o3** | Top-tier reasoning | Best on math, code, science; expensive |
-| **DeepSeek-R1** | Open-source reasoning | Matches o1; free to self-host |
-| **QwQ-32B** | Open reasoning | Qwen's reasoning model; strong |
-| **Gemini 2.0 Flash Thinking** | Google reasoning | Fast reasoning; good quality |
-| **Claude 3.7+ Sonnet** (extended thinking) | Anthropic reasoning | Visible thinking blocks; `budget_tokens` via API |
+| **OpenAI GPT-5.6 series** (`sol` / `terra` / `luna`) | Top-tier reasoning | Current OpenAI reasoning line; `reasoning.effort` defaults to `medium`. Supersedes o1/o3, which are all deprecated (o1 and o3-mini shut down 2026-10-23, o3 on 2026-12-11; o1-mini already retired 2025-10-27) |
+| **DeepSeek-R1** | Open-weights reasoning | Matched o1 on published benchmarks; free to self-host |
+| **Qwen3** | Open reasoning | Hybrid thinking / non-thinking in one model; supersedes QwQ-32B (Qwen3-30B-A3B beats QwQ-32B with ~1/10 the active parameters) |
+| **Gemini 3 / 3.5** | Google reasoning | `thinking_level` (`minimal`…`high`) replaced the integer `thinking_budget`; `thinking_budget` still accepted for back-compat |
+| **Claude** (adaptive / extended thinking) | Anthropic reasoning | Visible thinking blocks; `thinking.budget_tokens` via API. Adaptive thinking on Fable 5 / Opus 5 / Sonnet 5; extended thinking on Haiku 4.5 |
 | **Math-Shepherd** | PRM for math | Step-level reward signals |
 | **Lean 4** | Formal verification | Used by AlphaProof |
 | **OpenR** | MCTS for LLMs | Open-source MCTS implementation |
@@ -680,34 +728,34 @@ This self-correction behavior was NOT explicitly trained —
 A: Test-time compute scaling means inference performance improves predictably with more compute spent on generation — more thinking tokens, more rollouts, or tree search. Before o1, the primary scaling axis was training compute (bigger model, more data). Now there are two independent axes: (1) train more → smarter base model; (2) think more at inference → better answer from the same model. This is significant because it provides an immediate path to better performance on hard tasks without retraining, and it enables dynamic compute allocation — spend 100 tokens on a simple query, 10,000 on a hard one.
 
 **Q: What is chain-of-thought prompting and how does it differ from a reasoning model like o1?**
-A: Chain-of-thought prompting elicits step-by-step reasoning by adding "think step by step" to the prompt — the base model produces visible reasoning with no architectural or training change. Reasoning models (o1, DeepSeek-R1) are explicitly trained via RL to generate extended internal thinking: they explore multiple paths, self-correct, and verify before answering. CoT prompting improves accuracy 5-15% on medium reasoning tasks. Reasoning models improve 5-10× on hard tasks — AIME: GPT-4o 13% vs o1 74%. The key difference: CoT is a prompting technique applied to any model; reasoning models have internalized the ability to allocate arbitrary compute to hard problems through training.
+A: Chain-of-thought prompting elicits step-by-step reasoning by adding "think step by step" to the prompt — the base model produces visible reasoning with no architectural or training change. Reasoning models (o1, DeepSeek-R1) are explicitly trained via RL to generate extended internal thinking: they explore multiple paths, self-correct, and verify before answering. CoT prompting improves accuracy 5-15% on medium reasoning tasks. Reasoning models improve several-fold on hard tasks — AIME 2024 pass@1: GPT-4o 12% vs o1 74%. The key difference: CoT is a prompting technique applied to any model; reasoning models have internalized the ability to allocate arbitrary compute to hard problems through training.
 
 **Q: What is GRPO and why did DeepSeek-R1 use it instead of PPO?**
-A: GRPO (Group Relative Policy Optimization) generates G responses for each prompt, computes a reward for each, and normalizes advantages within the group: A_i = (r_i - mean(r)) / std(r). PPO requires a separate critic (value function) model to estimate a baseline reward for each state. GRPO eliminates the critic — the group mean serves as the baseline. Benefits for LLM training: roughly half the GPU memory (no critic model to train and store), simpler training pipeline, and a stable training signal because the normalization is within-group. DeepSeek-R1 used GRPO with only two rewards (correctness + format), demonstrating that complex reasoning can emerge without a learned value function.
+A: GRPO (Group Relative Policy Optimization) generates G responses for each prompt, computes a reward for each, and normalizes advantages within the group: A_i = (r_i - mean(r)) / std(r). PPO requires a separate critic (value function) model to estimate a baseline reward for each state. GRPO eliminates the critic — the group mean serves as the baseline. Benefits for LLM training: roughly half the GPU memory (no critic model to train and store), simpler training pipeline, and a stable training signal because the normalization is within-group. DeepSeek-R1-Zero used GRPO with only two rule-based rewards (accuracy + format), demonstrating that complex reasoning can emerge without a learned value function; the shipped R1 keeps GRPO but wraps it in a four-stage SFT/RL pipeline.
 
 **Q: What is the difference between outcome reward models (ORM) and process reward models (PRM)?**
 A: An ORM scores only the final answer — correct (+1) or wrong (0). A PRM scores each intermediate reasoning step independently. PRM advantages: (1) provides denser training signal — many step scores vs. one final score; (2) identifies where reasoning went wrong, not just that it did; (3) enables MCTS by scoring partial paths before they complete; (4) catches models that reach the right answer via wrong reasoning (which ORM rewards but PRM penalizes). PRM disadvantage: requires labeled reasoning step quality, which is expensive — either human annotation or a learned step-verifier model. In production, PRMs enable best-of-N reranking: generate N reasoning chains with sampling, then pick the one with the highest average step reward.
 
-**Q: How was DeepSeek-R1 trained without supervised reasoning data?**
-A: DeepSeek-R1 used GRPO with only two rewards: (1) correctness — +1 if the final answer matches ground truth; (2) format — small bonus for using `<think>...</think><answer>...</answer>` tags. No human annotation of reasoning chains was required. The model spontaneously developed extended chain-of-thought, self-correction, and reflection behaviors purely from the RL training signal. This demonstrated that reasoning behaviors are instrumentally useful for maximizing correctness — they emerge from incentivizing correct outcomes rather than from imitating human reasoning. A crucial insight: the RL training signal (correctness on math/code problems) is cheap and scalable because these domains have ground truth verifiers.
+**Q: How was DeepSeek-R1-Zero trained without supervised reasoning data?**
+A: DeepSeek-R1-Zero used GRPO with only two rule-based rewards: an accuracy reward for the final answer and a format reward for using `<think>...</think><answer>...</answer>` tags. No human annotation of reasoning chains was required. Note the distinction the paper draws and most summaries drop: R1-Zero is the pure-RL model; the shipped DeepSeek-R1 adds a cold-start SFT stage, a second SFT round from rejection-sampled data, and a final all-scenario RL stage — four stages, not pure RL. The model spontaneously developed extended chain-of-thought, self-correction, and reflection behaviors purely from the RL training signal. This demonstrated that reasoning behaviors are instrumentally useful for maximizing correctness — they emerge from incentivizing correct outcomes rather than from imitating human reasoning. A crucial insight: the RL training signal (correctness on math/code problems) is cheap and scalable because these domains have ground truth verifiers.
 
 **Q: What failure modes do reasoning models exhibit and how do you mitigate them?**
 A: Four main failure modes: (1) Reward hacking — model finds shortcuts to maximize reward without correct reasoning, e.g., outputting the right format with empty thinking blocks. Mitigation: PRM, diverse reward signals, held-out test cases. (2) Overthinking — generating thousands of unnecessary tokens on simple problems. Mitigation: difficulty routing, budget forcing with max_thinking_tokens. (3) Premise errors — reasoning flawlessly from an incorrect assumption. Mitigation: RAG + reasoning (facts from retrieval, logic from reasoning model). (4) Domain transfer failure — RL on math/code improves math/code but may not generalize to other domains. Mitigation: domain-specific RL fine-tuning or standard SFT for non-math/code tasks.
 
 **Q: How would you design a system that uses reasoning models cost-effectively in production?**
-A: Route by difficulty. Use a small, fast classifier to categorize queries as easy/medium/hard. Route easy queries (conversational, simple factual) to standard GPT-4o or Sonnet — low cost, low latency. Route medium queries (single-step math, moderate debugging) to o1-mini or similar. Route hard queries (multi-step proof, complex algorithmic design) to o1/o3 with a configured max_thinking_tokens budget. Cache reasoning traces for repeated similar problems. Set hard token budget limits on reasoning models to prevent runaway costs — a 50,000-token thinking chain at $15/1M tokens costs $0.75 per query. Result: 80-90% of queries served cheaply, 10-20% get full reasoning power. This is the architecture used by production AI tutoring applications.
+A: Route by difficulty. Use a small, fast classifier to categorize queries as easy/medium/hard. Route easy queries (conversational, simple factual) to a non-reasoning chat model — low cost, low latency. Route medium queries (single-step math, moderate debugging) to a mid-tier reasoning model at low effort. Route hard queries (multi-step proof, complex algorithmic design) to the top reasoning tier with an explicit thinking budget. Cache reasoning traces for repeated similar problems. Set hard token budget limits to prevent runaway costs, and price them at the OUTPUT rate — reasoning tokens are never returned to you but are billed as output, so a 50,000-token thinking chain on a $30/1M-output model costs $1.50 per query, not the input-rate figure people usually reach for. Result: 80-90% of queries served cheaply, 10-20% get full reasoning power.
 
 **Q: What is self-consistency and when does it fail?**
-A: Self-consistency generates N reasoning chains (N=10-40) with temperature > 0 and takes majority vote. It improves accuracy 5-15% on reasoning tasks with definitive correct answers. It fails when: (1) the model consistently makes the same error across all chains — systematic failure is not correctable by voting (N chains all wrong, majority is still wrong); (2) the task is creative or open-ended with no single correct answer — majority vote has no meaning; (3) the model accuracy on a problem is below 50% — majority vote doesn't reliably help when individual chain accuracy is near random. The quality ceiling is bounded by single-chain accuracy: self-consistency reduces variance but cannot raise the mean above the single-chain ceiling. For problems where even the best reasoning models are near random, MCTS or higher-quality models are needed.
+A: Self-consistency generates N reasoning chains (N=10-40) with temperature > 0 and takes majority vote. It improves accuracy 5-15% on reasoning tasks with definitive correct answers. It fails when: (1) the model consistently makes the same error across all chains — systematic failure is not correctable by voting (N chains all wrong, majority is still wrong); (2) the task is creative or open-ended with no single correct answer — majority vote has no meaning; (3) the model accuracy on a problem is below 50% — below that point voting actively makes things worse, not merely useless, because it sharpens toward the model's favourite answer, which is the wrong one (p=0.40, N=10 votes correctly only 16.6% of the time). Above 50% voting does raise accuracy above single-chain accuracy (p=0.60, N=10 gives 63.3%), but it is bounded by the pool: it can only pick an answer some chain already produced. For problems where even the best reasoning models are near random, MCTS or higher-quality models are needed.
 
 **Q: Explain the test-time compute scaling curve. Does it scale indefinitely?**
-A: Accuracy scales approximately log-linearly with test-time compute (thinking tokens) up to a task-specific ceiling. The ceiling varies: competition math (AIME) scales to ~99% with enough thinking tokens; general QA has a lower ceiling; formal verification with symbolic solvers can scale furthest. The ceiling is hit when the task difficulty exceeds the model's knowledge or reasoning capacity — you cannot think your way to facts you don't know, and you cannot reason through a problem whose structure exceeds your learned capabilities. In practice: easy problems reach their ceiling at 100-500 thinking tokens; olympiad math benefits from 5,000-20,000+ tokens. Beyond the task ceiling, additional thinking tokens produce diminishing or zero improvement.
+A: Accuracy scales approximately log-linearly with test-time compute (thinking tokens) up to a task-specific ceiling. The ceiling varies: competition math (AIME 2024) is the furthest anyone has pushed it publicly, at 96.7% for o3 in OpenAI's December 2024 preview announcement and 91.6% for the o3 that shipped; general QA has a lower ceiling; formal verification with symbolic solvers can scale furthest. The ceiling is hit when the task difficulty exceeds the model's knowledge or reasoning capacity — you cannot think your way to facts you don't know, and you cannot reason through a problem whose structure exceeds your learned capabilities. In practice: easy problems reach their ceiling at 100-500 thinking tokens; olympiad math benefits from 5,000-20,000+ tokens. Beyond the task ceiling, additional thinking tokens produce diminishing or zero improvement.
 
 **Q: How was DeepSeek-R1 trained to produce visible reasoning traces, while o1 hides its thinking?**
 A: DeepSeek-R1 used a format reward: the model earned a small bonus if it structured its response as `<think>...</think><answer>...</answer>`. The `<think>` content is part of the model's visible output — users and developers can inspect the reasoning. OpenAI o1 uses a separate thinking sequence that is stripped from the API response — only the final answer is delivered. R1's approach is more transparent (users can debug reasoning errors, verify thought process) but raises concerns about reasoning being performative rather than functional. Both approaches produce similar accuracy improvements on benchmarks; the tradeoff is transparency and debuggability (R1) vs. IP protection and reduced prompt injection risk via thinking manipulation (o1).
 
 **Q: What is MCTS applied to LLM reasoning and what are its practical limitations?**
-A: MCTS treats each reasoning step as a node in a tree. UCB (Upper Confidence Bound) balances exploration of new branches vs. exploitation of promising ones. Each rollout runs a complete reasoning chain from a node and scores it with a reward model (PRM or outcome checker). Node values are backpropagated: if a partial path leads to correct answers in 7 of 10 rollouts, that path gets a high value. Practical limitations: (1) each rollout is a full LLM forward pass — MCTS with 100 rollouts costs 100× base inference; (2) requires a reliable reward or verification signal — without a PRM or test-case checker, node values are noisy; (3) high implementation complexity. Used in AlphaProof (IMO silver-level proofs in Lean 4) and AlphaCode 2, but not in general-purpose commercial APIs because the compute cost is prohibitive at scale.
+A: MCTS treats each reasoning step as a node in a tree. UCB (Upper Confidence Bound) balances exploration of new branches vs. exploitation of promising ones. Each rollout runs a complete reasoning chain from a node and scores it with a reward model (PRM or outcome checker). Node values are backpropagated: if a partial path leads to correct answers in 7 of 10 rollouts, that path gets a high value. Practical limitations: (1) each rollout is a full LLM forward pass — MCTS with 100 rollouts costs 100× base inference; (2) requires a reliable reward or verification signal — without a PRM or test-case checker, node values are noisy; (3) high implementation complexity. Used in AlphaProof, which pairs a language model with AlphaZero-style RL and proof search in Lean and contributed 3 of the 4 problems DeepMind solved at IMO 2024, but not in general-purpose commercial APIs because the compute cost is prohibitive at scale. AlphaCode 2 is frequently miscited as an MCTS system; it is massive sampling plus filtering, clustering and a learned scorer, with no tree search.
 
 **Q: You're building a coding assistant that needs to solve hard algorithmic problems. How do you choose between reasoning models, self-consistency, and standard LLM + CoT?**
 A: Use a tiered approach based on difficulty and latency budget. For well-known algorithm patterns (sorting, BFS, standard DP): standard LLM with CoT is sufficient, fast (<2s), and cheap. For medium problems (graph algorithms, moderately complex DP): self-consistency with N=5 chains provides a meaningful accuracy boost at 5× cost — the problem space is navigable by the base model but benefits from aggregation. For hard competitive programming (novel algorithms, correctness proofs): reasoning model (o1 or DeepSeek-R1) is necessary — these problems have a combinatorial reasoning space that requires extended exploration. Always add programmatic verification: run test cases against the generated code and use the result as a second filter. The verification step is cheap and eliminates 10-20% of errors that even reasoning models make on hard problems.
@@ -716,7 +764,7 @@ A: Use a tiered approach based on difficulty and latency budget. For well-known 
 A: During pure RL training with no supervised reasoning data, DeepSeek-R1 spontaneously developed self-correction behavior: mid-reasoning phrases like "wait, that doesn't seem right, let me reconsider" followed by backtracking to a different and correct approach. This was not explicitly trained — no reward was given for self-correction specifically; only the correctness of the final answer was rewarded. This reveals that reasoning behaviors (exploration, verification, backtracking) are instrumentally useful for maximizing correctness rewards and emerge naturally from RL incentives. It suggests that human-like reasoning patterns may be achievable by incentivizing correct outcomes rather than by imitating human reasoning processes step by step.
 
 **Q: What is self-consistency and when is it worth the cost?**
-A: Self-consistency generates N reasoning chains (N=10-40) and takes the majority vote. It improves accuracy by 5-15% on reasoning tasks. Worth the cost when: (1) the task has a single correct answer (math, factual); (2) accuracy is more important than latency; (3) you cannot afford a full reasoning model but need better reliability. Not worth it for: creative tasks, very hard problems where models consistently fail (all chains wrong, so majority is wrong), or latency-sensitive applications. Rule of thumb: if single-chain accuracy on your task is between 40-80%, self-consistency gives meaningful gains; if it is below 30% or above 85%, the gains are marginal.
+A: Self-consistency generates N reasoning chains (N=10-40) and takes the majority vote. It improves accuracy by 5-15% on reasoning tasks. Worth the cost when: (1) the task has a single correct answer (math, factual); (2) accuracy is more important than latency; (3) you cannot afford a full reasoning model but need better reliability. Not worth it for: creative tasks, very hard problems where models consistently fail (all chains wrong, so majority is wrong), or latency-sensitive applications. Rule of thumb: if single-chain accuracy on your task is between 50-80%, self-consistency gives meaningful gains; above ~85% there is almost nothing left to win, and below 50% voting is worse than a single sample rather than merely marginal.
 
 **Q: How do process reward models enable best-of-N reranking, and how is that different from self-consistency?**
 A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temperature > 0, then score each chain using a PRM that evaluates each intermediate step. Select the chain with the highest average step score, or the highest minimum step score (weakest-link selection). This is more powerful than self-consistency majority voting because: (1) it can distinguish between chains that all reach the same answer — it picks the one with the best reasoning process; (2) it can identify when a chain reaches the right answer via a flawed shortcut; (3) PRM reranking scales better — the PRM is a forward pass only (no generation), so scoring 50 candidates is cheap. Self-consistency requires all chains to generate until EOS; PRM reranking can score partial chains early and prune. Practical tradeoff: PRM reranking requires a trained PRM model; self-consistency works with any generation.
@@ -725,7 +773,7 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 ## 13. Best Practices
 
-1. **Use reasoning models selectively** — profile which queries benefit from extended thinking, route only those to o1/o3.
+1. **Use reasoning models selectively** — profile which queries benefit from extended thinking, route only those to the reasoning tier.
 2. **Expose reasoning traces** — for trust and debugging, show users the thinking process (o1 hides it; R1 shows it — R1's approach is more transparent).
 3. **Combine with RAG for fact-intensive tasks** — reasoning solves logic; RAG provides facts; combining gives best accuracy.
 4. **Set budget limits** — reasoning models can use arbitrarily many tokens; set max_tokens to avoid runaway costs.
@@ -736,7 +784,7 @@ A: Best-of-N with PRM reranking: generate N reasoning chains (N=10-50) with temp
 
 ## 14. Case Study
 
-**Scenario:** A DevOps platform company serves 5,000 engineering teams. Their SRE assistant must automatically diagnose production incidents: given a stack trace, logs, and recent git diff, it must identify root cause, generate a fix, and write a regression test. Current GPT-4o (non-reasoning) solves 38% of incidents correctly on first attempt. SLA: correct root cause within 90 seconds for p90 of incidents, cost under $0.50/incident.
+**Scenario:** A DevOps platform company serves 5,000 engineering teams. Their SRE assistant must automatically diagnose production incidents: given a stack trace, logs, and recent git diff, it must identify root cause, generate a fix, and write a regression test. Their current non-reasoning chat model solves 38% of incidents correctly on first attempt. SLA: correct root cause within 90 seconds for p90 of incidents, cost under $0.50/incident. Every number in this case study is an illustrative figure for this fictional deployment, not a published vendor or company benchmark.
 
 **Architecture:**
 
@@ -753,8 +801,8 @@ flowchart TD
 
     TRIGGER("Incident triggered<br/>PagerDuty alert")
     TRIAGE["Incident Triage Agent<br/>Collects stack trace, last 500 log lines,<br/>git diff of last 3 commits, deployment metadata<br/>Classifies severity: P1 / P2 / P3"]
-    ROUTER["Model Router<br/>P3 low severity: claude-sonnet-4-6, temp=0<br/>P2 medium: o1-mini, budget_tokens=2000<br/>P1 critical: o3, budget_tokens=10000<br/>Timeout: P1 60s, P2 30s, P3 15s"]
-    REASON["Reasoning Model - o1/o3 or Sonnet<br/>Parses stack trace, correlates logs,<br/>inspects git diff, generates root cause,<br/>fix patch, and regression test<br/>Output: structured JSON"]
+    ROUTER["Model Router<br/>P3 low: claude-sonnet-4-6, budget_tokens=4000<br/>P2 medium: gpt-5.6-terra, effort=medium<br/>P1 critical: gpt-5.6-sol, effort=high<br/>Timeout: P1 60s, P2 30s, P3 15s"]
+    REASON["Reasoning Model - GPT-5.6 or Claude<br/>Parses stack trace, correlates logs,<br/>inspects git diff, generates root cause,<br/>fix patch, and regression test<br/>Output: structured JSON"]
     VALID["Validation Sandbox<br/>Apply patch to isolated container<br/>Run test suite - pytest, 120s timeout<br/>Pass: propose PR via GitHub API<br/>Fail: retry with self-correction, max 2x"]
 
     TRIGGER --> TRIAGE -- "structured incident context" --> ROUTER --> REASON --> VALID
@@ -767,11 +815,15 @@ flowchart TD
 ```
 
 ```
-Test-Time Compute Scaling — budget_tokens effect:
-  budget_tokens=500:   o1-mini "fast think" — 12s, 65% solve rate
-  budget_tokens=2000:  o1-mini "deep think" — 28s, 78% solve rate
-  budget_tokens=10000: o3 "full think"      — 58s, 91% solve rate
-  PRM reranking N=4:   o1-mini × 4 + PRM   — 35s, 84% solve rate (cheaper than o3)
+Test-Time Compute Scaling — reasoning-budget effect (ILLUSTRATIVE figures for
+this scenario, not vendor-published benchmarks). Note the knob differs by vendor:
+Anthropic takes an integer thinking.budget_tokens; OpenAI takes reasoning.effort
+plus a max_completion_tokens ceiling. There is no portable "budget_tokens".
+
+  effort=low    / ~500 reasoning tokens:   gpt-5.6-terra — 12s, 65% solve rate
+  effort=medium / ~2,000 reasoning tokens: gpt-5.6-terra — 28s, 78% solve rate
+  effort=high   / ~10,000 reasoning tokens: gpt-5.6-sol  — 58s, 91% solve rate
+  PRM reranking N=4:  gpt-5.6-terra x 4 + PRM — 35s, 84% solve rate (cheaper than sol)
 ```
 
 **Key implementation — 3 Python code blocks:**
@@ -823,9 +875,9 @@ async def diagnose_incident(
     if severity == "P3":
         return await _diagnose_sonnet(prompt, ctx.incident_id)
     elif severity == "P2":
-        return await _diagnose_o1_mini(prompt, ctx.incident_id, budget=2000)
+        return await _diagnose_terra(prompt, ctx.incident_id, budget=2000)
     else:  # P1
-        return await _diagnose_o3(prompt, ctx.incident_id, budget=10000)
+        return await _diagnose_sol(prompt, ctx.incident_id, budget=10000)
 
 
 def _build_prompt(ctx: IncidentContext) -> str:
@@ -887,14 +939,14 @@ async def _diagnose_sonnet(prompt: str, incident_id: str) -> DiagnosisResult:
     )
 
 
-async def _diagnose_o1_mini(
+async def _diagnose_terra(
     prompt: str, incident_id: str, budget: int
 ) -> DiagnosisResult:
-    """OpenAI o1-mini with reasoning effort budget."""
+    """OpenAI gpt-5.6-terra with reasoning effort budget."""
     client = openai.AsyncOpenAI()
     t0 = time.monotonic()
     response = await client.chat.completions.create(
-        model="o1-mini",
+        model="gpt-5.6-terra",
         max_completion_tokens=budget + 2048,
         reasoning_effort="medium",
         messages=[{"role": "user", "content": prompt}],
@@ -910,17 +962,17 @@ async def _diagnose_o1_mini(
         **parsed,
         thinking_tokens_used=getattr(reasoning_tokens, "reasoning_tokens", 0),
         latency_seconds=latency,
-        model_used="o1-mini",
+        model_used="gpt-5.6-terra",
     )
 
 
-async def _diagnose_o3(
+async def _diagnose_sol(
     prompt: str, incident_id: str, budget: int
 ) -> DiagnosisResult:
     client = openai.AsyncOpenAI()
     t0 = time.monotonic()
     response = await client.chat.completions.create(
-        model="o3",
+        model="gpt-5.6-sol",
         max_completion_tokens=budget + 4096,
         reasoning_effort="high",
         messages=[{"role": "user", "content": prompt}],
@@ -933,7 +985,7 @@ async def _diagnose_o3(
         **parsed,
         thinking_tokens_used=0,
         latency_seconds=latency,
-        model_used="o3",
+        model_used="gpt-5.6-sol",
     )
 
 
@@ -973,17 +1025,17 @@ class RankedDiagnosis:
 async def prm_reranked_diagnosis(
     ctx: IncidentContext,
     n_candidates: int = 4,
-    model: str = "o1-mini",
+    model: str = "gpt-5.6-terra",
     budget_per_candidate: int = 1500,
 ) -> RankedDiagnosis:
     """
     Generate N candidate diagnoses, score each with a PRM,
     return the highest-scoring candidate.
-    Cost: N × o1-mini << 1 × o3, similar quality for P2 incidents.
+    Cost: N × gpt-5.6-terra << 1 × gpt-5.6-sol, similar quality for P2 incidents.
     PRM is a smaller Claude Haiku model prompted to evaluate step correctness.
     """
     tasks = [
-        _diagnose_o1_mini(
+        _diagnose_terra(
             _build_prompt(ctx), ctx.incident_id, budget=budget_per_candidate
         )
         for _ in range(n_candidates)
@@ -1043,13 +1095,13 @@ import asyncio
 
 
 # BROKEN: No timeout on reasoning model call.
-# o3 with high reasoning effort can run for 5+ minutes on complex incidents.
+# gpt-5.6-sol with high reasoning effort can run for 5+ minutes on complex incidents.
 # P1 incident needs answer in <60s — model overshoots budget.
-async def broken_o3_call(prompt: str) -> str:
+async def broken_sol_call(prompt: str) -> str:
     import openai
     client = openai.AsyncOpenAI()
     response = await client.chat.completions.create(
-        model="o3",
+        model="gpt-5.6-sol",
         max_completion_tokens=32768,   # no budget limit — model thinks indefinitely
         messages=[{"role": "user", "content": prompt}],
     )
@@ -1058,13 +1110,13 @@ async def broken_o3_call(prompt: str) -> str:
 
 # FIX: Set reasoning budget and apply asyncio timeout.
 # If model exceeds timeout, fall back to cheaper faster model.
-async def fixed_o3_with_timeout(prompt: str, timeout_s: float = 60.0) -> str:
+async def fixed_sol_with_timeout(prompt: str, timeout_s: float = 60.0) -> str:
     import openai
     client = openai.AsyncOpenAI()
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model="o3",
+                model="gpt-5.6-sol",
                 max_completion_tokens=12000,   # ~10000 reasoning + 2000 output
                 reasoning_effort="high",
                 messages=[{"role": "user", "content": prompt}],
@@ -1074,14 +1126,14 @@ async def fixed_o3_with_timeout(prompt: str, timeout_s: float = 60.0) -> str:
         return response.choices[0].message.content or ""
     except asyncio.TimeoutError:
         # Fallback to faster model — better partial answer than timeout
-        return await fixed_o1_mini_fallback(prompt)
+        return await fixed_terra_fallback(prompt)
 
 
-async def fixed_o1_mini_fallback(prompt: str) -> str:
+async def fixed_terra_fallback(prompt: str) -> str:
     import openai
     client = openai.AsyncOpenAI()
     response = await client.chat.completions.create(
-        model="o1-mini",
+        model="gpt-5.6-terra",
         max_completion_tokens=4000,
         reasoning_effort="low",
         messages=[{"role": "user", "content": prompt}],
@@ -1092,7 +1144,7 @@ async def fixed_o1_mini_fallback(prompt: str) -> str:
 **Pitfall 1 — Feeding entire log file to reasoning model wastes tokens:**
 
 ```python
-# BROKEN: Pass 10,000 log lines to o3.
+# BROKEN: Pass 10,000 log lines to gpt-5.6-sol.
 # Most log lines are unrelated — reasoning model must wade through noise.
 # Token cost: ~30,000 tokens input; p99 latency 4 min.
 def broken_build_context(logs: list[str]) -> str:
@@ -1126,7 +1178,8 @@ async def fixed_validate_and_propose(patch: str, test_code: str) -> dict[str, st
         # Clone repo into tmpdir, apply patch, run tests
         subprocess.run(["git", "clone", "--depth=1", ".", tmpdir], check=True)
         result = subprocess.run(
-            ["git", "apply", "-"], input=patch.encode(), cwd=tmpdir
+            ["git", "apply", "-"], input=patch.encode(), cwd=tmpdir,
+            capture_output=True,   # without this, result.stderr is None -> AttributeError
         )
         if result.returncode != 0:
             return {"status": "patch_failed", "error": result.stderr.decode()}
@@ -1142,19 +1195,22 @@ async def fixed_validate_and_propose(patch: str, test_code: str) -> dict[str, st
 **Pitfall 3 — Using high reasoning effort for all incidents wastes budget:**
 
 ```python
-# BROKEN: Always use o3 with max budget regardless of incident severity.
-# P3 "CSS layout broke" incident costs $8 with o3; costs $0.04 with Sonnet.
-async def broken_always_o3(prompt: str) -> str: ...
+# BROKEN: Always use gpt-5.6-sol with max budget regardless of incident severity.
+# P3 "CSS layout broke" incident costs $2.10 with gpt-5.6-sol; costs $0.04 with Sonnet
+# (the same per-incident figures as the metrics table below — a ~50x overspend).
+async def broken_always_sol(prompt: str) -> str: ...
 
-# FIX: Tiered routing. Only P1 critical incidents use o3.
-# P2: o1-mini with budget=2000 or PRM reranking of 4 × o1-mini.
+# FIX: Tiered routing. Only P1 critical incidents use gpt-5.6-sol.
+# P2: gpt-5.6-terra with budget=2000 or PRM reranking of 4 × gpt-5.6-terra.
 # P3: claude-sonnet-4-6 with extended thinking.
 # Cost per incident: P3=$0.04, P2=$0.18, P1=$2.10 avg.
 ```
 
 **Metrics:**
 
-| Metric | GPT-4o baseline | Sonnet 4.6 (P3) | o1-mini (P2) | o3 (P1) |
+All figures below are illustrative for this scenario.
+
+| Metric | Non-reasoning baseline | Sonnet 4.6 (P3) | gpt-5.6-terra (P2) | gpt-5.6-sol (P1) |
 |--------|-----------------|-----------------|--------------|---------|
 | First-attempt solve rate | 38% | 61% | 79% | 91% |
 | p50 latency | 8s | 14s | 28s | 52s |
@@ -1162,24 +1218,24 @@ async def broken_always_o3(prompt: str) -> str: ...
 | Cost per incident | $0.12 | $0.04 | $0.18 | $2.10 |
 | Patch validation pass rate | 81% | 88% | 93% | 96% |
 | False escalation rate | 31% | 19% | 8% | 4% |
-| PRM rerank (4×o1-mini) | — | — | 84%/35s/$0.72 | — |
+| PRM rerank (4×gpt-5.6-terra) | — | — | 84%/35s/$0.72 | — |
 
 **Interview Q&As:**
 
 **Q: What is test-time compute scaling and how does it improve reasoning quality?**
-Test-time compute scaling dedicates more compute at inference time (not training time) to improve answer quality. Rather than making a single pass, the model generates extended "thinking" traces — step-by-step chains of reasoning — before producing the final answer. More budget_tokens allows more exploration of alternative approaches and self-correction. o1/o3 models demonstrate that a smaller model with 10x more reasoning compute outperforms a larger model with 1x compute on tasks requiring multi-step logic, math, or debugging.
+Test-time compute scaling dedicates more compute at inference time (not training time) to improve answer quality. Rather than making a single pass, the model generates extended "thinking" traces — step-by-step chains of reasoning — before producing the final answer. More budget_tokens allows more exploration of alternative approaches and self-correction. Reasoning models demonstrate that a smaller model with 10x more reasoning compute outperforms a larger model with 1x compute on tasks requiring multi-step logic, math, or debugging.
 
-**Q: When should you use PRM reranking instead of a single o3 call?**
-PRM reranking (generate N candidates with a cheaper model, score each, take the best) is cost-effective when N × cheaper_model_cost < single expensive_model_cost and when the task benefits from diverse reasoning paths. For P2 incidents: 4 × o1-mini ($0.18 each) = $0.72 vs 1 × o3 ($2.10) — PRM achieves 84% solve rate vs 91% for o3, at one-third the cost. PRM is less useful when candidates are too similar (low diversity) or when the PRM scorer itself is unreliable for the domain.
+**Q: When should you use PRM reranking instead of a single gpt-5.6-sol call?**
+PRM reranking (generate N candidates with a cheaper model, score each, take the best) is cost-effective when N × cheaper_model_cost < single expensive_model_cost and when the task benefits from diverse reasoning paths. For P2 incidents: 4 × gpt-5.6-terra ($0.18 each) = $0.72 vs 1 × gpt-5.6-sol ($2.10) — PRM achieves 84% solve rate vs 91% for gpt-5.6-sol, at one-third the cost. PRM is less useful when candidates are too similar (low diversity) or when the PRM scorer itself is unreliable for the domain.
 
 **Q: How do reasoning models differ from chain-of-thought prompting?**
-Chain-of-thought prompting adds "think step by step" to the user prompt; the reasoning is visible in the output and uses standard output tokens (billed at output rate). Reasoning models (o1, o3, Claude with extended thinking) perform internal reasoning in a separate "thinking" phase before generating the final response; this thinking may be partially or fully hidden, uses a separate token budget, and often uses a different (lower) per-token price than output tokens. Reasoning model chains tend to be more self-consistent and self-correcting than CoT-prompted standard models because the model is specifically trained to reason before answering.
+Chain-of-thought prompting adds "think step by step" to the user prompt; the reasoning is visible in the output and uses standard output tokens (billed at output rate). Reasoning models (the OpenAI GPT-5.6 line, the retired o-series, Claude with extended thinking) perform internal reasoning in a separate "thinking" phase before generating the final response; this thinking may be partially or fully hidden and uses a separate token budget, but it is NOT cheaper — reasoning tokens are not returned to you and are billed at the full output rate, which is why a hidden 50k-token chain can cost more than the answer you actually see. Reasoning model chains tend to be more self-consistent and self-correcting than CoT-prompted standard models because the model is specifically trained to reason before answering.
 
 **Q: Why is a validation sandbox essential after a reasoning model generates a code fix?**
 Reasoning models hallucinate syntactically plausible but semantically incorrect patches approximately 5-10% of the time — the reasoning process increases confidence but does not eliminate hallucination. A patch that looks correct may fail to compile, break unrelated tests, or introduce a subtle new bug. Running the fix in an isolated container with the test suite catches these cases before a PR is opened. The sandbox also provides ground-truth feedback for a retry loop: if the first fix fails validation, the agent can pass the test failure output back to the model for self-correction.
 
 **Q: How do you choose budget_tokens for a reasoning model in production?**
-Budget_tokens controls how many tokens the model can spend "thinking" before generating the final answer. More tokens = better accuracy but higher cost and latency. Calibrate by running your eval set with exponentially increasing budgets (500, 1000, 2000, 4000, 8000) and plotting solve rate vs cost. The curve typically shows diminishing returns after a threshold — often 2000-4000 tokens for code debugging. Set the production budget at the knee of that curve. Apply higher budgets only for the highest-severity incidents where cost is less important than correctness.
+Budget_tokens controls how many tokens the model can spend "thinking" before generating the final answer. The knob is vendor-specific: Anthropic takes an integer `thinking.budget_tokens`, OpenAI takes a `reasoning.effort` level plus a `max_completion_tokens` ceiling, and Gemini 3 takes a `thinking_level` enum that replaced its old integer `thinking_budget`. More tokens = better accuracy but higher cost and latency. Calibrate by running your eval set with exponentially increasing budgets (500, 1000, 2000, 4000, 8000) and plotting solve rate vs cost. The curve typically shows diminishing returns after a threshold — often 2000-4000 tokens for code debugging. Set the production budget at the knee of that curve. Apply higher budgets only for the highest-severity incidents where cost is less important than correctness.
 
 **Q: What makes code debugging particularly well-suited for reasoning models versus standard LLMs?**
 Code debugging requires multi-step logical deduction: (1) parse the stack trace to identify the fault, (2) trace backwards through the call chain, (3) correlate with external state (logs, recent changes), (4) form a causal hypothesis, (5) design a minimal fix, (6) verify the fix is consistent with all constraints. Standard LLMs tend to pattern-match to the most common bug for the given error type without thoroughly checking all evidence. Reasoning models systematically work through each step and self-correct when they detect contradictions — exactly the process an expert SRE uses, just codified as internal reasoning chains.

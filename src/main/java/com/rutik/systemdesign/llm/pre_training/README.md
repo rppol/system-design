@@ -6,7 +6,7 @@ Pre-training is the first and most expensive phase of building an LLM — the pr
 
 Pre-training is fundamentally a self-supervised learning problem: the training signal comes from the data itself (predicting the next token), not from human-labeled examples. This allows training on virtually unlimited amounts of text.
 
-The scale of pre-training is staggering: GPT-4 was trained on trillions of tokens; LLaMA 3 405B on 15+ trillion tokens; total compute often costs tens of millions of dollars. Getting pre-training right — data quality, training stability, hyperparameter choices — has an outsized impact on the final model's capability.
+The scale of pre-training is staggering: GPT-4 was trained on trillions of tokens; Llama 3 405B on 15.6 trillion text tokens for 3.8e25 FLOPs (Meta, Llama 3 paper §3); total compute often costs tens of millions of dollars. Getting pre-training right — data quality, training stability, hyperparameter choices — has an outsized impact on the final model's capability.
 
 ---
 
@@ -30,7 +30,7 @@ The scale of pre-training is staggering: GPT-4 was trained on trillions of token
 - **Training dynamics matter**: Loss curves, gradient norms, and learning rate schedules determine stability and final quality.
 - **Irreversibility**: Pre-training mistakes are expensive to fix — a contaminated training set or wrong architectural choice is hard to undo at scale.
 - **Compute-optimal training**: Per Chinchilla, the optimal strategy allocates compute equally between model size and tokens trained. The Chinchilla-optimal ratio is roughly 20 tokens per parameter.
-- **Emergent capabilities**: Many capabilities emerge only at sufficient scale and exhibit phase transitions — performance is near zero then suddenly jumps to high accuracy. In-context learning appears around 6-7B parameters; chain-of-thought reasoning around 60-100B parameters (PaLM, GPT-3.5 class); multi-step arithmetic at ~100B+ parameters. Some researchers argue emergence is partly a measurement artifact that depends on the chosen evaluation metric, but the practical effect is that certain capabilities are unavailable below a threshold model size.
+- **Emergent capabilities**: Many capabilities appear only at sufficient scale and look like phase transitions — performance is near chance then jumps. Wei et al. (2022, "Emergent Abilities of Large Language Models") catalogue tasks whose emergence thresholds cluster in the 10B-100B parameter range, and the chain-of-thought paper (Wei et al., 2022) reports that CoT prompting only helps at roughly the 100B scale. Schaeffer et al. (2023, "Are Emergent Abilities a Mirage?") argue the sharpness is partly an artifact of discontinuous metrics; the practical effect is still that certain capabilities are unavailable below a threshold model size. Treat any specific per-capability parameter threshold as task- and metric-dependent, not a constant.
 
 ---
 
@@ -112,14 +112,15 @@ and then guessed uniformly from the shortlist."
   2.00       7.4           "choosing among ~7 plausible tokens" (case study 2 final)
   2.10       8.2           the 200B-token checkpoint
   3.10      22.2           the 10B-token checkpoint
- 11.40  89,300            random init: ~ the whole 32k vocab, uniform
+ 10.40  32,900            random init: ~ the whole 32k vocab, uniform
 ```
 
 Two things fall out of this table that interviewers probe for. First, **loss is logarithmic, so
 small-looking loss drops are large**: 2.10 -> 2.00 looks like nothing but shrinks the shortlist from
 8.2 to 7.4 candidates, roughly a 10% cut in branching. Second, **a random model's perplexity is its
-vocabulary size** — `ln(32000) = 10.37`, which is why the 11.4 starting loss in case study 2 is the
-expected "knows nothing" value and not a bug. The same identity explains the case study 1 target:
+vocabulary size** — `ln(32000) = 10.37`, which is why the 10.4 starting loss in case study 2 is the
+expected "knows nothing" value and not a bug. A reported starting loss meaningfully *above* `ln(V)`
+is the bug: it means the initialization is not producing a near-uniform output distribution. The same identity explains the case study 1 target:
 domain perplexity 24.3 -> 15.7 is a loss drop of `ln(24.3) - ln(15.7) = 3.19 - 2.75 = 0.44`.
 
 Properties:
@@ -162,7 +163,12 @@ Used by: CodeLLaMA, Starcoder, DeepSeek-Coder. Enables IDE completion features w
 
 ### 4.4 Multi-Token Prediction (MTP)
 
-Instead of predicting only the next single token, the model predicts the next N tokens simultaneously (typically N=4). Multiple prediction heads share the same transformer trunk, with each head independently predicting the token at position +1, +2, ..., +N:
+Instead of predicting only the next single token, the model predicts the next N tokens (typically N=4 in Meta's formulation). There are **two distinct designs, and interviews confuse them constantly**:
+
+- **Parallel heads (Gloeckle et al. 2024, Meta):** N independent output heads (each a transformer layer) sit on one shared trunk and predict positions +1..+N *in parallel*, independently of each other. This is the design drawn below.
+- **Sequential modules (DeepSeek-V3, 2024):** the extra module for depth k takes the previous depth's hidden state, so the **full causal chain is preserved at each prediction depth**. The paper is explicit that this differs from Gloeckle et al.'s parallel independent heads. Each MTP module contains a Transformer block, and shares the embedding layer and output head with the main model — it is not a bare linear projection.
+
+The parallel form:
 
 ```
 Text: "The quick brown fox jumps over"
@@ -219,10 +225,11 @@ off-by-one bug, not a brilliant model.
 
 Properties:
 - Forces the model to plan ahead — to predict token +3 correctly, the model must implicitly reason about what tokens +1 and +2 will be, improving coherence on longer sequences
-- Enables 2-3x faster inference via speculative decoding compatibility: the auxiliary heads can draft candidate tokens that the main head verifies in parallel
-- Training cost increases ~15-20% per step due to the additional prediction heads, but models often converge faster, partially offsetting the overhead
+- Enables faster inference via self-speculative decoding: the auxiliary heads draft candidates that the main head verifies. Gloeckle et al. measure **up to 3x** (3.0x on code, ~2.5 of 3 suggested tokens accepted). DeepSeek-V3 reports an **85-90% acceptance rate** for its second-token prediction and **1.8x TPS**.
+- Training overhead is implementation-dependent, not inherent: Gloeckle et al. report **no training-time overhead** using a memory-efficient implementation that runs the per-head forward/backward sequentially, cutting peak head-related GPU memory from O(nV+d) to O(V+d)
 - Can be used as either the primary training objective or as an auxiliary loss alongside standard CLM
-- Used by: DeepSeek-V3 (MTP as auxiliary loss, contributing to its remarkable cost efficiency), Meta's research models
+- Quality: Gloeckle et al.'s 13B 4-token model solves **12% more HumanEval** and **17% more MBPP** problems than a comparable next-token model
+- Used by: DeepSeek-V3 (sequential MTP as an auxiliary loss, depth D=1 — i.e. it predicts 2 tokens total — with loss weight lambda 0.3 for the first 10T tokens then 0.1 for the remaining 4.8T), Meta's research models
 
 ---
 
@@ -331,7 +338,8 @@ the loss plateaus noisily forever — the model keeps stepping over the minimum 
 
 **Web data (Common Crawl) quality pipeline:**
 ```
-Raw CC crawl: ~100T tokens/year
+Raw CC crawl: ~2.0-2.5B pages / ~350-400 TiB uncompressed HTML per monthly snapshot
+               (RedPajama-V2 extracted 100T+ text tokens from 84 snapshots, ~1.2T/snapshot)
   |
   v  URL filtering (known-quality domains upweighted)
   |
@@ -354,13 +362,17 @@ The composition and weighting of training data domains has a direct, measurable 
 
 **Known effective mixtures:**
 ```
-LLaMA recipe:
-  ~67% web crawl      (general knowledge, conversational ability)
-  ~15% code            (reasoning, structured output, logic)
-  ~4.5% Wikipedia      (factual accuracy, entity knowledge)
-  ~4.5% books          (long-range coherence, writing quality)
-  ~5% academic papers   (technical depth, citation patterns)
-  ~4.5% other          (forums, Q&A, multilingual)
+LLaMA 1 recipe (Touvron et al. 2023, Table 1 — sampling proportions):
+  67.0% English CommonCrawl  (general knowledge, conversational ability)
+  15.0% C4                    (a second, differently-filtered web crawl)
+   4.5% GitHub                (reasoning, structured output, logic)
+   4.5% Wikipedia             (factual accuracy, entity knowledge)
+   4.5% Books                 (Gutenberg + Books3; long-range coherence)
+   2.5% ArXiv                 (technical depth, citation patterns)
+   2.0% StackExchange         (Q&A, applied problem solving)
+  Note: 82% of the mix is web text; code is only 4.5%. Later models moved
+  sharply the other way — Llama 3's final mix is ~50% general knowledge,
+  25% math/reasoning, 17% code, 8% multilingual (Llama 3 paper §3.1.2).
 
 The Pile (EleutherAI):
   Manually curated mixture across 22 sources
@@ -368,15 +380,15 @@ The Pile (EleutherAI):
   Deliberate inclusion of niche domains (GitHub, StackExchange, USPTO patents)
 ```
 
-**Algorithmic mixture optimization — DoReMi (Google, 2023):**
-1. Train a small proxy model (~280M params) on uniform data
-2. Train a second small model that learns per-domain loss weights by upweighting domains where the proxy struggles
-3. Apply the learned domain weights to train the full-scale model
-4. Result: 2-5% improvement on downstream benchmarks vs. uniform sampling, without increasing total data volume
+**Algorithmic mixture optimization — DoReMi (Xie et al., 2023):**
+1. Train a small reference model (280M params) on the baseline domain weights
+2. Train a second 280M proxy model with group-DRO, which upweights domains where the proxy's excess loss over the reference is largest
+3. Apply the learned domain weights to train the full-scale model (8B in the paper — 30x the proxy)
+4. Result on The Pile: **+6.5 percentage points** average few-shot downstream accuracy, and the baseline accuracy is reached with **2.6x fewer training steps** — without increasing total data volume
 
 **Key findings on domain weighting:**
-- Code data at 10-15% improves reasoning across all tasks, even non-code benchmarks like GSM8K (+5-10%), because code requires logical, step-by-step thinking
-- Diminishing returns apply: after ~1T tokens of a single domain, adding more of the same domain yields decreasing benefit — better to diversify
+- Raising the code fraction is widely reported to improve non-code reasoning as well, and frontier mixes have moved that way (Llama 3: 17% code + 25% math/reasoning). The size of the transfer is model- and eval-specific; treat any single "+X% on GSM8K" number as an internal measurement, not a published constant.
+- Diminishing returns apply: after enough tokens of a single domain, adding more of the same domain yields decreasing benefit — better to diversify
 - Quality filtering is a multiplier: a 10x smaller high-quality dataset can match a 10x larger unfiltered dataset (the Phi "textbooks are all you need" insight)
 - Late-stage mixture shifts (increasing code/math fraction in the final 10-20% of training) can sharpen specific capabilities without degrading general performance
 
@@ -384,7 +396,7 @@ The Pile (EleutherAI):
 
 **Gradient clipping**: Clip gradient norm to ~1.0. Prevents gradient explosion, especially early in training.
 
-**Loss spikes**: Loss occasionally spikes up then recovers. Usually indicates a problematic batch (bad data). Can be mitigated with data filtering or by rolling back a few hundred steps.
+**Loss spikes**: Loss occasionally spikes up then recovers. It is tempting to blame "bad data," but PaLM's authors ran the ablation and rejected that explanation: replaying the same batches from an earlier checkpoint produced no spike, so a spike is an interaction between a specific batch and a specific parameter state, not a property of the batch alone (PaLM, Chowdhery et al. 2022, §5.1). The practical mitigation is the same either way — roll back a few hundred steps and skip the surrounding batches.
 
 **Batch size ramp-up**: Start with small batch size (256K tokens), linearly increase to target (4M tokens) over first few billion tokens. Improves training stability.
 
@@ -469,19 +481,19 @@ and is now training at double the effective LR.
                 m_hat = 0.00360/0.190      v_hat = 0.0000352/0.0975
                       = 0.0189                   = 0.000361              0.0189/0.0190 = +0.995
   3     -0.040  0.9x0.00360+0.1x(-0.040)   0.95x0.0000352+0.05x0.001600
-                = -0.00076                 = 0.0000934
-                m_hat = -0.00076/0.271     v_hat = 0.0000934/0.143
-                      = -0.00280                 = 0.000653              -0.00280/0.0256 = -0.110
+                = -0.00076                 = 0.000113
+                m_hat = -0.00076/0.271     v_hat = 0.000113/0.143
+                      = -0.00280                 = 0.000795              -0.00280/0.0282 = -0.099
 
   step 1 weight change = -1e-5 x (+1.00)  = -1.00e-5
-  step 3 weight change = -1e-5 x (-0.110) = +1.10e-6
+  step 3 weight change = -1e-5 x (-0.099) = +9.90e-7
 ```
 
 Two behaviours to name in an interview. First, **the normalized step is roughly +/-1 whenever the
 gradient is behaving consistently** (steps 1 and 2), which is why Adam's `lr` is a near-absolute
 bound on how far any weight can move per step — that is what makes 3e-4 a sane number across wildly
 different layers. Second, when a **large outlier gradient arrives** (step 3), `v_t` jumps
-immediately while `m_t` barely turns, so the normalized step *shrinks* to 0.110 rather than
+immediately while `m_t` barely turns, so the normalized step *shrinks* to 0.099 rather than
 exploding: Adam automatically distrusts weights whose gradients just got noisy. This is also why
 `beta2` is lowered from 0.999 to 0.95 for LLMs — a shorter variance memory lets the optimizer react
 to a loss spike within tens of steps instead of thousands.
@@ -521,7 +533,9 @@ The same shape appears in all three scaling-law forms, which is why the Chinchil
 | `x^(-alpha)` | The power law itself. Negative exponent = grows -> loss falls |
 | `~` | Proportional to, ignoring the constant out front |
 
-**Walk one example.** Take `alpha = 0.076` (roughly the Kaplan/Chinchilla parameter exponent) and
+**Walk one example.** Take `alpha = 0.076` (Kaplan et al. 2020's fitted parameter exponent
+`alpha_N`; Chinchilla's joint fit uses a different parametrization and reports a steeper exponent
+for `N`, so do not quote 0.076 as "Chinchilla's") and
 ask what each 10x in model size buys:
 
 ```
@@ -554,15 +568,15 @@ saturated what this model size can extract and the fix is a bigger `N`, not more
 | Divergence | >20% | Does not recover | LR too high, NaN gradients | Stop training, diagnose, restart |
 | Plateau | 0% change | 500+ steps | Underfitting or data exhaustion | Check data pipeline, adjust LR |
 
-**Gradient norm monitoring**: Sudden gradient norm spikes precede loss spikes by approximately 100 steps, providing an early warning signal. Tracking per-layer gradient norms helps isolate which part of the network is destabilizing — attention layers and the final output projection are common culprits.
+**Gradient norm monitoring**: Sudden gradient norm spikes often lead the loss spike by some steps, providing an early warning signal (the lead time is run-specific — measure it on your own run rather than assuming a fixed number of steps). Tracking per-layer gradient norms helps isolate which part of the network is destabilizing — attention layers and the final output projection are common culprits.
 
 **Checkpoint strategy**: Save full checkpoints every 1000-2000 steps (in addition to the 30-60 minute hardware-failure checkpoints). After detecting a spike, reload the most recent clean checkpoint and skip the problematic data shard. Some teams maintain a rolling window of the last 3-5 checkpoints to avoid losing too much progress.
 
-**Production heuristic**: If the training loss has not decreased in 500 steps, investigate the data pipeline first (corrupted shards, tokenizer issues, data loader stalls) before adjusting hyperparameters. Data problems are the cause roughly 70% of the time at scale.
+**Production heuristic**: If the training loss has not decreased in 500 steps, investigate the data pipeline first (corrupted shards, tokenizer issues, data loader stalls) before adjusting hyperparameters — pipeline faults are cheap to rule out and expensive to miss, whereas an LR change invalidates the schedule for the rest of the run.
 
 ### Multi-Token Prediction — Training Mechanics
 
-When using MTP as an auxiliary loss (as in DeepSeek-V3), the total training loss combines the standard next-token loss with the multi-token heads:
+When using MTP as an auxiliary loss, the total training loss combines the standard next-token loss with the multi-token heads:
 
 ```
 L_total = L_CLM + lambda × (1/N) × Σ_{k=2}^{N} L_k
@@ -570,8 +584,9 @@ L_total = L_CLM + lambda × (1/N) × Σ_{k=2}^{N} L_k
 Where:
   L_CLM   = standard next-token prediction loss
   L_k     = cross-entropy loss for the k-th prediction head
-  lambda  = auxiliary loss weight (typically 0.1-0.3)
-  N       = number of prediction heads (typically 4)
+  lambda  = auxiliary loss weight (DeepSeek-V3: 0.3, then 0.1 late in training)
+  N       = number of prediction heads (4 in Meta's formulation; DeepSeek-V3 used
+            depth D=1, i.e. exactly one extra module)
 ```
 
 **Put simply.** "Train normally on the next token, then average the extra heads' losses together and add a small fraction of that as a nudge — the future-planning signal helps, but it must never outvote the objective you actually care about."
@@ -605,11 +620,11 @@ double the auxiliary's influence, so any head-count experiment would be confound
 change. Note also the `k=2` lower bound: including head 1 twice would double-weight the primary
 objective and make `lambda` mean something different than intended.
 
-Each auxiliary head is a lightweight linear projection from the shared trunk's hidden state. The heads do not attend to each other — they independently predict their assigned future position. This keeps the additional compute overhead to ~15-20% per training step while providing a strong planning signal that improves the trunk's representations. During inference, only Head 1 is required for standard autoregressive generation, but all heads can participate in speculative decoding for 2-3x throughput improvement.
+In Meta's parallel formulation each auxiliary head is its own transformer layer over the shared trunk's hidden state, and the heads do not attend to each other — they independently predict their assigned future position. Running the heads' forward/backward passes sequentially keeps peak memory (and, per Gloeckle et al., training time) close to the next-token baseline. In DeepSeek-V3's sequential formulation the depth-k module instead consumes the depth-(k-1) hidden state, preserving the causal chain, and shares the embedding and output head with the main model. During inference, only the next-token head is required for standard autoregressive generation, but the extra heads can drive self-speculative decoding — up to 3x in Gloeckle et al., 1.8x TPS in DeepSeek-V3.
 
 ### Compute Scaling
 
-The Chinchilla (Hoffman et al. 2022) formula for compute-optimal training:
+The Chinchilla (Hoffmann et al. 2022) formula for compute-optimal training, applied to the `C = 6ND` compute identity from Kaplan et al. 2020:
 ```
 For compute budget C (in FLOPs), using C = 6ND and D = 20N:
   C = 6N(20N) = 120N^2
@@ -626,7 +641,8 @@ For 5.9e23 FLOPs (the budget behind the widely-quoted pair):
   D ≈ 1.4T tokens
 
 In practice:
-  LLaMA 3 8B trained on 15T tokens (10x Chinchilla-optimal for inference efficiency)
+  Llama 3 8B trained on ~15T tokens = ~1,875 tokens/param, i.e. ~94x the
+  Chinchilla ratio of 20 tokens/param (Chinchilla-optimal for 8B is ~160B tokens)
   Rationale: inference on a smaller, longer-trained model is cheaper per token
 ```
 
@@ -721,12 +737,12 @@ section above).
 - ~$4-5M estimated training cost
 - Launched the LLM era; demonstrated few-shot learning at scale
 
-### LLaMA 3 (Meta, 2024)
-- 8B, 70B, 405B variants; 15T+ tokens training data
-- Data: curated web, code, math, multilingual
+### Llama 3 (Meta, 2024)
+- 8B, 70B, 405B variants; 405B pre-trained on 15.6T text tokens for 3.8e25 FLOPs
+- Data mix (paper §3.1.2): ~50% general knowledge, 25% math and reasoning, 17% code, 8% multilingual
 - 128K context via RoPE scaling
 - Open weights (community license)
-- 405B trained on 16K H100 GPUs for ~77 days
+- 405B trained on up to 16K H100s (80GB, 700W); reported BF16 MFU of 43% / 41% / 38% across the three parallelism stages (paper Table 4)
 
 ### Mistral 7B (2023)
 - 7B params, outperforms LLaMA 2 13B
@@ -735,9 +751,9 @@ section above).
 - Apache 2.0 license — fully open
 
 ### DeepSeek-V3 (2024)
-- 671B parameters, 37B active (MoE)
-- Trained for $5.5M total (shocked the industry with cost efficiency)
-- Multi-token prediction training objective (predict multiple next tokens simultaneously)
+- 671B parameters, 37B activated per token (MoE); trained on 14.8T tokens
+- 2.788M H800 GPU-hours (2.664M pre-training + 119K context extension + 5K post-training) = **$5.576M at an assumed $2/GPU-hour**. The paper is explicit that this "includes only the official training of DeepSeek-V3, excluding the costs associated with prior research and ablation experiments" — it is not the all-in program cost.
+- Multi-token prediction as an auxiliary objective (sequential, depth D=1)
 - FP8 mixed precision training
 
 ---
@@ -790,8 +806,8 @@ section above).
 | FSDP | Fully Sharded Data Parallel | PyTorch native; replaces DDP for large models |
 | GPT-NeoX | Open-source LLM training | EleutherAI framework |
 | Nanotron | LLM training framework | HuggingFace; modern replacement |
-| torchtitan | Meta's PyTorch-native training | Experimental; clean implementation |
-| Common Crawl | Web data source | ~100TB compressed / crawl |
+| torchtitan | PyTorch-native training platform | `pytorch/torchtitan`; released on PyPI (0.2.x), actively developed |
+| Common Crawl | Web data source | ~2-2.5B pages, ~350-400 TiB uncompressed per monthly snapshot |
 | The Pile | Curated training dataset | EleutherAI; 825GB diverse text |
 | DCLM | DataComp for LM | New curated CC dataset, strong quality |
 | RedPajama-v2 | Open training dataset | Together AI; 30T tokens |
@@ -804,7 +820,7 @@ section above).
 A: CLM (Causal Language Modeling) predicts the next token given only previous tokens — unidirectional, autoregressive, enables text generation. MLM (Masked Language Modeling) masks random tokens and predicts them using bidirectional context — better for understanding tasks but can't generate text. Modern LLMs use CLM; embedding/classification models use MLM.
 
 **Q: What are Chinchilla scaling laws and what did they change?**
-A: Chinchilla (Hoffman et al. 2022) showed that previous models like GPT-3 were over-parametrized relative to their training data. The optimal compute allocation splits equally between model size and training tokens. For a given compute budget, training a smaller model on more tokens is better than a larger model on fewer tokens. This led to LLaMA-style training: smaller models trained on much more data.
+A: Chinchilla (Hoffmann et al. 2022) showed that previous models like GPT-3 were over-parametrized relative to their training data. The optimal compute allocation splits equally between model size and training tokens. For a given compute budget, training a smaller model on more tokens is better than a larger model on fewer tokens. This led to LLaMA-style training: smaller models trained on much more data.
 
 **Q: How do you handle training instability / loss spikes?**
 A: First line of defense is gradient clipping (clip norm to 1.0). For spikes, roll back to the last checkpoint (every 30-60 min) and skip or filter the problematic batch. Long-term, improve data quality filtering to remove pathological examples. Some teams also use gradient norm monitoring to detect spikes before they destabilize training.
@@ -813,7 +829,7 @@ A: First line of defense is gradient clipping (clip norm to 1.0). For spikes, ro
 A: Data contamination occurs when evaluation benchmark examples appear in the training set. The model has "seen" the answers, inflating benchmark scores. This is why LLM evaluation is difficult to trust — most teams don't fully audit their training data. Mitigation: run n-gram deduplication between training data and all benchmarks before training.
 
 **Q: Why does repeating pre-training data for multiple epochs hurt large models?**
-A: Beyond roughly one pass, repeated data shifts the model from generalization toward memorization — benchmark gains flatten while verbatim regurgitation risk rises, and heavy repetition can actively degrade quality relative to training on fewer unique tokens. Empirically (Muennighoff et al., 2023, data-constrained scaling), up to ~4 epochs of repetition is nearly as valuable as fresh data, but returns decay rapidly after that, so frontier labs plan data volume upfront to keep the main run near 1 epoch. This is the opposite of classic small-data deep learning, where dozens of epochs are normal — at trillion-token scale, unique data is the binding constraint. If you must repeat, repeat only the highest-quality subsets with a different mix per pass.
+A: Beyond roughly one pass, repeated data shifts the model from generalization toward memorization — benchmark gains flatten while verbatim regurgitation risk rises, and heavy repetition can actively degrade quality relative to training on fewer unique tokens. Empirically (Muennighoff et al., 2023, data-constrained scaling), differences are insignificant up to ~4 epochs, meaningful gains continue to roughly 16 epochs, and beyond that returns collapse — so frontier labs plan data volume upfront to keep the main run near 1 epoch. This is the opposite of classic small-data deep learning, where dozens of epochs are normal — at trillion-token scale, unique data is the binding constraint. If you must repeat, repeat only the highest-quality subsets with a different mix per pass.
 
 **Q: Why can naive sequence packing silently hurt model quality even though it improves throughput?**
 A: Packing multiple documents into one fixed-length sequence without a block-diagonal attention mask lets tokens at the end of document A attend to document B — the model learns spurious cross-document dependencies that never exist at inference. Training loss can even look better (extra context to exploit) while single-document evaluation gets worse; the code-model case study in §14 measured +2.1 perplexity on single-file eval from exactly this bug. The fix is a per-document attention mask (each document attends only to itself) plus resetting position IDs at document boundaries. Always validate packing changes with an eval on unpacked, single-document inputs.
@@ -822,25 +838,25 @@ A: Packing multiple documents into one fixed-length sequence without a block-dia
 A: BF16 has the same 8-bit exponent range as FP32 (handles the dynamic range of gradients and activations), while FP16 has a smaller 5-bit exponent and frequently overflows/underflows during training. FP16 requires loss scaling to avoid underflow; BF16 doesn't. On modern GPUs (A100, H100), BF16 is as fast as FP16 but more numerically stable.
 
 **Q: How does data deduplication impact pre-training quality and what methods are used?**
-Data deduplication removes near-duplicate documents from the training corpus, which has been shown to improve model quality by 2-5% on benchmarks while reducing training compute. Without dedup, models memorize repeated passages (increasing regurgitation risk) and waste compute on redundant data. Methods: (1) exact dedup — hash each document, remove duplicates (fast but misses paraphrases); (2) MinHash/LSH — approximate dedup using locality-sensitive hashing on n-gram shingles, catches near-duplicates with >80% overlap; (3) suffix array — finds repeated substrings across documents (used by LLaMA). RefinedWeb (Falcon's dataset) demonstrated that aggressive dedup (removing 90%+ of Common Crawl) produces a corpus that matches curated datasets on downstream quality. The Pile uses a combination of MinHash and exact dedup. At scale, dedup can remove 30-60% of raw web crawl data.
+Data deduplication removes near-duplicate documents from the training corpus, improving model quality per token while reducing wasted compute. Without dedup, models memorize repeated passages (increasing regurgitation risk) and waste compute on redundant data. Methods: (1) exact dedup — hash each document, remove duplicates (fast but misses paraphrases); (2) MinHash/LSH — approximate dedup using locality-sensitive hashing on n-gram shingles, catches near-duplicates with >80% overlap; (3) suffix array — finds repeated substrings across documents (used by LLaMA). RefinedWeb (Falcon's dataset) demonstrated that an aggressive filtering-plus-dedup pipeline retaining only about 10% of raw Common Crawl produces a corpus that matches curated datasets on downstream quality — note that the ~90% removal is the whole pipeline, with language ID and quality filtering each roughly halving the data before dedup runs. The Pile uses a combination of MinHash and exact dedup.
 
 **Q: How does the Chinchilla scaling law differ from the LLaMA over-training approach, and which is better?**
-Chinchilla (Hoffmann et al., 2022) found the compute-optimal ratio is roughly 20 tokens per parameter — a 70B model should train on 1.4T tokens. LLaMA deliberately over-trains smaller models on much more data (7B trained on 1T tokens, 65B on 1.4T tokens — far beyond Chinchilla-optimal). The LLaMA approach is better for inference efficiency: a smaller over-trained model achieves the same quality as a larger Chinchilla-optimal model but is cheaper to serve. Chinchilla optimizes for training compute; LLaMA optimizes for inference compute. Since inference cost dominates in production (training is one-time, inference is continuous), the industry has shifted toward the LLaMA strategy. LLaMA 3 8B was trained on 15T tokens — nearly 2000x the Chinchilla-optimal ratio.
+Chinchilla (Hoffmann et al., 2022) found the compute-optimal ratio is roughly 20 tokens per parameter — a 70B model should train on 1.4T tokens. LLaMA 1 deliberately over-trained smaller models on much more data (6.7B and 13B on 1.0T tokens, 32.5B and 65.2B on 1.4T — far beyond Chinchilla-optimal for the small models). The LLaMA approach is better for inference efficiency: a smaller over-trained model achieves the same quality as a larger Chinchilla-optimal model but is cheaper to serve. Chinchilla optimizes for training compute; LLaMA optimizes for inference compute. Since inference cost dominates in production (training is one-time, inference is continuous), the industry has shifted toward the LLaMA strategy. Llama 3 8B was trained on ~15T tokens — about 1,875 tokens per parameter, roughly 94x the Chinchilla ratio of 20.
 
 **Q: What is curriculum learning in pre-training and does it help?**
-Curriculum learning orders training data from easy to hard, hypothesizing that models learn better with structured progression. In LLM pre-training, this might mean training on simple Wikipedia first, then academic papers, then code. Evidence is mixed: some studies (e.g., DoReMi by Google) show that optimizing data mixture ratios dynamically during training improves quality by 1-3% over uniform sampling. However, most frontier models (GPT-4, LLaMA 3) use simple random sampling with fixed domain proportions, suggesting that at sufficient scale, curriculum effects diminish. What does work: starting with high-quality data and maintaining quality throughout training, rather than starting with low-quality data. The most impactful "curriculum" choice is increasing the fraction of code and math data in later training stages, which several models (CodeLLaMA, DeepSeek) use successfully.
+Curriculum learning orders training data from easy to hard, hypothesizing that models learn better with structured progression. In LLM pre-training, this might mean training on simple Wikipedia first, then academic papers, then code. Evidence is mixed: optimizing the domain *mixture* clearly helps — DoReMi reports +6.5 percentage points average few-shot downstream accuracy on The Pile and reaches baseline accuracy 2.6x faster — but that is a better fixed mixture, not an easy-to-hard ordering. Most frontier models (GPT-4, Llama 3) use random sampling with fixed domain proportions, suggesting that at sufficient scale, ordering effects diminish. What does work: starting with high-quality data and maintaining quality throughout training, rather than starting with low-quality data. The most impactful "curriculum" choice is increasing the fraction of code and math data in later training stages, which several models (CodeLLaMA, DeepSeek) use successfully.
 
 **Q: How do you diagnose and recover from training instability (loss spikes) during pre-training?**
 Training instability manifests as sudden loss spikes — the training loss jumps by 0.5-2.0 and may or may not recover. Causes: (1) learning rate too high for current training stage; (2) data quality issues — a batch with corrupted or adversarial data; (3) numerical overflow in FP16/BF16 (especially with large gradient norms); (4) attention logits growing too large. Diagnosis: log gradient norms per layer (spikes in specific layers indicate the source), check the specific training examples in the spike batch, monitor attention entropy. Recovery strategies: (1) skip the problematic batch and resume; (2) roll back to a checkpoint 100-1000 steps before the spike; (3) reduce learning rate temporarily; (4) add gradient clipping (max_grad_norm=1.0). Prevention: use BF16 instead of FP16 (larger dynamic range), pre-attention LayerNorm (as in LLaMA), and z-loss regularization on attention logits. PaLM's training paper documented 20+ loss spikes during training, each requiring checkpoint rollback.
 
 **Q: What is the impact of training data composition (web, books, code, academic) on model capabilities?**
-Training data composition directly determines model strengths — models are what they eat. Typical frontier model mixtures: 50-70% web crawl (general knowledge, conversational ability), 10-15% code (reasoning, structured output), 10-15% books/academic papers (factual depth, writing quality), 5-10% Wikipedia/reference (factual accuracy), and 2-5% math (numerical reasoning). Increasing code proportion from 5% to 15% improves not just coding ability but general reasoning by 5-10% on benchmarks like GSM8K, because code requires logical thinking. The Phi models ("textbooks are all you need") demonstrated that training on high-quality synthetic textbook data can produce remarkably capable small models. Conversely, too much web crawl without filtering leads to toxic, low-quality outputs. The key insight: data quality matters more than quantity beyond a threshold — 1T high-quality tokens outperforms 10T unfiltered tokens.
+Training data composition directly determines model strengths — models are what they eat. The two published reference points bracket the range: LLaMA 1 (2023) sampled 82% web (67% CommonCrawl + 15% C4), 4.5% GitHub, 4.5% Wikipedia, 4.5% books, 2.5% arXiv, 2% StackExchange; Llama 3 (2024) shifted hard toward reasoning data with ~50% general knowledge, 25% math and reasoning, 17% code, 8% multilingual. Raising the code and math share is widely reported to improve non-code reasoning too, because code requires explicit step-by-step logic — but the size of that transfer is model- and eval-specific, so treat any single "+X% on GSM8K" figure as an internal measurement. The Phi models ("textbooks are all you need") demonstrated that training on high-quality synthetic textbook data can produce remarkably capable small models. Conversely, too much web crawl without filtering leads to toxic, low-quality outputs. The key insight: beyond a threshold, data quality matters more than raw token count.
 
 **Q: Why do LLMs need learning-rate warmup at the start of training?**
 Adam's second-moment estimates are unreliable in the first few hundred steps (built from too few gradient samples), so full-size steps early on are effectively steps with a miscalibrated preconditioner — a common cause of immediate divergence from random initialization. Linear warmup over 1-2% of total steps (e.g., 2,000 of 200,000) lets the moment estimates stabilize before the peak LR (1e-4 to 3e-4) is reached, and it also protects freshly initialized output layers from huge early gradients. Continued pre-training from a converged checkpoint needs a much shorter warmup (hundreds of steps) because the loss landscape is already benign. If training diverges in the first 1% of steps, lengthen warmup before touching the peak LR.
 
 **Q: How does multi-token prediction (MTP) change training, and why did DeepSeek-V3 adopt it?**
-MTP adds N-1 lightweight auxiliary heads (typically N=4) that predict tokens at positions +2..+N from the shared trunk, with the auxiliary loss weighted by lambda ≈ 0.1-0.3 on top of the standard next-token loss. The planning signal — to predict token +3 the model must implicitly commit to +1 and +2 — improves the trunk's representations and long-range coherence at ~15-20% extra compute per step. At inference only head 1 is required for standard generation, but the extra heads double as a built-in draft model for speculative decoding, giving 2-3× decoding throughput. DeepSeek-V3 used MTP as an auxiliary loss — one of several compounding efficiency choices (with FP8 training and MoE) behind its $5.5M training cost.
+MTP adds auxiliary prediction modules for future positions, trained with a weighted extra loss on top of the standard next-token loss. Two designs exist and are often conflated: Gloeckle et al. (Meta, 2024) use N independent output heads (N=4) predicting +1..+N in parallel from one shared trunk, and report no training-time overhead with a memory-efficient sequential per-head backward, up to 3× self-speculative decoding speedup, and +12% HumanEval / +17% MBPP at 13B. DeepSeek-V3 instead predicts sequentially, keeping the full causal chain at each depth, with depth D=1 and lambda 0.3 falling to 0.1 late in training; it reports an 85-90% acceptance rate on the second token and 1.8× TPS. The planning signal — to predict token +2 the model must implicitly commit to +1 — improves the trunk's representations. DeepSeek-V3's MTP was one of several compounding efficiency choices (with FP8 training and MoE) behind its reported $5.576M official training cost.
 
 **Q: Why must fill-in-the-middle (FIM) be trained during pre-training rather than bolted on later?**
 FIM rearranges training examples into (prefix, suffix, middle) or (suffix, prefix, middle) order with sentinel tokens, teaching the model to condition on both sides of a gap — the core capability behind IDE cursor-position completion. Applying FIM transforms to ~50% of training examples costs essentially nothing in left-to-right perplexity (the "FIM-for-free" result), but adding FIM only in a short post-training phase leaves a measurable gap — the code-model case study in §14 measured 18% lower FIM pass@1 versus training it from the start. The sentinel format at inference must exactly match training (PSM vs SPM ordering matters). If a code model will ever serve infill requests, bake FIM into pre-training from token zero.
@@ -1513,7 +1529,7 @@ def build_document_mask(doc_lengths: list[int], seq_len: int) -> torch.Tensor:
 
 | Checkpoint (tokens seen) | HumanEval pass@1 | MBPP pass@1 | Loss |
 |---|---|---|---|
-| 0 (random init) | 0.0% | 0.0% | 11.4 |
+| 0 (random init) | 0.0% | 0.0% | 10.4 |
 | 10B | 12.3% | 9.8% | 3.1 |
 | 50B | 31.7% | 28.4% | 2.4 |
 | 100B | 41.2% | 38.6% | 2.2 |

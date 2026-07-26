@@ -24,7 +24,7 @@
 ### Non-Functional Requirements
 - **Latency overhead**: < 10ms added latency (gateway should be transparent)
 - **Availability**: 99.99% (gateway must be more reliable than individual providers)
-- **Scale**: 100K req/sec peak; 1B tokens/day
+- **Scale**: 10M requests/day (~116 req/sec average, ~350 req/sec peak); ~8B tokens/day
 - **Multi-tenant**: 500 enterprise clients with isolated quotas and logs
 - **Compliance**: GDPR (log retention), SOC 2, optional HIPAA
 
@@ -34,22 +34,24 @@
 
 ### Traffic Estimates
 ```
-Peak QPS: 100,000 req/sec
+Daily requests: 10,000,000
+Average QPS: 10M / 86,400 = ~116 req/sec
+Peak QPS (3x average): ~350 req/sec
 Average input: 500 tokens
 Average output: 300 tokens
-Daily tokens: 1B input + 600M output = 1.6B tokens/day
+Daily tokens: 5B input + 3B output = 8B tokens/day
 
 Provider distribution (example):
   OpenAI (GPT-4o): 40% of traffic
-  Anthropic (Claude 3.5): 30%
-  Google (Gemini 1.5 Pro): 15%
-  Self-hosted (Llama 3): 15%
+  Anthropic (Claude Sonnet 5): 30%
+  Google (Gemini Pro tier): 15%
+  Self-hosted (Llama 3.3 70B): 15%
 
 Request rate per provider at peak:
-  OpenAI: 40,000 req/sec
-  Anthropic: 30,000 req/sec
-  Google: 15,000 req/sec
-  Self-hosted: 15,000 req/sec
+  OpenAI: ~140 req/sec
+  Anthropic: ~105 req/sec
+  Google: ~52 req/sec
+  Self-hosted: ~52 req/sec
 ```
 
 ### Storage Estimates
@@ -62,10 +64,10 @@ Request logs:
 Semantic cache:
   Cache entry: ~3KB (query embedding + response text + metadata)
   Cache size target: 10M entries = 30GB
-  Hit rate target: 20% → saves $0.20M/day at $0.01/request average
+  Hit rate target: 20% → 10M x 20% x $0.015 = $30,000/day saved (see Section 7)
 
 Metrics time series:
-  100K metrics/sec → InfluxDB / Prometheus
+  ~10K metric samples/sec → InfluxDB / Prometheus
   Cardinality: tenant × model × endpoint = 500 × 6 × 10 = 30,000 series
   Storage: 30K series × 90 days × ~500KB/series = 1.35TB
 ```
@@ -140,12 +142,12 @@ Level 2: Routing policy (admin-configured per tenant)
     "tenant_id": "acme_corp",
     "routing_policy": {
       "default_model": "gpt-4o",
-      "fallback_model": "claude-3-5-sonnet",
+      "fallback_model": "claude-sonnet-5",
       "cost_limit_per_request": 0.10,
       "latency_mode": "balanced",  // "fast" | "balanced" | "quality"
       "blocked_models": [],
       "a_b_tests": [
-        {"name": "sonnet_vs_gpt4", "model": "claude-3-5-sonnet", "percent": 20}
+        {"name": "sonnet_vs_gpt4", "model": "claude-sonnet-5", "percent": 20}
       ]
     }
   }
@@ -159,7 +161,7 @@ Level 3: Smart routing based on request characteristics
 
   Cost-based routing:
     Estimate cost: (input_tokens × input_price + est_output_tokens × output_price)
-    If estimate > threshold → route to cheaper model (Claude Haiku, Gemini Flash)
+    If estimate > threshold → route to cheaper model (Claude Haiku 4.5, Gemini Flash)
 
   Load-based routing:
     Monitor provider health metrics (latency p95, error rate)
@@ -170,7 +172,7 @@ Routing example:
   Request: {model_hint: "any", task: "summarize", tokens_in: 2000, max_tokens: 200}
   → No vision, no long context needed
   → Cost estimate: $0.01 (within budget)
-  → A/B test: 80% → GPT-4o, 20% → Claude 3.5 Sonnet
+  → A/B test: 80% → GPT-4o, 20% → Claude Sonnet 5
   → Load check: GPT-4o p95=800ms (normal) → route to GPT-4o
 ```
 
@@ -254,7 +256,7 @@ class SemanticCache_Broken:
         return result[2][1]
 ```
 
-FIX (threshold 0.92 — industry default, 15-25% hit rate):
+FIX (threshold 0.92 — a common starting point; calibrate per corpus, 15-25% hit rate in this deployment):
 
 ```python
 from __future__ import annotations
@@ -270,7 +272,7 @@ class SemanticCache:
     """
 
     def __init__(self, redis_client: Redis, embedding_model,
-                 similarity_threshold: float = 0.92,     # FIX: industry default
+                 similarity_threshold: float = 0.92,     # FIX: calibrated starting point
                  index_name: str = "sem_cache_idx") -> None:
         self.redis = redis_client
         self.embed = embedding_model
@@ -288,7 +290,8 @@ class SemanticCache:
         if not raw or raw[0] == 0:
             return None
         doc = dict(zip(raw[2][0::2], raw[2][1::2]))
-        cosine_sim = 1.0 - float(doc.get("__score", 1.0))        # L2 distance → similarity
+        cosine_sim = 1.0 - float(doc.get("__score", 1.0))        # index DISTANCE_METRIC COSINE:
+                                                                 # score = 1 - cosine similarity
         if cosine_sim < self.threshold:
             return None
         return doc.get("response") or None
@@ -305,7 +308,7 @@ class SemanticCache:
         pipe.execute()
 ```
 
-Threshold calibration: 0.98+ = near-zero hit rate (effectively disabled); 0.95 = 5-10% hit rate (conservative); **0.92 = industry default (15-25% hit rate, safe for factual queries)**; 0.88 = 30-40% hit rate (aggressive); 0.85 = poisoning risk (semantically-different queries match).
+Threshold calibration (illustrative hit rates measured on this deployment's own query mix — they are corpus- and embedding-model-specific, not published constants; recalibrate before adopting): 0.98+ = near-zero hit rate (effectively disabled); 0.95 = 5-10% hit rate (conservative); **0.92 = the chosen default (15-25% hit rate, safe for factual queries)**; 0.88 = 30-40% hit rate (aggressive); 0.85 = poisoning risk (semantically-different queries match).
 
 ### 4.3 Failover and Circuit Breaker
 
@@ -330,8 +333,8 @@ The binary open/closed lifecycle above was later replaced by the proportional `A
 
 ```
 Failover chain (configurable per tenant):
-  gpt-4o (OpenAI) → claude-3-5-sonnet (Anthropic) → gemini-1.5-pro (Google)
-  → llama-3-70b (self-hosted, last resort)
+  gpt-4o (OpenAI) → claude-sonnet-5 (Anthropic) → Gemini Pro tier (Google)
+  → Llama-3.3-70B-Instruct (self-hosted, last resort)
 
 Format translation: provider-specific request/response shapes (Anthropic requires max_tokens,
 uses content[0].text not choices[0].message.content) are handled by the adapter layer;
@@ -396,7 +399,7 @@ Every request generates rich telemetry. Key log fields per event:
   content is NOT stored by default; request_hash (BLAKE2b) used for deduplication.
 
 Pipeline:
-  Gateway → Kafka topic: llm-requests (100K events/sec)
+  Gateway → Kafka topic: llm-requests (~350 events/sec at peak, ~116/sec average)
   Kafka consumer → ClickHouse (analytical queries, cost reports)
   Kafka consumer → S3 (raw log archive, 90-day retention)
   Kafka consumer → Prometheus (real-time metrics)
@@ -449,7 +452,7 @@ Request body (OpenAI-compatible):
   "max_tokens": 1000,
   // Gateway extensions:
   "x_gateway": {
-    "fallback_models": ["claude-3-5-sonnet"],
+    "fallback_models": ["claude-sonnet-5"],
     "cache": true,
     "budget_limit_usd": 0.10
   }
@@ -486,7 +489,7 @@ Streaming: SSE format, compatible with OpenAI streaming
 |----------|--------|-------------|--------|
 | API format | OpenAI-compatible | Custom format | Drop-in replacement; minimal client changes |
 | Semantic cache | Embedding similarity | Exact match hash | ~20% hit rate vs 2%; semantic queries benefit |
-| Cache similarity threshold | 0.92 | 0.85 (too loose) or 0.98 (too strict) | 0.92 is industry default; 0.85 causes cache poisoning; 0.98 yields near-zero hit rate |
+| Cache similarity threshold | 0.92 | 0.85 (too loose) or 0.98 (too strict) | 0.92 calibrated on this deployment's query mix; 0.85 causes cache poisoning; 0.98 yields near-zero hit rate |
 | Rate limiting | Redis token bucket | DB-based | Microsecond latency; atomic operations |
 | Circuit breaker | Proportional (adaptive) | Binary open/closed | Handles partial degradation (8% error rate) that binary breakers miss |
 | Routing | Rule-based hybrid | ML-based | Interpretable; debuggable; ML adds complexity for marginal gain |
@@ -504,26 +507,35 @@ Streaming: SSE format, compatible with OpenAI streaming
 ## 7. Cost Impact Analysis
 
 ```
-Benefits of the gateway:
+Benefits of the gateway. Per-request cost is derived from this design's own
+500-in / 300-out average and 2026-07 list prices, not a blended guess:
+  GPT-4o          500 x $2.50/MTok + 300 x $10/MTok  = $0.00425
+  Claude Sonnet 5 500 x $3/MTok    + 300 x $15/MTok  = $0.00600
+  Claude Haiku 4.5 500 x $1/MTok   + 300 x $5/MTok   = $0.00200
+  Self-hosted Llama 3 (amortized GPU)                = ~$0.00050
+Blended across the Section 2 provider mix (40/30/15/15): ~$0.0045/request.
 
 1. Semantic caching (20% hit rate):
-   Daily cost without cache: 10M requests × $0.015 avg = $150,000/day
-   With 20% cache hit: 10M × 80% × $0.015 = $120,000/day
-   Savings: $30,000/day = $10.95M/year
+   Daily cost without cache: 10M requests × $0.0045 = $45,000/day
+   With 20% cache hit: 10M × 80% × $0.0045 = $36,000/day
+   Savings: $9,000/day = $3.29M/year
 
 2. Smart routing (route 60% to cheaper models):
-   Without routing: all requests → GPT-4o ($0.020 avg)
-   With routing: 40% GPT-4o + 60% Claude Haiku ($0.002 avg)
-   Cost: 10M × (40% × $0.020 + 60% × $0.002) = $92,000/day
-   Savings vs all-GPT-4o: $108,000/day = $39.4M/year
+   Without routing: all requests → GPT-4o ($0.00425) = $42,500/day
+   With routing: 10M × (40% × $0.00425 + 60% × $0.00200) = $29,000/day
+   Savings vs all-GPT-4o: $13,500/day = $4.93M/year
 
 3. Budget enforcement:
    Prevents runaway costs from bugs, prompt injection, excessive usage
    Estimated: saves 5-10% from unexpected usage spikes
 
-Total gateway ROI: well above gateway operating cost
-Gateway cost to run: ~$5,000/day (infrastructure, team)
-Annual savings: ~$50M → strong positive ROI
+Note: (1) and (2) overlap — cached requests are not also routed — so the two
+savings do not simply add. Applying routing first, then a 20% cache hit on the
+routed spend, the combined run rate is 10M × 0.80 × $0.0029 = $23,200/day,
+about $19,300/day below the unoptimized all-GPT-4o baseline.
+Gross annual saving: $19,300/day × 365 = ~$7.0M/year
+Gateway cost to run: ~$5,000/day = ~$1.8M/year (infrastructure, team)
+Net: ~$5.2M/year → positive ROI
 ```
 
 ---
@@ -601,7 +613,7 @@ See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) fo
 **Mitigation:**
 1. `AdaptiveCircuitBreaker` automatically reduces traffic to the failing provider proportionally to its error rate. No manual action needed for proportional reduction.
 2. If error rate exceeds 80% (complete outage): manually override routing table via admin API to set `openai.traffic_fraction = 0.0`. This forces 100% traffic to fallback providers.
-3. Monitor fallback provider capacity — a sudden 40,000 req/s shift to Anthropic may exceed their rate limits. Spread across all available fallbacks.
+3. Monitor fallback provider capacity — shifting OpenAI's whole 40% share (~140 req/s at peak) onto Anthropic alone may exceed that account's rate limits. Spread across all available fallbacks.
 
 **Resolution:** When provider status page shows green and error rate drops below 1% for 5 consecutive minutes, restore `openai.traffic_fraction` to 1.0 gradually (25% → 50% → 100%, 2-minute steps).
 
@@ -655,9 +667,15 @@ See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) fo
 
 ## 10. Production Failure Scenarios
 
+> The three incidents below are **illustrative composites** written against this case study's
+> own hypothetical deployment, not reports of named public outages. Timings, error rates and
+> user counts are internal to the example and should not be cited as industry data. The
+> failure *mechanisms* — LRU eviction of rate-limit counters, binary breakers missing partial
+> degradation, unscanned cache reads — are the transferable part.
+
 ### Incident 1: Redis Semantic Cache Memory Exhaustion Causes Total Outage
 
-**What happened:** The gateway's Redis cluster (32 GB) hit 100% memory utilization at 2:47 AM on a Monday. Redis began evicting LRU keys — including rate limit counters. Evicting a rate limit counter resets the counter to 0, effectively bypassing per-tenant rate limits. High-volume tenants burst past their limits, generating 40× normal traffic to OpenAI. OpenAI rate-limited the gateway globally. All tenants experienced 429 errors for 18 minutes.
+**What happened:** The gateway's Redis cluster (32 GB) hit 100% memory utilization at 2:47 AM on a Monday. Redis began evicting LRU keys — including rate limit counters. Evicting a rate limit counter resets the counter to 0, effectively bypassing per-tenant rate limits. High-volume tenants burst past their limits, generating 40× normal traffic to the primary provider, whose account-level limits then rate-limited the whole gateway. All tenants experienced 429 errors for 18 minutes.
 
 **Root cause:** Semantic cache entries had a default TTL of 7 days. Over 3 months, the cache grew to 28 GB of entries. A marketing campaign that week increased unique query diversity, adding 4 GB in 6 hours. The eviction policy (allkeys-lru) prioritized evicting rate limit counters (small, accessed frequently, LRU score was high) over cache entries (large, less frequently accessed, same query rarely repeated twice in 7 days).
 
@@ -696,7 +714,7 @@ def store_semantic_cache(
 
 ### Incident 2: Provider Circuit Breaker Flapping During Partial Degradation
 
-**What happened:** OpenAI's API was experiencing 8% error rate on a single region (us-east-1) — not enough to trigger the circuit breaker (threshold: 10%), but enough to cause user-visible failures. The gateway continued routing 100% of traffic to OpenAI us-east-1. The 8% failure rate generated exactly the kind of intermittent errors that frustrated users the most (some retries succeed, some don't). Duration: 47 minutes until OpenAI mitigated.
+**What happened:** The primary provider was returning an 8% error rate in one region — not enough to trip the binary circuit breaker, which was configured at a 10% threshold at the time (since tightened to the 5% shown in 4.3) — but enough to cause user-visible failures. The gateway continued routing 100% of traffic to the degraded region. The 8% failure rate generated exactly the kind of intermittent errors that frustrate users most (some retries succeed, some don't). Duration: 47 minutes until the provider mitigated.
 
 **Root cause:** Binary circuit breaker (open/closed) does not handle partial degradation. The 10% threshold was set to avoid false positives; 8% degradation was below the threshold but above user tolerance (SLA was 0.5% error rate).
 
@@ -749,7 +767,7 @@ class AdaptiveCircuitBreaker:
 
 ### Incident 3: Prompt Injection via Cached Response Propagation
 
-**What happened:** A malicious user submitted a prompt that caused GPT-4o to include `ignore previous instructions` preamble in its response. The response was stored in the semantic cache under a common query embedding. 47 subsequent users received the poisoned response from cache before the cache entry was invalidated.
+**What happened:** A malicious user submitted a prompt that caused the upstream model to include an `ignore previous instructions` preamble in its response. The response was stored in the semantic cache under a common query embedding. 47 subsequent users received the poisoned response from cache before the cache entry was invalidated.
 
 **Root cause:** Semantic cache stored raw LLM responses without output safety scanning. Cache lookup happened before output filtering.
 
@@ -774,7 +792,7 @@ def get_cached_response(
 
 ## 11. Capacity Planning Math
 
-**Target load:** 40M requests/month, mix: 65% simple (512-token output), 30% medium (1024-token), 5% complex (4096-token).
+**Target load:** 40M requests/month, mix: 65% simple (512-token output), 30% medium (1024-token), 5% complex (4096-token). This sizes a *single smaller reference deployment*, not the 10M req/day (300M/month) flagship figure used in Sections 1, 2 and 7 — multiply node and Redis counts by ~7.5x for that tier.
 
 ```
 Requests/second (peak 3× average):
@@ -793,18 +811,32 @@ Gateway nodes (routing + caching layer, NOT inference):
   Redis semantic cache: 1 × r6g.xlarge (32 GB) — covers 6-month cache growth at 20% hit rate
   Redis rate-limit: 1 × r6g.large (16 GB) — never needs eviction
 
-Cost breakdown at 40M req/month:
-  LLM API costs (before cache, before routing optimization):
-    Simple  (GPT-3.5-turbo):   26M req × 600 tok × $0.002/1k = $31,200/month
-    Medium  (GPT-4o-mini):     12M req × 1200 tok × $0.015/1k = $21,600/month
-    Complex (GPT-4o):           2M req × 4600 tok × $0.030/1k =  $27,600/month
-    Raw total: ~$80,400/month
+Cost breakdown at 40M req/month (list prices as of 2026-07; input and output
+priced separately — a single blended $/1k rate is where cost models go wrong):
+  Simple  (GPT-4o-mini, $0.15/MTok in, $0.60/MTok out), 400 in + 512 out:
+    26M × 400  =  10,400 MTok × $0.15 =  $1,560
+    26M × 512  =  13,312 MTok × $0.60 =  $7,987
+    Subtotal: $9,547/month
+  Medium  (Claude Haiku 4.5, $1/MTok in, $5/MTok out), 800 in + 1,024 out:
+    12M × 800   =  9,600 MTok × $1 =  $9,600
+    12M × 1,024 = 12,288 MTok × $5 = $61,440
+    Subtotal: $71,040/month
+  Complex (GPT-4o, $2.50/MTok in, $10/MTok out), 2,000 in + 4,096 out:
+    2M × 2,000 = 4,000 MTok × $2.50 = $10,000
+    2M × 4,096 = 8,192 MTok × $10   = $81,920
+    Subtotal: $91,920/month
 
-  After 34% semantic cache hit rate (cached = $0 marginal):
-    Effective: $80,400 × 0.66 = $53,064/month
+  Raw total (no cache, no routing): $172,507/month
+
+  After 20% semantic cache hit rate (cached = $0 marginal; 20% is the target
+  from Section 2, within the 15-25% band measured in 4.2):
+    $172,507 × 0.80 = $138,006/month
 
   Infrastructure (gateway nodes, Redis, monitoring): $4,200/month
-  Total: ~$57,264/month vs $180,000/month before optimization
+  Total: ~$142,200/month vs ~$172,500/month unoptimized (18% saving from cache alone;
+  the larger lever is the routing mix above — sending all 40M requests to GPT-4o
+  instead, at the mix-weighted 600 in / 845 out, costs 24,000 MTok × $2.50 +
+  33,792 MTok × $10 = ~$398,000/month, 2.3x the routed figure)
 ```
 
 ---
@@ -826,35 +858,43 @@ The gateway is a defense layer, not the only defense. Its role: (1) Input scanne
 
 **Q: Provider capability matrix:**
 
+List prices as of 2026-07. TTFT figures are this deployment's own measurements, not vendor SLAs.
+
 | Provider | Strength | Context | Cost/1M tokens | p99 TTFT |
 |---|---|---|---|---|
-| Llama-3-8B (self-hosted) | Simple classification, extraction | 8k | $0.20 | 180ms |
-| Claude Haiku 3 | Medium reasoning, summarization | 200k | $1.25 (in) / $3.75 (out) | 350ms |
-| GPT-4o | Complex reasoning, multi-step | 128k | $5 (in) / $15 (out) | 800ms |
-| Claude Sonnet 3.5 | Coding, analysis, long-form | 200k | $3 (in) / $15 (out) | 600ms |
+| Llama 3 8B (self-hosted) | Simple classification, extraction | 8k | ~$0.20 amortized GPU | 180ms |
+| GPT-4o mini | Cheap bulk generation | 128k | $0.15 (in) / $0.60 (out) | 250ms |
+| Claude Haiku 4.5 | Medium reasoning, summarization | 200k | $1 (in) / $5 (out) | 350ms |
+| GPT-4o | Complex reasoning, multi-step | 128k | $2.50 (in) / $10 (out) | 800ms |
+| Claude Sonnet 5 | Coding, analysis, long-form | 1M | $3 (in) / $15 (out) | 600ms |
 
 **Q: Routing decision logic (heuristic, first-match-wins):**
 
 ```python
 def classify_and_route(messages: list[dict], tenant_config: dict) -> RoutingDecision:
     prompt_tokens = count_tokens(messages)
-    has_code = any("```" in m.get("content", "") for m in messages)
+    code_fence = "`" * 3   # built, not literal: a bare ``` would close this fence
+    has_code = any(code_fence in m.get("content", "") for m in messages)
     has_tool_calls = any("function" in m.get("role", "") for m in messages)
 
     if tenant_config.get("force_model"):
         return _build_decision(tenant_config["force_model"], prompt_tokens)
 
-    if prompt_tokens > 16_000 or has_tool_calls:       # long-context / tools → Claude Sonnet
-        return RoutingDecision("anthropic", "claude-3-5-sonnet-20241022",
-                               min(4096, 200_000 - prompt_tokens),
+    # $/token rates below are list prices as of 2026-07:
+    #   claude-sonnet-5  $3/MTok in,   $15/MTok out
+    #   gpt-4o           $2.50/MTok in, $10/MTok out
+    #   claude-haiku-4-5 $1/MTok in,    $5/MTok out
+    if prompt_tokens > 16_000 or has_tool_calls:       # long-context / tools → Claude Sonnet 5
+        return RoutingDecision("anthropic", "claude-sonnet-5",
+                               min(4096, 1_000_000 - prompt_tokens),
                                prompt_tokens * 0.000003 + 1000 * 0.000015, "long_or_tools")
     if has_code or prompt_tokens > 4_000:              # code / complex → GPT-4o
         return RoutingDecision("openai", "gpt-4o", 1024,
-                               prompt_tokens * 0.000005 + 1024 * 0.000015, "code_or_complex")
-    if prompt_tokens > 1_000:                          # medium → Claude Haiku
-        return RoutingDecision("anthropic", "claude-3-haiku-20240307", 512,
-                               prompt_tokens * 0.00000125 + 512 * 0.00000375, "medium")
-    return RoutingDecision("self_hosted", "llama-3-8b-instruct", 256,    # simple → Llama-3-8B
+                               prompt_tokens * 0.0000025 + 1024 * 0.00001, "code_or_complex")
+    if prompt_tokens > 1_000:                          # medium → Claude Haiku 4.5
+        return RoutingDecision("anthropic", "claude-haiku-4-5-20251001", 512,
+                               prompt_tokens * 0.000001 + 512 * 0.000005, "medium")
+    return RoutingDecision("self_hosted", "llama-3-8b-instruct", 256,    # simple → Llama 3 8B
                            prompt_tokens * 0.0000002, "simple_short")
 ```
 
@@ -980,7 +1020,8 @@ class AnthropicAdapter(ProviderAdapter):
                 raw_response=data,
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 529:   # Anthropic overloaded code
+            # 429 = rate_limit_error, 529 = overloaded_error (both shed load, both retryable)
+            if exc.response.status_code in (429, 529):
                 raise RateLimitError("anthropic") from exc
             raise ProviderError("anthropic", str(exc)) from exc
 
@@ -1087,6 +1128,6 @@ Pin to specific model versions in routing config (`gpt-4o-2024-11-20`, not `gpt-
 - Pin specific model versions; 15-minute health pings give early deprecation warning
 - Single internal schema at the adapter boundary keeps all application code provider-agnostic
 
-**ROI summary:** For $50k+/month API spend, a gateway pays for itself in 2 months via semantic cache (25-35% call reduction), smart routing (60% traffic to cheaper models), and budget enforcement preventing runaway agent loops. Engineering investment: 4-6 weeks for a production v1.
+**ROI summary:** For $50k+/month API spend, a gateway pays for itself quickly via semantic cache (15-25% call reduction, per 4.2), smart routing (60% traffic to cheaper models), and budget enforcement preventing runaway agent loops. Engineering investment: 4-6 weeks for a production v1. Payback period depends entirely on your traffic's cache-hit profile — measure it before committing to a build-vs-buy decision.
 
 **Production lesson:** The most common gateway failure mode is under-investing in cache invalidation. Stale cached responses are worse than no cache — confidently wrong answers spread at scale. Monitor cache quality weekly and build invalidation triggers before the cache grows large enough to cause incidents.

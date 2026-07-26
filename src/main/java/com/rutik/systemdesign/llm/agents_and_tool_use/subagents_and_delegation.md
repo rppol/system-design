@@ -8,7 +8,7 @@ A subagent is an LLM agent spawned by a parent agent to handle a focused subtask
 
 Subagents matter for three reasons: (1) **context isolation** — a subagent doing web research doesn't need to see the parent's 30 prior tool calls, cutting cost and improving focus; (2) **parallelism** — 5 subagents dispatched simultaneously finish in roughly the time of one, dramatically reducing wall-clock latency on multi-source tasks; (3) **security** — restricting a subagent's tools shrinks the blast radius of any single [prompt injection](../llm_security/README.md) or model misbehavior.
 
-The pattern is the foundation of Claude Code's parallel research, Anthropic's research multi-agent system (reporting 15-minute research vs 1-hour single-agent), and most production agent architectures handling tasks that decompose into independent subtasks.
+The pattern is the foundation of Claude Code's parallel research, Anthropic's published multi-agent research system (which reports outperforming single-agent Claude Opus 4 by 90.2% on its internal research eval, and cutting research time by up to 90% on complex queries), and most production agent architectures handling tasks that decompose into independent subtasks. The same post is candid about the cost: multi-agent systems burn roughly 15x the tokens of a chat interaction.
 
 ---
 
@@ -111,7 +111,7 @@ That distinction is the whole reason fan-out disappoints in production. `sum` is
   ideal (N = 6, no synthesis, no dispatch)                6.00x
 ```
 
-The nominal win is `6x`; the realized win at even timings is `4.39x`, and one straggler at `75s` — while the other five still finish in `30s` — cuts it to `2.09x`. Note that `t_synth = 10s` is a fixed serial tax: it is Amdahl's law with `max(t_i)` as the parallel portion, which is why doubling `N` from 6 to 12 helps far less than making the slowest subagent faster. Anthropic's reported `1 hour -> 15 minutes` is exactly `4x` — the same neighbourhood as the `4.39x` above, not the `5x-20x` the subagent count might suggest.
+The nominal win is `6x`; the realized win at even timings is `4.39x`, and one straggler at `75s` — while the other five still finish in `30s` — cuts it to `2.09x`. Note that `t_synth = 10s` is a fixed serial tax: it is Amdahl's law with `max(t_i)` as the parallel portion, which is why doubling `N` from 6 to 12 helps far less than making the slowest subagent faster. Anthropic reports research time cut by "up to 90%" on complex queries — a `10x` ceiling, above the `4.39x` here — but note that its ceiling comes from stacking two levels of parallelism (parallel subagents, and 3+ parallel tool calls *inside* each subagent), not from fan-out width alone.
 
 ```
 Context Comparison
@@ -353,7 +353,7 @@ This is the property that makes parallel dispatch safe to expose to users. Witho
 
 **Claude Code** uses subagent dispatch via the Agent tool. Parent CLI agent spawns focused subagents for: codebase exploration (Explore subagent with read-only tools), code review (with bash+test tools), and code generation (with write tools).
 
-**Anthropic Research multi-agent system** dispatches 5-20 Sonnet subagents in parallel for deep research; reports 15-minute completion vs 1-hour for single agent on the same prompts — the canonical production deployment of the [orchestrator-worker pattern](../multi_agent_systems/orchestrator_worker_pattern.md).
+**Anthropic Research multi-agent system** uses a Claude Opus lead agent that spins up 3-5 Sonnet subagents in parallel (more than 10 for complex research), with each subagent running 3+ tools in parallel of its own; Anthropic reports a 90.2% improvement over single-agent Claude Opus 4 on its internal research eval and research time cut by up to 90% on complex queries — the canonical production deployment of the [orchestrator-worker pattern](../multi_agent_systems/orchestrator_worker_pattern.md).
 
 **Cursor Composer** spawns parallel file-editing subagents when changes span >5 files. Each subagent gets only the files it's editing in context.
 
@@ -542,7 +542,7 @@ Per-subagent: latency, tokens, iterations, success rate. Per-parent task: total 
 **Architecture**:
 
 ```
-                Parent Agent (Claude Opus 4.7, ext. thinking)
+              Parent Agent (Claude Opus 4.7, adaptive thinking)
                           |
                           v
                 Identifies N source-types needed (5-12)

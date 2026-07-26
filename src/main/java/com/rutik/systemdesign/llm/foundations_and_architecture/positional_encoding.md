@@ -27,7 +27,7 @@ One-line analogy: Positional encoding is like adding timestamps to messages in a
 
 Mental model: A transformer without positional encoding is a "bag of tokens" model — it knows what words are present but not where. Adding positional encoding is like writing the page number in the margin of every page of a book. Sinusoidal encoding writes a fixed code per page. RoPE writes the code as a rotation of the content itself — so comparing two pages automatically reveals their distance (the rotation difference).
 
-Why it matters: The transition from sinusoidal to RoPE (2021) and then the development of YaRN/LongRoPE (2023) directly enabled the scaling of context windows from 2K tokens (GPT-3) to 1M tokens (Gemini 1.5 Pro) without fundamental architecture changes.
+Why it matters: The transition from sinusoidal to RoPE (2021), and then the base-scaling and interpolation family that followed (PI, NTK-aware, YaRN, LongRoPE, 2023), is what let open models grow context windows from GPT-3's 2K to 128K+ without fundamental architecture changes. Frontier closed models now advertise 1M-token windows; their positional schemes are not published, so do not attribute them to any specific method here.
 
 Key insight: RoPE's key mathematical property — the dot product of two rotated position embeddings depends only on the relative position (m - n), not on the absolute positions m and n — makes it fundamentally more suitable for length generalization than sinusoidal APE, where the dot product depends on both m and n.
 
@@ -41,7 +41,7 @@ Key insight: RoPE's key mathematical property — the dot product of two rotated
 
 **Sinusoidal encoding extrapolation failure:** The original sinusoidal APE assigns fixed frequency-based codes to positions 0, 1, ..., N-1. At inference, positions > N-1 were never seen during training. The model's attention weights are not calibrated for these position codes — extrapolation degrades rapidly.
 
-**RoPE motivation:** Instead of adding a positional code to the token embedding, RoPE encodes position as a rotation in the complex plane applied to query and key vectors. The key property: `(R_m · q) · (R_n · k) = q · (R_{m-n} · k)` — the dot product of rotated Q and K depends only on the relative position (m - n). This naturally encodes relative position within the attention score computation.
+**RoPE motivation:** Instead of adding a positional code to the token embedding, RoPE encodes position as a rotation in the complex plane applied to query and key vectors. The key property: `(R_m · q)^T (R_n · k) = q^T (R_{n-m} · k)` — the dot product of rotated Q and K depends only on the relative position (n - m). This naturally encodes relative position within the attention score computation.
 
 **Context extension tradeoff:** Extending a trained model's context requires the model to process positions it was not trained on. Position Interpolation (scaling positions to fit within training range) preserves relative position information but distorts the effective scale. NTK-aware scaling (changing the base frequency) better preserves high-frequency positional information.
 
@@ -57,17 +57,19 @@ Key insight: RoPE's key mathematical property — the dot product of two rotated
 | Learned APE | Absolute, learned | None (no generalization) | Yes | GPT-2, early GPT models |
 | Shaw et al. (2018) | Relative | Good (within window) | Yes | Transformer-XL |
 | **RoPE** | Relative (rotation) | Good with scaling | None (applied at inference) | LLaMA, Mistral, Qwen, GPT-NeoX |
-| **ALiBi** | Relative (linear bias) | Good | None | MPT, BLOOM, Falcon-1 |
+| **ALiBi** | Relative (linear bias) | Good | None | MPT, BLOOM, Falcon-RW (the mainline Falcon 7B/40B/180B use RoPE) |
 | **T5 relative bias** | Relative (learned buckets) | Limited | Yes | T5, FLAN-T5 |
 
 ### 4.2 Context Extension Methods
 
 | Method | How | Quality | Requires Fine-tuning | Used In |
 |--------|-----|---------|----------------------|---------|
-| **Position Interpolation (PI)** | Scale position index by L/L' | Moderate degradation | Yes (~1000 steps) | CodeLLaMA 100K |
+| **Position Interpolation (PI)** | Scale position index by L/L' | Moderate degradation | Yes (~1000 steps) | Chen et al. 2023's own LLaMA 7B/65B 4K→32K extension |
+| **Base-period increase** | Raise RoPE base θ (10,000 → 10^6) and fine-tune | Good | Yes | Code Llama (16K fine-tune, stable to ~100K), LLaMA 2 Long |
 | **NTK-aware scaling** | Scale base θ by (L'/L)^(d/(d-2)) | Better than PI | Optional (often none) | Mistral/LLaMA community |
-| **Dynamic NTK** | Scale NTK factor dynamically per-position | Better than static NTK | None | LLaMA-3.1 long context |
-| **YaRN** | NTK + temperature + short-range integrity | Best quality | Yes (~400 steps) | Mistral-7B-v0.3, Qwen2.5 |
+| **Dynamic NTK** | Recompute the NTK factor from the actual sequence length at inference | Better than static NTK | None | HuggingFace `rope_type: "dynamic"` |
+| **Frequency-banded scaling** | Per-wavelength blend of PI and no-op | Good, no FT | None | LLaMA 3.1 (`rope_type: "llama3"`, factor 8, 8K→128K) |
+| **YaRN** | Per-band PI blend + attention temperature | Best quality | Yes (~400 steps) | Nous Research's YaRN-Llama-2 64k/128k; Qwen2.5 (opt-in `rope_scaling` yarn, factor 4) |
 | **LongRoPE** | Non-uniform rescaling per frequency | State of the art | Yes | Phi-3-mini-128K |
 
 ---
@@ -169,9 +171,9 @@ i=d/4: θ = ~0.01    (medium)
 i=d/2: θ = 0.0001   (slowest, period ~ 62K positions)
 
 KEY PROPERTY:
-(R_m · q)^T (R_n · k) = q^T R_{m-n} k
+(R_m · q)^T (R_n · k) = q^T R_{n-m} k
 
-The inner product depends only on (m-n), not on m or n separately.
+The inner product depends only on (n-m), not on m or n separately.
 This is the "relative position" property that makes RoPE naturally
 encode position differences in attention scores.
 ```
@@ -225,9 +227,11 @@ At `d_head = 128`:
 1,000,000    0.00000124094                5,063,260
 ```
 
-This is why LLaMA 3 raising the base from `10,000` to `500,000` is enough on its own to reach 128K
-natively: the slowest stripe now spans 2.56M positions, so 128K sits comfortably inside the first
-half-turn.
+This is why LLaMA 3 raised the base from `10,000` to `500,000`: the slowest stripe now spans 2.56M
+positions, so 128K sits comfortably inside the first half-turn. The base alone was not sufficient,
+though — Llama 3 shipped at 8K, and Llama 3.1's 128K came from a six-stage context-extension
+pre-training run (~800B tokens) plus a `rope_type: "llama3"` frequency-banded scaling with factor 8
+on top of the 500,000 base.
 
 ### Context Extension: Position Interpolation vs NTK
 
@@ -300,8 +304,9 @@ That table is the entire argument. PI applies a flat `8.00x` to every pair inclu
 leaves pair 0 untouched at `1.00x` and spends the whole `8.00x` on pair 63, which had the room to
 spare. Local token-order information survives; long-range range is bought anyway.
 
-**Where YaRN goes further.** NTK still applies *some* distortion to every pair. YaRN sorts the
-pairs into three bands by `r_i` — how many complete turns that pair made across the original 4096:
+**Where YaRN goes further.** NTK still applies *some* distortion to every pair. YaRN ("NTK-by-parts")
+sorts the pairs into three bands by `r_i` — how many complete turns that pair made across the
+original 4096 — and ramps each pair between "untouched" and "fully position-interpolated":
 
 ```
   r_i = L / wavelength_i        beta_fast = 32,  beta_slow = 1
@@ -309,8 +314,8 @@ pairs into three bands by `r_i` — how many complete turns that pair made acros
      i     wavelength       r_i       band
      0           6.28     651.9       r > 32       -> leave completely alone
     16          62.83      65.19      r > 32       -> leave completely alone
-    24         198.69      20.61      1 <= r <= 32 -> blend PI and NTK
-    32         628.32       6.519     1 <= r <= 32 -> blend PI and NTK
+    24         198.69      20.61      1 <= r <= 32 -> ramp between no-op and PI
+    32         628.32       6.519     1 <= r <= 32 -> ramp between no-op and PI
     48        6283.19       0.6519    r < 1        -> full interpolation
     63       54410.1        0.07528   r < 1        -> full interpolation
 
@@ -324,11 +329,10 @@ has no idea what its second half-turn looks like — interpolate it fully. The 2
 get a proportional blend.
 
 **The temperature term.** Redistributing attention over 8x more tokens flattens the softmax, so
-YaRN rescales the logits. Pitfall 5 below gives the form
-`sqrt(log(L') / log(L))^(1/s)`; at these numbers `sqrt(ln 32768 / ln 4096) = 1.118034` and
-`1.118034^(1/8) = 1.014044`. The canonical YaRN paper instead uses `0.1 * ln(s) + 1`, which at
-`s = 8` is `1.207944`. Either way it is a small, deliberate sharpening — omit it and, as Pitfall 5
-notes, the extended model is systematically overconfident.
+YaRN rescales the logits. The paper's fitted form for LLaMA is `sqrt(1/t) = 0.1 * ln(s) + 1`,
+which at `s = 8` gives `0.1 * 2.079442 + 1 = 1.207944` — the `1/sqrt(d_k)` scale is multiplied by
+that factor. It is a small, deliberate sharpening; omit it and, as Pitfall 5 notes, the extended
+model's attention is systematically too flat.
 
 ### ALiBi Bias — Attention Score Penalty Grid
 
@@ -428,19 +432,20 @@ the model has simply never seen.
 
 ```mermaid
 xychart-beta
-    title "Retrieval accuracy vs position of relevant doc (Liu et al. 2023, 20 docs)"
+    title "GPT-3.5-Turbo accuracy vs gold-doc position (Liu et al. 2023, 20-document setting)"
     x-axis ["doc 1", "doc 5", "doc 10", "doc 15", "doc 20"]
-    y-axis "retrieval accuracy (%)" 40 --> 100
-    line [92, 70, 54, 69, 90]
+    y-axis "accuracy (%)" 40 --> 100
+    line [75.8, 57.2, 53.8, 55.4, 63.2]
 ```
 
-Why the U-curve: causal attention + RoPE's positional bias favor recent tokens (end) and heavily
-attended early tokens; in Liu et al.'s 20-document setting accuracy sags from ~92% at the start
-to ~54% in the middle before recovering to ~90% at the end. Middle tokens have accumulated less multi-layer "coverage," and
-ALiBi's linear penalty exacerbates the dip. Practical fix: place key facts at the very beginning
-or very end of context, and train with data that explicitly requires middle retrieval to flatten
-the curve — see [Context Engineering](../context_engineering/README.md) for placement strategies
-that exploit this curve.
+Why the U-curve: causal attention plus positional bias favours recent tokens (end) and heavily
+attended early tokens. These are the paper's own GPT-3.5-Turbo numbers — accuracy falls from
+75.8% with the answer in the first document to 53.8% in the middle, recovering to 63.2% at the
+end. The dip is model-dependent: Claude-1.3 in the same table is nearly flat (59.9 / 55.9 / 56.8
+/ 57.2 / 60.1). Practical fix: place key facts at the very beginning or very end of context, and
+train with data that explicitly requires middle retrieval to flatten the curve — see
+[Context Engineering](../context_engineering/README.md) for placement strategies that exploit
+this curve.
 
 ---
 
@@ -631,26 +636,26 @@ def yarn_rope_freqs(
     max_seq_len: int,
     original_max_len: int = 4096,
     base: float = 10000.0,
-    alpha: float = 1.0,        # Short-range factor (>1 = interpolate nearby positions less)
-    beta: float = 32.0,        # Long-range factor (frequency below this: use NTK scaling)
-    scale: float = 0.1,        # Temperature scaling parameter
-    attn_factor: float = 0.1,  # Attention scaling (multiply by scale in attention)
+    beta_fast: float = 32.0,   # r_i above this: leave the dimension pair untouched
+    beta_slow: float = 1.0,    # r_i below this: interpolate the pair fully
     device: torch.device = torch.device("cpu"),
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, float]:
     """
-    YaRN: Yet Another RoPE Extension (Peng et al., 2023).
+    YaRN: Yet another RoPE extensioN (Peng et al., 2023).
 
-    Three components:
-    1. NTK-aware scaling for high-frequency components (same θ_i, scale base)
-    2. Short-range integrity: don't interpolate nearby positions (local coherence)
-    3. Temperature: scale attention scores to compensate for distribution shift
+    Two components live here, one is applied in the attention kernel:
+    1. "NTK-by-parts" ramp: blend between no-op and Position Interpolation
+       per dimension pair, selected by r_i = original_max_len / wavelength_i
+       (how many complete turns that pair made inside the trained context).
+    2. Short-range integrity falls out of (1): fast pairs have large r_i and
+       are left alone, so local token order survives.
+    3. Temperature: attention logits are scaled by sqrt(1/t) = 0.1*ln(s)+1
+       (the paper's fitted form for LLaMA). Returned here, applied at
+       attention time — see Pitfall 5.
 
-    Per-frequency decision:
-    - If freq_i > alpha (high freq, captures local structure): no interpolation
-    - If freq_i < beta (low freq, captures global structure): NTK-scale
-    - Otherwise (medium freq): linear blend
-
-    This is more nuanced than NTK-aware (which treats all frequencies equally).
+    NOTE the comparison is on r_i, NOT on the wavelength itself. Comparing a
+    wavelength (min 2*pi ~ 6.28 tokens) against beta_slow=1 would make the
+    "leave alone" branch unreachable — a common reimplementation bug.
     """
     s = max_seq_len / original_max_len  # extension ratio
 
@@ -658,44 +663,25 @@ def yarn_rope_freqs(
     i = torch.arange(0, d_head, 2, device=device).float()
     original_freqs = 1.0 / (base ** (i / d_head))  # (d_head/2,)
 
-    # NTK-scaled frequencies
-    ntk_base = base * (s ** (d_head / (d_head - 2)))
-    ntk_freqs = 1.0 / (ntk_base ** (i / d_head))
-
-    # Position interpolation frequencies (just scale positions)
-    # Equivalent to dividing original freqs by scale factor
+    # Position-interpolation frequencies: equivalent to dividing positions by s
     pi_freqs = original_freqs / s
 
-    # Per-frequency blending based on wavelength
-    low = 2 * math.pi / original_freqs   # wavelength in tokens
-    # Frequencies with long wavelength (low freq): use NTK scaling
-    # Frequencies with short wavelength (high freq): no interpolation
-    # Medium: blend
+    # r_i = turns completed inside the ORIGINAL context window
+    wavelength = 2 * math.pi / original_freqs
+    r = original_max_len / wavelength
 
-    mask_low = low < alpha    # short wavelength -> no interpolation
-    mask_high = low > beta    # long wavelength -> NTK scaling
+    # Ramp gamma in [0,1]: 1 = keep original (fast pair), 0 = full PI (slow pair)
+    gamma = ((r - beta_slow) / (beta_fast - beta_slow)).clamp(0.0, 1.0)
 
-    blended_freqs = torch.where(
-        mask_low,
-        original_freqs,         # short-range: keep as-is
-        torch.where(
-            mask_high,
-            ntk_freqs,          # long-range: NTK scaling
-            # Medium: linear interpolation between PI and NTK
-            (1 - (low - alpha) / (beta - alpha)) * pi_freqs +
-            (    (low - alpha) / (beta - alpha)) * ntk_freqs,
-        )
-    )
+    blended_freqs = (1.0 - gamma) * pi_freqs + gamma * original_freqs
 
     t = torch.arange(max_seq_len, device=device).float()
     freqs = torch.outer(t, blended_freqs)
 
-    # Temperature scaling: reduces attention score magnitude to compensate
-    # for distribution shift from context extension
-    # Applied at attention time: scores = QK^T / (sqrt(d_k) * attn_factor)
-    # where attn_factor = sqrt(log(max_seq_len) / log(original_max_len))^(1/2)
+    # Attention temperature (multiply the 1/sqrt(d_k) scale by this)
+    attn_factor = 0.1 * math.log(s) + 1.0
 
-    return freqs.cos(), freqs.sin()
+    return freqs.cos(), freqs.sin(), attn_factor
 
 
 def position_interpolation(
@@ -714,7 +700,9 @@ def position_interpolation(
     This ensures all positions are within the trained range.
     Requires ~1000 steps of fine-tuning to adapt to the compressed scale.
 
-    Used in: CodeLLaMA (4096 → 100K), LLaMA 2 Long (4096 → 32K)
+    Used in: Chen et al.'s own LLaMA 7B/65B extension (4096 → 32K).
+    NOT used by Code Llama or LLaMA 2 Long — both raised the RoPE base
+    period instead (10,000 → 1,000,000 and → 500,000 respectively).
     """
     if current_seq_len is None:
         current_seq_len = x.shape[-2]
@@ -801,15 +789,15 @@ def build_alibi_bias(
 
 ## 7. Real-World Examples
 
-**LLaMA 3 (Meta, 2024):** Uses RoPE with base=500,000 (vs original 10,000). The large base extends the natural frequency range, enabling 128K token context training from scratch. Higher base = slower rotation per position = longer effective "wavelength" for each dimension pair = better representation of long-range position differences.
+**LLaMA 3 / 3.1 (Meta, 2024):** Uses RoPE with base=500,000 (vs original 10,000). Higher base = slower rotation per position = longer effective "wavelength" for each dimension pair = better representation of long-range position differences. Llama 3 shipped at 8K context; Llama 3.1's 128K came from a six-stage long-context pre-training run (~800B tokens, increasing the window in increments from 8K to 128K) combined with a `rope_type: "llama3"` scaling entry (`factor: 8.0`, `low_freq_factor: 1.0`, `high_freq_factor: 4.0`) — a frequency-banded scheme, not the base alone.
 
-**Mistral 7B context extension (community):** NTK-aware scaling applied to extend Mistral's 8K-trained model to 32K+ without fine-tuning. Setting `rope_scaling={"type": "dynamic", "factor": 4.0}` in HuggingFace config applies dynamic NTK. Quality degrades roughly 1-2 PPL points vs a model natively trained at 32K, but works without any fine-tuning cost.
+**Mistral 7B context extension (community):** NTK-aware scaling is commonly applied to push Mistral-7B (config `max_position_embeddings` 32,768, sliding window 4,096) further without fine-tuning. Setting `rope_scaling={"rope_type": "dynamic", "factor": 4.0}` in the HuggingFace config applies dynamic NTK. Expect some quality loss versus a model natively trained at the target length; measure it on your own eval rather than relying on a published delta.
 
-**CodeLLaMA (Meta, 2023):** Position Interpolation from 4K to 100K contexts. Process: train LLaMA 2 at 4K, then fine-tune with PI for 1B tokens at 100K context (roughly 1000 steps). Position interpolation alone without fine-tuning degrades quality severely; the fine-tuning re-adapts the model to compressed position codes.
+**Code Llama (Meta, 2023):** Extended context by *raising the RoPE base period*, not by Position Interpolation. The paper states "we increase the base period θ from 10,000 to 1,000,000 for fine-tuning", fine-tunes at 16,384 tokens, and reports stable behaviour extrapolating to sequences of up to 100,000 tokens (with degradation past the 16K fine-tuning length). They explicitly chose this over Chen et al.'s linear frequency downscaling.
 
-**Qwen2.5 (Alibaba, 2024):** Uses YaRN with base=1,000,000 and non-uniform frequency interpolation. Achieves 128K native context with strong perplexity across the full length (verified by "needle-in-a-haystack" tests). The non-uniform YaRN approach preserves short-range token relationships (critical for grammar/syntax) while enabling long-range context (critical for document-level reasoning).
+**Qwen2.5 (Alibaba, 2024):** RoPE base=1,000,000, native `max_position_embeddings` of 32,768. 128K context is opt-in: add `rope_scaling={"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}` to reach 131,072. YaRN's per-band treatment preserves short-range token relationships (critical for grammar/syntax) while enabling long-range context.
 
-**Gemini 1.5 Pro (Google, 2024):** Uses RingAttention for 1M token context across multiple TPU pods. Each pod handles a shard of the sequence; attention is computed by passing K/V rings between pods. The positional encoding challenge at 1M tokens is solved by using a large enough base frequency and sufficient training data at long context. ALiBi was considered but rejected — the linear penalty was too aggressive for Gemini's multilingual, multi-domain use case.
+**RingAttention for very long context:** RingAttention (Liu et al., 2023) shards the sequence across devices and passes K/V blocks around a ring, accumulating with online softmax — this is the published mechanism for scaling attention past a single device's memory. Vendors of 1M-token closed models have not disclosed whether they use it, so treat any specific attribution ("model X uses ring attention") as unverified.
 
 ---
 
@@ -889,7 +877,7 @@ output = model.generate(input_ids_8k_context, max_new_tokens=200)
 # FIXED: Set rope_scaling in the model config
 from transformers import LlamaConfig
 config = LlamaConfig.from_pretrained("meta-llama/Llama-2-7b-hf")
-config.rope_scaling = {"type": "dynamic", "factor": 2.0}  # 2x extension: 4096 → 8192
+config.rope_scaling = {"rope_type": "dynamic", "factor": 2.0}  # 2x extension: 4096 → 8192
 model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", config=config)
 ```
 
@@ -900,11 +888,11 @@ model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", config=conf
 # The model expects position codes in range [0, L/factor]; without fine-tuning,
 # the dense attention patterns trained at [0, L] don't apply at scale [0, L/factor]
 
-# Quality comparison on long-document QA (32K context):
-# PI only (no FT): ROUGE-1 = 0.31  (worse than 4K chunking baseline)
-# PI + 1K FT steps: ROUGE-1 = 0.44
-# NTK (no FT): ROUGE-1 = 0.41
-# YaRN + 400 FT steps: ROUGE-1 = 0.51
+# ILLUSTRATIVE ordering (not measurements from any published benchmark) —
+# the ranking is what matters, and it is what practitioners consistently
+# report; run this comparison on your own corpus before choosing:
+#   PI only (no FT)      < NTK (no FT) < PI + 1K FT steps < YaRN + 400 FT steps
+# PI without fine-tuning is routinely worse than simply chunking at 4K.
 
 # GUIDELINE: If you cannot fine-tune, use NTK scaling (no FT required)
 # If you can fine-tune briefly, YaRN + 400 steps is superior
@@ -957,20 +945,22 @@ output = torch.nn.functional.scaled_dot_product_attention(
 
 ```python
 # YaRN includes a temperature adjustment to compensate for distribution shift
-# after context extension. The paper recommends:
-# attn_factor = sqrt(log(target_length) / log(original_length))^(1/scale_factor)
+# after context extension. The paper's fitted form for LLaMA is:
+#   sqrt(1/t) = 0.1 * ln(s) + 1        where s = target_length / original_length
+# At s = 8 that is 1.207944.
 
 # BROKEN: YaRN frequencies applied but attention factor omitted
-# Result: attention scores are systematically too large after extension,
-# causing overconfident attention distributions and quality degradation
+# Result: attention is spread over 8x more positions with no compensating
+# sharpening, so the distribution is systematically too flat and quality drops
 
-# FIXED: Apply YaRN attention factor in attention computation
-def attention_with_yarn_factor(q, k, v, d_head, attn_factor: float = 1.0):
-    scale = 1.0 / (d_head ** 0.5) / attn_factor  # attn_factor normalizes for extension
-    return F.scaled_dot_product_attention(q, k, v)  # pass custom scale if API supports
-    # Alternative: manually scale logits
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-    # ... apply causal mask, softmax, multiply V
+# FIXED: Fold the YaRN factor into the attention scale
+import math
+import torch.nn.functional as F
+
+def attention_with_yarn_factor(q, k, v, d_head: int, s: float):
+    attn_factor = 0.1 * math.log(s) + 1.0
+    scale = attn_factor / (d_head ** 0.5)      # sharpen, do not flatten
+    return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 ```
 
 ---
@@ -979,7 +969,7 @@ def attention_with_yarn_factor(q, k, v, d_head, attn_factor: float = 1.0):
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| HuggingFace `transformers` | RoPE config via `rope_scaling` | Supports "linear", "dynamic", "yarn" types |
+| HuggingFace `transformers` | RoPE config via `rope_scaling` | `rope_type` values include "default", "linear", "dynamic", "yarn", "longrope", "llama3" |
 | `rotary-embedding-torch` | RoPE reference implementation | pip install rotary-embedding-torch |
 | `longrope` | LongRoPE implementation | Non-uniform frequency scaling |
 | `yarn` (ggerganov fork) | YaRN implementation for llama.cpp | CLI flag: `--rope-scaling yarn --rope-scale 4` |
@@ -1021,25 +1011,25 @@ for exact shared prefixes, because reuse requires identical positions.
 Position Interpolation scales the position index: position m is mapped to m×(L/L') where L is training length and L' is target length. All positions are compressed to fit within [0, L]. Problem: high-frequency RoPE dimensions (large θ_i, small rotation angles) are most affected — they lose the ability to distinguish adjacent positions when the scale compresses their frequency too much. NTK-aware scaling instead modifies the base frequency: new_base = original_base × (L'/L)^(d/(d-2)). This scales all frequencies uniformly in log-space, avoiding the disproportionate compression of high-frequency components. The key difference: PI compresses the position axis (what goes into the rotation angle computation); NTK scales the frequency axis (how fast things rotate per position unit). NTK preserves the model's ability to distinguish adjacent tokens; PI does not. In practice, NTK requires little or no fine-tuning while PI requires ~1000 fine-tuning steps to adapt.
 
 **Q: What are the three components of YaRN and why is each necessary?**
-YaRN (Peng et al., 2023) extends RoPE with: (1) NTK-aware base scaling for low-frequency dimensions — handles long-range position relationships; uses modified base to extend the effective wavelength of slow-rotating dimensions. (2) Short-range integrity — high-frequency dimensions (large θ_i) are left unchanged. These dimensions cycle rapidly and capture fine-grained local position differences. Scaling them (as in PI) would destroy local position information. YaRN identifies a threshold and applies no modification to dimensions above it. (3) Temperature adjustment — context extension shifts the distribution of attention scores. The model was trained expecting a certain range of QK^T values; after extension, positions farther apart produce unexpected values. YaRN applies a multiplicative temperature factor `1/sqrt(log(L'/L) / log(L/L))` to attention scores. This component alone adds 0.5-1 PPL point improvement over NTK-only extension. Together, these three components provide the best known quality for context extension.
+YaRN (Peng et al., 2023) extends RoPE with: (1) "NTK-by-parts" interpolation — each dimension pair is ramped between untouched and fully position-interpolated according to `r_i = L / wavelength_i`, the number of complete turns it made inside the trained context. (2) Short-range integrity — this falls out of (1): high-frequency dimensions have large `r_i` and are left unchanged. These dimensions cycle rapidly and capture fine-grained local position differences; scaling them (as plain PI does) would destroy local position information. The band edges are `beta_fast = 32` and `beta_slow = 1`. (3) Temperature adjustment — spreading attention over `s` times more positions flattens the softmax, so YaRN multiplies the attention scale by `sqrt(1/t) = 0.1 * ln(s) + 1` (their fitted form for LLaMA; 1.208 at s=8). Together these give the best published quality for context extension at a few hundred fine-tuning steps.
 
 **Q: Why does ALiBi extrapolate better than sinusoidal APE?**
 Sinusoidal APE assigns each absolute position a fixed code via sin/cos frequencies. These codes are used as inputs to the attention computation. A model trained on positions 0..4095 has never seen position code 4096+; the attention weights were not calibrated for these codes. Extrapolation fails because the model encounters OOD inputs. ALiBi never modifies the token embeddings — positions are only reflected in the attention score bias: `m × (j - i)`. For positions beyond the training length, the model sees a larger negative bias for distant tokens. This is mathematically valid: the model was trained to understand that larger negative biases mean less relevant positions. Since the bias grows linearly (not discretely), positions 0..∞ all produce valid biases. The model generalizes: "this token is very far away → high penalty → attend to it less." This is semantically consistent extrapolation.
 
 **Q: How does LLaMA 3 achieve 128K context with RoPE?**
-LLaMA 3 was trained natively at 128K context using RoPE base=500,000 (vs LLaMA 2's 10,000). The higher base directly scales all frequencies: θ_i = base^(-2i/d) — higher base → smaller θ_i → slower rotation per position → effectively "zooms out" the frequency spectrum. At base=500,000, the slowest frequency (i=d/2-1) has period = 2π × 500,000^(d/(d-2)) ≈ 2.8M positions — more than enough for 128K context. LLaMA 3 also used graduated context window scaling during training: starting at 8K and expanding to 128K in later training phases (similar to curriculum learning for context). This avoids the attention pattern disruption that occurs when jumping directly to full context length. The key insight: choosing a large enough base frequency eliminates the need for post-hoc context extension methods entirely.
+LLaMA 3 uses RoPE base=500,000 (vs LLaMA 2's 10,000), then reaches 128K through staged long-context pre-training rather than training at 128K from the start. The higher base directly scales all frequencies: θ_i = base^(-2i/d) — higher base → smaller θ_i → slower rotation per position → effectively "zooms out" the frequency spectrum. At base=500,000 and d_head=128, the slowest pair (i=d/2-1) has wavelength 2π × 500,000^((d-2)/d) ≈ 2.56M positions — comfortably beyond 128K. On top of that, Llama 3.1 expands the window in six increments from the original 8K to 128K over roughly 800B tokens, and its config carries a `rope_type: "llama3"` scaling entry with factor 8. The staged approach avoids the attention-pattern disruption of jumping straight to full context length. The takeaway: a large base is necessary but not sufficient — Meta still paid for context-extension training and a scaling rule on top.
 
 **Q: What happens to model quality when you extend context 10x without any fine-tuning?**
-For pure position extrapolation (no extension method, no fine-tuning): quality degrades catastrophically beyond ~1.2-1.5x training length. At 4x training length: perplexity roughly doubles, generation becomes incoherent. At 10x: the model produces near-random output. For NTK-aware scaling (no fine-tuning): quality degrades gracefully. At 4x extension: PPL increases by ~1.5-2 points on standard benchmarks; generation is still coherent. At 10x: ~4-6 PPL increase; quality is useful but noticeably degraded. For YaRN (400 fine-tuning steps): at 4x: <0.5 PPL increase; at 10x: ~1-2 PPL increase; quality is nearly indistinguishable from natively trained. The practical recommendation: NTK scaling for zero-cost extension up to 4x; YaRN with 400 steps for up to 16x; train natively (with high base frequency) for extensions beyond 16x.
+For pure position extrapolation (no extension method, no fine-tuning), quality collapses not far past the training length — perplexity blows up and generation becomes incoherent well before 10x. The ordering that holds consistently: pure extrapolation is unusable; NTK-aware scaling with no fine-tuning degrades gracefully and stays coherent at moderate extension ratios; YaRN with a few hundred fine-tuning steps comes closest to a natively trained long-context model. Exact perplexity deltas are model- and corpus-specific — the YaRN paper reports its own numbers on LLaMA 2 and PG-19, and yours will differ, so measure rather than quoting a figure. The practical recommendation: NTK scaling for zero-cost extension up to ~4x; YaRN with ~400 steps for larger ratios; train with a high base frequency and staged context extension when you control pre-training.
 
 **Q: Explain the "lost in the middle" phenomenon and how positional encoding relates to it.**
 "Lost in the middle" (Liu et al., 2023) is the empirical finding that LLMs have difficulty retrieving information placed in the middle of long contexts — they perform well on information at the beginning and end. This is partly a positional encoding issue and partly an attention pattern issue. For RoPE, information at early positions has seen many subsequent positions "attend" to it across layers (because attention is causal and cumulative). Information in the middle has been processed by fewer subsequent attention layers' cross-positional interactions by the time the model generates a response. ALiBi's linear bias exacerbates this: tokens in the middle are far from both the beginning and the end (relative to a query at the end), receiving high penalties. Architecturally, addressing "lost in the middle": (1) bi-directional attention (BERT-style, but for generation) helps but contradicts causal training; (2) positional re-weighting (emphasize middle positions in attention); (3) training with more examples that specifically require middle-position retrieval (improves attention patterns).
 
 **Q: How would you extend a model from 4K to 32K context with minimal quality loss?**
-Decision tree: (1) Check if the model uses RoPE (LLaMA, Mistral, Qwen) or ALiBi (MPT, BLOOM). ALiBi extrapolates naturally — no action needed, test quality. (2) For RoPE: apply NTK-aware scaling first (no fine-tuning, fast to test). Set `rope_scaling={"type": "dynamic", "factor": 8}` in HuggingFace config. Measure PPL on a long-context benchmark (PG-19 or SCROLLS). (3) If quality is insufficient and fine-tuning compute is available: apply YaRN with 400-1000 steps on long-context data. Use learning rate ~2e-5, sequence length 32K, batch such that ~1M tokens per step. (4) If compute is very limited: evaluate whether NTK quality meets requirements — often good enough for retrieval-augmented applications where high PPL doesn't matter (you're looking for specific content, not generating fluently). (5) After extension, run needle-in-a-haystack tests across multiple positions and depths to confirm quality throughout the extended range.
+Decision tree: (1) Check if the model uses RoPE (LLaMA, Mistral, Qwen) or ALiBi (MPT, BLOOM, Falcon-RW). ALiBi extrapolates naturally — no action needed, test quality. (2) For RoPE: apply NTK-aware scaling first (no fine-tuning, fast to test). Set `rope_scaling={"rope_type": "dynamic", "factor": 8}` in HuggingFace config. Measure PPL on a long-context benchmark (PG-19 or SCROLLS). (3) If quality is insufficient and fine-tuning compute is available: apply YaRN with 400-1000 steps on long-context data. Use learning rate ~2e-5, sequence length 32K, batch such that ~1M tokens per step. (4) If compute is very limited: evaluate whether NTK quality meets requirements — often good enough for retrieval-augmented applications where high PPL doesn't matter (you're looking for specific content, not generating fluently). (5) After extension, run needle-in-a-haystack tests across multiple positions and depths to confirm quality throughout the extended range.
 
 **Q: What is dynamic NTK scaling and when does it help?**
-Dynamic NTK scaling (kaiokendev, 2023) applies NTK-aware scaling adaptively: the scale factor is computed from the actual sequence length at inference time, not from a fixed target length. At seq_len=4096 (training length): scale=1, no modification. At seq_len=8192: scale=2, apply NTK. At seq_len=32768: scale=8, apply NTK. This is useful for deployments where request lengths vary widely — a fixed NTK factor of 8 would distort position encodings even for short sequences (unnecessarily). Dynamic scaling applies the minimum necessary modification. Compared to static NTK: dynamic is slightly better for short sequences (no unnecessary distortion) but has the same quality at the target extension length. LLaMA 3.1 uses dynamic NTK scaling with base=500,000 — allowing graceful handling of any sequence length up to 128K without different model variants for different context lengths.
+Dynamic NTK scaling (proposed by /u/emozilla on r/LocalLLaMA in 2023, building on bloc97's NTK-aware scaling; kaiokendev's earlier "SuperHOT" work was linear position interpolation, a different method) applies NTK-aware scaling adaptively: the scale factor is computed from the actual sequence length at inference time, not from a fixed target length. At seq_len=4096 (training length): scale=1, no modification. At seq_len=8192: scale=2, apply NTK. At seq_len=32768: scale=8, apply NTK. This is useful for deployments where request lengths vary widely — a fixed NTK factor of 8 would distort position encodings even for short sequences (unnecessarily). Dynamic scaling applies the minimum necessary modification. Compared to static NTK: dynamic is slightly better for short sequences (no unnecessary distortion) but has the same quality at the target extension length. LLaMA 3.1 does something related but distinct — its config uses `rope_type: "llama3"`, a frequency-banded rule (factor 8, low_freq_factor 1.0, high_freq_factor 4.0) applied on top of base=500,000, which interpolates only the slow-rotating dimensions rather than rescaling by sequence length at runtime. Do not describe Llama 3.1 as using HuggingFace's `"dynamic"` NTK; they are different `rope_type` values.
 
 **Q: How does the sinusoidal encoding dot product encode relative position for nearby tokens?**
 For sinusoidal APE, the dot product of two position encodings PE_m and PE_n is: `PE_m · PE_n = Σ_{i=0}^{d/2-1} [sin(m·θ_i)sin(n·θ_i) + cos(m·θ_i)cos(n·θ_i)] = Σ_i cos((m-n)·θ_i)`. This depends only on the difference (m-n) — geometrically, it is the sum of cosines at different frequencies evaluated at the relative offset. For nearby tokens (|m-n| small), the cosines are all near 1 (small argument) → high dot product. For distant tokens, high-frequency components oscillate rapidly, reducing the mean dot product. This gives a loose relative position signal. However, it is not as clean as RoPE: the relation holds for the dot product between position encodings, but position encodings are added to token embeddings — the attention score includes cross-terms between token content and position. These cross-terms contaminate the "relative position" information, making sinusoidal APE less clean than RoPE.
@@ -1058,7 +1048,7 @@ converting or loading a checkpoint, a rotary_pct mismatch against the training c
 silently corrupts attention — verify it in the model config before weight conversion.
 
 **Q: How does RingAttention extend context to 1M+ tokens?**
-RingAttention (Liu et al., 2023) distributes the attention computation across multiple GPUs/TPUs arranged in a logical ring. Each device holds a chunk of the full sequence. In each communication round, one device's K/V chunk is passed to the next device in the ring (the "ring" of K/V blocks). Each device computes attention between its local Q chunk and the incoming K/V chunk, accumulating results using online softmax (same principle as Flash Attention). After N rounds (N = number of devices), each device has accumulated the full attention output for its Q chunk. Memory: O(seq_len / num_devices) per device. Communication: O(seq_len × d_model) total (each K/V block passes through the ring once). This enables context lengths limited only by total memory across the cluster. Gemini 1.5 Pro's 1M token context uses a form of distributed attention over TPU pods. The positional encoding challenge: RoPE works at 1M positions if the base frequency is high enough (Gemini uses a very large base).
+RingAttention (Liu et al., 2023) distributes the attention computation across multiple GPUs/TPUs arranged in a logical ring. Each device holds a chunk of the full sequence. In each communication round, one device's K/V chunk is passed to the next device in the ring (the "ring" of K/V blocks). Each device computes attention between its local Q chunk and the incoming K/V chunk, accumulating results using online softmax (same principle as Flash Attention). After N rounds (N = number of devices), each device has accumulated the full attention output for its Q chunk. Memory: O(seq_len / num_devices) per device. Communication: O(seq_len × d_model) total (each K/V block passes through the ring once). This enables context lengths limited only by total memory across the cluster. The positional-encoding side is separate and tractable: RoPE works at 1M positions provided the base frequency is high enough that the slowest dimension pair has not wrapped. Note that the attention mechanisms behind closed 1M-token models are not published — do not attribute RingAttention specifically to any vendor's product.
 
 ---
 
@@ -1067,7 +1057,7 @@ RingAttention (Liu et al., 2023) distributes the attention computation across mu
 1. Use RoPE for all new model training — it is the de facto standard in 2024-2025, supported by Flash Attention, compatible with KV cache, and extensible via YaRN.
 2. Set a large RoPE base (500,000 or higher) if training at long context from scratch — eliminates the need for post-hoc extension methods.
 3. Never extrapolate RoPE beyond 1.2x training length without at minimum NTK-aware scaling — the quality degradation is severe and often silent (model generates fluent but incorrect text).
-4. Use `rope_scaling={"type": "dynamic", "factor": N}` in HuggingFace for zero-cost extension; test quality with needle-in-a-haystack before deploying.
+4. Use `rope_scaling={"rope_type": "dynamic", "factor": N}` in HuggingFace for zero-cost extension; test quality with needle-in-a-haystack before deploying.
 5. For maximum quality at extended context, use YaRN + 400 fine-tuning steps on long-context data — the quality gap over NTK is significant for reasoning tasks.
 6. When extending context, always run RULER or needle-in-a-haystack evaluation across depths (first, middle, last third of context) — average metrics hide "lost in the middle" failures.
 7. ALiBi bias matrices must be added to attention scores before softmax, not to the output — a common implementation mistake that completely breaks the positional signal.
@@ -1096,7 +1086,8 @@ RingAttention (Liu et al., 2023) distributes the attention computation across mu
 # 2. NTK-aware (factor=8): new_base = 10000 * 8^(128/126) ≈ 82,685
 # 3. YaRN (factor=8) + 500 fine-tuning steps on legal text at 32K
 
-# Results on held-out legal contracts at 32K context:
+# ILLUSTRATIVE results for this scenario (not a published benchmark) —
+# the relative ordering is the transferable part, the absolute values are not:
 results = {
     "Pure extrapolation": {
         "ppl_32k": 312.4,   # catastrophic degradation
@@ -1124,14 +1115,15 @@ from transformers import LlamaForCausalLM, LlamaConfig
 config = LlamaConfig.from_pretrained("meta-llama/Llama-2-7b-hf")
 config.max_position_embeddings = 32768
 config.rope_scaling = {
-    "type": "yarn",
+    "rope_type": "yarn",   # "type" is still accepted for backwards compatibility
     "factor": 8.0,
     "original_max_position_embeddings": 4096,
-    "beta_fast": 32,    # short-range integrity threshold
-    "beta_slow": 1,     # long-range NTK scaling threshold
-    "mscale": 1.0,      # attention factor (YaRN temperature)
-    "mscale_all_dim": 0.707,
+    "beta_fast": 32,       # r_i above this: dimension pair left untouched
+    "beta_slow": 1,        # r_i below this: dimension pair fully interpolated
+    "attention_factor": None,  # None -> derived as 0.1*ln(factor)+1 = 1.208
 }
+# Note: "mscale"/"mscale_all_dim" are DeepSeek-specific YaRN keys and are not
+# part of the HuggingFace Llama rope_scaling schema — passing them fails validation.
 
 model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", config=config)
 

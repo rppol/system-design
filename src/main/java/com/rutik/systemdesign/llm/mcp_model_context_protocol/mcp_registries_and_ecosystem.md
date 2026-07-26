@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-The MCP ecosystem has grown from a handful of reference servers (filesystem, github) at launch (late 2024) to 3000+ servers across multiple registries by mid-2025. This deep-dive covers the major registries (Smithery, MCP Hub, Anthropic's catalog), the official "anthropic/mcp-servers" reference implementations, the most-popular community servers, installation patterns (Claude Desktop config, Cursor config, programmatic), versioning conventions, and the proposed signed-servers extension.
+The MCP ecosystem has grown from a handful of reference servers (filesystem, github) at launch (November 2024) to many thousands of servers indexed across several registries. The single most important structural change since launch is that MCP now has an **official registry** — `registry.modelcontextprotocol.io`, announced September 2025 and still labelled preview — which is the canonical metadata source that third-party marketplaces are expected to aggregate from. This deep-dive covers that registry and the third-party ones (Smithery, PulseMCP, MCP Hub), the `modelcontextprotocol/servers` reference implementations, popular community servers, installation patterns (Claude Desktop config, Cursor config, programmatic), versioning conventions, and how publisher trust is actually established.
 
 For developers building agent systems, the ecosystem question is two-sided: which existing servers to use (saves you from writing wrappers around every API), and how to publish your own server (so others can use it — see [MCP Server Building](mcp_server_building.md)). Understanding the registry landscape and conventions is key to both.
 
@@ -14,11 +14,11 @@ For developers building agent systems, the ecosystem question is two-sided: whic
 
 **One-line analogy**: MCP registries are to AI agents what npm/PyPI/cargo are to language ecosystems — a centralized way to discover, install, and version reusable components.
 
-**Mental model**: An MCP server is a package. You install it (or configure your client to spawn it). It exposes tools, resources, prompts. The registry is the directory you browse to find new servers. Smithery is the leading registry; Anthropic maintains an "official" servers list; community catalogs exist.
+**Mental model**: An MCP server is a package. You install it (or configure your client to spawn it). It exposes tools, resources, prompts. A registry is the directory you browse to find new servers. There are two layers: the **official MCP Registry** holds `server.json` metadata pointing at packages on npm/PyPI/Docker Hub, and **downstream aggregators** (Smithery, PulseMCP, marketplaces) pull from it and add curation, ratings and install tooling. The official registry is explicitly *not* meant to be consumed directly by host applications.
 
 **Why it matters**: Reusing community servers (rather than writing custom integrations) saves enormous engineering time. The Slack MCP server, Notion MCP server, GitHub MCP server are all already-written, maintained, and battle-tested. The cost is your config gets longer and security review is essential (see [MCP Security](mcp_security.md) for the full threat model).
 
-**Key insight**: The ecosystem is in a Wild West phase circa 2025 — many useful servers, many low-quality or abandoned ones, some malicious. Treat MCP server installation with the same care as installing native software: trust the publisher, pin versions, monitor for changes.
+**Key insight**: The ecosystem is still lightly governed — many useful servers, many low-quality or abandoned ones, and at least one confirmed malicious one (the September 2025 postmark-mcp npm package, which behaved correctly for fifteen releases before exfiltrating every email it sent). Treat MCP server installation with the same care as installing native software: trust the publisher, **pin versions**, monitor for changes. Note what the official registry does and does not give you — it authenticates the *namespace* (reverse-DNS names tied to a verified GitHub account or DNS domain) and delegates code scanning to npm/PyPI/Docker Hub and downstream aggregators. It is provenance, not an integrity guarantee.
 
 ---
 
@@ -29,31 +29,35 @@ For developers building agent systems, the ecosystem question is two-sided: whic
 - **Version pinning**: lock to specific versions; bump deliberately after review.
 - **Capability transparency**: registry shows what tools/resources each server exposes.
 - **Active maintenance signals**: recent commits, open issues addressed, popular = healthier.
-- **Signed releases**: cryptographic verification of publisher (emerging spec extension).
+- **Namespace verification**: the official registry ties every server name to a DNS- or GitHub-verified owner, so `io.github.acme/server` can only be published by that account. Cryptographic signing of the server *artifact* is not part of MCP.
 - **Reuse over rewrite**: if a good server exists, use it; build your own only when nothing fits.
 
 ---
 
 ## 4. Types / Architectures / Strategies
 
-### 4.1 Smithery (smithery.ai)
+### 4.1 Official MCP Registry (registry.modelcontextprotocol.io)
 
-Largest registry (2024-2025). Both stdio (auto-install via CLI) and hosted HTTP servers. Versioned, searchable, publisher accounts. Install via:
+Announced September 2025, backed by Anthropic, GitHub, Microsoft and PulseMCP; **still in preview**, with breaking changes and data resets explicitly possible before GA. It stores `server.json` metadata — the server's reverse-DNS name, where to find the package or remote URL, execution instructions, and discovery data — and exposes a REST API plus a published OpenAPI spec that other registries can implement. It hosts metadata only, never code, and it does not accept private servers. Namespaces are claimed by GitHub, DNS or HTTP challenge.
+
+### 4.2 Smithery (smithery.ai)
+
+The most established third-party registry. Both stdio (auto-install via CLI) and hosted HTTP servers. Versioned, searchable, publisher accounts. Install via:
 
 ```bash
-npx -y @smithery/cli install @anthropics/filesystem-mcp --client claude
+npx -y @smithery/cli install @modelcontextprotocol/server-filesystem --client claude
 ```
 
-### 4.2 Anthropic Official Servers (github.com/modelcontextprotocol/servers)
+### 4.3 Reference Servers (github.com/modelcontextprotocol/servers)
 
-Reference implementations maintained by Anthropic and the MCP community. Highest quality bar; often the canonical implementation of common patterns.
+Reference implementations "managed by Anthropic, but built together with the community". Highest quality bar; often the canonical implementation of common patterns. The set narrowed sharply during 2025 — only **everything, fetch, filesystem, git, memory, sequential-thinking and time** remain active. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers moved to an archive repo and their npm packages are marked deprecated. Several have first-party successors maintained by the vendor instead (`github/github-mcp-server`, `@playwright/mcp`).
 
-### 4.3 Community Server Lists
+### 4.4 Community Server Lists and Aggregators
 
+- PulseMCP, Smithery, MCP Hub, mcpservers.org and similar indices.
 - "Awesome MCP Servers" GitHub lists curate community servers.
-- MCP Hub, mcpservers.org, and other community indices.
 
-### 4.4 Built-into-Clients
+### 4.5 Built-into-Clients
 
 Some clients (Claude Desktop, Cursor) ship with built-in MCP servers (filesystem, web search).
 
@@ -146,20 +150,20 @@ Common Servers Categorization
 ### Installing via Smithery CLI
 
 ```bash
-# Install filesystem server for Claude Desktop
-npx -y @smithery/cli install @anthropics/filesystem-mcp --client claude
+# Install filesystem server for Claude Desktop.
+# NOTE: use a package name that actually exists — there is no
+# "@anthropics/filesystem-mcp"; the reference package is
+# @modelcontextprotocol/server-filesystem.
+npx -y @smithery/cli install @modelcontextprotocol/server-filesystem --client claude
 
 # Install for Cursor
-npx -y @smithery/cli install @anthropics/filesystem-mcp --client cursor
+npx -y @smithery/cli install @modelcontextprotocol/server-filesystem --client cursor
 
 # List installed
 npx -y @smithery/cli list
 
-# Configure (interactive)
-npx -y @smithery/cli configure @anthropics/filesystem-mcp
-
 # Uninstall
-npx -y @smithery/cli uninstall @anthropics/filesystem-mcp --client claude
+npx -y @smithery/cli uninstall @modelcontextprotocol/server-filesystem --client claude
 ```
 
 ### Manual Claude Desktop Config

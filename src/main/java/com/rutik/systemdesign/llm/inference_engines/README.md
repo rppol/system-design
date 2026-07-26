@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Inference engines are specialized software systems optimized for running LLM inference efficiently in production. While you can run an LLM with just Hugging Face Transformers' `model.generate()`, this approach leaves most GPU performance on the table. Production inference engines implement continuous batching, KV cache management, optimized CUDA kernels, quantization, and distributed serving to achieve 10-50× better throughput than naive approaches.
+Inference engines are specialized software systems optimized for running LLM inference efficiently in production. While you can run an LLM with just Hugging Face Transformers' `model.generate()`, this approach leaves most GPU performance on the table. Production inference engines implement continuous batching, KV cache management, optimized CUDA kernels, quantization, and distributed serving to achieve up to ~24× better throughput than naive approaches (vLLM's own published figure versus Hugging Face Transformers).
 
 The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA's highly-optimized offering; llama.cpp enables CPU and consumer GPU inference; SGLang introduces structural caching; Ollama makes local deployment trivial. Each engine makes different trade-offs between ease of use, performance, hardware requirements, and supported models.
 
@@ -10,7 +10,7 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 
 ## 2. Intuition
 
-> **One-line analogy**: Inference engines are like optimized car engines — the same fuel (model weights) produces 10-50× more horsepower (tokens/second) with engineering optimization than a stock implementation.
+> **One-line analogy**: Inference engines are like optimized car engines — the same fuel (model weights) produces an order of magnitude more horsepower (tokens/second) with engineering optimization than a stock implementation.
 
 **Mental model**: Hugging Face `model.generate()` works but leaves GPU resources massively underutilized. Inference engines implement continuous batching (no wasted GPU slots), PagedAttention (no KV cache fragmentation), fused CUDA kernels (fewer memory operations), and quantization (smaller weights = faster loads). vLLM is like a highly tuned racing engine — the same 70B model goes from 50 tokens/sec to 600+ tokens/sec with the same hardware.
 
@@ -46,8 +46,9 @@ The landscape has exploded: vLLM dominates cloud serving; TensorRT-LLM is NVIDIA
 # Installation and startup
 pip install vllm
 
-python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3-8B-Instruct \
+# `vllm serve` is the current entrypoint; the older
+# `python -m vllm.entrypoints.openai.api_server` form still works.
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --tensor-parallel-size 2 \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.9
@@ -74,36 +75,35 @@ response = client.chat.completions.create(
 
 ### 4.2 TensorRT-LLM (NVIDIA)
 
-NVIDIA's inference optimization library for H100/A100. Highest raw performance but more complex setup.
+NVIDIA's inference optimization library for data-centre GPUs (A100/H100/Blackwell). Highest raw performance, and since the 1.x line it is a PyTorch-architected framework rather than an ahead-of-time engine compiler.
 
 **Key features:**
 - Quantization: INT4, INT8, FP8 with auto-calibration
-- Custom CUDA/TensorRT kernels (faster than PyTorch ops)
+- Custom CUDA kernels (faster than stock PyTorch ops)
 - In-flight batching (equivalent to continuous batching)
-- Multi-GPU with tensor parallelism
+- Multi-GPU with tensor / pipeline / expert parallelism
 - Triton Inference Server integration
 
-```python
-# Build engine (one-time compilation step)
-trtllm-build \
-    --checkpoint_dir ./llama-3-70b \
-    --output_dir ./llama-3-70b-engine \
-    --dtype bfloat16 \
-    --use_inflight_batching \
-    --paged_kv_cache enable \
-    --max_batch_size 256
-
-# Serve with Triton
-tritonserver --model-repository=./triton_models
+```bash
+# TensorRT-LLM 1.x serves a HuggingFace checkpoint directly.
+# The `pytorch` backend is the default and needs no engine build step;
+# the old `trtllm-build` command was removed (only trtllm-serve,
+# trtllm-bench and trtllm-eval ship as console scripts today).
+trtllm-serve meta-llama/Meta-Llama-3-70B-Instruct \
+    --backend pytorch \
+    --tp_size 4 \
+    --max_batch_size 256 \
+    --max_seq_len 8192 \
+    --kv_cache_free_gpu_memory_fraction 0.9
 ```
 
-**Performance advantage over vLLM:** ~15-40% higher throughput on H100 due to custom kernels.
+**Performance advantage over vLLM:** commonly reported in the 15-40% band on NVIDIA hardware, driven by hand-tuned kernels and FP8. Treat that band as illustrative — the gap is model-, shape- and version-specific and both projects leapfrog each other, so benchmark your own traffic before committing.
 
 **Best for:** Maximum throughput in NVIDIA data center environments; enterprise deployments.
 
 ### 4.3 llama.cpp
 
-CPU-first inference engine with Metal (Apple Silicon), CUDA, and OpenCL backends. Enables running LLMs on consumer hardware.
+CPU-first inference engine with Metal (Apple Silicon), CUDA, Vulkan and SYCL backends (plus narrower ones such as OpenCL for Adreno and HIP for AMD). Enables running LLMs on consumer hardware.
 
 **Key features:**
 - GGUF quantized format: Q4_K_M (4-bit with mixed precision)
@@ -114,7 +114,7 @@ CPU-first inference engine with Metal (Apple Silicon), CUDA, and OpenCL backends
 
 ```bash
 # Build and run
-git clone https://github.com/ggerganov/llama.cpp
+git clone https://github.com/ggml-org/llama.cpp
 cmake -B build && cmake --build build --config Release
 
 ./build/bin/llama-cli \
@@ -127,12 +127,14 @@ cmake -B build && cmake --build build --config Release
 ```
 
 **Performance (8B Q4_K_M on M3 Pro):**
-- ~40 tokens/sec on Apple Silicon M3 Pro
-- <5GB RAM usage
+- ~20-25 tokens/sec single-user decode. The M3 Pro has 150 GB/s of memory
+  bandwidth and the model is ~4.9GB, so the ceiling from §6 is 150/4.9 ≈ 30 tokens/sec
+  — Max/Ultra-class parts with 400-800 GB/s are the ones that reach 40-140 tokens/sec
+- ~5-6GB RAM usage (weights plus KV cache)
 
 **Best for:** Local inference, privacy-sensitive applications, edge devices, development.
 
-### 4.4 SGLang (Stanford)
+### 4.4 SGLang (LMSYS; Zheng et al., NeurIPS 2024)
 
 **Structural caching** innovation: caches KV computations across requests that share prefixes.
 
@@ -185,7 +187,7 @@ curl http://localhost:11434/api/chat -d '{
 
 **Features:**
 - Automatic hardware detection (CPU/GPU/Metal)
-- Model library: 100+ models at ollama.com/library
+- Model library: 200+ curated models at ollama.com/library
 - OpenAI-compatible API (via `ollama serve`)
 - Model management: pull, list, delete
 
@@ -199,11 +201,14 @@ Production inference server from HuggingFace. Tight integration with HuggingFace
 docker run --gpus all \
     -p 8080:80 \
     -v $PWD:/data \
-    ghcr.io/huggingface/text-generation-inference:2.0 \
+    ghcr.io/huggingface/text-generation-inference:3.3.7 \
     --model-id meta-llama/Meta-Llama-3-8B-Instruct \
-    --max-input-length 4096 \
+    --max-input-tokens 4096 \
     --max-total-tokens 8192
 ```
+
+(`--max-input-length` still parses but is documented as the legacy spelling of
+`--max-input-tokens`.)
 
 **Features:**
 - Continuous batching, flash attention
@@ -321,10 +326,10 @@ FP8 (TensorRT-LLM on H100):
 ```
 Example: Serving LLaMA 3 70B, max 4096 context, 50 concurrent users on 2× H100 80GB
 
-Model weights (BF16):  70B × 2 bytes = 140GB (72GB per GPU with TP=2)
+Model weights (BF16):  70B × 2 bytes = 140GB (70GB per GPU with TP=2)
 Activations:           ~2GB per GPU (small)
 KV cache per user:     70B model: 2 × 80 layers × 8 KV heads × 128 dim × 2048 tokens × 2 bytes = 660MB
-                       (at 4096 tokens this doubles to ~1.34GB)
+                       (at 4096 tokens this doubles to ~1.31GB)
 50 users KV cache:     50 × 660MB = 33GB → 16.5GB per GPU
 
 Total per GPU:
@@ -334,11 +339,16 @@ Total per GPU:
   ─────────────
   Total:      89.5GB ← exceeds 80GB!
 
+Headroom left for KV after weights + overhead: 80 - 70 - 3 = 7GB per GPU (14GB across TP=2).
+Every fix below has to land inside that 7GB, which is a brutal constraint:
+
 Fix options:
-  1. Reduce max users to 32: KV = 32 × 660MB / 2 = 10.5GB → fits
-  2. Reduce context to 2048: KV = 330MB × 32 → fits with ~55 users
-  3. Quantize to INT4: weights = 35GB → more room for KV cache
-  4. Add a 3rd GPU (TP=3)
+  1. Reduce max users to 21: KV = 21 × 660MB / 2 = 6.9GB per GPU → fits (barely)
+  2. Halve context to 1024: KV = 330MB/user → 42 users in the same 6.9GB
+  3. Quantize weights to INT4: 35GB total = 17.5GB per GPU, leaving 59.5GB per GPU
+     for KV → ~180 users at 2048 context. Quantization buys far more than trimming users
+  4. Widen to TP=4: 35GB of weights per GPU, ~42GB per GPU left for KV → ~127 users.
+     (TP must divide num_kv_heads=8, so TP ∈ {1,2,4,8} — TP=3 is not a legal shape here)
 ```
 
 **The idea behind it.** "Each GPU must simultaneously hold the weights, one KV cache per
@@ -552,7 +562,8 @@ and buy pipeline stages you did not need.
 
 ### Engine Comparison Arithmetic
 
-The "15-40% higher throughput" claim in §4.2 converts to GPUs, and GPUs convert to dollars:
+The illustrative "15-40% higher throughput" band from §4.2 converts to GPUs, and GPUs convert to
+dollars. Substitute your own measured numbers — the method is the point, not the band:
 
 ```
 gpus_needed = ceil(demand_tokens_per_sec / per_gpu_tokens_per_sec)
@@ -571,52 +582,54 @@ fleet is not 20% of your bill; it is one GPU, if the ceiling happens to fall the
 | `ceil` | Round up. You cannot rent 16.4 GPUs |
 | demand | Peak sustained tokens/sec you must serve, not the daily average |
 | 730 | Hours in an average month (24 × 365 / 12) |
-| build cost | TensorRT-LLM compiles per model per GPU type: 30-60 min, redone on every swap |
+| switching cost | TensorRT-LLM 1.x serves HF checkpoints directly, so there is no engine-build wait — but you inherit NVIDIA's container/driver matrix and per-model tuning |
 
-**Walk one example.** 70,000 tokens/sec peak demand, A100s at $4/hr reserved:
+**Walk one example.** 70,000 tokens/sec peak demand, A100 80GB at ~$3.50/GPU-hour on-demand
+(AWS `p4de.24xlarge` is $27.45/hr for 8 A100 80GB = $3.43/GPU-hour):
 
 ```
                        per-GPU tok/s     gpus_needed          monthly GPU cost
-  vLLM                     3,500          ceil(70000/3500)=20   20 x 4 x 730 = $58,400
-  TensorRT-LLM +15%        4,025          ceil(70000/4025)=18   18 x 4 x 730 = $52,560
-  TensorRT-LLM +40%        4,900          ceil(70000/4900)=15   15 x 4 x 730 = $43,800
+  vLLM                     3,500          ceil(70000/3500)=20   20 x 3.5 x 730 = $51,100
+  TensorRT-LLM +15%        4,025          ceil(70000/4025)=18   18 x 3.5 x 730 = $45,990
+  TensorRT-LLM +40%        4,900          ceil(70000/4900)=15   15 x 3.5 x 730 = $38,325
 
-  saving at +15%   = $5,840/month     = 2 GPUs
-  saving at +40%   = $14,600/month    = 5 GPUs
+  saving at +15%   = $5,110/month      = 2 GPUs
+  saving at +40%   = $12,775/month     = 5 GPUs
 
   same math at 1/10th the scale (7,000 tokens/sec):
   vLLM   ceil(7000/3500) = 2 GPUs         TRT +15%  ceil(7000/4025) = 2 GPUs
   saving = $0 -- the 15% vanished into the ceiling
 ```
 
-The scale term is the whole story. Above ~20 GPUs the compilation pipeline pays for itself in weeks;
-at 2 GPUs a 15% engine advantage rounds to zero saved dollars while still costing you a 30-60 minute
-rebuild on every model swap. Benchmark first, then divide by your actual fleet size before switching.
+The scale term is the whole story. Above ~20 GPUs a 15% engine win is real money; at 2 GPUs it
+rounds to zero saved dollars while still costing you a second serving stack to operate, monitor
+and upgrade. Benchmark first, then divide by your actual fleet size before switching.
 
 ---
 
 ## 7. Real-World Examples
 
-### Together AI (vLLM-based)
-- Serves 50+ open-source models via API
-- vLLM as the core serving engine
-- Custom extensions for their multi-tenant environment
-- Continuously batches across thousands of users
+### Together AI
+- Serverless inference across 200+ open-source models via an OpenAI-compatible API
+- Runs its own inference stack (originally vLLM-derived) with custom kernels
+- Continuously batches across a multi-tenant fleet
 
-### Anyscale (vLLM)
-- AnyScale Endpoints built on vLLM
-- Ray Serve for request routing and scaling
-- Auto-scaling: 0 → N replicas based on traffic
+### Anyscale / Ray Serve
+- Anyscale's self-serve **Endpoints** API shut down on 2024-08-01; LLM serving moved into
+  the managed Anyscale Platform. Do not cite Endpoints as a live product.
+- Ray Serve remains the widely used pattern for request routing and 0 → N autoscaling
+  in front of vLLM replicas
 
 ### Mistral AI
-- Uses TensorRT-LLM for Mistral model serving (their own models)
-- Custom optimizations for Mistral architecture (sliding window attention)
-- La Plateforme API serves millions of requests/day
+- Mistral's own deployment docs put **vLLM first** for self-hosting Mistral models, with
+  TensorRT-LLM and TGI as documented alternatives
+- Mistral worked with NVIDIA to land Mixtral's sparse-MoE support in TensorRT-LLM
+- Mistral Large 3 is documented as running on a single 8×A100 or 8×H100 node under vLLM
 
 ### Local AI Community
-- llama.cpp runs on everything from Raspberry Pi to M3 MacBooks
-- Ollama has 1M+ downloads; most popular way to run models locally
-- LM Studio: GUI wrapper around llama.cpp for non-technical users
+- llama.cpp runs on everything from Raspberry Pi to Apple Silicon MacBooks
+- Ollama is the most common one-command path to a local model; its registry carries 200+ models
+- LM Studio: GUI wrapper around llama.cpp (and MLX on Apple Silicon) for non-technical users
 
 ---
 
@@ -641,9 +654,9 @@ rebuild on every model swap. Benchmark first, then divide by your actual fleet s
 - Need OpenAI-compatible API as drop-in replacement
 
 ### Use TensorRT-LLM When:
-- Maximum throughput on NVIDIA H100/A100 is the primary goal
+- Maximum throughput on NVIDIA H100/A100/Blackwell is the primary goal
 - Enterprise with NVIDIA DGX infrastructure
-- Willing to invest in longer build/compilation time
+- Willing to run NVIDIA's container/driver matrix and do per-model tuning
 
 ### Use llama.cpp When:
 - Consumer hardware (MacBook, gaming PC)
@@ -693,7 +706,7 @@ A: vLLM is an open-source LLM inference engine known for two key innovations: (1
 A: Continuous batching (iteration-level scheduling) admits new requests and retires finished ones at every decode step, whereas static batching runs a fixed batch until the longest sequence completes. The mechanism matters because output lengths are wildly variable: in a static batch of 32, one 2,000-token generation holds hostage 31 slots whose outputs finished at 100 tokens, collapsing effective GPU utilization; continuous batching returns each finished sequence immediately and slots a queued request into the freed KV pages at the next iteration. This scheduling change — not faster kernels — accounts for most of the 10-24× gap versus naive `model.generate()`. Gotcha to state in interviews: continuous batching raises aggregate throughput but does not speed up a single isolated request — batch size 1 sees no benefit.
 
 **Q: Why can a vLLM server OOM or refuse to start before serving a single request?**
-A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.9) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
+A: Because vLLM preallocates GPU memory at startup by design: it claims `gpu_memory_utilization` (default 0.92 in current releases) of the card, loads weights, then runs a profiling pass and reserves everything left over as KV-cache pages sized to `max_model_len`. If `max_model_len` defaults to the model's full training context (128K for many modern models), the profiler may find there is not enough memory for even one maximum-length sequence and abort — or leave so few KV pages that requests queue endlessly. Fix: set `--max-model-len` to your actual max input + output (e.g., 8192) and start at `--gpu-memory-utilization 0.85` to leave headroom for CUDA graphs and NCCL buffers. Corollary gotcha: near-100% GPU memory on an idle vLLM server is normal preallocation, not a leak.
 
 **Q: When would you use llama.cpp vs vLLM?**
 A: llama.cpp is designed for CPU and consumer-grade GPU inference — it runs quantized GGUF models on MacBooks, gaming PCs, and even Raspberry Pi. It prioritizes low memory usage and broad hardware support. vLLM is designed for data center GPU (A100, H100) serving with many concurrent users — it prioritizes maximum throughput and efficient GPU utilization. Use llama.cpp for local, edge, or privacy-sensitive deployments; use vLLM for cloud production serving.
@@ -702,10 +715,10 @@ A: llama.cpp is designed for CPU and consumer-grade GPU inference — it runs qu
 A: Most inference engines expose endpoints like `POST /v1/chat/completions` and `POST /v1/completions` with request/response formats identical to OpenAI's API. This means any application using the OpenAI SDK can switch from the OpenAI API to a self-hosted model by just changing the base_url. It matters because it eliminates vendor lock-in — you can run GPT-4-equivalent open models without changing application code.
 
 **Q: How does vLLM compare to TensorRT-LLM and when should you choose each?**
-vLLM is the best general-purpose open-source inference engine, while TensorRT-LLM offers higher peak performance on NVIDIA GPUs at the cost of more complex setup. vLLM advantages: easier setup (pip install + one command), model support (HuggingFace model hub compatibility), LoRA serving, active community, platform-agnostic. TensorRT-LLM advantages: 20-40% higher throughput on NVIDIA GPUs through kernel fusion, custom CUDA kernels, and FP8 optimization on H100s; better for production workloads with stable model configurations. Choose vLLM when: rapid iteration, multi-model serving, LoRA adapters, or non-NVIDIA hardware. Choose TensorRT-LLM when: maximum throughput on fixed NVIDIA hardware, latency-critical applications, and you have ML infrastructure engineers to handle the compilation pipeline. TensorRT-LLM requires compiling models into TensorRT engines (30-60 minutes per model), making model swaps slower.
+vLLM is the best general-purpose open-source inference engine, while TensorRT-LLM offers higher peak performance on NVIDIA GPUs at the cost of more complex setup. vLLM advantages: easier setup (pip install + one command), model support (HuggingFace model hub compatibility), LoRA serving, active community, platform-agnostic. TensorRT-LLM advantages: higher throughput on NVIDIA GPUs through kernel fusion, custom CUDA kernels, and FP8 optimization on H100/Blackwell — commonly reported in a 15-40% band, but treat that as illustrative and version-specific rather than a fixed number; better for production workloads with stable model configurations. Choose vLLM when: rapid iteration, multi-model serving, LoRA adapters, or non-NVIDIA hardware. Choose TensorRT-LLM when: maximum throughput on fixed NVIDIA hardware, latency-critical applications, and you can live inside NVIDIA's container/driver matrix. Note the setup story changed: TensorRT-LLM 1.x is PyTorch-architected and `trtllm-serve` loads a HuggingFace checkpoint directly, so the old ahead-of-time `trtllm-build` engine compilation is gone — do not repeat the "30-60 minute engine build per model" objection in an interview without checking the version being discussed.
 
 **Q: What are TTFT and TPOT, and which engine mechanisms improve each?**
-A: TTFT (time to first token) is queueing plus prefill — one compute-bound pass over the whole prompt; TPOT (time per output token, also called inter-token latency) is decode — a memory-bandwidth-bound pass per generated token. The two respond to different levers: prefix caching (vLLM `--enable-prefix-caching`, SGLang RadixAttention) and chunked prefill mainly cut TTFT — a cached 2,000-token system prompt removes hundreds of milliseconds of prompt computation; weight quantization (AWQ/INT4) and speculative decoding mainly cut TPOT, because decode time scales with bytes streamed from HBM per token, not FLOPs. When someone reports "the engine is slow," split the complaint into TTFT vs TPOT first — the fixes barely overlap, and optimizing the wrong phase wastes a sprint.
+A: TTFT (time to first token) is queueing plus prefill — one compute-bound pass over the whole prompt; TPOT (time per output token, also called inter-token latency) is decode — a memory-bandwidth-bound pass per generated token. The two respond to different levers: prefix caching (on by default in current vLLM; disable with `--no-enable-prefix-caching`, and SGLang's RadixAttention) and chunked prefill mainly cut TTFT — a cached 2,000-token system prompt removes hundreds of milliseconds of prompt computation; weight quantization (AWQ/INT4) and speculative decoding mainly cut TPOT, because decode time scales with bytes streamed from HBM per token, not FLOPs. When someone reports "the engine is slow," split the complaint into TTFT vs TPOT first — the fixes barely overlap, and optimizing the wrong phase wastes a sprint.
 
 **Q: How does llama.cpp handle quantization and what quality tradeoffs exist at different quantization levels?**
 llama.cpp supports multiple quantization formats: Q8_0 (8-bit, ~1% quality loss), Q5_K_M (5-bit mixed, ~2-3% loss), Q4_K_M (4-bit mixed, ~3-5% loss), Q3_K_M (3-bit, ~5-10% loss), Q2_K (2-bit, ~15-20% loss). The "K" variants use k-quant, which allocates more bits to important layers (attention) and fewer to less important ones (feed-forward). For a 7B model: FP16 = 14GB, Q8_0 = 7GB, Q4_K_M = 4GB, Q2_K = 2.5GB. Quality tradeoffs: Q4_K_M is the sweet spot for most consumer hardware — a 70B model in Q4_K_M (40GB) fits on an M2 Max with 64GB RAM and produces near-FP16 quality for conversational tasks. Below Q4, quality degrades noticeably on reasoning-heavy tasks (math, coding). llama.cpp runs on CPU (AVX2/AVX512), Apple Metal, and CUDA, making it the go-to for consumer hardware and edge deployment. For production servers, vLLM or TensorRT-LLM are preferred because they handle batching and concurrency better.
@@ -735,7 +748,7 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 
 ## 13. Best Practices
 
-1. **Set gpu_memory_utilization carefully** — vLLM's default 0.9 (90% of GPU for model + KV cache) is aggressive; start with 0.85 to leave headroom.
+1. **Set gpu_memory_utilization carefully** — vLLM's default (0.92 in current releases; 0.9 historically) is aggressive; start with 0.85 to leave headroom.
 2. **Set max_model_len explicitly** — don't let the engine default to model's maximum; set it to your actual max input + output.
 3. **Enable tensor parallelism across your GPUs** — multi-GPU almost always worth it for batch throughput.
 4. **Monitor queue depth** — if requests are queuing, add replicas; if GPU utilization is low, reduce replicas.
@@ -751,14 +764,15 @@ Model loading (downloading weights and transferring to GPU memory) takes 1-10 mi
 **Assessment:**
 - Traffic: 10M tokens/day input, 15M tokens/day output
 - Latency requirement: TTFT < 1s, TPOT < 50ms
-- Quality requirement: blind A/B on real writing tasks showed ~GPT-3.5-turbo quality suffices — the GPT-4-class endpoint was overkill for this workload
+- Quality requirement: blind A/B on real writing tasks showed a small-model quality tier suffices — the GPT-4-class endpoint was overkill for this workload
 - Privacy: no PII in prompts
 
 **Model choice:** Mistral 7B Instruct → meets quality bar for writing tasks
 
 **Infrastructure:**
 ```
-4× NVIDIA A100 80GB (on-demand: ~$12/hr)
+4× NVIDIA A100 80GB (on-demand: ~$3.50/GPU-hour, so ~$14/hr for four —
+AWS p4de.24xlarge is $27.45/hr for 8 A100 80GB = $3.43/GPU-hour)
 vLLM with:
   --model mistralai/Mistral-7B-Instruct-v0.3
   --tensor-parallel-size 1  (7B fits on one GPU)
@@ -771,43 +785,45 @@ vLLM with:
 
 **Cost comparison:**
 ```
-Current OpenAI bill (GPT-4-class pricing, $0.03/$0.06 per 1K):
+Current OpenAI bill (legacy GPT-4-class rate card, $0.03/$0.06 per 1K):
   10M input  × $0.03/1K = $300/day
   15M output × $0.06/1K = $900/day
   Total: $1,200/day = $36,000/month
-  (gpt-3.5-turbo pricing would be only ~$40/day — but the product was
-   built on the GPT-4-class endpoint, which is what the bill reflects)
+  (a small/cheap endpoint would have been an order of magnitude less — but the
+   product was built on the GPT-4-class endpoint, which is what the bill reflects)
 
-Self-hosted vLLM:
-  4× A100 at $12/hr × 24hr = $1152/day
-  Wait — that's MORE expensive!
+Self-hosted vLLM, plan A — the naive lift-and-shift:
+  4× A100 at $3.50/GPU-hr × 24hr = $336/day = $10,080/month
+  Cheaper than the API, yes. But look at what those 4 GPUs are doing.
 
-Key insight: Use spot/reserved instances
-  Reserved 1-year: ~$4/hr per GPU
-  4× A100 × $4 × 24 = $384/day = $11,520/month
+Utilization check:
+  25M tokens/day ÷ 86,400 s = 289 tokens/sec average
+  One A100 running vLLM ceilings around 3,500 tokens/sec (§6)
+  → the fleet is provisioned at roughly 2% of capacity; 3 GPUs buy nothing
 
-Still more? Use fewer GPUs with better utilization:
-  1× A100 handles 25M tokens/day = $4/hr × 24 = $96/day = $2,880/month
-  Add 1 standby = $5,760/month total
+Self-hosted vLLM, plan B — size to the actual load:
+  1× A100 saturated = $3.50/hr × 24 = $84/day = $2,520/month
+  Add 1 standby for availability = $168/day = $5,040/month total
 
-Final: $5,760/month vs $36,000/month → 84% cost reduction
-Quality: Acceptable — Mistral 7B matched the ~GPT-3.5-turbo bar the A/B set;
+Final: $5,040/month vs $36,000/month → 86% cost reduction
+       (plan A would have banked only 72% of that same migration)
+Quality: Acceptable — Mistral 7B matched the small-model quality bar the A/B set;
          the delta vs the old GPT-4-class endpoint was invisible for these
          writing tasks (that endpoint was the overkill being paid for)
 ```
 
 **Read it like this.** "Self-hosting is not cheaper per GPU-hour — it is cheaper per
-token, and only once one GPU is kept busy enough to spread its hourly rent over enough tokens."
+token, and only once each GPU is kept busy enough to spread its hourly rent over enough tokens."
 
-The comparison above walks into and back out of the classic trap: priced naively, four on-demand
-A100s cost *more* than the OpenAI bill. Nothing about the hardware changed between that line and the
-84% saving — only utilization and the purchase term did.
+The comparison above walks into and back out of the classic trap: sized by habit rather than by
+load, the fleet still beats the API bill, which is exactly why nobody audits it. Nothing about the
+hardware changed between plan A and plan B — only the GPU count did, and it took the saving from
+72% to 86%.
 
 | Symbol | What it is |
 |--------|------------|
 | $/M tokens | The only unit in which the two options are comparable |
-| on-demand | Hourly rate, cancel anytime. ~$3/hr per A100 here (4 GPUs = $12/hr) |
-| reserved | 1-year commit. ~$4/hr for the whole job's slice — roughly 3× cheaper per GPU |
+| on-demand | Hourly rate, cancel anytime. ~$3.50 per A100 80GB here (4 GPUs = $14/hr) |
 | utilization | Fraction of the rented hour that actually produced tokens |
 | standby | A second idle GPU you pay for so a failure is not an outage |
 
@@ -817,29 +833,29 @@ A100s cost *more* than the OpenAI bill. Nothing about the hardware changed betwe
   OpenAI, GPT-4-class blended
     $1,200/day / 25M tokens              = $48.00 per M tokens
 
-  Self-hosted, 4x on-demand A100, mostly idle
-    4 x $12/hr... = $1,152/day / 25M     = $46.08 per M tokens   <- 4% saving. pointless.
+  Self-hosted, 4x on-demand A100, ~2% utilized
+    4 x $3.50/hr x 24 = $336/day / 25M   = $13.44 per M tokens   <- 3.6x cheaper
 
-  Self-hosted, 1x reserved A100, saturated
-    $4/hr x 24 = $96/day / 25M           = $ 3.84 per M tokens   <- 12.5x cheaper
+  Self-hosted, 1x on-demand A100, saturated
+    $3.50/hr x 24 = $84/day / 25M        = $ 3.36 per M tokens   <- 14x cheaper
 
   add one standby GPU for availability
-    $192/day / 25M                       = $ 7.68 per M tokens
-    monthly                              = $5,760   vs   $36,000   = 84% saving
+    $168/day / 25M                       = $ 6.72 per M tokens
+    monthly                              = $5,040   vs   $36,000   = 86% saving
 ```
 
-**Why the utilization term is load-bearing.** Delete it and self-hosting looks like a rounding-error
-saving, which is exactly the conclusion the middle row reaches. Three GPUs in that first plan were
-buying nothing: 25M tokens/day is 289 tokens/sec average, and a single A100 running vLLM ceilings
-around 3,500 tokens/sec (§6). The original plan was provisioned at roughly 2% of capacity. The
-lesson generalizes past this case study — before comparing an API bill to a GPU bill, divide your
-daily token volume by 86,400 and check it against one GPU's ceiling first.
+**Why the utilization term is load-bearing.** Drop it and you bank a third of the win you were
+entitled to. Three GPUs in plan A were buying nothing: 25M tokens/day is 289 tokens/sec average,
+and a single A100 running vLLM ceilings around 3,500 tokens/sec (§6), so plan A was provisioned at
+roughly 2% of capacity. The lesson generalizes past this case study — before comparing an API bill
+to a GPU bill, divide your daily token volume by 86,400 and check it against one GPU's ceiling first.
 
 ---
 
-**Additional war story — vLLM PagedAttention eviction collision at 200 RPS causing garbled responses:**
+**Additional war story (illustrative composite — the incident is anonymized and the version numbers
+are not a public record) — KV-block collision under a home-grown multi-process vLLM wrapper:**
 
-A team running a 13B Mistral model on vLLM at 200 RPS discovered that 0.3% of responses were garbled (output tokens from one request appearing in another). Root cause: they were using vLLM 0.2.x with a custom multi-process setup that bypassed the block manager's eviction locking. When two requests competed for the same KV block slot during peak load, the block was reassigned before the first request finished reading it. The fix required upgrading to vLLM 0.4+ (where block manager uses atomic CAS on block state) and removing the custom multi-process shim.
+A team running a 13B Llama-class model on vLLM at 200 RPS saw a fraction of a percent of responses come back garbled (output tokens from one request appearing in another). Root cause: a custom multi-process wrapper put several independent `LLM` engines behind one GPU and shared device memory through hand-rolled CUDA IPC, outside anything vLLM's block manager knows about. Two engines could then hand the same physical KV block to two different sequences. The fix was to delete the shim and run one process with vLLM's own async engine, which owns the whole KV allocation. Generalizable lesson: PagedAttention's safety guarantees end at the boundary of a single engine process — never share its GPU memory from outside.
 
 ```python
 # BROKEN: custom multi-process vLLM wrapper that bypasses block manager safety
@@ -880,18 +896,18 @@ async def generate(prompt: str, request_id: str) -> str:
 
 **Additional interview Q&As:**
 
-**What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache allocates a contiguous memory block per sequence at request arrival (maximum sequence length × layers × heads × head_dim × 2 bytes). At 200 RPS with 13B model and 2048 max tokens, 200 concurrent sequences × ~800MB each would require 160GB — far exceeding single-GPU capacity. PagedAttention divides KV memory into fixed-size blocks (16-32 tokens each) allocated on demand and shared across beam search hypotheses via copy-on-write. This reduces fragmentation from 30-40% (contiguous allocation) to under 4%, enabling 2-4x more concurrent sequences on the same hardware.
+**What is the key architectural difference between vLLM's PagedAttention and the standard KV cache, and why does it matter at 200 RPS?** Standard KV cache reserves one contiguous block per sequence, sized to the maximum sequence length, at request arrival. For a 13B Llama-class model (40 layers, 40 heads, head_dim 128, MHA) that is 2 × 40 × 40 × 128 × 2 bytes = 800KB per token, so 2,048 tokens is ~1.6GB per sequence and 200 concurrent sequences would need ~320GB — four A100s' worth of memory for one model's cache. PagedAttention instead divides KV memory into fixed-size blocks (16 tokens by default) allocated on demand and shared across sampling branches via copy-on-write. The SOSP 2023 paper measured that prior systems put only 20.4-38.2% of their reserved KV memory to actual token state — 60-80% wasted to fragmentation and over-reservation — while vLLM's paged allocator drives that waste to near zero, which is where the 2-4x gain in concurrent sequences comes from.
 
-**When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation; you want a battle-tested production container maintained by HuggingFace. vLLM is preferred when: you need maximum throughput via PagedAttention (vLLM is typically 10-30% higher throughput than TGI for long outputs); you need speculative decoding; you need fine-grained control over scheduling. At 200 RPS with P95 < 500ms, vLLM consistently outperforms TGI in benchmarks.
+**When should you choose TGI (Text Generation Inference) over vLLM for a 13B model production deployment?** TGI is preferred when: you need native HuggingFace model hub integration without conversion; you are deploying on AWS SageMaker (official TGI container support); you need built-in Prometheus metrics and health endpoints without additional instrumentation; you want a battle-tested production container maintained by HuggingFace. vLLM is preferred when: you want the deepest PagedAttention/scheduler tuning surface; you need speculative decoding; you need fine-grained control over scheduling. Do not memorize a percentage gap between the two — vLLM's own 2023 launch benchmark claimed up to 3.5x over TGI and both projects have leapfrogged each other many times since, so any number you quote is a version-specific artifact. Benchmark both on your own traffic shape.
 
-**How do you right-size the number of GPU replicas for a 13B model serving 200 RPS with P95 < 500ms SLA?** Measure throughput at saturation: a single A100 80GB running Mistral-13B at FP16 achieves approximately 85-120 tokens/second throughput with continuous batching (varies with batch size and sequence length). At 200 RPS × 128 average output tokens = 25,600 tokens/second demand. Minimum replicas: ceil(25,600 / 100) = 26 A100s, but this ignores head-of-line blocking and latency requirements. For P95 < 500ms with queue jitter, target 60% GPU utilization at peak → 43 A100s. Add auto-scaling based on queue depth metric (HPA on Kubernetes) to handle bursty traffic.
+**How do you right-size the number of GPU replicas for a 13B model serving 200 RPS with P95 < 500ms SLA?** Start from the memory-bandwidth ceiling, not a remembered benchmark: 13B at FP16 is 26GB of weights, an A100 80GB streams ~2.0 TB/s, so one decode step costs 26GB of reads and the per-step rate is ~77/sec — at a batch of 32 that is ~2,460 tokens/sec aggregate, and ~2,000 tokens/sec is a safe planning figure once attention overhead is included. Demand is 200 RPS × 128 average output tokens = 25,600 tokens/second. Minimum replicas: ceil(25,600 / 2,000) = 13 A100s, but that ignores head-of-line blocking and latency headroom. For P95 < 500ms with queue jitter, size for ~60% utilization at peak → ceil(25,600 / 0.6 / 2,000) = 22 A100s. Add auto-scaling on queue depth (HPA on Kubernetes) to handle bursty traffic.
 
 **Quick-reference table:**
 
 | Engine | Throughput (13B, A100) | Best for | Trade-off |
 |---|---|---|---|
-| vLLM (PagedAttention) | Highest (~30% above TGI) | Maximum throughput, speculative decoding, complex batching | Steeper ops complexity; less HuggingFace native integration |
-| TGI (HuggingFace) | High | AWS SageMaker, HuggingFace Hub, production-ready container | Slightly lower throughput; less flexible scheduling |
+| vLLM (PagedAttention) | High (measure it — the vLLM/TGI ordering flips between releases) | Maximum throughput, speculative decoding, complex batching | Steeper ops complexity; less HuggingFace native integration |
+| TGI (HuggingFace) | High | AWS SageMaker, HuggingFace Hub, production-ready container | Fewer scheduler knobs than vLLM |
 | llama.cpp | Low-medium (CPU/low VRAM) | Edge deployment, MacBook M-series, 4-bit quantized models | Not suitable for multi-user high-RPS serving; no continuous batching |
 | SGLang | High (RadixAttention prefix caching) | High prefix reuse (system prompts, RAG boilerplate) | Smaller community; fewer deployment examples |
 
@@ -919,9 +935,9 @@ def route_request(prompt: str) -> str:
     return "long-pool" if estimated_tokens > 4096 else "short-pool"
 ```
 
-**How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. vLLM wins on throughput for high-concurrency online serving with PagedAttention (20-40% more throughput than TGI at 50+ concurrent requests). TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
+**How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. That measurement is the whole answer — do not carry a remembered percentage gap between vLLM and TGI into the decision, because it is a version-specific artifact that flips with releases. TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
 
-**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively (`--speculative-model`). The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
+**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'`; the older per-flag form (`--speculative-model`, `--num-speculative-tokens`) has been removed, so a config written against it will fail to start. The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
 
 ---
 

@@ -27,7 +27,7 @@
 - **GPU utilization target**: >85% cluster utilization (GPUs cost $2-3/hour each; idle GPUs burn money)
 - **Job start latency**: <5 minutes from submission to first training step (queue time + setup)
 - **Data pipeline throughput**: Process 1TB of uploaded data per hour across all tenants
-- **Model storage**: 200TB total (fine-tuned adapters average 500MB for LoRA, 30GB for full models)
+- **Model storage**: ~400TB total across datasets, checkpoints and artifacts (fine-tuned adapters average 500MB for LoRA, 30GB for full models; see the 336TB 12-month artifact figure in Section 2)
 - **Availability**: 99.9% for API and dashboard; training jobs tolerant to node failures via checkpointing
 - **Compliance**: SOC 2, GDPR (data deletion on request), optional HIPAA for healthcare tenants
 
@@ -58,8 +58,9 @@ GPU requirements per job:
   Full fine-tune (70B): 32x A100 80GB (FSDP + tensor parallelism)
 
 Peak GPU demand: ~1,200 A100 GPUs
-  (460 LoRA jobs x 1.5 avg GPUs + 25 QLoRA x 1 + 15 full x 12 avg)
-Cluster size: 1,600 A100 GPUs (25% headroom for scheduling + failures)
+  (460 LoRA jobs x 1.5 avg GPUs = 690) + (25 QLoRA x 1 = 25)
+  + (15 full x 32 avg = 480)  ->  1,195
+Cluster size: 1,600 A100 GPUs (~33% headroom for scheduling + failures)
 ```
 
 ### Data Volume
@@ -244,7 +245,7 @@ Job submission flow:
   POST /v1/training/jobs
   {
     "dataset_id": "ds_abc123",
-    "base_model": "meta-llama/Llama-3-70B-Instruct",
+    "base_model": "meta-llama/Llama-3.3-70B-Instruct",
     "method": "lora",               // lora | qlora | full
     "hyperparameters": "preset:quality",  // preset or custom
     "epochs": 3,
@@ -264,7 +265,7 @@ Job submission flow:
   Calculation:
     total_tokens = dataset.total_tokens x epochs
     tokens_per_second = model_benchmark[base_model][method]
-      (Llama-3-70B LoRA: ~8,000 tokens/sec on 4x A100)
+      (Llama-3.3-70B LoRA: ~8,000 tokens/sec on 4x A100)
     estimated_seconds = total_tokens / tokens_per_second
     estimated_hours = estimated_seconds / 3600
     GPU_count = hardware_requirements[base_model][method]
@@ -325,11 +326,15 @@ Job submission flow:
 from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 import torch, torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from torch.cuda.amp import autocast
-from transformers import LlamaDecoderLayer
+# torch.cuda.amp.autocast is deprecated ("use torch.amp.autocast('cuda', ...)").
+from torch.amp import autocast
+# LlamaDecoderLayer is NOT in transformers' top-level __all__ — importing it from
+# `transformers` directly raises ImportError. Import from the model module.
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 @dataclass
 class TrainingConfig:
@@ -343,11 +348,16 @@ class FineTuningTrainer:
 
     def train(self, config: TrainingConfig) -> dict:
         mp = torch.distributed.fsdp.MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
+        # transformer_auto_wrap_policy takes (module, recurse, nonwrapped_numel,
+        # transformer_layer_cls); FSDP supplies the first three. Calling it directly
+        # is a TypeError — bind transformer_layer_cls with functools.partial.
+        wrap_policy = partial(transformer_auto_wrap_policy,
+                              transformer_layer_cls={LlamaDecoderLayer})
         model = FSDP(self._load_model(config.model_name),
-                     auto_wrap_policy=transformer_auto_wrap_policy(transformer_layer_cls={LlamaDecoderLayer}),
+                     auto_wrap_policy=wrap_policy,
                      mixed_precision=mp if config.bf16 else None)
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-        amp_ctx = autocast(dtype=torch.bfloat16) if config.bf16 else nullcontext()
+        amp_ctx = autocast("cuda", dtype=torch.bfloat16) if config.bf16 else nullcontext()
         running_sum, running_n, last_ckpt = 0.0, 0, ""
         for step, batch in enumerate(self._build_dataloader(config.dataset_path)):
             with amp_ctx:
@@ -489,14 +499,17 @@ Mode 2: Golden Dataset Comparison (runs in 10-30 minutes)
 Mode 3: LLM-as-Judge Quality Scoring (runs in 15-45 minutes)
   - Sample 200 examples from golden dataset
   - For each example, generate response with both base and fine-tuned model
-  - Submit to judge LLM (GPT-4o or Claude 3.5 Sonnet):
+  - Submit to judge LLM (GPT-4o or Claude Sonnet 5):
     Prompt template:
       "You are an expert evaluator. Given the instruction and two responses (A and B,
        order randomized), rate each on: accuracy (1-5), helpfulness (1-5),
        safety (1-5), instruction following (1-5). Then pick the better response."
   - Randomize A/B position to avoid position bias
   - Aggregate: win rate of fine-tuned vs base, average score improvement
-  - Cost: 200 examples x ~2000 tokens x $0.01/1K = $4 per evaluation run
+  - Judge cost at GPT-4o list prices ($2.50/1M in, $10/1M out), ~1,800 input +
+    ~200 output tokens per example:
+      200 x (1,800 x $2.5e-6 + 200 x $1e-5) = 200 x $0.0065 = ~$1.30 per run
+    Billed to the tenant at a flat $4 evaluation fee (see 4.7)
 
 Regression detection:
   - If fine-tuned model scores worse than base on any metric by >5%: flag as regression
@@ -509,7 +522,7 @@ Evaluation record:
     eval_id: uuid,
     job_id: uuid,
     model_version: "ft:llama-3-70b:acme:v3",
-    base_model: "meta-llama/Llama-3-70B-Instruct",
+    base_model: "meta-llama/Llama-3.3-70B-Instruct",
     metrics: {
       val_loss: 1.42,
       perplexity: 4.14,
@@ -610,7 +623,7 @@ Model metadata in PostgreSQL:
     model_id: uuid,
     tenant_id: uuid,
     display_name: "customer-support-v3",
-    base_model: "meta-llama/Llama-3-70B-Instruct",
+    base_model: "meta-llama/Llama-3.3-70B-Instruct",
     method: "lora",
     status: "evaluated",    // training | evaluated | staging | production | archived
     version: 3,
@@ -881,7 +894,7 @@ POST /v1/training/jobs
   Body:
   {
     "dataset_id": "ds_abc123",
-    "base_model": "meta-llama/Llama-3-70B-Instruct",
+    "base_model": "meta-llama/Llama-3.3-70B-Instruct",
     "method": "lora",
     "hyperparameters": {
       "preset": "quality",
@@ -968,7 +981,7 @@ POST /v1/evaluations
     "model_id": "ft_model_abc",
     "eval_dataset_id": "ds_golden",
     "modes": ["metrics", "golden_comparison", "llm_judge"],
-    "judge_model": "gpt-4o"
+    "judge_model": "gpt-4o"      // or "claude-sonnet-5"
   }
 
 GET /v1/evaluations/{eval_id}
@@ -1023,27 +1036,45 @@ Infrastructure cost:
 
   Total monthly cost: ~$3,204,200
 
-Gross margin at current scale: ~$971,800 / $3,204,200 = 30% (negative margin)
+Revenue covers only ~$971,800 / $3,204,200 = 30% of cost.
+(Stated as a gross margin that is -230%: (971,800 - 3,204,200) / 971,800.)
 
-Path to profitability:
-  1. Scale to 5,000 tenants (60,000 jobs/month): revenue triples, GPU cost grows 2x
-     Revenue: ~$2.9M, Cost: ~$5.6M -> still negative but improving
-  2. Spot/preemptible GPUs for non-urgent LoRA jobs (60% cheaper):
-     Savings: $1.2M/month (if 70% of LoRA jobs tolerate preemption)
+Read the shape of this before reaching for growth as the fix. Job volume drives
+both revenue AND GPU cost roughly linearly, so **adding tenants does not close a
+30%-of-cost gap** — it scales both sides and holds the ratio. The levers that
+actually change the ratio are price, GPU unit cost, and utilization:
+
+  1. Price. Section 2 sets a target of charging 2-3x infrastructure cost; the job
+     prices above charge ~1.2x ($10 of GPU billed at $12). Closing that alone is
+     the single largest lever and is required for any break-even path.
+  2. Spot/preemptible GPUs for non-urgent LoRA jobs (60% cheaper).
+     LoRA is 690 of the 1,195 peak GPUs (~58% of the fleet); if 70% of those jobs
+     tolerate preemption, the discount applies to 0.58 x 0.70 = 40% of GPU spend:
+     0.40 x 0.60 x $2.88M = ~$700K/month saved.
   3. GPU utilization improvements:
      Time-slicing: run small LoRA jobs on same GPU (non-overlapping memory)
      Packing: fill gaps between large jobs with small ones
-     Target: 92% utilization -> saves $200K/month vs 85%
+     Target: 92% utilization -> saves ~$200K/month vs 85%
   4. Higher-value jobs (enterprise custom pricing):
      Dedicated clusters: $50K+/month per enterprise tenant
      10 enterprise tenants = $500K/month
 
-Break-even projection: ~8,000 tenants with spot GPU usage and 92% utilization
-  Revenue: ~$3.8M, Cost: ~$3.5M -> profitable
+Break-even needs (1) plus (2) and (3), not tenant growth: roughly doubling job
+pricing toward the Section 2 target takes revenue to ~$1.9M against a
+spot-and-utilization-optimized cost near $2.3M, and the enterprise-tier revenue
+in (4) closes the remainder. Tenant count then scales a positive-margin business
+instead of a negative one.
+
+Caveat on utilization: the job mix above consumes roughly 460,000 GPU-hours/month
+(18,400 LoRA x 4h x 1.5 GPU + 1,000 QLoRA x 4h + 600 full x 48h x 12 GPU) against
+a fleet capacity of 1,600 x 720 = 1,152,000 GPU-hours. That is ~40% average
+utilization, well under the >85% NFR target -- the 1,600-GPU fleet is sized for
+peak concurrency, not average demand, and closing that gap is what lever (3) means.
 
 Key cost levers:
   GPU utilization (biggest lever): every 1% improvement = $28,800/month saved
-  Spot instance mix: 60% spot adoption = $1.2M/month saved
+  Spot instance mix: 60% of the fleet on spot at a 60% discount
+    = 0.60 x 0.60 x $2.88M = ~$1.04M/month saved
   Training efficiency: better hyperparameter defaults reduce average job time 15%
   Cache base model weights: saves 5 min/job x 20,000 jobs = 1,667 GPU-hours = $4,167/month
 ```
@@ -1089,7 +1120,7 @@ Symptom: `gate_decision=FAIL` on every job iteration; tenant reports "model is w
 
 ## 9. Interview Discussion Points
 
-**Why default to LoRA instead of full fine-tuning?** LoRA trains only 0.1-1% of model parameters (low-rank adapters injected into attention layers), reducing GPU memory by 60-70% and training time by 5-10x. For a 70B model, full fine-tuning requires 32 A100 GPUs and costs $1,000+; LoRA achieves 90-95% of the quality improvement on 4 GPUs for $60-90. Full fine-tuning is only justified when the domain shift is extreme (e.g., English model to Japanese medical) and the dataset exceeds 100K examples. The platform should steer users toward LoRA by default and require explicit justification (minimum dataset size, budget confirmation) for full fine-tuning jobs.
+**Why default to LoRA instead of full fine-tuning?** LoRA trains only 0.1-1% of model parameters (low-rank adapters injected into attention layers), which removes the optimizer state and gradients for the frozen base and so cuts training memory several-fold. The LoRA paper (Hu et al., 2021) reports a 3x VRAM reduction on GPT-3 175B with Adam and roughly 25% training-throughput improvement — note that is a throughput gain, not the order-of-magnitude speedup sometimes claimed; the large wins are memory and the ability to fit on fewer GPUs. For a 70B model, full fine-tuning requires 32 A100 GPUs and costs $1,000+; LoRA runs on 4 GPUs for $60-90 and, on this platform's own golden-set evals, recovers most of the quality gain for typical domain-adaptation tasks. Full fine-tuning is only justified when the domain shift is extreme (e.g., English model to Japanese medical) and the dataset exceeds 100K examples. The platform should steer users toward LoRA by default and require explicit justification (minimum dataset size, budget confirmation) for full fine-tuning jobs.
 
 **How do you handle the noisy neighbor problem on a shared GPU cluster?** Three mechanisms work together. First, GPU isolation: each training job gets dedicated GPU(s) with no time-sharing -- one job per GPU eliminates memory contention and CUDA context switching. Second, network bandwidth isolation: NCCL traffic for distributed training jobs uses dedicated RDMA lanes; data loading traffic uses separate NICs. Third, fair scheduling with virtual clocks prevents any single tenant from monopolizing the queue. The remaining risk is CPU and disk I/O contention on shared nodes -- mitigated by pod resource limits (CPU requests/limits, ephemeral storage limits) and by scheduling memory-intensive jobs on dedicated high-memory nodes.
 
@@ -1105,6 +1136,6 @@ Symptom: `gate_decision=FAIL` on every job iteration; tenant reports "model is w
 
 **What is the model lineage problem and why does it matter for enterprises?** Regulated industries (finance, healthcare) require audit trails: "Which data trained the model that made this decision?" The model registry stores cryptographic hashes of the exact dataset, training configuration, and base model weights used for each fine-tuned version. Given any production prediction, you can trace: prediction -> model version -> training job -> dataset version -> raw upload file. This chain is immutable -- even if the dataset or model is later deleted, the metadata and hashes persist. For GDPR compliance, if a user requests data deletion, the platform can identify which models were trained on that data, flag them for retraining, and prove the data was removed. Without lineage tracking, an enterprise cannot answer "was this customer's data used in model training?" -- a compliance failure.
 
-**How do you handle the cold start problem for base model weights?** A 70B parameter model in bf16 is approximately 140GB. Downloading from S3 at 10Gbps takes about 2 minutes. If every training job downloads fresh, that is 2 minutes of wasted GPU time (4 GPUs idle = $0.09 wasted). The solution is a two-tier cache: each GPU node has 2TB NVMe SSD that caches the 3-4 most popular base models (covering 90% of jobs). A background daemon pre-fetches models based on the job queue -- if a Llama-3-70B job is queued for node 7 and node 7 does not have Llama-3-70B cached, the daemon starts downloading before the job is scheduled. Cache eviction uses LFU (least frequently used) with a 7-day minimum retention. For the 10% of jobs using rare models, the 2-minute download is acceptable and included in the cost estimate.
+**How do you handle the cold start problem for base model weights?** A 70B parameter model in bf16 is approximately 140GB. Downloading from S3 at 10Gbps takes about 2 minutes. If every training job downloads fresh, that is 2 minutes of wasted GPU time: 4 GPUs x (2/60) h x $2.50/GPU-h = $0.33 per job, or ~$6,700/month across 20,000 jobs. The solution is a two-tier cache: each GPU node has 2TB NVMe SSD that caches the 3-4 most popular base models (covering 90% of jobs). A background daemon pre-fetches models based on the job queue -- if a Llama-3-70B job is queued for node 7 and node 7 does not have Llama-3-70B cached, the daemon starts downloading before the job is scheduled. Cache eviction uses LFU (least frequently used) with a 7-day minimum retention. For the 10% of jobs using rare models, the 2-minute download is acceptable and included in the cost estimate.
 
 **How would you evolve this platform to support continual learning / online fine-tuning?** The current design is batch-oriented: upload data, train, evaluate, deploy. Continual learning requires three additions. First, a streaming data pipeline that accepts real-time feedback (user corrections, thumbs-down signals) and accumulates them into training batches automatically. Second, scheduled retraining triggers: "retrain every Sunday using the last 7 days of feedback data, merged with the original training set." Third, catastrophic forgetting prevention: when retraining on new data, evaluate on the original golden set to ensure old capabilities are preserved. The model registry already supports versioning, so each retrained model becomes a new version with full lineage. The key architectural change is the data pipeline: it must support append-mode datasets that grow over time, rather than static uploads.

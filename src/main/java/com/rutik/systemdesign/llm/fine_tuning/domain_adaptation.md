@@ -96,7 +96,7 @@ That one line in the code, `# No label masking — predict ALL tokens`, is the w
 | `block_size=2048` | Documents are concatenated and sliced into fixed 2048-token blocks |
 | CLM loss | Mean negative log-likelihood per token, in nats, over the whole block |
 | `exp(loss)` | Perplexity — the model's effective number of equally-likely next tokens |
-| `1e-4` | CPT learning rate: above SFT's `1e-5`, below pre-training's `3e-4` |
+| `1e-4` | CPT learning rate: above full-weight SFT's `1e-5`, below pre-training's `3e-4` (LoRA SFT runs higher, 1e-4 to 3e-4, because the adapter starts from zero) |
 | effective batch | `per_device 4 × grad_accum 16 = 64` sequences per update |
 
 **Walk one example.** Illustrative CLM losses on a held-out slice of the domain corpus, converted to perplexity:
@@ -276,9 +276,9 @@ The `1B-100B tokens` range above spans a hundredfold difference in cost. Two sta
   Chinchilla compute-optimal for N=8e9:  20 x 8e9  =  160B tokens
 ```
 
-The elbow lands at 200B, which is `25` tokens per parameter — essentially Chinchilla's `20`. That is not a coincidence: past the compute-optimal point, extra tokens buy progressively less because the model's capacity, not the data, has become the binding constraint. Pushing to 500B costs `2.5×` the FLOPs of 200B for **one** additional F1 point, exactly the "in retrospect, 200B would have achieved nearly equivalent results at 40% of the compute cost" the case study concludes. Priced out: `$18,000 × 0.4 = $7,200`, so that final point cost `$10,800`.
+The elbow lands at 200B, which is `25` tokens per parameter — essentially Chinchilla's `20`. That is not a coincidence: past the compute-optimal point, extra tokens buy progressively less because the model's capacity, not the data, has become the binding constraint. Pushing to 500B costs `2.5×` the FLOPs of 200B for **one** additional F1 point, exactly the "in retrospect, 200B would have achieved nearly equivalent results at 40% of the compute cost" the case study concludes. Priced in GPU-hours (see the next block): 200B needs ~21,000 A100-hours against ~53,000 for 500B, so that final F1 point cost ~32,000 A100-hours.
 
-**Sanity-check any stated wall clock against `6ND` before you trust it.** The same run's hardware line reads 64× A100 for ~4 days:
+**Sanity-check any stated wall clock against `6ND` before you trust it.** The case study's *initial* plan read 64× A100 for ~4 days on an $18,000 budget:
 
 ```
   GPU-hours available   64 x 4 x 24                        =     6,144
@@ -294,7 +294,7 @@ The elbow lands at 200B, which is `25` tokens per parameter — essentially Chin
   days needed for the full 500B at 40% MFU                =  34.8 days
 ```
 
-To consume 500B tokens in 6,144 GPU-hours would require 348% of an A100's peak throughput, which is not a thing. The lesson is the method, not the discrepancy: `6ND ÷ (GPUs × peak × MFU)` gives your wall clock in one line, and running it *before* provisioning is the difference between a 4-day plan and a 35-day invoice. Assume 40% MFU unless you have measured your own.
+To consume 500B tokens in 6,144 GPU-hours would require 348% of an A100's peak throughput, which is not a thing — so that plan was rejected and the run was rebudgeted at ~53,000 A100-hours (64 GPUs for ~35 days). The lesson is the method: `6ND ÷ (GPUs × peak × MFU)` gives your wall clock in one line, and running it *before* provisioning is the difference between a 4-day plan and a 35-day invoice. Assume 40% MFU unless you have measured your own.
 
 ### 3.4 Catastrophic Forgetting Mitigation
 
@@ -518,23 +518,28 @@ Low    |  Domain instruction tuning only (no CPT)
 
 ## 5. Real-World Examples
 
-### BioMedGPT / BioMedLM (Stanford CRFM)
-- LLaMA-2 base + continued pre-training on PubMed abstracts + full texts
-- 2.7B medical tokens in CPT phase
-- Then instruction tuning on medical Q&A pairs
-- Achieved strong performance on USMLE Step 1 questions
+### BioMedLM (Stanford CRFM + MosaicML, 2022)
+- A **2.7B-parameter** GPT-style model trained **from scratch** on PubMed abstracts and
+  full texts — not a LLaMA continued-pre-training run (the 2.7B is parameters, not tokens)
+- Custom PubMed-trained tokenizer, so biomedical terms are single tokens
+- Scored 50.3% on MedQA (USMLE-style multiple choice), state of the art at release
+- The useful lesson for domain adaptation: a small model with a domain-matched
+  tokenizer and corpus competes with far larger general models on in-domain tasks
 
 ### BloombergGPT (Bloomberg, 2023)
-- 50B parameter model trained from scratch on 700B financial tokens + 300B general tokens
+- 50B parameter model trained from scratch on 363B financial tokens (the proprietary
+  FinPile, 2007-2022) plus 345B tokens of public data — ~709B total, 51/49 split
 - Not domain adaptation — built from scratch with mixed training
 - Key insight: domain-specific pre-training from scratch beats general model fine-tuning for heavily specialized vocabulary (financial tickers, instruments, jargon)
 - Sets the upper bound for what domain adaptation is reaching toward
 
 ### CodeLLaMA (Meta, 2023)
-- LLaMA-2 base + 500B code token continued pre-training
+- LLaMA-2 base + 500B code token continued pre-training (1T for the 70B)
 - Then instruction fine-tuning on code Q&A pairs
-- Long context fine-tuning (2K → 100K context for code navigation)
-- Result: CodeLLaMA 34B outperformed GPT-3.5 on HumanEval
+- Long-context fine-tuning at 16,384-token sequences (up from Llama 2's 4,096), with
+  stable extrapolation demonstrated up to 100K tokens at inference
+- Result on HumanEval pass@1: Code Llama 34B 48.8% and Code Llama - Python 34B 53.7%,
+  against 48.1% for GPT-3.5 (ChatGPT) as reported in the paper
 
 ---
 
@@ -652,7 +657,7 @@ A: A mix of 80-90% domain data and 10-20% general data is the practical sweet sp
 A: Track MMLU (general knowledge), HumanEval (code generation), and MT-Bench (instruction following quality) scores at every CPT checkpoint alongside domain-specific metrics. Run these evaluations every 500-1,000 gradient steps rather than only at the end of training — forgetting can be rapid and catching it at checkpoint N-1 rather than at the end saves days of wasted training. Set concrete thresholds before training: define that >5% regression on MMLU or >10% regression on HumanEval triggers a training halt and LR reduction. If forgetting is detected: reduce the learning rate by 2-5×, increase the general data mixing fraction, or switch to LoRA if training full weights. Evaluate on the same benchmark splits across all checkpoints — switching benchmarks mid-run makes trend detection unreliable.
 
 **Q: What data mixing strategies exist for continued pre-training, and which is most robust?**
-A: Three primary strategies are used in practice. Proportional mixing: sample domain and general data in fixed proportions (85%/15%) throughout training; simple, reproducible, robust for most cases. Temperature-based sampling: each dataset is sampled with probability proportional to its token count raised to a temperature parameter T; at T=1.0 this is proportional mixing; at T<1.0 (e.g., T=0.7) smaller datasets are upsampled relative to their size, preventing large general corpora from dominating; T=0.7 is the most commonly cited robust default. Curriculum learning: start with general data in higher proportion (50/50), then progressively shift toward domain data over training (ending at 90/10); the intuition is that the model first stabilizes general knowledge, then acquires domain knowledge on top. Empirically, temperature sampling at T=0.7 is the most robust across diverse domain sizes and types; curriculum learning can outperform it when domain data volume is much smaller than general data.
+A: Three primary strategies are used in practice. Proportional mixing: sample domain and general data in fixed proportions (85%/15%) throughout training; simple, reproducible, robust for most cases. Temperature-based sampling: each dataset is sampled with probability proportional to its token count raised to a temperature parameter T; at T=1.0 this is proportional mixing; at T<1.0 (e.g., T=0.7) smaller datasets are upsampled relative to their size, preventing large general corpora from dominating. Curriculum learning: start with general data in higher proportion (50/50), then progressively shift toward domain data over training (ending at 90/10); the intuition is that the model first stabilizes general knowledge, then acquires domain knowledge on top. Temperature sampling is the most robust of the three across diverse domain sizes because it decouples the mix from raw corpus size, but the right temperature is corpus-specific and must be swept — published multilingual work has used values anywhere from 0.3 to 0.7, so treat any single "default" with suspicion. Curriculum learning can outperform it when domain data volume is much smaller than general data.
 
 **Q: How do you maintain both domain performance and general capability in evaluation?**
 A: Always maintain two parallel evaluation suites and set explicit acceptance criteria for both before training begins. The domain suite measures what the fine-tuning is trying to improve: domain-specific Q&A accuracy, task F1, expert ratings. The general suite measures what must not regress: MMLU for general knowledge, HumanEval for coding, MT-Bench for instruction following. Define success as: domain metrics improve by a target threshold AND general metrics stay within 5% of the base model baseline. If general metrics degrade beyond 5%, the run fails regardless of domain improvement — this hard constraint prevents shipping a model that is excellent at one domain task but broken for production use. Teams that skip general evaluation discover forgetting only after user complaints. Concretely: run both suites at every checkpoint and plot both on the same dashboard to make the tradeoff visible throughout training.
@@ -678,6 +683,8 @@ A: A replay buffer is a fixed-size collection of general-domain examples that ar
 
 ### Adapting LLaMA 3 8B for Legal Contract Analysis
 
+*Illustrative worked example — the method and the arithmetic are real, but the company, corpus sizes and accuracy figures are a composite, not a published deployment. Note in particular that no public English legal corpus is anywhere near 400B tokens (the Pile of Law, the largest open one, is ~256GB of text), so a corpus this size would have to be licensed.*
+
 #### Problem Statement
 
 A legal tech company needed a model to analyze commercial contracts: extract key clauses (indemnification, limitation of liability, payment terms, termination conditions), flag non-standard language, and summarize contract risk profiles. GPT-4 with prompting achieved 71% clause extraction F1 on their benchmark — insufficient for production (target: 85%+ F1). General-purpose LLMs struggled with legal boilerplate patterns and jurisdiction-specific clause structures not well-represented in standard pre-training data.
@@ -695,7 +702,10 @@ Phase 1: Continued Pre-Training
                                      Total CPT corpus:      500B tokens
   General mix fraction: 20% (100B / 500B)
   Training: LLaMA-3-8B full weights, LR=8e-5, cosine, 1 epoch
-  Hardware: 64x A100 80GB, ~4 days
+  Hardware: 64x A100 80GB
+    6ND = 6 x 8e9 x 500e9 = 2.4e22 FLOPs; at 40% MFU on A100 BF16 (312 TFLOPS)
+    that is ~53,000 A100-hours = ~35 days on 64 GPUs. The original ~4-day plan
+    was rejected by exactly this check (see 3.3).
 
            |
            v
@@ -790,8 +800,10 @@ cpt_args = TrainingArguments(
     warmup_ratio=0.01,
     num_train_epochs=1,
     bf16=True,
+    save_strategy="steps",
     save_steps=1000,
-    eval_steps=1000,  # MMLU/HumanEval evaluated here
+    eval_strategy="steps",   # without this, eval_steps alone never triggers evaluation
+    eval_steps=1000,         # MMLU/HumanEval evaluated here
     logging_steps=50,
 )
 
@@ -807,7 +819,7 @@ lora_config = LoraConfig(
 )
 
 sft_config = SFTConfig(
-    max_seq_length=4096,        # contracts can be long; extended context
+    max_length=4096,            # `max_seq_length` before TRL 0.20; contracts are long
     packing=False,              # contracts vary greatly in length; packing complicates masking
     num_train_epochs=3,
     per_device_train_batch_size=2,
@@ -835,7 +847,7 @@ The final model exceeded the 85% F1 target and outperformed GPT-4 with prompting
 
 **RAG as an alternative.** For contracts already in the company's database, RAG could retrieve similar clauses for comparison at query time. The team implemented RAG in parallel: RAG alone achieved 74% clause extraction F1 (better than prompting but worse than fine-tuning). The production system combined both: the fine-tuned model handled extraction and classification; RAG retrieved similar historical clauses for the comparative analysis task.
 
-**Full CPT vs. LoRA CPT tradeoff.** Full CPT cost approximately $18,000 in GPU compute (64× A100, 4 days). LoRA CPT at r=128 cost $6,000 but achieved only 81% clause extraction F1 vs. 88% for full CPT. For this use case the 7-point F1 improvement justified the 3× compute cost; for a smaller company the LoRA CPT tradeoff would favor cost savings.
+**Full CPT vs. LoRA CPT tradeoff.** Full CPT consumed ~53,000 A100-hours. LoRA CPT at r=128 is cheaper per step but not dramatically so — freezing the base removes the weight-gradient matmul, taking training from roughly `6ND` to roughly `4ND`, about a third less compute, not a multiple — and it reached only 81% clause extraction F1 against 88% for full CPT. The real LoRA CPT win is memory (no fp32 optimizer state for 8B parameters), which is what lets a smaller team run it on far fewer GPUs; the compute saving alone would not justify the 7-point F1 loss.
 
 **Data volume: 500B CPT tokens.** An ablation on CPT data volume (50B, 100B, 200B, 500B tokens) showed: 50B tokens improved F1 by +9 points; 100B by +13 points; 200B by +15 points; 500B by +16 points. The marginal return dropped sharply after 200B tokens — in retrospect, 200B CPT tokens would have achieved nearly equivalent results at 40% of the compute cost.
 

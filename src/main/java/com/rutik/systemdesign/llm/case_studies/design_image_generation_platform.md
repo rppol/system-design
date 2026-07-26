@@ -4,7 +4,7 @@
 
 > **Design intuition**: Image generation is LLM inference run sideways — instead of predicting the next token autoregressively, a diffusion model iteratively denoises a latent image from random noise over 20-50 steps. The platform challenge is completely different from text: each "generation" takes 2-15 seconds (not milliseconds), outputs are 4-25 MB files (not text), the GPU compute is dominated by U-Net/DiT convolutions (not attention), and users want to apply their personal style LoRA adapters to every generation.
 
-**Key insight for this design**: Image generation platforms live and die on LoRA adapter serving. A user who trains a custom style or face LoRA generates 10x more images than a user who does not. Serving 100,000 user LoRA adapters on a shared base model fleet — without reloading the 12 GB base model for each adapter swap — is the core infrastructure challenge that separates production platforms from hobby projects. Every other component (resolution routing, async queuing, C2PA watermarking, content safety) is secondary to making LoRA hot-swap work at scale.
+**Key insight for this design**: Image generation platforms live and die on LoRA adapter serving. A user who trains a custom style or face LoRA generates 10x more images than a user who does not. Serving 100,000 user LoRA adapters on a shared base model fleet — without reloading the 12 GB FP8-quantized base model for each adapter swap — is the core infrastructure challenge that separates production platforms from hobby projects. Every other component (resolution routing, async queuing, C2PA watermarking, content safety) is secondary to making LoRA hot-swap work at scale.
 
 ---
 
@@ -51,7 +51,8 @@ Daily active users:            5,000,000
 Generations per user per day:  10 (avg; power users generate 50-200)
 Total generations per day:     50,000,000
 Peak generations per second:   50M / 86,400 * 3x peak factor = ~1,736 peak gen/sec
-                                (measured: Midjourney peak ~2,000 gen/sec at 16M users)
+                                (Midjourney has never published throughput figures;
+                                 this is a modelled target, not a measured comparable)
 ```
 
 ```mermaid
@@ -74,10 +75,12 @@ LoRA adapter usage:
 ### GPU Fleet Sizing
 
 ```
-Per-generation compute (single H100 80GB SXM5):
+Per-generation compute (single H100 80GB SXM5). Both FLUX variants are 12B-parameter
+rectified-flow transformers; the serving fleet runs them FP8-quantized (~12 GB of
+weights) rather than bf16 (~24 GB):
   FLUX.1-dev (12B DiT), 28 steps, 1024x1024: ~3 s wall-clock
-  FLUX.1-schnell (4B DiT), 4 steps (distilled): ~0.4 s
-  SDXL (6.6B UNet), 20 steps, 1024x1024: ~2 s
+  FLUX.1-schnell (12B DiT, timestep-distilled), 4 steps: ~0.4 s
+  SDXL (2.6B UNet; 3.5B base model, 6.6B with refiner), 20 steps, 1024x1024: ~2 s
   A10G 24GB for 512x512 SDXL 20-step: ~1.2 s
 
 Average generation time across mix: 2.5 s
@@ -85,9 +88,8 @@ Concurrent H100s needed at average load:
   50M/day * 2.5s / 86,400s = ~1,447 H100-seconds/day concurrently
   = 1,447 concurrent jobs → 1,447 H100s at 1 job/GPU
 
-With CFG batching (batch_size=2 for conditional+unconditional forward pass):
-  4 concurrent 512px generations per H100 via batching
-  Effective: 1,447 / 4 * (1 job / 0.25) = ~362 H100s at average load
+With batching (4 concurrent generations resident per H100):
+  Effective: 1,447 concurrent jobs / 4 jobs per GPU = ~362 H100s at average load
 
 Peak (3x average load, 60% utilization target):
   362 * 3 / 0.60 = ~1,810 H100s
@@ -116,7 +118,10 @@ Storage costs:
   50M images * 5 MB avg = 250 TB/day generated
   Paid retention 1 year: 91 PB total → S3 IA at $0.01/GB = $910,000/month
   Free retention 30 days: 7.5 PB → S3 IA = $75,000/month
-  Storage dominates at scale: $985K/month vs $1.78M/month GPU
+  Storage is the fastest-growing line, not yet the largest: $985K/month storage
+  vs $1.78M/month GPU. Storage accrues (every retained image is a permanent
+  monthly charge) while GPU cost is flat per generation, so the two cross over
+  in roughly 18 months at this retention policy unless tiering is applied.
 
 LoRA adapter storage:
   100,000 user adapters * 200 MB (FLUX rank-16) = 20 TB total on S3
@@ -218,12 +223,12 @@ See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for fleet 
 
 ### 4.1 LoRA Adapter Manager (S-LoRA Style)
 
-The LoRA adapter manager is the single most important component in the system. FLUX.1-dev weighs 12 GB on H100 HBM (24 GB with safety margin for inference buffers). Loading the base model fresh for each generation with a different adapter would take 60-90 seconds per swap — rendering LoRA commercially useless.
+The LoRA adapter manager is the single most important component in the system. FLUX.1-dev is 12B parameters: ~24 GB in bf16, ~12 GB FP8-quantized, which is what the serving fleet loads. Loading the base model fresh for each generation with a different adapter would take 60-90 seconds per swap — rendering LoRA commercially useless.
 
 The fix: keep the base model permanently resident in GPU HBM, load only the LoRA delta weights (200 MB for FLUX rank-16) additively. LRU eviction manages the adapter hot set when HBM pressure increases.
 
 ```python
-# BROKEN: loads entire 12 GB base model for each adapter swap
+# BROKEN: loads the entire 12 GB (FP8) base model for each adapter swap
 # Cost: 60-90 seconds per adapter change, impossible at scale
 def generate_with_adapter_naive(prompt: str, adapter_id: str) -> bytes:
     model = load_model("/models/flux-dev")          # 60s, 12GB VRAM load
@@ -347,7 +352,7 @@ class LoRAAdapterCache:
         raise NotImplementedError  # torch.load(rec.nvme_path) → .cuda(self._gpu_id)
 ```
 
-Key numbers: an H100 with FLUX.1-dev base (12 GB) + safety/VAE buffers (6 GB) has ~62 GB free for adapter slots and inference. At 200 MB per rank-16 adapter: 310 adapter slots possible. With 8 active slots (simpler scheduling), the fleet of 1,350 H100s covers 1,350 × 8 = 10,800 simultaneous unique adapters — well beyond the 100K user adapters in total (most are cold at any given time).
+Key numbers: an H100 with FLUX.1-dev FP8 base (12 GB) + safety/VAE buffers (6 GB) has ~62 GB free for adapter slots and inference. At 200 MB per rank-16 adapter that is 310 slots on paper; in practice the in-flight generation workspaces claim most of it (see Section 10). With 8 active slots (simpler scheduling), the fleet of 700 H100s covers 700 × 8 = 5,600 simultaneous unique adapters — a small fraction of the 100K user adapters, which is fine because the access distribution is heavily long-tailed and most adapters are cold at any given time.
 
 ### 4.2 Diffusion Pipeline with CFG Batching
 
@@ -377,9 +382,14 @@ class GenerationConfig:
 
 class DiffusionSampler:
     """
-    FLUX.1-dev / SDXL sampler with CFG batching.
+    SDXL-family sampler with CFG batching (4-channel VAE latents).
     Batch size 2 (conditional + unconditional) runs in a single forward pass.
     Memory: 2x peak vs unconditional-only; latency: 35% faster than sequential.
+
+    NOTE: FLUX.1-dev does NOT run true CFG — it is guidance-distilled and takes a
+    scalar guidance embedding, so it needs one forward pass per step and this
+    batching trick does not apply. FLUX also uses 16-channel packed latents, not
+    the 4-channel shape below.
     """
 
     def __init__(self, model: object, scheduler: object) -> None:
@@ -442,10 +452,11 @@ class DiffusionSampler:
         return image_tensor.cpu().numpy().astype(np.uint8)
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError  # vae.decode(latents / 0.18215) → image pixels
+        raise NotImplementedError  # vae.decode(latents / 0.13025) → image pixels
+                                   # (0.13025 is SDXL's scaling factor; SD 1.5 uses 0.18215)
 ```
 
-CFG scale tuning: cfg_scale=1.0 ignores the prompt (pure noise), cfg_scale=7.5 is typical, cfg_scale=15-20 produces over-saturated outputs. FLUX.1-dev recommends cfg_scale=3.5 due to its guidance-distillation training.
+CFG scale tuning: cfg_scale=1.0 disables guidance — the output is the conditional prediction alone, which still follows the prompt but weakly and with washed-out detail (it is guidance scale 0 that would give the unconditional, prompt-free result). cfg_scale=7.5 is typical; cfg_scale=15-20 produces over-saturated outputs. FLUX.1-dev's `guidance_scale` defaults to 3.5 and is a distilled guidance embedding rather than a true CFG term.
 
 ### 4.3 Content Safety Pipeline
 
@@ -552,7 +563,7 @@ class SafetyPipeline:
         raise NotImplementedError
 ```
 
-CSAM detection via PhotoDNA: Microsoft PhotoDNA computes a perceptual hash of the generated image and compares it against the NCMEC (National Center for Missing and Exploited Children) hash database. The lookup is ~15 ms via the PhotoDNA Cloud Service API. Detection triggers mandatory NCMEC CyberTipline reporting within 1 hour (US federal law, 18 U.S.C. § 2258A). This cannot be toggled off for any user tier.
+CSAM detection via PhotoDNA: Microsoft PhotoDNA computes a perceptual hash of the generated image and compares it against the NCMEC (National Center for Missing and Exploited Children) hash database. The lookup is ~15 ms via the PhotoDNA Cloud Service API. **PhotoDNA is a known-material matcher, not a classifier** — it detects near-duplicates of images already in the hash set, so it catches regurgitation of known CSAM and adapters trained on it, but it will not flag novel synthetic CSAM that resembles nothing in the database. A production platform must pair hash matching with a trained CSAM classifier (e.g. Thorn's Safer) for novel material; the hash lookup alone is necessary, not sufficient. Detection triggers mandatory NCMEC CyberTipline reporting under 18 U.S.C. § 2258A, which requires a report "as soon as reasonably possible" — the 1-hour figure used throughout this design is an internal SLA, not the statutory deadline. Reporting cannot be toggled off for any user tier.
 
 ### 4.4 LoRA Training Pipeline
 
@@ -677,7 +688,7 @@ import asyncio  # noqa: E402 — placed here for narrative flow in this code blo
 
 ### 4.5 Resolution-Aware GPU Routing
 
-Not all resolutions need the most expensive GPU. Routing lower-resolution generations to cheaper A10G instances saves $0.92M/month at the fleet described in Section 2.
+Not all resolutions need the most expensive GPU. Routing lower-resolution generations to cheaper A10G instances saves ~$0.96M/month at the fleet described in Section 2.
 
 ```python
 from __future__ import annotations
@@ -702,7 +713,8 @@ class ResolutionRouter:
     Routes generation requests to the appropriate GPU tier based on resolution,
     model choice, and estimated VRAM footprint.
 
-    FLUX.1-dev peak VRAM at inference (bf16, CFG batch=2, no gradient):
+    FLUX.1-dev peak VRAM at inference (FP8 weights, single forward pass, no gradient;
+    the bf16 checkpoint is ~24 GB of weights alone and does NOT fit an A10G):
       512x512:    7.2 GB   → A10G eligible
       1024x1024: 14.8 GB   → A10G eligible (fits in 24GB with margin)
       1024x1024 with LoRA: 15.2 GB → A10G eligible
@@ -758,7 +770,7 @@ class ResolutionRouter:
         return snap(w), snap(h)
 ```
 
-Cost impact: 60% of traffic at 512px-1024px routes to A10G at $0.60/hr. Redirecting that 60% from H100 ($2.50/hr) saves $1.90/hr per GPU-slot. At 700 A10G slots: $1.90 × 700 × 24 = $31,920/day = $957,600/month.
+Cost impact: 60% of traffic at 512px-1024px routes to A10G at $0.60/hr. Redirecting that 60% from H100 ($2.50/hr) saves $1.90/hr per GPU-slot, before accounting for the A10G's lower throughput. At 700 A10G slots: $1.90 × 700 × 24 = $31,920/day = $957,600/month at 30 days.
 
 ---
 
@@ -766,12 +778,12 @@ Cost impact: 60% of traffic at 512px-1024px routes to A10G at $0.60/hr. Redirect
 
 | Decision | Chosen Approach | Alternative | Rationale |
 |----------|----------------|-------------|-----------|
-| Base model architecture | FLUX.1-dev (12B DiT) as primary | SDXL (6.6B UNet) | DiT scales better at >6B params; superior text rendering in images; industry convergence on DiT for new models (SD3, FLUX, Pixart) |
+| Base model architecture | FLUX.1-dev (12B DiT) as primary | SDXL (2.6B UNet) | DiT scales better at >6B params; superior text rendering in images; industry convergence on DiT for new models (SD3, FLUX, Pixart) |
 | LoRA rank default | rank-16 (200MB adapter) | rank-4 (50MB) or rank-64 (800MB) | rank-4 too low expressiveness for face/style capture; rank-64 quadruples adapter size (800MB) with marginal quality gain; rank-16 is the Pareto point |
-| LoRA serving strategy | Shared base model + HBM adapter slots (S-LoRA) | Per-user dedicated model copy | Dedicated: 100K users × 12GB = 1.2PB GPU HBM — physically impossible. S-LoRA: 12GB base + 200MB hot adapters per GPU = tractable |
+| LoRA serving strategy | Shared base model + HBM adapter slots (S-LoRA) | Per-user dedicated model copy | Dedicated: 100K users × 12GB = 1.2PB of GPU HBM, i.e. ~15,000 dedicated H100s to serve 20TB of adapter weights. S-LoRA: 12GB base + 200MB hot adapters per GPU = tractable |
 | Generation delivery | Async + S3 presigned URL webhook | Synchronous HTTP response | Generation takes 3-15s; HTTP keep-alive timeouts at 30s are unreliable; mobile clients go to background; async with webhook/polling decouples latency from delivery |
 | CFG batching | Single forward pass, batch=2 | Two sequential forward passes | 35% wall-clock reduction; 2x peak VRAM increase; at 14.8GB base VRAM for FLUX 1024px, 2x = 29.6GB still fits H100 80GB |
-| Content safety | Pre + post generation dual layer | Post-generation only | Pre-generation blocks before GPU compute (saves ~$0.015/blocked request at $0.02/gen cost); post-generation catches indirect NSFW not detectable from prompt text alone |
+| Content safety | Pre + post generation dual layer | Post-generation only | Pre-generation blocks before GPU compute (saves the full ~$0.002 GPU cost of a blocked 1024px generation, and all of its storage and delivery cost); post-generation catches indirect NSFW not detectable from prompt text alone |
 | LoRA training hardware | 4x A10G multi-GPU DDP | Single H100 | 4x A10G ($0.60/hr × 4 = $2.40/hr) vs 1x H100 ($2.50/hr): similar cost, better GPU availability; A10G DDP at 4 GPUs trains ~3.5x faster than single A10G |
 
 ### DiT vs UNet Architecture Comparison
@@ -790,15 +802,15 @@ Cost impact: 60% of traffic at 512px-1024px routes to A10G at $0.60/hr. Redirect
 
 ## 6. Real-World Implementations
 
-**Midjourney** (2022-present): Discord-first UX drove viral adoption by removing signup friction — users simply typed `/imagine` in Discord and images appeared. The Discord bot architecture created unexpected infrastructure challenges: Midjourney had to build custom async queue management on top of Discord's API to handle 15-minute generation queues during peak 2022 traffic. Eventually moved core generation infrastructure off Discord for reliability. Runs a proprietary model (not Stable Diffusion); architecture is closed but estimated at 10,000+ A100s based on revenue ($200M+ ARR) and reported 16M users. Subscription pricing ($10-$120/month) with unlimited generation tiers proved that image generation had strong willingness to pay. Has never published a technical architecture post.
+**Midjourney** (2022-present): Discord-first UX drove viral adoption by removing signup friction — users simply typed `/imagine` in Discord and images appeared. The Discord bot architecture created unexpected infrastructure challenges: Midjourney had to build custom async queue management on top of Discord's API to handle long generation queues during peak 2022 traffic. It later added a standalone web app and moved core generation off Discord for reliability. Runs a proprietary model (not Stable Diffusion); the architecture is closed and the company publishes no fleet, throughput, or infrastructure figures — any GPU-count estimate you see is third-party inference. Subscription pricing (roughly $10-$120/month) with high-volume tiers proved that image generation had strong willingness to pay. Has never published a technical architecture post.
 
-**Black Forest Labs FLUX.1** (August 2024): Released FLUX.1-dev (12B DiT, open weights, non-commercial) and FLUX.1-schnell (4-step distilled variant, Apache 2.0 commercial). FLUX.1-schnell generates 1024px images in ~0.4 seconds on H100, enabling near-real-time generation. Immediately adopted by Replicate, Fal.ai, and Together.ai within 72 hours of release. FLUX fills the gap between open-weight models (SDXL) and closed commercial (Midjourney) with significantly better text rendering in images. The guidance-distillation training (recommended cfg_scale=3.5 vs SDXL's 7.5) reduces the CFG forward pass cost since lower CFG scales tolerate fewer steps.
+**Black Forest Labs FLUX.1** (August 2024): Released FLUX.1-dev (12B rectified-flow DiT, open weights, non-commercial) and FLUX.1-schnell (same 12B architecture, timestep-distilled to 1-4 steps via latent adversarial diffusion distillation, Apache 2.0 commercial). FLUX.1-schnell generates 1024px images in ~0.4 seconds on H100, enabling near-real-time generation. Immediately adopted by Replicate, Fal.ai, and Together.ai within 72 hours of release. FLUX fills the gap between open-weight models (SDXL) and closed commercial (Midjourney) with significantly better text rendering in images. The guidance-distillation training (recommended cfg_scale=3.5 vs SDXL's 7.5) reduces the CFG forward pass cost since lower CFG scales tolerate fewer steps.
 
-**Adobe Firefly** (2023): Enterprise-focused platform differentiated entirely on training data provenance. Firefly is trained exclusively on licensed Adobe Stock content and public domain material — no scraped web content. This was a deliberate architectural and legal decision to avoid the class action lawsuits that hit Stability AI (trained on LAION-5B, scraped web data). C2PA watermarking was implemented from day one, not retrofitted. LoRA-equivalent functionality ships as "Firefly Custom Models" for enterprise customers (minimum $5,000/month contract). Integration into Photoshop/Express drives adoption through existing Creative Cloud install base of 33M paid subscribers. Monetized per-credit within Creative Cloud bundles, not standalone subscription.
+**Adobe Firefly** (2023): Enterprise-focused platform differentiated entirely on training data provenance. Firefly is trained exclusively on licensed Adobe Stock content and public domain material — no scraped web content. This was a deliberate architectural and legal decision to avoid the class action lawsuits that hit Stability AI (trained on LAION-5B, scraped web data). C2PA watermarking was implemented from day one, not retrofitted. LoRA-equivalent functionality ships as "Firefly Custom Models" for enterprise customers; Adobe does not publish a price floor for it. Integration into Photoshop/Express drives adoption through the existing Creative Cloud install base — Adobe does not disclose a subscriber count, so treat any specific figure as an estimate. Monetized per-credit within Creative Cloud bundles, not standalone subscription.
 
-**Ideogram 2.0** (2024): Achieved breakthrough accuracy in text-within-image generation — a longstanding weakness of diffusion models. Text-in-image requires the model to learn character-level spatial layout, which Ideogram accomplished through specific typography-focused fine-tuning. Raised $80M Series B. API-first architecture alongside consumer app, targeting developers building design tools. Average generation time 4-6 seconds for 1024px; no published GPU fleet details.
+**Ideogram 2.0** (2024): Achieved breakthrough accuracy in text-within-image generation — a longstanding weakness of diffusion models. Text-in-image requires the model to learn character-level spatial layout, which Ideogram accomplished through specific typography-focused fine-tuning. Raised an $80M Series A led by a16z (February 2024), six months after a $22.3M seed. API-first architecture alongside consumer app, targeting developers building design tools. Average generation time 4-6 seconds for 1024px; no published GPU fleet details.
 
-**Recraft** (2024): Specialized in vector art and illustration style, differentiating from photorealistic competitors. Trained on commercially licensed illustration datasets (similar to Adobe's approach). $12M seed funding; $10/month unlimited subscription drove rapid user acquisition among UI designers and illustrators. Generation quality deliberately optimized for clean geometric shapes and flat design over photorealism, enabling smaller model (fewer parameters, lower compute cost per generation).
+**Recraft** (2024): Specialized in vector art and illustration style, differentiating from photorealistic competitors. Trained on commercially licensed illustration datasets (similar to Adobe's approach). Venture-backed with a low-priced unlimited subscription that drove rapid user acquisition among UI designers and illustrators. Generation quality deliberately optimized for clean geometric shapes and flat design over photorealism, enabling smaller model (fewer parameters, lower compute cost per generation).
 
 ---
 
@@ -808,11 +820,13 @@ Cost impact: 60% of traffic at 512px-1024px routes to A10G at $0.60/hr. Redirect
 
 | Model | Params | Architecture | Text Rendering | Steps | License | Cost/Gen (H100) |
 |-------|--------|-------------|---------------|-------|---------|-----------------|
-| FLUX.1-dev | 12B | DiT | Excellent | 28 | Non-commercial | $0.018 |
-| FLUX.1-schnell | 4B | DiT (distilled) | Good | 4 | Apache 2.0 | $0.003 |
-| SDXL 1.0 | 6.6B | UNet | Poor | 20-30 | CreativeML Open RAIL+ | $0.008 |
-| SD3-Medium | 2B | DiT (MMDiT) | Good | 28 | Stability AI Open | $0.006 |
-| Midjourney v6 | Unknown | Proprietary | Very Good | ~50 | Closed API only | $0.04 API |
+| FLUX.1-dev | 12B | DiT | Excellent | 28 | Non-commercial | $0.0021 |
+| FLUX.1-schnell | 12B | DiT (timestep-distilled) | Good | 1-4 | Apache 2.0 | $0.0003 |
+| SDXL 1.0 | 2.6B UNet (3.5B base) | UNet | Poor | 20-30 | CreativeML Open RAIL++ | $0.0014 |
+| SD3-Medium | 2B | DiT (MMDiT) | Good | 28 | Stability AI Community | $0.0014 |
+| Midjourney v6 | Undisclosed | Proprietary | Very Good | Undisclosed | No public API | n/a |
+
+Cost/Gen is GPU cost only, derived from this design's own $2.50/hr H100 spot rate and the wall-clock times in Section 2 (e.g. FLUX.1-dev: 3 s × $2.50/3600 = $0.0021). It is not a retail API price — those are 5-20× higher because they include margin, storage, and delivery.
 
 ### LoRA Training Method Comparison
 
@@ -999,7 +1013,7 @@ Resolution: add pre-admission VRAM budget check: reject 2048px + LoRA request if
 
 Symptoms: PhotoDNA match detected in post-generation check; image quarantined and not delivered; `safety_block_total{reason=csam}` counter increments.
 
-Mitigation (immediate, must complete within 1 hour of detection): (1) Quarantine generated image — do not deliver under any circumstances. (2) Suspend generating user account. (3) File NCMEC CyberTipline report with: generation timestamp, user account information, original prompt, quarantined image hash. (4) Alert legal team and trust & safety team simultaneously.
+Mitigation (immediate; internal SLA is 1 hour, the statute requires "as soon as reasonably possible"): (1) Quarantine generated image — do not deliver under any circumstances. (2) Suspend generating user account. (3) File NCMEC CyberTipline report with: generation timestamp, user account information, original prompt, quarantined image hash. (4) Alert legal team and trust & safety team simultaneously.
 
 Resolution: audit all prior generations from the account. If systematic (multiple detections), provide account data to law enforcement upon legal request. Retrospectively check LoRA adapter if one was used in the generation — scan all training images and generated samples from that adapter per Runbook 2 protocol. Reference: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for LoRA adapter safety scanning.
 
@@ -1009,19 +1023,19 @@ Resolution: audit all prior generations from the account. If systematic (multipl
 
 **Midjourney Discord bandwidth crisis (2022)**
 
-After being featured in several AI news articles in late 2022, Midjourney's Discord server grew from 250K to 3M members in 10 days. Generation queue times ballooned from under 60 seconds to 15+ minutes. The root cause was not GPU capacity (they added A100s within 48 hours) but Discord API rate limits: the bot's `/imagine` response mechanism hit Discord's 50 messages-per-second per-server limit, causing confirmations and generated images to back up in a 200,000-item queue. Discord itself was not designed as a production job queue system. Midjourney had to build a secondary delivery path outside Discord (website gallery) for queued items, and eventually restructured the entire job dispatch system to decouple Discord UX from the generation backend. Impact: estimated $2M+ in churn from early subscribers and several weeks of degraded service.
+*(Illustrative composite. Midjourney's rapid 2022 Discord growth and long queue times are widely reported; the specific member counts, queue depth, and churn figure below are not published numbers.)* After being featured in AI press in late 2022, Midjourney's Discord server grew by an order of magnitude in weeks and generation queue times ballooned from under a minute to many minutes. The binding constraint in this pattern is not GPU capacity but the Discord bot API: a bot token is capped at a global request rate (on the order of 50 requests/second) plus per-channel message limits of roughly 5 messages per 5 seconds, so confirmations and generated images back up long before the GPUs saturate. Discord was never designed as a production job queue. The fix is a secondary delivery path outside Discord (a website gallery) for queued items, and restructuring job dispatch so the chat UX is decoupled from the generation backend.
 
 **FLUX open-weight NSFW variant proliferation (2024)**
 
-Within 48 hours of FLUX.1-dev open weights release, 23 NSFW fine-tuned variants appeared on HuggingFace. Black Forest Labs had released under a non-commercial license, but had no technical mechanism to prevent fine-tuning. The NSFW variants (removing the safety training) achieved competitive quality with no content filters within the model weights. This demonstrated a fundamental platform risk: open-weight image models have no runtime content control once weights are distributed. Any platform building on open weights must implement content safety at the application layer, not trust model-level safety training. Production implication: platform-level pre and post-generation safety checks are mandatory regardless of base model safety claims. Estimated 500K+ downloads of NSFW variants in the first 30 days.
+Within days of the FLUX.1-dev open-weights release, NSFW fine-tuned variants appeared on HuggingFace in volume (the exact counts below are illustrative — HuggingFace publishes no such tally). Black Forest Labs had released under a non-commercial license, but had no technical mechanism to prevent fine-tuning. The NSFW variants (removing the safety training) achieved competitive quality with no content filters within the model weights. This demonstrated a fundamental platform risk: open-weight image models have no runtime content control once weights are distributed. Any platform building on open weights must implement content safety at the application layer, not trust model-level safety training. Production implication: platform-level pre and post-generation safety checks are mandatory regardless of base model safety claims.
 
 **Stability AI LAION training data class action (2023-ongoing)**
 
-A class action lawsuit filed in January 2023 alleged that Stable Diffusion's training on LAION-5B (a dataset of 5.85 billion image-text pairs scraped from the web) violated copyright for the constituent images. Stability AI faced potential statutory damages that could have exceeded $1 billion. Adobe specifically used this as a marketing and enterprise sales differentiator for Firefly: "trained exclusively on licensed content." The lawsuit has not been fully resolved as of 2026, but it created material risk for any platform using models trained on scraped web data. Production decision: enterprise contracts now routinely include training data provenance attestations. Platforms using SDXL or FLUX (trained on LAION variants) face higher legal risk than those using Firefly or proprietary-trained models. Quantified business impact: Adobe gained significant enterprise market share (estimated 15 enterprise customers per week citing training data provenance in Q1 2024).
+Andersen v. Stability AI, a class action filed in January 2023, alleged that Stable Diffusion's training on LAION-5B (a dataset of 5.85 billion image-text pairs scraped from the web) violated copyright for the constituent images. No damages figure has been established — the case survived a motion to dismiss in part and remains unresolved; any dollar exposure quoted for it is speculation. Adobe used this as a marketing and enterprise sales differentiator for Firefly: "trained exclusively on licensed content." The unresolved litigation created material risk for any platform using models trained on scraped web data. Production decision: enterprise contracts now routinely include training data provenance attestations. Platforms using SDXL or FLUX (trained on web-scraped data) face higher legal risk than those using Firefly or proprietary-trained models. Adobe does not break out enterprise wins attributable to provenance, so the commercial impact is directional, not measured.
 
 **LoRA adapter poisoning incident (discovered via post-generation safety)**
 
-A malicious user submitted a LoRA adapter that appeared to generate innocent portrait photography when tested with standard prompts, but produced CSAM images when the specific trigger word ("ohwx child") was included in the prompt. The pre-generation prompt classifier did not detect CSAM intent from the trigger word alone. The PhotoDNA post-generation check detected the CSAM in 3 generated images before delivery. The adapter was quarantined within 4 minutes. Analysis revealed the adapter had been trained on CSAM material (evading upload-time scans because individual training frames were not hash-matched). Root cause: LoRA adapters encode knowledge that is not visible from the adapter weights alone; the trigger word mapping is learned implicitly. Fix deployed: (1) CSAM-scan all training images via PhotoDNA at upload time before training starts. (2) During LoRA training, generate 20 probe images at each 250-step checkpoint and run PhotoDNA. (3) After training, generate 100 images with common trigger word combinations and scan all outputs. (4) Hash-scan adapter weights against known-bad adapter signatures. Reference: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for LoRA safety scanning protocol. Impact: 3 images generated and immediately quarantined; 0 delivered to user.
+*(Illustrative composite describing a known attack class, not a reported public incident.)* A malicious user submitted a LoRA adapter that appeared to generate innocent portrait photography when tested with standard prompts, but produced CSAM when a specific trigger word was included in the prompt. The pre-generation prompt classifier did not detect CSAM intent from the trigger word alone. The PhotoDNA post-generation check detected the CSAM in 3 generated images before delivery. The adapter was quarantined within 4 minutes. Analysis revealed the adapter had been trained on CSAM material (evading upload-time scans because individual training frames were not hash-matched). Root cause: LoRA adapters encode knowledge that is not visible from the adapter weights alone; the trigger word mapping is learned implicitly. Fix deployed: (1) CSAM-scan all training images via PhotoDNA at upload time before training starts. (2) During LoRA training, generate 20 probe images at each 250-step checkpoint and run PhotoDNA. (3) After training, generate 100 images with common trigger word combinations and scan all outputs. (4) Hash-scan adapter weights against known-bad adapter signatures. Reference: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for LoRA safety scanning protocol. Impact: 3 images generated and immediately quarantined; 0 delivered to user.
 
 **Storage cost explosion at 1M paying users**
 
@@ -1045,28 +1059,31 @@ max_hbm_adapter_slots = (total_hbm_gb - base_model_gb - inference_buffer_gb)
 
 Where:
   total_hbm_gb        = GPU HBM capacity (H100 SXM5: 80GB)
-  base_model_gb       = FLUX.1-dev bf16 loaded: 24GB
-                        (12B params × 2 bytes/param)
-  inference_buffer_gb = CFG batch buffers + VAE decoder + scheduler: 8GB
+  base_model_gb       = FLUX.1-dev FP8 loaded: 12GB
+                        (12B params × 1 byte/param; bf16 would be 24GB)
+  inference_buffer_gb = VAE decoder + scheduler + safety buffers: 8GB
   adapter_size_gb     = rank-16 FLUX LoRA: 0.20GB per adapter
 
-Max HBM slots per H100:
-  (80 - 24 - 8) / 0.20 = 48 / 0.20 = 240 adapter slots per H100
+Max HBM slots per H100 (memory bound only):
+  (80 - 12 - 8) / 0.20 = 60 / 0.20 = 300 adapter slots per H100
 
-With KV-cache headroom for in-flight generations (4 concurrent at 1024px):
-  4 generations × 14.8GB each = 59.2GB (this conflicts with the above)
+The real bound is not memory, it is scheduler batch width. The 14.8GB figure in
+Section 4.5 is TOTAL peak VRAM for one 1024px generation INCLUDING the shared
+12GB of weights, so each additional in-flight generation costs only its own
+~2.8GB of activations and latents — not another 14.8GB.
 
-Reality: not all 240 adapters run concurrently. The scheduler batches requests.
-Practical HBM layout at 4 concurrent generations:
+Practical HBM layout at 4 concurrent 1024px generations:
 
-  [0-24 GB]    FLUX.1-dev base model weights (fixed, never evicted)
-  [24-73 GB]   4x in-flight generation workspaces (14.8GB each = 59.2GB)
-  [73-76.2 GB] 16x LoRA adapter slots (200MB each = 3.2GB)
-  [76.2-80 GB] VAE decoder + safety buffers (3.8GB)
+  [0-12 GB]     FLUX.1-dev FP8 base weights (fixed, never evicted)
+  [12-23.2 GB]  4x in-flight generation workspaces (2.8GB activations each)
+  [23.2-26.4]   16x LoRA adapter slots (200MB each = 3.2GB)
+  [26.4-34.4]   VAE decoder + safety buffers (8GB)
+  [34.4-80 GB]  headroom for 2048px jobs and burst concurrency
 
-Practical adapter slots per H100: 16 (not 240)
-  with 1,350 H100s × 16 slots = 21,600 simultaneous adapter slots fleet-wide
-  vs 100K total user adapters → 21.6% of adapters can be hot simultaneously
+Practical adapter slots per H100: 16 (not 300) — capped by scheduler batch
+width and eviction churn, not by HBM.
+  with 700 H100s × 16 slots = 11,200 simultaneous adapter slots fleet-wide
+  vs 100K total user adapters → 11.2% of adapters can be hot simultaneously
 
 NVMe warm cache (per node, 2TB dedicated to adapters):
   2000 GB / 0.2 GB per adapter = 10,000 adapters per node warm on NVMe
@@ -1086,18 +1103,22 @@ Where:
   gen_per_gpu_concurrent   = 4 (512px batching) or 1 (2048px)
   target_utilization       = 0.60 (40% headroom for spikes)
 
-H100 fleet (1024px+ traffic, 40% of total):
-  1,736 × 0.40 × 2.5 / (1 × 0.60) = 1,157 H100s
+H100 fleet (1024px+ traffic, 40% of total; 4 concurrent generations per GPU):
+  1,736 × 0.40 × 2.5 / (4 × 0.60) = 723 H100s
 
 A10G fleet (512px traffic, 60% of total):
   1,736 × 0.60 × 2.5 / (4 × 0.60) = 1,085 A10Gs
 
-Cost at peak sizing:
-  1,157 H100 spot × $2.50/hr × 24hr = $69,420/day
-  1,085 A10G spot × $0.60/hr × 24hr = $15,624/day
-  Total GPU: $85,044/day
+(2048px jobs run 1-per-GPU and are sized separately; at <3% of traffic they add
+ roughly 40 dedicated H100s.)
 
-vs revenue: $500,000/day → 83% GPU gross margin
+Cost at peak sizing:
+    723 H100 spot × $2.50/hr × 24hr = $43,380/day
+  1,085 A10G spot × $0.60/hr × 24hr = $15,624/day
+  Total GPU: $59,004/day
+
+vs revenue: $500,000/day → 88% GPU gross margin
+(consistent with Section 2's 700 H100 + 1,200 A10G fleet at $59,280/day)
 ```
 
 See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for spot vs on-demand blending, preemption risk modeling, and fleet resizing decision framework.
@@ -1108,7 +1129,7 @@ See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for spot v
 
 **Q: Why is LoRA adapter serving — not model quality — the core scaling challenge for an image generation platform?**
 
-Model quality is a solved problem: FLUX.1-dev and SDXL produce commercially viable outputs. The hard engineering problem is that users who train custom LoRA adapters generate 10x more images than users who don't, so adapter utilization is the primary revenue driver. Serving 100K unique user adapters on a shared fleet requires keeping the 12GB base model permanently in GPU HBM and hot-swapping only the 200MB LoRA delta weights. Naive per-adapter model copies would require 100K × 12GB = 1.2PB of GPU HBM — physically impossible. S-LoRA (Stanford, 2023) solves this: base model stays resident, adapters occupy LRU slots. The correct interview answer is: LoRA multiplexing is to image generation what KV-cache management is to LLM text generation — the fundamental resource scheduling problem that determines whether the business unit economics work.
+Model quality is a solved problem: FLUX.1-dev and SDXL produce commercially viable outputs. The hard engineering problem is that users who train custom LoRA adapters generate 10x more images than users who don't, so adapter utilization is the primary revenue driver. Serving 100K unique user adapters on a shared fleet requires keeping the 12GB FP8 base model permanently in GPU HBM and hot-swapping only the 200MB LoRA delta weights. Naive per-adapter model copies would require 100K × 12GB = 1.2PB of GPU HBM — about 15,000 dedicated H100s to carry 20TB of actual adapter weights, which is economically absurd rather than literally impossible. S-LoRA (Stanford, 2023) solves this: base model stays resident, adapters occupy LRU slots. The correct interview answer is: LoRA multiplexing is to image generation what KV-cache management is to LLM text generation — the fundamental resource scheduling problem that determines whether the business unit economics work.
 
 **Q: What is CFG batching and why does it save 35% generation latency?**
 
@@ -1132,15 +1153,15 @@ The competitive advantage is enterprise B2B sales. Large media companies (Disney
 
 **Q: How do you handle CSAM in a platform that serves user-provided LoRA adapters?**
 
-CSAM detection is mandatory at three points, not one. First: PhotoDNA scan all training images at upload time before the LoRA training job starts. Second: during LoRA training, generate probe images at each 250-step checkpoint and PhotoDNA-scan the outputs — this catches adapters that learn CSAM generation from non-CSAM training images through adversarial prompt-adapter combinations. Third: post-generation PhotoDNA scan of every generated image before delivery, regardless of prompt or adapter. Omitting any of the three layers creates a bypass vector. Detection triggers mandatory NCMEC CyberTipline reporting within 1 hour (18 U.S.C. § 2258A, applicable to any "electronic service provider" — image generation platforms qualify). This is a legal obligation, not an optional feature.
+CSAM detection is mandatory at three points, not one. First: PhotoDNA scan all training images at upload time before the LoRA training job starts. Second: during LoRA training, generate probe images at each 250-step checkpoint and PhotoDNA-scan the outputs — this catches adapters that learn CSAM generation from non-CSAM training images through adversarial prompt-adapter combinations. Third: post-generation PhotoDNA scan of every generated image before delivery, regardless of prompt or adapter. Omitting any of the three layers creates a bypass vector. Detection triggers mandatory NCMEC CyberTipline reporting under 18 U.S.C. § 2258A, which applies to any "electronic communication service" or "remote computing service" provider — image generation platforms qualify — and requires a report "as soon as reasonably possible"; the 1-hour target here is an internal SLA, not the statutory wording. Note also that PhotoDNA only matches *known* material, so layer two and three must include a CSAM classifier, not just hash lookups. This is a legal obligation, not an optional feature.
 
 **Q: How does resolution-aware GPU routing reduce fleet costs?**
 
-A10G GPUs cost $0.60/hr spot vs H100 at $2.50/hr — a 4.2x cost difference. 512px and 1024px FLUX.1-dev generations fit in 24GB A10G VRAM (14.8GB peak with CFG batching, leaving 9GB margin). 2048px generation requires 28.6GB (exceeds A10G 24GB, requires H100). Routing 60% of traffic (512px-1024px) to A10G and 40% (2048px or high-throughput) to H100 reduces effective GPU cost per generation from $0.020 to $0.012 — a 40% reduction. The router must also account for LoRA adapter overhead (+400MB) and check whether the candidate GPU has the adapter hot-cached (adapter-affinity routing reduces cache-miss latency from 2.1s to 260ms for 80% of requests).
+A10G GPUs cost $0.60/hr spot vs H100 at $2.50/hr — a 4.2x cost difference. 512px and 1024px FLUX.1-dev generations fit in 24GB A10G VRAM (14.8GB peak with CFG batching, leaving 9GB margin). 2048px generation requires 28.6GB (exceeds A10G 24GB, requires H100). Routing 60% of traffic (512px-1024px) to A10G and 40% (2048px or high-throughput) to H100 reduces the blended GPU cost per generation by roughly 25% (A10G at $0.60/hr and 1.2 s per 512px job costs ~$0.0002/generation vs ~$0.0021 for a 3 s H100 FLUX job). The router must also account for LoRA adapter overhead (+400MB) and check whether the candidate GPU has the adapter hot-cached (adapter-affinity routing reduces cache-miss latency from 2.1s to 260ms for 80% of requests).
 
 **Q: What is the async generation UX pattern and why is it mandatory above 4-second generation times?**
 
-Synchronous HTTP requires the client to hold an open connection for the entire generation duration. At 3-15 seconds, this creates three failure modes: mobile app backgrounding closes the connection (iOS/Android kill background network activity after 30-90 seconds on cellular); corporate proxies and load balancers timeout idle connections at 60 seconds; HTTP keep-alive overhead becomes significant at scale. The async pattern: client submits job → receives `{"job_id": "gen_abc", "status": "queued"}` immediately → polls `GET /jobs/gen_abc` every 2 seconds (or receives webhook) → when status is "complete", retrieves presigned S3 URL (valid 7 days). Polling interval of 2 seconds is the practical sweet spot: aggressive enough that users perceive near-real-time feedback, light enough that 5M daily active users generate only 5M/5 = 1M polls/second (manageable). Webhook delivery (POST to user-registered URL) is preferred for API integrations; polling is for web/mobile UIs.
+Synchronous HTTP requires the client to hold an open connection for the entire generation duration. At 3-15 seconds, this creates three failure modes: mobile app backgrounding closes the connection (iOS/Android kill background network activity after 30-90 seconds on cellular); corporate proxies and load balancers timeout idle connections at 60 seconds; HTTP keep-alive overhead becomes significant at scale. The async pattern: client submits job → receives `{"job_id": "gen_abc", "status": "queued"}` immediately → polls `GET /jobs/gen_abc` every 2 seconds (or receives webhook) → when status is "complete", retrieves presigned S3 URL (valid 7 days). Polling interval of 2 seconds is the practical sweet spot: aggressive enough that users perceive near-real-time feedback, light enough to stay cheap. Poll load scales with *in-flight jobs*, not with the user base: at 1,736 peak generations/sec and ~4 s per job there are roughly 7,000 jobs open at any instant, so a 2-second interval produces about 3,500 polls/sec — trivially served from a Redis-backed status endpoint. Webhook delivery (POST to user-registered URL) is preferred for API integrations; polling is for web/mobile UIs.
 
 **Q: How do you prevent the NVMe thundering herd problem when many users simultaneously request adapters not in cache?**
 
@@ -1148,7 +1169,7 @@ The thundering herd occurs when 60+ users simultaneously request different LoRA 
 
 **Q: What storage architecture supports petabyte-scale image retention at reasonable cost?**
 
-At 50M images/day × 5MB = 250TB/day, naive S3 Standard at $0.023/GB would cost $5.75M/month for a single day's images retained indefinitely. The practical architecture uses tiered retention: generated images are written to S3 Standard (hot, fast CDN delivery), automatically transitioned to S3 Intelligent-Tiering after 7 days (moves to IA when not accessed for 30 days, ~40% cost reduction), then to S3 Glacier Instant Retrieval after 90 days for paid tier (additional 60% reduction vs IA). Free tier images are deleted after 30 days. A pre-deletion notification email with a "download your images" link is sent 7 days before expiry. Additionally, WebP conversion at 85% quality at upload time reduces average file size from 5MB JPEG to 2.8MB WebP (44% reduction), applied to all tiers. Combined: storage cost per TB-month drops from $23 (S3 Standard) to $4.60 (tiered + WebP), an 80% reduction.
+Tiered retention plus format conversion, because the cost is a run-rate that accumulates rather than a one-time charge. At 50M images/day × 5MB = 250TB/day, a single day's output on S3 Standard at $0.023/GB costs $5,750/month, and that charge repeats for every subsequent day retained — an unbounded policy therefore reaches ~$2.1M/month after one year. The practical architecture uses tiered retention: generated images are written to S3 Standard (hot, fast CDN delivery), automatically transitioned to S3 Intelligent-Tiering after 7 days (moves to IA when not accessed for 30 days, ~40% cost reduction), then to S3 Glacier Instant Retrieval after 90 days for paid tier (additional 60% reduction vs IA). Free tier images are deleted after 30 days. A pre-deletion notification email with a "download your images" link is sent 7 days before expiry. Additionally, WebP conversion at 85% quality at upload time reduces average file size from 5MB JPEG to 2.8MB WebP (44% reduction), applied to all tiers. Combined: storage cost per TB-month drops from $23 (S3 Standard) to $4.60 (tiered + WebP), an 80% reduction.
 
 ---
 

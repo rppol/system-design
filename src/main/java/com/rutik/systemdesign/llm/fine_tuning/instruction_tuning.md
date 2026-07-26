@@ -263,7 +263,8 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
 
 # Training configuration
 sft_config = SFTConfig(
-    max_seq_length=2048,          # truncate examples longer than this
+    max_length=2048,              # truncate examples longer than this
+                                  # (named `max_seq_length` before TRL 0.20)
     packing=True,                 # pack short examples into one sequence
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,  # effective batch = 32
@@ -295,7 +296,7 @@ trainer = SFTTrainer(
     args=sft_config,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    peft_config=LoraConfig(r=16, lora_alpha=32, ...)  # optional LoRA
+    peft_config=LoraConfig(r=16, lora_alpha=32)  # optional LoRA
 )
 
 trainer.train()
@@ -310,8 +311,8 @@ Nearly every SFT config quantity derives from one chain: examples to tokens, tok
 | `per_device_train_batch_size` | Sequences per forward pass, 4 — bounded by GPU memory |
 | `gradient_accumulation_steps` | Forward passes accumulated before one optimizer update, 8 |
 | effective batch | `4 × 8 = 32` sequences per weight update |
-| `max_seq_length` | 2048 — every sequence is this long once packed or padded |
-| tokens per step | `effective batch × max_seq_length` |
+| `max_length` | 2048 — every sequence is this long once packed or padded |
+| tokens per step | `effective batch × max_length` |
 | `num_train_epochs` | 2 — how many times the dataset is traversed |
 | `warmup_ratio` | 0.03 — fraction of total steps spent ramping the learning rate up |
 
@@ -329,7 +330,7 @@ Nearly every SFT config quantity derives from one chain: examples to tokens, tok
   warmup = 0.03 x steps    =      1.8  ->  2      =      3.5  ->  4
 ```
 
-**The trap this arithmetic exposes.** The case study sets `eval_steps=200`, `save_steps=200`, and `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. The whole run is 59 to 118 steps. **The evaluation callback never fires once**, no checkpoint is ever written, and "load best model at end" has no evaluations to choose between — it silently loads the final model. Always compute your step count before setting `eval_steps`; a good rule is 10 to 20 evals per run, which here means `eval_steps=5` or `10`, not 200.
+**The trap this arithmetic exposes.** The case study sets `eval_steps=200`, `save_steps=200`, and `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. The whole run is 59 to 118 steps. **The evaluation callback never fires once**, no step-checkpoint is ever written, and "load best model at end" has no evaluations to choose between — it falls back to the final model. Always compute your step count before setting `eval_steps`; a good rule is 10 to 20 evals per run, which here means `eval_steps=5` or `10`, not 200. (A second, louder trap sits next to it: `load_best_model_at_end=True` raises `ValueError` outright unless `eval_strategy` and `save_strategy` match — the default `eval_strategy="no"` means `eval_steps` alone does nothing.)
 
 The warmup row has the same problem in miniature: a 3% ratio on a 59-step run gives a **2-step** warmup. Warmup exists to stop the first few updates from destabilizing the optimizer's moment estimates, and two steps barely does that. On short SFT runs, set warmup by absolute step count (20 to 50 steps) rather than by ratio.
 
@@ -353,7 +354,10 @@ With packing:
 
 Implementation:
   SFTConfig(packing=True) in TRL handles this automatically
-  Uses ConstantLengthDataset to pack examples into full-length sequences
+  Default packing_strategy="bfd" (best-fit decreasing) fills each max_length slot;
+  TRL emits per-example position_ids and runs padding-free so FlashAttention keeps
+  examples from attending across boundaries
+  (the old ConstantLengthDataset packer was removed)
 
 Caution: packing combines multiple examples in one sequence
   Need attention mask modification to prevent cross-example attention:
@@ -363,15 +367,15 @@ Caution: packing combines multiple examples in one sequence
 
 **Put simply.** "You pay for 2048 token slots whether or not you fill them, so stop shipping half-empty sequences."
 
-Attention cost is set by `max_seq_length`, not by how much real content sits inside it. A padded slot consumes the same compute as a real token and teaches the model nothing. Utilization is therefore just `real tokens / allocated slots`.
+Attention cost is set by `max_length`, not by how much real content sits inside it. A padded slot consumes the same compute as a real token and teaches the model nothing. Utilization is therefore just `real tokens / allocated slots`.
 
 | Symbol | What it is |
 |--------|------------|
-| `max_seq_length` | 2048 — the slot budget every sequence occupies regardless of content |
+| `max_length` | 2048 — the slot budget every sequence occupies regardless of content |
 | real tokens | Actual example content in a sequence |
 | padding tokens | Slots filled to reach 2048; compute is spent, nothing is learned |
 | GPU utilization | `real tokens / (num_sequences × 2048)` |
-| `ConstantLengthDataset` | The TRL machinery that concatenates examples to fill 2048 exactly |
+| `packing_strategy="bfd"` | The TRL packer that concatenates examples to fill 2048 exactly |
 
 **Walk one example.** The five examples from the block above (200, 300, 400, 600, 500 tokens), costed both ways:
 
@@ -393,7 +397,7 @@ Attention cost is set by `max_seq_length`, not by how much real content sits ins
   speedup on this batch:  10,240 / 2,048  =  5.0x fewer sequences to process
 ```
 
-The section's two-example figure works the same way: `500 / (2 x 2048) = 12.2%`, matching the `~12%` quoted. And 5.0× sits squarely inside the `5-10×` the Best Practices section claims — the multiplier is simply `max_seq_length / average example length`, so a dataset of 200-token examples gets `2048 / 200 = 10.2x` and one of 1000-token examples gets only `2.0x`. Packing pays in inverse proportion to how long your examples already are.
+The section's two-example figure works the same way: `500 / (2 x 2048) = 12.2%`, matching the `~12%` quoted. And 5.0× sits squarely inside the `5-10×` the Best Practices section claims — the multiplier is simply `max_length / average example length`, so a dataset of 200-token examples gets `2048 / 200 = 10.2x` and one of 1000-token examples gets only `2.0x`. Packing pays in inverse proportion to how long your examples already are.
 
 **Packing changes your step count, and that surprises people.** Fewer sequences means fewer optimizer steps for the same data:
 
@@ -473,9 +477,12 @@ Labels (after masking):
 - Demonstrates that diversity (1M pairs across many task types) outperforms repetitive domain data
 
 ### LLaMA-3-Instruct (Meta, 2024)
-- LLaMA-3-8B-Base + multi-round SFT + [RLHF](../alignment_and_rlhf/README.md)
-- SFT uses ~10M high-quality instruction pairs covering 30+ task types
-- Multi-turn conversation data: 20-30% of training set
+- LLaMA-3-8B-Base + six rounds of SFT followed by rejection sampling and DPO
+  ([alignment](../alignment_and_rlhf/README.md)) — the paper does not publish an
+  absolute SFT example count
+- The reported SFT data mix (Llama 3 paper, Table 7): 52.7% general English,
+  21.2% reasoning and tool use, 14.9% code, 8.1% exam-like, 3.0% multilingual,
+  0.1% long context; 4.7 turns per example on average
 - Safety instruction data: explicitly included to produce safe refusals
 
 ---
@@ -586,7 +593,7 @@ A: Single-turn data: each training example is one (instruction, response) pair. 
 A: System prompts are per-session instructions that establish the model's persona, behavioral constraints, and context before the user message. In instruction tuning: include diverse system prompts in the training data so the model learns to respect system prompt constraints. Without system prompt training, the model ignores or inconsistently follows system prompts at inference. Training examples should cover: (1) default helpful assistant persona; (2) domain-specific personas ("You are a medical advisor..."); (3) behavioral constraints ("Always respond in formal English"); (4) format specifications ("Always respond in JSON format"); (5) safety instructions ("Refuse requests for harmful content"). System prompts are part of the chat template and must be handled consistently between training and inference — masked in labels (treated as instruction, not response).
 
 **Q: How do you handle very long instructions or responses in instruction tuning?**
-A: Sequences longer than the model's maximum context window must be handled. Options: (1) Truncation: truncate to max_length, but this loses the end of long responses — critical if the main answer is in the truncated portion; (2) Filtering: remove examples where instruction + response exceeds max_length — ensures all training data fits cleanly; (3) Chunking: for long documents in instructions, use document chunking (sliding window over the instruction) to create multiple shorter examples; (4) Long context model: use a model with longer context (LLaMA-3 supports 8K, others 32K+) and increase max_seq_length accordingly. For most instruction tuning: filter examples >2048 tokens (keeps ~85% of typical instruction datasets) and use the model's native context window.
+A: Sequences longer than the model's maximum context window must be handled. Options: (1) Truncation: truncate to max_length, but this loses the end of long responses — critical if the main answer is in the truncated portion; (2) Filtering: remove examples where instruction + response exceeds max_length — ensures all training data fits cleanly; (3) Chunking: for long documents in instructions, use document chunking (sliding window over the instruction) to create multiple shorter examples; (4) Long context model: use a model with longer context (LLaMA-3 supports 8K, others 32K+) and increase the trainer's max_length accordingly. For most instruction tuning: filter examples >2048 tokens (keeps ~85% of typical instruction datasets) and use the model's native context window.
 
 **Q: Does data quality or quantity matter more in instruction tuning, and what evidence supports this?**
 A: Data quality dominates data quantity, especially beyond ~5,000 examples. The LIMA paper (Less Is More for Alignment, 2023) demonstrated this empirically: a model instruction-tuned on 1,000 carefully curated examples matched or outperformed models trained on 52,000 unfiltered examples (the original Alpaca dataset) on human preference evaluations. The mechanism: after the model sees enough diverse examples to learn the instruction-following format (~1,000-5,000 examples), additional noisy examples add noise to the gradient signal rather than new information. Adding poor-quality examples past this threshold actively hurts quality by teaching the model to produce mediocre responses. Practical implication: invest budget in quality filtering and human review of 1,000-5,000 examples rather than generating 50,000 synthetic examples without filtering.
@@ -595,10 +602,10 @@ A: Data quality dominates data quantity, especially beyond ~5,000 examples. The 
 A: Format diversity — training on a mix of single-turn, multi-turn, JSON, markdown, code, and prose response formats — prevents format rigidity, a failure mode where the model learns to produce only the format types it saw during training. Without format diversity: a model trained only on prose Q&A pairs will produce prose even when the instruction explicitly asks for JSON; a model trained only on single-turn examples will ignore conversational context in multi-turn interactions; a model trained only on short responses will truncate long answers. Include all target output formats in the training data in representative proportions. If the production use case requires JSON outputs 30% of the time, ensure roughly 30% of training examples have JSON responses. Evaluate format compliance rate (fraction of responses that match the requested format) as a first-class metric alongside accuracy.
 
 **Q: What did the FLAN scaling experiments reveal about the relationship between number of tasks and instruction tuning quality?**
-A: The FLAN experiments (Google, 2021-2022) showed that instruction tuning quality scales with the number of distinct tasks in training, but with strong diminishing returns after roughly 200 diverse tasks. Scaling from 20 tasks to 200 tasks produced substantial improvements across held-out task evaluations; scaling from 200 to 1,836 tasks produced marginal further gains. The implication: breadth of task coverage matters up to a point, but task diversity (covering fundamentally different task types: classification, generation, extraction, reasoning, translation) matters more than raw task count. A dataset covering 50 genuinely distinct task types outperforms one with 500 tasks that are all variations of text classification. For practical instruction tuning datasets: ensure coverage of 10-20 fundamentally different task categories rather than exhaustively cataloging hundreds of similar tasks.
+A: The Flan experiments (Chung et al. 2022) showed that instruction tuning quality scales with the number of distinct tasks, but with strong diminishing returns after 282 tasks. The paper states the majority of the improvement comes from using up to 282 tasks; on the 540B model, going from 282 to all 1,836 tasks moved the normalized average only from 57.5% to 58.5%. The implication: breadth of task coverage matters up to a point, but task diversity (covering fundamentally different task types: classification, generation, extraction, reasoning, translation) matters more than raw task count. A dataset covering 50 genuinely distinct task types outperforms one with 500 tasks that are all variations of text classification. For practical instruction tuning datasets: ensure coverage of 10-20 fundamentally different task categories rather than exhaustively cataloging hundreds of similar tasks.
 
 **Q: What quality problems were found in the original Alpaca dataset, and why does this matter?**
-A: Post-hoc audits of the Stanford Alpaca dataset found approximately 30% of the 52,000 examples contained quality issues: factual mistakes (incorrect information in responses), incomplete answers (responses that started but didn't finish addressing the instruction), formatting inconsistencies, and unhelpful or overly brief responses. This occurred because the examples were generated using GPT-3 (text-davinci-003) without filtering, and GPT-3's instruction-following quality was inconsistent for complex or ambiguous instructions. The consequence: models fine-tuned on unfiltered Alpaca learned some incorrect behaviors and response patterns. This spawned "Alpaca-Cleaned," a filtered version that removed or fixed identified issues. The practical lesson: always apply quality filtering to synthetic datasets before fine-tuning — use a stronger model (GPT-4) as a judge to score each (instruction, response) pair and remove examples scoring below a threshold; target removing at least the bottom 20-30% of examples by quality score.
+A: The Alpaca-Cleaned project catalogued ten recurring defect classes in the original 52K dataset: hallucinated answers to instructions that referenced unavailable internet data, merged instructions, empty outputs, empty code examples, impossible image-generation tasks, "N/A" outputs, inconsistent input fields, wrong answers, nonsensical instructions, and stray escape characters. The one quantified figure its dataset card gives is that roughly 80% of the math problems are estimated to have incorrect answers; there is no published overall defect rate. This occurred because the examples were generated using text-davinci-003 without filtering, and its instruction-following quality was inconsistent for complex or ambiguous instructions. The consequence: models fine-tuned on unfiltered Alpaca learned some incorrect behaviors and response patterns. This spawned "Alpaca-Cleaned," a filtered version that removed or fixed identified issues. The practical lesson: always apply quality filtering to synthetic datasets before fine-tuning — use a stronger model (GPT-4) as a judge to score each (instruction, response) pair and remove examples scoring below a threshold; target removing at least the bottom 20-30% of examples by quality score.
 
 **Q: How should you evaluate an instruction-tuned model to ensure it generalizes to new instruction types?**
 A: Effective evaluation requires held-out instructions sampled from task categories not seen during training, LLM-as-judge scoring across multiple quality dimensions, and human preference evaluation. The held-out set should include instruction types deliberately excluded from training: if the model was trained on Q&A, summarization, and code, the eval set should include translation, comparison, and roleplay instructions to test generalization. LLM-as-judge (using GPT-4 as evaluator) scores each response on helpfulness (1-5), instruction compliance (did the model do what was asked?), and format accuracy. Human preference evaluation: present pairs of responses (from base model vs. fine-tuned model, or model A vs. model B) to human raters and collect preference votes. Aggregate win rate across 100-200 human-evaluated pairs is the most reliable quality signal. Never evaluate only on task types included in training — that measures memorization, not generalization.
@@ -620,6 +627,8 @@ A: Effective evaluation requires held-out instructions sampled from task categor
 ## 12. Case Study
 
 ### Building an Instruction-Tuned Model for a Healthcare Q&A System
+
+*Illustrative worked example — the pipeline and configuration are real, but the company, dataset counts and evaluation figures are a composite, not a published deployment.*
 
 #### Problem Statement
 
@@ -681,7 +690,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
-model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="bfloat16")
+model = AutoModelForCausalLM.from_pretrained(model_id, dtype="bfloat16")  # `torch_dtype` renamed `dtype`
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 # LoRA config — instruction tuning, not CPT; r=32 is sufficient
@@ -711,7 +720,7 @@ def format_medical_example(example):
 dataset = dataset.map(lambda ex: {"text": format_medical_example(ex)})
 
 sft_config = SFTConfig(
-    max_seq_length=2048,
+    max_length=2048,            # `max_seq_length` before TRL 0.20
     packing=True,
     num_train_epochs=2,
     per_device_train_batch_size=4,
@@ -720,6 +729,8 @@ sft_config = SFTConfig(
     lr_scheduler_type="cosine",
     warmup_ratio=0.03,
     bf16=True,
+    eval_strategy="steps",   # required: load_best_model_at_end raises ValueError
+    save_strategy="steps",   # unless eval_strategy and save_strategy match
     eval_steps=200,
     save_steps=200,
     load_best_model_at_end=True,

@@ -16,7 +16,7 @@ The eight core patterns covered here — streaming thoughts, interrupt/resume, a
 
 **Mental model**: A user interacting with an agent is in a "co-pilot" relationship. They've delegated execution but they need three things continuously: visibility (what is the agent doing now?), control (can I stop or correct it?), and reversibility (can I undo what it did?). Every UX pattern serves one of these three needs.
 
-**Why it matters**: Users abandon agent products at 3× the rate when there's no progress indicator for tasks >5 seconds. Approval gates on irreversible actions reduce costly mistakes by ~80% in production deployments. Confidence signaling reduces over-trust on hallucinated answers. The UX is not cosmetic — it directly affects retention, error rates, and trust.
+**Why it matters**: as a working rule of thumb — not a published industry statistic — teams commonly observe roughly a 3× jump in abandonment when there is no progress indicator on tasks over 5 seconds, and roughly an 80% drop in costly mistakes once irreversible actions sit behind approval gates. Both figures below are used as illustrative inputs to the arithmetic, and you should measure your own. Confidence signaling reduces over-trust on hallucinated answers. The UX is not cosmetic — it directly affects retention, error rates, and trust.
 
 **Key insight**: The hardest UX problem in agents is not making the agent feel fast — it's making errors and corrections feel safe. Users will tolerate a 30-second wait if they can see progress and trust that nothing irreversible happens without their approval. They will not tolerate a 5-second wait that ends with a deleted file.
 
@@ -165,10 +165,15 @@ client = anthropic.AsyncAnthropic()
 async def stream_agent(user_request: str):
     """Yield SSE events as the agent runs."""
     
+    # Current models (Opus 5 / Sonnet 5 / Fable 5) think by default and take
+    # thinking={"type": "adaptive", ...}; `display` defaults to "omitted", so you
+    # must opt into "summarized" or no thinking_delta events are emitted at all.
+    # The older thinking={"type": "enabled", "budget_tokens": N} form applies only
+    # to extended-thinking-only models such as Sonnet 4.5 / Haiku 4.5 / Opus 4.5.
     async with client.messages.stream(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=4096,
-        thinking={"type": "enabled", "budget_tokens": 3000},
+        thinking={"type": "adaptive", "display": "summarized"},
         messages=[{"role": "user", "content": user_request}],
     ) as stream:
         async for event in stream:
@@ -356,16 +361,16 @@ async def bash_tool(command: str):
     return subprocess.run(command, shell=True, ...)
 ```
 
-**War story**: A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/README.md).
+**War story** (anonymized, illustrative — not a verified public record): A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/README.md).
 
 **What this actually says.** "One incident per week became zero incidents per twenty-six weeks — a gate that catches 80% of mistakes should still have let about five through, so the observed zero is better than the headline number predicts."
 
-The `~80%` reduction claim from Section 2 and this war story's timeline are checkable against each other.
+The `~80%` working figure from Section 2 and this war story's timeline are checkable against each other.
 
 | Symbol | What it is |
 |--------|------------|
 | `r` | Incident rate without gates. `1` per week, from the war story's "within a week" |
-| `g` | Fraction of mistakes the gate catches. `0.80` per Section 2 |
+| `g` | Fraction of mistakes the gate catches. `0.80` working figure per Section 2 |
 | `1 - g` | Residual rate multiplier. `0.20` gets through |
 | `r x (1-g)` | Expected gated incident rate |
 | `t` | Observation window. 6 months is about `26` weeks |
@@ -402,7 +407,7 @@ Two things explain the gap, and both are worth naming. First, the `~80%` figure 
 ## 12. Interview Questions with Answers
 
 **Q: Why is streaming thoughts important for agent UX?**
-Without streaming, users see a blank screen for the duration of the agent's processing (often 5-30+ seconds). User attention drops sharply after 3-5 seconds of unexplained wait. Streaming the agent's reasoning (or even a "thinking..." indicator) keeps users engaged and lets them estimate completion time. Reduces abandonment rate by ~3× on tasks longer than 5 seconds.
+Without streaming, users see a blank screen for the duration of the agent's processing (often 5-30+ seconds). User attention drops sharply after 3-5 seconds of unexplained wait. Streaming the agent's reasoning (or even a "thinking..." indicator) keeps users engaged and lets them estimate completion time. Teams commonly report abandonment falling by roughly 3× on tasks longer than 5 seconds — a widely used planning rule of thumb rather than a published benchmark, so measure it on your own funnel.
 
 **Q: Which actions warrant an approval gate?**
 Three categories: (1) irreversible (delete, drop, force-push, send email), (2) expensive (deploy to production, run a $10 API call, large data import), (3) sensitive (access PII, modify auth, change permissions). Configurable per environment — dev environment may auto-approve more; production demands stricter gating.
@@ -465,7 +470,7 @@ Surprise data access erodes trust. If the user said "summarize my emails", they 
 
 ## 14. Case Study
 
-**Internal DevOps Agent at a Mid-Size SaaS Company**
+**Internal DevOps Agent at a Mid-Size SaaS Company** (illustrative composite — the metrics below are representative, not a published case)
 
 **Problem**: On-call engineers wanted an agent to help triage and resolve common alerts (disk full, cert expiring, slow query). Initial version had no approval gates; ran kubectl/aws-cli commands directly. Within 2 weeks: agent deleted a wrong pod (caused 11-minute outage); another time it auto-rotated a cert in production at 3am without warning.
 

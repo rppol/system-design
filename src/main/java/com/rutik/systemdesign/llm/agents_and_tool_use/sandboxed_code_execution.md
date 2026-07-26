@@ -8,7 +8,7 @@ Sandboxed code execution is the practice of running LLM-generated code inside an
 
 The core tension: LLM agents need to run code to be useful (data analysis, test execution, debugging, build pipelines), but LLM-generated code is untrusted input. Sandboxing resolves this by providing a controlled execution environment where code can run freely within defined resource and network boundaries.
 
-Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes that spin up in 100-500ms, run the code, return output, and disappear — giving agents the power of code execution without the risk of arbitrary host access.
+Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes that spin up in tens to a couple of hundred milliseconds, run the code, return output, and disappear — giving agents the power of code execution without the risk of arbitrary host access.
 
 ---
 
@@ -39,41 +39,43 @@ Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes tha
 
 ### 3.1 MicroVM Sandboxes (E2B, Daytona)
 
-Full Linux virtual machines started from snapshots in 500ms. Each sandbox is a real Firecracker microVM with a full OS, filesystem, and network stack. Provides the most compatibility (any Linux binary works) at the cost of higher startup latency and memory overhead.
+Full Linux virtual machines started from snapshots in well under a second. Each sandbox is a real Firecracker microVM with a full OS, filesystem, and network stack. Provides the most compatibility (any Linux binary works) at the cost of higher startup latency and memory overhead than a Wasm runtime.
 
-**E2B** — the leading cloud microVM provider for AI agents:
-- 500ms cold start from Firecracker snapshot
-- Python, JavaScript, TypeScript, Bash, R, Go support
+**E2B** — a leading cloud microVM provider for AI agents:
+- Sandbox start under 200ms in-region (80ms for its quick-start variant), on Firecracker
+- Anything that runs on a Linux box: Python, JavaScript, Bash, and more
 - Persistent filesystem within a session (files survive across code calls)
 - Network enabled by default (can restrict with allowlists)
-- $0.10/hour of sandbox uptime; billed per second
+- Billed per second by resource: $0.000028/s for the default 2 vCPU (≈$0.10/hour of compute) plus $0.0000045/GiB/s of RAM
+- Session length capped at 1 hour on Hobby, 24 hours on Pro
 - Python SDK: `pip install e2b-code-interpreter`
 
-**Daytona** — full dev environments:
+**Daytona** — agent sandbox runtime:
+- Advertises sub-90ms sandbox creation
 - Git clone + install deps + run in a reproducible environment
 - Designed for longer-lived coding tasks (minutes to hours)
-- Self-hosted or cloud-hosted
+- Pay-as-you-go per vCPU-hour plus storage; sandboxes can run in your own cloud
 - Good for agents that need to clone a repo, run tests, and iterate
 
 ### 3.2 WebAssembly Sandboxes (Riza)
 
-Code compiled to WebAssembly runs in a WASM runtime — no real OS, no real filesystem, no real network. Startup in under 100ms. More restrictive than microVMs but faster and cheaper.
+Code runs inside a WebAssembly sandbox — no real OS, no real filesystem, no real network. There is no VM to boot, so execution starts almost immediately. More restrictive than microVMs but faster and cheaper.
 
-**Riza** — WASM-based code execution:
-- Sub-100ms cold start
-- Python, JavaScript, TypeScript, Ruby, PHP
+**Riza** — Wasm-based code execution:
+- Code starts executing under 10ms after Riza receives it; there is no sandbox boot step
+- Python, JavaScript, Ruby, PHP
 - No network by default (must explicitly add HTTP allow rules)
-- No filesystem access (code gets virtual stdin/stdout only)
-- Deterministic execution (same code, same output — good for testing)
+- No filesystem access by default
+- Wasm modules are not reused across executions, so nothing leaks between runs
 - Good for data processing, format conversion, computation
 
 ### 3.3 Serverless Container Sandboxes (Modal)
 
-Serverless functions in containers with GPU support. Not microVMs — containers share a kernel — but with strong cgroup isolation.
+Serverless functions in containers with GPU support. Not microVMs — Modal containerizes and virtualizes compute jobs with **gVisor**, Google's user-space kernel, which intercepts guest syscalls in a sandboxed process rather than passing them to the host kernel. Stronger than plain namespaces-and-cgroups, weaker than a hardware-virtualized guest kernel.
 
 **Modal** — serverless GPU containers:
 - 100-300ms cold start
-- GPU access (A100, H100) for ML workloads
+- GPU access (A10, L4, A100, H100, B200) for ML workloads
 - Persistent volumes for data between runs
 - `@app.function()` decorator turns any Python function into a sandboxed serverless call
 - Good for agents that need GPU compute (image generation, model inference)
@@ -106,7 +108,7 @@ flowchart TD
     end
 
     subgraph WASM["WebAssembly Sandbox (Riza)"]
-        WA["Riza API → WASM Runtime\nNo real OS / filesystem / network (default)\nSub-100ms startup, deterministic output"]
+        WA["Riza API → Wasm Runtime\nNo real OS / filesystem / network (default)\nUnder 10ms to first instruction, no VM to boot"]
     end
 
     classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
@@ -142,17 +144,17 @@ A sandbox is not a prediction that code will behave. It is a *bound* on misbehav
 | Disk quota | `1-10GB`. Bounds fork-and-write exhaustion of the node |
 | Network ACL | The only row that bounds *exfiltration* rather than *consumption* |
 
-**Walk one example.** Take the timeout row and price it at E2B's `$0.10/hour`, which is `$2.78e-5` per second:
+**Walk one example.** Take the timeout row and price it at E2B's published rates for a default 2 vCPU sandbox with 1 GiB of RAM — `$0.000028/s` of compute plus `$0.0000045/s` of RAM, so `$0.0000325` per second:
 
 ```
   timeout   worst-case cost   cost across 1M hung runs
-    15s        $0.000417            $   417
-    30s        $0.000833            $   833
-    60s        $0.001667            $ 1,667
-   300s        $0.008333            $ 8,333
+    15s        $0.000488            $   488
+    30s        $0.000975            $   975
+    60s        $0.001950            $ 1,950
+   300s        $0.009750            $ 9,750
 ```
 
-Choosing `300s` over `15s` because "some analyses are slow" is a 20× multiplier on your worst case — `$8,333` versus `$417` at a million hung runs. The right move is not one global timeout but a per-task-class one, because the ceiling is paid by every runaway regardless of how rare the slow legitimate task is. Note also that the first five rows only bound *resource* damage; a sandbox with perfect limits on all five and an open Network ACL still leaks every secret it can see, which is exactly the failure in the war story in Section 9.
+Choosing `300s` over `15s` because "some analyses are slow" is a 20× multiplier on your worst case — `$9,750` versus `$488` at a million hung runs. The right move is not one global timeout but a per-task-class one, because the ceiling is paid by every runaway regardless of how rare the slow legitimate task is. Note also that the first five rows only bound *resource* damage; a sandbox with perfect limits on all five and an open Network ACL still leaks every secret it can see, which is exactly the failure in the war story in Section 9.
 
 ---
 
@@ -172,7 +174,7 @@ async def execute_agent_code(user_request: str) -> str:
     
     # Step 1: Generate code with Claude
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=2048,
         system=(
             "You are a data analysis agent. When given a task, write Python code "
@@ -221,17 +223,17 @@ asyncio.run(main())
 | `[:50_000]` | The output cap from the table above, enforced at the call site |
 | `k` | How many `run_code` calls fit inside one sandbox lifetime |
 
-**Walk one example.** Bound the worst case for one `execute_agent_code` call at E2B's `$2.78e-5` per second:
+**Walk one example.** Bound the worst case for one `execute_agent_code` call at E2B's `$0.0000325` per second (2 vCPU + 1 GiB):
 
 ```
   k = floor(60 / 30)      =  2 executions max inside one sandbox
-  sandbox lifetime cost   =  60s x $2.78e-5  =  $0.001667   (hard ceiling)
-  a single 30s execution  =  30s x $2.78e-5  =  $0.000833
+  sandbox lifetime cost   =  60s x $3.25e-5  =  $0.001950   (hard ceiling)
+  a single 30s execution  =  30s x $3.25e-5  =  $0.000975
 
-  1M agent calls, all hitting the ceiling    =  $1,667
+  1M agent calls, all hitting the ceiling    =  $1,950
 ```
 
-The per-execution timeout is what makes the retry loop work: a `30s` kill returns a real error string the agent can reason about, whereas hitting the `60s` sandbox timeout destroys the VM and loses the session filesystem with it. Set them equal and you get only one attempt per sandbox and pay a fresh `500ms` cold start for every retry. The `2:1` ratio here buys exactly one retry inside a warm box — a deliberate choice, not a default.
+The per-execution timeout is what makes the retry loop work: a `30s` kill returns a real error string the agent can reason about, whereas hitting the `60s` sandbox timeout destroys the VM and loses the session filesystem with it. Set them equal and you get only one attempt per sandbox and pay a fresh sub-`200ms` sandbox start for every retry. The `2:1` ratio here buys exactly one retry inside a warm box — a deliberate choice, not a default.
 
 ### Riza: WebAssembly Execution (No Network)
 
@@ -292,7 +294,7 @@ import modal
 app = modal.App("agent-sandbox")
 
 @app.function(
-    gpu="A10G",
+    gpu="A10",            # valid values include T4, L4, A10, L40S, A100, H100, B200
     memory=8192,          # 8GB RAM
     timeout=120,          # 2-minute hard limit
     network_file_systems={"/data": modal.NetworkFileSystem.from_name("agent-data")},
@@ -333,7 +335,7 @@ with app.run():
 
 **Replit Agent**: Spins up a Replit container per project. LLM-generated code runs in that container with internet access (necessary for `pip install`) but isolated from other users' containers.
 
-**OpenAI Code Interpreter** (ChatGPT): Runs in a Kubernetes pod per session. Python execution, file upload/download. Network blocked entirely. 120-second timeout. Files persist for the session lifetime (typically 1 hour).
+**OpenAI Code Interpreter**: Runs each session in a managed container. Python execution, file upload/download, memory tiers of 1GB (default), 4GB, 16GB and 64GB. Containers are ephemeral and expire after 20 minutes of inactivity, after which the container is unreachable and its data is discarded — you cannot revive one, only create a new one.
 
 **Devin (Cognition AI)**: Full Ubuntu VM per session. Agent has root access inside VM. VM is isolated from production infrastructure with VPN-based network allowlists.
 
@@ -345,40 +347,40 @@ with app.run():
 
 | Dimension | subprocess (unsafe) | E2B MicroVM | Riza WASM | Modal Container | Local seccomp |
 |---|---|---|---|---|---|
-| Startup latency | <1ms | ~500ms | <100ms | 100-300ms | <10ms |
-| Isolation level | None | High (VM) | Very high (WASM) | Medium (cgroup) | Medium (seccomp) |
-| Language support | Any | Python/JS/Bash/R/Go | Python/JS/Ruby/PHP | Any | Any |
+| Startup latency | <1ms | <200ms (80ms quick-start) | <10ms | 100-300ms | <10ms |
+| Isolation level | None | High (hardware-virtualized guest kernel) | High (Wasm, no OS syscall surface) | Medium-high (gVisor user-space kernel) | Medium (seccomp) |
+| Language support | Any | Any Linux binary | Python/JS/Ruby/PHP | Any | Any |
 | Network control | Full host access | Configurable ACL | Blocked by default | Configurable | seccomp filter |
 | GPU support | Yes | No | No | Yes | Yes |
 | Filesystem persistence | Yes (host!) | Within session | No | Volumes | Configurable |
-| Cost | Free (risky) | $0.10/hr | Pay-per-call | $0.0002-0.002/s | Infrastructure cost |
+| Cost | Free (risky) | $0.000028/s (2 vCPU) + $0.0000045/GiB/s | Pay-per-call | $0.0000131/core/s + $0.00000222/GiB/s, +$0.000306-0.001097/s for a GPU | Infrastructure cost |
 | Operational overhead | None | None (SaaS) | None (SaaS) | Low | High |
 | Self-hostable | Yes | No | No | No | Yes |
 
-**Put simply.** The Cost row is unreadable as printed because the units disagree — `$0.10/hr` against `$0.0002-0.002/s` against `$0.0001/s`. Converted to one unit, the row says: "per second of sandbox uptime, E2B is the cheap one and a Modal GPU container is 72× more expensive."
+**Put simply.** The Cost row is unreadable as printed because every provider quotes a different bundle of resources. Priced at one comparable configuration, the row says: "per second of sandbox uptime, a Modal GPU container is roughly 21× a Modal CPU container, and the resource preset matters more than the vendor."
 
 | Symbol | What it is |
 |--------|------------|
-| `$0.10/hr` | E2B, billed per second. Divide by 3600 to compare: `$2.78e-5` per second |
-| `$0.0002/s` | Modal CPU container — the low end of its range |
-| `$0.002/s` | Modal with a GPU attached — the high end, and why the range is 10× wide |
-| `$0.0001/s` | Fly.io Machines, per second |
+| E2B | `$0.000028/s` for 2 vCPU + `$0.0000045/GiB/s`. At 2 vCPU + 1 GiB: `$0.0000325/s` |
+| Modal (CPU) | `$0.0000131/core/s` (a core is 2 vCPU) + `$0.00000222/GiB/s`. At 1 core + 1 GiB: `$0.0000153/s` |
+| Modal (GPU) | The same CPU line plus the accelerator: `$0.000306/s` for an A10, up to `$0.001097/s` for an H100 |
+| Fly.io | `$0.00000078/s` for the smallest `shared-cpu-1x` 256MB preset (≈$2.02/month); larger presets cost proportionally more |
 | cold start | Latency you pay per invocation but, for billed-per-second providers, also *bill* for |
 | `T` | Total billed seconds: `cold_start + execution_time` |
 
 **Walk one example.** One 30-second execution, adding each provider's own cold start:
 
 ```
-  provider        T (billed)     cost per run     per 1M runs
-  E2B             30.0 + 0.5s      $0.000833        $   833
-  Fly.io          30.0 + 2.0s      $0.003200        $ 3,200
-  Modal (CPU)     30.0 + 0.3s      $0.006060        $ 6,060
-  Modal (GPU)     30.0 + 0.3s      $0.060600        $60,600
+  provider        T (billed)     $/s          cost per run     per 1M runs
+  Fly.io          30.0 + 2.0s    $0.00000078    $0.0000250       $    25
+  Modal (CPU)     30.0 + 0.3s    $0.0000153     $0.0004636       $   464
+  E2B             30.0 + 0.2s    $0.0000325     $0.0009815       $   982
+  Modal (A10)     30.0 + 0.3s    $0.0003213     $0.0097354       $ 9,735
 
-  Modal GPU / E2B  =  72.7x
+  Modal A10 / Modal CPU  =  21.0x
 ```
 
-Two things this makes visible that the table hides. First, cold start is a *cost* line, not only a latency line, on per-second billing — Fly.io's `2s` start adds `$0.0002` to every run before any code executes, which is 24% of an E2B run's entire price. Second, the `$0.0002-0.002/s` range for Modal is not a pricing band to average; it is the CPU-versus-GPU switch, and picking `gpu="A10G"` when the task is `pandas` work multiplies the bill by 10 for zero benefit. Match the tier to the workload before optimizing anything else in this table.
+Two things this makes visible that the table hides. First, cold start is a *cost* line, not only a latency line, on per-second billing — Fly.io's `2s` start is 6.3% of its own run's billed time before any code executes, versus 0.7% for E2B's sub-`200ms` start. Second, Modal's price is not a single band to average; the accelerator is a switch, and attaching a GPU when the task is `pandas` work multiplies the bill by 21x for zero benefit. Match the tier to the workload before optimizing anything else in this table — and note that the Fly.io row is cheap because its preset is far smaller, not because its per-resource rate is better.
 
 ---
 
@@ -395,7 +397,7 @@ Two things this makes visible that the table hides. First, cold start is a *cost
 **Do not use (or accept the risk) when:**
 - Running developer-written scripts in isolated dev environments
 - Code is pre-approved and audited (not generated by LLM)
-- Latency is critical and 500ms startup is unacceptable (use Riza WASM at <100ms)
+- Latency is critical and even a sub-200ms microVM start is unacceptable (use Riza's Wasm sandbox, which begins executing in under 10ms)
 - Air-gapped environment with no external sandbox providers
 
 ---
@@ -460,8 +462,8 @@ if len(result) > 50_000:
 | chars | Bytes of stdout the sandbox produced. `10_000_000` in the broken case |
 | `chars / 4` | Rough chars-per-token for English and code — the conversion that makes it money |
 | `50_000` | The cap, in characters, from the resource-limit table above |
-| `$3.00/M` | Sonnet input price per million tokens |
-| 200K | Sonnet's context window, for comparison against the token count |
+| `$3.00/M` | Claude Sonnet 5 list input price per million tokens |
+| 1M | Sonnet 5's context window, for comparison against the token count |
 | `[Truncated: N chars total]` | Tells the agent output was cut, so it narrows the query instead of retrying |
 
 **Walk one example.** Price `print('x' * 10_000_000)` against the same run with the cap in place:
@@ -472,10 +474,10 @@ if len(result) > 50_000:
 
   ratio                            200x fewer tokens, 200x cheaper
 
-  2,500,000 tok / 200,000 window   =  12.5x   -> the call cannot even be made
+  2,500,000 tok / 1,000,000 window =   2.5x   -> the call cannot even be made
 ```
 
-The comment in the broken snippet says `$5 wasted`, which brackets correctly — `$5.00` at a `$2.00/M` input rate, `$7.50` at Sonnet's `$3.00/M`. But the money is the smaller problem: at `12.5×` the context window the request fails outright, and on a model with a large enough window it would succeed and then re-send those 2.5M tokens on every subsequent turn of the loop. That is the compounding failure — one unbounded `print` poisons the entire remaining agent run, not just the call that produced it.
+The comment in the broken snippet says `$5 wasted`, which brackets correctly — `$5.00` at a `$2.00/M` input rate, `$7.50` at Sonnet 5's `$3.00/M`. But the money is the smaller problem: at `2.5×` the context window the request fails outright even on a 1M-token model, and on a model with a large enough window it would succeed and then re-send those 2.5M tokens on every subsequent turn of the loop. That is the compounding failure — one unbounded `print` poisons the entire remaining agent run, not just the call that produced it.
 
 ### Pitfall 3: Secrets in sandbox environment
 
@@ -498,11 +500,11 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 
 | Tool | Type | Languages | Cold Start | Network | GPU | Pricing |
 |---|---|---|---|---|---|---|
-| E2B | Cloud microVM | Python, JS, Bash, R, Go | ~500ms | Configurable ACL | No | $0.10/hr |
-| Riza | WASM runtime | Python, JS, Ruby, PHP | <100ms | Blocked (default) | No | Pay-per-call |
-| Daytona | Dev environment VM | Any (full Linux) | 2-10s | Configurable | No | Self-host or cloud |
-| Modal | Serverless container | Any (Docker) | 100-300ms | Configurable | Yes | $0.0002-0.002/s |
-| Fly.io Machines | MicroVM | Any | 500-2000ms | Configurable | No | $0.0001/s |
+| E2B | Cloud microVM (Firecracker) | Any Linux binary | <200ms (80ms quick-start) | Configurable ACL | No | $0.000028/s (2 vCPU) + $0.0000045/GiB/s |
+| Riza | Wasm runtime | Python, JS, Ruby, PHP | <10ms to first instruction | Blocked (default) | No | Pay-per-call |
+| Daytona | Agent sandbox runtime | Any (full Linux) | sub-90ms | Configurable | Yes | Per vCPU-hour; self-host or cloud |
+| Modal | Serverless container (gVisor) | Any (Docker) | 100-300ms | Configurable | Yes | $0.0000131/core/s + $0.00000222/GiB/s (+GPU) |
+| Fly.io Machines | MicroVM | Any | 500-2000ms | Configurable | Yes | From $0.00000078/s (shared-cpu-1x 256MB) |
 | RestrictedPython | In-process Python AST | Python only | <1ms | None (in-process) | No | Free |
 | seccomp+namespaces | Linux kernel | Any | <10ms | Blocked | Yes | Free (self-host) |
 
@@ -514,7 +516,7 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 LLMs are susceptible to prompt injection — malicious content in retrieved documents or tool outputs can cause the model to generate harmful code. Even a well-intentioned LLM can produce code with bugs that cause accidental file deletion or network exposure. Defense-in-depth requires assuming the generated code is untrusted regardless of the LLM's intent.
 
 **Q: What is the difference between E2B and Riza, and when would you choose each?**
-E2B uses Linux microVMs (Firecracker) — real OS, persistent filesystem, configurable network, ~500ms startup, $0.10/hr. Riza uses WebAssembly — no OS, no filesystem, no network by default, <100ms startup, cheaper per-call. Choose E2B when the code needs pip installs, file I/O, or network access. Choose Riza when you need deterministic data processing with no external dependencies and maximum isolation.
+E2B uses Linux microVMs (Firecracker) — real OS, persistent filesystem, configurable network, sub-200ms start, billed per second by vCPU and RAM. Riza uses WebAssembly — no OS, no filesystem, no network by default, code begins executing in under 10ms because there is no sandbox to boot, and it is billed per call. Choose E2B when the code needs pip installs, file I/O, or network access. Choose Riza when you need short, dependency-free data processing and the smallest possible attack surface.
 
 **Q: What resource limits should you set on a code execution sandbox?**
 At minimum: execution timeout (15-60s for most tasks), memory limit (512MB-4GB), CPU limit (1-2 cores), and output size limit (50KB stdout to prevent token flooding). Additionally: disk quota (1-10GB), network egress ACL (allowlist-only or blocked), and a maximum number of concurrent sandboxes per user to prevent cost abuse.
@@ -529,13 +531,13 @@ RestrictedPython is an in-process Python sandbox that compiles code with an AST 
 Never pass production database connections into sandboxes. Instead: (1) pre-extract sample data before the sandbox runs and mount it as a file; (2) if the agent needs to query, have the agent generate SQL that is reviewed (by human or another LLM) before execution against production; (3) use a read-only replica with row-level security to limit blast radius. The sandbox is not a substitute for data access controls.
 
 **Q: What is Firecracker and why do microVM-based sandboxes use it?**
-Firecracker is an open-source VMM (Virtual Machine Monitor) from AWS, designed for serverless workloads. It starts VMs in 125ms from a pre-built snapshot, uses 5MB of memory overhead per VM (vs 100MB+ for QEMU), and provides hardware-level isolation (separate kernel, separate memory space). Sandbox providers like E2B use Firecracker to start hundreds of VMs per second economically.
+Firecracker is an open-source VMM (Virtual Machine Monitor) developed at AWS to back Lambda and Fargate. Its specification commits to two numbers: no more than 125ms from the `InstanceStart` API call to the guest's `/sbin/init`, and no more than 5 MiB of VMM memory overhead for a 1-vCPU, 128 MiB microVM — far leaner than a general-purpose VMM like QEMU. It provides hardware-level isolation (separate guest kernel, separate memory space), which is why sandbox providers like E2B use it to start many VMs per host economically. Snapshot resume is a separate, faster path than the 125ms cold-boot figure.
 
 **Q: How do you handle the case where LLM-generated code has an infinite loop?**
 Set a hard execution timeout enforced by the sandbox provider — not a Python signal handler (which can be bypassed). E2B and Modal both enforce timeouts at the VM/container level (SIGKILL). The sandbox returns an error when timeout is exceeded; the agent receives this error and can either retry with fixed code or report failure. Never rely on `sys.setrecursionlimit` or Python-level guards alone.
 
 **Q: What is the cold start problem and how do sandbox providers solve it?**
-Cold start is the time to provision a fresh execution environment. For microVMs, this is VM boot time (typically 1-3 seconds from scratch). E2B solves it with pre-warmed Firecracker snapshots — a pool of paused VMs ready to resume in ~500ms. Riza solves it by using WASM runtimes that initialize in under 100ms. Modal solves it by keeping containers warm for frequently used functions.
+Cold start is the time to provision a fresh execution environment. A general-purpose VM boots in seconds; Firecracker itself specifies at most 125ms from API call to guest init. E2B layers pre-warmed Firecracker snapshots on top of that and advertises in-region sandbox start under 200ms (80ms for its quick-start variant). Riza avoids the problem entirely — there is no sandbox to boot, so code starts executing in under 10ms. Modal solves it by keeping containers warm for frequently used functions.
 
 **Q: How do you test an agent's code execution behavior?**
 (1) Test with malicious inputs (path traversal, network calls, file deletion) and assert that the sandbox blocks them. (2) Test with infinite loops and assert that the timeout fires correctly. (3) Test with large outputs and assert truncation works. (4) Test error propagation — assert that execution errors are returned to the agent correctly so it can self-correct. Use pytest with real sandbox calls in integration tests; mock for unit tests.
@@ -544,7 +546,7 @@ Cold start is the time to provision a fresh execution environment. For microVMs,
 E2B charges by sandbox uptime (seconds of VM running, not CPU used). Control costs by: (1) using short timeouts; (2) destroying sandboxes immediately after use (context manager pattern); (3) reusing sandboxes within a session rather than creating new ones per code execution; (4) limiting concurrent sandboxes per user with a semaphore. Riza charges per execution call — cheaper for infrequent use, more expensive at high volume.
 
 **Q: Can a sandbox escape? What are known escape vectors?**
-MicroVM sandboxes are resistant to escapes because the guest kernel is fully isolated from the host kernel. Known historical vectors: Firecracker had one privilege escalation CVE in 2022 (patched). WASM sandboxes have had spec-compliance bugs in runtimes (e.g., Wasmer). In-process sandboxes (RestrictedPython) have multiple known bypasses via `__subclasses__`, `ctypes`, or C extension modules. Defense: use microVMs or WASM for LLM-generated code; apply defense-in-depth (run sandbox provider as unprivileged user, network-isolated host).
+MicroVM sandboxes are resistant to escapes because the guest kernel is fully isolated from the host kernel, but "resistant" is not "immune" — Firecracker has published security advisories, including an arbitrary host file overwrite via symlink in the jailer (January 2026, moderate) and an out-of-bounds write in the virtio-pci transport (April 2026, high). WASM sandboxes have had spec-compliance bugs in runtimes. In-process sandboxes (RestrictedPython) have multiple known bypasses via `__subclasses__`, `ctypes`, or C extension modules. Defense: use microVMs or WASM for LLM-generated code, patch the VMM promptly, and apply defense-in-depth (run the sandbox provider as an unprivileged user, on a network-isolated host).
 
 **Q: How should output from the sandbox be validated before feeding back to the agent?**
 (1) Truncate to a maximum length (50KB) to prevent context overflow. (2) Sanitize control characters that could break JSON serialization. (3) If the output is supposed to be structured (JSON, CSV), validate the format before passing to the agent — malformed output causes parsing errors downstream. (4) Flag high-risk patterns in output (base64-encoded strings, URLs, credentials patterns) for logging even if you allow them through.
@@ -553,7 +555,7 @@ MicroVM sandboxes are resistant to escapes because the guest kernel is fully iso
 Sandbox isolation prevents code from accessing the host filesystem, network, and processes. Data access control (RBAC, row-level security) limits what data the code can query. Both are necessary: sandbox prevents escape, data access control limits what can be queried even within the allowed execution scope. A sandboxed agent with a production DB connection can still query all rows — you need both layers.
 
 **Q: How do you implement a per-user sandbox concurrency limit?**
-Use a semaphore per user (stored in Redis for distributed enforcement): `async with redis_semaphore(user_id, max_concurrent=3): execute_in_sandbox()`. Return HTTP 429 when the limit is exceeded. Set limits based on your cost model — at $0.10/hr per sandbox, 3 concurrent sandboxes per user costs $0.30/hr. Log semaphore wait time to detect user frustration and tune limits.
+Use a semaphore per user (stored in Redis for distributed enforcement): `async with redis_semaphore(user_id, max_concurrent=3): execute_in_sandbox()`. Return HTTP 429 when the limit is exceeded. Set limits based on your cost model — a 2 vCPU / 1 GiB E2B sandbox costs about $0.117/hr, so 3 concurrent sandboxes per user is roughly $0.35/hr. Log semaphore wait time to detect user frustration and tune limits.
 
 ---
 
@@ -606,9 +608,9 @@ flowchart LR
 
 **Results**:
 - Zero host escapes after migration (sandbox handles all code execution)
-- P95 execution latency: 2.1s (500ms sandbox start + 1.6s code execution)
+- P95 execution latency: 1.8s (200ms sandbox start + 1.6s code execution)
 - 3 caught prompt injection attempts in month 1 (all blocked by network ACL)
-- Cost: ~$0.004/query at average 2.4 minutes of sandbox uptime per session
-- Analysts run 200-400 queries/day → $0.80-$1.60/day sandbox cost
+- Cost: ~$0.0047/query at average 2.4 minutes of sandbox uptime per session (144s x $0.0000325/s for 2 vCPU + 1 GiB)
+- Analysts run 200-400 queries/day → $0.94-$1.87/day sandbox cost
 
-**Lesson**: The 500ms E2B cold start felt slow initially. Solution: pre-warm one sandbox per active analyst session (keep alive for 5 minutes of inactivity). Reduced perceived latency to near-zero for follow-up questions.
+**Lesson**: Even E2B's sub-200ms sandbox start is visible when it lands on every follow-up question. Solution: pre-warm one sandbox per active analyst session (keep alive for 5 minutes of inactivity). Reduced perceived latency to near-zero for follow-up questions.

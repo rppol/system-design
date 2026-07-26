@@ -294,9 +294,9 @@ from typing import Any, Protocol
 
 
 class ModelTier(Enum):
-    FRONTIER = "frontier"      # GPT-4o, Claude 3.5 Sonnet — complex tasks
-    MID = "mid"                # GPT-4o-mini, Claude Haiku — standard tasks
-    SELF_HOSTED = "self"       # Llama-3-70B — high-volume, cost-sensitive
+    FRONTIER = "frontier"      # GPT-4o, Claude Sonnet 5 — complex tasks
+    MID = "mid"                # GPT-4o-mini, Claude Haiku 4.5 — standard tasks
+    OPEN_WEIGHT = "open"       # Llama-3-70B on a hosted endpoint — high-volume
 
 
 @dataclass
@@ -320,11 +320,13 @@ class GenerationFleet:
     CIRCUIT_BREAK_WINDOW = 60     # seconds
     RETRY_DELAYS = [1, 2, 4]      # exponential backoff in seconds
 
+    # Blended $/token at this platform's 500-input / 1500-output mix.
+    # e.g. gpt-4o at $2.50/M in + $10.00/M out -> (500*2.5 + 1500*10)/2000 = $8.13/M.
     COST_PER_TOKEN: dict[str, float] = {
-        "gpt-4o": 0.000005,
-        "claude-3-5-sonnet": 0.000004,
-        "gpt-4o-mini": 0.00000045,
-        "llama-3-70b": 0.00000020,   # self-hosted amortized cost
+        "gpt-4o": 0.0000081,
+        "claude-sonnet-5": 0.000012,   # $3/M in, $15/M out
+        "gpt-4o-mini": 0.00000049,     # $0.15/M in, $0.60/M out
+        "llama-3-70b": 0.00000036,     # hosted open-weight endpoint, ~$0.23/M in, $0.40/M out
     }
 
     def __init__(self, clients: dict[str, LLMClient]):
@@ -373,13 +375,13 @@ class GenerationFleet:
         if request.difficulty == "hard" and not self._is_circuit_broken("gpt-4o"):
             return "gpt-4o"
         if request.style == "preference_pair":
-            return "claude-3-5-sonnet"
+            return "claude-sonnet-5"
         return "gpt-4o-mini"
 
     def _fallback_model(self, model: str) -> str:
         fallbacks = {
-            "gpt-4o": "claude-3-5-sonnet",
-            "claude-3-5-sonnet": "gpt-4o",
+            "gpt-4o": "claude-sonnet-5",
+            "claude-sonnet-5": "gpt-4o",
             "gpt-4o-mini": "llama-3-70b",
         }
         return fallbacks.get(model, "llama-3-70b")
@@ -398,11 +400,11 @@ class GenerationFleet:
         self._failure_times[model] = []  # reset on success
 
     def _tier_of(self, model: str) -> ModelTier:
-        if model in ("gpt-4o", "claude-3-5-sonnet"):
+        if model in ("gpt-4o", "claude-sonnet-5"):
             return ModelTier.FRONTIER
-        if model in ("gpt-4o-mini", "claude-haiku"):
+        if model in ("gpt-4o-mini", "claude-haiku-4-5"):
             return ModelTier.MID
-        return ModelTier.SELF_HOSTED
+        return ModelTier.OPEN_WEIGHT
 
     def _build_prompt(self, request: GenerationRequest) -> str:
         constraints = "\n".join(f"- {c}" for c in request.domain_constraints)
@@ -595,7 +597,7 @@ class QualityFilterPipeline:
 DPO and RLHF training require (prompt, chosen_response, rejected_response) triples. Two strategies exist:
 
 - **Contrastive model pairing**: GPT-4o as chosen, Llama-3-8B as rejected. Cheap but the model learns stylistic differences (length, formatting) rather than behavioral alignment.
-- **Best-of-N from same model**: sample N=8 responses at temperature 0.9, score all with LLM judge, take highest and lowest. Produces subtle, behaviorally meaningful contrasts. Costs 8x generation but the training signal is 3-4x more effective per pair (empirical, based on DPO loss curves).
+- **Best-of-N from same model**: sample N=8 responses at temperature 0.9, score all with LLM judge, take highest and lowest. Produces subtle, behaviorally meaningful contrasts. Costs 8x generation; the qualitative argument for it is confound removal, not a published effect size — treat any "3-4x more effective per pair" figure as an internal, workload-specific observation rather than a general result.
 
 ```python
 import asyncio
@@ -806,8 +808,8 @@ class DatasetRegistry:
 
 | Decision | Option A | Option B | Choice | Rationale |
 |---|---|---|---|---|
-| Generation model selection | Frontier only (GPT-4o) — $0.005/example | Self-hosted only (Llama-70B) — $0.0005/example | Hybrid tiering | Frontier for hard domains (math, code); self-hosted for instruction paraphrases. 5x cost reduction with <3% quality difference on held-out eval |
-| Preference pair generation | Contrastive (strong model chosen, weak rejected) — 1x cost | Best-of-N (N=8 samples, judge selects) — 8x cost | Best-of-N | Contrastive pairs contain style artifacts (length, formality) that confound DPO training. Best-of-N pairs show 3-4x better alignment improvement per pair on Alpaca-Eval |
+| Generation model selection | Frontier only (GPT-4o) — 2,000 tok x $8.13/M = $0.0163/example | Open-weight only (Llama-3-70B hosted) — 2,000 tok x $0.36/M = $0.0007/example | Hybrid tiering | Frontier for hard domains (math, code); open-weight for instruction paraphrases. At the 30/70 split in Section 10 the blend is $0.0008/example — a 20x reduction against frontier-only, at a quality difference measured on this platform's held-out eval, not a published one |
+| Preference pair generation | Contrastive (strong model chosen, weak rejected) — 1x cost | Best-of-N (N=8 samples, judge selects) — 8x cost | Best-of-N | Contrastive pairs contain style artifacts (length, formality) that confound DPO training, so the preference signal is partly stylistic. Best-of-N removes that confound; the size of the gain is workload-specific and should be measured on your own eval, not assumed |
 | Filtering strategy | Offline batch (generate all, filter after) | Online (filter each example immediately, stop bad batches early) | Online filtering | At 70% reject rate, offline wastes 70% of storage I/O and judge cost before filtering. Online filtering stops spending judge tokens on batches where Stage 1-2 already rejects 50% |
 | Deduplication method | Exact SHA-256 hash — 0ms, 0% false negatives, 100% false positives for paraphrases | MinHash LSH — 5ms, 95% near-dup recall, 1% FPR | MinHash LSH | Exact hash misses paraphrases entirely; embedding similarity (50ms/example) is too slow for 3.3M/day. MinHash at 5ms hits the 500ms pipeline budget |
 | Quality judging | Constitutional AI self-critique (no judge model) | Trained reward model | LLM-as-judge (bootstrapped) | Constitutional AI requires no additional training but produces inconsistent scores as judge model updates. Trained RM is most consistent but requires 10K+ human labels to bootstrap. Start with GPT-4o-mini as judge; graduate to trained RM at dataset v3.0 |
@@ -816,17 +818,49 @@ class DatasetRegistry:
 
 ## 6. Real-World Implementations
 
-**Scale AI (SEAL — Scale Evaluation and Learning)**
-Scale AI's internal SEAL platform is the generation engine behind Llama-2 and Llama-3 instruction fine-tuning data for Meta, and contributes to OpenAI's training pipeline. SEAL employs 30,000+ remote labelers as quality auditors who review LLM-generated examples, not generate raw content themselves. The platform processes billions of examples per year and represents approximately $1B of Scale AI's ARR. Their key architectural insight: humans are too slow and expensive to generate examples at scale, but they are irreplaceable for catching systemic LLM failures — reward hacking, subtle factual errors in specialized domains, and cultural bias that automated judges calibrated on English data cannot detect.
+**Scale AI (data engine + human audit network)**
+Scale AI's commercial model is a data engine: LLMs and templating produce candidate examples at
+volume, and a large contracted annotator network reviews and corrects them rather than authoring
+raw content from scratch. Scale is a named data vendor for several frontier labs' post-training
+programs. Revenue figures, annotator headcount, and per-customer attribution are not published by
+Scale and are omitted here rather than asserted. The architectural insight is the durable part:
+humans are too slow and expensive to generate examples at scale, but they are irreplaceable for
+catching systemic LLM failures — reward hacking, subtle factual errors in specialized domains, and
+cultural bias that automated judges calibrated on English data cannot detect. (Note: Scale's
+publicly branded "SEAL" effort is its model-evaluation and leaderboard work, which is a different
+thing from its data-generation business — do not conflate the two.)
 
-**Hugging Face (Magpie, UltraChat, OpenHermes)**
-The Magpie dataset (1M instruction pairs, released 2024) uses a zero-human-labeling approach: Llama-3-Instruct is prompted with only the system prompt and an empty user turn, causing the model to self-generate both the user query and the assistant response. This exploits instruction-tuned models' learned response pattern to produce plausible user queries without any seed data. Quality filtering uses a combination of reward model scoring (Llama-3-based RM) and length heuristics. UltraChat uses GPT-3.5-Turbo to generate multi-turn conversation trees seeded from Wikipedia topics, with each conversation branch exploring a different aspect of the topic.
+**Magpie and UltraChat (open synthetic instruction datasets)**
+Magpie (Xu et al., arXiv 2406.08464, 2024) uses a zero-human-labeling approach: Llama-3-Instruct is
+prompted with only the chat template prefix preceding the user turn and nothing else, causing the
+model to self-generate both the user query and the assistant response. The paper generates
+**4 million** instruction instances and keeps **300,000** after filtering — the ratio, not the raw
+count, is the lesson. Quality filtering uses reward model scoring plus length heuristics. UltraChat
+(Ding et al., arXiv 2305.14233, 2023) is 1.5 million synthetically generated multi-turn dialogues
+produced entirely without human queries, using an iterative framework that expands a conversation
+turn by turn. The generating model and exact seed topic sources are described in the paper body,
+not the abstract, so they are not restated here.
 
-**Cohere (Aya — 101-language multilingual dataset)**
-Cohere's Aya dataset required generating examples in 101 languages simultaneously. Their architecture uses language-routing: a classifier assigns each seed document to a language track, each track uses a language-specific generation model (or a multilingual base model with language-specific few-shot examples), and quality scoring uses language-specific judges (not a single English-calibrated judge). The critical finding: a single quality judge trained on English data gives systematically lower scores to grammatically correct non-English responses because fluency patterns differ. Language-specific judges improved audit agreement from 61% to 87%.
+**Cohere (Aya — multilingual instruction data)**
+The Aya Dataset is a human-curated instruction-following dataset spanning **65 languages**; the
+larger Aya Collection reaches **114 languages** and 513M instances via templating and translation.
+(The "Aya 101" name refers to the 101-language model, not the dataset — these are frequently
+conflated.) The architectural pattern worth copying is language routing: a classifier assigns each
+seed document to a language track, each track uses a language-appropriate generation model or
+language-specific few-shot examples, and quality scoring uses language-specific judges rather than
+one English-calibrated judge. The underlying failure — an English-calibrated judge systematically
+under-scoring grammatically correct non-English responses — is real and well attested. Specific
+before/after agreement percentages for language-specific judging do **not** appear in the Aya
+Dataset paper and are not asserted here.
 
-**Google DeepMind (Gemini training pipeline)**
-Gemini's training data pipeline uses multi-stage synthetic augmentation on top of web-crawled documents: (1) document-level filtering via quality classifier, (2) paragraph-level QA extraction using a smaller model to generate question-answer pairs from each paragraph, (3) response augmentation adding structured reasoning steps to each answer using a larger reasoning model. This produces training signal that is more explicit about reasoning chains than raw web text, contributing to Gemini's strong performance on multi-step reasoning benchmarks.
+**Multi-stage synthetic augmentation over web text (general pattern)**
+Frontier labs describe, at a high level, layering synthetic augmentation on top of web-crawled
+documents: (1) document-level filtering via a quality classifier, (2) paragraph-level QA extraction
+using a smaller model to generate question-answer pairs from each paragraph, (3) response
+augmentation adding explicit reasoning steps using a larger model. This produces training signal
+that is more explicit about reasoning chains than raw web text. The stage ordering is the
+transferable idea; no lab publishes enough pipeline detail to attribute a specific benchmark gain
+to a specific stage, so no such attribution is made here.
 
 ---
 
@@ -842,18 +876,27 @@ Gemini's training data pipeline uses multi-stage synthetic augmentation on top o
 | SemDeDup (FAISS embedding) | 20 | 97-99% | 0.1% | 12 GB (index) | High |
 | BM25 near-dup (Elasticsearch) | 50 | 88-93% | 1-2% | 8 GB (inverted index) | Medium |
 
-MinHash LSH is the practical choice at 3.3M examples/day: 200 examples/sec × 16 workers covers the throughput, and 92-96% near-dup recall keeps the dataset clean without the 12 GB FAISS index that SemDeDup requires per model.
+MinHash LSH is the practical choice at 3.3M examples/day: the load is only 3,333,333 / 86,400 = 38.6 examples/sec, so 2 workers at 200 examples/sec each carry it with 10x headroom (matching the Section 2 sizing), and 92-96% near-dup recall keeps the dataset clean without the 12 GB FAISS index that SemDeDup requires per model.
 
 ### Quality Judging Tool Comparison
 
+Cost per 1K judgments below is computed on this pipeline's judgment shape: 500 input tokens
+(prompt + response) and ~5 output tokens (a single score), at current list prices.
+Consistency and calibration columns are this platform's own measurements, not published
+benchmarks.
+
 | Tool | Cost/1K judgments | Consistency (σ across runs) | Calibration to human | Latency |
 |---|---|---|---|---|
-| GPT-4o as judge | $5.00 | 0.15 | 0.82 Pearson | 400ms |
-| GPT-4o-mini as judge | $0.45 | 0.22 | 0.74 Pearson | 150ms |
-| Trained reward model (Llama-3-8B) | $0.02 | 0.08 | 0.79 Pearson | 25ms |
+| GPT-4o as judge ($2.50/M in, $10/M out) | $1.30 | 0.15 | 0.82 Pearson | 400ms |
+| GPT-4o-mini as judge ($0.15/M in, $0.60/M out) | $0.08 | 0.22 | 0.74 Pearson | 150ms |
+| Trained reward model (Llama-3-8B, self-hosted) | $0.02 | 0.08 | 0.79 Pearson | 25ms |
 | Rule-based heuristics | $0.00 | 0.00 | 0.41 Pearson | 1ms |
 
-At 3.3M judgments/day, GPT-4o-mini at $0.45/1K = $1,485/day; trained RM at $0.02/1K = $66/day. The trained RM pays for itself after 3 months if it requires 50,000 human-labeled calibration examples at $1/label ($50,000 one-time cost).
+At 3.3M judgments/day, GPT-4o-mini at $0.08/1K = $267/day (consistent with the $250/day in
+Section 2); a trained RM at $0.02/1K = $67/day, saving $200/day. If the RM needs 50,000
+human-labeled calibration examples at $1/label ($50,000 one-time), payback is
+$50,000 / $200 = 250 days, roughly 8 months — not the few weeks the raw per-token gap
+suggests. Build the RM for consistency and latency; the cost saving alone does not justify it.
 
 ---
 
@@ -919,11 +962,16 @@ Key span attributes on every span: `request_id`, `dataset_version`, `source_mode
 
 ## 9. Common Pitfalls & War Stories
 
+The five incidents below are **illustrative composites**. The failure mechanisms — judge length
+bias, stale diversity weights, PII format gaps, silent model updates, margin collapse — are all
+real and recur; the example counts, benchmark deltas and dollar figures are constructed to make
+the blast radius concrete and are not verified public record.
+
 **1. Reward Hacking in the Quality Judge**
 An internal team observed that GPT-4o-mini (used as judge) systematically scored longer responses higher, independent of actual quality — a length-quality correlation artifact from its RLHF training. The generation fleet, optimizing for high judge scores, learned to produce verbose responses. Average response length increased from 420 tokens to 870 tokens over 3 weeks of training data generation. The fine-tuned model showed a 23% increase in average response length with no quality improvement on human evaluations, and user NPS dropped because responses felt "padded." The failure was discovered 6 weeks post-training when users began complaining. Fix: add a length-normalized quality score — divide raw judge score by log(response_length_tokens) — and penalize responses longer than 2× the median for their topic. Cost of delayed detection: 2 retraining runs at $180,000 each.
 
 **2. Topic Collapse Despite Diversity Sampling**
-A 10-day generation run produced 5M examples. Post-hoc embedding cluster analysis showed 58% of examples concentrated in 18 of 500 leaf topics. Root cause: the DiversitySampler's `_counts` dictionary was populated at startup from the previous run's totals, but weights were not recalculated mid-run — topics that were already over-represented at the start of the run remained over-represented for the full 10-day window. The resulting dataset underrepresented math, multilingual, and creative writing. Model fine-tuned on this data scored 8.4 points below baseline on MT-Bench math subcategory. Fix: recalculate weights every 10,000 generations and reset counts relative to the current run, not cumulative totals.
+A 10-day generation run produced 5M examples. Post-hoc embedding cluster analysis showed 58% of examples concentrated in 18 of 500 leaf topics. Root cause: the DiversitySampler's `_counts` dictionary was populated at startup from the previous run's totals, but weights were not recalculated mid-run — topics that were already over-represented at the start of the run remained over-represented for the full 10-day window. The resulting dataset underrepresented math, multilingual, and creative writing. The model fine-tuned on this data dropped 0.84 points below baseline on the MT-Bench math subcategory (MT-Bench is scored 1-10, so an "8.4 point" drop would be off the scale — a common way these numbers get mis-copied). Fix: recalculate weights every 10,000 generations and reset counts relative to the current run, not cumulative totals.
 
 **3. PII Leakage from Seed Documents**
 Seed documents for customer support Q&A generation included real customer service tickets. Presidio's default configuration missed phone numbers in non-standard formats: "(800) 123.4567" (period separator) and "+1-800.123.4567" (mixed separator). Approximately 50,000 examples containing real phone numbers passed through the quality filter and entered training data version v1.7. The failure was discovered during a routine monthly audit when a human reviewer flagged an example containing a recognizable phone number. Full dataset recall was required: v1.7 was deprecated, all 50,000 affected examples were scrubbed, and 120,000 downstream generated examples that used v1.7 examples as seeds were also invalidated. Total cost: $2.1M in compute for dataset regeneration and one delayed model release. Fix: add regex-based phone number detection as a mandatory Stage 1 rule (not relying solely on Presidio), covering 15 international phone number formats. Add monthly adversarial PII audit using synthetic PII injection to test the scrubber.
@@ -948,42 +996,55 @@ high_quality_examples_per_day =
     (token_budget_per_day / avg_cost_per_token) / avg_tokens_per_example * pass_rate
 
 Where:
-  avg_cost_per_token = (frontier_fraction × $0.00000045) +
-                       ((1 - frontier_fraction) × $0.00000020)
+  avg_cost_per_token = (api_fraction × $0.00000049) +
+                       ((1 - api_fraction) × $0.00000036)
+    api_fraction        = share routed to the GPT-4o-mini API tier
+    $0.00000049/token   = GPT-4o-mini blended at 500 in / 1500 out ($0.15/M, $0.60/M)
+    $0.00000036/token   = Llama-3-70B on a hosted open-weight endpoint, same mix
   avg_tokens_per_example = 2,000 (500 input + 1,500 output)
   pass_rate = 0.30 (empirical; improves to ~0.40 with better seed data)
 ```
 
 **Worked example at $10,000/day budget:**
 ```
-Frontier fraction:      30% (complex domains)
-Self-hosted fraction:   70% (instruction paraphrases)
-Blended cost/token:     0.30 × $0.00000045 + 0.70 × $0.00000020
-                      = $0.000000135 + $0.00000014
-                      = $0.000000275/token
+API tier fraction:        30% (complex domains)
+Open-weight fraction:     70% (instruction paraphrases)
+Blended cost/token:       0.30 × $0.00000049 + 0.70 × $0.00000036
+                        = $0.000000147 + $0.000000252
+                        = $0.000000399/token
 
-Daily token capacity:   $10,000 / $0.000000275 = 36.4B tokens
-Raw examples possible:  36.4B / 2,000 = 18.2M raw examples
-High-quality output:    18.2M × 0.30 = 5.46M examples/day
+Daily token capacity:   $10,000 / $0.000000399 = 25.1B tokens
+Raw examples possible:  25.1B / 2,000 = 12.5M raw examples
+High-quality output:    12.5M × 0.30 = 3.76M examples/day
 
 At target 1M/day, required budget:
-  1M / (18.2M / $10,000) = $549/day for generation alone
-  Add 7% for quality judging: $549 × 1.07 = $587/day
-  Add 15% for infrastructure (workers, storage, networking): $675/day
+  1M / (12.5M / $10,000) = $798/day for generation alone
+  Add 7% for quality judging: $798 × 1.07 = $854/day
+  Add 15% for infrastructure (workers, storage, networking): $982/day
 ```
 
-**Hardware sizing for self-hosted tier:**
+**Why the open-weight tier is rented, not owned:**
 ```
-Llama-3-70B on 4× H100 SXM5 (80GB HBM3):
+Llama-3-70B on 4× H100 SXM5 (80GB HBM3), if you ran the GPUs yourself:
   Throughput at 65% MBU:   ~1,800 tokens/sec (batch size 32)
   Daily token output:      1,800 × 86,400 = 155.5M tokens/day per pod
-  Cost per pod/day:        4 × H100 at $32/hr = $128/day (on-demand)
+  Cost per pod/day:        $32/hr for the 4-GPU pod × 24 h = $768/day
+                           (NOT $128 — the hourly rate must be multiplied by 24)
+  Implied cost/token:      $768 / 155.5M = $0.00000494/token
 
-At 70% self-hosted allocation:
-  Self-hosted tokens needed: 36.4B × 0.70 = 25.5B tokens/day
-  Pods required:             25.5B / 155.5M = 164 pods
-  Annualized cost:           164 × $128 × 365 = $7.66M/year
-  Reserved instance discount: ~40% → $4.6M/year
+At 70% open-weight allocation of the 25.1B-token budget:
+  Open-weight tokens needed: 25.1B × 0.70 = 17.6B tokens/day
+  Owned pods required:       17.6B / 155.5M = 113 pods
+  Annualized owned cost:     113 × $768 × 365 = $31.7M/year
+  With ~40% reserved discount:                  $19.0M/year
+
+  Same 17.6B tokens/day on a hosted open-weight endpoint at $0.00000036/token:
+    17.6B × $0.00000036 = $6,336/day = $2.31M/year
+
+Owning the GPUs is ~8x more expensive at this batch size and utilization, which is why
+the design rents the open-weight tier. Self-hosting only wins once you can drive a pod
+far past 1,800 tok/s (large batches, FP8, near-continuous load) — see the break-even
+question in Section 11.
 ```
 
 Cross-reference: [./cross_cutting/gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md) for reserved vs spot GPU cost modeling.
@@ -993,7 +1054,7 @@ Cross-reference: [./cross_cutting/gpu_pool_economics.md](./cross_cutting/gpu_poo
 ## 11. Interview Discussion Points
 
 **Q: Why can synthetic data match or exceed human-labeled data for instruction tuning?**
-Synthetic data from a frontier model covers the prompt distribution more uniformly than human labelers, who cluster around familiar topics and writing patterns. Human labelers are also inconsistent — inter-annotator agreement for instruction quality is typically 0.65-0.75 Fleiss' kappa. A well-calibrated LLM judge applied consistently can achieve higher consistency (σ ≈ 0.08 for a trained RM) while covering millions of examples per day that human labeling cannot reach. The caveat: for specialized domains (medical, legal, safety-critical), human expert review remains essential to catch subtle errors the LLM judge cannot detect.
+Synthetic data from a frontier model covers the prompt distribution more uniformly than human labelers, who cluster around familiar topics and writing patterns. Human labelers are also inconsistent: agreement on subjective instruction-quality ratings is routinely only moderate on the Fleiss/Cohen kappa scale, and varies enough across rubrics and annotator pools that a single headline kappa should not be quoted as an industry constant — measure it on your own rubric. A well-calibrated LLM judge applied consistently can achieve higher consistency (σ ≈ 0.08 for a trained RM) while covering millions of examples per day that human labeling cannot reach. The caveat: for specialized domains (medical, legal, safety-critical), human expert review remains essential to catch subtle errors the LLM judge cannot detect.
 
 **Q: How does diversity sampling prevent topic collapse, and what is the failure mode when it breaks?**
 Diversity sampling assigns generation probability inversely proportional to how many examples have already been generated for each topic, using a topic tree with 500 leaf nodes. The failure mode is stale weight state: if sampling weights are computed once at startup from historical totals, topics that began over-represented remain over-represented for the entire run. The fix is recalculating weights every 10,000 generations relative to the current run, not cumulative historical counts. Monitoring: track normalized entropy of the leaf distribution hourly; values below 0.6 indicate collapse.
@@ -1013,8 +1074,8 @@ Every example carries a content-addressed hash (SHA-256 of prompt + response). A
 **Q: Why does a 0.5% error rate in training data cause measurable model regression?**
 At 1M examples per training epoch, 0.5% = 5,000 defective examples. These examples are not distributed randomly — they often cluster in a specific topic or generation batch, creating systematic bias in a particular capability area. Models are highly sensitive to systematic biases in their training data: even a small number of examples that consistently reward the wrong behavior (e.g., verbosity, hedging, factual errors in a specific domain) are reinforced across many gradient steps. The effect compounds over multiple epochs.
 
-**Q: How is Scale AI's $1B ARR defensible against open-source synthetic data alternatives?**
-Scale AI's defensible moat is not the generation software (replicable) but the human annotation network (30,000+ vetted domain expert labelers), enterprise data handling compliance (SOC 2 Type II, HIPAA, classified environments), and the calibration feedback loop: Scale's quality signals from billions of human reviews improve their automated quality judges, which reduces the cost of human review required per new task. Open-source datasets like Magpie and UltraChat require no human review budget but produce lower-quality data for specialized domains (medicine, law, STEM) where factual accuracy cannot be assessed by a general LLM judge.
+**Q: What makes a commercial data vendor defensible against open-source synthetic data?**
+The moat is not the generation software, which is replicable in a week, but three things that are not: a vetted domain-expert annotation network, enterprise data-handling compliance (SOC 2 Type II, HIPAA, classified environments), and a calibration feedback loop in which quality signals from accumulated human reviews improve the automated judges, lowering the human-review cost per new task. Open-source datasets like Magpie and UltraChat require no human review budget but produce weaker data for specialized domains (medicine, law, STEM) where factual accuracy cannot be assessed by a general LLM judge. Revenue and headcount figures for private data vendors are not published; do not build an argument on them.
 
 **Q: What does Constitutional AI contribute compared to a trained reward model?**
 Constitutional AI enables quality scoring without any human-labeled preference data: the LLM self-critiques responses against a declared set of principles and revises them. This is useful during cold-start when you have no labeled data to train a reward model. The limitation is inconsistency: as the judge LLM's base model updates, the scoring distribution shifts without warning. A trained reward model produces consistent scores (σ ≈ 0.08 vs σ ≈ 0.22 for LLM-as-judge) but requires 10,000+ human-labeled pairs to bootstrap. The practical strategy: start with Constitutional AI, collect human judgments on 5,000 examples per month, train a reward model at 10K examples, switch to RM scoring at 6-9 months.
@@ -1024,17 +1085,25 @@ Break-even point: self-hosted GPU cost per token = frontier API cost per token.
 
 At Llama-3-70B on 4× H100 (on-demand $32/hr for the pod):
   Throughput: 1,800 tokens/sec = 155.5M tokens/day
-  Cost/day: $128
-  Cost/token: $128 / 155.5M = $0.000000823/token (8.2× higher than GPT-4o-mini's $0.00000045 blended)
+  Cost/day: $32/hr × 24 h = $768/day
+  Cost/token: $768 / 155.5M = $0.00000494/token
+              (10× higher than GPT-4o-mini's $0.00000049 blended, and 14× a hosted
+               open-weight Llama-3-70B endpoint at ~$0.00000036)
 
-Self-hosting breaks even only at scale: with reserved GPU pricing (40% discount), utilization above 70%, and amortizing model storage and infrastructure costs:
-  Reserved cost: $76.80/day, utilization 80%: effective $0.00000062/token
-  Still more expensive than GPT-4o-mini for low volume.
+Reserved GPU pricing (~40% discount) brings the pod to $460/day, or $0.00000296/token
+at the same throughput — still 6× the API. The only lever that closes the gap is
+throughput per pod, not the hourly rate:
+  break-even vs GPT-4o-mini requires $768 / $0.00000049 = 1.57B tokens/day per pod
+                                    = ~18,100 tokens/sec sustained
+That is roughly 10× the 1,800 tok/s assumed here, and reaching it means FP8 weights,
+very large batches, and near-continuous load — i.e. a dedicated, saturated deployment.
 
-Self-hosting becomes cost-effective at >500M tokens/day per deployment, when the blended reserved GPU rate falls below the API rate, or in air-gapped environments where API access is not permitted.
+Practical conclusion: self-hosting is a utilization bet, not a price bet. It pays off when
+you can keep a pod saturated 24/7, or when an air-gapped environment forbids API access
+at any price. For bursty synthetic-data generation, rent the open-weight endpoint.
 
 **Q: How do you handle multilingual quality judging without introducing language bias?**
-A single English-calibrated judge gives systematically lower scores to correct non-English responses because it pattern-matches on English-language fluency signals. The fix is a routing layer: classify each generated example's language, route to a language-specific judge (or a multilingual judge with language-specific few-shot calibration examples). Validate calibration by running the judge on 100 human-labeled examples per language and measuring Pearson correlation with human scores. Cohere's Aya dataset found that language-specific calibration improved audit agreement from 61% to 87% across 20 target languages.
+A single English-calibrated judge gives systematically lower scores to correct non-English responses because it pattern-matches on English-language fluency signals. The fix is a routing layer: classify each generated example's language, route to a language-specific judge (or a multilingual judge with language-specific few-shot calibration examples). Validate calibration by running the judge on 100 human-labeled examples per language and measuring Pearson correlation with human scores per language, not pooled. Multilingual data programs such as Cohere's Aya (65 human-curated languages, 114 in the wider Aya Collection) use per-language review pipelines for exactly this reason; the Aya Dataset paper does not publish a before/after judge-agreement figure, so do not quote one.
 
 Cross-references:
 - [./cross_cutting/llm_eval_harness_in_production.md](./cross_cutting/llm_eval_harness_in_production.md)

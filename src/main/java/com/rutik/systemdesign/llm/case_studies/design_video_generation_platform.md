@@ -29,7 +29,7 @@ Real systems: OpenAI Sora, Google Veo 2/3, Runway Gen-3, Pika Labs, Luma Dream M
 - Output quality: FVD (Frechet Video Distance) < 100; FID < 50 on benchmark prompt set
 - Content safety: 99.9% NSFW detection rate; false positive rate < 0.5%
 - Cost target: < $1.00 GPU cost per 10s 1080p video at scale
-- Peak concurrency: 100,000 queued jobs; 5,000 actively executing jobs at any time
+- Peak concurrency: 100,000 queued jobs; ~470 jobs executing concurrently at the daily average and ~1,400 at a 3x diurnal peak (derived in Section 10 from job mix and job duration — the executing count is GPU-bound and far smaller than the queue depth)
 - Storage durability: 99.999999999% (S3 standard); videos retained 7 days (free), 90 days (paid)
 
 ### Out of Scope
@@ -46,8 +46,11 @@ Real systems: OpenAI Sora, Google Veo 2/3, Runway Gen-3, Pika Labs, Luma Dream M
 ```
 Daily generation jobs:         500,000/day at scale
 Average job parameters:        10s video at 1080p, 24 fps
-Peak concurrent executing:     5,000 active jobs (GPU-bound ceiling)
+Avg concurrent executing:      468 active jobs (Section 10: sum of jobs x duration / 86,400)
+Peak concurrent executing:     ~1,400 active jobs at a 3x diurnal peak
 Peak queued:                   100,000 jobs in priority queues
+  (queue depth and executing count differ by 2 orders of magnitude: a job sits in the
+   queue for minutes but occupies a pod for only 45-180s)
 
 Free vs paid split:
   Free tier:   50% of jobs (250,000/day) — 480p, 5s, lower compute
@@ -78,20 +81,22 @@ H100 spot price:      $2.50/hr per GPU
 Standard job:         8 H100s x (180s / 3600s) x $2.50 = $1.00/job
 Draft tier job:       8 H100s x (45s / 3600s) x $2.50 = $0.25/job (4-bit, 4x fit per pod)
 
-Daily GPU cost:
+Daily GPU cost (Standard = 720p 10s = 90s of pod time = $0.50, per the Section 5 table):
   Premium:   75,000 jobs x $1.00  = $75,000
-  Standard: 175,000 jobs x $0.80  = $140,000
+  Standard: 175,000 jobs x $0.50  = $87,500
   Free:     250,000 jobs x $0.25  = $62,500
-  Total daily GPU cost:            ~$277,500
+  Total daily GPU cost:            ~$225,000
 
-Monthly GPU cost:     ~$8.3M
+Monthly GPU cost (all-spot):     ~$6.75M
 
 Revenue (paid tier):
   Premium:  75,000/day x $10/video  = $750,000/day
   Standard: 175,000/day x $3/video  = $525,000/day
-  Total daily revenue:               $1,275,000/day (~$38M/month)
-  COGS (GPU 22%):                    ~$8.3M/month
-  Gross margin:                      ~78% before bandwidth, storage, ops
+  Total daily revenue:               $1,275,000/day (~$38.3M/month)
+  COGS (GPU, all-spot):              $6.75M/month = 17.6% of revenue
+  Gross margin:                      ~82% before bandwidth, storage, ops
+  (Section 10 re-prices this on an 80/20 spot/on-demand blend: ~$9.6M/month, 25% COGS,
+   ~75% gross margin — the blend buys a job failure rate under 1% instead of 5%.)
 ```
 
 ### Storage Estimates
@@ -107,13 +112,14 @@ Retention (90-day paid, 7-day free):
   Paid:  250,000/day x 12 MB x 90 days = 270 TB  (S3 Standard)
   Free:  250,000/day x 12 MB x 7 days  = 21 TB   (S3 Standard-IA)
   Total hot storage:                      ~291 TB
-  S3 Standard cost at $0.023/GB:          ~$6,700/month
-  S3 Standard-IA at $0.0125/GB:           ~$260/month
+  S3 Standard on the 270 TB paid tier at $0.023/GB:  ~$6,200/month
+  S3 Standard-IA on the 21 TB free tier at $0.0125/GB: ~$260/month
 
-GPU pod fleet at peak:
-  5,000 concurrent standard jobs / 1 job per pod = 5,000 pods
-  5,000 pods x 8 H100s = 40,000 H100s
-  Practical ceiling: 2,000 active pods (10,000-job SLA queue, not all simultaneous)
+GPU pod fleet:
+  1 job per 8-H100 pod (no cross-job batching; see Section 11)
+  Average:  468 concurrent jobs -> 468 pods -> 3,744 H100s
+  3x peak:  ~1,400 concurrent jobs -> ~1,400 pods -> ~11,200 H100s
+  Provisioned fleet (Section 10, 1.5x growth headroom): 702 pods = 5,616 H100s
 ```
 
 ---
@@ -136,9 +142,9 @@ flowchart TD
     MOD["Content Moderator (pre-gen)\nNSFW text check"]
     QUEUE["Job Queue Service\nRedis sorted set\nper priority tier"]
     SCHED["Job Scheduler\nassigns GPU pods\ntier SLA enforcement"]
-    PREM["PREMIUM GPU pool\n8x H100 · 50 pods\nSLA 5m"]
-    STD["STANDARD GPU pool\n8x H100 · 200 pods\nSLA 15m"]
-    FREE["FREE GPU pool\n4x H100 4-bit\nSLA 60m"]
+    PREM["PREMIUM GPU pool\n8x H100 · 188 pods\nSLA 5m"]
+    STD["STANDARD GPU pool\n8x H100 · 220 pods\nSLA 15m"]
+    FREE["FREE GPU pool\n8x H100 4-bit · 156 pods\nSLA 60m"]
     DIT["DiT Inference Pod\n1. T5 text encode\n2. DiT denoise (50 steps, TP=8)\n3. VAE decode\n4. H.264 encode"]
     SSIM["Temporal Consistency Checker\nSSIM per frame"]
     C2PA["C2PA Watermarker\ninvisible embed + metadata sign"]
@@ -210,10 +216,10 @@ Text Prompt
 |  3D attention window                     |
 +-------------------------------------------+
     |
-    v  (z_0: latent video 4x spatial downsampled)
+    v  (z_0: latent video, 16x spatial downsample -> 1080p becomes 120x68 latents)
 +-------------------+
 | Causal VAE Decode |  z_0 → RGB frames
-| (3D conv decoder) |  (256 frames for 10s @ 24fps)
+| (3D conv decoder) |  (240 frames for 10s @ 24fps)
 +-------------------+
     |
     v
@@ -284,10 +290,12 @@ class Tier(Enum):
     PREMIUM = "premium"
 
 
+# Pod counts are the Section 10 sizing: concurrent jobs per tier plus a 20% preemption
+# buffer (PREMIUM 156 -> 188, STANDARD 182 -> 220, FREE 130 -> 156). Total 564 pods.
 TIER_CONFIG = {
-    Tier.PREMIUM:  {"gpu_pods": 50,  "sla_sec": 300,  "score_boost": -1_000_000},
-    Tier.STANDARD: {"gpu_pods": 200, "sla_sec": 900,  "score_boost": -500_000},
-    Tier.FREE:     {"gpu_pods": 100, "sla_sec": 3600, "score_boost": 0},
+    Tier.PREMIUM:  {"gpu_pods": 188, "sla_sec": 300,  "score_boost": -1_000_000},
+    Tier.STANDARD: {"gpu_pods": 220, "sla_sec": 900,  "score_boost": -500_000},
+    Tier.FREE:     {"gpu_pods": 156, "sla_sec": 3600, "score_boost": 0},
 }
 
 
@@ -379,7 +387,7 @@ class PriorityJobScheduler:
         return self._r.zcard(f"{self.QUEUE_PREFIX}{tier.value}")
 ```
 
-The Lua script makes `ZRANGE` + `ZREM` atomic, preventing two scheduler workers from dequeuing the same job. Dedicated GPU pod pools per tier (50 PREMIUM, 200 STANDARD, 100 FREE) guarantee that a FREE queue spike never steals capacity from paid tiers.
+The Lua script makes `ZRANGE` + `ZREM` atomic, preventing two scheduler workers from dequeuing the same job. Dedicated GPU pod pools per tier (188 PREMIUM, 220 STANDARD, 156 FREE) guarantee that a FREE queue spike never steals capacity from paid tiers.
 
 ### 4.2 DiT Inference Pipeline with CFG Batching Optimization
 
@@ -468,7 +476,7 @@ class DiffusionPipeline:
         return list(range(1000, 0, -1000 // num_steps))[:num_steps]
 ```
 
-CFG batching reduces per-step latency from 6s (2x sequential 3s passes) to 3.8s (1 batched pass with ~27% overhead for doubled batch size), saving ~30% of total generation wall-clock time. At 5,000 concurrent jobs, this is equivalent to adding 1,500 free GPU pods.
+CFG batching reduces per-step latency from ~4.3s (two sequential passes of ~2.15s) to the 3.0s per step assumed in Section 2 (one batched pass, which costs ~40% more than a single unbatched pass rather than 100% more), saving ~30% of total generation wall-clock time. At the 468 concurrent jobs of Section 10, recovering 30% of pod time is equivalent to adding about 140 free GPU pods.
 
 See also: [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md) for cost modeling of tensor-parallel pod configurations.
 
@@ -496,7 +504,9 @@ class TemporalConsistencyChecker:
     SSIM-based frame-pair scoring for generated video.
     Triggers re-generation with increased temporal_weight if below thresholds.
 
-    Thresholds derived from Runway internal benchmark (2024):
+    Thresholds are this platform's own operating points, calibrated against its human
+    preference eval. No vendor publishes SSIM acceptance thresholds; do not cite these
+    as an industry standard.
       mean_ssim >= 0.85 → acceptable temporal smoothness
       min_ssim  >= 0.70 → no single hard jump visible to users
     """
@@ -815,7 +825,7 @@ class VideoJobNotifier:
         raise NotImplementedError  # HMAC-SHA256 of JSON payload with tenant secret
 ```
 
-SSE preview frames: at denoising step 25 (halfway through), the partially denoised latent is decoded to a low-resolution preview frame (128x72 for 1080p jobs) and uploaded to S3. This preview is included in the step-25 SSE event, giving users visual feedback that generation is proceeding correctly — reducing support tickets about "is it actually running?" by 60% (Runway internal metric, 2023).
+SSE preview frames: at denoising step 25 (halfway through), the partially denoised latent is decoded to a low-resolution preview frame (128x72 for 1080p jobs) and uploaded to S3. This preview is included in the step-25 SSE event, giving users visual feedback that generation is proceeding correctly, which is the single cheapest way to suppress "is it actually running?" support tickets on a multi-minute job. (Any specific percentage reduction you see quoted for this is a vendor-internal figure that has never been published; measure it on your own ticket volume.)
 
 See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE connection pooling, Redis pub/sub architecture, and long-poll fallback for clients that cannot maintain persistent SSE connections.
 
@@ -839,7 +849,7 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 |------------|---------------------|----------|-----------|----------------------|
 | 480p native | 45s | $0.25 | 145 | 6.2/10 |
 | 720p native | 90s | $0.50 | 95 | 7.8/10 |
-| 720p→1080p upscaled | 90s + 10s | $0.58 | 108 | 7.9/10 |
+| 720p→1080p upscaled | 90s + 10s | $0.56 | 108 | 7.9/10 |
 | 1080p native | 180s | $1.00 | 78 | 8.6/10 |
 | 1080p, 50→20 DDIM | 72s | $0.40 | 98 | 7.7/10 |
 
@@ -847,15 +857,15 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 
 ## 6. Real-World Implementations
 
-**OpenAI Sora** (demo Feb 2024, GA Dec 2024): Uses a DiT architecture where video is represented as "spacetime patches" — the video equivalent of image patches in Vision Transformers. Each patch spans multiple frames, forcing the model to learn temporal structure directly in its attention layers. Generates up to 60s at 1080p. Training used approximately 10,000 H100s for several months ($65M+ GPU cost estimate for final training run alone). Pricing: Sora Turbo at $20/month (lower quality, ~2-5 min per video) and full Sora at $200/month (up to 60s, 1080p, 5-15 min). API not public as of May 2026 — available only through ChatGPT interface. Key limitation: no audio; cinematic quality but highest latency of major competitors.
+**OpenAI Sora** (demo Feb 2024, first release Dec 2024; Sora 2 since late 2025): Uses a DiT architecture where video is represented as "spacetime patches" — the video equivalent of image patches in Vision Transformers. Each patch spans multiple frames, forcing the model to learn temporal structure directly in its attention layers. Sora 2 **is** available in the OpenAI API as `sora-2` and `sora-2-pro`, billed per second of generated video ($0.10/s and $0.30/s respectively) at 1280x720 landscape or 720x1280 portrait, and it generates **synchronized audio** with the video — the "ChatGPT-only, silent video" description of the original Sora is no longer accurate. Consumer access remains bundled with ChatGPT subscriptions. Training compute for the original model was never disclosed; the widely repeated "10,000 H100s for months" figure is an outside estimate, not an OpenAI statement.
 
-**Google Veo 2/3** (2024-2025): Veo 2 integrated into VideoFX (consumer) and Vertex AI (enterprise). Veo 3 (announced Google I/O 2025) adds synchronized audio generation — the first major commercial model to generate video and audio together in a single pass. Google's primary training data advantage: YouTube's licensed video dataset (the largest high-quality video corpus available to any company, estimated 800PB+ of 1080p+ video). Veo 2 supports 4K output; Veo 3 reportedly 2x more temporally consistent than Veo 2 on the EvalCrafter benchmark. Enterprise pricing through Vertex AI: $0.35/second of generated video at 720p. Veo 3's hyper-realistic output caused multiple viral deepfake incidents in May 2025, accelerating EU AI Act enforcement discussions.
+**Google Veo 2/3** (2024-2025): Veo 2 shipped through consumer surfaces and Vertex AI (enterprise). Veo 3, announced at Google I/O in May 2025, was the first major commercial model to generate video and synchronized audio together in a single pass. Google's structural training-data advantage is its own licensed video library, which no competitor can match; published corpus sizes for it do not exist, so no figure is given here. Vertex AI bills Veo per second of generated video, with separate rates per model variant and for audio-on versus video-only — the rates change often enough that a number written down in a case study will be wrong by the time it is read; check the Vertex AI pricing page. Veo 3's photorealism drove a wave of deepfake incidents through 2025 and sharpened regulatory attention on synthetic-media labelling.
 
-**Runway Gen-3 Alpha** (Jun 2024): Fastest turnaround of major competitors — sub-3-minute generation for 10s 1080p. Focused on creative professionals (film, VFX, advertising). Notable features: "Motion Brush" (user paints region of video and describes motion direction), "Camera Controls" (dolly, zoom, orbit specified as JSON parameters to generation API). Pricing: $12/100 credits; 10 credits per second of video = $1.20/second. API publicly available, enabling third-party integrations. Strong Hollywood adoption for pre-visualization and VFX reference. FVD score on EvalCrafter benchmark approximately 89 (as of Q3 2024 public eval).
+**Runway Gen-3 Alpha** (Jun 2024): Fastest turnaround of major competitors at launch — sub-3-minute generation for 10s 1080p. Focused on creative professionals (film, VFX, advertising). Notable features: "Motion Brush" (user paints a region of video and describes motion direction) and "Camera Controls" (dolly, zoom, orbit specified as parameters to the generation API). Billing is credit-based, with credits consumed per second of generated video; plan prices and credit rates have changed repeatedly since launch and are not restated here. API publicly available, enabling third-party integrations. Strong adoption for pre-visualization and VFX reference. Public leaderboard FVD numbers for commercial models are not comparable across evaluations (different reference sets and frame counts), so none is quoted.
 
-**Pika Labs** (2023-2024): Discord-first launch strategy drove viral adoption; became the go-to tool for consumer video generation before Sora's release. Strongest in stylized and animated content (anime, 3D cartoon); weaker at photorealistic live action. Raised $80M Series A (Dec 2023) at $500M valuation on the back of viral Discord clips. Key product insight: Discord's UI forced users to see each other's generations in a shared feed, creating organic virality. Migrated to web app in 2024 but retained Discord as a channel.
+**Pika Labs** (2023-2024): Discord-first launch strategy drove viral adoption; became a leading consumer video generation tool before Sora's release. Strongest in stylized and animated content (anime, 3D cartoon); weaker at photorealistic live action. Key product insight: Discord's UI forced users to see each other's generations in a shared feed, creating organic virality. Migrated to a web app in 2024 but retained Discord as a channel. (Reported round sizes and valuations for Pika vary widely between secondary sources and are omitted.)
 
-**Kling (Kuaishou)** (2024): Chinese competitor; strongest on extended video duration — generates coherent 1-2 minute videos where most Western competitors top out at 10-30s. Model architecture undisclosed but likely hybrid DiT/UNet for the long-sequence case. Launched internationally via API with competitive pricing ($0.14/credit, approximately $0.50/10s video). Temporal consistency on character motion over 60+ seconds is its differentiating quality metric.
+**Kling (Kuaishou)** (2024): Chinese competitor; strongest on extended video duration — generates coherent 1-2 minute videos where most Western competitors topped out at 10-30s at the time. Model architecture undisclosed. Launched internationally via a credit-based API priced aggressively against Western incumbents. Temporal consistency of character motion over 60+ seconds is its differentiating quality claim.
 
 **Hailuo (MiniMax)** (2024): Known specifically for character consistency across scenes — the T2V-01 model maintains face identity and clothing across multiple generated clips better than competitors. Became viral in Q4 2024 for generating coherent character acting sequences. Underlying mechanism appears to be reference image conditioning: each generation is conditioned on a face embedding extracted from a user-provided or auto-generated character reference image, similar to IP-Adapter for image generation.
 
@@ -881,7 +891,7 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for SSE co
 | Latency (1080p frame pair) | 180ms on A10G | 22ms on A10G | 400ms on A10G |
 | VRAM | 6 GB | 2 GB | 8 GB |
 | Use case | 24fps → 60fps upsampling | Real-time preview; draft tier | Offline quality upsampling |
-| Open source | Yes (Google Research) | Yes (ECCV 2020) | Yes (CVPR 2019) |
+| Open source | Yes (Google Research, ECCV 2022) | Yes (ECCV 2022) | Yes (CVPR 2019) |
 
 ### Video Codecs
 
@@ -1041,20 +1051,39 @@ Resolution: (1) Drain affected nodes and replace with healthy instances. (2) Imp
 
 ## 9. Common Pitfalls and War Stories
 
-**Veo 3 Deepfake Viral Spread (Google, May 2025)**
-Google's Veo 3 generated hyper-realistic video indistinguishable from news footage. Within two weeks of limited release, multiple clips went viral on X (Twitter) and TikTok as purported real footage — a fake clip of a tornado destroying a specific city neighborhood, and a fabricated political speech, each receiving 10M+ views before debunking. Root cause: C2PA watermarking was embedded invisibly but no major social media platform checked C2PA metadata during upload. The visible watermark ("Made with Veo") was cropped out by re-uploaders. Impact: reputational damage to Google; European Parliament accelerated AI Act amendment hearings; Google added mandatory visible watermark (bottom-right overlay) for all consumer-facing Veo outputs within 72 hours of the incidents. Lesson: invisible watermarking alone is insufficient; platform-level watermark verification requires industry coordination that takes years; visible watermarks are the only reliable near-term safeguard.
+The incidents below mix one real, publicly reported phenomenon (synthetic-video virality after
+Veo 3) with **illustrative composites** for the operational failures. Where a company is named,
+only what that company publicly did is stated; the queue-starvation, upscaling, storage and
+prompt-injection stories carry constructed counts and dollar figures and are not public record.
 
-**Runway Queue Starvation at Launch (Jun 2024)**
-Runway Gen-3 Alpha launched publicly with a shared GPU pool across all tiers. Free-tier users submitted 10x the expected volume within 4 hours of launch. The single priority queue was overwhelmed: PREMIUM (paid) jobs waited 45 minutes for 10-second videos. Runway issued $180,000 in credit refunds in the first 24 hours and received significant negative press coverage. Root cause: GPU capacity was shared between all tiers; no dedicated capacity reservation guaranteed paid SLAs. Fix: Runway immediately split GPU capacity into dedicated pools per tier with hard minimums. The architectural change took 6 hours to deploy but reduced paid-tier wait times from 45 minutes to under 3 minutes. Lesson: shared GPU pools with soft priority are insufficient for commercial SLA guarantees — dedicated capacity per tier is required.
+**Synthetic-Video Virality After Veo 3 (2025)**
+Google's Veo 3, released in May 2025, produced photorealistic video that ordinary viewers could
+not distinguish from real footage, and synthetic clips circulated widely on social platforms
+through 2025. The structural failure is the one to internalize: Google shipped provenance
+signalling (SynthID watermarking plus a visible mark on consumer-tier output), but no major
+social platform verified provenance metadata on upload, and re-uploaders crop visible marks.
+Invisible watermarking alone is insufficient because detection requires the *distribution*
+platform to check it — that is industry coordination, not a feature you can ship. Specific view
+counts, legislative hearing schedules and 72-hour internal response timelines attributed to this
+episode circulate widely but are not sourceable; they are omitted rather than repeated.
 
-**Sora Undisclosed Training Economics**
-Sora's training cost is estimated at $65M-$130M in GPU compute (10,000 H100s × 90 days × $3/hr = $65M for the final run alone, with ablation runs adding 2x). At $20/month Sora Turbo pricing, OpenAI needs 3.25M paying subscribers just to recover the training cost — before any inference costs. The commercial model depends on bundling Sora with ChatGPT Plus as a retention feature rather than a standalone profitable product. Lesson: video generation is not economically viable as a standalone product at < $5M ARR.
+**Queue Starvation at Launch (illustrative composite)**
+A video platform launches with a shared GPU pool across all tiers. Free-tier users submit 10x the
+expected volume within hours. The single priority queue is overwhelmed: paid jobs wait 45 minutes
+for 10-second videos, and the company issues credit refunds and absorbs negative press. Root
+cause: GPU capacity shared between all tiers, with no dedicated capacity reservation backing the
+paid SLA. Fix: split GPU capacity into dedicated pools per tier with hard minimums — the change
+is hours of work but cuts paid-tier wait from 45 minutes to under 3. Lesson: shared GPU pools
+with soft priority cannot deliver a commercial SLA; only dedicated capacity per tier can.
+
+**Undisclosed Training Economics (order-of-magnitude exercise, not a reported figure)**
+OpenAI has never published Sora's training cost. The commonly repeated outside estimate assumes 10,000 H100s x 90 days x $3/GPU-hr = $64.8M for a single final run, with ablations plausibly doubling it. Treat that as an arithmetic exercise on assumed inputs, not a measurement: every one of the three inputs is a guess. What the exercise does establish robustly is the shape of the problem — at a $20/month consumer subscription, $65M of training compute is 3.25M subscriber-months of revenue before a single second of inference is paid for. That is why every major video model ships bundled into a broader subscription or priced per second for enterprise, rather than sold standalone.
 
 **Temporal Artifact After Resolution Upscaling**
-A major platform generated 720p videos then upscaled to 1080p with bicubic interpolation (40% GPU cost reduction). Temporal consistency was checked on 720p frames (mean_ssim 0.88 — passed). Bicubic upscaling introduced high-frequency flickering in hair and fabric regions invisible at 720p but prominent at 1080p. The defect appeared in 3.2% of all generated videos; 2.1M defective videos were delivered over 11 days before user complaints surfaced (8,400 complaints, 1.8-star rating for affected jobs). Fix: run temporal consistency check on upscaled frames, not source frames. Use Real-ESRGAN-Video (a temporally-aware upscaler) rather than bicubic. Lesson: any transformation applied post-consistency-check is an unchecked consistency risk.
+A major platform generated 720p videos then upscaled to 1080p with bicubic interpolation (40% GPU cost reduction). Temporal consistency was checked on 720p frames (mean_ssim 0.88 — passed). Bicubic upscaling introduced high-frequency flickering in hair and fabric regions invisible at 720p but prominent at 1080p. The defect appeared in 3.2% of all generated videos: at 500,000 jobs/day that is 16,000 defective videos a day, about 176,000 over the 11 days before complaints surfaced. Fix: run temporal consistency check on upscaled frames, not source frames. Use Real-ESRGAN-Video (a temporally-aware upscaler) rather than bicubic. Lesson: any transformation applied post-consistency-check is an unchecked consistency risk.
 
-**Storage Cost Explosion from Abandoned Free-Tier Outputs**
-A consumer platform stored all videos for 90 days uniformly across tiers. After 8 months, storage costs hit $340,000/month (85 TB in S3 Standard). Audit: 62% of free-tier videos were never downloaded; the platform paid $211,000/month to store content no user would ever view. Fix: 7-day deletion policy for free-tier videos with a countdown timer in the job history UI. Storage costs dropped 58% ($197,000/month savings); < 0.2% of free users objected. Lesson: free-tier abandoned outputs dominate storage costs; short retention on free tier is both economically necessary and user-acceptable.
+**Storage Cost Creep from Abandoned Free-Tier Outputs**
+A consumer platform stored all videos for 90 days uniformly across tiers. At this case study's own volumes that is 500,000 jobs/day x 12 MB x 90 days = 540 TB in S3 Standard, or 540,000 GB x $0.023 = **$12,400/month** — split evenly between the paid and free halves of the job mix. Audit: 62% of free-tier videos were never downloaded, so roughly $3,850/month bought storage no user would ever view. Fix: 7-day deletion policy for free-tier videos with a countdown timer in the job history UI, dropping the free half from 270 TB Standard to 21 TB Standard-IA and the monthly bill from $12,400 to about $6,450 — a 48% reduction, matching the Section 2 storage estimate. Note the magnitude: object storage at this scale is a four-figure monthly line item, not a six-figure one. Anyone quoting hundreds of thousands of dollars a month for tens of terabytes has confused storage with egress — check the arithmetic (`TB x 1,000 x $0.023`) before escalating. Lesson: free-tier abandoned outputs dominate *storage* volume, and short free-tier retention is both cheap to implement and user-acceptable — but if your storage line item looks enormous, the cost is almost certainly CDN egress, not S3.
 
 **Prompt Injection via Negative Prompt Field**
 The platform's content moderation classifier was applied only to the positive prompt field. A security researcher embedded bypass instructions in the negative prompt field — "negative prompt: [safety rules]" while putting target content in the positive prompt — partially bypassing moderation in models that parsed the negative prompt as a guidance signal. The bug affected ~4,500 jobs over 3 months (0.03% of attempts) before discovery. Fix: apply the NSFW text classifier to both positive and negative prompt fields identically; every user-controlled field is an attack surface regardless of its framing.
@@ -1108,10 +1137,14 @@ Spot vs on-demand blending:
   Effective cost with preemption: $1.36 x 1.05 = $1.43/job (still below $1.50 target)
 
 Monthly GPU cost at 500K jobs/day:
-  500,000 jobs/day x $1.43/job avg = $715,000/day x 30 = $21.45M/month
-  (Consistent with $8.3M figure in Section 2 which used all-spot pricing;
-   blended spot/on-demand increases cost 43% but reduces job failure rate
-   from 5% spot-only to < 1%)
+  $1.43 is the blended cost of a PREMIUM 1080p job, NOT the fleet average. Apply the
+  blend multiplier (1.36 for spot/on-demand x 1.05 for preemption = 1.428) to the
+  all-spot daily total from Section 2, not to the premium unit cost:
+    $225,000/day all-spot x 1.428 = $321,300/day x 30 = ~$9.6M/month
+  Cross-check against the fleet: 468 pods x 8 GPUs x $3.40/hr blended x 720 hr
+    = $9.17M/month. The two agree within the preemption factor.
+  (Section 2's ~$6.75M/month is the same fleet priced all-spot; the blend costs 43%
+   more and cuts the job failure rate from ~5% spot-only to < 1%.)
 ```
 
 ### Pod Fleet Sizing with SLA Constraints
@@ -1140,7 +1173,7 @@ Video generation cannot batch across jobs because each job's intermediate latent
 Temporal consistency in DiT models is enforced through 3D causal temporal attention layers that attend across frames within each denoising step. Each spatial token in frame N attends to corresponding tokens in the k=4 preceding frames via a sliding causal window. This forces the model to denoise each frame conditioned on its spatial neighbors in time, creating natural coherence. UNet-based video models (AnimateDiff, SVD) add temporal attention as a separate module between spatial layers, resulting in weaker coupling. The architectural difference is significant: DiT's spacetime patches treat video as a unified spatiotemporal sequence, while UNet treats it as spatial frames with temporal bridges. For production systems, this means DiT models require less post-processing to achieve acceptable temporal consistency, reducing the retry rate (< 5% vs 10-15% for UNet at equivalent SSIM thresholds).
 
 **Q: Why is async job submission mandatory for video generation, not just preferred?**
-Three independent reasons make synchronous video generation impractical regardless of user preference. First, HTTP connections across proxies, mobile networks, and load balancers have default timeouts of 30-120 seconds — well below the 180-second minimum generation time for standard jobs; the connection would drop before the response is ready. Second, web servers and API gateways (nginx, Kong, AWS API Gateway) have per-connection thread/goroutine costs; holding 5,000 connections open for 3-15 minutes each would exhaust the connection pool of any standard gateway. Third, mobile clients and browsers aggressively suspend background network connections; a user who minimizes the browser tab or locks their phone mid-generation would receive no result. The async model (submit → job_id → webhook/SSE) is not a convenience optimization — it is the only architecture that works across the realistic client diversity of a consumer product.
+Three independent reasons make synchronous video generation impractical regardless of user preference. First, HTTP connections across proxies, mobile networks, and load balancers have default timeouts of 30-120 seconds — well below the 180-second minimum generation time for standard jobs; the connection would drop before the response is ready. Second, web servers and API gateways (nginx, Kong, AWS API Gateway) have per-connection thread/goroutine costs; under synchronous generation every queued job would hold a connection too, so the gateway would need to hold roughly 100,000 connections open for 3-15 minutes each — not the ~470 that are actually executing — which exhausts the connection pool of any standard gateway. Third, mobile clients and browsers aggressively suspend background network connections; a user who minimizes the browser tab or locks their phone mid-generation would receive no result. The async model (submit → job_id → webhook/SSE) is not a convenience optimization — it is the only architecture that works across the realistic client diversity of a consumer product.
 
 **Q: What is the economic challenge that makes video generation harder to monetize than LLM serving?**
 LLM serving achieves high GPU utilization through continuous batching: hundreds of concurrent requests share KV cache pages on each GPU, achieving 65-85% HBM utilization with marginal cost near zero per additional token once the model is loaded. Video generation achieves 0% batching across jobs — each job monopolizes 8 GPUs for 3-15 minutes. The resulting unit economics: $1.00 GPU cost per standard 10-second video means the platform needs to charge at least $3-5/video to achieve 3-5x gross margin (vs LLM inference at $0.80/M tokens against $0.20 GPU cost). At $3-5/video, volume is limited (users generate far fewer videos than LLM queries), making fixed infrastructure costs harder to amortize. The only escape: either dramatically reduce per-job compute (faster models, quantization, fewer steps) or build into a subscription where the video feature drives retention for a broader product. This is why all major video generation platforms (Sora, Veo, Runway) are either subscription-bundled or enterprise-priced rather than offered purely on per-video pay-as-you-go.
@@ -1152,10 +1185,10 @@ The deepfake detection is scoped specifically to identity fraud — generating v
 CFG batching stacks the conditional and unconditional forward passes on the batch dimension, running them as a single forward pass of batch size 2 instead of two sequential forward passes of batch size 1. The theoretical gain is 50% latency reduction. In practice, the gain is 27-30% for three reasons: (1) the doubled batch size increases memory bandwidth demand, causing the GPU to operate slightly below peak MFU (Model FLOP Utilization) due to HBM bandwidth saturation; (2) all-reduce communication overhead for tensor parallelism across 8 GPUs scales with batch size — doubled batch means slightly more data in the all-reduce; (3) the T5 text encoder and VAE decoder (which do not participate in CFG batching) contribute fixed overhead to the total job time, diluting the per-step savings. Practical guidance: CFG batching is the single highest-ROI inference optimization for video generation; implement it before any other decoding optimization.
 
 **Q: How do you prevent PREMIUM queue starvation from FREE tier volume?**
-Three independent mechanisms guarantee PREMIUM SLA isolation: (1) dedicated GPU pod pools per tier — PREMIUM pods are never shared with STANDARD or FREE jobs; even if PREMIUM queue is empty, those pods idle rather than serving FREE jobs (protecting capacity for PREMIUM bursts); (2) scheduler drain order — the scheduler always checks PREMIUM before STANDARD before FREE, so a PREMIUM job that arrives while STANDARD jobs are running preempts the next STANDARD dispatch slot; (3) circuit breaker — if PREMIUM queue depth exceeds 20 jobs (2-minute backlog at 156-pod throughput), the scheduler immediately pauses FREE tier processing and redirects all spare capacity to PREMIUM. The combination means a FREE tier volume spike — even 10x expected volume — cannot delay a PREMIUM job by more than 30 seconds.
+Three independent mechanisms guarantee PREMIUM SLA isolation: (1) dedicated GPU pod pools per tier — PREMIUM pods are never shared with STANDARD or FREE jobs; even if PREMIUM queue is empty, those pods idle rather than serving FREE jobs (protecting capacity for PREMIUM bursts); (2) scheduler drain order — the scheduler always checks PREMIUM before STANDARD before FREE, so a PREMIUM job that arrives while STANDARD jobs are running preempts the next STANDARD dispatch slot; (3) circuit breaker — if PREMIUM queue depth exceeds 20 jobs (well under a 2-minute backlog against 188 PREMIUM pods), the scheduler immediately pauses FREE tier processing and redirects all spare capacity to PREMIUM. The combination means a FREE tier volume spike — even 10x expected volume — cannot delay a PREMIUM job by more than 30 seconds.
 
 **Q: Why does DiT scale better than UNet for video generation at large model sizes?**
-DiT (Diffusion Transformer) applies the standard Transformer scaling laws: performance improves predictably with parameters, data, and compute following a power law relationship similar to language model scaling laws. UNet's hierarchical encoder-decoder structure with skip connections introduces architectural bottlenecks: the skip connections between encoder and decoder stages create fixed-width information highways that do not scale with parameter count. At > 1B parameters, UNet quality gains flatten while compute costs continue increasing. DiT eliminates skip connections entirely — video is processed as a flat sequence of spacetime patches through uniform Transformer layers. Empirically: OpenAI's Sora (DiT, ~13B parameters) produces qualitatively better output than Stable Video Diffusion (UNet, ~1.5B parameters) not primarily because of parameter count but because of architectural scalability. Practical guidance: for production video generation at quality competitive with Sora or Veo, DiT architecture is the correct choice; UNet is appropriate only for lower-compute or community fine-tuned use cases.
+DiT (Diffusion Transformer) applies the standard Transformer scaling laws: performance improves predictably with parameters, data, and compute following a power law relationship similar to language model scaling laws. UNet's hierarchical encoder-decoder structure with skip connections introduces architectural bottlenecks: the skip connections between encoder and decoder stages create fixed-width information highways that do not scale with parameter count. At > 1B parameters, UNet quality gains flatten while compute costs continue increasing. DiT eliminates skip connections entirely — video is processed as a flat sequence of spacetime patches through uniform Transformer layers. Empirically: OpenAI's Sora (DiT; parameter count never disclosed) produces qualitatively better output than Stable Video Diffusion (UNet, ~1.5B parameters) not primarily because of parameter count but because of architectural scalability. Practical guidance: for production video generation at quality competitive with Sora or Veo, DiT architecture is the correct choice; UNet is appropriate only for lower-compute or community fine-tuned use cases.
 
 **Q: What does FVD measure, and why is FID alone insufficient for video quality evaluation?**
 FID (Frechet Inception Distance) measures the distributional distance between the feature embeddings of generated and real images using an Inception V3 network trained on ImageNet. For video, FID measures only per-frame quality — it is computed on a sample of individual frames and has no concept of temporal structure. Two models can achieve identical FID scores with completely different temporal coherence: one model might produce smooth, consistent motion; the other might generate each frame independently (flickering) but with identical per-frame quality distribution. FVD (Frechet Video Distance) addresses this by using a video-specific 3D convolutional network (I3D, trained on Kinetics-400) that captures both spatial and temporal features in its embeddings. The 3D feature space penalizes temporal inconsistency directly. In practice: track both FVD (temporal quality) and FID (spatial quality) in your eval pipeline; a model can have good FID but bad FVD if temporal attention is misconfigured, which corresponds exactly to the "visually sharp but flickering" failure mode users most frequently complain about.

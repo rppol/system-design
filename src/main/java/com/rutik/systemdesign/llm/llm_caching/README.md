@@ -9,10 +9,13 @@ probabilistic. The five distinct caching layers in an LLM production stack — e
 semantic, provider prompt (prefix KV), self-hosted KV-prefix, and embedding — each address
 different cost-latency tradeoffs and have different invalidation semantics.
 
-**Cost anchor:** A 100k-token context at 10 requests/second with a 70% prompt cache hit rate saves
-roughly 700k cached input tokens/second. At GPT-4o pricing ($2.50/1M), that is $1.75/second —
-$6,300/hour — recovered by caching stable prefixes. At 1M requests/day, a 60% semantic cache hit
-rate on FAQ-type queries at an average of 500 tokens/query saves $750/day at GPT-4o-mini pricing.
+**Cost anchor:** A 100k-token context at 10 requests/second with a 70% prompt cache hit rate serves
+roughly 700k input tokens/second from cache. On a mid-tier model at $2.50/1M input whose cache reads
+bill at 0.1x ($0.25/1M), the avoided spend is 700k x $2.25/1M = $1.575/second — about $5,670/hour —
+recovered by caching stable prefixes. At 1M requests/day, a 60% semantic cache hit rate on FAQ-type
+queries at an average of 500 tokens/query skips 300M input tokens/day, worth $750/day at that same
+$2.50/1M input rate (more once the avoided output tokens are counted, since a semantic hit skips the
+model call entirely).
 Full pricing math lives in [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md).
 
 ---
@@ -96,13 +99,20 @@ returns the cached response for that similar query.
 The model provider stores the KV-attention tensors for a fixed context prefix. Subsequent requests
 with the same prefix skip the attention computation for the cached portion.
 
-| Provider | Feature | Discount | Min cacheable tokens |
-|----------|---------|----------|---------------------|
-| Anthropic | `cache_control: {"type": "ephemeral"}` | 90% on cached tokens | 1,024 |
-| OpenAI | Automatic (no API change needed) | 50% on cached tokens | 1,024 |
-| Google Gemini | `context_caching` API | Variable | 32,768 |
+| Provider | Feature | Cache-read price | Min cacheable tokens |
+|----------|---------|------------------|---------------------|
+| Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off); writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
+| OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.50 in / $0.25 cached). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
+| Google Gemini | Implicit caching (on by default) plus explicit cache objects | Reduced rate; see the Gemini pricing page | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
 
-**The formula hiding behind that "Discount" column.** The discount is a ceiling, not a bill. What
+Two traps live in that last column. First, Anthropic's minimum is **per model and not monotonic in
+model size** — Opus 5 caches from 512 tokens while the older Opus 4.5 and Haiku 4.5 need 4,096, so
+"bigger model, smaller minimum" is a real ordering and you cannot infer it. Second, an undersized
+prefix **fails silently**: no error, the request is simply processed uncached. The only way to know
+is to read `cache_creation_input_tokens` and `cache_read_input_tokens` back off the response — if
+both are 0, your `cache_control` did nothing.
+
+**The formula hiding behind that cache-read price.** The discount is a ceiling, not a bill. What
 you actually pay is a blend of the cached price and the full price, weighted by how often you hit:
 
 ```
@@ -122,16 +132,16 @@ constant handed to you.
 |--------|---------------------|
 | `h` | Fraction of input tokens served from cache. A number from 0 to 1 |
 | `1 - h` | The share you still pay full freight on. Always the expensive half |
-| `p_cached` | Price per 1M cache-*read* tokens. $0.30/1M on Claude, $1.25/1M on GPT-4o |
+| `p_cached` | Price per 1M cache-*read* tokens. $0.30/1M on Claude Sonnet 5; $1.25/1M on the legacy 0.5x-tier gpt-4o |
 | `p_full` | List price per 1M uncached input tokens. The number on the pricing page |
 | `E` | The blended price per 1M — the number that actually shows up on the invoice |
 | `S` | How much of the list price you avoided. What you should report, not the discount |
 
-**Walk one example.** The 70% prompt cache hit rate from the cost anchor in Section 1, priced on
-both providers:
+**Walk one example.** The 70% prompt cache hit rate from the cost anchor in Section 1, priced on a
+0.1x cache-read tier and on a legacy 0.5x tier:
 
 ```
-  Anthropic Claude:  p_full = $3.00/1M, p_cached = $0.30/1M (90% off), h = 0.70
+  Claude Sonnet 5:   p_full = $3.00/1M, p_cached = $0.30/1M (0.1x), h = 0.70
 
       hit  portion:   0.70 x $0.30   =  $0.210
       miss portion:   0.30 x $3.00   =  $0.900
@@ -140,7 +150,7 @@ both providers:
 
       S = 1 - 1.110 / 3.00 = 0.63    ->  63% off the list price, NOT 90%
 
-  OpenAI GPT-4o:     p_full = $2.50/1M, p_cached = $1.25/1M (50% off), same h = 0.70
+  Legacy 0.5x tier (gpt-4o):  p_full = $2.50/1M, p_cached = $1.25/1M, same h = 0.70
 
       hit  portion:   0.70 x $1.25   =  $0.875
       miss portion:   0.30 x $2.50   =  $0.750
@@ -149,8 +159,12 @@ both providers:
 
       S = 1 - 1.625 / 2.50 = 0.35    ->  35% off
 
-  Same 70% hit rate, very different outcomes: the 90%-discount provider converts it into
-  63% savings, the 50%-discount provider into 35%.
+  Same 70% hit rate, very different outcomes: the 0.1x tier converts it into 63%
+  savings, the 0.5x tier into 35%. Check which tier your model is on before
+  promising a number -- current OpenAI models are also 0.1x (gpt-5.6-terra is
+  $2.50 in / $0.25 cached), so both major providers now land near 63% at h = 0.70;
+  but gpt-5.6 and later additionally bill cache WRITES at 1.25x, which the
+  gpt-4o-era models did not.
 ```
 
 **Why the `(1 - h)` term is the one that bites.** Because `p_full` is 10x `p_cached` on Claude, the
@@ -197,6 +211,13 @@ take to earn that back?"
                                                             $0.2342
 
       saving = 1 - 0.2342 / 2.1000 = 0.889   ->  88.9%
+
+  Same sum for the 1-hour TTL, where p_write = 2.0 x p_full = $6.00/1M:
+
+      N* = (6.00 - 3.00) / (3.00 - 0.30) = 3.00 / 2.70 = 1.11  ->  ceil  ->  2 reads
+
+  So the 5-minute TTL repays on the FIRST reuse; the 1-hour TTL needs TWO reuses
+  (three requests total) before it beats paying full price every time.
 ```
 
 **Why `N* = 1` is the whole argument for prefix caching.** The write penalty is only $0.75/1M while
@@ -315,12 +336,13 @@ The "from the very beginning" clause is the entire reason Pitfall 4 exists. A pr
 |--------|---------------------|
 | `L` | Tokens that match from position 0 until the first difference |
 | `B` | Cache granularity. vLLM PagedAttention uses 16 tokens per block |
-| `M` | Provider floor below which nothing is cached. 1,024 on Anthropic and OpenAI, 32,768 on Gemini |
+| `M` | Provider floor below which nothing is cached. 1,024 on OpenAI; **per-model** on Anthropic (512 to 4,096 — see the §4.3 table); 2,048-4,096 on Gemini |
 | `floor(L/B) x B` | L rounded down to a whole number of blocks. The partial trailing block is recomputed |
 | `cached` | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |
 
 **Walk one example.** The exact layout drawn above — 14,200 total tokens, 7,000 marked cacheable —
-under three scenarios:
+on Claude Sonnet 5, whose minimum cacheable prefix is `M` = 1,024, under three scenarios (run the
+same sum with `M` = 4,096 if you are on Opus 4.5 or Haiku 4.5 and scenario 2 gets worse, not better):
 
 ```
   Scenario 1: prefix byte-identical (the happy path)
@@ -563,7 +585,10 @@ def call_with_prompt_cache(
     user_message: str,
 ) -> str:
     response = _client.messages.create(
-        model="claude-opus-4-5",
+        # Sonnet 5: $3/$15 per MTok list, minimum cacheable prefix 1,024 tokens.
+        # The minimum is per-model — Opus 5 caches from 512, Opus 4.5 and
+        # Haiku 4.5 need 4,096. Check before assuming your prefix qualifies.
+        model="claude-sonnet-5",
         max_tokens=1_024,
         system=[
             {
@@ -587,19 +612,25 @@ def call_with_prompt_cache(
 
 ## 7. Real-World Examples
 
-**Perplexity AI** reports over 60% of inference requests hit the semantic cache for popular search
-queries. The cache is partitioned by query language and time window (queries from the last 24h are
-cached; older entries have a lower TTL for freshness). This alone reduces inference costs by
-approximately 40%.
+Note on sourcing: cache hit rates are almost never published by the companies that run them. The
+three shapes below are the recurring *patterns* worth knowing, with the numbers presented as
+illustrative planning figures rather than as reported facts about any named vendor.
 
-**Customer support bots (Intercom, Zendesk AI)** observe that the top 1,000 query clusters account
-for 60-70% of all questions. An exact-match cache on normalized queries achieves 25-35% hit rate;
-a semantic cache above that achieves 55-65% combined. The majority of queries are served without
-a model call.
+**AI search / answer engines** (Perplexity-style) are the textbook semantic-cache workload: popular
+queries follow a steep power law, so a semantic cache in front of the answer generator absorbs a
+large share of traffic. The design detail that matters is partitioning — by query language and by
+recency window, so a cached answer to "who won last night" cannot outlive the fact it encodes.
 
-**Cursor editor** uses Anthropic prompt caching for code context. The repository index is placed in
-a cached prefix block. Across a coding session, 80% of input tokens are served from the KV cache,
-reducing per-query inference cost by ~70%.
+**Customer support bots** (the Intercom Fin / Zendesk AI category) see heavily clustered intent: a
+few thousand query clusters cover most volume. The layered pattern is an exact-match cache on
+normalized queries first, then a semantic cache above it — the second layer is where most of the
+incremental hit rate comes from, because users paraphrase.
+
+**Coding assistants** (Cursor, Claude Code and similar) lean on *provider prompt caching* rather
+than response caching: the repository index and system prompt sit in a cached prefix block that is
+byte-identical across a session, while the user turn changes every request. Cursor's own docs
+confirm the mechanism — Anthropic prompt caching is applied server-side for Claude requests with no
+user-facing toggle — but do not publish a hit rate, so do not quote one.
 
 ---
 
@@ -648,9 +679,10 @@ threshold on production query logs; use metadata filters as secondary hard keys.
 
 **Pitfall 4 — Prompt cache miss from unstable prefix.** Adding a timestamp or user ID to the
 system prompt defeats the KV-prefix cache because every request has a unique prefix. At 10
-requests/second and a 100k-token context, this wastes $1.75/second in caching potential
-($6,300/hour at GPT-4o rates). Fix: move all dynamic content to the user turn; the system prompt
-must be byte-identical across all requests using the same cached prefix.
+requests/second and a 100k-token context, this throws away the $1.575/second of avoided spend from
+the Section 1 anchor — about $5,670/hour at a $2.50/1M input rate with 0.1x cache reads. Fix: move
+all dynamic content to the user turn; the system prompt must be byte-identical across all requests
+using the same cached prefix.
 
 ```python
 # BROKEN: dynamic values in the system prompt — unique prefix on every request
@@ -681,8 +713,8 @@ because the key format changed after a refactor. Fix: expose cache hit rate as a
 | Qdrant | Semantic cache store | Standalone; filtering; high-throughput |
 | LiteLLM | Proxy with built-in cache | Drop-in OpenAI-compatible; exact + semantic cache |
 | GPTCache | Semantic cache library | Open source; multiple backends and embedding models |
-| Anthropic API | Provider prompt caching | cache_control blocks; 90% discount on cached tokens |
-| OpenAI API | Provider prompt caching | Automatic; 50% discount; 1,024-token minimum |
+| Anthropic API | Provider prompt caching | cache_control blocks; reads at 0.1x, writes at 1.25x (5-min TTL) or 2.0x (1-hour TTL); per-model minimum prefix |
+| OpenAI API | Provider prompt caching | Automatic; reads at 0.1x on current models (0.5x on gpt-4o-era); 1,024-token minimum; writes billed at 1.25x from gpt-5.6 on |
 | vLLM | Self-hosted KV prefix cache | Automatic prefix caching (APC); TTFT reduction |
 | SGLang | Self-hosted KV prefix cache | RadixAttention; multi-level cache |
 | Memcached | Exact-match store | Simpler than Redis; horizontal scale; no persistence |
@@ -696,7 +728,8 @@ because the key format changed after a refactor. Fix: expose cache hit rate as a
 savings for identical queries. (2) Semantic cache: returns a cached response when the input is
 semantically similar above a cosine threshold; handles paraphrased queries. (3) Provider prompt
 caching (Anthropic cache_control, OpenAI automatic): caches KV-attention tensors for a stable
-context prefix; saves 50-90% on cached input tokens for shared system prompts. (4) Self-hosted
+context prefix; cache reads bill at 0.1x the base input rate on current Anthropic and OpenAI models
+(0.5x on the legacy gpt-4o tier), so shared system prompts get 50-90% off their cached tokens. (4) Self-hosted
 KV-prefix caching (vLLM APC, SGLang RadixAttention): GPU-resident LRU cache of KV tensors;
 reduces time-to-first-token for requests sharing a prefix. (5) Embedding cache: avoids re-embedding
 unchanged documents; critical for RAG performance.
@@ -735,12 +768,15 @@ problem — it reuses input computation while the model still samples fresh outp
 
 **Q: How does Anthropic prompt caching work and how do you maximize hit rate?**
 Anthropic caches the KV-attention tensors for any content block marked with
-`cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is 1,024 tokens; the TTL is
-5 minutes. To maximize hit rate: place the system prompt and tool definitions in cached blocks at
-the front of every request; ensure these blocks are byte-identical across requests — no timestamps,
-user IDs, or dynamic content; track `cache_read_input_tokens` vs `cache_creation_input_tokens` in
-usage metadata. The discount is 90% on cached input tokens ($3.00 → $0.30/1M for Claude 3.5
-Sonnet).
+`cache_control: {"type": "ephemeral"}`. The minimum cacheable prefix is per-model and non-monotonic
+— 512 tokens on Opus 5 and Fable 5, 1,024 on Sonnet 5 and Sonnet 4.6, 2,048 on Opus 4.7, 4,096 on
+Opus 4.6, Opus 4.5 and Haiku 4.5 — and the default TTL is 5 minutes, with a 1-hour tier available
+via `"ttl": "1h"`. To maximize hit rate: place the system prompt and tool definitions in cached
+blocks at the front of every request; ensure these blocks are byte-identical across requests — no
+timestamps, user IDs, or dynamic content; track `cache_read_input_tokens` vs
+`cache_creation_input_tokens` in usage metadata. Cache reads bill at 0.1x the base input price
+($3.00 → $0.30/1M on a Sonnet-class model). A prefix under the minimum fails silently — both usage
+counters come back 0 and you are billed full price with no error.
 
 **Q: How does vLLM automatic prefix caching (APC) work?**
 vLLM's APC maintains a GPU-resident LRU cache of KV tensors keyed by the SHA-256 of the token

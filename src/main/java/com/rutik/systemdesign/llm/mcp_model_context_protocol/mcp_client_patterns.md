@@ -74,12 +74,12 @@ distinct names, not that the model can choose among them.
 ## 3. Core Principles
 
 - **ClientSession per server**: each server gets its own session.
-- **Initialize once**: handshake at connection; never re-initialize without disconnect.
+- **Initialize once**: handshake at connection; never re-initialize without disconnect. One exception on HTTP: if a server returns 404 for your `MCP-Session-Id`, the session is gone and you must re-initialize without one.
 - **List capabilities + cache**: `list_tools`/`list_resources` called once at startup; refresh on `notifications/*/list_changed`.
 - **Prefix tools by server**: avoid name collisions in multi-server setups.
 - **Handle reconnection**: servers may restart; clients must detect and reconnect.
 - **Sampling roundtrip**: if server supports sampling, client must handle `sampling/createMessage` requests by calling the LLM and returning the result.
-- **Timeout per call**: default 60s for tool calls; configurable.
+- **Timeout per call**: SDKs default to roughly 60s and make it configurable; the spec mandates no value, only that senders set timeouts and issue `notifications/cancelled` when they lapse.
 
 ---
 
@@ -123,11 +123,11 @@ sequenceDiagram
     S-->>C: tool_result
     Note over C,S: server may push notifications
     S-->>C: notifications/tools/list_changed
-    C->>S: shutdown
-    S-->>C: ack
+    Note over C,S: no shutdown message in MCP
+    C->>S: close transport (stdio: close stdin · HTTP: close conn / DELETE session)
 ```
 
-Initialize exactly once per connection; everything after the handshake is request/response plus server-pushed notifications — `list_changed` is the only signal that invalidates the cached tool list.
+Initialize exactly once per connection; everything after the handshake is request/response plus server-pushed notifications — `list_changed` is the only signal that invalidates the cached tool list. Note the ending: MCP defines no `shutdown` request or `exit` notification, so the client tears the session down at the transport layer.
 
 ### Multi-Server Architecture
 
@@ -155,7 +155,7 @@ One `ClientSession` per server; the merged, prefix-namespaced tool list is what 
 sequenceDiagram
     participant S as Server
     participant C as Client
-    participant L as LLM (Claude API, GPT-4o, ...)
+    participant L as LLM (Claude API, OpenAI API, ...)
 
     S->>C: sampling/createMessage(prompt)
     C->>L: LLM call on the client's account/auth
@@ -174,6 +174,7 @@ Sampling inverts the usual direction: the server asks the client for an LLM call
 
 ```python
 import asyncio
+import os
 from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -286,7 +287,9 @@ class MCPClientManager:
 async def main():
     servers = [
         MCPServerConfig(name="github", command="python", args=["github_server.py"]),
-        MCPServerConfig(name="slack", command="npx", args=["@anthropics/slack-server"]),
+        # Use a package that actually exists; there is no "@anthropics/slack-server".
+        MCPServerConfig(name="memory", command="npx",
+                        args=["-y", "@modelcontextprotocol/server-memory"]),
     ]
     
     async with MCPClientManager(servers) as mcp:
@@ -409,7 +412,7 @@ except (asyncio.TimeoutError, ConnectionError):
 ## 12. Interview Questions with Answers
 
 **Q: Why does an MCP client need to call `initialize` first?**
-The initialize handshake negotiates protocol version and capabilities. Both sides learn what the other supports (e.g., does client support sampling? does server support notifications?). Without it, the connection is undefined.
+The initialize handshake negotiates the protocol version and both sides' capabilities, and the spec forbids sending anything except `ping` before it completes. Both sides learn what the other supports — does the client offer sampling, roots, elicitation? does the server offer tools, resources, prompts, and do its lists emit `listChanged`? Calling a method whose capability was never declared is a protocol violation, not just bad manners. On HTTP the handshake also fixes the value you must send in the `MCP-Protocol-Version` header on every later request.
 
 **Q: How do you avoid tool name collisions across multiple MCP servers?**
 Prefix each tool name with the server's logical name: `github_create_issue` from GitHub server, `gitlab_create_issue` from GitLab server. Routes calls by parsing the prefix. Standard pattern in Claude Desktop, Cursor.
@@ -418,13 +421,13 @@ Prefix each tool name with the server's logical name: `github_create_issue` from
 Once at session start (cache the list). Refresh when the server sends `notifications/tools/list_changed`. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
 
 **Q: What's sampling and how does the client handle it?**
-Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM (Claude, GPT-4o, etc); returns the result to the server. Useful when the server needs AI capability without bundling its own model access.
+Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM; returns the result to the server. Useful when the server needs AI capability without bundling its own model access.
 
 **Q: How do clients handle long-running server operations?**
 Per spec, tool calls should return within a reasonable timeout. For long ops, two patterns: (1) server returns a task_id quickly + provides a polling tool to check status; (2) server supports progress notifications during the call.
 
 **Q: What's the right timeout for tool calls?**
-60 seconds default in most SDKs. Configurable per call. For known long operations, increase. For interactive UIs, may want 5-10s with progress indication. Always have a hard cap to detect server hangs.
+Around 60 seconds by default in most SDKs, configurable per call — the spec sets no number, it only requires that you set one. For known long operations, increase, or use the experimental Tasks utility added in 2025-11-25. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
 
 **Q: How do you handle a server that crashes?**
 Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Re-initialize. Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
@@ -436,7 +439,7 @@ Yes — different connection methods, same `ClientSession` API afterward. Common
 Reads `claude_desktop_config.json` (path varies by OS — `~/Library/Application Support/Claude/` on macOS). The config lists servers with command/args/env. Claude Desktop spawns each at startup.
 
 **Q: What auth methods do MCP clients support?**
-For stdio: server inherits subprocess auth (e.g., env vars passed at launch with API keys). For HTTP: per 2025 spec, OAuth 2.0 with PKCE for user-authorized servers. Custom: server-specific auth via headers in HTTP transport.
+For stdio: the server takes credentials from the environment (e.g. env vars passed at launch) — the authorization spec explicitly does not apply to stdio. For HTTP: OAuth 2.1 with mandatory PKCE (`S256`) for user-authorized servers, with the authorization server discovered from RFC 9728 protected-resource metadata, and an RFC 8707 `resource` parameter so the token is bound to that one MCP server. Custom: server-specific auth via headers on the HTTP transport.
 
 **Q: How do you debug MCP client issues?**
 (1) Use MCP Inspector to verify the server works in isolation. (2) Enable verbose logging on the client (`MCP_LOG_LEVEL=debug`). (3) Inspect JSON-RPC traffic with a proxy or stdio interceptor. (4) Try Claude Desktop as a reference client — if it works there but not in your client, the bug is yours.
@@ -451,7 +454,7 @@ For stdio, the server runs as a subprocess in your trust boundary — treat care
 Use async I/O so connections multiplex; each session is lightweight. For 50+ servers, lazy-connect (only when first tool from that server is called). Monitor per-server health; isolate failures.
 
 **Q: What happens if a tool result is too large?**
-The MCP spec allows up to whatever the transport supports (HTTP: typically multi-MB; stdio: limited by pipe buffer). But large results bloat LLM context. Client should truncate before passing to LLM (50KB typical) or convert to a resource URI for on-demand reads.
+The MCP spec sets no size limit, so you get whatever the transport supports (HTTP: typically multi-MB; stdio: limited by pipe buffer). But large results bloat LLM context. Clients should truncate before passing to the LLM (50KB is a common in-house cap, not a standard) or have the server return a `resource_link` content block so the payload is fetched only on demand.
 
 ---
 

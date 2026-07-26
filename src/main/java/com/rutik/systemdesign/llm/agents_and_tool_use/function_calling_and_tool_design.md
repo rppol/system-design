@@ -49,23 +49,29 @@ Every major provider implements this differently in detail, but the underlying p
           "description": "City and country code, e.g. 'London, GB' or 'New York, US'"
         },
         "units": {
-          "type": "string",
-          "enum": ["celsius", "fahrenheit"],
-          "description": "Temperature units. Default to celsius unless user specifies."
+          "type": ["string", "null"],
+          "enum": ["celsius", "fahrenheit", null],
+          "description": "Temperature units. Pass null to default to celsius."
         },
         "days": {
-          "type": "integer",
-          "description": "Number of forecast days (1-7). Default to 1 for current conditions.",
+          "type": ["integer", "null"],
+          "description": "Number of forecast days (1-7). Pass null for current conditions only.",
           "minimum": 1,
           "maximum": 7
         }
       },
-      "required": ["location"],
+      "required": ["location", "units", "days"],
       "additionalProperties": false
     }
   }
 }
 ```
+
+Note the shape of `required`. Under `strict: true` **every** key in `properties`
+must appear in `required` — there is no such thing as an omitted optional field.
+"Optional" is expressed by adding `null` to the type union, as `units` and `days`
+do above. Listing only `["location"]` while declaring three properties is the
+single most common strict-mode schema rejection.
 
 ### Anthropic Tool Spec Format
 
@@ -102,7 +108,7 @@ tools = [
 messages = [{"role": "user", "content": "What's the weather in Paris and Tokyo?"}]
 
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     messages=messages,
     tools=tools,
     tool_choice="auto",          # or "required", "none", or specific tool
@@ -138,7 +144,7 @@ messages.append(response.choices[0].message)  # assistant's tool call message
 messages.extend(tool_results)                  # one tool result per call
 
 final_response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     messages=messages,
     tools=tools
 )
@@ -218,7 +224,9 @@ tool_choice={"type": "function", "function": {"name": "extract_entities"}}
 ```python
 # strict: true uses constrained decoding to guarantee valid JSON
 # arguments will always match the declared schema exactly
-# requires: additionalProperties: false, all nested objects declare properties
+# requires: additionalProperties: false on every object, all nested objects
+#           declare their properties, and EVERY property listed in `required`
+#           (optional fields are expressed as a null type union)
 
 {
     "name": "book_appointment",
@@ -386,9 +394,14 @@ flowchart TD
 
 ### OpenAI Assistants API — Built-in Tools
 
+The Assistants API is **deprecated** and shuts down on **August 26, 2026**; new work
+should use the Responses API (plus the Conversations API for thread state), which
+reached feature parity and adds computer use, MCP and deep research. The shape below
+is retained because the built-in-tool idea carries over directly.
+
 ```python
 assistant = client.beta.assistants.create(
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     tools=[
         {"type": "code_interpreter"},   # Python sandbox
         {"type": "file_search"},        # RAG over uploaded files
@@ -504,7 +517,7 @@ This is why "parallelize independent calls" is named the primary latency optimis
 
 2. **Argument hallucination without strict mode**: Without `strict: true`, models invent enum values, ignore required fields, and pass wrong types. Always use strict mode for production.
 
-3. **Tool result too large**: Returning a 10KB JSON response bloats context, degrades model reasoning, and increases cost. Truncate at ~500 words; summarize where possible. A model that ingested 10KB tool results over 10 steps uses 100KB of context — $0.50+ per run at GPT-4o prices.
+3. **Tool result too large**: Returning a 10KB JSON response bloats context, degrades model reasoning, and increases cost. Truncate at ~500 words; summarize where possible. A model that ingested 10KB tool results over 10 steps uses 100KB of context — $0.50+ per run at $5/1M input-token pricing (e.g. GPT-5.6 Sol).
 
 4. **Not handling tool errors**: Assuming tool calls always succeed. The model receives errors as observations and can recover — but only if you inject them as tool result messages with `status: "error"` rather than raising an exception.
 
@@ -539,7 +552,7 @@ Nothing is removed from the message list between steps. Step 1 sends one result,
 | `N` | Number of agent steps. 10 in the pitfall above |
 | `tokens_per_result` | One tool result converted to tokens. 10KB / 4 = 2,560 |
 | `N x (N+1) / 2` | Triangular number: total result payloads billed across all N calls |
-| `price_per_token` | $0.000005 for GPT-4o input, i.e. $5 per 1M tokens |
+| `price_per_token` | $0.000005, i.e. $5 per 1M input tokens (GPT-5.6 Sol list price) |
 
 **Walk one example.** Ten agent steps, 10KB of JSON per tool result:
 
@@ -567,7 +580,7 @@ The "$0.50+ per run" quoted in the pitfall only makes sense on the accumulating 
 | **LangChain tools** | Tool abstraction layer | 100+ pre-built tools |
 | **[LangGraph tool node](../agentic_frameworks/langgraph.md)** | Tool execution in graphs | Built-in error handling |
 | **Marvin** | Type-safe extraction | Maps LLM output to Python types |
-| **OpenAI Assistants** | Managed tool execution | Threads + built-in tools |
+| **OpenAI Assistants** | Managed tool execution | Deprecated; shuts down 2026-08-26 — use Responses API |
 | **E2B** | Code execution tool | Secure sandbox; fast spin-up |
 
 ---
@@ -581,7 +594,7 @@ A: Function calling is a native model capability where the model is trained to r
 A: When `parallel_tool_calls=True` (the default in OpenAI), the model can emit multiple tool calls in a single response, each with a unique `id`. You execute all of them (in parallel if independent), then inject one `role: "tool"` message per call, keyed by `tool_call_id`. When `parallel_tool_calls=False`, the model emits only one tool call per response, forcing sequential execution. Use parallel calls whenever the tools are logically independent — comparing two weather forecasts, searching multiple topics, or extracting entities from multiple documents. Use sequential when each call's result informs the next call's arguments.
 
 **Q: What is strict mode in OpenAI's function calling and when is it essential?**
-A: Strict mode (`"strict": true` in the tool spec) uses constrained decoding — the model generates tokens only from the set allowed by the JSON schema. This guarantees the arguments always match the declared schema exactly: no extra keys, no wrong types, no missing required fields. Requirements: `additionalProperties: false` on all objects, all nested objects must declare their properties. Strict mode is essential for: production systems where argument parsing failures cause hard errors, structured extraction pipelines, and anywhere tool call reliability matters more than slight latency overhead. The trade-off: strict mode disallows dynamic or creative argument structures the model might otherwise produce.
+A: Strict mode (`"strict": true` in the tool spec) uses constrained decoding — the model generates tokens only from the set allowed by the JSON schema. This guarantees the arguments always match the declared schema exactly: no extra keys, no wrong types, no missing required fields. Requirements: `additionalProperties: false` on all objects, all nested objects must declare their properties, and every key in `properties` must be listed in `required` — an "optional" argument is declared by adding `null` to its type union, never by leaving it out of `required`. Strict mode is essential for: production systems where argument parsing failures cause hard errors, structured extraction pipelines, and anywhere tool call reliability matters more than slight latency overhead. The trade-off: strict mode disallows dynamic or creative argument structures the model might otherwise produce.
 
 **Q: How do you write a tool description to maximize correct selection accuracy?**
 A: Include four elements: (1) what the tool does (mechanism); (2) when to call it (trigger condition — "call this when the user asks about X"); (3) when NOT to call it (disambiguation — "do not use for Y, use Z instead"); (4) examples of good call scenarios. Bad description: "Gets data." Good description: "Retrieves real-time stock prices for publicly traded companies. Call this when the user asks about current stock price, market cap, or recent price change. Do NOT use for historical prices — use get_historical_prices instead. Example: 'What is AAPL trading at?' → call with symbol='AAPL'." Description quality directly correlates with tool selection accuracy.
@@ -620,14 +633,14 @@ A: Parallelize when: the tool calls have no data dependency (neither call's argu
 A: Three layers of defense: (1) hard step limit — hard-code a maximum number of tool call rounds (typically 20-50 depending on task complexity); inject "You have N steps remaining — prioritize completing the task" at each step to give the model self-awareness; (2) repetition detection — after each tool call, compare the (tool_name, arguments) pair to all previous calls; if an exact duplicate appears, inject "You have already called this tool with these arguments and received the following result: [result]. Do not repeat this call. Try a different approach or conclude the task." (3) progress scoring — every 5 steps, ask a lightweight LLM call: "Based on the trajectory so far, is the agent making meaningful progress? YES or NO." If NO, inject a refocus message or abort. The repetition detection is the most important layer — infinite loops almost always manifest as repeated identical tool calls.
 
 **Q: How do you version tools and maintain backward compatibility in a live production system?**
-A: Version by appending `_v2`, `_v3` to the tool name when making breaking changes (parameter renames, removed required parameters, changed return schema). Non-breaking additions (new optional parameters with defaults, new optional return fields) do not require versioning — add them to the existing tool. Migration protocol: (1) add the new versioned tool to the spec alongside the old one; (2) add a deprecation notice to the old tool's description: "DEPRECATED: use `search_v2` which supports filtering. This tool will be removed 2025-09-01."; (3) monitor tool selection logs — the model will switch to the new tool if its description signals it is preferred; (4) after 30+ consecutive days of zero selection of the old tool, safely remove it. Never silently remove a tool the model might still select — the API will return an error for unrecognized tool call names.
+A: Version by appending `_v2`, `_v3` to the tool name when making breaking changes (parameter renames, removed required parameters, changed return schema). Non-breaking additions (new optional parameters with defaults, new optional return fields) do not require versioning — add them to the existing tool. Migration protocol: (1) add the new versioned tool to the spec alongside the old one; (2) add a deprecation notice to the old tool's description: "DEPRECATED: use `search_v2` which supports filtering. This tool will be removed 2026-09-01."; (3) monitor tool selection logs — the model will switch to the new tool if its description signals it is preferred; (4) after 30+ consecutive days of zero selection of the old tool, safely remove it. Never silently remove a tool the model might still select — the API will return an error for unrecognized tool call names.
 
 ---
 
 ## Best Practices
 
 1. **Write tool descriptions as triggers**: "Call this when X" and "Do NOT call this when Y" — disambiguate between similar tools explicitly.
-2. **Use strict mode in production**: It eliminates argument hallucination at zero reliability cost; required `additionalProperties: false` is the only constraint.
+2. **Use strict mode in production**: It eliminates argument hallucination at zero reliability cost; the constraints are `additionalProperties: false` on every object and every property listed in `required` (optional = null union).
 3. **Always structured tool results**: Return JSON with a `status` field; never raw prose; truncate to 500-word equivalent maximum.
 4. **Parallelize independent calls**: Identify tool calls with no data dependency and execute them concurrently; this is the primary latency optimization for agents.
 5. **Log every tool call**: name, arguments, result, latency — essential for debugging which tool selection decision caused an incorrect final answer.
@@ -653,7 +666,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     USER(["User Request"])
-    LLM["Travel Assistant LLM (GPT-4o, strict mode)\ntool selection based on descriptions + context"]
+    LLM["Travel Assistant LLM (strict mode)\ntool selection based on descriptions + context"]
     SF["search_flights\n(read-only)"]
     SH["search_hotels\n(read-only)"]
     GW["get_weather\n(read-only)"]
@@ -700,8 +713,11 @@ The read-only search tools run in parallel (cutting response latency from ~6 s s
 **Implementation**:
 
 ```python
+# Responses API tool shape: type/name/description/parameters at the top level.
+# (Chat Completions nests the same fields under a "function" key.)
 tools = [
     {
+        "type": "function",
         "name": "search_flights",
         "description": (
             "Search for available flights between two cities. "
@@ -715,19 +731,23 @@ tools = [
             "properties": {
                 "origin": {"type": "string", "description": "IATA code, e.g. 'JFK'"},
                 "destination": {"type": "string", "description": "IATA code, e.g. 'CDG'"},
-                "departure_date": {"type": "string", "description": "ISO date, e.g. '2025-06-15'"},
+                "departure_date": {"type": "string", "description": "ISO date, e.g. '2026-06-15'"},
                 "cabin": {
-                    "type": "string",
-                    "enum": ["economy", "business", "first"],
-                    "description": "Default to economy unless user specifies."
+                    # strict mode requires every property in `required`;
+                    # optionality is expressed with a null union, not omission
+                    "type": ["string", "null"],
+                    "enum": ["economy", "business", "first", None],
+                    "description": "Pass null to default to economy."
                 },
-                "passengers": {"type": "integer", "description": "Number of passengers (1-9)"}
+                "passengers": {"type": ["integer", "null"],
+                               "description": "Number of passengers (1-9); null means 1"}
             },
-            "required": ["origin", "destination", "departure_date"],
+            "required": ["origin", "destination", "departure_date", "cabin", "passengers"],
             "additionalProperties": False
         }
     },
     {
+        "type": "function",
         "name": "confirm_flight",
         "description": (
             "Book a specific flight that the user has explicitly chosen and approved. "
@@ -757,8 +777,8 @@ async def execute_tools(tool_calls: list) -> list:
     read_tools = {"search_flights", "search_hotels", "get_weather", "get_itinerary"}
     write_tools = {"confirm_flight", "confirm_hotel"}
 
-    read_calls = [tc for tc in tool_calls if tc.function.name in read_tools]
-    write_calls = [tc for tc in tool_calls if tc.function.name in write_tools]
+    read_calls = [tc for tc in tool_calls if tc.name in read_tools]
+    write_calls = [tc for tc in tool_calls if tc.name in write_tools]
 
     # Parallel execution for all read calls
     results = await asyncio.gather(*[execute_single(tc) for tc in read_calls])

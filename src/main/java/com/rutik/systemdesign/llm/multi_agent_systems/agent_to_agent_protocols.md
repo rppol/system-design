@@ -6,11 +6,11 @@
 
 Agent-to-agent (A2A) communication protocols define how autonomous AI agents discover each other, negotiate capabilities, delegate tasks, exchange results, and authenticate across trust boundaries. As multi-agent systems move from single-process orchestrators to distributed networks of specialized agents, standardized wire protocols become as critical as HTTP is to the web.
 
-Three major open specifications have emerged in 2024-2025:
+Three major open specifications emerged in 2024-2025, and the field has since consolidated around one of them:
 
-- **A2A** (Agent-to-Agent, Google 2025): task-oriented, HTTP/JSON + SSE, agent cards for capability advertisement, explicit task lifecycle state machine
-- **ACP** (Agent Communication Protocol, BeeAI/IBM): REST-based, supports synchronous and asynchronous message threading, open-source reference implementation
-- **ANP** (Agent Network Protocol): decentralized peer-to-peer agent discovery via Decentralized Identifiers (DID), no central registry dependency
+- **A2A** (Agent2Agent, Google, April 2025): task-oriented, agent cards for capability advertisement, explicit task lifecycle state machine. Google donated A2A to the **Linux Foundation on 2025-06-23**, and the specification reached **v1.0.0** under that governance. This is the survivor — treat it as the default.
+- **ACP** (Agent Communication Protocol, BeeAI/IBM, March 2025): REST-based, synchronous and asynchronous message threading. **ACP merged into A2A under the Linux Foundation in August 2025 and its repository is archived**; the BeeAI platform now speaks A2A. It is covered here for historical context and because its design choices (message threads, REST idioms) are still worth contrasting — not as a live alternative to pick.
+- **ANP** (Agent Network Protocol): decentralized peer-to-peer agent discovery via Decentralized Identifiers (DID), no central registry dependency. Still an early specification with a much smaller ecosystem.
 
 These protocols sit above [MCP (Model Context Protocol)](../mcp_model_context_protocol/README.md), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
 
@@ -34,7 +34,7 @@ Key insight: The hardest problems are not the happy path (send task, get result)
 
 **Capability advertisement**: Agents declare what they can do before a task is submitted. Callers can route intelligently without trial-and-error.
 
-**Explicit task lifecycle**: A task moves through well-defined states (submitted, working, input-required, completed, failed, cancelled). Both parties know exactly where the task stands at any moment.
+**Explicit task lifecycle**: A task moves through well-defined states (submitted, working, input-required, auth-required, completed, failed, canceled, rejected). Both parties know exactly where the task stands at any moment.
 
 **Authentication at the protocol layer**: Agents authenticate each other using standard mechanisms (API keys, OAuth 2.0, JWT) before any task data is exchanged. Security is not an afterthought.
 
@@ -48,11 +48,11 @@ Key insight: The hardest problems are not the happy path (send task, get result)
 
 ## 4. Types / Architectures / Strategies
 
-### 4.1 A2A — Agent-to-Agent Protocol (Google, 2025)
+### 4.1 A2A — Agent2Agent Protocol (Google, 2025; Linux Foundation since June 2025)
 
-A2A is an open specification published by Google in April 2025. It defines:
+A2A is an open specification published by Google in April 2025 and donated to the Linux Foundation on 2025-06-23, where it now sits at **v1.0.0**. It defines:
 
-**Agent Card**: A JSON document served at `/.well-known/agent.json` advertising the agent's capabilities, supported input/output modalities, authentication requirements, and endpoint URLs.
+**Agent Card**: A JSON document served at the RFC 8615 well-known path **`/.well-known/agent-card.json`** advertising the agent's capabilities, supported input/output modalities, authentication requirements, and endpoint URLs. (Early drafts used `/.well-known/agent.json`; code written against that path will 404 against a current server.)
 
 ```json
 {
@@ -80,21 +80,24 @@ A2A is an open specification published by Google in April 2025. It defines:
 }
 ```
 
-**Task Lifecycle States**:
+**Task Lifecycle States** — the v1.0 `TaskState` enum has nine values, not the six that early write-ups list:
 - `submitted`: task received, queued for processing
 - `working`: actively being processed by the agent
 - `input-required`: agent needs clarification from caller (multi-turn)
+- `auth-required`: agent needs additional credentials before it can proceed
 - `completed`: task finished successfully, result available
 - `failed`: terminal failure, error details available
-- `cancelled`: explicitly cancelled by caller
+- `canceled`: explicitly cancelled by caller (note the single-`l` spelling in the wire enum)
+- `rejected`: the agent declined the task outright, without attempting it
+- `unspecified`: the default/unknown zero value
 
-**Transport**: HTTP/JSON for task submission and polling; Server-Sent Events (SSE) for streaming responses; webhook callbacks for push notifications on long tasks.
+**Transport**: A2A v1.0 defines three bindings — **JSON-RPC 2.0**, **gRPC**, and **HTTP+JSON/REST**. Under the JSON-RPC binding the core methods are `a2a.message.send`, `a2a.message.sendStreaming`, `a2a.tasks.get`, `a2a.tasks.list`, `a2a.tasks.cancel`, `a2a.tasks.subscribe`, the `a2a.tasks.pushNotificationConfig.*` family, and `a2a.agent.getExtendedAgentCard`. Server-Sent Events (SSE) carry streaming responses; webhook callbacks carry push notifications on long tasks.
 
 **Multi-turn conversations**: When an agent reaches `input-required` state, it returns a question. The caller submits a follow-up message to the same task ID, resuming the conversation without losing context.
 
-### 4.2 ACP — Agent Communication Protocol (BeeAI/IBM)
+### 4.2 ACP — Agent Communication Protocol (BeeAI/IBM) — merged into A2A, August 2025
 
-ACP is a REST-based open protocol from the BeeAI project (IBM Research). It focuses on:
+ACP was a REST-based open protocol from the BeeAI project (IBM Research), donated to the Linux Foundation in March 2025. **In August 2025 it merged into A2A under the same foundation and its repository was archived**; BeeAI agents now expose A2A via an `A2AServer` adapter. Do not start a new integration on ACP. Its design is still instructive because it took different positions from A2A on the same problems:
 
 - **Message threading**: conversations are organized into threads; each message in a thread has a parent reference enabling tree-structured dialogue
 - **Synchronous mode**: caller blocks waiting for a response (suitable for fast agents)
@@ -102,7 +105,7 @@ ACP is a REST-based open protocol from the BeeAI project (IBM Research). It focu
 - **Multimodal payloads**: messages contain typed parts (text, file, binary data) rather than a single content string
 - **Agent discovery**: agents register with an ACP directory and expose a standard capabilities endpoint
 
-ACP is more REST-idiomatic than A2A and has a simpler state model, making it easier to adopt in traditional microservice environments.
+ACP was more REST-idiomatic than A2A and had a simpler state model, which made it easier to adopt in traditional microservice environments — and is precisely why A2A v1.0 later added an HTTP+JSON/REST binding alongside JSON-RPC. The merge is the clearest signal in this space that agent-protocol fragmentation is resolving toward one specification rather than several.
 
 ### 4.3 ANP — Agent Network Protocol
 
@@ -155,7 +158,7 @@ Enterprise deployments use private registries. Open ecosystems use public regist
 sequenceDiagram
     participant O as Orchestrator Agent
     participant S as Specialist Agent
-    O->>S: GET /.well-known/agent.json
+    O->>S: GET /.well-known/agent-card.json
     S-->>O: Agent Card (capabilities)
     O->>S: POST /tasks {id: "t-001", message: {...}}
     S-->>O: 202 Accepted {taskId: "t-001", status: "submitted"}
@@ -323,8 +326,12 @@ class AgentCard:
 
 
 async def fetch_agent_card(agent_base_url: str) -> AgentCard:
-    """Fetch and parse an agent's capability advertisement."""
-    well_known_url = f"{agent_base_url.rstrip('/')}/.well-known/agent.json"
+    """Fetch and parse an agent's capability advertisement.
+
+    The A2A v1.0 well-known path is /.well-known/agent-card.json. Early drafts
+    used /.well-known/agent.json; that path 404s against a current server.
+    """
+    well_known_url = f"{agent_base_url.rstrip('/')}/.well-known/agent-card.json"
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(well_known_url)
         response.raise_for_status()
@@ -341,23 +348,37 @@ def find_skill(card: AgentCard, skill_id: str) -> AgentSkill | None:
 
 ### 6.2 JWT-Authenticated A2A Task Submission
 
+The client below is written against a plain REST shape (`POST /tasks`,
+`GET /tasks/{id}`) to keep the authentication and lifecycle mechanics readable.
+A production client for A2A v1.0 targets one of the three standard bindings —
+JSON-RPC 2.0 (`a2a.message.send`, `a2a.tasks.get`, `a2a.tasks.cancel`), gRPC, or
+HTTP+JSON/REST — most easily via the official `a2aproject/a2a-python` SDK. The
+auth pattern, the state machine, and the polling logic transfer unchanged.
+
 ```python
 import time
 import uuid
 import httpx
 import jwt  # PyJWT
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 
 class TaskStatus(str, Enum):
+    """Subset of the A2A v1.0 TaskState enum that a client must handle.
+
+    The full enum also carries AUTH_REQUIRED, REJECTED and UNSPECIFIED.
+    Note the wire spelling of "canceled" -- one 'l'.
+    """
     SUBMITTED = "submitted"
     WORKING = "working"
     INPUT_REQUIRED = "input-required"
+    AUTH_REQUIRED = "auth-required"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
 
 
 @dataclass
@@ -504,7 +525,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_STATES = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+TERMINAL_STATES = {
+    TaskStatus.COMPLETED,
+    TaskStatus.FAILED,
+    TaskStatus.CANCELED,
+    TaskStatus.REJECTED,
+}
 
 
 async def execute_task_with_polling(
@@ -545,8 +571,11 @@ async def execute_task_with_polling(
                 raise RuntimeError(
                     f"Task {task.task_id} requires input but no handler provided"
                 )
-            # Pause backoff, handle clarification synchronously
-            question = task.result.get("question", "Agent requires clarification")
+            # Pause backoff, handle clarification synchronously.
+            # `result` is None until the task carries a payload, so guard it.
+            question = (task.result or {}).get(
+                "question", "Agent requires clarification"
+            )
             answer = await clarification_handler(question)
             task = await client.reply_to_task(task.task_id, answer)
             backoff = 1.0  # reset backoff after successful interaction
@@ -663,13 +692,13 @@ class AgentAuthValidator:
 
 ## 7. Real-World Examples
 
-**Google's A2A reference implementation** (2025): Google published a reference server and client in Python and TypeScript alongside the A2A specification. The Vertex AI Agent Builder platform uses A2A to connect specialized agents (coding agent, search agent, data agent) under an orchestrator.
+**A2A reference implementations** (2025): Google published reference servers and clients in Python and TypeScript alongside the A2A specification, and transferred them to the Linux Foundation with the spec in June 2025 — they now live under the `a2aproject` GitHub organization, not `google`. Seven companies including AWS, Microsoft, Cisco and Salesforce joined as founding members of the Linux Foundation project.
 
 **Enterprise HR automation**: An orchestrator agent receives a "onboard new employee" task. Via A2A it delegates to: an IT provisioning agent (creates accounts), an identity agent (sets up SSO), a payroll agent (initializes compensation), and a facilities agent (assigns desk). Each delegation uses JWT scoped to the minimum required operation. The orchestrator tracks four concurrent A2A tasks and combines results.
 
 **Research pipeline**: A research orchestrator delegates "summarize recent papers on RAG" to a search agent (finds papers via MCP web search tool) via A2A, then delegates "extract key findings" to an analysis agent. The analysis agent uses the input-required state to ask which aspects to prioritize before proceeding.
 
-**BeeAI ACP adoption**: IBM's internal agent platform uses ACP for inter-department automation agents. A contract review agent and a compliance checking agent communicate via ACP threads, with each message in the thread referencing the previous, building an auditable decision log.
+**BeeAI and the ACP-to-A2A migration**: IBM Research's BeeAI platform originally ran on ACP, with each message in a thread referencing the previous one to build an auditable decision log — the pattern a contract review agent and a compliance checking agent need. After the August 2025 merge, BeeAI agents expose the same capability over A2A through an `A2AServer` adapter, and consume external A2A agents through `A2AAgent`. The migration is the concrete example of why picking a protocol on ecosystem momentum, not feature checklists, is the right call.
 
 **ANP in open agent ecosystems**: Decentralized agent marketplaces being prototyped in 2025 use ANP + DID for agents from different companies to discover and authenticate each other without a shared trust authority. An agent at `did:web:agent.fintech-startup.com` can delegate a task to `did:web:agent.data-vendor.com` with full cryptographic verification and no intermediary.
 
@@ -679,19 +708,19 @@ class AgentAuthValidator:
 
 ### Protocol Comparison
 
-| Dimension | A2A (Google) | ACP (BeeAI/IBM) | ANP | MCP |
+| Dimension | A2A (Google / Linux Foundation) | ACP (BeeAI/IBM) — merged into A2A | ANP | MCP |
 |-----------|-------------|-----------------|-----|-----|
 | Primary use | Agent-to-agent tasks | Agent-to-agent messaging | Decentralized discovery | LLM-to-tool |
-| Transport | HTTP/JSON + SSE | REST HTTP/JSON | HTTP + DID resolution | HTTP/JSON-RPC |
-| Discovery | Registry / well-known URL | ACP directory | DID (decentralized) | Configured at startup |
+| Transport | JSON-RPC 2.0, gRPC, or HTTP+JSON/REST; SSE for streaming | REST HTTP/JSON | HTTP + DID resolution | HTTP/JSON-RPC |
+| Discovery | Registry / `/.well-known/agent-card.json` | ACP directory | DID (decentralized) | Configured at startup |
 | Authentication | API key / OAuth 2.0 / JWT | Bearer token / API key | DID-linked signatures | API key / local |
-| Task state machine | Yes (6 states) | Simplified (3 states) | None (message-based) | None (request/response) |
+| Task state machine | Yes (9 `TaskState` values) | Simplified (3 states) | None (message-based) | None (request/response) |
 | Streaming | SSE | Webhook / polling | Not specified | Yes (SSE) |
 | Push notifications | Yes | Yes | Yes (via DID service) | No |
 | Multi-turn | Yes (input-required state) | Yes (message threads) | Yes (message exchange) | No |
 | Decentralization | Central registry | Central directory | Fully decentralized | Central config |
-| Standard maturity | Published April 2025 | Active development | Early specification | Published Nov 2024 |
-| Best for | Structured task delegation | Conversational agents | Cross-org open networks | Tool invocation |
+| Standard maturity | Published April 2025; donated to the Linux Foundation June 2025; spec at v1.0.0 | **Merged into A2A August 2025; repo archived** | Early specification | Published Nov 2024 |
+| Best for | Structured task delegation | Historical reference — migrate to A2A | Cross-org open networks | Tool invocation |
 
 ### Latency Characteristics
 
@@ -759,9 +788,7 @@ decision.
 - Streaming progress updates matter to the caller (e.g., progressive report generation)
 
 ### Use ACP when:
-- Your agent communication is more conversational (message threads) than task-oriented
-- You operate in an IBM/BeeAI ecosystem with existing ACP tooling
-- You want simpler state management with a REST-idiomatic design
+- Essentially never, for new work: ACP merged into A2A in August 2025 and its repo is archived. If you already run ACP agents in an IBM/BeeAI environment, the migration path is the `A2AServer` adapter. If you wanted ACP for its REST idioms and simpler state model, A2A v1.0's HTTP+JSON/REST binding now covers that case.
 
 ### Use ANP when:
 - Building open, decentralized agent networks across organizational boundaries
@@ -955,9 +982,9 @@ async def delegate_to_specialist(task: dict):
 
 | Tool / Library | Role | Notes |
 |----------------|------|-------|
-| **google/a2a-python** | A2A reference SDK | Official Python implementation by Google (GitHub, 2025) |
-| **google/a2a-typescript** | A2A reference SDK | Official TypeScript implementation |
-| **BeeAI framework** | ACP implementation | IBM Research; includes ACP server/client and agent runner |
+| **a2aproject/a2a-python** | A2A reference SDK | Official Python implementation; moved from the `google` org to `a2aproject` with the Linux Foundation donation |
+| **a2aproject/a2a-js** | A2A reference SDK | Official JavaScript/TypeScript implementation, same org |
+| **BeeAI framework** | A2A implementation (was ACP) | IBM Research; ACP merged into A2A in Aug 2025, so use its `A2AServer` / `A2AAgent` adapters |
 | **PyJWT** | JWT creation and validation | `pip install PyJWT[crypto]`; use RS256 for agent auth |
 | **python-jose** | JOSE / JWT | Alternative to PyJWT with JWK set support |
 | **httpx** | Async HTTP client | SSE streaming via `client.stream()`; A2A task submission |
@@ -978,10 +1005,10 @@ async def delegate_to_specialist(task: dict):
 A2A solves capability advertisement, task lifecycle management, and standardized agent identity in one protocol. Existing RPC frameworks handle the transport layer but leave discovery, long-running task state, multi-turn conversation, and agent-specific authentication conventions to each implementation. A2A defines these at the protocol level so agents from different vendors interoperate without custom integration code.
 
 **Q: What is an agent card and what information does it contain?**
-An agent card is a JSON document served at `/.well-known/agent.json` that advertises an agent's identity, supported skills, input/output modalities, authentication requirements, and endpoint URLs. It is the machine-readable equivalent of an API's documentation — other agents fetch it to determine whether this agent can handle a given task before submitting anything.
+An agent card is a JSON document served at `/.well-known/agent-card.json` that advertises an agent's identity, supported skills, input/output modalities, authentication requirements, and endpoint URLs. It is the machine-readable equivalent of an API's documentation — other agents fetch it to determine whether this agent can handle a given task before submitting anything. Watch the path: early A2A drafts used `/.well-known/agent.json`, and clients still hardcoding that will 404 against a v1.0 server.
 
-**Q: Walk through the six A2A task lifecycle states and explain why input-required exists.**
-Tasks start as `submitted` (received, queued), transition to `working` (actively processing), then reach `completed`, `failed`, or `cancelled`. The `input-required` state exists for multi-turn scenarios: if the agent discovers mid-task that it needs clarification (ambiguous instruction, missing parameter, conflicting constraints), it pauses and prompts the caller rather than making an assumption or failing. The caller provides the answer via a follow-up message to the same task ID, resuming work without losing accumulated context.
+**Q: Walk through the A2A task lifecycle states and explain why input-required exists.**
+Tasks start as `submitted` (received, queued), transition to `working` (actively processing), then reach `completed`, `failed`, `canceled` or `rejected`; the v1.0 `TaskState` enum has nine values in total, adding `input-required`, `auth-required` and an `unspecified` zero value. The `input-required` state exists for multi-turn scenarios: if the agent discovers mid-task that it needs clarification (ambiguous instruction, missing parameter, conflicting constraints), it pauses and prompts the caller rather than making an assumption or failing. The caller provides the answer via a follow-up message to the same task ID, resuming work without losing accumulated context. `auth-required` is the same idea for credentials, and `rejected` distinguishes "I declined this" from "I tried and failed."
 
 **Q: How does A2A differ from MCP, and when would an agent use both simultaneously?**
 MCP is a client-server protocol where an LLM host calls tool servers (web search, calculator, database). A2A is a peer protocol where one autonomous agent delegates tasks to another autonomous agent. An agent uses both simultaneously when it has its own internal LLM that calls tools via MCP, but also exposes an A2A interface so orchestrators can assign it tasks, and itself delegates sub-tasks to specialist agents via A2A.
@@ -1023,7 +1050,7 @@ Implement retry with exponential backoff on the caller side: attempt submission 
 
 ## 13. Best Practices
 
-**Always fetch the agent card before submitting a task.** Verify the target agent supports the required skill, input modality, and authentication scheme before constructing and sending a task. Fail fast with a clear error rather than submitting a task the agent cannot process.
+**Always fetch the agent card before submitting a task**, from `/.well-known/agent-card.json`. Verify the target agent supports the required skill, input modality, and authentication scheme before constructing and sending a task. Fail fast with a clear error rather than submitting a task the agent cannot process.
 
 **Use short-lived, scoped JWTs for all agent authentication.** Maximum 5-minute TTL. Scope the audience to the specific target agent URL. Include a `jti` claim and maintain a short-lived token cache (< token TTL) to avoid re-signing every request while still rotating tokens frequently.
 

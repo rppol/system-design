@@ -46,7 +46,9 @@
 ```
 Users:              1M developers + 50M end-users (via apps built on the API)
 Requests/day:       10M TTS requests/day
-Average chars/req:  500 characters (approx 40 words, ~15 seconds of speech at 150 wpm)
+Average chars/req:  500 characters. English averages ~5.7 characters per word including the
+                    space, so 500 chars ~ 88 words ~ 35 seconds of speech at 150 wpm.
+                    (A common sizing error is to assume ~12 chars/word and land on 15 s.)
 Total chars/day:    10M x 500 = 5B characters/day
 
 Average QPS:        10M / 86,400 = 116 req/sec
@@ -55,8 +57,8 @@ Peak QPS (5x):      ~580 req/sec (voice agent platforms have sharp morning peaks
 
 ### Audio Volume Estimates
 ```
-Audio per request: 15 s x 24 kHz x 16-bit mono = 720 KB WAV; MP3 128kbps = 240 KB
-Daily audio:       10M requests x 240 KB = 2.4 TB/day generated (ephemeral — streamed
+Audio per request: 35 s x 24 kHz x 16-bit mono = 1.68 MB WAV; MP3 128 kbps = 560 KB
+Daily audio:       10M requests x 560 KB = 5.6 TB/day generated (ephemeral — streamed
                    directly; not stored unless user requests download endpoint)
 Audio CDN cache:   built-in voices + frequently repeated phrases: ~5% cache hit rate
                    (most TTS is unique per request; caching provides marginal benefit)
@@ -64,7 +66,11 @@ Audio CDN cache:   built-in voices + frequently repeated phrases: ~5% cache hit 
 
 ### GPU Compute Sizing
 ```
-Cartesia Sonic (SSM-based): processes 3,000 chars/sec on one A10G 24GB GPU
+Cartesia Sonic (SSM-based): ~3,000 chars/sec AGGREGATE on one A10G 24GB GPU across ~20
+concurrent streams. A single unbatched stream runs much faster than real time but far
+below 3,000 chars/sec on its own; the fleet math below uses aggregate throughput, and
+the per-request latency numbers in Section 4.1 are single-request latencies on an
+unsaturated GPU. Do not mix the two regimes.
 5B chars/day / 86,400 s   = 57,870 chars/sec average throughput needed
 Average fleet:              57,870 / 3,000 = 20 A10Gs for average load
 Peak fleet (5x avg):        100 A10Gs
@@ -86,10 +92,16 @@ Audio sample backup: 1M x avg 5 MB = 5 TB (S3, stored for dispute resolution, 90
 
 ### Cost Model
 ```
-GPU cost:    30 A10Gs x $0.60/hr = $18/hr = $432/day
+GPU cost:    30 A10Gs x $0.60/hr (spot/reserved rate; A10G on-demand is ~$1.00/hr on
+             g5.xlarge) = $18/hr = $432/day
 Revenue:     5B chars x $0.015/1K chars = $75,000/day
-Gross margin: ($75,000 - $432) / $75,000 = 99.4% (GPU-dominant; real margin after
-              infra/eng overhead is ~65-70%, consistent with ElevenLabs reported economics)
+             ($0.015/1K is a high-volume/enterprise contract rate. Public list prices are
+              several times higher: ElevenLabs charges roughly $0.05/1K chars on its
+              Flash/Turbo models and $0.10/1K on Multilingual.)
+Gross margin: ($75,000 - $432) / $75,000 = 99.4% on GPU alone. That number is not a real
+              margin — it omits everything except inference. No TTS vendor publishes gross
+              margin, so no vendor comparison is offered here; after infrastructure,
+              storage, support and engineering, expect a real gross margin far below this.
 ```
 
 ---
@@ -170,13 +182,13 @@ See also: [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for the We
 
 ### 4.1 Streaming TTS with Sub-200 ms TTFB
 
-The core engineering challenge: autoregressive TTS models generate audio tokens sequentially (left-to-right across time). Waiting for the complete audio before streaming produces 2-8 s latency on a 15 s response — eight times the 200 ms SLA.
+The core engineering challenge: autoregressive TTS models generate audio tokens sequentially (left-to-right across time). Waiting for the complete audio before streaming produces 2-8 s latency on a 35 s response — an order of magnitude past the 200 ms SLA.
 
 ```python
 # BROKEN: generates full audio before streaming — 2-8 s TTFB
 def synthesize(text: str, voice_id: str) -> bytes:
     # This blocks for the entire audio duration before returning a single byte.
-    # For 500 characters (~15 s of speech), this takes 3-8 s wall-clock on A10G.
+    # For 500 characters (~35 s of speech), this takes 3-8 s wall-clock on A10G.
     # The user hears nothing for 3-8 s, then the entire audio plays at once.
     audio = tts_model.generate(text, voice_id)   # blocks for full duration
     return audio                                  # caller waits for this entire call
@@ -299,7 +311,8 @@ class TTSStreamHandler:
                         chunks[i + 1],
                         embedding,
                         output_format,
-                        context_audio=audio_bytes[-48_000:],  # last 2s at 24kHz/16-bit
+                        # 2 s at 24 kHz / 16-bit = 48,000 samples = 96,000 BYTES
+                        context_audio=audio_bytes[-96_000:],
                     )
                 )
 
@@ -526,22 +539,35 @@ import numpy as np
 
 class AudioWatermarker:
     """
-    Spread-spectrum frequency-domain watermarking.
-    Embeds a 64-bit payload (generation_id hash) by applying imperceptible phase shifts
-    across 64 pseudo-randomly selected frequency bins, one bit per bin.
+    Blind frequency-domain watermarking via phase quantisation (QIM / dither modulation).
+    Embeds a 64-bit payload (generation_id hash) across 64 pseudo-randomly selected
+    frequency bins, one bit per bin.
+
+    Why quantisation and not a raw phase shift: a detector never has the original audio,
+    so "shift this bin's phase by +delta for a 1" is undetectable — the absolute phase of
+    a bin carries no information about which way it was nudged. Quantising the phase to a
+    lattice makes the bit recoverable from the received signal alone: bit 0 snaps the phase
+    to a multiple of STEP, bit 1 to a multiple offset by STEP/2. The detector reads the
+    residue modulo STEP. Any scheme that "detects" by testing `phase > 0` is broken.
 
     Properties:
-      - Inaudible: phase shifts < 0.05 radians, below human auditory threshold
-      - Robust: survives MP3 re-encoding, ±20% speed change, 20 dB additive noise
-      - Detection accuracy: 99.7% on clean audio; 94% on heavily compressed audio (128 kbps MP3)
-      - Detection rate on stripped/tampered audio: raises DetectionFailure with no false positive
+      - Inaudible: maximum phase displacement is STEP/2 = 0.10 rad, in mid-frequency bins
+      - Robust to: MP3/AAC re-encoding at >= 128 kbps, moderate additive noise
+      - NOT robust to: time-stretch, resampling, or pitch shift. Any operation that moves
+        energy between FFT bins destroys the lattice. See the speed-perturbation war story
+        in Section 9 — this is a known, structural limitation of blind spectral
+        watermarking, not an implementation defect, and it is why C2PA signed manifests
+        are the complement rather than the substitute.
+      - Detection accuracy figures quoted anywhere in this design are this platform's own
+        measurements on its own corpus, not published benchmark results.
 
     C2PA metadata (visible, not hidden) is separately embedded in the audio container
     as a JSON block in the ID3 or RIFF INFO chunk — required by EU AI Act Article 50.
     """
 
     SAMPLE_RATE = 24_000
-    PHASE_SHIFT_RADIANS = 0.04      # imperceptible to human listeners
+    QUANT_STEP_RADIANS = 0.20       # lattice step; max displacement STEP/2 = 0.10 rad
+    DETECT_MIN_MARGIN = 0.25        # mean normalised distance-to-lattice below this = watermark
     SEED_PHRASE = b"tts_platform_watermark_v1"
 
     def embed(self, audio: np.ndarray, generation_id: str) -> np.ndarray:
@@ -560,12 +586,17 @@ class AudioWatermarker:
         # FFT
         spectrum = np.fft.rfft(audio)
 
-        # Embed: for each bit, shift phase of the corresponding bin
-        for bit_idx, (bit_val, bin_idx) in enumerate(zip(payload_bits, freq_bins)):
-            phase_delta = self.PHASE_SHIFT_RADIANS if bit_val else -self.PHASE_SHIFT_RADIANS
+        # Embed: quantise each bin's phase onto the lattice for its bit.
+        # bit 0 -> phase congruent to 0 (mod STEP); bit 1 -> congruent to STEP/2.
+        step = self.QUANT_STEP_RADIANS
+        for bit_val, bin_idx in zip(payload_bits, freq_bins):
             magnitude = np.abs(spectrum[bin_idx])
             current_phase = np.angle(spectrum[bin_idx])
-            spectrum[bin_idx] = magnitude * np.exp(1j * (current_phase + phase_delta))
+            offset = (step / 2.0) * bit_val
+            # Snap to the nearest lattice point for this bit: displacement <= STEP/2.
+            k = np.round((current_phase - offset) / step)
+            new_phase = k * step + offset
+            spectrum[bin_idx] = magnitude * np.exp(1j * new_phase)
 
         # IFFT and clip to valid range
         watermarked = np.fft.irfft(spectrum, n=len(audio))
@@ -573,28 +604,36 @@ class AudioWatermarker:
 
     def detect(self, audio: np.ndarray) -> str | None:
         """
-        Detects watermark and returns generation_id SHA-256 hex prefix (first 16 chars),
-        or None if no watermark detected (detection confidence below threshold).
+        Blind detection: recovers the 64-bit payload from the received audio alone and
+        returns it as hex, or None if the phases do not sit on the lattice (i.e. the
+        audio is unwatermarked, or the lattice was destroyed by resampling).
         """
         freq_bins = self._select_bins(len(audio))
         spectrum = np.fft.rfft(audio)
+        step = self.QUANT_STEP_RADIANS
 
         recovered_bits: list[int] = []
+        residual_distances: list[float] = []
         for bin_idx in freq_bins:
-            phase = np.angle(spectrum[bin_idx])
-            # Positive phase shift → bit=1, negative → bit=0
-            # Use small threshold to account for noise
-            recovered_bits.append(1 if phase > 0 else 0)
+            phase = float(np.angle(spectrum[bin_idx]))
+            residue = phase % step                      # position within one lattice cell
+            # Nearest lattice point is either 0/step (bit 0) or step/2 (bit 1).
+            d0 = min(residue, step - residue)
+            d1 = abs(residue - step / 2.0)
+            recovered_bits.append(0 if d0 <= d1 else 1)
+            # Normalised distance to the CHOSEN lattice point: ~0 if watermarked,
+            # uniformly distributed up to 0.5 if the audio was never marked.
+            residual_distances.append(min(d0, d1) / (step / 2.0))
 
         if len(recovered_bits) < 64:
             return None
+        if float(np.mean(residual_distances)) > self.DETECT_MIN_MARGIN:
+            return None   # phases are not on the lattice: no watermark present
 
         payload_bytes = self._bits_to_bytes(recovered_bits[:64])
-        hex_repr = payload_bytes.hex()
-
-        # Confidence check: verify recovered payload is plausible
-        # (in production: compare against generation_id lookup table in Redis)
-        return hex_repr if self._confidence_check(recovered_bits) else None
+        # Caller resolves this 64-bit payload against the generation_id table in Redis;
+        # an unresolvable payload is itself a negative detection.
+        return payload_bytes.hex()
 
     def _select_bins(self, signal_length: int) -> list[int]:
         """Deterministic bin selection using platform secret seed."""
@@ -618,15 +657,11 @@ class AudioWatermarker:
             result.append(byte_val)
         return bytes(result)
 
-    def _confidence_check(self, bits: list[int]) -> bool:
-        """
-        Check that recovered bits form a valid watermark (not random noise).
-        In production: verify first 16 bits match platform identity prefix.
-        """
-        platform_prefix_bits = self._bytes_to_bits(
-            hashlib.sha256(self.SEED_PHRASE).digest()[:2]
-        )
-        return bits[:16] == platform_prefix_bits
+    # Note: there is deliberately no separate "confidence check" on the bit VALUES.
+    # The payload is a hash of generation_id, so it has no fixed prefix to compare
+    # against — a prefix check would reject every genuine watermark. Confidence comes
+    # from the lattice-residual test in detect(), plus resolving the payload against
+    # the generation_id table.
 ```
 
 ### 4.4 Multi-Speaker Real-Time Conversation
@@ -739,7 +774,8 @@ class ConversationTTSManager:
             ):
                 audio = chunk.audio_bytes
                 # Update prosody context tail for next chunk
-                self._previous_audio_tail = audio[-48_000:]   # last 2 s at 24kHz/16-bit
+                # 2 s at 24 kHz / 16-bit = 48,000 samples = 96,000 bytes
+                self._previous_audio_tail = audio[-96_000:]
                 yield audio
 
             self._synthesis_queue.task_done()
@@ -767,9 +803,11 @@ class VoiceSimilarityEval:
     Automated voice clone quality check using speaker embedding cosine similarity.
     Replaces MOS (Mean Opinion Score, requires human listeners) for automated pipelines.
 
-    EqualErrorRate (EER) for speaker verification: < 1.5% (industry benchmark for
-    ECAPA-TDNN on VoxCeleb1 test set). Cosine similarity > 0.85 corresponds to
-    perceptual MOS > 4.2/5 in ElevenLabs internal human evaluation studies.
+    EqualErrorRate (EER) for speaker verification: ECAPA-TDNN reports 0.87% EER on the
+    VoxCeleb1-O test set (Desplanques et al., 2020), so a < 1.5% operating point is
+    comfortable. The mapping from cosine similarity to perceptual MOS below is this
+    platform's own calibration against its quarterly human listening panel; no TTS vendor
+    publishes such a mapping, so do not attribute these thresholds to one.
     """
 
     TIER_THRESHOLDS = [
@@ -844,15 +882,47 @@ class VoiceSimilarityEval:
 
 ## 6. Real-World Implementations
 
-**ElevenLabs** (founded 2022, $1.1B valuation 2024, $80M Series B): the market leader in commercial TTS. Instant voice cloning from a 30 s sample; 29 languages; Eleven Turbo v2 model for ultra-low latency (< 75 ms TTFB on their Flash tier). API-first with usage-based pricing ($0.015/1K chars on Creator plan). Voice actor marketplace with revenue sharing (voice actors earn per-character royalty when their listed voice is used). Mandated voice consent verification after the Biden robocall incident in February 2024 — Professional Voice Clones now require an identity verification step. Publishes a Safety Policy requiring that clones of public figures may only be used for non-deceptive purposes.
+Funding rounds, valuations and acquisitions in this market turn over fast and are widely
+mis-reported in secondary coverage; they are omitted below rather than asserted unverified.
+Product architecture and published pricing are stated only where they can be checked against
+the vendor's own current documentation.
 
-**Cartesia (Sonic)** (founded 2024, $65M Series B at $500M valuation): differentiated by SSM (State Space Model) architecture — Mamba-based, not transformer-based. The key engineering advantage: Mamba processes audio tokens with O(1) memory per step (constant state size), vs transformer's O(n) growing KV cache. This enables genuine streaming synthesis with fixed, predictable latency at any output length. Claimed TTFB < 50 ms. Used heavily by [voice agent](../voice_agents/README.md) companies (Bland AI, Retell AI, Vapi) where latency is critical. API-only product; no consumer voice library. Processing speed: processes in real time on a single A10G with multiple concurrent streams.
+**ElevenLabs**: the market leader in commercial TTS. Instant voice cloning from a 30 s sample;
+its current TTS models advertise 32 languages (its dubbing product covers 29 — a common source
+of confusion). The Flash/Turbo model line targets ultra-low latency. API-first with usage-based
+pricing: per its published API pricing, roughly **$0.05 per 1,000 characters on Flash/Turbo and
+$0.10 per 1,000 characters on Multilingual**, with subscription tiers bundling a monthly
+character allowance (for example, the $22/month Creator tier includes 220,000 characters, which
+is exactly $0.10/1K). Voice actor marketplace with per-character revenue sharing. Mandated voice
+consent verification after the January 2024 Biden robocall incident — Professional Voice Clones
+now require an identity verification step. Publishes a safety policy restricting clones of
+public figures to non-deceptive uses.
 
-**PlayHT** (founded 2023, $10M Series A): notable for 142-language support and voice cloning from 3 s samples (vs competitors' 30 s). PlayDialog model specifically optimized for conversational TTS (vs narration). The 3 s clone feature attracted developer attention but produced lower MOS (3.4 vs 4.2 for 30 s samples) — PlayHT A/B tested that most users preferred quality over speed of enrollment and made 30 s the default in 2024, with 3 s as "quick preview." Strong developer community; self-serve API with generous free tier.
+**Cartesia (Sonic)**: differentiated by an SSM (State Space Model) architecture — Mamba-based,
+not transformer-based. The key engineering advantage: Mamba carries O(1) state per decode step
+(constant-size recurrent state) rather than a transformer's O(n) growing KV cache. This enables
+genuine streaming synthesis with flat, predictable per-step latency at any output length, which
+is the property that matters for voice agents. Marketed on sub-100 ms model latency; treat the
+exact advertised number as a moving target. Used by voice agent platforms
+([voice agents](../voice_agents/README.md)) where latency is the product. API-only; no consumer
+voice library.
 
-**LMNT** (founded 2022, acquired by Resemble AI 2024): ultra-low latency specialist; claimed < 50 ms TTFB. Used by AI companies for voice agent backends. Introduced "flash synthesis" — dedicated inference path that bypasses certain quality layers to achieve minimum latency. Acquisition by Resemble AI signals consolidation in the voice AI space as voice cloning commoditizes.
+**PlayHT**: notable for very broad language coverage (advertised at 140+) and voice cloning from
+samples as short as 3 s, against competitors' 30 s. The PlayDialog model line is tuned for
+conversational rather than narration TTS. The 3 s clone is a genuine differentiator on
+enrollment friction and a genuine regression on clone fidelity — the quality gap between a 3 s
+and a 30 s enrollment is the durable engineering point, independent of any specific MOS numbers.
 
-**Wellsaid Labs** (founded 2019, $20M Series A): enterprise-focused studio narration. Human voice actor partnerships with explicit consent contracts and revenue sharing. Strongest at long-form content: e-learning modules, IVR systems, audiobook production. Less emphasis on real-time latency (their primary use case is batch generation of narration scripts, not live conversation). SOC 2 Type II certified; preferred vendor for Fortune 500 companies with compliance requirements. Differentiated by human-in-the-loop voice quality review for Premium tier.
+**LMNT**: ultra-low latency specialist marketed on sub-100 ms TTFB, used as a voice agent
+backend. Introduced a "flash" synthesis path that bypasses certain quality layers to minimise
+latency. (Ownership of LMNT has changed; the specific acquirer and date are not restated here
+because they could not be confirmed against a primary source.)
+
+**WellSaid Labs**: enterprise-focused studio narration. Human voice actor partnerships with
+explicit consent contracts and revenue sharing. Strongest at long-form content: e-learning
+modules, IVR systems, audiobook production. Less emphasis on real-time latency — the primary use
+case is batch generation of narration scripts, not live conversation. Sells into compliance-
+sensitive enterprises, and differentiates on human-in-the-loop quality review for its top tier.
 
 ---
 
@@ -860,11 +930,15 @@ class VoiceSimilarityEval:
 
 ### TTS Model Comparison
 
+TTFB and RTF columns are this platform's own bench measurements on an A10G plus vendor-advertised
+figures for the closed APIs; MOS columns are internal listening-panel scores. None of these are
+comparable published benchmark results, and vendor latency claims change with every model release.
+
 | Model | TTFB (streaming) | RTF | Clone Quality MOS | Languages | License | Self-Hostable |
 |---|---|---|---|---|---|---|
 | Cartesia Sonic | < 50 ms | 0.05 | 4.3 | 17 | Commercial API | No |
 | XTTS v2 (Coqui) | 150-200 ms | 0.15 | 4.1 | 17 | CPML (non-commercial) | Yes |
-| ElevenLabs Turbo v2 | < 75 ms | 0.07 | 4.5 | 29 | Commercial API | No |
+| ElevenLabs Flash / Turbo | < 100 ms | 0.07 | 4.5 | 32 | Commercial API | No |
 | Bark (Suno) | 500-1,500 ms (full-gen) | 0.50 | 4.0 | 13 | MIT | Yes |
 | F5-TTS (2024) | 200-300 ms | 0.20 | 4.2 | 8 | MIT | Yes |
 | StyleTTS2 | 180-250 ms | 0.18 | 4.2 | 2 (EN/ZH) | MIT | Yes |
@@ -981,17 +1055,21 @@ Resolution: (1) Publish updated watermark version as `watermark_version="v2"` in
 
 ## 9. Common Pitfalls & War Stories
 
-**ElevenLabs Biden Voice Clone Incident (February 2024)**: a robocall used ElevenLabs to clone President Biden's voice, instructing New Hampshire primary voters not to vote. The clone was traced to an ElevenLabs account within 24 hours of the recording going viral. ElevenLabs suspended the account, issued a public statement, and mandated identity verification and explicit consent workflows for Professional Voice Clones within two weeks. The FCC issued an emergency declaratory ruling within 30 days banning AI voice deepfakes in political robocalls. Impact: the incident triggered the broadest regulatory action against TTS platforms to date and became the catalyst for consent verification across the industry. Any platform without single-use consent tokens and identity verification is one viral deepfake away from emergency regulatory intervention.
+The first item below is public record. The five that follow are **illustrative composites**:
+the mechanisms are real and recur, but the counts, percentages and internal metrics are
+constructed to make the failure concrete and are not verified reports.
 
-**Prosody Discontinuity at Chunk Boundaries**: early streaming TTS in a 2023 production voice agent platform (anonymized, Series B fintech) produced audible clicks and pitch jumps at sentence boundaries. Each chunk was synthesized independently with no context of the previous chunk, so the model initialized its prosody state fresh for each sentence — resulting in abrupt tempo changes between sentences. Users described it as "robot voice" despite high per-sentence quality. The team measured 23% of chunk transitions as having perceptual discontinuity in human listening tests. Fix: pass the last 2 s of the previous chunk's PCM audio as conditioning context to the TTS engine for each subsequent chunk. Discontinuity rate dropped to 1.4% after the fix. Implementation cost: 48 KB of extra data per chunk synthesis call (2 s × 24 kHz × 16-bit = 96,000 bytes); negligible latency impact (< 5 ms extra for context encoding).
+**ElevenLabs Biden Voice Clone Incident (January 2024)**: a robocall days before the January 23, 2024 New Hampshire primary used a cloned President Biden voice to tell voters not to vote. Voice-forensics analysis attributed the clone to ElevenLabs, and the account was suspended within days. ElevenLabs then mandated identity verification and explicit consent workflows for Professional Voice Clones. The FCC issued a declaratory ruling on February 8, 2024 — under three weeks later — confirming that AI-generated voices in robocalls are illegal under the TCPA. Impact: the incident triggered the broadest regulatory action against TTS platforms to date and became the catalyst for consent verification across the industry. Any platform without single-use consent tokens and identity verification is one viral deepfake away from emergency regulatory intervention.
+
+**Prosody Discontinuity at Chunk Boundaries**: early streaming TTS in a 2023 production voice agent platform (anonymized, Series B fintech) produced audible clicks and pitch jumps at sentence boundaries. Each chunk was synthesized independently with no context of the previous chunk, so the model initialized its prosody state fresh for each sentence — resulting in abrupt tempo changes between sentences. Users described it as "robot voice" despite high per-sentence quality. The team measured 23% of chunk transitions as having perceptual discontinuity in human listening tests. Fix: pass the last 2 s of the previous chunk's PCM audio as conditioning context to the TTS engine for each subsequent chunk. Discontinuity rate dropped to 1.4% after the fix. Implementation cost: 96 KB of extra data per chunk synthesis call (2 s x 24 kHz x 16-bit = 48,000 samples = 96,000 bytes — slice bytes, not samples, or you will silently pass 1 s of context); negligible latency impact (< 5 ms extra for context encoding).
 
 **PlayHT 3-Second Clone Quality Surprise**: PlayHT launched voice cloning from 3 s samples as a differentiator in 2023, marketing it as "the fastest enrollment in the industry." Initial user reaction was positive (low friction). But MOS scores for 3 s clones averaged 3.4 vs 4.2 for 30 s clones — a perceptible quality gap. User retention for 3 s clone users was 23% lower than for 30 s clone users over 90 days (internal metric). An A/B test showed 78% of users preferred the 30 s quality when presented with both. PlayHT changed the default enrollment to 30 s (with 3 s as "quick preview" mode) in late 2023. Lesson: enrollment friction and clone quality are in direct tension; users will tolerate 30 s enrollment if they understand the quality benefit.
 
-**GPU Memory Fragmentation on Audiobook Synthesis**: a publishing company's pipeline synthesized 10-minute audiobook chapters (12,000 characters per chapter) as single API calls to an XTTS v2 deployment. The autoregressive model's KV cache grows linearly with output length: 12,000 chars ≈ 9 minutes of audio ≈ 12,960,000 time-domain samples at 24 kHz ≈ 26 MB of intermediate KV state on GPU. After processing 15-20 simultaneous chapter requests, the A10G (24 GB HBM) exhausted memory and crashed with `CUDA out of memory`. The crash lost all in-progress synthesis for active requests. Fix: chunk long requests at the API gateway level into 200-char segments; synthesize and concatenate server-side; pipeline synthesis so GPU generates segment N+1 while CPU encodes and buffers segment N. Memory footprint per segment: 200 chars ≈ 9 seconds audio → 2.1 MB KV state. Stable at 100 simultaneous requests.
+**GPU Memory Fragmentation on Audiobook Synthesis**: a publishing company's pipeline synthesized audiobook chapters of 12,000 characters as single API calls to an XTTS v2 deployment. At the ~5.7 chars/word, 150 wpm rate used throughout this design, 12,000 characters is about 2,100 words, or **14 minutes** of audio — 20.2M samples at 24 kHz. The autoregressive model's KV cache grows linearly with output length, so a single chapter carried tens of megabytes of intermediate state on GPU. After a couple of dozen simultaneous chapter requests, the A10G (24 GB HBM) exhausted memory and crashed with `CUDA out of memory`, losing all in-progress synthesis. Fix: chunk long requests at the API gateway into 200-char segments (about 14 seconds of audio each, 1/60th of the KV state); synthesize and concatenate server-side; pipeline so the GPU generates segment N+1 while the CPU encodes and buffers segment N. Stable at 100 simultaneous requests.
 
 **Consent Token Replay Attack**: a malicious user (anonymized enterprise platform, 2023) captured a legitimate consent token JWT from a victim user's browser via a phishing page. The JWT had a 24-hour expiry. The attacker waited until the legitimate user had completed their enrollment, then used the same JWT to enroll the victim's voice under the attacker's account, creating a clone they could use to impersonate the victim in voice agent calls. The 24-hour window gave the attacker time to extract meaningful content. Fix: single-use consent tokens (Redis SETEX with 10-min TTL, `NX` flag to detect first use, delete on successful use). Any second attempt with the same JWT returns `ConsentError: token already used`. The attack surface reduced from 24 hours to 0 seconds post-use. Lesson: consent tokens must be single-use; treating them like API keys (long-lived, reusable) breaks the consent model entirely.
 
-**Watermark Stripping via Speed Perturbation**: in late 2024, a researcher published a paper demonstrating that a 10% speed increase (applying a pitch-preserving time-stretch) reduced watermark detection accuracy from 99.7% to 41% for the spread-spectrum approach used by a major TTS provider (not named but details match ElevenLabs' architecture). A simple Python script using librosa's `time_stretch` with `rate=1.1` broke the watermark. The platform responded by embedding the watermark at multiple redundant frequency scales and adding a second watermark in the time domain. Detection accuracy recovered to 91% against 10% time-stretch and 87% against 20%. Lesson: spread-spectrum watermarking provides deterrence and attribution for good-faith users; it does not provide cryptographic guarantees against determined adversaries. C2PA signed manifests (unforgeable without the platform's RSA private key) are the complement, not the substitute.
+**Watermark Stripping via Speed Perturbation**: a pitch-preserving time-stretch of as little as 10 percent (`librosa.effects.time_stretch(rate=1.1)`, three lines of Python) collapses detection for any blind spectral watermark, including the phase-quantisation scheme in Section 4.3. The reason is structural, not a bug: resampling moves signal energy between FFT bins, so the bins the detector reads are no longer the bins the embedder wrote, and the phase lattice is destroyed. Mitigations are partial — embed redundantly at multiple frequency scales, add an independent time-domain mark, and prepend a synchronisation preamble so the detector can estimate and undo the stretch before reading. None of these restore clean-audio detection rates. No specific vendor is named here and no published attack paper is cited, because the underlying weakness is generic to the technique rather than an implementation defect in any one product. Lesson: spread-spectrum watermarking provides deterrence and attribution for good-faith users; it does not provide cryptographic guarantees against determined adversaries. C2PA signed manifests (unforgeable without the platform's RSA private key) are the complement, not the substitute.
 
 See also: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for adversarial voice safety testing, jailbreak probing for consent bypass, and watermark robustness evaluation protocols.
 
@@ -1029,8 +1107,10 @@ Peak multiplier:     5x (morning peak on voice agent workloads, 07:00-09:00 loca
 Peak chars/sec:      5B / 86,400 * 5 = 289,350 chars/sec
 
 Cartesia Sonic on A10G:
-  Single-stream throughput:          3,000 chars/sec/GPU
-  Concurrent stream overhead (20x):  2,400 chars/sec/GPU effective (80% efficiency)
+  Aggregate throughput at ~20 concurrent streams:  3,000 chars/sec/GPU
+  After scheduling/batching overhead:              2,400 chars/sec/GPU (80% efficiency)
+  (A single stream in isolation is far below 3,000 chars/sec — see Section 2. The
+   per-request latencies in the TTFB formula above are unsaturated-GPU latencies.)
 
 GPU requirement at peak:   289,350 / 2,400 = 121 A10Gs
 With autoscale headroom (25% buffer): 151 A10Gs
@@ -1041,7 +1121,10 @@ Fleet design:
   Autoscale trigger:       GPU utilization > 70% for 60 s (Karpenter, 60 s cold start)
   Cost at baseline:        30 x $0.60/hr = $18/hr = $432/day
   Cost at sustained peak:  150 x $0.60/hr = $90/hr = $2,160/day
-  (Peak is 2-3 hours/day; average daily GPU cost: $432 + $1,728/7 days = ~$680/day)
+  Realistic daily cost (peak lasts ~3 h/day, not 24 h) — count GPU-hours, not day-rates:
+    baseline 30 GPUs x 24 h                  =   720 GPU-hours
+    peak burst +120 GPUs x  3 h              =   360 GPU-hours
+    total 1,080 GPU-hours x $0.60            = ~$648/day
 ```
 
 ### Voice Embedding Store Sizing
@@ -1062,7 +1145,7 @@ S3 cost at 45 TB: 45 TB x $0.023/GB = $1,035/month (S3 Standard)
 
 **Q: Why does TTFB matter more than RTF (Real-Time Factor) for voice UX?**
 
-TTFB is the time until the user hears the first sound; RTF is the ratio of synthesis time to audio duration. A user cannot perceive RTF directly — what they perceive is silence before speech begins. An RTF of 0.1 means 15 s of audio generates in 1.5 s, but if the system waits for all 1.5 s before streaming the first byte, the user hears 1.5 s of silence. That feels like a hung call. With sentence-level streaming, the first chunk (1-2 s of audio) starts playing at 180 ms, and subsequent chunks arrive during playback. RTF governs whether the synthesis can keep up with real-time playback (RTF < 1.0 required; < 0.3 gives comfortable headroom). TTFB governs whether the experience feels natural. A system with RTF 0.05 (very fast) but TTFB 800 ms will feel slower than a system with RTF 0.2 (slower) but TTFB 180 ms.
+TTFB is the time until the user hears the first sound; RTF is the ratio of synthesis time to audio duration. A user cannot perceive RTF directly — what they perceive is silence before speech begins. An RTF of 0.1 means 35 s of audio generates in 3.5 s, but if the system waits for all 3.5 s before streaming the first byte, the user hears 3.5 s of silence. That feels like a hung call. With sentence-level streaming, the first chunk (1-2 s of audio) starts playing at 180 ms, and subsequent chunks arrive during playback. RTF governs whether the synthesis can keep up with real-time playback (RTF < 1.0 required; < 0.3 gives comfortable headroom). TTFB governs whether the experience feels natural. A system with RTF 0.05 (very fast) but TTFB 800 ms will feel slower than a system with RTF 0.2 (slower) but TTFB 180 ms.
 
 **Q: How does sentence-level chunking affect the prosody vs latency tradeoff?**
 
@@ -1090,7 +1173,7 @@ Barge-in requires bidirectional communication, which is why voice agents prefer 
 
 **Q: Why is A10G more economical than H100 for TTS serving?**
 
-TTS models (Cartesia Sonic: ~1B active params; XTTS v2: 1.5B params) are small by modern LLM standards. On an H100 (80 GB HBM, 3.35 TB/s HBM3 bandwidth), the TTS model is memory-bandwidth-bound: it consumes 2-3 GB of HBM, leaving 77 GB unused. The extra HBM bandwidth and tensor cores of H100 provide < 10% speedup over A10G for models this small, because the compute intensity (FLOPs/byte) of small autoregressive TTS is low — memory bandwidth, not compute, is the bottleneck. A10G (24 GB HBM, 600 GB/s bandwidth) provides sufficient bandwidth for 10-20 concurrent TTS streams and costs $0.60/hr vs $2.50/hr for H100 — a 4.2x cost advantage with < 10% throughput penalty. H100 becomes relevant only if serving very large TTS models (hypothetical 7B+ param voice models) or batching 100+ concurrent streams per GPU.
+TTS models (Cartesia Sonic: ~1B active params; XTTS v2: 1.5B params) are small by modern LLM standards. On an H100 (80 GB HBM, 3.35 TB/s HBM3 bandwidth), the TTS model is memory-bandwidth-bound: it consumes 2-3 GB of HBM, leaving 77 GB unused. The extra HBM bandwidth and tensor cores of H100 provide < 10% speedup over A10G for models this small, because the compute intensity (FLOPs/byte) of small autoregressive TTS is low — memory bandwidth, not compute, is the bottleneck. A10G (24 GB HBM, 600 GB/s bandwidth) provides sufficient bandwidth for 10-20 concurrent TTS streams and costs about $0.60/hr against about $2.50/hr for H100 at comparable spot/reserved terms — a 4.2x cost advantage with < 10% throughput penalty. (Both are spot/reserved rates; A10G on-demand on g5.xlarge is around $1.00/hr, and H100 on-demand is several times higher again, which widens the gap rather than narrowing it.) H100 becomes relevant only if serving very large TTS models (hypothetical 7B+ param voice models) or batching 100+ concurrent streams per GPU.
 
 **Q: How do you evaluate voice clone quality without human MOS scores?**
 
@@ -1098,7 +1181,7 @@ Human MOS evaluation requires recruiting listeners, paying them, and waiting 24-
 
 **Q: What is the regulatory landscape for voice deepfakes, and how does it affect platform design?**
 
-Three regulatory regimes currently in force or imminent: (1) US FCC (February 2024): emergency ruling banning AI voice deepfakes in political robocalls; platforms that knowingly enable political deepfakes face enforcement. Practical impact: platforms must screen synthesis requests for political campaign content and require additional verification. (2) EU AI Act Article 50 (August 2026): AI-generated audio must be labeled as AI-generated using machine-readable standards (C2PA). Platforms serving EU users must embed C2PA metadata in all generated audio. (3) Various US state laws (California AB 602, Texas SB 751, others): consent required before using someone's voice likeness commercially; clones of deceased persons require estate consent. Platform design implications: consent verification is not a product feature but a legal requirement; single-use consent tokens, consent audit logs (stored separately from voice embeddings, for legal discovery), and watermarking are all compliance artifacts; voice_id suspension workflow must be operable within hours of a legal complaint (the Biden incident resolved in < 24 h — that should be the SLA for legal response).
+Three regulatory regimes currently in force or imminent: (1) US FCC (February 2024): emergency ruling banning AI voice deepfakes in political robocalls; platforms that knowingly enable political deepfakes face enforcement. Practical impact: platforms must screen synthesis requests for political campaign content and require additional verification. (2) EU AI Act Article 50 (August 2026): AI-generated audio must be labeled as AI-generated using machine-readable standards (C2PA). Platforms serving EU users must embed C2PA metadata in all generated audio. (3) Various US state laws. California AB 2602 (2024) requires specific, informed consent in contracts before a digital replica of a performer's voice or likeness may be used, and AB 1836 (2024) requires estate consent for digital replicas of deceased personalities; Texas SB 751 (2019) targets deepfake video made to influence elections. (Note that California AB 602 is about non-consensual deepfake pornography, not commercial voice licensing — it is frequently mis-cited in this context.) Platform design implications: consent verification is not a product feature but a legal requirement; single-use consent tokens, consent audit logs (stored separately from voice embeddings, for legal discovery), and watermarking are all compliance artifacts; the voice_id suspension workflow must be operable within hours of a legal complaint, since attribution and account suspension in the Biden robocall case took days, not weeks.
 
 **Q: How do you handle cross-lingual voice cloning (clone an English speaker, generate French)?**
 

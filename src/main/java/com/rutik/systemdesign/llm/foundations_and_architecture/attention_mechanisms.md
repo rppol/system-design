@@ -111,7 +111,7 @@ term is easy to omit and hard to debug.
 
 **Online softmax:** The key algorithmic insight behind Flash Attention. Softmax requires knowing all scores to compute the denominator (exp(x_i) / Σ exp(x_j)). Online softmax computes a numerically stable softmax incrementally by tracking running maximum and running sum, updating both as new blocks of scores are processed.
 
-**KV cache:** During autoregressive generation, each new token requires attention to all previous tokens. Recomputing K and V for past tokens at each step costs O(N²T) total for a sequence of length T. The KV cache stores K and V for all past positions, reducing to O(N) per decoding step. For a 70B model, KV cache consumes ~2.6MB/token, making it the primary memory bottleneck in long-context serving.
+**KV cache:** During autoregressive generation, each new token requires attention to all previous tokens. Recomputing K and V for past tokens at each step costs O(N²T) total for a sequence of length T. The KV cache stores K and V for all past positions, reducing to O(N) per decoding step. For LLaMA-3-70B the cache is 320KB/token with its 8 GQA KV heads (it would be 2.6MB/token with 64 MHA heads), making it the primary memory bottleneck in long-context serving.
 
 ---
 
@@ -122,9 +122,9 @@ term is easy to omit and hard to debug.
 | Variant | Q heads | K heads | V heads | KV Cache Size vs MHA | Quality vs MHA |
 |---------|---------|---------|---------|----------------------|----------------|
 | **MHA** (Multi-Head) | H | H | H | 1x | Baseline |
-| **MQA** (Multi-Query) | H | 1 | 1 | 1/H x | -0.5 to -2 PPL |
-| **GQA** (Grouped Query) | H | G | G (G<H) | G/H x | -0.1 to -0.5 PPL |
-| **MLA** (Multi-Head Latent, DeepSeek-V2) | H | 1 (compressed) | 1 (compressed) | ~1/(4H) x | Near-MHA quality |
+| **MQA** (Multi-Query) | H | 1 | 1 | 1/H x | Noticeably below MHA; degrades most on copying/retrieval |
+| **GQA** (Grouped Query) | H | G | G (G<H) | G/H x | Close to MHA at G=H/8 (Ainslie et al. 2023, T5-XXL) |
+| **MLA** (Multi-Head Latent, DeepSeek-V2) | H | 1 (compressed) | 1 (compressed) | ~2.25/H x (1/57 at DeepSeek-V2's H=128) | Near-MHA quality |
 
 Typical: LLaMA 3 8B — 32 Q heads, 8 KV heads (GQA 4:1 ratio). LLaMA 3 70B — 64 Q heads, 8 KV heads (8:1 ratio).
 
@@ -132,9 +132,9 @@ Typical: LLaMA 3 8B — 32 Q heads, 8 KV heads (GQA 4:1 ratio). LLaMA 3 70B — 
 
 | Version | Key Improvement | Peak FLOP Utilization (A100) | Notes |
 |---------|-----------------|------------------------------|-------|
-| **FA-1** (2022) | Online softmax, SRAM tiling | ~30-50% | O(N) memory; backward uses recomputation |
-| **FA-2** (2023) | Better warp-level parallelism; less non-matmul FLOPs | ~50-73% | 2x faster than FA-1; standard today |
-| **FA-3** (2024) | H100-specific async pipeline; FP8 support | ~75% peak | H100 only; async WGMMA+softmax pipelining |
+| **FA-1** (2022) | Online softmax, SRAM tiling | 25-40% fwd, 25-35% bwd | O(N) memory; backward uses recomputation |
+| **FA-2** (2023) | Better warp-level parallelism; less non-matmul FLOPs | 50-73% fwd, up to 63% bwd | 2x faster than FA-1; standard today |
+| **FA-3** (2024) | H100-specific async pipeline; FP8 support | ~75% peak (on H100, not A100) | H100 only; async WGMMA+softmax pipelining |
 
 ### 4.3 Sparse and Linear Attention
 
@@ -142,7 +142,7 @@ Typical: LLaMA 3 8B — 32 Q heads, 8 KV heads (GQA 4:1 ratio). LLaMA 3 70B — 
 |---------|-----------|----------|---------|
 | **Longformer** | O(N×W + N×g) | Local sliding window + global tokens | Global tokens must be task-specified |
 | **BigBird** | O(N×(W+g+r)) | Local + global + random attention | Complex, slow in practice |
-| **Performer** | O(N×d) | Random feature approximation of softmax | ~5-10% quality degradation |
+| **Performer** | O(N×d) | Random feature approximation of softmax | Measurable quality loss on language modeling (the approximation cannot form sharp, peaked attention) |
 | **cosFormer** | O(N×d) | Cosine-based reweighting | Weaker on long-range than softmax |
 | **Sliding window (Mistral)** | O(N×W) | Each token attends to W previous tokens | Relies on layering for long-range flow |
 
@@ -246,17 +246,21 @@ Savings: H/G = 8/2 = 4x KV cache reduction
 ### MLA (Multi-Head Latent Attention) — Cache Compression
 
 ```
-Standard KV Cache (MHA, H=128 heads, d_head=128):    MLA Cache (DeepSeek-V2, d_c=512):
+Standard KV Cache (MHA, H=128 heads, d_head=128):    MLA Cache (DeepSeek-V2, d_c=512 + d_rope=64):
 
 Per token per layer stored:                          Per token per layer stored:
   K: [H × d_head] = [128 × 128] = 16,384 values       c: [d_c] = [512] values
-  V: [H × d_head] = [128 × 128] = 16,384 values         (single compressed latent)
-  Total = 32,768 values                               Total = 512 values
+  V: [H × d_head] = [128 × 128] = 16,384 values       k_rope: [d_h^R] = [64] values
+  Total = 32,768 values                               Total = 576 values
 
-At 128K context, 60 layers, FP16:                    At 128K context, 60 layers, FP16:
-  32,768 × 128K × 60 × 2 bytes ≈ 253 GB               512 × 128K × 60 × 2 bytes ≈ 7.9 GB
+At 128K context (131,072 tok), 60 layers, FP16:      Same context and depth:
+  32,768 × 131,072 × 60 × 2 bytes ≈ 515 GB            576 × 131,072 × 60 × 2 bytes ≈ 9.1 GB
 
-                             253 GB → 7.9 GB  (~32× reduction)
+                             515 GB → 9.1 GB  (~57× reduction)
+
+The DeepSeek-V2 paper states this as "(d_c + d_h^R)·l ≈ 9/2·d_h·l", i.e. equivalent to
+GQA with only 2.25 groups — so the general ratio vs MHA is 2.25/H, = 1/57 at H=128.
+Against DeepSeek 67B (which used GQA, not MHA) the paper reports a 93.3% cache reduction.
 
 At attention time: decompress c → K, V via learned up-projections W_K, W_V.
 Compression is learned jointly with the model — not a post-hoc quantization.
@@ -266,17 +270,18 @@ Compression is learned jointly with the model — not a post-hoc quantization.
 
 ```mermaid
 xychart-beta
-    title "Attention weight from token T10 to prior positions (StreamingLLM, Xiao et al. 2023)"
+    title "Schematic: attention weight from token T10 to prior positions (sink pattern)"
     x-axis [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10]
     y-axis "attention weight" 0 --> 0.5
     bar [0.22, 0.17, 0.10, 0.01, 0.02, 0.01, 0.01, 0.02, 0.01, 0.43]
 ```
 
-First 3–4 tokens absorb disproportionate attention weight regardless of content — here
-T1–T3 hold 0.22/0.17/0.10 while T4–T9 sit near 0.01. They act as "sinks": aggregate value
-buffers for the model's residual state. Evict T1–T4 and quality collapses; keep T1–T4 plus a
-sliding window and quality is preserved. StreamingLLM's fix is to always maintain
-`num_sink_tokens` (4) + a recent window in the cache.
+The bar heights above are illustrative, not measurements from any paper — they exist to show
+the *shape*. The finding they illustrate is real: StreamingLLM (Xiao et al., 2023) showed the
+first few tokens absorb disproportionate attention weight regardless of content, acting as
+"sinks" — aggregate value buffers for the model's residual state. Evict them and quality
+collapses; keep them plus a sliding window and quality is preserved. StreamingLLM's fix is to
+always maintain `num_sink_tokens` (4) + a recent window in the cache.
 
 ---
 
@@ -538,8 +543,8 @@ MHA is simply the special case `n_kv_heads == num_attention_heads`; MQA is the s
 Read the last column as a serving constraint, not a statistic. On one 80 GiB H100 the GQA cache
 alone permits `80 / 40 = 2` concurrent 128K sequences — before a single byte of model weights. The
 MHA variant at 320 GiB does not fit on an 8xH100 node once weights are resident, which is the whole
-reason GQA shipped. MQA's 5 GiB would allow 16 such sequences, and the 0.5-2 PPL it costs is the
-price of that 8x.
+reason GQA shipped. MQA's 5 GiB would allow 16 such sequences, and the quality it gives up versus
+GQA — largest on copying and retrieval — is the price of that further 8x.
 
 ### Multi-Head Latent Attention (DeepSeek-V2)
 
@@ -696,9 +701,9 @@ class SinkKVCache:
 
 **Mistral 7B (Sliding Window + GQA):** Window size 4096, 32 Q heads, 8 KV heads. Rolling KV cache: 4096 × 8 × 128 × 2 × 32 layers × 2 bytes ≈ 536MB per sequence — fits comfortably in VRAM alongside model weights. Standard KV cache at 32K context would be 4GB per sequence.
 
-**Flash Attention 2 production impact:** DeepMind's Gemini training switched from custom attention to FA-2. Training throughput increased 2.5x. The bottleneck shifted from memory bandwidth (HBM reads for attention) to compute (matrix multiplications). This enabled training with longer sequences (previously limited by OOM) and higher batch sizes.
+**Flash Attention 2 production impact:** the FA-2 paper (Dao, 2023) reports up to 225 TFLOPs/s per A100 in end-to-end GPT training — 72% model FLOPs utilization — versus the original FlashAttention's 25-40% of theoretical peak on the attention kernel itself. The bottleneck shifts from memory bandwidth (HBM reads for attention) to compute (matrix multiplications), which is what enables longer sequences (previously OOM-limited) and larger batches. FA-2 is a CUDA kernel, so this applies to NVIDIA-GPU training stacks; TPU-based stacks use their own fused attention implementations.
 
-**DeepSeek-V2 MLA:** MLA compresses KV cache to 512 dimensions per token (vs standard 128 per head × 128 heads = 16384 total). Cache reduction: 32x smaller than equivalent MHA. At 128K context: MLA cache = 512 × 128K × 2 bytes × 60 layers = 7.9GB vs MHA 253GB. This enabled deploying a 236B parameter MoE model economically.
+**DeepSeek-V2 MLA:** MLA caches a 512-dim compressed latent plus a 64-dim decoupled RoPE key per token per layer — 576 values, against MHA's 2 × 128 heads × 128 dims = 32,768. That is a ~57x reduction; at 128K context (131,072 tokens) and 60 layers in FP16 the MLA cache is ~9.1GB where MHA would need ~515GB. Against DeepSeek 67B, which used GQA rather than MHA, the paper reports a 93.3% cache reduction. This is what made deploying a 236B-parameter MoE model economical.
 
 ---
 
@@ -707,10 +712,10 @@ class SinkKVCache:
 | Variant | KV Cache (relative) | Quality (PPL) | Implementation Complexity | Best For |
 |---------|--------------------|--------------|--------------------------|---------  |
 | MHA | 1x | Baseline | Simple | Research, small models |
-| MQA | 1/H x | -0.5 to -3 PPL | Simple | Latency-critical, quality flexible |
-| GQA (4:1) | 0.25x | -0.1 to -0.5 PPL | Simple | Production sweet spot |
-| GQA (8:1) | 0.125x | -0.2 to -1 PPL | Simple | Large model serving (70B+) |
-| MLA | ~1/(32H) x | Near-MHA | Complex (down+up projections) | Extreme context, model density |
+| MQA | 1/H x | Largest quality drop of the three (Ainslie et al. measured MQA-XXL at 46.6 avg ROUGE vs MHA's 47.2 on T5) | Simple | Latency-critical, quality flexible |
+| GQA (4:1) | 0.25x | Small | Simple | Production sweet spot |
+| GQA (8:1) | 0.125x | Small (GQA-8-XXL: 47.1 vs MHA 47.2 avg ROUGE) | Simple | Large model serving (70B+) |
+| MLA | ~2.25/H x (1/57 at H=128) | Near-MHA | Complex (down+up projections) | Extreme context, model density |
 
 | Flash Attention vs Naive | |
 |--------------------------|--|
@@ -792,9 +797,11 @@ output = torch.nn.functional.scaled_dot_product_attention(
 ### Pitfall 2: GQA quality degradation at extreme ratios
 
 ```python
-# PROBLEM: Very high Q:KV ratios degrade quality significantly
-# LLaMA 3 8B: 32 Q heads, 8 KV heads -> 4:1 ratio -> <0.2 PPL loss
-# But: 32 Q heads, 1 KV head (MQA) -> 32:1 -> 2-3 PPL loss on complex tasks
+# PROBLEM: Very high Q:KV ratios degrade quality
+# LLaMA 3 8B: 32 Q heads, 8 KV heads -> 4:1 ratio -> quality close to MHA
+# But: 32 Q heads, 1 KV head (MQA) -> 32:1 -> clear degradation on complex
+# tasks (Ainslie et al. measured MQA below both MHA and GQA-8 on T5;
+# the exact loss is model- and task-specific, so measure yours)
 
 # MEASUREMENT: Check quality degradation before choosing G
 # For a 7B model, per-head dimension d_k=128:
@@ -865,9 +872,9 @@ def kv_cache_gb_wrong(seq_len, num_layers, num_heads, d_head, bytes=2):
 def kv_cache_gb(seq_len, num_layers, num_kv_heads, d_head, bytes=2):
     return 2 * seq_len * num_layers * num_kv_heads * d_head * bytes / 1e9
 
-# LLaMA 3 70B example:
-# Wrong (using H=64): 2 * 128000 * 80 * 64 * 128 * 2 / 1e9 = 84.5 GB (per sequence!)
-# Correct (using G=8): 2 * 128000 * 80 * 8 * 128 * 2 / 1e9 = 10.6 GB (per sequence)
+# LLaMA 3 70B example, 128,000-token sequence:
+# Wrong (using H=64): 2 * 128000 * 80 * 64 * 128 * 2 / 1e9 = 335.5 GB (per sequence!)
+# Correct (using G=8): 2 * 128000 * 80 *  8 * 128 * 2 / 1e9 =  41.9 GB (per sequence)
 # The difference (8x) is the whole point of GQA
 ```
 
@@ -882,7 +889,7 @@ def kv_cache_gb(seq_len, num_layers, num_kv_heads, d_head, bytes=2):
 | `xformers` (Meta) | Memory-efficient attention ops | Flash attention + custom ops |
 | `vLLM` | KV cache management for serving | PagedAttention for dynamic KV cache allocation |
 | TransformerLens | Mechanistic interpretability | Head-level attention pattern analysis |
-| BerViz | Attention visualization | Multi-head attention heatmaps |
+| BertViz | Attention visualization | Multi-head attention heatmaps |
 | `flash-attn-3` | H100-specific FA-3 | Async pipelining, FP8, 75% FLOP utilization |
 
 ---
@@ -896,40 +903,40 @@ Let Q and K have entries i.i.d. from N(0,1). The attention score for token i att
 Flash Attention solves the O(N²) memory problem in attention by processing K and V in blocks that fit in SRAM, using an online softmax to accumulate the result without materializing the full N×N score matrix. Online softmax works as follows: normal softmax `exp(x_i) / Σ_j exp(x_j)` requires all x_j before computing any output. Online softmax maintains a running maximum `m` and running denominator `l`. For each new block of scores: (1) compute new block max `m_block`; (2) update global max `m_new = max(m_prev, m_block)`; (3) rescale previous accumulated output by `exp(m_prev - m_new)` (compensating for max increase); (4) add new block contribution. The mathematical identity `softmax([x1,...,xN]) = softmax_online([x1,...,xN])` holds exactly. Memory: O(N × d) (linear) instead of O(N²). HBM accesses: reduced by M/d where M is SRAM size — typically 5-10x fewer reads/writes, which is where the 2-4x speedup comes from.
 
 **Q: How does GQA reduce KV cache size? What is the quality tradeoff?**
-GQA assigns G key-value heads (G < H) shared across H/G query heads each. During forward pass, the G key-value matrices are expanded via `repeat_interleave` to match H query heads. At inference (generation), only the G KV heads are stored in the KV cache: cache size reduces from `H × d_head` to `G × d_head` per token per layer — a factor of H/G reduction. For LLaMA 3 70B with H=64, G=8: 8x KV cache reduction. Quality tradeoff: less distinct KV representation per query head means some cross-position information is lost. Empirically, GQA with G=H/8 loses 0.2-1.0 perplexity points on language modeling. Tasks requiring fine-grained position tracking (copying, coreference) degrade more than tasks requiring semantic understanding. The sweet spot is G=H/4 to G=H/8 — providing 4-8x KV savings with <0.5 PPL quality loss.
+GQA assigns G key-value heads (G < H) shared across H/G query heads each. During forward pass, the G key-value matrices are expanded via `repeat_interleave` to match H query heads. At inference (generation), only the G KV heads are stored in the KV cache: cache size reduces from `H × d_head` to `G × d_head` per token per layer — a factor of H/G reduction. For LLaMA 3 70B with H=64, G=8: 8x KV cache reduction. Quality tradeoff: less distinct KV representation per query head means some cross-position information is lost. Empirically the loss is small: Ainslie et al. (2023) measured GQA-8 on T5-XXL at 47.1 average ROUGE against MHA's 47.2, with MQA at 46.6. Tasks requiring fine-grained position tracking (copying, coreference) degrade more than tasks requiring semantic understanding. The production sweet spot is G=H/4 to G=H/8 — 4-8x KV savings for close-to-MHA quality; note that no published ablation covers 70B scale, so this is an extrapolation from the T5 result plus the fact that every major open 70B model shipped with it.
 
 **Q: What is the attention sink phenomenon and how does it affect KV cache eviction?**
 StreamingLLM (Xiao et al., 2023) showed that LLMs assign disproportionately high attention weights to the first 4-8 tokens in the sequence regardless of their semantic content. These "attention sinks" act as aggregate value storage — because a massive fraction of softmax attention goes to them, they must encode the model's otherwise-unattended state. Removing sink tokens from the KV cache causes catastrophic quality degradation even when all semantically relevant tokens are retained. This has three practical implications: (1) KV eviction strategies must never evict sink tokens (always keep first 4-8); (2) sliding window attention must include initial tokens as global tokens; (3) context truncation should remove from the middle, not the beginning. StreamingLLM implements a constant-memory cache by keeping sink tokens (4) + a sliding window of recent tokens, enabling infinite-length generation at fixed memory cost.
 
 **Q: Compare MQA, GQA, and MLA. When would you use each?**
-MQA (Multi-Query): H query heads, 1 KV head. Maximum KV cache reduction (H× smaller). Quality drops 1-3 PPL points on complex tasks. Used in older models (PaLM, early Falcon) and latency-critical deployments. GQA (Grouped Query): H query heads, G KV heads where G is a divisor of H. Configurable quality-memory tradeoff. Standard for modern production models (LLaMA 2+, Mistral, Gemma, Qwen). G=H/8 is the most common. MLA (DeepSeek-V2): Compresses the KV representation to a latent vector of dimension d_c (e.g., 512) regardless of num_heads or d_head. Cache stores d_c dimensional vector per token; at attention time, decompresses to full K and V. Achieves ~32x KV reduction vs MHA for DeepSeek-V2's 128 heads, enabling serving a 236B MoE model economically. Complexity: more architectural changes; cannot simply be added to an existing model.
+MQA (Multi-Query): H query heads, 1 KV head. Maximum KV cache reduction (H× smaller), with the largest quality cost of the three — Ainslie et al. put MQA-XXL at 46.6 avg ROUGE against MHA's 47.2 on T5. Used in older models (PaLM, Falcon 7B/40B) and latency-critical deployments. GQA (Grouped Query): H query heads, G KV heads where G is a divisor of H. Configurable quality-memory tradeoff. Standard for modern production models (LLaMA 2+, Mistral, Gemma, Qwen). G=H/8 is the most common. MLA (DeepSeek-V2): Compresses the KV representation to a latent vector of dimension d_c (e.g., 512) regardless of num_heads or d_head. Cache stores a d_c-dimensional latent (plus a 64-dim RoPE key) per token; at attention time, decompresses to full K and V. Achieves ~57x KV reduction vs MHA at DeepSeek-V2's 128 heads, enabling serving a 236B MoE model economically. Complexity: more architectural changes; cannot simply be added to an existing model.
 
 **Q: What does Flash Attention do differently in the backward pass?**
-The standard backward pass for attention requires storing the attention matrix `P = softmax(QK^T/sqrt(d_k))` for computing gradients — O(N²) storage. Flash Attention's backward pass uses activation recomputation: it stores only the output O and the softmax statistics (m, l) — O(N) storage. During backward, it recomputes P from Q, K, and the stored m/l statistics. This recomputation takes additional FLOPs (~1/3 of forward pass cost) but eliminates the O(N²) memory requirement. FA-2's backward pass additionally optimizes warp-level parallelism for the gradient computation, achieving ~50% of theoretical H100 FLOP utilization in backward (vs ~73% in forward). In practice, the memory saving from not storing N²-sized activation matrices enables much larger batch sizes and longer sequences during training.
+The standard backward pass for attention requires storing the attention matrix `P = softmax(QK^T/sqrt(d_k))` for computing gradients — O(N²) storage. Flash Attention's backward pass uses activation recomputation: it stores only the output O and the softmax statistics (m, l) — O(N) storage. During backward, it recomputes P from Q, K, and the stored m/l statistics. This recomputation takes additional FLOPs (~1/3 of forward pass cost) but eliminates the O(N²) memory requirement. FA-2's backward pass additionally optimizes warp-level parallelism for the gradient computation, reaching up to 63% of theoretical A100 FLOP utilization in backward (vs 50-73% in forward; the original FlashAttention managed only 25-35% backward). In practice, the memory saving from not storing N²-sized activation matrices enables much larger batch sizes and longer sequences during training.
 
 **Q: Explain sparse attention (Longformer, BigBird) and when these approaches fell out of favor.**
 Sparse attention restricts the full O(N²) attention to structured subsets of token pairs, achieving O(N×W) complexity. Longformer: each token attends to a local window of W tokens plus a small set of global tokens (like [CLS], or task-specific tokens like question tokens in QA). BigBird: extends Longformer with random attention connections (each token additionally attends to r random other tokens), providing theoretical guarantees of being a universal approximator. These approaches required custom CUDA kernels that were complex to implement and maintain. Flash Attention changed the equation: FA-2 makes full O(N²) attention cheap enough that sparse attention's complexity savings are often unnecessary. For 8K context, FA-2 attention is fast enough. For 128K+ context where even FA-2 is memory-limited, modern solutions prefer RingAttention (distributes attention across devices) or sliding window attention. Sparse attention patterns (Longformer-style) are still used in some long-context encoder models.
 
 **Q: How does the KV cache grow and what strategies exist to manage it?**
-KV cache size = 2 (K+V) × num_kv_heads × d_head × seq_len × num_layers × bytes_per_element. It grows linearly with sequence length. At 128K tokens with LLaMA 3 70B (GQA, 8 KV heads): ~10.6GB per sequence. Strategies: (1) GQA/MQA: reduce num_kv_heads (most impactful; discussed above); (2) KV cache quantization: INT8 or FP8 KV cache reduces by 2-4x with <0.5 PPL loss; (3) PagedAttention (vLLM): virtualizes KV cache into fixed-size pages, eliminating fragmentation and enabling 100% KV cache utilization; (4) Prefix caching: share KV cache across requests with common prefixes (e.g., same system prompt); (5) KV eviction (H2O, StreamingLLM): evict low-importance tokens from cache; must keep attention sinks; (6) Sliding window cache: discard all but recent W tokens (loses long-range context).
+KV cache size = 2 (K+V) × num_kv_heads × d_head × seq_len × num_layers × bytes_per_element. It grows linearly with sequence length. At 128K tokens with LLaMA 3 70B (GQA, 8 KV heads, 80 layers, d_head 128, FP16): ~42GB per sequence. Strategies: (1) GQA/MQA: reduce num_kv_heads (most impactful; discussed above); (2) KV cache quantization: INT8 or FP8 KV cache reduces by 2-4x with <0.5 PPL loss; (3) PagedAttention (vLLM): virtualizes KV cache into fixed-size pages, eliminating fragmentation and enabling 100% KV cache utilization; (4) Prefix caching: share KV cache across requests with common prefixes (e.g., same system prompt); (5) KV eviction (H2O, StreamingLLM): evict low-importance tokens from cache; must keep attention sinks; (6) Sliding window cache: discard all but recent W tokens (loses long-range context).
 
 **Q: How much does Flash Attention actually speed things up in practice?**
-Flash Attention 2 achieves 50-73% of peak theoretical A100 FLOPs on attention computation. Compare to naive PyTorch attention which achieves ~30-35% utilization due to HBM bandwidth being the bottleneck, not compute. Practical measurements: FA-2 vs PyTorch naive attention (causal, d_head=128): (1) Forward pass speedup: ~2.6x at N=2048, ~3.1x at N=8192 (scales better at longer sequences because memory bandwidth savings increase). (2) Memory: 6-8x less peak memory at N=8192. (3) Backward pass: ~2.5x speedup with similar memory savings. Combined effect on end-to-end training throughput: ~1.5-2x (not all time is spent in attention; FFN layers have fixed cost). The absolute improvement is largest for long-context models where attention previously dominated compute time.
+Flash Attention 2 achieves 50-73% of peak theoretical A100 FLOPs on attention computation, versus the original FlashAttention's 25-40%, because HBM bandwidth rather than compute was the binding constraint. The FA-2 paper reports roughly 2x over FA-1 on the attention kernel and up to 225 TFLOPs/s per A100 (72% MFU) in end-to-end GPT training. Speedups grow with sequence length, since the memory-traffic saving scales with N while the FLOP count does not change. End-to-end training throughput gains are smaller than kernel-level gains because FFN layers dominate at short context — always measure end-to-end, not attention in isolation. The absolute improvement is largest for long-context models where attention previously dominated compute time.
 
 **Q: What is the difference between local and global tokens in Longformer?**
 Local tokens in Longformer use sliding window attention: each token attends to at most W tokens to its left and right (e.g., W=512). Global tokens attend to all tokens and are attended to by all tokens — essentially the original full attention. Global token selection is task-specific: for document classification, [CLS] is global; for QA, all question tokens are global so they can aggregate evidence from the full document; for named entity recognition, no global tokens are needed. The two-level design is crucial: purely local attention cannot propagate information beyond one layer × window_size tokens without stacking many layers. The global tokens serve as information aggregation points — any information needed globally can route through them. Longformer achieves O(N×W + N×g) complexity where g is the number of global tokens (typically ≤ 64), making it near-linear for typical g values.
 
 **Q: What is multi-head latent attention (MLA) and how does DeepSeek-V2 achieve near-MHA quality with it?**
-MLA (DeepSeek-V2, 2024) learns to compress KV representations into a low-dimensional latent vector. Instead of caching K and V directly (which scale with num_heads × d_head = e.g., 128 × 128 = 16K dims), MLA caches only the latent vector c (e.g., 512 dims) — a 32x reduction. At attention time, c is decompressed to full K and V via learned linear projections. Quality is maintained because: (1) the compression is learned jointly with the rest of the model (not a post-hoc quantization); (2) the model learns which information is critical to preserve in the latent; (3) the up-projection matrices have sufficient capacity to reconstruct K and V accurately from c. DeepSeek-V2 achieves perplexity within 0.1-0.3 of an equivalent MHA model while using 32× less KV cache. The tradeoff: decompression adds ~4 matrix multiplications per attention forward pass (negligible vs the attention computation itself).
+MLA (DeepSeek-V2, 2024) learns to compress KV representations into a low-dimensional latent vector. Instead of caching K and V directly (2 × num_heads × d_head = 2 × 128 × 128 = 32,768 values per token per layer), MLA caches a 512-dim latent plus a 64-dim decoupled RoPE key — 576 values, a ~57x reduction. At attention time, c is decompressed to full K and V via learned linear projections. Quality is maintained because: (1) the compression is learned jointly with the rest of the model (not a post-hoc quantization); (2) the model learns which information is critical to preserve in the latent; (3) the up-projection matrices have sufficient capacity to reconstruct K and V accurately from c. The paper's own framing is that MLA's cache equals "GQA with only 2.25 groups" while performing better than MHA, and it reports a 93.3% cache reduction against the GQA-based DeepSeek 67B. The tradeoff: decompression adds ~4 matrix multiplications per attention forward pass (negligible vs the attention computation itself).
 
 **Q: How does attention relate to the "softmax bottleneck" problem in LLMs?**
 The softmax bottleneck (Yang et al., 2018) is a property of the output layer: the LM head computes `logits = h @ E^T` where E is the embedding matrix. If the embedding dimension d is smaller than the number of distinguishable contexts, the LM cannot express all possible output distributions — the rank of `h @ E^T` is bounded by min(d, vocab_size). This is unrelated to attention softmax but often discussed together. Within attention specifically, the softmax in `Attn = softmax(QK^T) V` is NOT a bottleneck — it applies independently per row (per query position), so the rank constraint is on the V matrix multiplication, not the attention weights. The attention softmax bottleneck is about something different: the output of attention (before FFN) is a convex combination of V vectors, constraining the rank of attention output representations. This is why multi-head attention (projecting into multiple subspaces) increases expressiveness — each head can form a different convex combination.
 
 **Q: What is the "attention is not all you need" criticism and how does it apply to GQA?**
-Some researchers (e.g., the RWKV, Mamba papers) argue that attention's O(N²) complexity is fundamentally limiting and that recurrent or selective state space alternatives achieve similar quality at O(N) complexity. The criticism is valid at extreme context lengths (>1M tokens) where even FA-3 is memory-limited. GQA provides a middle ground: it doesn't reduce attention's theoretical complexity but dramatically reduces the memory cost of the KV cache (the practical bottleneck in serving, not training). The criticism more applies to the serving side: for a model serving 1000 concurrent users at 128K context, even with GQA, KV cache is 10GB × 1000 = 10TB — impossible. Solutions being explored: (1) shared prefix caching reduces this for common prompts; (2) KV cache quantization reduces 2-4x; (3) speculative decoding reduces the number of full KV accesses per generated token; (4) hybrid architectures (Jamba, Zamba) replace some attention layers with SSM layers to reduce total KV cache by 50%.
+Some researchers (e.g., the RWKV, Mamba papers) argue that attention's O(N²) complexity is fundamentally limiting and that recurrent or selective state space alternatives achieve similar quality at O(N) complexity. The criticism is valid at extreme context lengths (>1M tokens) where even FA-3 is memory-limited. GQA provides a middle ground: it doesn't reduce attention's theoretical complexity but dramatically reduces the memory cost of the KV cache (the practical bottleneck in serving, not training). The criticism more applies to the serving side: for a model serving 1000 concurrent users at 128K context, even with GQA, KV cache is 42GB × 1000 = 42TB — impossible. Solutions being explored: (1) shared prefix caching reduces this for common prompts; (2) KV cache quantization reduces 2-4x; (3) speculative decoding reduces the number of full KV accesses per generated token; (4) hybrid architectures (Jamba, Zamba) replace some attention layers with SSM layers to reduce total KV cache by 50%.
 
 **Q: How does PyTorch's scaled_dot_product_attention dispatch to Flash Attention?**
-`torch.nn.functional.scaled_dot_product_attention` (introduced in PyTorch 2.0) is a composite operation that automatically selects the best implementation based on input characteristics: (1) Flash Attention 2 kernel: when inputs are on CUDA, dtype is FP16 or BF16, d_head <= 256, and no custom attention mask (or is_causal=True); (2) Memory-efficient attention (xformers-style): when FA-2 conditions are not fully met but CUDA is available; (3) Math (naive): CPU or custom conditions. The dispatch is automatic — no code change needed. Check which backend is used: `torch.backends.cuda.flash_sdp_enabled()`, `torch.backends.cuda.mem_efficient_sdp_enabled()`. To force a specific backend: `with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False): ...`. Practical implication: always use SDPA in production code; it will automatically use FA-2 when available and is forward-compatible with FA-3 when PyTorch adds support.
+`torch.nn.functional.scaled_dot_product_attention` (introduced in PyTorch 2.0) is a composite operation that automatically selects the best implementation based on input characteristics: (1) Flash Attention 2 kernel: when inputs are on CUDA, dtype is FP16 or BF16, d_head <= 256, and no custom attention mask (or is_causal=True); (2) Memory-efficient attention (xformers-style): when FA-2 conditions are not fully met but CUDA is available; (3) Math (naive): CPU or custom conditions. The dispatch is automatic — no code change needed. Check which backend is used: `torch.backends.cuda.flash_sdp_enabled()`, `torch.backends.cuda.mem_efficient_sdp_enabled()`. To force a specific backend, use the current API: `from torch.nn.attention import sdpa_kernel, SDPBackend` then `with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]): ...`. The older `torch.backends.cuda.sdp_kernel(enable_flash=True, ...)` context manager is deprecated (it emits a FutureWarning) and slated for removal. Practical implication: always use SDPA in production code; it will automatically use FA-2 when available and is forward-compatible with FA-3 when PyTorch adds support.
 
 **Q: Walk through the memory math for serving 100 concurrent users at 32K context on LLaMA 3 8B.**
 LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV cache per token = 2 (K+V) × 32 layers × 8 KV heads × 128 dims × 2 bytes = 131,072 bytes ≈ 128KB per token. Per user at 32K tokens: 32,768 × 128KB = 4GB. For 100 users: 400GB — impossible on standard GPU clusters. Practical solutions: (1) Reduce context to 8K (common): 1GB per user, 100GB total — feasible on 2x H100 (160GB). (2) Use KV quantization INT8: halves to 50GB for 100 users at 8K. (3) PagedAttention (vLLM): allows sharing KV pages across users with common prefixes (system prompt); reduces unique KV storage by 20-40%. (4) Reduce max batch: serve 25 concurrent users at 32K, accept lower throughput. Model weights: 8B × 2 bytes = 16GB — small compared to KV cache at this scale.
@@ -944,9 +951,9 @@ LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV ca
 4. Never remove attention sinks (first 4-8 tokens) from KV cache eviction policies — they disproportionately harm output quality.
 5. Profile attention vs FFN vs embedding time before optimizing — at small context (<2K), FFN is often the bottleneck, not attention.
 6. Use BF16 for attention computations (not FP16) — BF16 has the same exponent range as FP32 preventing overflow in attention scores; FP16 requires loss scaling.
-7. For custom positional biases (ALiBi, learned biases), fall back to `enable_math=True` in SDPA — FA-2 does not support arbitrary attention bias matrices.
+7. For custom positional biases (ALiBi, learned biases), force the math backend with `sdpa_kernel(backends=[SDPBackend.MATH])` — FA-2 does not support arbitrary attention bias matrices.
 8. Profile KV cache memory before model weights — at long context (>16K), KV cache is often larger than model weights and drives hardware requirements.
-9. Consider INT8 KV cache quantization as a free win — most frameworks (vLLM, TensorRT-LLM) support it with <0.3 PPL quality loss and 2x memory reduction.
+9. Consider INT8/FP8 KV cache quantization — most frameworks (vLLM, TensorRT-LLM) support it for a 2-4x memory reduction; the quality cost is usually small but is workload-dependent, so measure it rather than assuming a published number.
 10. When benchmarking attention variants, measure end-to-end throughput, not attention-isolated speed — attention may be 3x faster but represent only 30% of total time, yielding only 1.4x overall speedup.
 
 ---
@@ -955,7 +962,7 @@ LLaMA 3 8B specs: 32 layers, 8 KV heads (GQA), d_head=128, BF16 (2 bytes). KV ca
 
 ### Problem: Serving LLaMA 3 70B at 128K Context for Legal Document Analysis
 
-**Context:** A legal research platform needs to process 128K-token contracts (multiple documents) end-to-end without chunking, as cross-document references are critical. Target: serve 50 concurrent users with <2s TTFT (Time to First Token) on 8× H100 80GB nodes.
+**Context:** A legal research platform needs to process 128K-token contracts (multiple documents) end-to-end without chunking, as cross-document references are critical. Target: serve 50 concurrent users with a TTFT (Time to First Token) budget of 15s on 8× H100 80GB nodes — a full 128K prefill of a 70B model is over 10 PFLOPs of work, so a sub-2s target is not physically reachable on one node.
 
 **Hardware budget:** 8× H100 SXM5 (80GB each), NVLink interconnect. Total VRAM: 640GB.
 
@@ -999,12 +1006,17 @@ BUT: 8 GPUs tensor-parallel = 1 model instance
   Per user (full): 19.7GB
   Concurrent: floor(475 / 19.7) = 24 users at 128K context
 
-TTFT: 128K prefill on 8×H100 with FA-3 ≈ 1.8s ✓
+TTFT: 128K prefill on 8×H100 with FA-3
+  dense term      2 × 70e9 × 131,072                     = 1.8e16 FLOPs
+  attention term  ~2 × N² × d_model × layers (causal)    = 2.3e16 FLOPs
+  total                                                  ≈ 4.1e16 FLOPs
+  8 × H100 at 989 TFLOPS × ~45% MFU                      ≈ 3.6e15 FLOPS
+  -> ~11 s  ✓ (inside the 15s budget; the earlier ~2s target was not achievable)
 ```
 
 **Key decisions:**
 - GQA 8:1 ratio: 8× KV cache reduction vs MHA — the enabling technology
-- INT8 KV quant: additional 2× with 0.2 PPL quality loss (acceptable for legal retrieval)
+- INT8 KV quant: additional 2× at a small quality cost (measure on your own eval; vendors quote sub-0.5 PPL but it is workload-dependent)
 - vLLM PagedAttention: prevents 20-30% KV fragmentation that would otherwise reduce effective users
 - Prefix caching: modest but free optimization for shared system prompts
-- Result: 24 concurrent users at 128K context, 1.8s TTFT — meets requirements
+- Result: 24 concurrent users at 128K context, ~11s TTFT — meets the revised requirement

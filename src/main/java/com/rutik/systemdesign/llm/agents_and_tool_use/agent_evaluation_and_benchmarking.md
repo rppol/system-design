@@ -41,10 +41,11 @@ Purpose: Evaluate general-purpose AI assistant capabilities requiring
          real-world tool use and multi-step reasoning
 
 Structure:
-  466 tasks across 3 difficulty levels:
-    Level 1 (easy): 165 tasks, ~avg 5 steps needed
-    Level 2 (medium): 232 tasks, ~avg 10 steps needed
-    Level 3 (hard): 69 tasks, 10+ steps, complex multi-modal reasoning
+  466 tasks across 3 difficulty levels (paper, Table 4):
+    Level 1 (easy): 146 tasks, no tools or one tool, at most 5 steps
+    Level 2 (medium): 245 tasks, roughly 5-10 steps, combining different tools
+    Level 3 (hard): 75 tasks, long sequences, arbitrary tools, near-perfect
+                    general assistant required
 
 Task types:
   - Web search + synthesis
@@ -67,11 +68,18 @@ Scoring:
   Exact match on final answer (normalized: strip units, lowercase, etc.)
   Binary: 0 or 1 per task
 
-Results (2024):
-  GPT-4 (no tools): 15% Level 1, 5% Level 2, <1% Level 3
-  GPT-4 + browsing: 30% Level 1, 20% Level 2, 5% Level 3
-  Claude 3.5 Sonnet + tools: ~50% Level 1, ~35% Level 2, ~15% Level 3
-  Human annotators: 92% Level 1, 82% Level 2, 47% Level 3
+Results reported in the paper (2023 baselines, Tables 3-4):
+  GPT-4, no tools:     9.1% Level 1,  2.6% Level 2, 0% Level 3
+  GPT-4 Turbo:        13.0% Level 1,  5.5% Level 2
+  GPT-4 + plugins:    30.3% Level 1,  9.7% Level 2, 0% Level 3
+  Human annotators:     94% Level 1,   92% Level 2, 87% Level 3
+                        (92% aggregated across all levels)
+
+Note: 75% / 68% / 47% are the paper's *question-validity* rates per level,
+not human accuracy — the two rows sit adjacent in Table 3 and are
+frequently conflated. Frontier tool-using agents have since moved far past
+these 2023 baselines; check the live leaderboard rather than quoting them
+as current.
 ```
 
 **Stated plainly.** "A single headline GAIA number is a weighted average, and the weights are not equal — half the benchmark is Level 2."
@@ -80,30 +88,33 @@ Per-level scores are the honest reporting format; a one-number score is what lea
 
 | Symbol | What it is |
 |--------|------------|
-| `165 / 232 / 69` | Task counts at Levels 1, 2, 3. They sum to the 466 total |
+| `146 / 245 / 75` | Task counts at Levels 1, 2, 3. They sum to the 466 total |
 | level share | `tasks at level / 466`. The weight that level carries in any overall score |
 | per-level rate | Fraction of that level's tasks answered exactly right. Binary 0/1 per task, then averaged |
 | overall score | `sum(share x rate)` across levels — a weighted, not arithmetic, mean |
 
-**Walk one example.** Claude 3.5 Sonnet with tools, collapsed to one number:
+**Walk one example.** A hypothetical tool-using agent scoring 50 / 35 / 15, collapsed to one number:
 
 ```
                      tasks    share of 466    rate    contribution
-  Level 1 (easy)      165        35.4%         50%    0.354 x 0.50 = 0.177
-  Level 2 (medium)    232        49.8%         35%    0.498 x 0.35 = 0.174
-  Level 3 (hard)       69        14.8%         15%    0.148 x 0.15 = 0.022
+  Level 1 (easy)      146        31.3%         50%    0.313 x 0.50 = 0.157
+  Level 2 (medium)    245        52.6%         35%    0.526 x 0.35 = 0.184
+  Level 3 (hard)       75        16.1%         15%    0.161 x 0.15 = 0.024
                      -----      ------                --------------------
-                      466       100.0%                overall      = 0.373
+                      466       100.0%                overall      = 0.365
 
-  overall = 37.3%
+  overall = 36.5%
 
-  same weighting applied to the human annotators (92 / 82 / 47):
-    0.354 x 0.92 + 0.498 x 0.82 + 0.148 x 0.47 = 0.804  ->  80.4%
+  same weighting applied to the paper's human annotators (94 / 92 / 87):
+    0.313 x 0.94 + 0.526 x 0.92 + 0.161 x 0.87 = 0.918  ->  91.8%
 
-  gap to human = 80.4 - 37.3 = 43.1 points
+  that 91.8% reproduces the paper's headline 92% aggregated human score,
+  which is a useful check that the level counts and weights are right.
+
+  gap to human = 91.8 - 36.5 = 55.3 points
 ```
 
-**Why the plain average would mislead.** Averaging 50, 35 and 15 gives 33.3% — nearly four points below the true 37.3%, because it silently promotes Level 3 from 14.8% of the benchmark to 33.3% of the score. The bias runs the other way too: a system tuned only on easy tasks looks better under the weighted score than a plain average would suggest, since Level 1 carries more than double Level 3's weight. Always ask which mean a reported agent score used, and prefer the per-level breakdown when comparing two systems.
+**Why the plain average would mislead.** Averaging 50, 35 and 15 gives 33.3% — more than three points below the true 36.5%, because it silently promotes Level 3 from 16.1% of the benchmark to 33.3% of the score. The bias runs the other way too: a system tuned only on easy tasks looks better under the weighted score than a plain average would suggest, since Level 1 carries nearly double Level 3's weight. Always ask which mean a reported agent score used, and prefer the per-level breakdown when comparing two systems.
 
 ### SWE-bench
 
@@ -114,9 +125,12 @@ Purpose: Measure ability to resolve real GitHub issues
          in real Python repositories
 
 Structure:
-  2294 real GitHub issues from 12 repositories:
-    Django, Flask, Sympy, Pandas, NumPy, Requests, SciPy,
-    Marshmallow, Pylint, Pytest, Scikit-learn, Astropy
+  2294 real GitHub issues from 12 Python repositories (test split):
+    django (850), sympy (386), scikit-learn (229), sphinx (187),
+    matplotlib (184), pytest (119), xarray (110), astropy (95),
+    pylint (57), requests (44), seaborn (22), flask (11)
+  Note: pandas, numpy, scipy and marshmallow are NOT in the test split
+  (marshmallow is in the small dev split) — a commonly repeated error.
 
 Task format:
   Input:  issue description + entire codebase at time of issue
@@ -134,13 +148,13 @@ SWE-bench Verified (500 tasks):
 
 ```mermaid
 xychart-beta
-    title "SWE-bench resolve rate — historical results"
-    x-axis ["GPT-4 (2023)", "Devin (2024)", "SWE-agent (2024)", "Claude 3.5 + scaffold", "o3 + scaffold"]
-    y-axis "Issues resolved (%)" 0 --> 80
-    bar [1.74, 13.8, 18.1, 49, 71.7]
+    title "SWE-bench resolve rate over time — NOTE: mixed splits, see caption"
+    x-axis ["RAG GPT-4 2024 (full)", "Devin 2024 (25% subset)", "SWE-agent GPT-4 2024 (Lite)", "o3 2024 (Verified, vendor)", "live-SWE-agent + Opus 4.5 2025 (Verified)"]
+    y-axis "Issues resolved (%)" 0 --> 90
+    bar [1.31, 13.86, 18.0, 71.7, 79.2]
 ```
 
-From 1.74% (GPT-4, 2023, no tools) to 71.7% (o3 with specialized scaffolding, on the verified subset) in roughly two years; Devin's 13.8% was Cognition's original claim.
+**The bars are not directly comparable — each is on a different split.** RAG GPT-4 resolved 30/2294 = 1.31% of the full test split (the paper's often-quoted 1.74% is GPT-4 with oracle file retrieval on a 25% sample, a different setting). Devin resolved 79/570 = 13.86% of a randomly chosen 25% subset. SWE-agent + GPT-4 resolved 54/300 = 18.0% on Lite and 286/2294 = 12.47% on the full split — the same system, 5.5 points apart, purely from the split. o3's 71.7% on Verified is an OpenAI-reported figure, not a leaderboard submission. The current leaderboard top on Verified is 396/500 = 79.2% (live-SWE-agent and Sonar Foundation Agent, both on Claude Opus 4.5, Dec 2025). Always state the split.
 
 ```
 What 20% means in practice:
@@ -161,26 +175,26 @@ That severity is the benchmark's greatest strength and its sharpest limitation. 
 | `2294` | Full SWE-bench issue count, drawn from 12 real Python repositories |
 | `500` | The Verified subset — manually checked to be well-specified. 21.8% of the full set |
 | resolve | Binary `1` if every relevant test passes after applying the patch, else `0`. No middle ground |
-| resolve rate | Resolved issues divided by issues attempted. What every number in the chart above is |
+| resolve rate | Resolved issues divided by issues attempted. Always split-specific |
 
-**Walk one example.** Turn the published percentages into issue counts, all expressed against the 500-task Verified subset for comparability:
+**Walk one example.** Go the other way — from published percentages back to raw issue counts, using each system's *own* denominator rather than pretending they share one:
 
 ```
-  resolve rate                             issues resolved out of 500
-     1.74%   GPT-4 (2023, no tools)      ->     8.7
-    13.8%    Devin (2024)                ->    69.0
-    18.1%    SWE-agent (2024)            ->    90.5
-    49%      Claude 3.5 + scaffold       ->   245.0
-    71.7%    o3 + scaffold               ->   358.5
+  system                                resolved / attempted        rate
+    RAG GPT-4 (2024, full split)          30 / 2,294              1.31%
+    Devin (2024, random 25% subset)       79 /   570             13.86%
+    SWE-agent + GPT-4 (Lite)              54 /   300             18.00%
+    SWE-agent + GPT-4 (full split)       286 / 2,294             12.47%
+    live-SWE-agent + Opus 4.5 (Verified) 396 /   500             79.20%
 
-  1.74% -> 71.7% is a 41.2x improvement in roughly two years
+  1.31% -> 79.20% is a 60x improvement in roughly two years
 
   reading the "1 in 5" framing: at a 20% resolve rate,
     issues attempted per issue resolved = 1 / 0.20 = 5
-    on the full 2,294-issue set, 1.74% would have been about 40 issues
+    on the full 2,294-issue set, 1.31% is 30 issues
 ```
 
-**Why the scaffold, not just the model, is on the x-axis.** Every entry past GPT-4 pairs a model with a harness: file navigation, test execution, patch validation, retry logic. The 49% and 71.7% figures are not model scores, they are system scores, and swapping the scaffold moves them by tens of points on an unchanged model. This is why "SWE-bench score" is close to meaningless without naming the scaffold, and why a resolve rate reported without stating full-set versus Verified is unusable — the Verified subset is deliberately easier, having filtered out issues whose descriptions were too vague to be solvable at all.
+**Why the scaffold, not just the model, is on the x-axis.** Every entry past bare RAG pairs a model with a harness: file navigation, test execution, patch validation, retry logic. The 71.7% and 79.2% figures are not model scores, they are system scores, and swapping the scaffold moves them by tens of points on an unchanged model. The two SWE-agent rows make the second point concrete: the *same* system reports 18.00% or 12.47% depending only on the split. This is why "SWE-bench score" is close to meaningless without naming both the scaffold and the split — the Verified subset is deliberately easier, having filtered out issues whose descriptions were too vague to be solvable at all.
 
 ### AgentBench
 
@@ -189,27 +203,37 @@ AgentBench (Liu et al., 2023)
 
 Purpose: Comprehensive multi-environment agent evaluation
 
-8 environments:
-  OS: Terminal command execution tasks
-  DB: SQL query and database interaction
-  KG: Knowledge graph traversal and querying
-  LTP: Long-term planning tasks
-  HouseHolding: Embodied household tasks (ALFWorld)
-  WebShop: E-commerce purchasing agents
-  Mind2Web: Web navigation on 2K real websites
-  WebArena: Realistic web environment (100+ sites)
+8 environments, grouped by grounding type:
 
-Scoring: success rate per environment (0-100%)
+  Code-grounded:
+    OS:  Operating System — terminal command execution
+    DB:  Database — SQL query and database interaction
+    KG:  Knowledge Graph — traversal and querying
+
+  Game-grounded:
+    DCG: Digital Card Game
+    LTP: Lateral Thinking Puzzles (NOT "long-term planning" — a
+         common misreading of the abbreviation)
+    HH:  House-Holding — embodied household tasks (ALFWorld)
+
+  Web-grounded:
+    WS:  Web Shopping (WebShop)
+    WB:  Web Browsing (Mind2Web — 2,000+ tasks across 137 websites
+         in 31 domains; the "2K" is tasks, not websites)
+
+Scoring: each environment has its own native metric; the headline
+  "overall" figure is NOT a percentage. Each task's average score is
+  normalized to 1 across the evaluated models, then averaged.
 
 Results (2023):
-  GPT-4: ~26% overall
-  GPT-3.5-turbo: ~9%
-  Text-davinci-003: ~4%
-  Open-source models (Llama-2-70B): <5%
+  GPT-4: 4.01 overall on that normalized scale — best of the models
+         tested, and top on 6 of the 8 environments
 
 Key finding: Strong performance on OS/DB tasks;
              much weaker on web/household tasks
 ```
+
+Note: WebArena is a separate benchmark (below), not one of AgentBench's eight environments.
 
 ### WebArena
 
@@ -218,12 +242,13 @@ WebArena (Zhou et al., 2024)
 
 Purpose: Realistic web navigation — functional websites with real backends
 
-810 tasks across 5 websites:
-  Shopping (OpenMag e-commerce)
-  Forum (Postmill, Reddit-like)
-  Gitlab (software development)
-  CMS (WordPress)
-  Maps (OpenStreetMap)
+812 tasks (instantiated from 241 templates, ~3.3 each) across 5 self-hosted sites:
+  Shopping — OneStopShop, running Adobe Magento
+  Shopping admin / CMS — the Magento admin portal
+  Forum — Postmill (Reddit-like)
+  GitLab (software development)
+  Maps — OpenStreetMap
+Plus tools (calculator, scratchpad) and an offline English Wikipedia
 
 Task examples:
   "Find all products with a customer rating under 2 stars and add the
@@ -235,11 +260,12 @@ Evaluation:
   Function-based: check backend state matches expected state
   (e.g., database was actually updated correctly)
 
-Results:
-  GPT-4V (2024): ~14%
-  Claude 3 Sonnet: ~20%
-  State-of-the-art with custom scaffolding: ~35%
-  Human: ~78%
+Results (paper baselines, 2023-24):
+  Best GPT-4-based agent: 14.41%
+  Human: 78.24%
+
+Frontier agent scaffolds have since pushed well past the paper's baseline;
+quote the live leaderboard rather than these numbers as current SOTA.
 ```
 
 ### Trajectory-Level Evaluation
@@ -364,7 +390,7 @@ Output format:
 }}"""
 
 async def evaluate_with_llm_judge(trajectory: AgentTrajectory,
-                                   judge_model: str = "gpt-4o") -> dict:
+                                   judge_model: str = "claude-opus-5") -> dict:
     trajectory_text = format_trajectory(trajectory)
     response = await llm.ainvoke([
         SystemMessage("You are an expert AI evaluator."),
@@ -535,17 +561,17 @@ Every trajectory produced by agent execution fans out to three independent score
 
 ## Real-World Examples
 
-### Anthropic's Internal Agent Eval
+### Frontier-lab internal agent eval (typical shape; specific suite sizes are not public)
 
-- Anthropic evaluates Claude-based agents on internal task suites covering coding, research, and tool use
+- Labs evaluate their own agents on internal task suites covering coding, research, and tool use
 - Trajectory evaluation: every step scored by LLM judge with specific rubrics
 - Cost tracking: every run logged with token counts; cost-per-task alerts if it exceeds a budget threshold
-- Regression testing: every model update must maintain or improve on a suite of 500+ agent tasks
+- Regression testing: every model update must maintain or improve on a fixed agent-task suite
 
 ### DeepMind SIMA (Scalable Instructable Multiworld Agent)
 
 - Evaluates agents on 3D game environments
-- Task success rate across 600+ different tasks
+- Task success rate across a set of roughly 600 basic skills
 - Generalization: agents trained on N-1 games evaluated on the N-th game
 - Result: agents that understand natural language instructions generalize better
 
@@ -603,12 +629,12 @@ A large enterprise deploys a research agent:
 
 ```python
 # BROKEN: agent judges its own trajectories — self-preference bias inflates scores
-agent = Agent(model="gpt-4o")
-judge = LLMJudge(model="gpt-4o", rubric=RUBRIC)
+agent = Agent(model="gpt-5.4")
+judge = LLMJudge(model="gpt-5.4", rubric=RUBRIC)
 
 # FIXED: cross-family judge, gated on human agreement before it is trusted at scale
-agent = Agent(model="gpt-4o")
-judge = LLMJudge(model="claude-opus-4", rubric=RUBRIC)
+agent = Agent(model="gpt-5.4")
+judge = LLMJudge(model="claude-opus-5", rubric=RUBRIC)
 assert spearman(judge.scores(calibration_set), human_scores) > 0.8
 ```
 
@@ -643,10 +669,10 @@ A: Single LLM evaluation compares one output to one expected output — straight
 A: SWE-bench provides 2294 real GitHub issues from 12 Python repositories. The agent receives the issue description and the full codebase at the time of filing, and must produce a patch (git diff). Evaluation is automated: apply the patch, run the repository's test suite, check if previously failing tests now pass without breaking previously passing tests. It's rigorous because: tasks are drawn from real production codebases (not synthetic problems), success is binary and programmatic (no human judgment of "close enough"), the test coverage verifies correct behavior rather than surface-level code similarity, and the distribution covers diverse bug types across diverse codebases. The benchmark is hard precisely because it requires codebase understanding, not just code generation.
 
 **Q: What is LLM-as-judge and when is it reliable?**
-A: LLM-as-judge uses a capable LLM (often GPT-4o or Claude) to score agent trajectories against a rubric, replacing or augmenting human evaluation. The judge receives the task, the full trajectory, and a structured scoring rubric; it outputs scores with reasoning per dimension. It's reliable when: (1) the scoring rubric is specific and unambiguous; (2) the judge model is stronger or at least equal in capability to the judged model; (3) you validate the judge against human labels on a calibration set (target: judge-human agreement >80%). It's unreliable when: the task requires domain expertise the judge doesn't have, the rubric is vague, or you use the same model as both agent and judge (self-serving bias). Production use: LLM judge on 5-10% of traces for cost control, with spot human review.
+A: LLM-as-judge uses a capable frontier LLM (a current Claude Opus or GPT-5-tier model) to score agent trajectories against a rubric, replacing or augmenting human evaluation. The judge receives the task, the full trajectory, and a structured scoring rubric; it outputs scores with reasoning per dimension. It's reliable when: (1) the scoring rubric is specific and unambiguous; (2) the judge model is stronger or at least equal in capability to the judged model; (3) you validate the judge against human labels on a calibration set (target: judge-human agreement >80%). It's unreliable when: the task requires domain expertise the judge doesn't have, the rubric is vague, or you use the same model as both agent and judge (self-serving bias). Production use: LLM judge on 5-10% of traces for cost control, with spot human review.
 
 **Q: What is the GAIA benchmark and what does it test that other benchmarks miss?**
-A: GAIA (General AI Assistants) tests real-world tool-use reasoning across 466 tasks at three difficulty levels. Unlike coding-focused benchmarks (SWE-bench) or single-domain benchmarks, GAIA covers general assistant capabilities: web search and synthesis, file analysis, multi-step fact verification, calculator-style reasoning. Its key property is that tasks require tool use — they can't be solved from parametric knowledge alone. GAIA difficulty levels correspond to average steps required (Level 1: ~5, Level 2: ~10, Level 3: 10+). The gap between AI performance (~35% average) and human performance (~82%) reveals where agents fail: multi-step reasoning that humans find natural remains challenging for current systems.
+A: GAIA (General AI Assistants) tests real-world tool-use reasoning across 466 tasks at three difficulty levels. Unlike coding-focused benchmarks (SWE-bench) or single-domain benchmarks, GAIA covers general assistant capabilities: web search and synthesis, file analysis, multi-step fact verification, calculator-style reasoning. Its key property is that tasks require tool use — they can't be solved from parametric knowledge alone. GAIA difficulty levels correspond to steps required (Level 1: no tools or one, at most 5 steps; Level 2: roughly 5-10 steps combining tools; Level 3: long arbitrary sequences), with 146 / 245 / 75 tasks respectively. Human annotators score 92% aggregated (94 / 92 / 87 by level) while the paper's 2023 tool-using baselines managed 30.3% at Level 1 and 0% at Level 3 — the gap reveals where agents fail: multi-step reasoning that humans find natural remains challenging.
 
 **Q: How do you build a custom eval harness for a production agent?**
 A: (1) Dataset creation: sample 100-200 real production tasks; manually annotate correct answers or use LLM to generate expected answers; tag by difficulty and category; (2) Agent execution: run the agent on each task with timeout (prevent runaway); log complete trajectory (steps, tokens, cost, wall time); (3) Outcome evaluation: compare final answer to expected (exact match or LLM judge for open-ended answers); (4) Efficiency evaluation: compute steps-per-task, cost-per-task, success-per-dollar; (5) Aggregate and monitor: track metrics over time; alert on regressions; stratify results by difficulty and task category. Key: run the harness in CI on every agent code change to catch regressions before production.
@@ -658,7 +684,7 @@ A: pass@k estimates the probability that at least one of k independent runs succ
 A: Core metrics: (1) Task success rate — binary or LLM-scored; track daily P7D rolling average; alert if drops >5%; (2) Cost per task — average $/task; alert if exceeds budget; (3) P95 latency — wall time for 95th percentile task; SLA adherence; (4) Step count per task — efficiency metric; rising step count indicates model or tool degradation; (5) Tool error rate — fraction of tool calls returning errors; high rate indicates infrastructure or API issues; (6) Human escalation rate — for agents with HITL; rising rate indicates quality degradation. Supporting metrics: token usage distribution, model calls per task, retry rate. Alert thresholds: set during baseline period (first 2 weeks), then alert on >2 standard deviation shifts.
 
 **Q: How do golden trajectories work in agent evaluation?**
-A: A golden trajectory is an expert-annotated correct solution path for a task: the ideal sequence of tool calls, their arguments, and expected outputs that correctly and efficiently solves the task. Generated by: (1) human experts solving the task while being recorded; (2) a strong model (o1, Claude Opus) solving the task with expert review and correction. Usage: (1) step-level F1: compare agent trajectory steps to golden trajectory steps; (2) prefix match: check if agent's first N steps match golden steps before diverging; (3) tool argument similarity: for matching tool calls, compare argument quality. Limitation: most tasks have multiple valid trajectories — a golden trajectory is one valid path, not the only one. Use golden trajectories to detect systematic errors (always using wrong tool, always forming poor queries) rather than as rigid correct answers.
+A: A golden trajectory is an expert-annotated correct solution path for a task: the ideal sequence of tool calls, their arguments, and expected outputs that correctly and efficiently solves the task. Generated by: (1) human experts solving the task while being recorded; (2) a strong reasoning model (a current Claude Opus or GPT-5-tier model at high effort) solving the task with expert review and correction. Usage: (1) step-level F1: compare agent trajectory steps to golden trajectory steps; (2) prefix match: check if agent's first N steps match golden steps before diverging; (3) tool argument similarity: for matching tool calls, compare argument quality. Limitation: most tasks have multiple valid trajectories — a golden trajectory is one valid path, not the only one. Use golden trajectories to detect systematic errors (always using wrong tool, always forming poor queries) rather than as rigid correct answers.
 
 **Q: How do you detect when a production agent has degraded in quality?**
 A: Automated regression detection: (1) scheduled eval runs on the fixed eval dataset (daily or per deployment); compare to historical baseline; (2) production sampling: run LLM judge on 5% of live traffic; track daily judgment scores; (3) proxy metrics that correlate with quality: user satisfaction signals (thumbs down, rephrasing the question), step count anomalies (agent taking 2× normal steps), escalation rate (HITL agents asking for help more), tool error rate (tool calls failing more). Alert strategy: primary metric (task success rate) alerts are high-severity; proxy metric alerts are medium; combine multiple proxy signals before escalating. Root cause: when quality drops, check: model version change, tool API changes, context window changes, or prompt modifications.
@@ -676,7 +702,7 @@ A: Multi-turn evaluation has three compounding difficulties. First, trajectory b
 A: Calibration ensures the LLM judge produces scores that correlate with human expert judgment. Process: (1) create a calibration set of 50-100 agent trajectories; (2) have 2-3 human experts score each trajectory on the same rubric the LLM judge uses (4-dimension rubric: task success, reasoning quality, efficiency, tool use); (3) compute inter-annotator agreement (Cohen's kappa; target >0.7 for reliable calibration); (4) run the LLM judge on the same trajectories; (5) compute judge-human correlation (Spearman's rho; target >0.8 for production use). If correlation is below 0.7, iterate on the rubric: common fixes include making scoring criteria more specific ("5 = task completed with correct final answer and no unnecessary steps" rather than "5 = excellent"), adding concrete examples of each score level, and restricting the judge to a 3-point scale (bad/acceptable/good) instead of 5-point. Re-calibrate quarterly because model updates change judge behavior. Cost: a 100-task calibration set with 3 annotators costs roughly 20-40 hours of expert time, but this investment prevents months of unreliable automated evaluation.
 
 **Q: How do you design cost-aware evaluation for production agent systems?**
-A: Cost-aware evaluation treats cost-per-task as a first-class metric alongside quality. Implementation: (1) log input_tokens, output_tokens, and model used for every LLM call within a task; compute cost using the model's pricing (e.g., GPT-4o: $5/1M input, $15/1M output; Claude 3.5 Sonnet: $3/1M input, $15/1M output); (2) compute cost-per-successful-task (total cost / successful tasks) — this is the metric that matters for ROI; (3) build a cost-quality Pareto frontier: plot task success rate (y-axis) vs. average cost per task (x-axis) for each agent configuration; configurations on the Pareto frontier are candidates for production; (4) set cost budgets per task: if a single task exceeds $2.00, terminate early and log as a cost-exceeded failure. Design the eval harness to report: median cost per task, P95 cost per task, cost per successful task, and total eval run cost. A practical benchmark: a research agent averaging $0.30/task at 60% success has a cost-per-success of $0.50 — compare this against the manual labor cost for the same task to determine deployment viability.
+A: Cost-aware evaluation treats cost-per-task as a first-class metric alongside quality. Implementation: (1) log input_tokens, output_tokens, and model used for every LLM call within a task; compute cost using the model's pricing (e.g., Claude Sonnet 4.6: $3/1M input, $15/1M output; Claude Opus 5: $5/1M input, $25/1M output; gpt-5.4: $2.50/1M input, $15/1M output); (2) compute cost-per-successful-task (total cost / successful tasks) — this is the metric that matters for ROI; (3) build a cost-quality Pareto frontier: plot task success rate (y-axis) vs. average cost per task (x-axis) for each agent configuration; configurations on the Pareto frontier are candidates for production; (4) set cost budgets per task: if a single task exceeds $2.00, terminate early and log as a cost-exceeded failure. Design the eval harness to report: median cost per task, P95 cost per task, cost per successful task, and total eval run cost. A practical benchmark: a research agent averaging $0.30/task at 60% success has a cost-per-success of $0.50 — compare this against the manual labor cost for the same task to determine deployment viability.
 
 **Q: How do you evaluate agents deployed in safety-critical domains?**
 A: Safety-critical agent evaluation requires three additional layers beyond standard quality metrics. First, harm rate measurement: track the fraction of tasks where the agent takes a harmful, irreversible, or policy-violating action — even one harmful action in 10,000 tasks may be unacceptable for healthcare, finance, or legal domains. Second, adversarial testing (red teaming): craft inputs designed to trigger unsafe behavior — prompt injections, ambiguous instructions that could be interpreted as harmful, edge cases where the correct action is to refuse or escalate. Target: test 200+ adversarial scenarios per deployment cycle and require 0% harmful action rate. Third, escalation correctness: measure whether the agent correctly identifies when to escalate to a human rather than acting autonomously — false negatives (agent acts when it should escalate) are critical failures; false positives (agent escalates unnecessarily) are annoying but safe. Evaluation frequency: safety-critical agents should be evaluated on the adversarial test set with every model update, every prompt change, and every tool modification — never skip safety eval even for "minor" changes. Production monitoring: run the full adversarial suite weekly in shadow mode (agent generates actions but does not execute them) and compare against the safety baseline.
@@ -685,7 +711,7 @@ A: Safety-critical agent evaluation requires three additional layers beyond stan
 A: Trajectory evaluation requires three complementary lenses: (1) Efficiency scoring — compute `golden_steps / agent_steps` (capped at 1.0) where golden_steps is the expert-annotated minimum; an agent completing a 5-step task in 15 steps scores 0.33; (2) Step correctness — annotate each step with a 1-5 rubric: 1 = wrong tool entirely, 3 = right tool but suboptimal arguments, 5 = optimal tool and arguments; aggregate across steps for a trajectory-level score; (3) Observation utilization — verify the model's Thought after each step explicitly references key facts from the Observation; a model that ignores "no results found" observations and repeats the same query is unreliable even if final answers are occasionally correct. Full trajectory evaluation costs $0.05-0.15 per trajectory in LLM judge calls. Run on 100% of your evaluation dataset and 10-20% of production traffic (sampled); never rely on final-answer accuracy alone for complex multi-step tasks.
 
 **Q: What cost-normalized metrics should teams prioritize when comparing agent architectures?**
-A: Three cost-normalized metrics drive architecture selection: (1) Success-per-dollar — `task_success_rate / avg_cost_usd_per_task`; the most direct ROI metric; an agent at 70% success for $0.20/task ($3.50/success) may be inferior to one at 65% success for $0.05/task ($0.77/success) for high-volume workloads; (2) Quality-loss-per-dollar-saved — when downgrading from GPT-4o to GPT-4o-mini, measure: `(quality_drop_pct) / (cost_savings_pct)`; a ratio below 0.2 (less than 20% quality loss per 100% cost reduction) is generally acceptable; above 0.5 is not; (3) Cost at target quality — the minimum cost configuration that achieves a fixed quality bar (e.g., 85% task success); find via ablation across model tier, step limit, and memory injection size. Instrument the eval harness to emit cost-per-task for every run automatically; cost data that is not captured during evaluation is never retroactively reconstructed accurately.
+A: Three cost-normalized metrics drive architecture selection: (1) Success-per-dollar — `task_success_rate / avg_cost_usd_per_task`; the most direct ROI metric; an agent at 70% success for $0.20/task scores 3.5 successes per dollar, or $0.29 per success, and may be inferior to one at 65% success for $0.05/task (13 successes per dollar, $0.077 per success) for high-volume workloads — note success-per-dollar and cost-per-success are reciprocals, so never label one with the other's units; (2) Quality-loss-per-dollar-saved — when downgrading from a flagship model to its mini tier, measure: `(quality_drop_pct) / (cost_savings_pct)`; a ratio below 0.2 (less than 20% quality loss per 100% cost reduction) is generally acceptable; above 0.5 is not; (3) Cost at target quality — the minimum cost configuration that achieves a fixed quality bar (e.g., 85% task success); find via ablation across model tier, step limit, and memory injection size. Instrument the eval harness to emit cost-per-task for every run automatically; cost data that is not captured during evaluation is never retroactively reconstructed accurately.
 
 **Q: What human evaluation protocols produce reliable quality assessments for agent outputs?**
 A: Reliable human evaluation for agents requires five structural elements: (1) Calibration before scoring — annotators score 20 pre-scored "gold" trajectories before scoring new ones; require >80% agreement with gold scores or provide coaching; (2) Two-annotator redundancy — every trajectory gets two independent scores; compute Cohen's kappa; target kappa > 0.6 for ordinal rubrics; adjudicate disagreements with a third senior annotator; (3) Blind evaluation — strip all metadata (model name, date, architecture version) before showing to annotators; knowledge of which model produced a trajectory creates systematic bias toward known high-quality models; (4) Comparative preference over absolute scoring — for close architecture comparisons, show two trajectories side-by-side and ask "which better accomplishes the task?"; comparative judgment is more reliable than absolute 1-5 scoring for small quality gaps; (5) Domain expert annotators for specialized domains — a general annotator cannot evaluate whether a legal research agent cited the right precedents; match annotator expertise to task domain. Budget: 5-10 minutes per trajectory for experienced annotators; scale accordingly.
@@ -727,7 +753,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PT(["Production Traffic<br/>5,000 tickets/day"]) --> AGENT["Customer Service Agent<br/>Claude 3.5 Sonnet<br/>Tools: CRM lookup, transaction DB,<br/>knowledge base search"]
+    PT(["Production Traffic<br/>5,000 tickets/day"]) --> AGENT["Customer Service Agent<br/>Claude Sonnet 4.6<br/>Tools: CRM lookup, transaction DB,<br/>knowledge base search"]
     AGENT --> LOGGER["Trace Logger<br/>all traces"]
     AGENT --> SAMPLER["5% Sampler<br/>LLM Judge"]
     AGENT --> NIGHTLY["Nightly Eval Run<br/>200-task suite"]
@@ -745,7 +771,7 @@ Traffic flows through the agent and fans out to three independent evaluation arm
 
 **Key Decisions**
 
-1. Three-tier evaluation strategy: (a) full trace logging for all tickets (cost: storage only); (b) LLM-as-judge on 5% random sample (250 tickets/day, ~$12/day in judge costs at GPT-4o pricing); (c) nightly regression run on a fixed 200-task eval dataset drawn from real production tickets.
+1. Three-tier evaluation strategy: (a) full trace logging for all tickets (cost: storage only); (b) LLM-as-judge on 5% random sample (250 tickets/day, ~$12/day in judge costs — about $0.048 per judged trace); (c) nightly regression run on a fixed 200-task eval dataset drawn from real production tickets.
 
 2. Four-dimension LLM judge rubric calibrated against 3 human annotators on 100 tickets: task success (was the customer's issue resolved?), response quality (was the tone appropriate and information accurate?), efficiency (steps and tokens used), and safety compliance (no disclosure of other customers' data, no unauthorized account changes).
 
@@ -760,7 +786,7 @@ class CustomerServiceEvalSuite:
     def __init__(self):
         self.eval_dataset = load_dataset("prod_eval_200.jsonl")
         self.adversarial_set = load_dataset("adversarial_50.jsonl")
-        self.judge = LLMJudge(model="gpt-4o", rubric=CS_RUBRIC)
+        self.judge = LLMJudge(model="claude-opus-5", rubric=CS_RUBRIC)
 
     async def nightly_regression(self) -> EvalReport:
         # Run agent on 200 fixed tasks

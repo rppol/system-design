@@ -47,7 +47,7 @@ This architectural shift enabled:
   - **Post-LN** (original Transformer): `output = LN(x + sublayer(x))` — LayerNorm after residual addition. Gradients at early layers can explode or vanish, requiring careful learning rate warmup.
   - **Pre-LN** (modern standard): `output = x + sublayer(LN(x))` — LayerNorm before the sublayer. The residual path stays "clean" (no normalization on it), producing more stable gradient flow. Tradeoff: some studies show slightly lower final performance, but dramatically easier training.
   - Nearly all modern LLMs use Pre-LN: GPT-2+, LLaMA, Mistral, Falcon, Qwen.
-  - **RMSNorm** (LLaMA, Mistral, Gemma): Simplified LayerNorm that normalizes by root-mean-square only, skipping mean centering. ~10-15% faster than standard LayerNorm with equivalent quality. Used in all LLaMA variants.
+  - **RMSNorm** (LLaMA, Mistral, Gemma): Simplified LayerNorm that normalizes by root-mean-square only, skipping mean centering. Zhang & Sennrich (2019) report 7-64% training-step speedups across architectures (7-9% on Transformers) at equivalent quality. Used in all LLaMA variants.
 - **Token Prediction**: Autoregressive models predict the next token given all previous tokens (causal LM).
 
 ---
@@ -90,9 +90,9 @@ Standard self-attention computes O(n^2) interactions — every token attends to 
 - Each token attends only to the W previous tokens (e.g., W=4096 in Mistral 7B)
 - Complexity drops from O(n^2) to O(n * W) — linear in sequence length for a fixed window size
 - Information propagation across layers: with L layers and window W, information can flow across L * W tokens total through stacking
-- Mistral 7B: W=4096, 32 layers -> effective attention span of 131,072 tokens despite each layer seeing only 4096
+- Mistral 7B: W=4096, 32 layers -> theoretical attention span of ~131,072 tokens (the figure the Mistral 7B paper states) despite each layer seeing only 4096
 - Combines naturally with a **rolling KV cache**: only store W entries per layer instead of the full sequence length
-- KV cache savings: at 32K sequence length with W=4096, the rolling cache saves ~87% KV cache memory compared to full attention
+- KV cache savings: at 32K sequence length with W=4096, the rolling cache saves ~87% KV cache memory compared to full attention (the *compute* saving is smaller, ~77% — see §6)
 
 ---
 
@@ -193,7 +193,7 @@ MQA — Multi-Query Attention (H=8 Q, G=1 KV) — all Q heads share a single K,V
             K0                      KV cache = 1 × d_head  →  0.125× MHA (8:1)
 ```
 
-GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA with <1 PPL quality loss.
+GQA is the production sweet spot: LLaMA 3 70B uses H=64, G=8 — an 8× KV cache reduction vs MHA. The GQA paper (Ainslie et al. 2023) measured this on T5-XXL, where GQA-8 scored 47.1 average ROUGE vs MHA's 47.2 at close to MQA speed; no equivalent published ablation exists at 70B.
 
 ### Pre-LN vs Post-LN Data Flow
 
@@ -263,10 +263,10 @@ xychart-beta
     title "Same logits (3.0, 1.0, 0.5) for tokens A/B/C under three temperatures"
     x-axis ["A T=0.5", "B T=0.5", "C T=0.5", "A T=1.0", "B T=1.0", "C T=1.0", "A T=2.0", "B T=2.0", "C T=2.0"]
     y-axis "Probability" 0 --> 1
-    bar [0.879, 0.119, 0.002, 0.744, 0.100, 0.062, 0.516, 0.260, 0.224]
+    bar [0.976, 0.018, 0.007, 0.821, 0.111, 0.067, 0.604, 0.222, 0.173]
 ```
 
-T=0.5 sharpens (logits scaled ×2 → token A takes 0.879); T=1.0 is the raw softmax (0.744/0.100/0.062); T=2.0 flattens (logits scaled ×0.5 → mass spreads to 0.516/0.260/0.224). T → 0 is argmax/greedy; T → ∞ is uniform. Factual tasks: T≈0.0–0.3; creative tasks: T≈0.7–1.2; above T=2.0 output degrades.
+T=0.5 sharpens (logits scaled ×2 → token A takes 0.976); T=1.0 is the raw softmax (0.821/0.111/0.067); T=2.0 flattens (logits scaled ×0.5 → mass spreads to 0.604/0.222/0.173). T → 0 is argmax/greedy; T → ∞ is uniform. Factual tasks: T≈0.0–0.3; creative tasks: T≈0.7–1.2; above T=2.0 output degrades.
 
 ### Embedding Semantic Space
 
@@ -420,7 +420,7 @@ embeddings = E[token_ids, :]   # shape: [2, d_model] — just indexing rows of E
 
 **Why embeddings capture meaning**: During training, tokens appearing in similar contexts receive similar gradient updates, pulling their vectors closer together. "king" and "queen" appear in similar contexts → their vectors become close. This enables the famous arithmetic: `king - man + woman ≈ queen`.
 
-The embedding matrix `E` is `[vocab_size × d_model]` — for LLaMA 3 8B: `[128,256 × 4,096]` = 524M parameters (the single largest weight matrix in many models).
+The embedding matrix `E` is `[vocab_size × d_model]` — for LLaMA 3 8B: `[128,256 × 4,096]` = 525M parameters (the single largest weight matrix in many models).
 
 ---
 
@@ -440,11 +440,11 @@ probs:        [128256]   — sums to 1.0
 next token ID
 ```
 
-**Weight tying**: In most modern LLMs, the LM head weight matrix is **shared with (transposed from) the embedding matrix** `E`:
+**Weight tying**: In *small* modern LLMs the LM head weight matrix is **shared with (transposed from) the embedding matrix** `E`:
 ```python
 logits = hidden @ E.T    # shape: [vocab_size]
 ```
-This works because E already encodes good token representations. The LM head is asking "how similar is my hidden state to each token's embedding?" — the token with the highest similarity is the most likely next token. Weight tying saves ~500M parameters and often improves quality.
+This works because E already encodes good token representations. The LM head is asking "how similar is my hidden state to each token's embedding?" — the token with the highest similarity is the most likely next token. Weight tying saves ~500M parameters at LLaMA-3's vocabulary size. Note the size split: tying is standard for sub-4B models (Gemma, Qwen small variants, Llama 3.2 1B/3B all set `tie_word_embeddings: true`) but the larger models — including the LLaMA 3 8B config used throughout this section — keep the two matrices **untied** (`tie_word_embeddings: false`), because past a few billion parameters the vocabulary matrices are a small fraction of the model and the extra capacity is worth more than the saving.
 
 **Stated plainly.** "Dot your final hidden state against every token's embedding vector and read off the similarities. The embedding table already knows what each token 'looks like' as a vector, so you can reuse it backwards as the output classifier instead of learning a second copy."
 
@@ -466,11 +466,11 @@ This works because E already encodes good token representations. The LM head is 
      "dog"  [0.8, 0.2, 0.0, 0.1]   0.9*.8+0.1*.2+0*0 +0.2*.1 =   0.76
      "the"  [0.0, 0.0, 1.0, 0.0]   0.9*0 +0.1*0 +0*1 +0.2*0  =   0.00
 
-   softmax([0.90, 0.76, 0.00]) = [0.427, 0.371, 0.173]
+   softmax([0.90, 0.76, 0.00]) = [0.439, 0.382, 0.179]
    -> "cat" wins, "dog" is a close second (their embeddings are similar), "the" is far off
 ```
 
-**Why tying is nearly free quality.** Both matrices are `[128256 × 4096]` = 524M parameters. Keeping them separate means 1.05B parameters devoted to the vocabulary boundary alone — roughly 13% of an 8B model — and the untied output matrix has to relearn from scratch the same "which tokens are similar" structure the embedding table already encodes. Tying halves that cost and shares the gradient signal: every time the model reads "cat" it also improves its ability to predict "cat".
+**Why tying is attractive at small scale.** Both matrices are `[128256 × 4096]` = 525M parameters. Keeping them separate means 1.05B parameters devoted to the vocabulary boundary alone — roughly 13% of an 8B model, and a far larger fraction of a 1B model — and the untied output matrix has to relearn from scratch the same "which tokens are similar" structure the embedding table already encodes. Tying halves that cost and shares the gradient signal: every time the model reads "cat" it also improves its ability to predict "cat". The counter-argument, and why 8B+ models untie, is that the input embedding and the output classifier are being asked for genuinely different things, and at that scale the 13% is affordable.
 
 ---
 
@@ -491,9 +491,9 @@ Effect of T on distribution shape:
 
 **Numerical example** with logits `[3.0, 1.0, 0.5]`:
 ```
-T = 0.5: softmax([6.0, 2.0, 1.0]) → [0.879, 0.119, 0.002]  ← sharp, confident
-T = 1.0: softmax([3.0, 1.0, 0.5]) → [0.744, 0.100, 0.062]  ← normal
-T = 2.0: softmax([1.5, 0.5, 0.25])→ [0.516, 0.260, 0.224]  ← flat, diverse
+T = 0.5: softmax([6.0, 2.0, 1.0]) → [0.976, 0.018, 0.007]  ← sharp, confident
+T = 1.0: softmax([3.0, 1.0, 0.5]) → [0.821, 0.111, 0.067]  ← normal
+T = 2.0: softmax([1.5, 0.5, 0.25])→ [0.604, 0.222, 0.173]  ← flat, diverse
 ```
 
 For factual tasks, use T≈0.0–0.3. For creative writing, T≈0.7–1.2. Above T=2.0, outputs degrade rapidly.
@@ -514,29 +514,31 @@ The key realization for an interview: temperature does not change the *ranking* 
 
 ```
                       logit z    z / T      exp(z/T)    prob = exp / sum
-  T = 0.5   A           3.0       6.00        403.4         0.879
-            B           1.0       2.00          7.39        0.119
-            C           0.5       1.00          2.72        0.002 (rounded)
+  T = 0.5   A           3.0       6.00        403.43        0.976
+            B           1.0       2.00          7.39        0.018
+            C           0.5       1.00          2.72        0.007
                                               -------
-                                       sum =   413.5
+                                       sum =   413.54
 
-  T = 1.0   A           3.0       3.00         20.09        0.744
-            B           1.0       1.00          2.72        0.100
-            C           0.5       0.50          1.65        0.062
+  T = 1.0   A           3.0       3.00         20.09        0.821
+            B           1.0       1.00          2.72        0.111
+            C           0.5       0.50          1.65        0.067
                                               -------
-                                       sum =    24.46
+                                       sum =    24.45
 
-  T = 2.0   A           3.0       1.50          4.48        0.516
-            B           1.0       0.50          1.65        0.260
-            C           0.5       0.25          1.28        0.224
+  T = 2.0   A           3.0       1.50          4.48        0.604
+            B           1.0       0.50          1.65        0.222
+            C           0.5       0.25          1.28        0.173
                                               -------
                                        sum =     7.41
 
-  A's lead over B:   T=0.5 -> 7.4x     T=1.0 -> 7.4x logits, 0.744 vs 0.100
-                     T=2.0 -> 0.516 vs 0.260, barely 2x
+  A's odds against B (ratio of the exp column, = exp((z_A - z_B)/T)):
+                     T=0.5 -> 403.43 / 7.39 = 54.6x
+                     T=1.0 ->  20.09 / 2.72 =  7.4x
+                     T=2.0 ->   4.48 / 1.65 =  2.7x
 ```
 
-Read the middle column: the gap between A and B in *logit* space is always 2.0, but after dividing by `T` it becomes 4.0 at T=0.5 and 1.0 at T=2.0. Exponentiating then turns that gap into a ratio — `exp(4.0) = 54.6x` versus `exp(1.0) = 2.7x`. That is the whole mechanism: `T` rescales the gaps, `exp` converts gaps into odds.
+Read the middle column: the gap between A and B in *logit* space is always 2.0, but after dividing by `T` it becomes 4.0 at T=0.5 and 1.0 at T=2.0. Exponentiating then turns that gap into a ratio — `exp(4.0) = 54.6x` versus `exp(1.0) = 2.7x`, exactly the odds computed above. That is the whole mechanism: `T` rescales the gaps, `exp` converts gaps into odds.
 
 **Why `T` sits in the denominator and not as a multiplier.** Writing it as `z_i / T` makes the knob read intuitively as "temperature": high heat means more disorder, and `T -> ∞` drives every `z/T` to 0, every `exp(0)` to 1, and the distribution to uniform. If you removed `T` entirely you would be locked at the raw softmax — no way to trade creativity for reliability at inference time without retraining, which is exactly why every serving API exposes this parameter.
 
@@ -692,13 +694,13 @@ The output for "it" is now 73% "cat" — the pronoun has literally absorbed the 
   What softmax does with a gap of that size (two tokens):
 
    scores [ 2.0,  0.0]  ->  softmax = [0.881, 0.119]   healthy, gradient flows
-   scores [11.3,  0.0]  ->  softmax = [0.999, 0.001]   saturated, near one-hot
-   scores [34.0,  0.0]  ->  softmax = [1.000, 0.000]   fully saturated
+   scores [11.3,  0.0]  ->  softmax = [0.99999, 0.00001]  saturated, near one-hot
+   scores [34.0,  0.0]  ->  softmax = [1.00000, 0.00000]  fully saturated
 
   Dividing by sqrt(d_k) = 11.3 pulls the 34.0 case back to 3.0, restoring a usable spread.
 ```
 
-Saturation is fatal because softmax's gradient is proportional to `p × (1 - p)`. At `p = 0.999` that is `0.000999` — effectively zero, so the attention weights stop being trainable and the head freezes at whatever pattern it initialized into. Dividing by `√d_k` normalizes the score variance back to roughly 1 regardless of head size, which is why the same learning rate works for `d_k = 64` and `d_k = 128`. Note that it is `√d_k` and not `d_k`: variance scales with `d_k`, so *standard deviation* — the thing that sets the score's spread — scales with its square root.
+Saturation is fatal because softmax's gradient is proportional to `p × (1 - p)`. At `p = 0.99999` that is `1.0e-5` — effectively zero, so the attention weights stop being trainable and the head freezes at whatever pattern it initialized into. Dividing by `√d_k` normalizes the score variance back to roughly 1 regardless of head size, which is why the same learning rate works for `d_k = 64` and `d_k = 128`. Note that it is `√d_k` and not `d_k`: variance scales with `d_k`, so *standard deviation* — the thing that sets the score's spread — scales with its square root.
 
 ### Sliding Window Attention — Detailed Mechanics
 
@@ -715,8 +717,10 @@ T6: X X X X X X . .           T6: . . . X X X . .
 T7: X X X X X X X .           T7: . . . . X X X .
 T8: X X X X X X X X           T8: . . . . . X X X
 
-Full: 36 active cells             Window: 22 active cells (39% fewer)
-At n=32K, W=4096: ~87% fewer attention computations
+Full: 36 active cells             Window: 21 active cells (42% fewer)
+At n=32K, W=4096: full causal is n(n+1)/2 = 537M cells vs the window's
+(n-W)*W + W(W+1)/2 = 126M cells -> ~77% fewer attention computations.
+(The ~87% figure often quoted is the KV *cache* saving, W/n = 4096/32768.)
 ```
 
 **Information propagation through layer stacking:**
@@ -736,11 +740,13 @@ Mistral 7B: W=4096, L=32 layers
 ```
 Standard KV cache at position 10000:  stores 10000 entries per layer
 Rolling KV cache at position 10000:   stores 4096 entries per layer (W=4096)
-  -> Position 10000 overwrites the slot at index (10000 mod 4096) = 1712
-  -> Memory: fixed at W * num_layers * 2 * d_head * bytes regardless of sequence length
+  -> Position 10000 overwrites the slot at index (10000 mod 4096) = 1808
+  -> Memory: fixed at W * num_layers * 2 * n_kv_heads * d_head * bytes regardless of sequence length
 ```
 
-For Mistral 7B serving at 32K context: standard KV cache needs ~2.1GB per sequence; rolling cache needs ~270MB per sequence — a fixed cost that does not grow with sequence length.
+For Mistral 7B (32 layers, 8 KV heads, d_head 128, FP16) serving at 32K context: the standard KV cache is
+`2 x 32 x 8 x 128 x 32768 x 2 bytes` = 4.3 GB per sequence; the rolling cache holds only W=4096 entries, so
+`2 x 32 x 8 x 128 x 4096 x 2 bytes` = 537 MB per sequence — a fixed cost that does not grow with sequence length.
 
 ---
 
@@ -815,7 +821,7 @@ Every doubling of context multiplies the attention matrix by 4. This single tabl
 |---------|---------|---------|
 | **Post-LN** (original) | `LN(x + sublayer(x))` — normalize after residual | Gradient instability in early layers; requires careful warmup; slightly higher final quality in some studies |
 | **Pre-LN** (modern standard) | `x + sublayer(LN(x))` — normalize before sublayer | Clean residual path, stable gradients, easier training; used in GPT-2+, LLaMA, Mistral, Falcon |
-| **RMSNorm** | Normalize only by RMS (no mean subtraction) | ~10-15% faster than LayerNorm; equivalent quality; used in LLaMA, Mistral, Gemma |
+| **RMSNorm** | Normalize only by RMS (no mean subtraction) | 7-9% faster than LayerNorm on Transformers (Zhang & Sennrich 2019 report 7-64% across architectures); equivalent quality; used in LLaMA, Mistral, Gemma |
 
 **4. Activations**
 
@@ -823,7 +829,7 @@ Every doubling of context multiplies the attention matrix by 4. This single tabl
 |---------|---------|---------|
 | **ReLU** (original) | `max(0, x)` | Simple; dying neuron problem |
 | **GELU** | `x × Φ(x)` (smooth approximation) | Better for language; used in BERT, GPT-2 |
-| **SwiGLU** | `SiLU(xW₁) ⊙ xW₂` (gated) | Best empirically; requires 2 weight matrices but expansion ratio 2/3 of standard FFN; used in LLaMA, PaLM |
+| **SwiGLU** | `SiLU(xW₁) ⊙ xW₂` then `· W₃` (gated) | Best empirically; requires 3 weight matrices instead of 2, so the hidden expansion is cut to 2/3 of the standard 4× to keep parameter count comparable; used in LLaMA, PaLM |
 
 **Reading GELU in plain English.** "Instead of ReLU's hard cutoff — keep it or zero it — GELU asks 'what fraction of the time would a value this large survive a random gate?' and scales the input by that probability. Big positives pass almost fully, big negatives get almost fully suppressed, and values near zero get partially attenuated instead of chopped."
 
@@ -922,13 +928,13 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 
 ### Google
 - PaLM/PaLM-2: Pathways architecture, multilingual, coding excellence
-- Gemini 1.5 Pro: 1M token context via ring attention, multimodal natively
+- Gemini 1.5 Pro (2024): first widely available 1M-token context window, multimodal natively. Google has not published the attention or positional-encoding scheme behind it.
 
 ### Anthropic Claude
-- Constitutional AI alignment, ~100K-200K context, strong instruction following
+- Constitutional AI alignment, 1M-token context on the current Opus 5 / Sonnet 5 / Fable 5 generation (200K on Haiku 4.5), strong instruction following
 
 ### DeepSeek
-- DeepSeek-V3: 671B MoE, 37B active params, trained for $5.5M — challenged assumptions about training cost
+- DeepSeek-V3: 671B MoE, 37B active params. Its paper reports 2.788M H800 GPU-hours for the official training run — about $5.6M at an assumed $2/GPU-hour — explicitly excluding all prior research and ablation runs, which is the figure popularly quoted as "trained for $5.5M".
 
 ---
 
@@ -942,12 +948,17 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 | Inference speed | Fast (no generation) | Token by token | Slower |
 | Best use case | Classification, embeddings | Chat, reasoning | Translation, summarization |
 
-| Model Size | Parameters | Typical Use | Inference Cost |
+| Model Size | Parameters | Typical Use | Relative inference cost |
 |-----------|-----------|-------------|---------------|
-| Small | 1-7B | Edge, latency-sensitive | <$0.001/1K tokens |
-| Medium | 13-34B | Balanced tasks | ~$0.001-0.01/1K tokens |
-| Large | 70-90B | Complex reasoning | ~$0.01-0.1/1K tokens |
-| Giant | 200B+ | State of the art | >$0.1/1K tokens |
+| Small | 1-7B | Edge, latency-sensitive | Cheapest; frequently self-hosted, where cost is GPU-hours not per-token |
+| Medium | 13-34B | Balanced tasks | Roughly linear in active parameters at fixed batch size |
+| Large | 70-90B | Complex reasoning | Higher, but MoE models break the parameter-to-cost link (active ≪ total) |
+| Giant | 200B+ | State of the art | Highest; frontier hosted tiers |
+
+Do not translate parameter count into a dollar rate: vendors do not disclose the size of hosted
+models, and MoE decouples total parameters from serving cost. For a checkable anchor, use published
+API rates instead — as of July 2026 Anthropic lists Claude Haiku 4.5 at $1/$5 per million input/output
+tokens, Sonnet 5 at $3/$15, Opus 5 at $5/$25, and Fable 5 at $10/$50.
 
 ---
 
@@ -981,7 +992,7 @@ But in practice, models are often undertrained relative to Chinchilla-optimal be
 2. **Confusing temperature=0 with determinism**: Temperature=0 is greedy but not perfectly reproducible across different hardware/batching.
 3. **Forgetting context window is quadratic cost**: Attention is O(n²) in sequence length. Long contexts are expensive.
 4. **Assuming bigger is always better**: A well-prompted 7B model often outperforms a poorly-prompted 70B model.
-5. **Not accounting for KV cache memory**: A 70B model serving 10 concurrent users at 32K context needs ~60GB for KV cache alone. See [Inference & Decoding](../inference_and_decoding/README.md) for KV cache management.
+5. **Not accounting for KV cache memory**: LLaMA-3-70B (80 layers, 8 KV heads, d_head 128, FP16) needs 320 KB/token, so 10 concurrent users at 32K context is ~107GB of KV cache alone — more than one H100 holds. See [Inference & Decoding](../inference_and_decoding/README.md) for KV cache management.
 
 ---
 
@@ -1028,7 +1039,7 @@ A: GQA reduces the number of key/value heads while keeping query heads unchanged
 A: MoE replaces the single FFN in each transformer block with N expert FFNs plus a router that selects K experts per token. Total parameter count scales with N experts, but compute scales with K (active experts). You get large model capacity at smaller inference cost. Tradeoff: higher memory bandwidth (all experts must fit in memory even if not all are active), communication overhead in distributed settings.
 
 **Q: How do you calculate KV cache memory requirements for a transformer model?**
-KV cache memory per token = 2 (K and V) x num_layers x hidden_dim x bytes_per_param. For LLaMA 3 70B with 80 layers, 8192 hidden dim, FP16: 2 x 80 x 8192 x 2 bytes = 2.6MB per token per sequence. For a batch of 32 sequences at 4096 context length: 32 x 4096 x 2.6MB = 327GB — more than the model weights themselves (140GB in FP16). This is why KV cache management (PagedAttention, FP8 KV cache, GQA) is the critical bottleneck in LLM serving, not model computation.
+KV cache memory per token = 2 (K and V) x num_layers x num_kv_heads x head_dim x bytes_per_param — note it is the KV head count, not hidden_dim, on any GQA model. For LLaMA 3 70B (80 layers, 8 KV heads, head_dim 128, FP16): 2 x 80 x 8 x 128 x 2 bytes = 327,680 bytes = 320KB per token per sequence. For a batch of 32 sequences at 4096 context length: 32 x 4096 x 320KB = 43GB — roughly a third of the 140GB FP16 weights, but unlike the weights it scales with every concurrent user. Had the model used MHA (64 KV heads), the same batch would need 344GB, more than the weights themselves — which is exactly why GQA exists. This is why KV cache management (PagedAttention, FP8 KV cache, GQA) is the critical bottleneck in LLM serving, not model computation.
 
 **Q: What is Grouped Query Attention (GQA) and what concrete memory savings does it provide?**
 GQA shares key-value heads across multiple query heads, reducing KV cache size proportionally. Standard multi-head attention (MHA) uses equal numbers of Q, K, V heads (e.g., 64 each). GQA groups query heads to share fewer KV heads — LLaMA 3 70B uses 64 query heads but only 8 KV heads (8:1 ratio), reducing KV cache by 8x compared to MHA. Multi-Query Attention (MQA) is the extreme case with a single KV head shared across all query heads. GQA provides the best quality-efficiency tradeoff: near-MHA quality with near-MQA memory savings. Practically, GQA enables serving 8x more concurrent users on the same GPU memory.
@@ -1043,7 +1054,7 @@ Attention sink refers to the observation that transformer models assign dispropo
 Sliding window attention restricts each token to attend only to the W previous tokens within a single layer, reducing per-layer complexity from O(n^2) to O(n * W). Long-range information flows through layer stacking: at layer 1, token i sees positions [i-W, i]; at layer 2, it effectively sees [i-2W, i] because tokens at position i-W already incorporated information from i-2W in the previous layer. With L layers and window W, the effective attention span is L * W tokens. Mistral 7B uses W=4096 and 32 layers, giving an effective span of 131,072 tokens — far exceeding its 32K context window. The practical benefit extends to memory: a rolling KV cache stores only W entries per layer in a circular buffer instead of the full sequence length, saving ~87% KV cache memory at 32K context. This fixed-size cache means memory does not grow with sequence length, which is critical for streaming and long-document inference.
 
 **Q: What is the difference between Pre-LN and Post-LN, and why do nearly all modern LLMs use Pre-LN?**
-Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which is ~10-15% faster with no quality loss.
+Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which Zhang & Sennrich (2019) measured at 7-9% faster per training step on Transformers with no quality loss.
 
 **Q: Why do modern LLMs use SwiGLU in the FFN instead of ReLU or GELU?**
 A: SwiGLU — `FFN(x) = (SiLU(x·W_gate) ⊙ x·W_up)·W_down` — consistently achieves lower loss than ReLU/GELU FFNs at equal compute in ablations, which is why PaLM and every LLaMA generation adopted it. The gate lets the network modulate each hidden unit multiplicatively rather than merely thresholding it, and because SwiGLU needs three weight matrices instead of two, the hidden expansion is reduced from the classic 4× to roughly 8/3× (LLaMA 2 7B: 4096 → 11008) to keep parameter count comparable. Default to SwiGLU for any new pretraining; only keep GELU/ReLU when you must match an existing checkpoint's architecture.
@@ -1094,23 +1105,29 @@ A: Because Chinchilla optimizes *training* compute only, while production models
   Memory Layout (per Pod, 4×H100 80GB NVLink):
   ┌──────────────────────────────────────────┐
   │  GPU 0 (80 GB)                           │
-  │  Model shard (FP8, TP=4): 70GB/4/2 = 8.75GB│
+  │  Model shard (FP8 = 1 B/param, so 70 GB  │
+  │  total; TP=4): 70GB/4 = 17.5 GB          │
   │  KV cache (paged, 16-tok blocks):        │
-  │    Remaining: ~70 GB                     │
+  │    Remaining: ~62 GB                     │
   │    Each block: 80 layers × 2 × 8 KV heads│
   │    × 128 head dim × 16 tokens × 1 byte  │
-  │    = 80×2×8×128×16 = 3.28 MB/block      │
-  │    Blocks available: 70,000 MB / 3.28 MB │
-  │    = ~21,000 blocks = 336,000 KV tokens  │
+  │    = 80×2×8×128×16 = 2.62 MB/block       │
+  │    Blocks available: 62,000 MB / 2.62 MB │
+  │    = ~23,700 blocks = 379,000 KV tokens  │
   └──────────────────────────────────────────┘
 
   Attention Bottleneck Analysis:
-  Prefill (compute-bound):
-    FLOPs for 600-token prefill: 2 × seq² × hidden (self-attn)
-      = 2 × 600² × 8192 = 5.9B FLOPs for attention alone
-    + FFN: 2 × seq × 4 × hidden² = 2 × 600 × 32768 × 8192 = 322B FLOPs
-    Total per layer: ~328B FLOPs; 80 layers: 26 TFLOPs per request
-    H100 BF16: 989 TFLOPS → 80 requests fill GPU compute at 500 RPS
+  Prefill (compute-bound), per layer, 600-token prompt:
+    Attention scores + weighted values: 4 × seq² × hidden
+      = 4 × 600² × 8192 = 11.8B FLOPs
+    Q/K/V/O projections: 2 × seq × hidden × (hidden + 2·1024 + hidden)
+      = 2 × 600 × 8192 × 18432 = 181B FLOPs
+    SwiGLU FFN (3 matrices, d_ff = 28672): 2 × 3 × seq × hidden × d_ff
+      = 2 × 3 × 600 × 8192 × 28672 = 846B FLOPs
+    Total per layer: ~1.04 TFLOP; 80 layers: ~83 TFLOPs per request
+    Cross-check with the 2·N·D rule: 2 × 70e9 × 600 = 84 TFLOPs — matches.
+    H100 BF16 dense peak: 989 TFLOPS → ~12 prefills/s/GPU at 100% utilization,
+    ~5/s at a realistic 40-50% MFU, so 500 RPS needs on the order of 25 pods.
 
   Decode (memory-bandwidth-bound):
     Each decode step loads all 70B weights once: 70B bytes (FP8) = 70 GB
@@ -1156,7 +1173,8 @@ class GroupedQueryAttention(nn.Module):
     GQA (Grouped Query Attention) as used in LLaMA-3-70B.
     num_heads=64 query heads, num_kv_heads=8 KV heads.
     Each KV head is shared by 64/8=8 query heads.
-    Reduces KV cache size by 8× vs MHA with no quality loss at 70B scale.
+    Reduces KV cache size by 8× vs MHA; the published GQA ablation
+    (Ainslie et al. 2023) is at T5-XXL scale, not 70B.
     Uses Flash Attention 2 for memory-efficient attention computation.
     """
 
@@ -1254,7 +1272,8 @@ class KVCacheConfig:
     dtype_bytes: int = 1                 # FP8 KV cache
     gpu_count_per_pod: int = 4
     gpu_vram_gb: float = 80.0
-    model_weights_gb: float = 35.0       # 70B FP8 / 4 GPUs = 8.75 GB/GPU; total 35 GB
+    model_weights_gb: float = 70.0       # 70B params at FP8 = 1 byte each = 70 GB
+                                         # across the pod; 70/4 = 17.5 GB per GPU
 
     @property
     def kv_bytes_per_block(self) -> int:
@@ -1298,11 +1317,11 @@ class KVCacheConfig:
 
 
 # Example output for 70B on 4×H100 with FP8 KV:
-# kv_bytes_per_block_MB: 3.28 MB
-# available_kv_GB: 266 GB (4×80 - 35) × 0.92
-# total_blocks: 81,091 blocks
-# max_concurrent_tokens: 1,297,462 tokens
-# max_concurrent_seqs_at_1k_avg: 1,297 sequences per pod
+# kv_bytes_per_block_MB: 2.5 MB      (80×2×8×128×16×1 = 2,621,440 B)
+# available_kv_GB: 230 GB            ((4×80 - 70) × 0.92)
+# total_blocks: 94,208 blocks
+# max_concurrent_tokens: 1,507,328 tokens
+# max_concurrent_seqs_at_1k_avg: 1,507 sequences per pod
 ```
 
 Block 3 — BROKEN -> FIX: naive attention in decode and prefill batching collision:
@@ -1313,8 +1332,8 @@ import torch
 
 
 # BROKEN: Standard O(N²) attention — stores full N×N attention matrix in GPU memory.
-# For 8192-token context, attention matrix = 8192² × 2 bytes = 128 MB per head.
-# 64 heads × 80 layers = 655 GB per request — completely infeasible.
+# For 8192-token context, attention matrix = 8192² × 2 bytes = 128 MiB per head.
+# 64 heads × 80 layers = 640 GiB (687 GB) — completely infeasible.
 def broken_standard_attention(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
 ) -> torch.Tensor:
@@ -1339,9 +1358,10 @@ def fixed_flash_attention(
 
 
 # BROKEN: Batch prefill and decode requests together naively.
-# A 8192-token prefill takes ~80ms compute; a 1-token decode takes 2ms.
-# Batching them: decode requests wait 80ms for the prefill to finish.
-# p99 decode latency: 80ms → violates 45ms/token SLA.
+# An 8192-token prefill is 2 × 70e9 × 8192 = 1.15 PFLOP; on this TP=4 pod
+# (4 × 989 TFLOPS at ~45% MFU ≈ 1.8 PFLOPS) that is ~600ms of compute.
+# A 1-token decode step takes ~20ms. Batching them: decode requests wait
+# ~600ms for the prefill to finish → violates the 45ms/token SLA by 13x.
 def broken_batch_mixed(prefill_requests: list, decode_requests: list) -> list:
     batch = prefill_requests + decode_requests  # mix them — decode starved
     return _process_batch(batch)
@@ -1350,7 +1370,8 @@ def broken_batch_mixed(prefill_requests: list, decode_requests: list) -> list:
 # FIX: Chunked prefill — break long prefills into chunks of 2048 tokens.
 # Scheduler interleaves prefill chunks with decode steps.
 # Decode requests get a step every 2048 prefill tokens instead of waiting for 8192.
-# P99 decode latency drops from 80ms to 12ms (one 2048-chunk ≈ 20ms, shared).
+# P99 decode latency drops from ~600ms to ~150ms (one 2048-chunk ≈ 150ms) — a 4x
+# win, though meeting a 45ms/token SLA needs a smaller token budget (~512/chunk).
 def fixed_chunked_prefill(
     prefill_request: dict, decode_requests: list, chunk_size: int = 2048
 ) -> list:
@@ -1374,7 +1395,7 @@ def _process_batch(batch: list) -> list:
 ```python
 # BROKEN: Accept all request lengths without limit.
 # A 8192-token prompt for one request uses 8192/16=512 KV blocks.
-# At 21,000 blocks per GPU, one long request takes 2.4% of total KV cache.
+# At ~23,700 blocks per GPU, one long request takes 2.2% of total KV cache.
 # 50 concurrent long requests = 25,600 blocks — KV cache exhausted, others preempted.
 
 # FIX: Tiered queue with per-tier max_model_len limits.
@@ -1396,7 +1417,8 @@ def route_by_prompt_length(prompt_tokens: int) -> str:
 # Decode becomes compute-and-communication-bound — unusable.
 
 # FIX: Ensure all TP GPUs are within same NVLink domain.
-# NVLink: 600 GB/s; same AllReduce = 200MB / 600GB/s = 0.33ms; 80 layers × 2 = 53ms.
+# H100 SXM NVLink 4: 900 GB/s; same AllReduce = 200MB / 900GB/s = 0.22ms;
+# 80 layers × 2 = 36ms.
 # Verify with: nvidia-smi topo -m — NVLink connections shown as NV4/NV18.
 ```
 
@@ -1404,12 +1426,12 @@ def route_by_prompt_length(prompt_tokens: int) -> str:
 
 ```python
 # BROKEN: KV cache stored in BF16 (2 bytes per element).
-# 70B model, 4×H100: KV bytes/block = 80×2×8×128×16×2 = 6.55 MB/block.
-# Available blocks: 266 GB / 6.55 MB = 40,610 blocks → 649,760 max tokens.
-# Max concurrent 1k-token sequences: 649.
+# 70B model, 4×H100: KV bytes/block = 80×2×8×128×16×2 = 5.24 MB/block.
+# Available blocks: 230 GB / 5.24 MB = 47,104 blocks → 753,664 max tokens.
+# Max concurrent 1k-token sequences: 753.
 
 # FIX: Use FP8 KV cache (1 byte per element).
-# KV bytes/block: 3.28 MB; blocks: 81,091; max tokens: 1.3M; sequences: 1,297.
+# KV bytes/block: 2.62 MB; blocks: 94,208; max tokens: 1.5M; sequences: 1,507.
 # 2× the concurrent capacity at same GPU count, same model quality.
 # vLLM: --kv_cache_dtype fp8; requires H100 (FP8 tensor core support).
 ```
@@ -1433,10 +1455,10 @@ def route_by_prompt_length(prompt_tokens: int) -> str:
 Prefill processes all prompt tokens in parallel — it is compute-bound (high arithmetic intensity). Decode generates one token at a time, requiring a full forward pass through all model weights to produce each token — it is memory-bandwidth-bound (low arithmetic intensity: load 70 GB of weights to produce 1 token). This is why batching dramatically improves decode throughput: processing 16 decode requests together loads the weights once, amortizing the 20ms memory load across 16 tokens. Compute bottlenecks benefit from faster GPUs; memory bandwidth bottlenecks benefit from larger batches.
 
 **Q: How does Grouped Query Attention (GQA) reduce KV cache memory without significantly hurting quality?**
-GQA uses fewer KV heads than query heads — LLaMA-3-70B has 64 query heads but only 8 KV heads. Each KV head is shared by 8 query heads. The KV cache stores only 8 sets of keys and values, reducing KV cache size by 8× compared to Multi-Head Attention. During attention computation, each KV head is replicated across the 8 query heads that use it — this expansion is cheap (a tensor repeat_interleave) and happens entirely in registers. Research (Ainslie et al. 2023) shows GQA achieves 95-99% of MHA quality at 70B+ scale while reducing KV cache 8×.
+GQA uses fewer KV heads than query heads — LLaMA-3-70B has 64 query heads but only 8 KV heads. Each KV head is shared by 8 query heads. The KV cache stores only 8 sets of keys and values, reducing KV cache size by 8× compared to Multi-Head Attention. During attention computation, each KV head is replicated across the 8 query heads that use it — this expansion is cheap (a tensor repeat_interleave) and happens on the fly rather than in the cache. The published evidence is Ainslie et al. 2023, who uptrained T5 checkpoints with 5% of original pre-training compute and found GQA-8-XXL scored 47.1 average ROUGE against MHA-XXL's 47.2 while running at 0.28s vs 1.51s per inference — near-MHA quality at near-MQA speed. That ablation is at T5-XXL (11B) scale; the 8:1 ratio at 70B is an engineering extrapolation, not a measured result in that paper.
 
 **Q: What is chunked prefill and how does it improve decode latency fairness?**
-Without chunked prefill, a long 8192-token prompt monopolizes the GPU for ~80ms while all other decode requests wait. Chunked prefill breaks the prompt into chunks of 2048 tokens; the scheduler interleaves one prefill chunk with decode steps from waiting requests. Decode requests get a turn every ~20ms (one chunk) instead of waiting 80ms, reducing p99 decode latency by 4×. The tradeoff is slightly higher TTFT for the long prompt (it now takes 4 scheduling rounds instead of 1), but TTFT fairness is generally more important than minimizing a single long prompt's prefill time.
+Without chunked prefill, a long 8192-token prompt monopolizes the GPU for ~600ms while all other decode requests wait. Chunked prefill breaks the prompt into chunks of 2048 tokens; the scheduler interleaves one prefill chunk with decode steps from waiting requests. Decode requests get a turn every ~150ms (one chunk) instead of waiting ~600ms, reducing p99 decode latency by 4×. The tradeoff is slightly higher TTFT for the long prompt (it now takes 4 scheduling rounds instead of 1), but TTFT fairness is generally more important than minimizing a single long prompt's prefill time.
 
 **Q: How does Flash Attention 2 reduce memory complexity from O(N²) to O(N)?**
 Standard attention materializes the full N×N attention weight matrix — for N=8192 tokens and 64 heads, this is 8192² × 64 × 2 bytes ≈ 8.6 GB per layer, infeasible. Flash Attention 2 (Dao 2023) tiles the attention computation — processes Q, K, V in small blocks that fit in SRAM (on-chip cache), computing the softmax denominator incrementally without materializing the full matrix. The final output is computed by accumulating tiled attention-weighted values. Peak SRAM usage is O(block_size²) which is constant; total VRAM usage for activations is O(N). For a 8192-token sequence, Flash Attention 2 reduces attention memory from 8.6 GB to ~64 MB per layer.

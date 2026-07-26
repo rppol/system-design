@@ -14,7 +14,7 @@ Techniques include: query rewriting (make the query explicit and retrieval-frien
 
 **Mental model**: The gap between how users phrase questions and how documents are written is the root cause of retrieval failures. A user asks "What did they decide about the budget?" — but the document says "The executive team approved a $4.2M R&D allocation for Q4." No embedding model bridges this gap without query transformation.
 
-**Why it matters**: Improving retrieval recall by 15-30% is often achievable through query transformation alone, with no changes to the document index or embedding model. It is the highest-leverage, lowest-cost improvement available in a RAG pipeline.
+**Why it matters**: Query transformation can lift retrieval recall with no changes to the document index or embedding model, which makes it one of the cheapest levers in a RAG pipeline. The size of the lift is entirely domain- and query-distribution-dependent — there is no published industry-wide figure, so treat every percentage in this page as an illustrative planning range and measure it on your own eval set.
 
 **Key insight**: The LLM already knows what a good answer looks like — HyDE exploits this by generating a hypothetical answer and embedding it, moving from "query space" into "document space" for retrieval.
 
@@ -106,7 +106,8 @@ LLM generates 4 alternatives:
   4. "setState behavior in React functional components"
 
 Retrieve top-20 for each → merge → deduplicate → re-rank top-10
-Result: 40-60% more recall than single-query retrieval
+Result: materially higher recall than single-query retrieval — Section 6 uses
+        30-50% as an illustrative planning range for broad queries; measure it
 ```
 
 ```python
@@ -158,11 +159,11 @@ Deduplication is critical: the same document retrieved by multiple query variant
   for the same price as the 1st, which contributed 20.
 ```
 
-**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 6's "3-5 variants" guidance and under Pitfall 4's warning about 10+ variants: past five, you are buying duplicates at full price.
+**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 6's "3-5 variants" guidance and under Pitfall 5's warning about 10+ variants: past five, you are buying duplicates at full price.
 
 **What dedup actually saves.** At `N = 5`, 38.98 of the 100 retrievals are repeats. Removing them before the reranker cuts 39 cross-encoder passes — roughly `38.98 x 0.8 ms = 31 ms` — but the real damage of skipping dedup (Pitfall 3) is not latency. A document surfaced by four of five variants appears four times in the reranker's input and four times in the final context, so it both distorts the ranking and consumes context slots that other evidence needed.
 
-**Walk the transformation bill.** Section 12 measures `$0.0004` per query for the transformation LLM call:
+**Walk the transformation bill.** The case study in Section 13 measures `$0.0004` per query for the transformation LLM call:
 
 ```
   10,000 queries/day  -> $  4.00/day
@@ -302,15 +303,15 @@ HyDE:      [User Query]  →  LLM  →  [Hypothetical Answer]
 - `StepDecomposeQueryTransform`: step-by-step decomposition for multi-hop queries
 - Production use: enterprise document Q&A pipelines with mixed-quality queries
 
-### Perplexity Query Understanding
-- Implicit query rewriting: expands user queries with inferred context before web search
-- Multi-query for broad topics: fires 3-5 parallel searches for multi-faceted queries
-- Measurably improves citation coverage for ambiguous queries
+### Answer engines (Perplexity and similar)
+- Observable behavior, not documented internals: an answer engine visibly rewrites and expands the user's query before searching, and fans out to several parallel searches for multi-faceted questions — the shown "sources" list usually reveals more than one distinct search behind a single answer
+- The exact variant count and the internal ranking pipeline are not published; do not quote a specific number or a citation-coverage lift as vendor fact
 
-### RAG-Fusion (Arxiv 2023)
-- Generates 4-6 query variations with an LLM
+### RAG-Fusion (Rackauckas, arXiv:2402.03367, Feb 2024; technique popularized by Adrian Raudaschl in late 2023)
+- Generates several query variations with an LLM (the paper's worked examples show 3-4; the count is not fixed)
 - Retrieves for each, applies Reciprocal Rank Fusion to merge rankings
-- Demonstrated consistent 15-20% improvement in NDCG@10 over single-query RAG
+- The paper's evaluation is a manual human review by Infineon domain experts on accuracy, relevance and comprehensiveness — it reports **no** NDCG or recall numbers, so there is no published percentage lift to cite
+- The one quantitative figure it does give is cost, not quality: RAG-Fusion took **1.77×** as long as traditional RAG in the author's runtime testing
 
 ---
 
@@ -323,6 +324,12 @@ HyDE:      [User Query]  →  LLM  →  [Hypothetical Answer]
 | Multi-query (4x) | 30-50% | +400ms parallel | 4× retrieval cost | Excessive noise; dedup critical |
 | Step-back | 10-25% | +300ms | Low | Too general; retrieves irrelevant background |
 | Decomposition | 40-60% (complex queries) | +500ms-2s | High (N LLM calls) | Wrong decomposition misses key sub-questions |
+
+The recall-improvement column is an **illustrative planning range**, not a benchmark
+result: no public study reports these numbers across domains, and the observed lift
+swings widely with corpus, embedding model and query distribution. Use it to rank the
+techniques against each other, then measure the real numbers on your own eval set
+before committing to any of them.
 
 ---
 
@@ -383,7 +390,7 @@ Fix: Cache (original_query → transformed_queries) with a short TTL (1-24 hours
 | **LangChain** | Multi-query retriever | MultiQueryRetriever; generates N queries, merges results |
 | **DSPy** | Automated query optimization | Learn optimal query transformations from examples |
 | **Cohere** | Reranking post-expansion | Essential to reduce 80+ candidates to top-5 |
-| **OpenAI GPT-4o-mini** | Cheap transformation LLM | ~$0.00015/1K tokens; use small model for rewrites |
+| **Small OpenAI model** (gpt-4o-mini, gpt-5.4-nano) | Cheap transformation LLM | gpt-4o-mini $0.15/1M input ($0.00015/1K), $0.60/1M output; gpt-5.4-nano $0.20/1M input, $1.25/1M output. Verify current prices before budgeting |
 | **RAGAS** | Evaluate transformation impact | Measure context recall before/after transformation |
 
 ---
@@ -397,7 +404,7 @@ A: HyDE (Hypothetical Document Embeddings) generates a hypothetical answer to th
 A: Three primary failure modes. First, hallucinated hypotheses: if the LLM generates a factually wrong hypothetical answer, retrieval finds documents matching the wrong facts — the system confidently retrieves the wrong thing. Second, distributional mismatch: if the hypothetical answer is in a different style or register than the target documents (e.g., LLM writes in a casual tone but documents are formal legal text), the embedding space alignment breaks. Third, length mismatch: hypothetical answers that are much longer or shorter than typical document chunks sit in different regions of embedding space. Mitigation: always A/B test HyDE vs. direct retrieval on a labeled eval set before deploying.
 
 **Q: How does multi-query expansion improve recall, and what are its tradeoffs?**
-A: Multi-query expansion generates N alternative phrasings of the query (typically 3-5), retrieves candidates for each, then merges and deduplicates before reranking. It improves recall because different phrasings of the same question match different document phrasings — a document discussing "useState hook behavior" may not match "React state management" but does match "React useState hook." Empirically, 3-5 variants improve recall@10 by 30-50% for broad queries. Tradeoffs: N× retrieval cost, added LLM latency for generation, and the deduplication + reranking step becomes critical — without it you overwhelm the LLM with redundant context.
+A: Multi-query expansion generates N alternative phrasings of the query (typically 3-5), retrieves candidates for each, then merges and deduplicates before reranking. It improves recall because different phrasings of the same question match different document phrasings — a document discussing "useState hook behavior" may not match "React state management" but does match "React useState hook." As a planning range, 3-5 variants are where the marginal-yield curve in Section 3.3 still pays for itself; the 30-50% recall@10 figure quoted in Section 6 is an illustrative estimate rather than a published benchmark, so verify it on your own eval set. Tradeoffs: N× retrieval cost, added LLM latency for generation, and the deduplication + reranking step becomes critical — without it you overwhelm the LLM with redundant context.
 
 **Q: What is the difference between step-back prompting and query decomposition?**
 A: Step-back prompting generates a more general version of the query to retrieve background context alongside the specific answer. It widens the retrieval scope. Query decomposition breaks a complex multi-hop question into specific sub-questions, each answered independently before synthesis. Step-back is additive (retrieve specific + general); decomposition is sequential (answer each sub-question in order). Use step-back for "why" questions needing background context; use decomposition for multi-hop questions like "who runs the company that acquired X?"
@@ -412,7 +419,7 @@ A: Build a golden evaluation set: 100-200 (query, expected_documents) pairs wher
 A: Dedup by chunk/document ID before reranking. Keeping duplicates causes two problems: (1) the reranker sees the same document multiple times and may over-score it relative to other candidates; (2) the final context passed to the LLM contains repeated information, wasting context window tokens. Implementation: use a dict keyed by document ID, taking the first occurrence (from the most relevant query) or the highest retrieval score across all queries. After dedup, rerank the merged set against the original query using a cross-encoder.
 
 **Q: What is RAG-Fusion and how does it combine multi-query with RRF?**
-A: RAG-Fusion generates 4-6 query variations, retrieves top-K documents for each, then combines rankings using Reciprocal Rank Fusion (RRF): `score(doc) = Σ 1/(k + rank_i)` where k=60 and rank_i is the rank of the document in each individual retrieval result. Documents that appear in top positions across multiple query variants get boosted scores. Compared to simple merge-and-dedup, RRF uses position information (a document ranked #1 in 3 queries is better than one ranked #15 in 3 queries). Demonstrated 15-20% improvement in NDCG@10 over single-query RAG.
+A: RAG-Fusion generates several query variations, retrieves top-K documents for each, then combines rankings using Reciprocal Rank Fusion (RRF). The RRF score is `score(doc) = Σ 1/(k + rank_i)` where k=60 (the constant from Cormack et al. 2009) and rank_i is the rank of the document in each individual retrieval result. Documents that appear in top positions across multiple query variants get boosted scores. Compared to simple merge-and-dedup, RRF uses position information (a document ranked #1 in 3 queries is better than one ranked #15 in 3 queries). Note the RAG-Fusion paper (Rackauckas, arXiv:2402.03367) evaluated the method by manual human review of accuracy, relevance and comprehensiveness and published no NDCG or recall figures — the only number it reports is that RAG-Fusion took 1.77× as long as traditional RAG.
 
 **Q: How do you choose which query transformation technique to use for a given application?**
 A: Start by characterizing your query distribution. If queries are typically terse and ambiguous (conversational), rewriting helps most. If queries are domain-specific with vocabulary mismatch (medical, legal), HyDE bridges the gap. If queries are broad and multi-faceted, multi-query improves coverage. If queries are multi-hop (require chaining facts), decomposition is essential. In practice: run all techniques on your eval set and measure context recall improvement independently. Use the highest-gain technique, or combine (e.g., rewrite + multi-query) if the recall improvement justifies the latency.
@@ -421,7 +428,7 @@ A: Start by characterizing your query distribution. If queries are typically ter
 A: Query transformations improve semantic similarity-based retrieval but don't affect metadata filters. A rewritten or HyDE query still needs the correct metadata filters applied (date range, source, department) to scope results. One consideration: multi-query expansion can generate queries with different implicit metadata scopes (one variant might reference "2023 data," another "2024 data"). Apply the original query's metadata filters to all variants — don't let LLM-generated variants override the user's intended scope.
 
 **Q: What are the cost implications of query transformation at production scale?**
-A: At 10,000 queries/day, each transformation adds one LLM call. With GPT-4o-mini at $0.00015/1K tokens and 500-token transformation prompts, rewriting costs ~$0.075/day per technique — negligible. At 1M queries/day, rewriting costs ~$7.50/day — still cheap. Multi-query at 4 variants costs 4× more ($30/day at 1M queries). The dominant cost at scale is usually the retrieval and reranking, not the transformation LLM call. Use a small fast model (gpt-4o-mini, claude-haiku) for transformations; save the capable model for final generation.
+A: At 10,000 queries/day, each transformation adds one LLM call. With gpt-4o-mini at $0.00015/1K input tokens and 500-token transformation prompts, that is $0.000075 per query, so rewriting costs ~$0.75/day per technique — negligible. At 1M queries/day, rewriting costs ~$75/day — still cheap. Multi-query at 4 variants costs 4× more (~$300/day at 1M queries). The dominant cost at scale is usually the retrieval and reranking, not the transformation LLM call. Use a small fast model (gpt-4o-mini, gpt-5.4-nano, claude-haiku-4-5) for transformations; save the capable model for final generation.
 
 **Q: What are HyDE's specific failure modes and how do you detect them in production?**
 A: HyDE fails in three distinct ways. First, the hallucinated hypothesis misleads retrieval: the LLM generates a confident but factually wrong hypothetical answer; retrieval finds documents matching the wrong hypothesis; the final answer cites plausible-sounding but incorrect sources. This is the most dangerous failure because it is silent — the system appears to work. Detection: on your eval set, compare HyDE recall against direct-embedding recall; any queries where HyDE recall is lower indicate hypothesis-driven misdirection. Second, distributional mismatch: the hypothetical answer's style or length differs significantly from corpus documents (e.g., conversational hypothesis vs. formal legal text), causing poor embedding alignment. Third, recency blindness: for recent events or rapidly changing data, the LLM's parametric knowledge generates an outdated hypothetical, steering retrieval to outdated documents. Mitigation for all three: classify queries by type (factual, conceptual, procedural, recent-event) and disable HyDE for types where it underperforms on your eval set.
@@ -433,7 +440,7 @@ A: Comparative questions like "Which of our products had both above-average marg
 A: Measuring only retrieval recall misses generation-level impacts. A complete measurement protocol: (1) Retrieval recall@K: fraction of expected documents in top-K, with and without transformation — measures retrieval improvement. (2) Context precision: fraction of retrieved documents that are actually relevant — transformation should improve precision by filtering noise, but multi-query can hurt precision by adding tangential documents. (3) Answer accuracy: correctness of final answers on a labeled QA set — the ultimate measure; sometimes better retrieval recall doesn't improve answer accuracy if the LLM was already finding the key facts. (4) Faithfulness: does the answer cite the retrieved context accurately? — important if transformation changes what's retrieved. Run a statistical significance test (McNemar's test for accuracy, Wilcoxon for continuous metrics) on at least 200 labeled examples before claiming a transformation technique improves quality.
 
 **Q: What is the cost-benefit analysis for adding query transformation (one extra LLM call per query) vs. improving the embedding model or retrieval system?**
-A: Query transformation costs one small LLM call per query (~0.5-2 cents per 1000 queries with gpt-4o-mini) and typically improves recall by 15-30% for ambiguous queries. Embedding model improvements (switching from ada-002 to text-embedding-3-large) improve recall by 5-15% with zero per-query cost but a one-time re-indexing cost. Reranker addition improves precision by 20-30% with 50-100ms latency and 1-5 cents per 1000 queries. The cost-benefit hierarchy for most systems: (1) improve chunking strategy (zero cost, often 10-20% recall improvement); (2) add a reranker (low cost, high precision improvement); (3) upgrade embedding model (one-time re-indexing cost); (4) add query transformation (ongoing LLM call cost, justified for conversational or ambiguous query distributions). Query transformation is high-leverage for systems with highly variable query phrasing but is unnecessary if queries are already well-structured.
+A: Query transformation costs one small LLM call per query — roughly 5-10 cents per 1000 queries with gpt-4o-mini at 500-token prompts — and can lift recall materially for ambiguous queries. Embedding model upgrades (for example text-embedding-3-small to text-embedding-3-large; note text-embedding-ada-002 is legacy and should no longer be a target) improve recall with zero per-query cost but a one-time re-indexing cost. Adding a reranker improves precision at 50-100ms latency and a few cents per 1000 queries. The cost-benefit hierarchy for most systems: (1) improve chunking strategy (zero ongoing cost, often the largest single win); (2) add a reranker (low cost, high precision improvement); (3) upgrade embedding model (one-time re-indexing cost); (4) add query transformation (ongoing LLM call cost, justified for conversational or ambiguous query distributions). Any percentage you attach to these steps is a planning estimate — no public benchmark reports them across domains, so rank the options with the hierarchy and get the real numbers from your own eval set. Query transformation is high-leverage for systems with highly variable query phrasing but is unnecessary if queries are already well-structured.
 
 **Q: When does query transformation hurt retrieval performance, and what are the warning signs?**
 A: Query transformation degrades performance in four scenarios. First, over-transformation of precise queries: a well-formed technical query like "What is the difference between TCP and UDP?" paraphrased to "Compare network transport protocols" becomes less specific and retrieves less relevant documents. Second, HyDE on out-of-distribution topics: the LLM generates a confident but wrong hypothetical for topics it doesn't know well, steering retrieval in the wrong direction. Third, multi-query drift: LLM-generated variants may introduce tangential topics not in the original query, adding noise to the retrieved set. Fourth, decomposition mistakes: wrong decomposition of a complex query creates sub-questions that don't collectively cover the original intent. Warning signs in production: recall@10 drops after transformation is enabled (compare with an A/B test); answer relevance scores decrease; users provide more negative feedback after transformation rollout. If recall drops even by 2%, investigate which query types are being hurt.
@@ -453,6 +460,10 @@ A: Query transformation degrades performance in four scenarios. First, over-tran
 ---
 
 ## 13. Case Study: Query Transformation for a Technical Support System
+
+> **Illustrative composite.** The company, the metrics and the costs below are a
+> worked teaching example, not a published or verifiable deployment. Use the shape
+> of the reasoning, not the numbers.
 
 **Problem Statement**: A SaaS company operates a technical support system serving 45,000 enterprise customers. The knowledge base contains 28,000 support articles, API documentation, release notes, and internal troubleshooting runbooks. Customers open support tickets ranging from precise technical questions ("Error code E_AUTH_403 when calling /v2/tokens endpoint") to vague problem descriptions ("My integration stopped working after the update"). The baseline RAG system had a first-response resolution rate of 31% — 69% of auto-generated responses required human agent follow-up, a significant cost driver. The core problem was vocabulary mismatch: customer language ("integration stopped working") vs. documentation language ("OAuth token refresh failure after API version migration").
 
@@ -500,7 +511,9 @@ The query-type classifier routes each ticket to its optimal transformation — t
 
 **Implementation**:
 ```python
-from langchain.retrievers.multi_query import MultiQueryRetriever
+# MultiQueryRetriever lives in langchain-classic as of LangChain 1.x
+# (it is no longer importable from `langchain.retrievers.multi_query`).
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
 from langchain_cohere import CohereRerank
 
 def transform_and_retrieve(ticket_text: str, query_type: str) -> list[Document]:
@@ -537,15 +550,18 @@ def transform_and_retrieve(ticket_text: str, query_type: str) -> list[Document]:
             llm=llm_mini,
             include_original=True
         )
-        candidates = multi_retriever.get_relevant_documents(ticket_text)
+        # `get_relevant_documents()` was removed in langchain-core 1.x;
+        # retrievers are Runnables, so use .invoke().
+        candidates = multi_retriever.invoke(ticket_text)
         # Dedup by document ID
         seen, unique = set(), []
         for doc in candidates:
             if doc.metadata["id"] not in seen:
                 seen.add(doc.metadata["id"])
                 unique.append(doc)
-        # Rerank top-5
-        return cohere_rerank.rerank(ticket_text, unique, top_n=5)
+        # Rerank top-5. CohereRerank.rerank() takes (documents, query) in that
+        # order — pass them by keyword so the order cannot be transposed.
+        return cohere_rerank.rerank(documents=unique, query=ticket_text, top_n=5)
 
     elif query_type == "multi_issue":
         # Decompose into sub-questions

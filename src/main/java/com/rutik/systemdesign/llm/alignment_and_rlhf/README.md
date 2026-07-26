@@ -156,7 +156,7 @@ Constitutional AI reduces dependence on human labelers for safety data while mai
 Single-stage alignment — combines SFT and preference learning in one loss:
 
 ```
-ORPO Loss = -log P(chosen) + λ × log(1 - odds_ratio)
+ORPO Loss = -log P(chosen) + λ × [-log σ(log odds_ratio)]
 
 Where odds_ratio = P(chosen) / (1 - P(chosen)) / [P(rejected) / (1 - P(rejected))]
 
@@ -181,11 +181,11 @@ More parameter efficient; faster training
   odds_ratio = 3.0 / 0.25 = 12   <- chosen is 12x better odds than rejected
 ```
 
-An odds ratio of `12` means the model already separates them well, so the penalty term contributes little. An odds ratio near `1` means the model finds them equally plausible — and the `log(1 - odds_ratio)` term produces a large gradient that drives them apart.
+An odds ratio of `12` means the model already separates them well: `log 12 = 2.48`, `σ(2.48) = 0.923`, so `-log σ = 0.08` — the penalty term contributes little. An odds ratio near `1` means the model finds them equally plausible: `log 1 = 0`, `σ(0) = 0.5`, `-log σ = 0.69` — a large loss whose gradient drives them apart.
 
 **Why this removes the reference model.** RLHF and DPO both need a frozen `π_ref` to answer "did we drift?" ORPO answers a different question — "did we separate the pair?" — which only needs the current model's own two probabilities. No second copy of the weights in VRAM, and SFT and alignment happen in a single pass instead of two sequential stages.
 
-Used by: Phi-3, some Mistral variants.
+Used by: Phi-2 and Mistral-7B in the original ORPO paper (the released Mistral-ORPO-α/β checkpoints).
 
 ### 4.5 KTO (Kahneman-Tversky Optimization)
 
@@ -234,7 +234,7 @@ Where:
   y_w: chosen (winning) response
   y_r: rejected response
   beta: scaling factor
-  gamma: target reward margin between chosen and rejected (typically 0.5-2.0)
+  gamma: target reward margin between chosen and rejected (paper: 0.5-1.5)
   |y|: response length (normalizes by token count)
 
 Key differences from DPO:
@@ -253,7 +253,7 @@ Key differences from DPO:
 | `\|y\|` | Token count of that response |
 | `sum(log π_θ(y\|x))` | Total confidence across every token in the response |
 | `(1/\|y\|) × sum(...)` | Per-token confidence. The length normalization |
-| `γ` | Required margin. The good answer must win by at least this much. Typical 0.5–2.0 |
+| `γ` | Required margin. The good answer must win by at least this much. Paper range 0.5–1.5 |
 
 **Why dividing by `|y|` matters so much.** Log-probabilities are negative and they *accumulate*, so a longer response always has a worse total — regardless of quality:
 
@@ -269,7 +269,7 @@ Without the `1/|y|`, the loss has a built-in bias toward whichever response is s
 
 **What `γ` buys you.** Subtracting `γ` before the sigmoid means a pair only stops producing gradient once the chosen response beats the rejected one *by γ*, not merely by a hair. Barely-correct orderings keep training instead of being marked done — the model is pushed toward decisive separation rather than coin-flip margins.
 
-**Pros**: Simpler training pipeline; lower memory footprint; competitive with DPO on AlpacaEval 2 (44.7 vs 40.5 length-controlled win rate) and MT-Bench
+**Pros**: Simpler training pipeline; lower memory footprint; competitive with DPO on AlpacaEval 2 (44.7 vs 40.3 length-controlled win rate on Llama-3-8B-Instruct) and MT-Bench
 **Cons**: Gamma requires tuning per task; length normalization can under-reward genuinely detailed responses
 
 ### 4.8 GRPO (Group Relative Policy Optimization)
@@ -318,8 +318,9 @@ Reward formulation:
   (optionally: partial credit for passing K of N test cases)
 
 Used in combination with RL (PPO or GRPO):
-  DeepSeek-R1: code correctness + format reward
-  OpenAI o1/o3: math/code verification signals
+  DeepSeek-R1: accuracy (math/code correctness) + format reward
+  OpenAI o-series: recipe undisclosed; large-scale RL on CoT per
+    OpenAI's own statements, believed to use verification signals
 ```
 
 **Pros**: Zero reward model noise; no reward hacking possible (ground truth is the reward); no human preference data needed for verifiable domains
@@ -424,7 +425,7 @@ Data format: Human raters rank K responses (K=4-9) per prompt
 
 **What this actually says.** "Score the better answer higher than the worse one. How much higher doesn't matter — only the ordering does."
 
-Bradley-Terry is a 1952 model for ranking chess players from match outcomes, borrowed wholesale. Swap "player A beat player B" for "rater preferred response A" and it works unchanged.
+Bradley-Terry is a 1952 model for paired-comparison data (Bradley & Terry, *Biometrika*), borrowed wholesale. Swap "item A beat item B" for "rater preferred response A" and it works unchanged.
 
 | Piece | What it does |
 |-------|--------------|
@@ -597,8 +598,8 @@ The loss enforces a margin gamma between chosen and rejected:
   L = -log sigma(beta * (r_SimPO(x, y_w) - r_SimPO(x, y_r) - gamma))
 
 Practical details:
-  beta = 2.0-10.0 (higher than DPO's typical 0.1-0.5)
-  gamma = 0.5-2.0 (target reward margin; 1.0-1.4 works well empirically)
+  beta = 2.0-2.5 (higher than DPO's typical 0.1-0.5)
+  gamma = 0.5-1.5 (target reward margin; the paper's recommended band)
   Length normalization prevents the model from gaming reward via verbosity
 
 Memory savings vs DPO:
@@ -614,7 +615,9 @@ GRPO replaces PPO's learned critic with group-level statistics. Detailed walkthr
 ```
 Step 1: Sample G outputs per prompt
   For prompt x_i, generate {y_1, ..., y_G} from pi_theta_old
-  Typical G = 16-64 (DeepSeek-R1 used G=64 for math tasks)
+  Typical G = 16-64 (DeepSeekMath used G=64; the DeepSeek-R1 paper
+  publishes G=16 for its Qwen2.5-32B RL ablation and does not state
+  the group size used for R1/R1-Zero itself)
 
 Step 2: Compute rewards
   r_j = reward_fn(x_i, y_j) for each output j in group
@@ -670,9 +673,10 @@ Format rewards (used alongside verifiable rewards):
   -0.1 if response skips reasoning steps
   Prevents reward hacking via short-circuiting to just the answer
 
-DeepSeek-R1 combined reward:
+R1-style combined reward (DeepSeek-R1 used accuracy + format rule
+rewards; the paper does not publish the weighting):
   r_total = r_correctness + lambda * r_format
-  lambda = 0.1-0.5 (format reward weight)
+  lambda = 0.1-0.5 (format reward weight, typical practice)
 ```
 
 ---
@@ -682,24 +686,24 @@ DeepSeek-R1 combined reward:
 ### OpenAI InstructGPT / GPT-3.5-turbo
 - First large-scale RLHF-aligned model (Ouyang et al. 2022)
 - SFT on 13K demonstrations by contractors
-- RM trained on 33K comparisons (8 responses ranked per prompt)
-- PPO fine-tuning with β=0.01 KL
+- RM trained on 33K comparison prompts (K=4 to 9 responses ranked per prompt)
+- PPO fine-tuning with β=0.02 KL reward coefficient
 - 1.3B InstructGPT preferred to 175B GPT-3 by human evaluators
 
 ### Anthropic Claude
-- Constitutional AI: 16 principles guiding behavior
+- Constitutional AI: 16 harmlessness principles in the original CAI paper (Claude's later published constitution is broader)
 - RLAIF to scale beyond human labeler capacity
 - Harmlessness and helpfulness balanced via reward modeling
 - Iterative red-teaming → retraining loop
 
 ### Meta LLaMA 3 Alignment
-- Combination of SFT + DPO + PPO
+- Combination of SFT + rejection sampling + DPO (β=0.1, lr=1e-5); the paper reports exploring PPO but choosing DPO because it needed less compute and performed better, especially on IFEval
 - "Rejection sampling fine-tuning": generate N responses, filter by reward model, SFT on winners
 - Multiple rounds of alignment with human feedback
 
 ### DeepSeek-R1 Alignment
 - Group Relative Policy Optimization (GRPO) — PPO variant without value function or separate critic
-- Sampled G=64 outputs per prompt, computed advantage via group mean/std normalization
+- Samples a group of G outputs per prompt and computes advantage via group mean/std normalization (the paper publishes G=16 only for its Qwen2.5-32B RL ablation; DeepSeekMath, the GRPO source paper, used G=64)
 - Reward: correctness (verifiable math/code via execution and symbolic checking) + format rewards (valid CoT structure)
 - No human preference data needed for reasoning -- verifiable rewards replaced the reward model entirely
 - Demonstrated emergent chain-of-thought reasoning, self-verification, and backtracking purely from RL on correctness signals
@@ -785,7 +789,7 @@ DeepSeek-R1 combined reward:
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **TRL (HuggingFace)** | RLHF, DPO, PPO, KTO | Most used; PPOTrainer, DPOTrainer |
+| **TRL (HuggingFace)** | DPO, GRPO, RLOO, KTO, reward models | Most used; stable trainers are DPOTrainer, GRPOTrainer, RLOOTrainer, KTOTrainer, RewardTrainer — PPOTrainer and ORPOTrainer moved to `trl.experimental` in TRL 1.x |
 | **OpenRLHF** | Production RLHF | Large-scale; Ray-based; better than TRL at scale |
 | **LLaMA-Factory** | DPO/RLHF training | Easy YAML config |
 | **Argilla** | Preference labeling UI | Collect human comparison data |
@@ -830,7 +834,7 @@ KTO aligns models using only binary feedback (thumbs up/thumbs down) on individu
 A reward model is a classifier trained on human preference data to predict which of two responses a human would prefer. Architecture: take the base LLM, replace the language modeling head with a scalar reward head, and train with Bradley-Terry loss on preference pairs. Training data: 50K-500K preference pairs, each containing a prompt, a chosen response, and a rejected response. Key considerations: (1) annotator quality — use 3+ annotators per pair, measure inter-annotator agreement (>70% agreement is good); (2) diversity — include easy pairs (clearly good vs clearly bad), hard pairs (both good but different styles), and adversarial pairs (reward hacking patterns); (3) evaluation — hold out 10% of preference pairs, measure accuracy (good reward models achieve 70-75% agreement with human preferences). Failure modes: (1) length bias — preferring longer responses regardless of quality; (2) style bias — preferring a specific writing style regardless of content; (3) sycophancy — preferring responses that agree with the user. Mitigate by including length-controlled pairs and contrarian examples in training data.
 
 **Q: When would you choose SimPO over DPO, and what are SimPO's limitations?**
-Choose SimPO over DPO when GPU memory is the binding constraint. SimPO eliminates the frozen reference model entirely, using the average per-token log probability of the response as an implicit reward with a target margin gamma between chosen and rejected. For a 7B model, this saves ~14GB of VRAM (no reference model copy); for 70B models, it can mean the difference between needing 4 vs 8 A100s. SimPO achieves competitive results -- 44.7 vs DPO's 40.5 length-controlled win rate on AlpacaEval 2, and comparable MT-Bench scores. Choose DPO over SimPO when: (1) you need tight control over how far the policy drifts from a known-good reference (DPO's explicit KL against pi_ref); (2) your preference data has noisy labels where the reference model acts as a regularizer; (3) you are doing iterative alignment and want a stable anchor point across rounds. SimPO's gamma hyperparameter (typically 0.5-2.0) requires tuning per task, and its length normalization can under-reward responses that are genuinely more detailed.
+Choose SimPO over DPO when GPU memory is the binding constraint. SimPO eliminates the frozen reference model entirely, using the average per-token log probability of the response as an implicit reward with a target margin gamma between chosen and rejected. For a 7B model, this saves ~14GB of VRAM (no reference model copy); for 70B models, it can mean the difference between needing 4 vs 8 A100s. SimPO achieves competitive results -- 44.7 vs DPO's 40.3 length-controlled win rate on AlpacaEval 2 (Llama-3-8B-Instruct setting), and comparable MT-Bench scores. Choose DPO over SimPO when: (1) you need tight control over how far the policy drifts from a known-good reference (DPO's explicit KL against pi_ref); (2) your preference data has noisy labels where the reference model acts as a regularizer; (3) you are doing iterative alignment and want a stable anchor point across rounds. SimPO's gamma hyperparameter (paper range 0.5-1.5) requires tuning per task, and its length normalization can under-reward responses that are genuinely more detailed.
 
 **Q: How does GRPO differ from PPO, and why was it chosen for DeepSeek-R1?**
 GRPO (Group Relative Policy Optimization) replaces PPO's learned critic (value function) with group-level statistics. For each prompt, GRPO samples G outputs (typically 16-64), scores them, and computes advantage as (reward - group_mean) / group_std. This eliminates the critic network entirely -- for a 7B model, PPO needs ~56GB for actor + critic + reward model + reference, while GRPO needs ~28GB for actor + reference only. DeepSeek chose GRPO for R1 because: (1) reasoning tasks naturally produce diverse outputs that can be ranked within a group; (2) verifiable rewards (code execution, math checking) provide clean signals without a learned reward model, and GRPO pairs naturally with these; (3) the group normalization provides a stable advantage estimate without the instability of training a separate value network. The tradeoff is higher inference cost during training -- generating G=64 outputs per prompt is expensive, but this cost is offset by eliminating the critic and by the improved sample efficiency on reasoning benchmarks. GRPO is less suited for open-ended tasks (conversation, creative writing) where verifiable rewards are unavailable and group diversity may be low.
@@ -839,10 +843,14 @@ GRPO (Group Relative Policy Optimization) replaces PPO's learned critic (value f
 Online methods (PPO, GRPO) generate new responses during training and score them in real time, while offline methods (DPO, SimPO, KTO) train on a fixed preference dataset with no generation. The core tradeoff is distribution shift vs. cost. Online methods never suffer distribution shift because the reward model always evaluates on-policy outputs -- as the policy improves, training data improves with it. But online training requires running inference during each training step, which can 2-5x wall-clock time compared to offline. Offline methods are simpler and faster but learn only from a static dataset: after a few epochs, the policy may have moved far enough from the data distribution that the preference signal becomes stale. In practice, this manifests as DPO performance plateauing or degrading after 2-3 epochs. The practical middle ground is iterative DPO: run DPO for 1-2 epochs, regenerate preference data using the updated policy, re-score with a reward model or human evaluation, and repeat. This captures most of online RL's benefits at much lower complexity. Rule of thumb: use offline (DPO/SimPO) for general alignment, online (GRPO) for reasoning tasks with verifiable rewards, and iterative DPO when you need continuous improvement without full RL infrastructure.
 
 **Q: What are verifiable rewards and when do they fail?**
-Verifiable rewards use objective, execution-based signals as the reward in RL training -- code test case pass/fail, math answer correctness against ground truth, formal proof verification. Their key advantage is eliminating reward model noise entirely: there is no proxy, no Goodhart's Law, no reward hacking. The ground truth IS the reward. DeepSeek-R1 demonstrated that RL with only verifiable rewards (code execution + math checking) can produce emergent chain-of-thought reasoning, self-verification, and backtracking without any human preference data. OpenAI's o1/o3 models also use verification-based training for math and code. Limitations: (1) only works for tasks with objectively checkable outputs -- summarization, creative writing, and open-ended conversation have no ground truth to verify against; (2) binary pass/fail signals are sparse, especially for hard problems where the model rarely produces correct answers early in training (partial credit on test suites helps); (3) test case quality matters -- weak test cases let incorrect solutions pass, and comprehensive test suites are expensive to curate; (4) execution environments must be sandboxed (Docker, gVisor) with timeouts (10-30s) to prevent infinite loops and security exploits during training. In practice, verifiable rewards are combined with format rewards (+0.1 for valid CoT structure) and sometimes a lightweight reward model for stylistic preferences.
+Verifiable rewards use objective, execution-based signals as the reward in RL training -- code test case pass/fail, math answer correctness against ground truth, formal proof verification. Their key advantage is eliminating reward model noise entirely: there is no proxy, no Goodhart's Law, no reward hacking. The ground truth IS the reward. DeepSeek-R1 demonstrated that RL with only verifiable rewards (code execution + math checking) can produce emergent chain-of-thought reasoning, self-verification, and backtracking without any human preference data. OpenAI's o-series training recipe is not public, but OpenAI has stated the models are trained with large-scale RL on chain-of-thought, which is widely understood to include verification-based signals for math and code. Limitations: (1) only works for tasks with objectively checkable outputs -- summarization, creative writing, and open-ended conversation have no ground truth to verify against; (2) binary pass/fail signals are sparse, especially for hard problems where the model rarely produces correct answers early in training (partial credit on test suites helps); (3) test case quality matters -- weak test cases let incorrect solutions pass, and comprehensive test suites are expensive to curate; (4) execution environments must be sandboxed (Docker, gVisor) with timeouts (10-30s) to prevent infinite loops and security exploits during training. In practice, verifiable rewards are combined with format rewards (+0.1 for valid CoT structure) and sometimes a lightweight reward model for stylistic preferences.
 
 **Q: Why does RLHF include a KL penalty against the reference policy, and what happens when it is too weak or too strong?**
 A: The KL term anchors the policy to the SFT reference so the optimizer cannot wander into regions where the reward model is meaningless. The reward model was trained on outputs near the SFT distribution; once the policy drifts far from it, reward scores are extrapolations — this is exactly where reward hacking lives. Too weak a penalty (low beta) and you see the classic failure: reward climbs while actual quality collapses into repetitive, sycophantic, or gibberish-but-high-scoring text, often visible as KL exploding past a few dozen nats. Too strong (high beta) and the policy barely moves — reward plateaus early and alignment gains never materialize, an expensive way to reproduce the SFT model. Practically, teams monitor reward and KL together (some use an adaptive KL controller targeting a fixed KL budget) and treat "reward up, KL up sharply, evals flat" as the signature of hacking rather than progress. DPO inherits the same idea structurally: its beta plays the identical anchoring role against the frozen reference, which is why the reference model cannot be dropped casually — SimPO's reference-free trick works only with its length-normalized margin compensating.
+
+---
+
+## 13. Best Practices
 
 1. **Start with high-quality SFT before DPO** — DPO needs a good reference model; a weak SFT leads to poor alignment.
 2. **Use diverse prompts** — alignment training data should cover safety, helpfulness, and harmlessness equally.
@@ -933,11 +941,11 @@ def train_dpo(
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model_id,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",          # `torch_dtype` was renamed `dtype` in Transformers v5
         device_map="auto",
     )
 
-    # LoRA adapter — only train ~0.4% of parameters
+    # LoRA adapter — only train ~0.17% of parameters
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=lora_rank,                   # rank
@@ -948,7 +956,9 @@ def train_dpo(
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    # Output: trainable params: 33,554,432 || all params: 8,063,651,840 || 0.42%
+    # Output: trainable params: 13,631,488 || all params: 8,043,892,736 || 0.1695%
+    # (r=16 on q/k/v/o across 32 layers; k_proj and v_proj are 4096x1024 under
+    #  Llama-3's GQA with 8 KV heads, which is why the count is not 4x the q_proj cost)
 
     dataset = Dataset.from_list([
         {
@@ -971,12 +981,11 @@ def train_dpo(
         logging_steps=50,
         save_steps=200,
         eval_steps=200,
-        evaluation_strategy="steps",
+        eval_strategy="steps",     # `evaluation_strategy` was removed in Transformers 4.46
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         remove_unused_columns=False,
-        max_length=1024,
-        max_prompt_length=512,
+        max_length=1024,           # `max_prompt_length` was dropped from DPOConfig in TRL 1.x
     )
 
     trainer = DPOTrainer(
@@ -985,7 +994,7 @@ def train_dpo(
         args=dpo_config,
         train_dataset=train_test["train"],
         eval_dataset=train_test["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,   # `tokenizer=` was removed in favor of processing_class
     )
 
     trainer.train()
@@ -1026,7 +1035,7 @@ def train_reward_model(
     model = AutoModelForSequenceClassification.from_pretrained(
         base_model_id,
         num_labels=1,            # single scalar reward head
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,    # `torch_dtype` renamed to `dtype` in Transformers v5
     )
     # Replace CausalLM head with regression head
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -1056,7 +1065,7 @@ def train_reward_model(
         per_device_train_batch_size=8,
         learning_rate=1e-5,
         bf16=True,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         logging_steps=50,
         metric_for_best_model="eval_accuracy",
@@ -1070,7 +1079,7 @@ def train_reward_model(
         args=training_args,
         train_dataset=train_test["train"],
         eval_dataset=train_test["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
     trainer.train()
     trainer.save_model(output_dir)
@@ -1083,7 +1092,7 @@ def evaluate_reward_model(
     """Compute accuracy: how often does RM prefer chosen over rejected?"""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16
+        model_path, dtype=torch.bfloat16
     ).eval()
 
     correct = 0

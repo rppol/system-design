@@ -25,7 +25,7 @@ Understanding evaluation is critical for both building systems (how do you know 
 - **No single benchmark captures everything**: MMLU measures knowledge; HumanEval measures coding; TruthfulQA measures honesty. No benchmark measures all.
 - **Benchmark contamination is pervasive**: If a model trains on data containing benchmark answers, scores are inflated. New benchmarks become contaminated within months.
 - **Human evaluation is gold but expensive**: Human judgments are the ground truth but don't scale.
-- **LLM-as-judge is useful but biased**: GPT-4 can judge responses but has systematic biases (prefers longer, more confident responses; prefers its own style).
+- **LLM-as-judge is useful but biased**: a strong model can judge responses but carries systematic biases (position, verbosity, self-preference — all measured in Zheng et al. 2023, arXiv 2306.05685).
 - **Task-specific evaluation beats generic**: Your production metric (SQL execution accuracy, code pass rate, customer satisfaction) matters more than MMLU.
 
 ---
@@ -39,15 +39,22 @@ Understanding evaluation is critical for both building systems (how do you know 
 57 tasks × 4 multiple choice options per question
 Domains: STEM, humanities, social science, professional (law, medicine, finance)
 Metric: accuracy (0-100%)
-Questions: graduate-level knowledge
+Difficulty: elementary -> advanced professional (NOT uniformly graduate level)
 
-GPT-4:       86.4%
-Claude 3.5:  88.7%
-LLaMA 3 70B: 82.0%
-Humans:      ~89%
+Human baselines from the MMLU paper (Hendrycks et al., arXiv 2009.03300):
+  Unspecialized humans (Mechanical Turk):  34.5%
+  Expert-level estimate (95th percentile): ~89.8%
+
+2024-era reference scores -- kept as historical anchors, not current SOTA.
+Every one depends on the prompting setup, so the setup is part of the number:
+  GPT-4:       86.4%  (5-shot, GPT-4 technical report)
+  LLaMA 3 70B: 82.0%  (5-shot, Meta)
+  Claude 3.5 Sonnet: 88.7% (0-shot CoT, Anthropic)
+A 5-shot number and a 0-shot-CoT number are not comparable; frontier models
+have since moved well past all three.
 
 Limitations: multiple choice; doesn't test reasoning or generation;
-  heavily contaminated by 2024 (LLMs trained on MMLU-like data)
+  widely assumed contaminated by 2024 (LLMs trained on MMLU-like data)
 ```
 
 **HellaSwag (commonsense reasoning)**:
@@ -59,15 +66,21 @@ Score: 95%+ for frontier models (essentially "solved")
 
 **GPQA Diamond (Graduate-level Questions)**:
 ```
-448 expert-level multiple choice questions in biology, chemistry, physics
-Written by domain experts (PhDs, researchers)
-Human (non-expert) accuracy: ~34%
-Human (expert) accuracy: ~65%
+GPQA main set: 448 expert-written multiple choice questions (bio, chem, physics)
+GPQA Diamond:  the hardest 198 of those 448 -- both experts right, at most one
+               of three web-enabled non-experts right. Diamond is what leaderboards
+               report; do not quote 448 as the Diamond size.
+Written by domain experts (PhDs, PhD-track researchers)
 
-GPT-4o: 53%
-o3:     87%  (superhuman)
+Human accuracy (GPQA paper, arXiv 2311.12022):
+  non-expert with unrestricted web access: ~34% (<=33% on Diamond)
+  domain expert: ~65% on the main set, ~69.7% on Diamond
 
-Designed to resist saturation: very hard even for LLMs
+GPT-4o: 53.6% (OpenAI, May 2024)
+o3:     87.7% on Diamond (OpenAI's Dec 2024 preview livestream)
+
+Designed to resist saturation -- but frontier scores have climbed well past the
+expert baseline since 2024, so check a live leaderboard before quoting a "SOTA"
 ```
 
 **BBH (BIG-Bench Hard)**:
@@ -83,12 +96,13 @@ Current SOTA: ~90%+ with CoT
 ```
 164 Python functions; docstring → implement the function
 Metric: pass@k = probability at least 1 of k samples passes all tests
-pass@1 scores (single attempt):
-  GPT-4o: 90%
-  o1:     95%+
-  LLaMA 3 70B: 80%
+pass@1 scores (2024-era anchors, 0-shot):
+  GPT-4o:      90.2%  (OpenAI, May 2024)
+  LLaMA 3 70B: 81.7%  (Meta, Llama 3 Instruct)
 
-Limitation: mostly "solved" for frontier models; needs harder successor
+Limitation: saturated for frontier models -- everything current clusters at the
+  ceiling, so HumanEval no longer separates systems. Use it as a smoke test and
+  move to repo-level benchmarks (SWE-bench and successors) for real signal.
 ```
 
 The unbiased pass@k estimator used by the HumanEval paper is:
@@ -149,47 +163,58 @@ you the whole pass@1 / pass@5 / pass@10 curve from a single generation run.
 
 **SWE-bench (Real GitHub Issues)**:
 ```
-2294 real GitHub issues from Python repos
-Evaluation: automated test suite pass rate
-% resolved:
-  Claude 3.5 Sonnet (tools): 49%
-  o3 + scaffolding: 71.7%
-  Human programmers: ~100% (over unlimited time)
+SWE-bench full test set: 2,294 real GitHub issues from 12 Python repos
+SWE-bench Verified:      a 500-issue human-validated subset (OpenAI, Aug 2024)
+Evaluation: the repo's own test suite must pass after the model's patch
 
-Gold standard for "can the model write code that actually works?"
+IMPORTANT: essentially every headline "% resolved" is on VERIFIED (500), not on
+the full 2,294. Quoting a Verified score next to the 2,294 figure is the single
+most common way this benchmark gets misreported.
+
+% resolved on SWE-bench Verified:
+  Claude 3.5 Sonnet + 2 general tools: 49.0%  (Anthropic, Oct 2024)
+  o3 + scaffolding:                    71.7%  (OpenAI, Dec 2024 preview)
+  2026 frontier models:                mid-90s -- public leaderboards now call
+                                       Verified near-saturated
+
+Scaffold matters as much as the model: the same weights score very differently
+under different agent harnesses, so a score without its scaffold is not a result.
 ```
 
 **MBPP (Mostly Basic Python Programming)**:
 ```
-500 crowd-sourced Python problems
+974 crowd-sourced Python problems; the standard test split is 500 (task IDs
+  11-510). A 427-problem hand-verified "sanitized" subset is also widely used
 Simpler than HumanEval; good for smaller models
 pass@1: most 7B+ models score 60-80%
 ```
 
 ### 4.3 Human Preference Evaluation
 
-**LMSYS Chatbot Arena**:
+**Chatbot Arena** (originally LMSYS; now run as **LMArena**):
 ```
 Methodology:
   Real users submit prompts
   Two anonymous model responses displayed side by side
   User votes: A is better / B is better / Tie
-  Elo rating system (like chess) ranks models
+  Ratings fitted on the accumulated votes with the Bradley-Terry model
+    (reported on an Elo-style scale)
 
 Why it's valuable:
   Real user prompts (not curated benchmarks)
   Real user preferences (not researcher's judgment)
   Difficult to contaminate (novel prompts constantly)
-  Includes >100 models
+  Hundreds of models ranked; millions of pairwise votes accumulated
 
-2024 Elo rankings (approximate):
-  o3: ~1370
-  GPT-4o: ~1290
-  Claude 3.5 Sonnet: ~1310
-  LLaMA 3.1 405B: ~1270
+Ratings are NOT stable reference points -- the board is refit continuously and
+the top of the scale has drifted up by hundreds of points since 2023. Any
+specific number in a document like this is stale the week it is written; read
+the live board. The worked example below uses two invented ratings purely to
+show the arithmetic.
 
 Limitations: user base is self-selected (technical users); biases toward
-  verbose, confident responses; not task-specific
+  verbose, confident responses; not task-specific; ratings only mean something
+  relative to the models on the board at the same time
 ```
 
 The rating machinery is two formulas — an expected-score curve and an update rule:
@@ -222,16 +247,16 @@ of times — a model with few votes drifts fast toward its true level, then sett
 | `S_A - E_A` | Result minus prediction. Positive = did better than expected |
 | `K` | How many rating points one full unit of surprise is worth. Chess uses 32 |
 
-**Walk one match.** GPT-4o at 1290 versus Claude 3.5 Sonnet at 1310, from the table above. One
-arena vote comes in and the user picks GPT-4o:
+**Walk one match.** Two hypothetical models, A at 1290 and B at 1310 (invented ratings — the
+point is the arithmetic, not the models). One arena vote comes in and the user picks A:
 
 ```
   gap        = R_B - R_A       = 1310 - 1290 =   20
   odds       = 10^(20 / 400)   = 10^0.05     =    1.122
-  E_A        = 1 / (1 + 1.122) = 1 / 2.122   =    0.471   <- GPT-4o "should" win 47% of the time
+  E_A        = 1 / (1 + 1.122) = 1 / 2.122   =    0.471   <- A "should" win 47% of the time
   E_B        = 1 - 0.471                     =    0.529
 
-  user votes GPT-4o  ->  S_A = 1, S_B = 0
+  user votes A  ->  S_A = 1, S_B = 0
 
   K = 32 (chess default)          K = 4 (arena-style, many votes)
     A: 32 x (1 - 0.471) = +16.9     A: 4 x (1 - 0.471) =  +2.1
@@ -266,7 +291,12 @@ Score: most frontier models: 8.5-9.5/10
 
 ```python
 from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy, context_recall, context_precision
+# ragas 0.4.x: metrics are classes constructed with their own judge LLM.
+# The old lowercase singletons (`from ragas.metrics import faithfulness, ...`)
+# still resolve but raise DeprecationWarning and are slated for removal in 1.0.
+from ragas.metrics.collections import (
+    Faithfulness, AnswerRelevancy, ContextRecall, ContextPrecision,
+)
 
 # RAGAS metrics:
 # faithfulness: Is the answer supported by the retrieved context?
@@ -285,8 +315,12 @@ from ragas.metrics import faithfulness, answer_relevancy, context_recall, contex
 
 result = evaluate(
     dataset,
-    metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
-    llm=gpt4_judge  # LLM used as judge
+    metrics=[
+        Faithfulness(llm=judge_llm),
+        AnswerRelevancy(llm=judge_llm),
+        ContextRecall(llm=judge_llm),
+        ContextPrecision(llm=judge_llm),
+    ],
 )
 # Returns: {"faithfulness": 0.87, "answer_relevancy": 0.93, ...}
 ```
@@ -416,7 +450,7 @@ flowchart TD
     NEW["New Model / Prompt Change"]
     BENCH["Automated Benchmark Suite\nMMLU / domain (knowledge)\nHumanEval / SWE-bench (code)\nRAGAS (RAG) · safety (AdvBench, WildGuard)"]
     REG["Automated Regression Check\nvs. current production model\ngate: no regression > 2%"]
-    HUM["Human Evaluation Sample\n1 000 production-representative queries\nLLM-as-judge (gpt-4o) + 10% human review"]
+    HUM["Human Evaluation Sample\n1 000 production-representative queries\nLLM-as-judge (cross-family) + 10% human review"]
     AB["A/B Test in Production\n5% traffic · real user feedback\nrun minimum 48 hours"]
     PASS["Gradual Rollout"]
     FAIL["Investigate and Fix"]
@@ -449,11 +483,17 @@ Detection methods:
 
 Mitigation:
   Hold-out new benchmarks until training data cutoff
-  Use new benchmarks regularly (GPQA, FrontierMath rotate questions)
+  Rotating benchmarks: LiveBench replaces ~1/6 of its questions every month, so
+    the set is fully refreshed roughly twice a year
+  Private/held-out benchmarks: GPQA and FrontierMath do NOT rotate questions --
+    they resist contamination by keeping answers unpublished, which is a
+    different mechanism from rotation. Don't conflate the two.
   Open vs. closed benchmarks: closed (held-out) more trustworthy
 
-2024 example: LLaMA 3 MMLU scores higher than expected
-  Investigation: several MMLU subsets found in CommonCrawl training data
+Note: "model X was caught training on benchmark Y" claims circulate widely and
+are rarely backed by a published overlap analysis. Frontier labs do publish
+their own contamination estimates in model papers -- cite those rather than
+repeating a rumour.
 ```
 
 ### Evaluation at Different Stages
@@ -540,7 +580,11 @@ LLM-as-judge for A/B:
   Use a judge model to compare outputs from variant A vs B on same input
   Run both orderings (A first, B first) to cancel position bias
   Aggregate win rates with confidence intervals
-  Cost: ~$0.01-0.05 per comparison with GPT-4o judge
+  Cost: derive it, don't quote it. On a mid-tier 2026 judge (~$2.50 per MTok
+    input, ~$15 per MTok output) one judge call at 1,500 in / 200 out costs
+    1500 x 2.5e-6 + 200 x 15e-6 = $0.0068; long responses (5,000 in / 400 out)
+    push it to ~$0.019. Position-swapped = two calls per comparison, so
+    budget roughly $0.014-0.04 per comparison.
 
 Stratification (critical for LLM A/B tests):
   Split results by query type (factual, creative, reasoning, code)
@@ -600,8 +644,9 @@ worst case, maximum variance):
 ```
 
 That lands squarely on the "1000-5000+ comparisons per variant" and "10,000+ for 2-5% effects"
-guidance above. At $0.01-0.05 per GPT-4o judge comparison, the 2% test costs $200-1000 in judge
-calls alone — before you double it for both orderings to cancel position bias.
+guidance above. Priced with the arithmetic in the box above — two position-swapped judge calls per
+comparison at $0.007-0.019 each — the 2% test's 10,000 comparisons cost roughly $140-400 in judge
+calls alone, and that is before any human review of the disagreements.
 
 **Why `z_beta` is in there at all.** Drop it and you get the far smaller `n = 4 p(1-p)/delta^2`,
 which is the sample size at which a real effect is merely *not ruled out* — a coin flip as to
@@ -710,8 +755,13 @@ Model drift is a silent production killer — API providers update models, weigh
 ```
 Capability regression:
   Model updates or API changes silently degrade specific capabilities
-  Example: OpenAI GPT-4 performance on coding and math tasks reportedly
-    degraded between March-June 2023 — users noticed before OpenAI acknowledged
+  Documented example: Chen, Zaharia & Zou, "How Is ChatGPT's Behavior Changing
+    over Time?" (arXiv 2307.09009) measured GPT-4 in March vs June 2023 and
+    found prime-vs-composite identification fell 84% -> 51%, reduced
+    responsiveness to chain-of-thought prompting, and more code-formatting
+    mistakes. OpenAI publicly disputed that the model had gotten worse, and
+    critics noted the code metric penalised non-executable markdown fences --
+    so treat this as a well-known dispute, not a settled regression.
   Root cause: model updates optimize for aggregate quality but can regress
     on specific subcategories (Goodhart's Law at scale)
 
@@ -997,21 +1047,28 @@ labels are ordinal (1-5 rubric scores) rather than categorical.
 ## 7. Real-World Examples
 
 ### OpenAI Evals
-- Open-source evaluation framework for GPT models
-- Community-contributed evals: 1000+ task-specific evaluations
-- Used internally at OpenAI to track regressions
+- Open-source evaluation framework and registry (github.com/openai/evals)
+- Community-contributed registry: 463 eval YAML files under
+  `evals/registry/evals` as of July 2026 (each may define several variants)
 - Structured format: jsonl files with input/ideal output
 
 ### HELM (Holistic Evaluation of Language Models)
-- Stanford CRFM initiative
-- 42 scenarios × multiple models
-- Standardized evaluation across models
-- Public leaderboard
+- Stanford CRFM initiative (Liang et al., arXiv 2211.09110)
+- HELM classic: 42 scenarios (16 core + 26 targeted) and 7 metrics — accuracy,
+  calibration, robustness, fairness, bias, toxicity, efficiency
+- The 7-metric-per-core-scenario grid is the point: one number per model is
+  exactly what HELM is arguing against
+- Public leaderboard; has since branched into several HELM variants
 
 ### LiveBench (2024)
-- New benchmark questions added monthly (from recent news, competition problems)
-- Minimizes contamination by design (questions are too new to be in training data)
-- Covers: reasoning, math, coding, language comprehension
+- "LiveBench: A Challenging, Contamination-Limited LLM Benchmark", arXiv 2406.19314
+- Roughly one sixth of the questions are replaced each month, so the set fully
+  turns over about every six months
+- Sources questions from recent math competitions, arXiv papers, news articles
+  and recently modified repos — too new to be in older training data
+- Ground truth is objective and machine-checkable, so there is no LLM judge in
+  the scoring loop
+- Covers: reasoning, math, coding, language comprehension, data analysis
 
 ---
 
@@ -1050,13 +1107,13 @@ labels are ordinal (1-5 rubric scores) rather than categorical.
 
 1. **Benchmark shopping**: Reporting only the benchmarks where your model looks good. Best practice: report a standardized suite and disclose any that are unfavorable.
 2. **Ignoring benchmark contamination**: Not checking if test set examples are in training data.
-3. **Using the same judge model as the model being evaluated**: GPT-4 judging GPT-4 responses is biased.
+3. **Using the same judge model as the model being evaluated**: a model judging its own outputs is biased (self-enhancement bias).
 4. **Single-metric optimization**: Optimizing MMLU causes capability regression on other tasks (Goodhart's Law).
 5. **Not testing on your domain**: A model scoring 86% on MMLU might score 60% on your medical QA domain.
 6. **Ignoring latency in evaluation**: A model that scores 5% better but runs 3× slower may be worse for production.
-7. **Treating LLM evaluation as deterministic**: Same prompt with temperature=0 can still vary across runs due to floating-point non-determinism, GPU batching differences, and provider-side model updates. A team at a fintech company saw their "deterministic" evaluation suite produce scores ranging from 82% to 87% on the same model across consecutive runs — they were making launch decisions on noise. Mitigation: run each evaluation 3-5 times, report mean and 95% confidence intervals, and only flag changes that exceed the confidence interval.
-8. **Trusting single-run LLM-as-judge scores**: Judge models disagree with themselves 10-20% of the time on borderline cases. One production team discovered their "improved" prompt was indistinguishable from the baseline when they ran the judge evaluation three times — the initial "improvement" was within judge variance. Mitigation: use majority voting with 3+ independent judge evaluations per sample, and report the agreement rate alongside quality scores. If inter-judge agreement drops below 70%, the evaluation rubric needs refinement, not more samples.
-9. **Ignoring evaluation prompt sensitivity**: Changing the wording of an LLM-as-judge evaluation prompt can shift aggregate scores by 5-15%. A team changed "Rate the helpfulness of this response" to "How helpful is this response?" and saw average scores jump from 3.8/5 to 4.2/5 — same model, same test set, same judge. Best practice: version-lock evaluation prompts, judge models, and all parameters (temperature, max_tokens, system prompt). Treat evaluation infrastructure as production code with the same rigor around versioning, testing, and change management.
+7. **Treating LLM evaluation as deterministic**: Same prompt with temperature=0 can still vary across runs due to floating-point non-associativity, GPU batching differences, and provider-side model updates. *Illustrative:* a team's "deterministic" suite swings several points on the same unchanged model across consecutive runs, and launch decisions get made on that noise. Mitigation: run each evaluation 3-5 times, report mean and 95% confidence intervals, and only flag changes that exceed the confidence interval.
+8. **Trusting single-run LLM-as-judge scores**: Judges are not self-consistent — Zheng et al. 2023 measured GPT-4 returning the same pairwise verdict after a position swap only 65% of the time, so a single run's score carries real variance. *Illustrative:* an "improved" prompt turns out to be indistinguishable from the baseline once the judge evaluation is repeated three times. Mitigation: use majority voting with 3+ independent judge evaluations per sample, and report the agreement rate alongside quality scores. If inter-judge agreement is low, the evaluation rubric needs refinement, not more samples.
+9. **Ignoring evaluation prompt sensitivity**: Rewording an LLM-as-judge prompt shifts aggregate scores even when model, test set and judge are unchanged — the rubric wording is part of the metric. *Illustrative:* "Rate the helpfulness of this response" versus "How helpful is this response?" moving a mean rubric score by a few tenths of a point. Best practice: version-lock evaluation prompts, judge models, and all parameters (temperature, max_tokens, system prompt). Treat evaluation infrastructure as production code with the same rigor around versioning, testing, and change management.
 
 ---
 
@@ -1068,7 +1125,7 @@ labels are ordinal (1-5 rubric scores) rather than categorical.
 | **LangSmith** | Evaluation + tracing | Annotation workflow, online eval |
 | **TruLens** | LLM evaluation | RAG triad: context relevance, groundedness |
 | **DeepEval** | LLM test framework | pytest-like; many metrics |
-| **OpenAI Evals** | Open-source eval framework | 1000+ community evals |
+| **OpenAI Evals** | Open-source eval framework | Community registry, hundreds of eval definitions |
 | **Eleuther Harness** | Language model eval | Standard open-source benchmarks |
 | **HELM** | Holistic evaluation | Stanford; multi-scenario |
 | **Chatbot Arena** | Human preference | Real users, Elo ratings |
@@ -1080,13 +1137,13 @@ labels are ordinal (1-5 rubric scores) rather than categorical.
 ## 12. Interview Questions with Answers
 
 **Q: What is LLM-as-judge and what are its limitations?**
-A: LLM-as-judge uses a capable model (usually GPT-4) to evaluate another model's responses — rating quality, comparing two responses, or checking correctness. Limitations: (1) self-preference bias — GPT-4 rates GPT-4 style responses higher; (2) verbosity bias — longer responses rated higher regardless of quality; (3) position bias — first response shown often preferred; (4) instruction-following bias — well-formatted responses preferred; (5) can't catch factual errors the judge model also makes. Mitigations: use diverse judges, randomize position, include explicit rubrics, validate against human judgments.
+A: LLM-as-judge uses a capable model to evaluate another model's responses — rating quality, comparing two responses, or checking correctness. Limitations: (1) self-preference bias — a judge rates responses in its own family's style higher; (2) verbosity bias — longer responses rated higher regardless of quality; (3) position bias — first response shown often preferred; (4) instruction-following bias — well-formatted responses preferred; (5) can't catch factual errors the judge model also makes. Mitigations: use diverse judges, randomize position, include explicit rubrics, validate against human judgments.
 
 **Q: Why is benchmark contamination a problem and how do you detect it?**
 A: Contamination occurs when benchmark test examples appear in training data, so the model "memorizes" answers rather than demonstrating the underlying capability. It inflates scores and makes models look better than they are. Detection: (1) n-gram overlap analysis between training data and benchmarks; (2) membership inference — does the model reproduce benchmark examples verbatim?; (3) performance anomalies — unusually high scores on specific subsets. Solution: use held-out benchmarks released after the model's training cutoff, or continuously refreshed benchmarks (LiveBench, competitive math).
 
 **Q: Why can the same evaluation suite at temperature=0 produce different scores across runs?**
-A: Because temperature=0 does not make LLM inference deterministic — floating-point non-associativity, GPU batching differences, and silent provider-side model updates all shift outputs between runs. A fintech team saw its "deterministic" evaluation suite swing between 82% and 87% on the same unchanged model across consecutive runs, effectively making launch decisions on noise; LLM judges compound this by disagreeing with themselves 10-20% of the time on borderline cases. Run each evaluation 3-5 times, report the mean with a 95% confidence interval, and only act on changes that exceed that interval.
+A: Because temperature=0 does not make LLM inference deterministic — floating-point non-associativity, GPU batching differences, and silent provider-side model updates all shift outputs between runs. A suite that swings several points on the same unchanged model across consecutive runs turns launch decisions into coin flips; LLM judges compound this, since Zheng et al. 2023 measured GPT-4 giving the same pairwise verdict after a position swap only 65% of the time. Run each evaluation 3-5 times, report the mean with a 95% confidence interval, and only act on changes that exceed that interval.
 
 **Q: Why can an aggregate A/B test metric hide a real regression?**
 A: Because LLM quality changes are rarely uniform across query types — a model can improve 10% on creative tasks while regressing 5% on factual tasks, and the blended metric reports a ~3% "improvement" that masks the regression. This is why stratification is mandatory for LLM A/B tests: split results by task type (factual, creative, reasoning, code), difficulty tier, and domain, since a 2% aggregate gain can coexist with a 15% drop in a critical category. Always report per-category win rates alongside the aggregate, and block rollout on any critical-category regression even when the aggregate improves.
@@ -1098,7 +1155,7 @@ A: RAGAS is an evaluation framework for RAG systems. It measures four dimensions
 A: (1) Define task-specific metrics aligned with business goals (e.g., SQL execution accuracy, customer resolution rate, factual accuracy on domain Q&A); (2) Build a golden test set: 200-500 examples with human-verified correct answers; (3) Automated evaluation: run on every model/prompt change; fail if regression > threshold; (4) LLM-as-judge for open-ended aspects: helpfulness, clarity; validate judge against human labels; (5) Online evaluation: sample 1-5% of production traffic, use user feedback (implicit: session continuation, explicit: ratings); (6) Weekly human review sample: manually inspect 50-100 cases for systematic issues automated metrics miss.
 
 **Q: How reliable is LLM-as-judge evaluation and what are its biases?**
-LLM-as-judge achieves 80-85% agreement with human evaluators on pairwise preference tasks, comparable to inter-human agreement. Known biases: (1) position bias — GPT-4 prefers the first response in a comparison 60% of the time (mitigate by evaluating both orders and averaging); (2) verbosity bias — judges prefer longer, more detailed responses even when shorter ones are more accurate; (3) self-preference — models rate their own outputs higher than competitors' outputs (don't use GPT-4 to judge GPT-4 vs Claude); (4) sycophancy — judges agree with confident-sounding responses regardless of accuracy. Mitigation: (1) use reference-based judging (provide the correct answer for comparison); (2) use structured rubrics with explicit criteria and scoring scales; (3) average across multiple judge models; (4) calibrate with a human-evaluated validation set. For production: LLM-as-judge is practical for automated quality monitoring at scale, but high-stakes evaluations (model selection, launch decisions) should include human evaluation on a representative sample.
+LLM-as-judge reaches over 80% agreement with human evaluators on pairwise preference tasks, the same level humans agree with each other (Zheng et al. 2023, arXiv 2306.05685). Known biases: (1) position bias — in that paper's Table 2, GPT-4 returns the same verdict after swapping the two responses only 65.0% of the time, and when it flips it favours the first position in 30.0% of cases versus the second in 5.0% (mitigate by evaluating both orders and averaging); (2) verbosity bias — judges prefer longer, more detailed responses even when shorter ones are more accurate; (3) self-preference — models rate their own outputs higher than competitors' outputs (don't use GPT-4 to judge GPT-4 vs Claude); (4) sycophancy — judges agree with confident-sounding responses regardless of accuracy. Mitigation: (1) use reference-based judging (provide the correct answer for comparison); (2) use structured rubrics with explicit criteria and scoring scales; (3) average across multiple judge models; (4) calibrate with a human-evaluated validation set. For production: LLM-as-judge is practical for automated quality monitoring at scale, but high-stakes evaluations (model selection, launch decisions) should include human evaluation on a representative sample.
 
 **Q: How does benchmark contamination occur and how do you detect it?**
 Benchmark contamination happens when test set data appears in the model's training corpus, inflating benchmark scores beyond true capability. Sources: (1) web crawl — popular benchmarks (MMLU, HumanEval) appear on blogs, forums, and GitHub discussions; (2) synthetic data — models trained on GPT-4 outputs may inherit GPT-4's memorized benchmark answers; (3) data pipeline leaks — evaluation datasets accidentally included in training splits. Detection: (1) n-gram overlap analysis — check for exact or near-exact matches between training data and benchmark questions; (2) canary strings — embed unique identifiers in evaluation data and check if models reproduce them; (3) performance gap analysis — if a model scores 90% on public benchmarks but only 70% on held-out private tests of similar difficulty, suspect contamination; (4) memorization probing — test if the model can complete benchmark questions from partial prompts. Frontier labs (OpenAI, Anthropic, Google) now maintain private evaluation suites specifically to avoid contamination. For your own evaluations: always create domain-specific test sets from data generated after your model's training cutoff.
@@ -1107,7 +1164,7 @@ Benchmark contamination happens when test set data appears in the model's traini
 RAGAS (Retrieval-Augmented Generation Assessment) provides four automated metrics: (1) Faithfulness — what fraction of claims in the generated answer are supported by the retrieved context (target: >0.85); (2) Answer Relevancy — how relevant the answer is to the question, measured by generating questions from the answer and checking similarity to the original question (target: >0.80); (3) Context Precision — are the relevant chunks ranked higher in the retrieved set (target: >0.75); (4) Context Recall — what fraction of the ground-truth answer can be attributed to the retrieved context (target: >0.80). Interpretation: low faithfulness + high context recall = the LLM is ignoring retrieved context and hallucinating; low context recall + high faithfulness = retrieval is the bottleneck (model is faithful to what it gets, but it's not getting the right information); low answer relevancy = the model is generating off-topic responses. RAGAS uses an LLM (GPT-4 recommended) to compute these metrics, so scores are approximate. Calibrate RAGAS scores against human judgments on 50-100 examples before trusting them for automated monitoring.
 
 **Q: How does the Chatbot Arena / ELO methodology work and why is it considered the gold standard?**
-Chatbot Arena uses blind pairwise comparisons where users submit a prompt to two anonymous models simultaneously, then vote for the better response. ELO ratings are computed from these votes using the Bradley-Terry model — each vote updates both models' ratings based on the expected vs actual outcome (upset victories cause larger rating changes). Why it's the gold standard: (1) it uses real user prompts (not synthetic benchmarks), reflecting actual use cases; (2) blind evaluation eliminates brand bias; (3) the ELO system naturally handles the fact that different models are compared different numbers of times; (4) diverse evaluators (thousands of users) average out individual biases. Limitations: (1) English-centric — most users submit English prompts; (2) conversational bias — favors chatty, helpful responses over concise expert answers; (3) recency bias — users may favor newer models; (4) sample size — rare model pairs may have insufficient comparisons for reliable ratings. As of 2025, Chatbot Arena has collected 1M+ votes, making it the largest human evaluation of LLMs.
+Chatbot Arena uses blind pairwise comparisons where users submit a prompt to two anonymous models simultaneously, then vote for the better response. ELO ratings are computed from these votes using the Bradley-Terry model — each vote updates both models' ratings based on the expected vs actual outcome (upset victories cause larger rating changes). Why it's the gold standard: (1) it uses real user prompts (not synthetic benchmarks), reflecting actual use cases; (2) blind evaluation eliminates brand bias; (3) the ELO system naturally handles the fact that different models are compared different numbers of times; (4) diverse evaluators (thousands of users) average out individual biases. Limitations: (1) English-centric — most users submit English prompts; (2) conversational bias — favors chatty, helpful responses over concise expert answers; (3) recency bias — users may favor newer models; (4) sample size — rare model pairs may have insufficient comparisons for reliable ratings. The platform (now run as LMArena) has accumulated millions of blind pairwise votes across hundreds of models, making it the largest running human evaluation of LLMs; quote the live board rather than a remembered vote count or rating.
 
 **Q: How do you design an evaluation suite for a production LLM application?**
 A production evaluation suite needs three tiers: (1) unit tests — deterministic checks for format (valid JSON, required fields present), safety (no PII leakage, no harmful content), and basic accuracy (known fact lookups with exact match); (2) automated quality scoring — LLM-as-judge evaluation on 100-500 representative queries covering all use case categories, run on every model update or weekly; (3) human evaluation — expert review of 50-100 cases quarterly, focusing on edge cases and failure modes. Structure: define 5-10 evaluation categories matching your product's use cases (e.g., for a customer support bot: greeting, FAQ, troubleshooting, escalation, refund requests). For each category, maintain 20-50 test cases with expected behavior descriptions. Track metrics per category over time to detect category-specific regressions. Automation: integrate tier-1 tests into CI/CD pipeline; run tier-2 evaluations on model updates and weekly in production; schedule tier-3 reviews quarterly. Alert on: >5% regression in any category, new failure modes not seen in previous evaluations.
@@ -1116,16 +1173,16 @@ A production evaluation suite needs three tiers: (1) unit tests — deterministi
 Held-out evaluation tests the model on a fixed dataset before deployment, while online evaluation measures quality in production with real user traffic. Held-out evaluation is controlled and reproducible but may not reflect real usage patterns — users ask questions that evaluation designers never anticipated. Online evaluation captures real-world performance but is noisier and harder to control. Online evaluation methods: (1) implicit signals — regeneration rate (user clicks "try again"), conversation abandonment, task completion rate; (2) explicit feedback — thumbs up/down buttons, star ratings; (3) A/B testing — serve different models to different users and compare metrics. Key challenge: online metrics can be misleading — users may give thumbs-up to incorrect but confident-sounding answers. Best practice: use held-out evaluation for model selection and gate-keeping (don't deploy a model that regresses on held-out tests), and use online evaluation for continuous monitoring and detecting issues that held-out tests miss. The two complement each other.
 
 **Q: What is pass@k and why do code benchmarks use it instead of plain accuracy?**
-Pass@k is the probability that at least one of k sampled completions passes all unit tests — the natural metric when generation is stochastic and correctness is machine-verifiable by execution. HumanEval reports pass@1 around 90% for GPT-4o and 95%+ for o1, but pass@1 and pass@10 can differ by 10+ points for the same model because sampling multiple candidates raises the chance that one passes. Report pass@1 for product decisions (users typically see a single completion), and use higher k only when your product actually samples and filters multiple candidates.
+Pass@k is the probability that at least one of k sampled completions passes all unit tests — the natural metric when generation is stochastic and correctness is machine-verifiable by execution. HumanEval pass@1 was already 90.2% for GPT-4o in mid-2024 and the benchmark is saturated now, but pass@1 and pass@10 can differ by tens of points for the same model because sampling multiple candidates raises the chance that one passes. Report pass@1 for product decisions (users typically see a single completion), and use higher k only when your product actually samples and filters multiple candidates.
 
 **Q: How do you detect silent capability drift in an API-hosted model you don't control?**
-Run a version-controlled golden dataset (200-500 curated examples) against the API on a fixed schedule — weekly, plus on any announced model change — and track per-category scores, not just the aggregate. Providers update hosted models without notice; GPT-4's reported coding/math regression between March and June 2023 was noticed by users before it was acknowledged, and a gradual 1%-per-week drift compounds to 10%+ over a quarter if only point-in-time scores are eyeballed. Alert on a >3% drop in any single category, block dependent releases at >5%, and treat three consecutive weekly ~1% declines as a slow-drift trend alert.
+Run a version-controlled golden dataset (200-500 curated examples) against the API on a fixed schedule — weekly, plus on any announced model change — and track per-category scores, not just the aggregate. Providers update hosted models without notice; Chen, Zaharia & Zou (arXiv 2307.09009) measured GPT-4's prime-vs-composite accuracy falling from 84% to 51% between March and June 2023 — a finding OpenAI publicly disputed, which is exactly why you need your own instrumented baseline — and a gradual 1%-per-week drift compounds to 10%+ over a quarter if only point-in-time scores are eyeballed. Alert on a >3% drop in any single category, block dependent releases at >5%, and treat three consecutive weekly ~1% declines as a slow-drift trend alert.
 
 **Q: How many comparisons does a statistically significant LLM A/B test need?**
 Typically 1,000-5,000+ pairwise comparisons per variant — an order of magnitude more than the 200-500 samples that suffice for a click-through test — because open-ended text output has enormous variance. Detecting small effects (2-5% improvements) can require 10,000+ comparisons; judge each pair in both orderings to cancel position bias (roughly $0.01-0.05 per comparison with a GPT-4o judge) and run at least two full weekly cycles so weekday/weekend patterns and the new-model novelty effect wash out. Do a power analysis that accounts for output variance up front — standard calculators tuned to binary conversion metrics will badly underestimate the required sample size.
 
 **Q: Why has SWE-bench largely displaced HumanEval as the primary code-capability benchmark?**
-Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's 2,294 real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite — Claude 3.5 Sonnet with tools resolves ~49% and o3 with scaffolding 71.7%, so the benchmark still discriminates between systems. Keep HumanEval-style tasks as a cheap smoke test, and use SWE-bench-style repo-level evaluation for anything marketed as a coding agent.
+Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite; almost all published figures are on SWE-bench **Verified**, the 500-issue human-validated subset rather than the 2,294-issue full set — Claude 3.5 Sonnet with two tools resolved 49.0% there in Oct 2024 and o3 with scaffolding 71.7% in Dec 2024, while 2026 frontier systems sit in the mid-90s. Always state which SWE-bench variant and which agent scaffold a number came from, keep HumanEval as a cheap smoke test, and expect Verified itself to need a harder successor.
 
 ---
 
@@ -1190,12 +1247,12 @@ Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on
   └────────────────────────────────────────────────────────────────┘
 
 Cost Breakdown (per eval run, 2000 examples):
-  Model under test (claude-sonnet-4-6):
+  Model under test (claude-sonnet-5, $3 / MTok input):
     2000 × 1500 tokens input = 3M tokens = $9
-  LLM Judge (claude-opus-4):
-    2000 × 2000 tokens = 4M tokens = $60
+  LLM Judge (claude-opus-5, $5 / MTok input):
+    2000 × 2000 tokens = 4M tokens = $20
   Human spot-check: 20 × $15/hour × 0.25 hr = $75
-  Total per run: $144 (well under $500 budget)
+  Total per run: $104 (well under $500 budget)
   Runtime: 2000 examples / 50 concurrent / 3s avg = 2 min model
            + 5 min judge + 2 min analysis = 9 min total
 ```
@@ -1287,7 +1344,7 @@ Rate the AI reviewer on these dimensions (0.0 to 1.0):
 Return JSON: {{"relevance": 0.0, "accuracy": 0.0, "completeness": 0.0, "false_positive_rate": 0.0, "severity_accuracy": 0.0, "reasoning": "..."}}"""
 
     response = await client.messages.create(
-        model="claude-opus-4-5",    # Use strongest model as judge for calibration
+        model="claude-opus-5",    # Use a strong model as judge for calibration
         max_tokens=500,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -1457,29 +1514,30 @@ def fixed_task_specific_eval() -> dict[str, float]:
 
 
 # BROKEN: LLM judge uses same model family as the model under test.
-# Evaluating Claude claude-sonnet-4-6 with a Claude judge → sycophancy bias.
-# Claude judge rates Claude claude-sonnet-4-6 outputs 8% higher than GPT-4 judges
-# on identical outputs — familial bias inflates scores.
+# Evaluating claude-sonnet-5 with a Claude judge → self-preference bias.
+# Self-enhancement bias is documented in Zheng et al. 2023 (arXiv 2306.05685);
+# the size of the inflation is model- and task-specific, so measure it on your
+# own data rather than assuming a fixed percentage.
 async def broken_judge_with_same_family(model_output: str, gold: str) -> float:
     import anthropic
     client = anthropic.AsyncAnthropic()
-    # Judge is claude-sonnet-4-6, same family as the model under test
+    # Judge is claude-sonnet-5, same family as the model under test
     response = await client.messages.create(
-        model="claude-sonnet-4-6",  # SAME family as tested model — biased
+        model="claude-sonnet-5",  # SAME family as tested model — biased
         max_tokens=100,
         messages=[{"role": "user", "content": f"Rate this: {model_output}. Gold: {gold}"}],
     )
     return 0.8   # inflated due to familial bias
 
 
-# FIX: Use a different model family as judge (GPT-4 judging Claude, or vice versa).
+# FIX: Use a different model family as judge (an OpenAI model judging Claude, or vice versa).
 # Alternatively: calibrate judge scores against human ratings on 500-example sample.
 # If judge scores consistently diverge from human scores by > 5%, apply calibration.
 async def fixed_cross_family_judge(model_output: str, gold: str) -> float:
     import openai
     client = openai.AsyncOpenAI()
     response = await client.chat.completions.create(
-        model="gpt-4o",   # Different family from the Claude model under test
+        model="gpt-5.6-terra",   # Different family from the Claude model under test
         max_tokens=100,
         messages=[{"role": "user", "content": f"Rate this code review: {model_output}. Gold: {gold}. Return 0.0-1.0."}],
     )
@@ -1549,7 +1607,7 @@ def build_eval_set(positive_examples: list, clean_examples: list) -> list:
 
 **Metrics:**
 
-| Metric | Baseline (Claude claude-sonnet-4-6 v1) | v2 (prompt improved) | v3 (model updated) |
+| Metric | Baseline (claude-sonnet-5 v1) | v2 (prompt improved) | v3 (model updated) |
 |--------|-------------------------------------|---------------------|-------------------|
 | Python issue F1 | 0.61 | 0.71 | 0.74 |
 | JavaScript issue F1 | 0.43 | 0.58 | 0.69 |
@@ -1558,7 +1616,7 @@ def build_eval_set(positive_examples: list, clean_examples: list) -> list:
 | Severity accuracy | 0.58 | 0.67 | 0.72 |
 | Adversarial pass rate | 71% | 83% | 89% |
 | Judge-human agreement | 0.78 | 0.79 | 0.81 |
-| Cost per eval run | $144 | $144 | $144 |
+| Cost per eval run | $104 | $104 | $104 |
 | Runtime | 9 min | 9 min | 9 min |
 | Regressions caught (vs production) | — | 2 | 1 |
 
@@ -1580,7 +1638,7 @@ Strict data splits with access controls: the eval set (10% of data) is stored se
 Threshold should be calibrated based on: (1) The metric's variance across multiple eval runs on the same model (run the same eval 10 times on an unchanged model — the standard deviation sets the noise floor); (2) The minimum regression users would notice in production (instrument user feedback signals to learn this); (3) The severity of different metrics (false positive rate regression is more user-visible than recall regression — false positives cause users to disable the tool). Typical settings: 3% overall F1 regression blocks release; 5% per-language regression blocks release; any increase in false positive rate > 5% blocks release. Never set thresholds so tight that every release is blocked — this leads to threshold inflation.
 
 **Q: How do you evaluate LLM outputs when there is no single correct answer (open-ended generation)?**
-Three complementary methods: (1) Reference-based: ROUGE-L, BLEU, BERTScore measure similarity to gold references — fast and cheap but penalizes valid paraphrases. (2) LLM-as-judge: strong model rates outputs on a rubric — captures semantic quality beyond surface similarity but expensive (~$0.03/example) and needs calibration. (3) Human evaluation: highest signal but most expensive; use for calibrating LLM judges and for high-stakes decisions. For production eval pipelines, combine reference-based metrics (for regression detection speed) with LLM judge (for quality measurement) and human spot-check (for judge calibration). Weight the three methods based on cost-quality trade-off for your specific task.
+Three complementary methods: (1) Reference-based: ROUGE-L, BLEU, BERTScore measure similarity to gold references — fast and cheap but penalizes valid paraphrases. (2) LLM-as-judge: strong model rates outputs on a rubric — captures semantic quality beyond surface similarity but costs roughly a cent per example at 2026 mid-tier judge prices, and needs calibration. (3) Human evaluation: highest signal but most expensive; use for calibrating LLM judges and for high-stakes decisions. For production eval pipelines, combine reference-based metrics (for regression detection speed) with LLM judge (for quality measurement) and human spot-check (for judge calibration). Weight the three methods based on cost-quality trade-off for your specific task.
 
 ---
 

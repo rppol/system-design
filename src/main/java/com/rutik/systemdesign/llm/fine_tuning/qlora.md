@@ -2,9 +2,9 @@
 
 ## 1. Concept Overview
 
-QLoRA (Dettmers et al. 2023) combines two techniques to dramatically reduce GPU memory requirements for LLM fine-tuning: quantize the frozen base model to 4-bit NF4 (NormalFloat4) precision, and train [LoRA](lora.md) adapters in full BF16 precision on top of the quantized base. A 7B model that requires 28GB for standard LoRA training requires only 5-6GB with QLoRA — enabling fine-tuning on a single 16GB consumer GPU.
+QLoRA (Dettmers et al. 2023, [arXiv:2305.14314](https://arxiv.org/abs/2305.14314)) combines two techniques to dramatically reduce GPU memory requirements for LLM fine-tuning: quantize the frozen base model to 4-bit NF4 (NormalFloat4) precision, and train [LoRA](lora.md) adapters in full BF16 precision on top of the quantized base. A 7B model that needs ~15GB for standard BF16 LoRA training needs only 5-6GB with QLoRA — enabling fine-tuning on a single 16GB consumer GPU.
 
-QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (April 2023), fine-tuning a 7B model required at least a 40GB A100 for LoRA or significantly more for full fine-tuning. After QLoRA, an RTX 4090 (24GB) or even an RTX 4080 (16GB) can fine-tune 7B models, and a single A100 80GB can fine-tune 65B+ models.
+QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (paper released May 2023), fine-tuning a 7B model needed a 24GB+ GPU for LoRA or significantly more for full fine-tuning, and 65B was out of reach on one card. After QLoRA, an RTX 4080 (16GB) can fine-tune 7B models, and the paper's own headline result fine-tuned a 65B model on a single 48GB GPU.
 
 ---
 
@@ -45,9 +45,9 @@ Uniform INT4 quantization:
 NF4 (NormalFloat4):
   16 levels chosen so each level captures equal probability mass
   of a standard normal distribution N(0, 1)
-  Level boundaries:
-    -1.0000, -0.6962, -0.5252, -0.3949, -0.2844, -0.1848, -0.0933, 0.0000,
-     0.0791,  0.1609,  0.2461,  0.3379,  0.4407,  0.5626,  0.7230,  1.0000
+  Level values (bitsandbytes get_4bit_type("nf4"), rounded to 4 dp):
+    -1.0000, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0000,
+     0.0796,  0.1609,  0.2461,  0.3379,  0.4407,  0.5626,  0.7230,  1.0000
 
   More levels near zero (where most LLM weights cluster)
   Fewer levels at extremes (rare weight values)
@@ -93,9 +93,9 @@ Note what is and is not stored: a 4-bit weight is an *index*, and the 16 float v
     70B at NF4  =  35.0 GB  -> 45 GB left for adapters, grads, activations -> works
 ```
 
-That last block is the whole reason QLoRA exists as a named technique rather than a footnote. The compression ratio is a boring constant 4×; what is not boring is that 4× is precisely the factor that moves a 70B model across the one-GPU line. Halving again to int8 leaves no headroom, and the section's own case study confirms it — 70B at 8-bit is 70 GB against an 80 GB card, which the Tradeoffs section flags as still too large once gradients and activations are stacked on top.
+That last block is the whole reason QLoRA exists as a named technique rather than a footnote. The compression ratio is a boring constant 4×; what is not boring is that 4× is precisely the factor that moves a 70B model across the one-GPU line. Halving again to int8 leaves no headroom, and the section's own case study confirms it — 70B at 8-bit is 70 GB against an 80 GB card, which the case study flags as still too large once scales, gradients and activations are stacked on top.
 
-**Why the level placement matters more than the bit count.** Both INT4 and NF4 spend the same 4 bits. Since roughly 68% of a standard normal's mass sits inside `±1σ`, uniform INT4 spacing spends a large share of its 16 levels on tail regions holding almost no weights, while the dense center gets coarse resolution. NF4's equal-probability construction guarantees every level is responsible for the same `6.25%` of weights, so no level is wasted and none is overloaded. Same storage, better-placed levels, `~0.5-1%` less quantization error — a free win, which is why Pitfall 2 says never to leave the quantization type at INT4.
+**Why the level placement matters more than the bit count.** Both INT4 and NF4 spend the same 4 bits. Since roughly 68% of a standard normal's mass sits inside `±1σ`, uniform INT4 spacing spends a large share of its 16 levels on tail regions holding almost no weights, while the dense center gets coarse resolution. NF4's equal-probability construction guarantees every level is responsible for the same `6.25%` of weights, so no level is wasted and none is overloaded. Same storage, better-placed levels: the QLoRA paper (Table 2) measured mean Pile Common Crawl perplexity across 125M-13B OPT/BLOOM/LLaMA/Pythia models at `34.34` for Int4, `31.07` for FP4 (E2M1) and `27.41` for NF4 + double quantization. That gap is why Pitfall 2 says never to leave `bnb_4bit_quant_type` at its default.
 
 ### NF4 vs INT4 — Match the Levels to the Weights
 ```
@@ -114,28 +114,29 @@ NF4 — 16 levels at equal-probability quantiles (packed near zero):
        -1.0        0.0        +1.0
 
 Each NF4 level carries equal probability mass, so resolution is finest exactly where
-weights cluster → ~0.5-1% less quantization error than INT4 at the same 4 bits.
+weights cluster. QLoRA paper Table 2: mean Pile CC perplexity 34.34 (Int4) vs 27.41
+(NF4 + double quant) at the same 4 bits.
 ```
 
 ### 3.2 Double Quantization
 
-NF4 quantization stores a scaling factor per block of weights (typically 64 weights per block) to normalize to the NF4 range before quantizing. These scaling factors add overhead:
+NF4 quantization stores a scaling factor per block of weights (64 weights per block in the QLoRA paper) to normalize to the NF4 range before quantizing. These scaling factors add overhead:
 
 ```
 Without double quantization:
-  64 weights per block → 1 scaling factor (BF16, 2 bytes)
-  Overhead: 2 bytes / 64 weights = 3.1% overhead on top of 4-bit weights
+  64 weights per block → 1 absmax scaling factor (FP32, 4 bytes = 32 bits)
+  Overhead: 32 bits / 64 weights = 0.5 bits/param
+            = 12.5% on top of the 4-bit payload
 
 Double quantization:
-  Group scaling factors (e.g., 256 per super-block)
-  Quantize scaling factors themselves to 8-bit
+  Group scaling factors (256 per super-block)
+  Quantize the scaling factors themselves to 8-bit
   Second-level scaling factor (FP32): 1 per super-block
-  Overhead reduced to: (256 × 0.5 bytes [8-bit scale] + 4 bytes [FP32 super-scale])
-                       / (256 × 64 weights × 0.5 bytes)
-                     ≈ 0.4% overhead
+  Overhead reduced to: 8/64 + 32/(64 × 256) = 0.127 bits/param
+            = 3.2% on top of the 4-bit payload
 
-  Memory savings: ~0.37 bits per parameter
-  For a 7B model: ~300MB saved (small but meaningful)
+  Memory savings: 0.373 bits per parameter (QLoRA paper, Sec. 3)
+  For a 7B model: ~326MB saved (small but meaningful)
 ```
 
 **The idea behind it.** "You compressed the weights to 4 bits, but the scales you needed to do that are still full-precision — so compress the scales too, with exactly the same trick applied one level up."
@@ -187,7 +188,7 @@ That `0.373` is exactly the "~0.37 bits per parameter" the block above quotes �
 
 The 7B figure of `326.4 MB` reproduces the `~325MB` quoted in the Interview section, confirming the derivation. Note how the two levels differ in importance: the FP8 first-level scales cost `0.125` bits/param while the FP32 super-scales cost `0.001953` — **64× less**. The second level is essentially free, which is why nobody bothers with a third.
 
-**Why the effective bit-width is never 4.0.** Marketing says "4-bit"; the honest number is `4.127` bits/param with double quantization, or `4.5` without. On a 65B model that gap between `4.0` and `4.5` is `4.06 GB` of pure bookkeeping — larger than the entire LoRA adapter, gradients, and optimizer state combined. Turning double quantization off does not just cost `0.37` bits abstractly; on the case study's 70B run it costs `3.26 GB`, which is the difference between fitting the A100 and not. This is also why the block above notes the scale overhead varies with block size: shrink the block from 64 to 32 for better fidelity and the single-quant overhead *doubles* to `1.0` bits/param.
+**Why the effective bit-width is never 4.0.** Marketing says "4-bit"; the honest number is `4.127` bits/param with double quantization, or `4.5` without. On a 65B model that gap between `4.0` and `4.5` is `4.06 GB` of pure bookkeeping — larger than the entire LoRA adapter, gradients, and optimizer state combined. Turning double quantization off does not just cost `0.37` bits abstractly; on the case study's 70B run it costs `3.26 GB` of the A100's headroom, roughly the whole activation budget. This is also why the block above notes the scale overhead varies with block size: shrink the block from 64 to 32 for better fidelity and the single-quant overhead *doubles* to `1.0` bits/param.
 
 ### 3.3 Paged Optimizer
 
@@ -224,7 +225,7 @@ Combined memory savings of paged 8-bit Adam vs. standard Adam:
 | `2 × P × bytes` | Optimizer state size. The `2` is `m` and `v`; `bytes` is 4 for fp32, 1 for 8-bit |
 | unified memory | An allocation the GPU addresses normally but that CUDA may physically place in CPU RAM |
 | page event | One spill-or-restore round trip across PCIe. Cost is `size / bandwidth`, nothing more |
-| PCIe 4.0 x16 | The pipe, ~16 GB/s usable. The only term that turns megabytes into milliseconds |
+| PCIe 3.0 x16 | The pipe, 15.75 GB/s per direction (rounded to 16 below). PCIe 4.0 x16 doubles it to 31.5 GB/s. The only term that turns megabytes into milliseconds |
 
 **Walk one example.** Optimizer state for the 8M-parameter adapter above, and the cost of moving it:
 
@@ -235,7 +236,7 @@ Combined memory savings of paged 8-bit Adam vs. standard Adam:
     Adam bf16   2 x 8e6 x 2 B  =  32 MB
     AdamW8bit   2 x 8e6 x 1 B  =  16 MB     <- 4x smaller than fp32
 
-  PAGE-EVENT COST at 16 GB/s
+  PAGE-EVENT COST at 16 GB/s (PCIe 3.0 x16; halve these on PCIe 4.0 x16)
 
      16 MB  ->   1.00 ms
      64 MB  ->   4.00 ms
@@ -269,44 +270,47 @@ So the trade is roughly **6x less activation memory for 33% more compute**, and 
 ### 3.4 Full QLoRA Memory Layout
 
 ```
-GPU Memory for 7B model fine-tuning with QLoRA (r=16, all-attn+FFN):
+GPU Memory for 7B model fine-tuning with QLoRA
+(r=16, all-attn+FFN → ~40M trainable params: A 18.2M, B 21.8M):
 
 +----------------------------------------+
 | Base model weights (NF4 4-bit)         |  ~3.5GB (7B × 0.5 bytes)
 +----------------------------------------+
-| Quantization metadata (scaling factors)|  ~150MB (double-quantized)
+| Quantization metadata (scaling factors)|  ~110MB (7B × 0.127 bits / 8)
 +----------------------------------------+
-| LoRA adapter A (BF16)                  |  ~80MB
-| LoRA adapter B (BF16)                  |  ~80MB
+| LoRA adapter A (BF16)                  |  ~36MB
+| LoRA adapter B (BF16)                  |  ~44MB
 +----------------------------------------+
-| Gradients (A, B only)                  |  ~160MB (same size as adapters)
+| Gradients (A, B only)                  |  ~80MB (same size as adapters)
 +----------------------------------------+
-| PagedAdamW8bit optimizer states        |  ~320MB (8-bit, 2 × 160MB)
+| PagedAdamW8bit optimizer states        |  ~80MB (8-bit, 2 × 40M × 1 byte)
 +----------------------------------------+
 | Activations + input batch              |  ~1-2GB (depends on seq length)
 | (gradient checkpointing reduces this)  |
 +----------------------------------------+
-TOTAL: ~5.5-6.5GB for 7B model QLoRA
+TOTAL: ~5-6GB for 7B model QLoRA
 
 Comparison:
-  QLoRA 7B:           5.5-6.5GB → RTX 4080 (16GB) ✓, even RTX 3080 (10GB) with small batches
-  LoRA 7B (BF16):     ~15GB     → RTX 4090 (24GB) ✓
-  Full FT 7B (BF16):  ~56GB     → 2× A100 40GB ✓, single A100 80GB ✓
+  QLoRA 7B:           ~5-6GB    → RTX 4080 (16GB) ✓, even RTX 3080 (10GB) with small batches
+  LoRA 7B (BF16):     ~15-16GB  → RTX 4090 (24GB) ✓
+  Full FT 7B (BF16 mixed precision, AdamW):
+    fp32 optimizer states (16 B/param):  ~112GB → 2× A100 80GB
+    8-bit optimizer states (8 B/param):  ~56GB  → single A100 80GB ✓
 ```
 
 ### 3.5 BitsAndBytes Configuration
 
 ```python
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import torch
 
 # QLoRA-specific quantization config
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,                      # enable 4-bit loading
-    bnb_4bit_quant_type="nf4",             # use NF4 quantization
+    bnb_4bit_quant_type="nf4",             # NF4; the default is "fp4" — must set this
     bnb_4bit_compute_dtype=torch.bfloat16, # dequantize to BF16 for compute
-    bnb_4bit_use_double_quant=True,        # double quantization for scaling factors
+    bnb_4bit_use_double_quant=True,        # default is False — must set this too
 )
 
 # Load model in 4-bit
@@ -316,9 +320,10 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto"                       # automatic device placement
 )
 
-# Prepare model for gradient checkpointing (reduces activation memory)
-model.gradient_checkpointing_enable()
-model = prepare_model_for_kbit_training(model)
+# Cast norms/head to fp32, make inputs require grad, and enable gradient
+# checkpointing. prepare_model_for_kbit_training defaults to
+# use_gradient_checkpointing=True and calls gradient_checkpointing_enable() itself.
+model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
 # Add LoRA adapters (trained at BF16)
 lora_config = LoraConfig(
@@ -361,14 +366,14 @@ GPU RAM (16GB RTX 4080):
  | during forward pass  |
  +----------------------+
 [LoRA Adapters — BF16]
- |  A matrix ~80MB      |
- |  B matrix ~80MB      |
+ |  A matrices ~36MB    |
+ |  B matrices ~44MB    |
  +----------------------+
 [Gradients — only LoRA]
- |  ~160MB              |
+ |  ~80MB               |
  +----------------------+
 [PagedAdamW States — 8-bit]
- |  ~320MB              |
+ |  ~80MB               |
  +---------+------------+
            |
            | (paged to CPU if needed)
@@ -440,21 +445,20 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 ## 5. Real-World Examples
 
-### Guanaco (QLoRA paper model, Dettmers 2023)
-- QLoRA fine-tuned LLaMA 65B on a single A100 80GB in 24 hours
-- Training cost: ~$36 on cloud GPU
-- Guanaco 65B evaluated at 99.3% ChatGPT quality on MT-Bench
-- Proved that QLoRA enables frontier-model-quality fine-tuning on single GPU
+### Guanaco (QLoRA paper model, Dettmers et al. 2023)
+- QLoRA fine-tuned LLaMA 65B on a **single 48GB GPU**, 24 hours of fine-tuning (paper abstract)
+- Guanaco 65B reached **99.3% of ChatGPT's performance level on the Vicuna benchmark** — the paper's headline number; it is not an MT-Bench score
+- Proved that QLoRA enables frontier-model-quality fine-tuning on a single GPU
 
 ### Community fine-tuning ecosystem
-- Thousands of community QLoRA adapters on HuggingFace Hub
-- LLAMA-3-8B adapters for specific tasks: medical Q&A, legal summarization, code generation
-- Typical training setup: 1× RTX 4090 (24GB), 8-16 hours, $4-10 cloud cost
+- Thousands of community PEFT/QLoRA adapters on the HuggingFace Hub
+- Llama-3-8B adapters for specific tasks: medical Q&A, legal summarization, code generation
+- Typical training setup: 1× RTX 4090 (24GB), single-digit hours for a small SFT set
 
 ### Axolotl QLoRA production pipelines
 - Axolotl configuration YAML for reproducible QLoRA training
 - Widely used in production fine-tuning; handles data formatting, evaluation, checkpoint management
-- Default configuration uses QLoRA + NF4 + paged_adamw_8bit
+- Ships example configs that set `adapter: qlora`, `load_in_4bit: true` and `optimizer: paged_adamw_8bit` (per-config, not a global default)
 
 ---
 
@@ -462,11 +466,11 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 | Dimension | LoRA (BF16) | QLoRA (NF4 4-bit) |
 |-----------|-------------|-------------------|
-| VRAM (7B) | ~15GB | ~5.5-6.5GB |
+| VRAM (7B) | ~15-16GB | ~5-6GB |
 | VRAM (13B) | ~28GB | ~10-11GB |
 | VRAM (70B) | ~140GB | ~36-40GB |
-| Quality vs. full FT | -1.5-3% | -2-4% |
-| Quality vs. LoRA | baseline | -0.5-2% |
+| Quality vs. full FT | ~parity on the QLoRA paper's GLUE / Super-NaturalInstructions comparison | ~parity on the same comparison |
+| Quality vs. LoRA | baseline | ~parity where measured; assume a small task-dependent loss until you eval |
 | Training speed | Fast | Moderate (dequant overhead) |
 | Hardware needed (7B) | RTX 4090 (24GB) | RTX 4080 (16GB) |
 | Inference: can merge | Yes | After dequantize or separate |
@@ -478,7 +482,7 @@ Which is exactly why the sign of the effect flips during training. Training runs
 ### Use QLoRA When:
 - GPU VRAM is the primary constraint (16GB consumer GPU)
 - Fine-tuning a 13B+ model where LoRA alone doesn't fit
-- Quality loss of ~1-2% vs. standard LoRA is acceptable
+- A small, task-dependent quality loss vs. standard LoRA is acceptable (measure it; the paper found parity on its benchmarks)
 - Cost-sensitive cloud training (smaller GPU = cheaper per hour)
 
 ### Use Standard LoRA When:
@@ -500,9 +504,9 @@ Which is exactly why the sign of the effect flips during training. Training runs
 QLoRA requires dequantization from NF4 to BF16 on every forward pass. This adds ~15-30% training time compared to standard LoRA. At scale (multiple epochs, large datasets), this is meaningful.
 Fix: Profile training throughput with and without QLoRA; if latency is not the bottleneck, use standard LoRA on a larger GPU.
 
-**2. Using INT4 instead of NF4**
-INT4 quantization (uniform levels) causes higher quality degradation than NF4 (normal-distribution-optimized levels) for LLM weights.
-Fix: Always specify `bnb_4bit_quant_type="nf4"` in BitsAndBytesConfig, not "int4".
+**2. Leaving `bnb_4bit_quant_type` at its default**
+`BitsAndBytesConfig.bnb_4bit_quant_type` defaults to `"fp4"`, and the only two accepted values are `"fp4"` and `"nf4"` — there is no `"int4"` option in bitsandbytes. Forget to set it and you silently train on FP4, which the QLoRA paper measures at 31.07 mean PPL against NF4's 27.41. `bnb_4bit_use_double_quant` likewise defaults to `False`.
+Fix: Always pass `bnb_4bit_quant_type="nf4"` and `bnb_4bit_use_double_quant=True` explicitly.
 
 **3. Not enabling gradient checkpointing**
 Without gradient checkpointing, activation memory scales with sequence length × batch size. For long sequences (4096 tokens), activations can exceed remaining GPU memory.
@@ -524,11 +528,11 @@ Fix: Use gradient_accumulation_steps=8 or more to achieve an effective batch siz
 |------|---------|-------|
 | **BitsAndBytes** | 4-bit and 8-bit quantization | Required for QLoRA; `bnb_4bit_quant_type="nf4"` |
 | **HuggingFace PEFT** | LoRA adapter layer | Works with quantized models via `prepare_model_for_kbit_training` |
-| **Unsloth** | Optimized QLoRA training | 2× faster, 70% less VRAM than standard PEFT; highly recommended |
-| **Axolotl** | Training orchestration | YAML config; default QLoRA support |
-| **TRL SFTTrainer** | SFT + PEFT integration | `SFTTrainer(model=model, peft_config=lora_config)` |
+| **Unsloth** | Optimized QLoRA training | By Daniel Han, Michael Han and the Unsloth team; claims up to 2x faster with 70% less VRAM |
+| **Axolotl** | Training orchestration | YAML config; first-class QLoRA support |
+| **TRL SFTTrainer** | SFT + PEFT integration | `SFTTrainer(model=model, peft_config=lora_config, args=SFTConfig(...))` |
 | **torchao** | Alternative quantization | PyTorch-native; newer alternative to BitsAndBytes |
-| **AutoGPTQ** | Inference quantization | For merging QLoRA and re-quantizing for inference |
+| **GPTQModel** | Inference quantization | For merging QLoRA and re-quantizing for inference; replaces AutoGPTQ, which was archived in April 2025 and removed as a Transformers backend |
 
 ---
 
@@ -538,43 +542,43 @@ Fix: Use gradient_accumulation_steps=8 or more to achieve an effective batch siz
 A: QLoRA (Quantized LoRA) combines base model weight quantization with LoRA adapter training. The frozen base model is quantized to 4-bit NF4 precision — reducing a 7B model from 14GB (BF16) to ~3.5GB. LoRA adapters are then trained on top in standard BF16 precision. During the forward pass, 4-bit weights are dequantized to BF16 on-the-fly for matrix multiplication and immediately discarded — the GPU stores 4-bit but computes in 16-bit. Three additional innovations: double quantization (quantizes the quantization scaling factors themselves to save ~0.37 bits/param), paged optimizer (pages Adam states to CPU RAM to prevent OOM), and NF4 format optimized for normally-distributed LLM weights. Result: 7B model fine-tuning in ~6GB VRAM vs. 15GB for standard LoRA.
 
 **Q: What is NF4 quantization and why is it better than INT4 for LLM weights?**
-A: INT4 quantization divides the weight value range into 16 uniformly spaced levels. LLM pre-trained weights are approximately normally distributed (most weights near zero, few large values). Uniform levels waste resolution on the extremes where few weights cluster, and sacrifice resolution near zero where most weights cluster. NF4 (NormalFloat4) uses 16 levels chosen so each captures equal probability mass of a standard normal distribution N(0,1). This places more quantization levels near zero (where most LLM weights are) and fewer at the extremes. NF4 minimizes quantization error for the specific distribution of LLM weights. Empirically: NF4 causes ~0.5-1% less quality degradation than INT4 at 4-bit precision.
+A: INT4 quantization divides the weight value range into 16 uniformly spaced levels. LLM pre-trained weights are approximately normally distributed (most weights near zero, few large values). Uniform levels waste resolution on the extremes where few weights cluster, and sacrifice resolution near zero where most weights cluster. NF4 (NormalFloat4) uses 16 levels chosen so each captures equal probability mass of a standard normal distribution N(0,1). This places more quantization levels near zero (where most LLM weights are) and fewer at the extremes. NF4 minimizes quantization error for the specific distribution of LLM weights. Empirically, the QLoRA paper's Table 2 reports mean Pile Common Crawl perplexity of 34.34 for Int4, 31.07 for FP4 and 27.41 for NF4 with double quantization, across 125M-13B OPT, BLOOM, LLaMA and Pythia models.
 
 **Q: How does paged optimizer prevent OOM during QLoRA training?**
 A: During training, Adam optimizer maintains two momentum states (m and v) per parameter, each the same size as the parameter. Even for LoRA adapters (~50-160MB), optimizer states add another ~100-300MB. In tight memory situations (especially with long sequences), peak memory usage during optimizer updates can cause CUDA out-of-memory errors that terminate training. Paged optimizer stores optimizer states in CUDA unified memory — a region that appears to the GPU as GPU memory but can overflow to CPU RAM. When GPU memory is tight, CUDA automatically "pages" optimizer states to CPU RAM and pages them back when needed for updates. This prevents OOM crashes at the cost of PCIe bus transfer overhead (~5-10ms per page event, acceptable since it's infrequent).
 
 **Q: What quality difference should you expect between QLoRA and standard LoRA fine-tuning?**
-A: The quality gap is approximately 0.5-2% on most benchmarks, but it's task-dependent. For general instruction following: typically <1% difference (the QLoRA paper showed Guanaco 65B QLoRA at 99.3% of ChatGPT quality). For precision-critical tasks (SQL generation, structured output): 1-3% difference, as quantization introduces noise that affects consistent formatting. For creative/open-ended generation: often imperceptible. The quality delta comes from two sources: NF4 quantization introduces ~0.3-0.5% quality loss regardless of fine-tuning; the dequantize-requantize cycle during training adds a small additional perturbation. For most production applications, this quality loss is acceptable given the 2.5-3× memory savings.
+A: The quality gap is small but task-dependent, and the published evidence says it is close to zero on standard benchmarks. The QLoRA paper's own controlled comparison (Table 3) shows QLoRA NF4+DQ matching LoRA BF16 and full 16-bit finetuning on GLUE and Super-NaturalInstructions within a point (e.g. T5-3B: 55.4 LoRA BF16 vs 55.3 QLoRA), and Guanaco 65B reached 99.3% of ChatGPT's level on the Vicuna benchmark. Beyond those measured settings the delta is anecdotal: teams commonly report a slightly larger gap on precision-critical structured output (SQL, strict JSON) where consistent formatting is sensitive to weight rounding, and essentially none on creative or open-ended generation. Treat any specific percentage you have not measured on your own eval as illustrative. For most production applications the loss is acceptable given the ~2.5x memory savings (~15GB to ~6GB on 7B).
 
 **Q: How does double quantization work and how much memory does it save?**
-A: NF4 quantization normalizes weights in blocks (64 weights per block) to the NF4 range using a BF16 scaling factor. These scaling factors occupy: 2 bytes (BF16) / 64 weights = 3.1% overhead on top of the 4-bit weights. Double quantization groups these scaling factors into super-blocks of 256, then quantizes the scaling factors themselves to FP8 (8-bit floating point), using one FP32 scale per super-block. Overhead reduces to: (256 × 1 byte FP8 + 4 bytes FP32) / (256 × 64 × 0.5 bytes) ≈ 0.38%. Memory saved by double quantization: approximately 0.37 bits per parameter. For a 7B model: 7B × 0.37 / 8 ≈ 325MB saved — not enormous but meaningful for tight memory budgets.
+A: NF4 quantization normalizes weights in blocks of 64 to the NF4 range using an FP32 absmax scaling factor. Those scales cost 32 bits / 64 weights = 0.5 bits per parameter, which is 12.5% on top of the 4-bit payload. Double quantization groups the scales into super-blocks of 256, quantizes the scales themselves to 8-bit, and keeps one FP32 scale per super-block. Overhead drops to 8/64 + 32/(64 × 256) = 0.127 bits per parameter, or 3.2% on top of the payload. Memory saved: 0.373 bits per parameter, exactly the figure the QLoRA paper reports. For a 7B model: 7e9 × 0.373 / 8 ≈ 326MB saved — not enormous but meaningful for tight memory budgets.
 
 **Q: When is QLoRA inappropriate and you should use full-precision LoRA instead?**
-A: Four scenarios where standard LoRA is preferred over QLoRA. (1) Quality is critical and a ~1-2% degradation is unacceptable — e.g., a production model where every percentage point of eval accuracy matters. (2) Inference framework compatibility — some quantization pipelines, GGUF conversion tools, and serving frameworks expect non-quantized adapters; QLoRA adapters require careful handling during merge/export. (3) Very long sequences (8K+) — gradient checkpointing + QLoRA dequantization overhead makes training significantly slower; if a 24GB GPU is available, standard LoRA is faster. (4) Iterative research — frequent model loading/swapping is faster without quantization overhead; use QLoRA only when you need the memory savings.
+A: Four scenarios where standard LoRA is preferred over QLoRA. (1) Quality is critical and even an unmeasured degradation is unacceptable — e.g., a production model where every percentage point of eval accuracy matters. (2) Inference framework compatibility — some quantization pipelines, GGUF conversion tools, and serving frameworks expect non-quantized adapters; QLoRA adapters require careful handling during merge/export. (3) Very long sequences (8K+) — gradient checkpointing + QLoRA dequantization overhead makes training significantly slower; if a 24GB GPU is available, standard LoRA is faster. (4) Iterative research — frequent model loading/swapping is faster without quantization overhead; use QLoRA only when you need the memory savings.
 
 **Q: How do you export a QLoRA-trained model for inference?**
 A: Two main approaches. Merge-then-inference: (1) load the BF16 base model (requires 14GB, usually done on a larger machine post-training); (2) apply the LoRA adapter via `PeftModel.from_pretrained`; (3) merge with `model.merge_and_unload()`; (4) save the merged BF16 model; (5) optionally re-quantize for serving (GPTQ, AWQ, or llama.cpp GGUF). Adapter-with-quantized-base: load the same 4-bit quantized base model for inference and dynamically apply the LoRA adapter at runtime (PEFT inference mode). The first approach produces a clean merged model compatible with all inference frameworks. The second keeps adapter flexibility but requires BitsAndBytes at inference.
 
 **Q: How does gradient checkpointing interact with QLoRA's memory savings?**
-A: Gradient checkpointing recomputes activations during the backward pass rather than storing them through the forward pass. This trades compute (recompute activations) for memory (don't store activations). For a 7B model with 32 transformer layers and sequence length 2048, activations can be 3-4GB without checkpointing. With gradient checkpointing, activation memory drops to ~300-500MB. QLoRA is especially dependent on gradient checkpointing because the base model's 4-bit weights already use most of the memory savings on weights — without checkpointing, activation memory easily causes OOM during training. Always enable gradient checkpointing before applying QLoRA: `model.gradient_checkpointing_enable()` must be called before `prepare_model_for_kbit_training(model)`.
+A: Gradient checkpointing recomputes activations during the backward pass rather than storing them through the forward pass. This trades compute (recompute activations) for memory (don't store activations). For a 7B model with 32 transformer layers and sequence length 2048, activations can be 3-4GB without checkpointing. With gradient checkpointing, activation memory drops to ~300-500MB. QLoRA is especially dependent on gradient checkpointing because the base model's 4-bit weights already use most of the memory savings on weights — without checkpointing, activation memory easily causes OOM during training. You rarely need to call it yourself: PEFT's `prepare_model_for_kbit_training(model)` takes `use_gradient_checkpointing=True` by default and invokes `model.gradient_checkpointing_enable()` internally for k-bit-loaded models.
 
 **Q: What is the difference between QLoRA and GPTQ for model quantization?**
 A: QLoRA and GPTQ are both 4-bit quantization techniques but designed for different phases. QLoRA is a training-time quantization technique: the base model is quantized to NF4 during fine-tuning to reduce training memory. The quantized weights are never finalized as a stand-alone model — they're dequantized during forward passes. GPTQ is a post-training inference quantization technique: after fine-tuning, the merged model is quantized to 4-bit using a second-order optimization procedure (Hessian-based calibration). GPTQ produces a standalone quantized inference model with minimal quality loss. In a QLoRA workflow: train with QLoRA (NF4) → merge to BF16 → re-quantize with GPTQ for deployment. The quantization at inference (GPTQ) is separate from training quantization (QLoRA).
 
 **Q: How does Unsloth improve QLoRA training efficiency?**
-A: Unsloth (Tim Dettmers' recommended library for QLoRA training) achieves 2× faster training and 70% less VRAM through four optimizations: (1) Custom triton kernels for fused quantized matmul operations — avoids the standard BitsAndBytes NF4-to-BF16 dequantization path, replacing it with fused kernels that compute directly without creating temporary BF16 tensors; (2) Optimized backward pass — rewrites gradient computation for LoRA adapters to avoid redundant operations; (3) Custom FlashAttention implementation for quantized attention weights; (4) Memory-efficient sequence packing. Result: on a 16GB GPU, Unsloth can train a 7B model with longer sequences than standard PEFT+BitsAndBytes, and finishes in half the wall-clock time. Recommended for any production QLoRA pipeline.
+A: Unsloth (built by Daniel Han, Michael Han and the Unsloth team) advertises up to 2x faster training with 70% less VRAM, mainly through custom kernels. Its README credits "custom Triton and mathematical kernels built with PyTorch and Hugging Face": (1) fused quantized matmul kernels that avoid the standard BitsAndBytes NF4-to-BF16 dequantization path and its temporary BF16 tensors; (2) a hand-written backward pass for LoRA adapters that removes redundant operations; (3) padding-free packing so no compute is spent on pad tokens; (4) attention and long-context optimizations layered on the same kernel stack. Treat the "2x / 70%" figures as vendor-published upper bounds, not a guarantee — they are workload-dependent, so benchmark on your own data before sizing hardware around them.
 
 **Q: What is the difference between NF4 and INT4 quantization for LLM weights, and why does it matter?**
-A: NF4 (NormalFloat4) is information-theoretically optimal for normally distributed data, while INT4 uses uniform level spacing regardless of the data distribution. INT4 divides the weight value range into 16 equal intervals. LLM pre-trained weights cluster near zero following approximately N(0, 1) after per-block normalization, meaning uniform INT4 wastes most of its 16 levels on the extremes where very few weights exist, while allocating only a few levels to the dense zero-region. NF4 assigns levels at the quantiles of a standard normal distribution — each of the 16 levels captures equal probability mass, so more levels are near zero where weights actually cluster. The practical impact: NF4 introduces approximately 0.5-1% less quantization error than INT4 at 4-bit precision, translating to 0.3-0.7% better downstream task quality. Always specify `bnb_4bit_quant_type="nf4"` in BitsAndBytesConfig; the default in some older versions was INT4, which produces meaningfully worse results.
+A: NF4 (NormalFloat4) is information-theoretically optimal for normally distributed data, while INT4 uses uniform level spacing regardless of the data distribution. INT4 divides the weight value range into 16 equal intervals. LLM pre-trained weights cluster near zero following approximately N(0, 1) after per-block normalization, meaning uniform INT4 wastes most of its 16 levels on the extremes where very few weights exist, while allocating only a few levels to the dense zero-region. NF4 assigns levels at the quantiles of a standard normal distribution — each of the 16 levels captures equal probability mass, so more levels are near zero where weights actually cluster. The practical impact, from the QLoRA paper's Table 2: mean Pile Common Crawl perplexity of 34.34 for Int4 versus 27.41 for NF4 with double quantization. One nuance to state correctly in an interview: bitsandbytes never exposed an `"int4"` option — `bnb_4bit_quant_type` accepts only `"fp4"` and `"nf4"`, and it defaults to `"fp4"` (31.07 mean PPL), so the real mistake is leaving the default rather than picking INT4.
 
 **Q: How does double quantization work and what is its memory overhead?**
-A: Standard NF4 quantization normalizes each block of 64 weights using a BF16 scaling factor before mapping to NF4 levels. These scaling factors themselves occupy 2 bytes (BF16) per block of 64 weights, which is 2/64 = 3.1% overhead on top of the 4-bit weights. Double quantization eliminates most of this overhead by quantizing the scaling factors themselves to 8-bit floating point, grouping them into super-blocks of 256 scaling factors each with one FP32 scale. The resulting overhead is (256 × 1 byte [8-bit scale] + 4 bytes [FP32 super-scale]) / (256 × 64 × 0.5 bytes [4-bit weights]) ≈ 0.4% — a reduction from 3.1% to 0.4%. The memory saving is approximately 0.37 bits per parameter, totaling roughly 325MB for a 7B model. Double quantization adds negligible compute overhead because scaling factor dequantization is a tiny fraction of total forward-pass compute. Enable it with `bnb_4bit_use_double_quant=True`.
+A: Standard NF4 quantization normalizes each block of 64 weights using an FP32 absmax scaling factor before mapping to NF4 levels. Those scaling factors occupy 32 bits per block of 64 weights = 0.5 bits per parameter, which is 12.5% overhead on top of the 4-bit payload. Double quantization eliminates most of it by quantizing the scaling factors themselves to 8-bit, grouped into super-blocks of 256 with one FP32 scale each. The resulting overhead is 8/64 + 32/(64 × 256) = 0.127 bits per parameter, or 3.2% of the payload — a reduction from 12.5% to 3.2%. The memory saving is 0.373 bits per parameter, roughly 326MB on a 7B model and 3.26GB on a 70B model. Double quantization adds negligible compute overhead because scaling factor dequantization is a tiny fraction of total forward-pass compute. Enable it with `bnb_4bit_use_double_quant=True` — it defaults to `False`.
 
 **Q: When does the paged optimizer actually trigger and what is its performance cost?**
-A: The paged optimizer triggers when GPU memory is under pressure during the optimizer update step, which happens after each gradient accumulation cycle. Peak memory moments occur when: (1) the optimizer simultaneously holds gradients, parameters, and both Adam momentum states (m and v); (2) long sequences create large activation tensors before gradient checkpointing discards them. When GPU memory drops below a CUDA-configured threshold, the paged optimizer spills the least-recently-used optimizer state tensors to CPU RAM via the CUDA unified memory mechanism. Each spill-and-restore cycle costs approximately 10-30ms of PCIe transfer time (at 16 GB/s PCIe 4.0 bandwidth, 160MB of optimizer states transfers in ~10ms). In typical QLoRA runs on tight hardware (16GB GPU), paging triggers a few times per epoch, adding roughly 5-10% total training time overhead. The alternative — OOM crash terminating training — makes this overhead completely acceptable. Use `optim="paged_adamw_8bit"` to activate both paging and 8-bit optimizer state quantization simultaneously.
+A: The paged optimizer triggers when GPU memory is under pressure during the optimizer update step, which happens after each gradient accumulation cycle. Peak memory moments occur when: (1) the optimizer simultaneously holds gradients, parameters, and both Adam momentum states (m and v); (2) long sequences create large activation tensors before gradient checkpointing discards them. When GPU memory drops below a CUDA-configured threshold, the paged optimizer spills the least-recently-used optimizer state tensors to CPU RAM via the CUDA unified memory mechanism. Each spill-and-restore cycle costs roughly 10-30ms of PCIe transfer time (at ~16 GB/s, a PCIe 3.0 x16 link, 160MB of optimizer states transfers in ~10ms; PCIe 4.0 x16 halves that). In typical QLoRA runs on tight hardware (16GB GPU), paging triggers a handful of times per epoch, so the total is milliseconds to seconds across a multi-hour run — negligible against wall-clock. The alternative — OOM crash terminating training — makes this overhead completely acceptable. Use `optim="paged_adamw_8bit"` to activate both paging and 8-bit optimizer state quantization simultaneously.
 
 **Q: What is the quality gap between QLoRA and full fine-tuning, and when does it widen?**
-A: QLoRA achieves 95-99% of full fine-tuning quality on most standard NLP benchmarks, including instruction following, summarization, and conversational tasks. The original QLoRA paper demonstrated Guanaco 65B (QLoRA fine-tuned) at 99.3% of ChatGPT quality on MT-Bench. The quality gap widens in three specific scenarios. First, tasks requiring precise numerical reasoning (arithmetic, unit conversion, financial calculations) show 3-5% larger gaps because quantization noise accumulates across the multiple forward passes needed for chain-of-thought reasoning. Second, very long context tasks (8K+ tokens) show larger gaps because quantization error in early attention layers propagates and compounds across many transformer layers with extended sequences. Third, structured output tasks with strict formatting (code generation, JSON schemas, SQL) show 1-3% larger gaps because consistent symbol placement requires fine-grained weight precision that NF4 rounding partially degrades. For most production applications outside these categories, the gap is imperceptible to end users.
+A: On the benchmarks the QLoRA paper actually measured, there is essentially no gap — it replicates 16-bit LoRA and full finetuning. Table 3 of the paper shows QLoRA NF4+DQ within about a point of both BF16 full finetuning and BF16 LoRA on GLUE and Super-NaturalInstructions across T5-80M through T5-11B, and Guanaco 65B reached 99.3% of ChatGPT's level on the Vicuna benchmark (not MT-Bench — a common misquote). Where the gap is believed to widen is not quantified in the paper, so treat these as hypotheses to test rather than numbers: chain-of-thought numerical reasoning, where rounding noise compounds across many forward passes; very long context, where error in early attention layers propagates; and strict structured output (JSON schemas, SQL), where consistent symbol placement is sensitive to weight precision. Measure your own eval before quoting any percentage.
 
 **Q: How do you diagnose and fix 4-bit training instability in QLoRA?**
 A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2.0 in training loss followed by partial or no recovery) or divergence (loss trend consistently increasing after the first few hundred steps). Diagnosis: enable per-layer gradient norm logging and identify which layers produce abnormally large gradients immediately before loss spikes — these are typically the layers where NF4 quantization error is highest relative to the weight magnitude. The most reliable fixes: (1) enable double quantization (`bnb_4bit_use_double_quant=True`) — double quantization reduces the quantization constants' error, which is the most common source of instability; (2) reduce the learning rate by 2-3× (from 2e-4 to 7e-5) — lower LR gives the adapter more time to compensate for quantization noise in the base model; (3) use `bf16=True` with `tf32=False` to ensure full BF16 precision in adapter computations; (4) lower the gradient clipping threshold from 1.0 to 0.3, which prevents single large gradient steps from destabilizing the adapter. If instability persists after these changes, the model has quantization sensitivity in critical layers — switch to 8-bit quantization (`load_in_8bit=True`) or standard BF16 LoRA if the hardware permits.
@@ -583,10 +587,10 @@ A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2
 
 ## 11. Best Practices
 
-1. **Use `bnb_4bit_quant_type="nf4"` always** — NF4 consistently outperforms INT4 for LLM weights; never use generic 4-bit quantization.
-2. **Enable gradient checkpointing** — essential for fitting training in memory with QLoRA; always call before `prepare_model_for_kbit_training`.
+1. **Set `bnb_4bit_quant_type="nf4"` explicitly** — the default is `"fp4"`, and NF4 measurably outperforms it (27.41 vs 31.07 mean PPL in the QLoRA paper); `"int4"` is not an accepted value.
+2. **Enable gradient checkpointing** — essential for fitting training in memory with QLoRA; `prepare_model_for_kbit_training` turns it on by default, so verify rather than double-call.
 3. **Use paged_adamw_8bit optimizer** — prevents OOM crashes during optimizer updates at peak memory usage.
-4. **Use Unsloth in production** — 2× faster, 70% less VRAM vs. standard PEFT+BitsAndBytes; well-tested and production-ready.
+4. **Evaluate Unsloth in production** — its published claim is up to 2x faster with 70% less VRAM vs. standard PEFT+BitsAndBytes; confirm on your own workload before sizing hardware to it.
 5. **Use effective batch ≥ 32** — compensate for small physical batch with gradient accumulation (gradient_accumulation_steps = 32 / batch_size).
 6. **Benchmark with Unsloth before committing to cloud hardware** — QLoRA memory requirements vary by sequence length; measure empirically on your data before choosing GPU type.
 7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible. (GPTQ/AWQ inference quantization mechanics: [Optimization & Quantization](../optimization_and_quantization/README.md).)
@@ -601,27 +605,27 @@ A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2
 ```
 Single A100 80GB Training Setup:
 
-GPU Memory Layout (peak ~48GB):
+GPU Memory Layout (peak ~40GB):
 +------------------------------------------+
 | 70B Base Model Weights (NF4 4-bit)       |  ~35GB (70B × 0.5 bytes)
 +------------------------------------------+
-| NF4 Scaling Factors (double-quantized)   |  ~700MB
+| NF4 Scaling Factors (double-quantized)   |  ~1.1GB (70B × 0.127 bits / 8)
 +------------------------------------------+
-| LoRA Adapter A matrices (BF16)           |  ~200MB (r=16, all-attn)
-| LoRA Adapter B matrices (BF16)           |  ~200MB
+| LoRA Adapter A matrices (BF16)           |  ~84MB (r=16, all-attn, GQA)
+| LoRA Adapter B matrices (BF16)           |  ~47MB
 +------------------------------------------+
-| Adapter Gradients (BF16)                 |  ~400MB
+| Adapter Gradients (BF16)                 |  ~131MB
 +------------------------------------------+
-| PagedAdamW8bit Optimizer States          |  ~800MB (8-bit, pageable)
+| PagedAdamW8bit Optimizer States          |  ~131MB (8-bit, pageable)
 +------------------------------------------+
 | Activations (gradient checkpointing)     |  ~2-3GB
 +------------------------------------------+
 | Input batch + misc buffers               |  ~500MB
 +------------------------------------------+
-TOTAL PEAK: ~40-42GB (well within 80GB)
+TOTAL PEAK: ~39-40GB (well within 80GB)
 
 Post-training Export:
-  Adapter (BF16, ~400MB) ──> merge onto BF16 base (CPU, 140GB RAM) ──> GPTQ 4-bit ──> deploy
+  Adapter (BF16, ~131MB) ──> merge onto BF16 base (CPU, 140GB RAM) ──> GPTQ 4-bit ──> deploy
 ```
 
 **Key Design Decisions**:
@@ -633,16 +637,16 @@ Post-training Export:
 
 **Implementation**:
 ```python
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, TrainingArguments
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 import torch
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,    # saves ~700MB on 70B model
+    bnb_4bit_use_double_quant=True,    # 0.373 bits/param -> saves ~3.3GB on a 70B model
 )
 
 model = AutoModelForCausalLM.from_pretrained(
@@ -651,8 +655,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto"
 )
 
-model.gradient_checkpointing_enable()
-model = prepare_model_for_kbit_training(model)
+model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
 
 lora_config = LoraConfig(
     r=16,
@@ -663,9 +666,12 @@ lora_config = LoraConfig(
     task_type="CAUSAL_LM"
 )
 model = get_peft_model(model, lora_config)
-# Trainable: ~83M / 70,000M = 0.12%
+# Trainable: 80 layers x 819,200 = ~65.5M / 70,000M = 0.094%
+# (k_proj/v_proj are 8192->1024 because Llama 3 70B uses GQA with 8 KV heads)
 
-training_args = TrainingArguments(
+# SFTTrainer takes an SFTConfig, not a bare TrainingArguments; sequence length
+# lives on SFTConfig as max_length (max_seq_length was removed).
+sft_config = SFTConfig(
     output_dir="./legal70b_qlora",
     per_device_train_batch_size=2,
     gradient_accumulation_steps=16,  # effective batch = 32
@@ -677,16 +683,16 @@ training_args = TrainingArguments(
     bf16=True,
     max_grad_norm=0.5,               # tighter gradient clipping for stability
     logging_steps=25,
-    evaluation_strategy="steps",
+    eval_strategy="steps",           # renamed from evaluation_strategy, removed in v4.46
     eval_steps=100,
-    max_seq_length=512
+    max_length=512
 )
 
 trainer = SFTTrainer(
     model=model,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    args=training_args
+    args=sft_config
 )
 trainer.train()
 model.save_pretrained("./legal70b_adapter")
@@ -696,20 +702,20 @@ model.save_pretrained("./legal70b_adapter")
 # peft_model = PeftModel.from_pretrained(base, "./legal70b_adapter")
 # merged = peft_model.merge_and_unload()
 # merged.save_pretrained("./legal70b_merged_bf16")
-# # Then quantize with AutoGPTQ for production deployment
+# # Then quantize with GPTQModel (AutoGPTQ is archived) for production deployment
 ```
 
-**Results**:
-- Peak GPU memory during training: 41.3GB (within 80GB budget with comfortable headroom)
+**Results** (illustrative run, not a published benchmark):
+- Peak GPU memory during training: 39.8GB (within 80GB budget with comfortable headroom)
 - Training time: 14 hours for 3 epochs on 8,000 training examples (512 tokens each)
-- Training cost: ~$42 at A100 cloud rates ($3/hr)
+- Training cost: ~$42 at an assumed $3/hr A100 rate (14 h × $3)
 - Clause classification accuracy: 89.2% on 47-category holdout set
 - Risk summary quality (human evaluation): 4.2/5.0 average score (vs. 3.1/5.0 for 13B model)
 - Quality vs. hypothetical full fine-tune (estimated): ~2% gap on classification accuracy (89.2% vs. estimated 91%)
-- Paged optimizer triggered: 23 times across the full training run; added approximately 8 minutes total overhead
+- Paged optimizer triggered: 23 times across the full training run; at ~131MB of 8-bit state per spill-and-restore that is under a second of PCIe time in total — the value is the crash that did not happen, not the time saved
 
 **Tradeoffs and Alternatives**:
 - Standard LoRA on 70B (BF16) was impossible on a single A100 80GB — would require 140GB weight memory alone, far exceeding 80GB.
 - Two-GPU LoRA (BF16 with model parallelism) was evaluated: achieves ~91% classification accuracy (vs. 89.2% QLoRA) but doubles infrastructure cost and requires NVLink for efficient gradient synchronization.
 - 13B model with full fine-tuning (alternative that fits on single A100): achieved only 81% classification accuracy — the 70B QLoRA model provides an 8-percentage-point improvement critical for this legal application.
-- 8-bit quantization (bitsandbytes load_in_8bit) would reduce memory from 35GB to ~70GB for 70B model (8 bits × 70B / 8 = 70GB) — still too large for a single 80GB A100 when combined with adapter gradients and activations.
+- 8-bit quantization (bitsandbytes `load_in_8bit`) would cut the 140GB BF16 weights only to ~70GB (8 bits × 70B / 8 = 70GB), against ~35GB for NF4 — still too large for a single 80GB A100 once scales, adapter gradients and 2-3GB of activations are stacked on top.

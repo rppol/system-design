@@ -6,7 +6,7 @@
 
 Multi-agent debate and consensus is a prompting and orchestration strategy in which multiple LLM instances independently reason about a problem, share their answers and justifications with each other, and iteratively revise their positions over one or more rounds before a final answer is extracted. The goal is to reduce individual model errors — hallucinations, miscalculations, reasoning gaps — by exposing each agent's output to critique from peers.
 
-The technique is grounded in the 2023 paper by Du et al. ("Improving Factuality and Reasoning in Language Models through Multiagent Debate"), which demonstrated that structured inter-agent debate measurably improves factuality and arithmetic accuracy over single-model chain-of-thought prompting. A 3-agent GPT-4 debate setup improved MMLU accuracy from 82% to 89%, a gain of 7 percentage points with no fine-tuning.
+The technique is grounded in the 2023 paper by Du et al. ("Improving Factuality and Reasoning in Language Models through Multiagent Debate", arXiv 2305.14325), which demonstrated that structured inter-agent debate measurably improves factuality and arithmetic accuracy over single-model prompting. Their headline setup — 3 agents, 2 rounds, all instances of `gpt-3.5-turbo-0301` — improved MMLU accuracy from 63.9% to 71.1%, a gain of 7.2 percentage points with no fine-tuning, and GSM8K from 77.0% to 85.0%.
 
 Key capabilities:
 - Factuality checking through peer disagreement signals
@@ -40,7 +40,7 @@ Key insight: the mechanism of improvement is not that agents vote and the majori
 
 **Principle 5 — Separation of debaters and judges.** In judge-arbitrator patterns, the agent that renders the final verdict should not have participated in debate rounds. A participating agent carries positional bias from arguments it made earlier.
 
-**Principle 6 — Diversity injection.** Agents must start from genuinely different initial positions. Temperature diversity (temp=0.3 / 0.7 / 1.2 across three instances of the same model) is the cheapest mechanism. Role diversity (mathematician / critic / skeptic) is a complementary signal.
+**Principle 6 — Diversity injection.** Agents must start from genuinely different initial positions. Temperature diversity (temp=0.2 / 0.6 / 1.0 across three instances of the same model) is the cheapest mechanism. Note the provider ceilings: the Anthropic Messages API accepts `temperature` only in the range 0.0–1.0, while OpenAI allows up to 2.0 — and Anthropic's adaptive-thinking models (Claude Opus 4.7 and later, including Opus 5, Sonnet 5, Fable 5) reject any non-default `temperature`/`top_p`/`top_k` with an HTTP 400, so temperature diversity requires either an older Claude generation or an OpenAI-family model. Role diversity (mathematician / critic / skeptic) is a complementary signal that works on every model.
 
 ---
 
@@ -135,7 +135,9 @@ Example: a math agent handles arithmetic, a logic agent checks proof steps, a la
 
 ### 4.5 Temperature Diversity Trick
 
-Run the same model checkpoint three times with temperatures 0.3, 0.7, and 1.2 on the same prompt. Temperature 0.3 produces a near-deterministic, high-confidence answer. Temperature 0.7 produces moderate diversity. Temperature 1.2 produces a more exploratory, sometimes unconventional answer.
+Run the same model checkpoint three times with temperatures 0.2, 0.6, and 1.0 on the same prompt. Temperature 0.2 produces a near-deterministic, high-confidence answer. Temperature 0.6 produces moderate diversity. Temperature 1.0 produces a more exploratory, sometimes unconventional answer.
+
+Mind the provider ceiling: Anthropic's Messages API documents `temperature` as ranging from 0.0 to 1.0 and defaults to 1.0, so values above 1.0 are invalid there (OpenAI's range goes to 2.0). Anthropic's adaptive-thinking models — Claude Opus 4.7 and later, including Opus 5, Sonnet 5, and Fable 5 — reject any non-default sampling parameter with an HTTP 400, so this trick needs a model generation that still accepts `temperature` at all.
 
 This generates opinion diversity without paying for multiple model families or fine-tunes. Works because high-temperature sampling explores lower-probability token sequences, which sometimes correspond to correct alternative reasoning paths.
 
@@ -155,9 +157,9 @@ One agent is assigned the role of critic and must argue against the current best
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
 flowchart TD
     Q([Question]) --> A0 & B0 & C0
-    A0["Agent A (temp=0.3)\n→ Ans_A0"]
-    B0["Agent B (temp=0.7)\n→ Ans_B0"]
-    C0["Agent C (temp=1.2)\n→ Ans_C0"]
+    A0["Agent A (temp=0.2)\n→ Ans_A0"]
+    B0["Agent B (temp=0.6)\n→ Ans_B0"]
+    C0["Agent C (temp=1.0)\n→ Ans_C0"]
     A0 & B0 & C0 --> Share["Share all round-0 answers"]
     Share --> A1 & B1 & C1
     A1["Agent A sees B0, C0\n→ Ans_A1"]
@@ -306,7 +308,13 @@ spot and why the convergence check in Section 10 pays for itself.
 ```python
 """
 Multi-agent debate implementation using the Anthropic SDK.
-Python 3.10+, uses claude-3-5-sonnet-20241022.
+Python 3.10+.
+
+Model choice matters here: this pattern sets `temperature` per agent, and
+Anthropic's adaptive-thinking models (Claude Opus 4.7 and later, including
+Opus 5, Sonnet 5, Fable 5) reject non-default temperature/top_p/top_k with an
+HTTP 400. Use a generation that still accepts sampling parameters, and keep
+every value within Anthropic's documented 0.0-1.0 range.
 """
 
 from __future__ import annotations
@@ -318,7 +326,7 @@ from typing import Sequence
 
 import anthropic
 
-MODEL = "claude-3-5-sonnet-20241022"
+MODEL = "claude-sonnet-4-6"   # accepts `temperature`; Sonnet 5 / Opus 5 do not
 MAX_TOKENS = 1024
 
 
@@ -335,7 +343,7 @@ class DebateRound:
     responses: dict[str, str] = field(default_factory=dict)  # agent_id -> response text
 
 
-def build_initial_prompt(question: str, role_prompt: str) -> list[dict]:
+def build_initial_prompt(question: str, role_prompt: str) -> tuple[list[dict], str]:
     system = (
         "You are a careful reasoning assistant. "
         + (role_prompt if role_prompt else "")
@@ -536,9 +544,9 @@ async def run_with_judge(
 # Example usage
 async def main() -> None:
     agents = [
-        AgentConfig(agent_id="A", temperature=0.3),
-        AgentConfig(agent_id="B", temperature=0.7),
-        AgentConfig(agent_id="C", temperature=1.2),
+        AgentConfig(agent_id="A", temperature=0.2),
+        AgentConfig(agent_id="B", temperature=0.6),
+        AgentConfig(agent_id="C", temperature=1.0),
     ]
 
     question = (
@@ -600,15 +608,17 @@ budget = estimate_debate_tokens(200, 300, 3, 2)
 
 ## 7. Real-World Examples
 
-**MMLU benchmark (Du et al. 2023).** Single GPT-4 with chain-of-thought: 82% accuracy. Three-agent GPT-4 round-robin debate, 2 rounds: 89% accuracy. The 7-point gain is largest on questions requiring multi-step reasoning (history, law, medicine) and smallest on pure recall questions.
+**MMLU benchmark (Du et al. 2023, arXiv 2305.14325, Table 2).** Single agent: 63.9% (±4.8). Single agent with self-reflection: 57.7% (±5.0) — worse than doing nothing. Three-agent round-robin debate, 2 rounds: 71.1% (±4.6). All three configurations used `gpt-3.5-turbo-0301`; the paper did not run its main benchmark suite on GPT-4. Note the reflection row: the gain comes from encountering a *peer's* contradicting argument, not from a model being told to re-check itself.
 
-**GSM8K math word problems.** Majority voting (5 samples, no communication) improves GPT-4 accuracy from 87% to 92%. Adding one round of debate between the three highest-confidence samples further improves to 94%. Debate adds 2 points on top of what voting alone achieves.
+**GSM8K math word problems (same paper, Table 1).** Single agent: 77.0% (±4.2). Single agent with reflection: 75.0% (±4.3). Three-agent debate, 2 rounds: 85.0% (±3.5) — an 8-point gain on grade-school math word problems, the largest reported in the paper's main table.
 
-**Code correctness checking.** Three-agent debate where each agent is given the same buggy function and asked to identify the bug: agents independently propose fixes, then critique each other's patches. Teams at a mid-sized AI company reported a 30% reduction in false-positive bug reports (cases where the AI claimed a bug that was not present) when switching from single-agent review to three-agent debate.
+**Scaling agents and rounds (same paper).** The authors state they evaluated "mainly using three agents with two rounds of debates" for cost reasons, "although we found further gains with both more agents and rounds of debate." Treat any claim that a 4th agent or 3rd round adds nothing as a budget heuristic, not a published finding.
 
-**Medical differential diagnosis simulation.** A research team used three GPT-4 agents assigned roles of attending physician, radiologist, and pathologist to debate diagnoses from case vignettes. Debate reduced hallucinated lab values cited as evidence by 40% compared to single-agent output, because peer agents challenged unsupported factual claims.
+**Code correctness checking (illustrative pattern, not a published result).** Three-agent debate where each agent is given the same buggy function and asked to identify the bug: agents independently propose fixes, then critique each other's patches. The reported benefit in practice is a lower false-positive rate — the AI claiming a bug that is not present — because a peer agent must be persuaded before the finding survives. Measure this on your own codebase; no public benchmark reports a false-positive delta for this setup.
 
-**Automated essay scoring disagreement resolution.** Two scoring agents frequently disagreed on borderline essays (scores of 3 vs 4 on a 6-point scale). Adding a third agent to debate the disagreement and a judge agent to render the final score reduced human-override rates by 22% in A/B testing.
+**Medical differential diagnosis (illustrative pattern, not a published result).** Assigning three agents the roles of attending physician, radiologist, and pathologist to debate diagnoses from case vignettes is a common role-diversity design. The mechanism to expect is fewer unsupported factual claims surviving to the final answer, because peer agents challenge evidence that is not in the vignette. Any specific reduction figure must come from your own labeled evaluation.
+
+**Automated essay scoring disagreement resolution (illustrative pattern, not a published result).** Two scoring agents frequently disagree on borderline essays (scores of 3 vs 4 on a 6-point scale). Adding a third agent to debate the disagreement plus a judge agent to render the final score is the standard escalation design; whether it reduces human-override rates is an A/B question for your own rubric and rater pool.
 
 ---
 
@@ -738,7 +748,7 @@ for round_idx in range(1, MAX_ROUNDS + 1):
         break  # All agents agree — stop early
 ```
 
-Real-world cost: on a dataset of 500 MMLU questions with MAX_ROUNDS=3 and 3 agents, removing the convergence check increased token spend by 34% with no accuracy improvement (67% of questions converged by round 1).
+Why this pays: the saving equals the fraction of questions that converge early multiplied by the rounds you would otherwise have run. Illustratively, if two-thirds of a factual dataset converges by round 1, skipping rounds 2 and 3 on those questions removes roughly a third of total spend with no accuracy change. The early-convergence fraction is task-specific — measure it on your own dataset before assuming a number; the same check on a genuinely hard reasoning set converges far less often and saves far less.
 
 ### Pitfall 3 — Using debate for subjective tasks
 
@@ -809,9 +819,9 @@ than by whether the debate is still producing value.
 
 **Anthropic SDK (Python/TypeScript)** — direct API access. Use `asyncio.gather` for parallel round-0 calls. No built-in debate orchestration; implement as shown in Section 6.
 
-**OpenAI Assistants API** — threads can hold debate history natively, but each thread is one agent; requires N threads per debate and manual cross-thread context injection.
+**OpenAI Assistants API** — deprecated: OpenAI notified developers on 2025-08-26 and removes it from the API on 2026-08-26, directing new work to the Responses and Conversations APIs. Threads could hold debate history natively, but each thread is one agent, so a debate needed N threads plus manual cross-thread context injection. Do not start here.
 
-**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. `GroupChat` with `RoundRobinSpeakerSelection` implements debate directly. Most feature-complete out-of-the-box for multi-agent debate.
+**[AutoGen (Microsoft)](../agentic_frameworks/autogen.md)** — built-in group chat with round-robin and broadcast modes. In the current `autogen-agentchat` package the class is `RoundRobinGroupChat` (import from `autogen_agentchat.teams`); in the legacy 0.2 API the equivalent is `GroupChat(..., speaker_selection_method="round_robin")`. There is no `RoundRobinSpeakerSelection` class in either. Most feature-complete out-of-the-box for multi-agent debate.
 
 **CrewAI** — sequential and hierarchical process modes. Hierarchical mode with a manager agent approximates the judge pattern. Less flexible than LangGraph for custom convergence logic.
 
@@ -828,14 +838,14 @@ than by whether the debate is still producing value.
 **Q: What is multi-agent debate and how does it differ from self-consistency / majority voting?**
 Multi-agent debate is an iterative process where agents share their reasoning and revise their answers in response to peer arguments across multiple rounds. Self-consistency (majority voting) is a one-shot process: N independent samples, pick the most common answer. The key difference is communication: debate agents can correct each other's reasoning; majority voting agents cannot. Debate produces larger accuracy gains on tasks with structured reasoning errors but at significantly higher token cost.
 
-**Q: What accuracy improvement did Du et al. 2023 report for three-agent GPT-4 debate on MMLU?**
-Three-agent GPT-4 debate improved MMLU accuracy from 82% to 89%, a gain of 7 percentage points. This was achieved with 2 debate rounds and no fine-tuning. The gain was concentrated on multi-step reasoning questions and was smaller on pure recall questions, where single-agent performance was already near ceiling.
+**Q: What accuracy improvement did Du et al. 2023 report for three-agent debate on MMLU?**
+Three-agent debate improved MMLU accuracy from 63.9% to 71.1%, a gain of 7.2 percentage points. This was achieved with 2 debate rounds, no fine-tuning, and `gpt-3.5-turbo-0301` for every agent — not GPT-4, which the paper did not use for its main benchmark table. The same paper reports GSM8K rising from 77.0% to 85.0%. A useful control in the same table: single-agent self-reflection *lowered* MMLU to 57.7%, which is why the mechanism is credited to encountering a peer's argument rather than to being told to re-check.
 
 **Q: Why must all agents generate round-0 answers independently, without seeing peer responses?**
 If agents see each other's responses before generating their own initial answers, diversity collapses immediately. The first agent to respond anchors all subsequent agents, and the debate becomes an echo chamber. Round 0 must establish genuinely independent starting positions so that subsequent rounds involve real information exchange rather than mutual confirmation. This is the most common implementation mistake.
 
 **Q: What is the temperature diversity trick and why does it work?**
-Running the same model at temperatures 0.3, 0.7, and 1.2 produces answers that sample from different parts of the token probability distribution. Low temperature (0.3) selects near-deterministic high-probability tokens — the model's "confident" answer. High temperature (1.2) explores lower-probability sequences that sometimes correspond to correct alternative reasoning paths. This generates opinion diversity without deploying multiple model families, at the same per-token cost.
+Running the same model at temperatures 0.2, 0.6, and 1.0 produces answers that sample from different parts of the token probability distribution. Low temperature (0.2) selects near-deterministic high-probability tokens — the model's "confident" answer. High temperature (1.0) explores lower-probability sequences that sometimes correspond to correct alternative reasoning paths. This generates opinion diversity without deploying multiple model families, at the same per-token cost. Two provider constraints bound the trick: Anthropic caps `temperature` at 1.0 (OpenAI allows 2.0), and Anthropic's adaptive-thinking models from Claude Opus 4.7 onward reject non-default sampling parameters with an HTTP 400 — on those, use role diversity instead.
 
 **Q: When does the judge agent pattern outperform simple majority voting?**
 The judge pattern outperforms when the debate produces high-quality reasoning that the majority vote fails to capture — for example, when two agents are wrong for the same reason and one agent is correct for an unusual reason. The judge reads the full reasoning trace and can identify the sound argument even when it is in the minority. Majority voting would incorrectly pick the 2-agent wrong answer. The judge pattern also provides explainability: the verdict includes a reasoning chain.
@@ -847,10 +857,10 @@ Society of Mind (inspired by Minsky 1986) uses specialized agents each responsib
 Debate hurts on subjective tasks (creative writing, design, preference selection) because agents optimize for consensus, and consensus on subjective dimensions selects the generic midpoint rather than the best option. It also hurts when all agents share the same systematic bias — they will debate and converge on a confident wrong answer. Debate cannot correct errors that are universally shared across agents trained on similar data.
 
 **Q: How does convergence detection reduce token cost, and what is a reasonable convergence criterion?**
-Early convergence detection terminates debate when all agents agree on the same final answer for the current round. This avoids running unnecessary rounds that add tokens but not accuracy. A reasonable criterion: unanimous agreement (all N agents give the same extracted final answer). In practice, 67% of questions in a typical factual dataset converge by round 1, saving roughly one-third of debate token spend compared to always running the maximum number of rounds.
+Early convergence detection terminates debate when all agents agree on the same final answer for the current round. This avoids running unnecessary rounds that add tokens but not accuracy. A reasonable criterion: unanimous agreement (all N agents give the same extracted final answer). The saving equals your dataset's early-convergence fraction times the rounds skipped — measure that fraction rather than assuming it, because easy factual sets converge early and hard reasoning sets barely converge at all.
 
 **Q: What are the token cost multipliers for 3-agent debate with 1 and 2 rounds versus a single call?**
-A single call is 1x. Three-agent majority voting (round 0 only) is 3x. Three-agent debate with 1 additional round is roughly 6–7x because each agent's round-1 prompt includes the question plus two peer responses from round 0. Three-agent debate with 2 additional rounds is roughly 12–15x because peer context grows each round. Beyond 2 rounds, accuracy gains are marginal for most tasks.
+A single call is 1x. Three-agent majority voting (round 0 only) is 3x. Three-agent debate with 1 additional round is roughly 10x, because each agent's round-1 prompt carries the question plus two peer responses from round 0. Three-agent debate with 2 additional rounds is roughly 20x, because peer context grows with the round index. Working the §5 formula at Q=200 and A=300 tokens gives 9.6x and 19.8x exactly; the growth is quadratic in both agents and rounds, so budget from the formula rather than from agent count. Beyond 2 rounds the marginal accuracy gain rarely repays the doubling.
 
 **Q: How do you prevent context window overflow in long debate sessions?**
 Include only the immediately preceding round's peer responses in each agent's next-round prompt, not the full debate history. This caps the peer context at (N-1) * avg_response_tokens per round regardless of how many rounds have elapsed. Agents do not need full history — they only need to know what their peers said most recently to update their position.
@@ -877,15 +887,15 @@ The judge agent is specifically well-suited for non-convergence: it reads the fu
 
 ## 13. Best Practices
 
-Use exactly 3 agents for most tasks. Adding a 4th or 5th agent increases token cost by 33–67% per round but produces less than 2% additional accuracy gain on standard benchmarks. The marginal agent adds redundancy, not new reasoning.
+Use exactly 3 agents for most tasks. This is the configuration Du et al. evaluated, and they chose it for cost, explicitly noting they "found further gains with both more agents and rounds of debate." So the 3-agent default is a budget decision, not a quality ceiling: a 4th or 5th agent adds roughly `(N-1)/(N-2)` more peer context per round on top of its own call, and you should only pay that when a measured evaluation on your task shows the accuracy is there.
 
 Always run round 0 in parallel. All agents must call the model simultaneously with no shared context. Sequential round-0 execution eliminates diversity without any benefit and introduces unnecessary latency.
 
 Enforce structured output at the prompt level. Require `FINAL ANSWER: <answer>` in every agent response. Parse deterministically. Do not use a separate LLM call to extract the final answer from free-form text.
 
-Limit debate to 2 rounds. In empirical evaluations across factual Q&A, math, and code, round 2 produces the largest marginal accuracy gain after round 1. Round 3 produces less than 1% additional gain on average. The token cost of round 3 is rarely justified.
+Limit debate to 2 rounds as a default. Two rounds is what the published result was measured at, and the §5 arithmetic shows a third round roughly doubles the bill. Round 3 is a decision to make against a measured accuracy delta on your own task, not a default to inherit.
 
-Implement convergence detection. Check after each round whether all agents agree. On typical factual datasets, early exit saves 25–40% of token spend with no accuracy penalty.
+Implement convergence detection. Check after each round whether all agents agree. The saving scales with your dataset's early-convergence fraction and costs nothing to add, so it is worth wiring in before you know that fraction.
 
 Log per-round answers, not just the final answer. When an agent changes its answer between rounds, that change is a signal: either the agent corrected an error (good) or it was incorrectly persuaded (bad). Monitoring answer-change rates by task type reveals whether debate is adding signal or noise.
 
@@ -902,6 +912,10 @@ Monitor cost per query in production. Debate token cost grows superlinearly with
 ## 14. Case Study
 
 ### Multi-Agent Debate for Financial Statement Fact-Checking
+
+> Illustrative composite. The architecture, the token arithmetic, and the cost
+> derivation are real and reproducible; the firm, the incident, and the outcome
+> percentages are a worked scenario, not a published case.
 
 **Context.** A financial services firm uses LLMs to extract and verify numerical claims from analyst reports before they are published. The original pipeline used a single GPT-4 call to check whether each numerical claim in a draft report was consistent with the cited source documents. The hallucination rate (agent-confirmed claims that were factually wrong) was 11% in internal audits, which was unacceptable for regulatory reasons.
 
@@ -921,9 +935,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Draft(["Draft claim +<br/>source documents"]) --> A0 & B0 & C0
-    A0("Agent A accountant<br/>temp=0.3 -> Ans_A0")
-    B0("Agent B auditor<br/>temp=0.7 -> Ans_B0")
-    C0("Agent C skeptic<br/>temp=1.2 -> Ans_C0")
+    A0("Agent A accountant<br/>temp=0.2 -> Ans_A0")
+    B0("Agent B auditor<br/>temp=0.6 -> Ans_B0")
+    C0("Agent C skeptic<br/>temp=1.0 -> Ans_C0")
     A0 & B0 & C0 --> Share("Share round-0<br/>responses")
     Share --> A1 & B1 & C1
     A1("Agent A -> Ans_A1")

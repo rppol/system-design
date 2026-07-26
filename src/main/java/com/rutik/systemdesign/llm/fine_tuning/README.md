@@ -138,7 +138,8 @@ LoRA adapters: still trained in BF16
 
 7B model memory:
   Full fine-tune:  ~56GB (weights 14GB + grads 14GB + Adam states 28GB)
-  LoRA:            ~28GB (frozen 14GB + LoRA adapters ~0.1GB + gradients)
+  LoRA:            ~16GB (frozen 14GB + adapters ~0.03GB + adapter grads/optimizer
+                          ~0.2GB + activations with gradient checkpointing)
   QLoRA:           ~6GB  (frozen 3.5GB in 4-bit + LoRA adapters ~0.1GB)
 ```
 
@@ -183,9 +184,9 @@ The asymmetry is the point. Quantization error is fatal for weights you are *opt
 
 That reclaimed 0.33 GB on a 7B looks like noise until you read the budget line: the whole QLoRA run fits in ~6 GB, so double quantization is worth roughly one extra GB of activations — a doubled sequence length or batch size, for free.
 
-QLoRA enables fine-tuning a 7B model on a single 16GB consumer GPU (RTX 4080/4090). This democratized fine-tuning dramatically.
+QLoRA enables fine-tuning a 7B model on a single 16GB consumer GPU (RTX 4080 has 16GB; RTX 4090 has 24GB). This democratized fine-tuning dramatically.
 
-Tradeoff: 4-bit quantization introduces small quality degradation (~1-2% on benchmarks).
+Tradeoff: the QLoRA paper reports no quality loss — 4-bit NF4 matched both 16-bit full fine-tuning and 16-bit LoRA on its academic benchmarks (Dettmers et al. 2023). The real cost is throughput: every forward pass dequantizes NF4 blocks on the fly.
 
 ### 4.4 Instruction Tuning
 
@@ -256,8 +257,8 @@ flowchart LR
 
     X["Input x\n(d_model)"]
     W["Frozen W\ngradient = 0\npre-trained weights"]
-    A["Adapter A\nd×r  down-project\n(initialised ~ N(0,σ))"]
-    B["Adapter B\nr×d  up-project\n(initialised = 0)"]
+    A["Adapter A\nr×d  down-project\n(initialised ~ N(0,σ))"]
+    B["Adapter B\nd×r  up-project\n(initialised = 0)"]
     SCALE["Scale by α / r"]
     SUM["Σ  merge\nWx + BA·x·(α/r)"]
     OUT["Projection output"]
@@ -298,12 +299,14 @@ xychart-beta
     title "Fine-tuning a 7B model — GPU memory by method"
     x-axis ["Full fine-tune", "LoRA r=16", "QLoRA r=16"]
     y-axis "GPU memory (GB)" 0 --> 60
-    bar [56, 28, 6]
+    bar [56, 16, 6]
 ```
 Full fine-tune = weights + grads + Adam states (needs 2× A100 40GB); LoRA = frozen base + adapter grads; QLoRA = 4-bit base + BF16 adapters.
 QLoRA's 4-bit base model collapses the footprint ~9× (56 GB → 6 GB) — turning a
-two-GPU job into one that runs on a single consumer card. This is the whole reason
-fine-tuning became accessible outside research labs.
+two-GPU job into one that runs on a single consumer card. Plain LoRA already removes
+the gradient and optimizer rows (56 GB → ~16 GB); quantizing the frozen base is what
+removes the last 14 GB. This is the whole reason fine-tuning became accessible outside
+research labs.
 
 ### Fine-Tuning Pipeline
 
@@ -469,9 +472,10 @@ Benefits of keeping separate:
 ## 7. Real-World Examples
 
 ### LLaMA → Vicuna (2023)
-- Fine-tuned LLaMA 13B on 70K ChatGPT conversations (user-shared)
-- Training cost: $300
-- Achieved ~90% ChatGPT quality on MT-Bench
+- Fine-tuned LLaMA 13B on 70K ChatGPT conversations (user-shared, via ShareGPT)
+- Training cost: ~$300 (LMSYS blog, March 2023)
+- Claimed ">90% ChatGPT quality" from a preliminary GPT-4-as-judge comparison that the
+  authors themselves labelled non-scientific — not MT-Bench, which came later
 - Proved that instruction fine-tuning with high-quality data is the key ingredient
 
 ### Mistral → Mistral-7B-Instruct
@@ -482,11 +486,14 @@ Benefits of keeping separate:
 ### CodeLLaMA (Meta, 2023)
 - Fine-tuned LLaMA 2 on 500B code tokens (continued pre-training)
 - Then instruction fine-tuned on code Q&A pairs
-- Added FIM training objective during continued pre-training
-- Result: 34B CodeLLaMA outperformed GPT-3.5 on HumanEval
+- Added the FIM (infilling) objective for the 7B/13B/70B variants — the 34B was trained
+  without it
+- Result: HumanEval pass@1 — Code Llama 34B 48.8%, Code Llama - Python 34B 53.7%,
+  versus 48.1% for GPT-3.5 (ChatGPT) as reported in the paper
 
 ### Domain Fine-Tuning: BloombergGPT
-- 50B model trained from scratch on 700B financial tokens + 300B general tokens
+- 50B model trained from scratch on 363B financial tokens (FinPile) + 345B public tokens
+  (~709B total; 512× A100 40GB, 53 days)
 - Custom tokenizer with financial vocabulary
 - Showed domain-specific pre-training beats general model fine-tuning for finance
 
@@ -497,10 +504,13 @@ Benefits of keeping separate:
 | Method | VRAM (7B) | Speed | Quality | Forgetting Risk |
 |--------|-----------|-------|---------|----------------|
 | Full fine-tune | ~56 GB | Slow | Best | High |
-| LoRA (r=16) | ~28 GB | Fast | Very good | Low |
+| LoRA (r=16) | ~16 GB | Fast | Very good | Low |
 | QLoRA (r=16) | ~6 GB | Medium | Good | Low |
-| Prefix tuning | ~28 GB | Fast | Moderate | Very low |
+| Prefix tuning | ~15 GB | Fast | Moderate | Very low |
 | Prompt tuning | ~14 GB | Fastest | Lower | None |
+
+Every non-full-FT row is dominated by the same frozen 14 GB of BF16 base weights; the
+differences between them are adapter gradients, optimizer state and activations.
 
 ---
 
@@ -554,6 +564,7 @@ Benefits of keeping separate:
 
 ```python
 # QLoRA fine-tuning with PEFT (simplified)
+import torch
 from peft import LoraConfig, get_peft_model
 from transformers import BitsAndBytesConfig
 
@@ -577,7 +588,7 @@ model = get_peft_model(base_model, lora_config)
 A: Fine-tune when: you need consistent output format, the task is highly repetitive at scale (cost justifies training), latency matters (fine-tuned 7B beats prompted 70B), or privacy requires not sending data to external APIs. Use prompting when: rapid iteration needed, task variety is high, dataset is too small, or the base model already handles the task adequately.
 
 **Q: What are the key differences between full fine-tuning and PEFT methods?**
-A: Full fine-tuning updates all model parameters — provides maximum quality but requires the same memory as pre-training (~56GB for 7B). PEFT trains 0.1-1% of parameters while freezing the rest — reduces training memory to 6-16GB for 7B models with only 1-3% quality loss. PEFT also reduces catastrophic forgetting risk (frozen weights preserve general knowledge) and enables modular multi-task adapters. For most production fine-tuning, LoRA r=16 is the right default.
+A: Full fine-tuning updates all model parameters — provides maximum quality but requires the same memory as pre-training (~56GB for 7B). PEFT trains 0.1-1% of parameters while freezing the rest — reduces training memory to 6-16GB for 7B models, and the LoRA paper reports matching or exceeding full fine-tuning on GPT-3 175B (WikiSQL, MNLI-m, SAMSum) with 4.7M trainable parameters. PEFT also reduces catastrophic forgetting risk (frozen weights preserve general knowledge) and enables modular multi-task adapters. For most production fine-tuning, LoRA r=16 is the right default.
 
 **Q: How does fine-tuning differ from RAG for adding domain knowledge?**
 A: Fine-tuning bakes knowledge into model weights at training time — static, but fast at inference. RAG injects knowledge dynamically at query time — always current, but adds retrieval latency and cost per query. Fine-tuning is better when: knowledge is stable, the same information is queried millions of times (amortize training cost), or latency prohibits context injection. RAG is better when: knowledge changes frequently, private documents are added continuously, or source attribution is required. Fine-tuning cannot access documents it hasn't seen; RAG can answer about documents added yesterday.
@@ -595,7 +606,7 @@ A: Alpha sets the scaling factor alpha/r applied to the adapter output (h = Wx +
 Fine-tune when you need consistent format adherence, domain-specific behavior that prompting can't achieve, or when prompt length is eating into your context budget. Prompt engineering is better when: you have fewer than 100 examples, the task changes frequently, or you need quick iteration. Rule of thumb: if your system prompt exceeds 2000 tokens to get the desired behavior, fine-tuning will likely be cheaper and more reliable. Fine-tuning is also better when you need to reduce latency (shorter prompts = faster inference) or improve consistency on structured outputs. However, fine-tuning requires an evaluation pipeline — without proper eval, you can't tell if fine-tuning helped or hurt. Start with prompting, measure the gap, then fine-tune only if prompting falls short.
 
 **Q: How do you select the right LoRA rank for your task?**
-LoRA rank determines the capacity of the adaptation — higher rank allows more complex behavior changes but uses more memory and risks overfitting. Rank 4-8 is sufficient for style/format adaptation (e.g., always respond in JSON). Rank 16-32 works well for domain adaptation (legal, medical terminology). Rank 64-128 is needed for significant behavior changes or learning new capabilities. Empirically, rank 16 captures 90%+ of the performance of full fine-tuning for most instruction-following tasks. To select: start with rank 16, evaluate, then try rank 8 (if quality is maintained, use it for efficiency) or rank 32 (if quality is insufficient). Monitor the ratio of LoRA parameter count to training examples — if you have fewer training examples than LoRA parameters, you are almost certainly overfitting. For LLaMA 7B with rank 16 on all linear layers: roughly 20M trainable parameters, so you need at least 20K-50K training examples.
+LoRA rank determines the capacity of the adaptation — higher rank allows more complex behavior changes but uses more memory and risks overfitting. Rank 4-8 is sufficient for style/format adaptation (e.g., always respond in JSON). Rank 16-32 works well for domain adaptation (legal, medical terminology). Rank 64-128 is needed for significant behavior changes or learning new capabilities. Empirically, low ranks go a long way: the LoRA paper found r=1 to r=64 nearly indistinguishable on WikiSQL/MultiNLI when adapting Wq and Wv on GPT-3 175B. To select: start with rank 16, evaluate, then try rank 8 (if quality is maintained, use it for efficiency) or rank 32 (if quality is insufficient). Scale rank down when the dataset is small — a few thousand examples with a high-rank adapter overfits within 2-3 epochs. For Llama-2-7B with rank 16 on all seven linear projections: 39,976,960 trainable parameters (0.59% of 6.74B); the same config restricted to q_proj and v_proj is 8.4M.
 
 **Q: What is catastrophic forgetting in fine-tuning and how do you prevent it?**
 Catastrophic forgetting occurs when fine-tuning on new data causes the model to lose capabilities it had from pre-training — for example, a model fine-tuned on medical data might forget how to write code. Prevention strategies: (1) LoRA/PEFT — by only modifying a small number of parameters, the base model's knowledge is largely preserved; (2) data mixing — include 10-20% of general instruction data alongside domain-specific data during fine-tuning; (3) lower learning rate — use 1e-5 to 5e-5 instead of higher rates; (4) shorter training — monitor evaluation loss and stop when general benchmarks start degrading (typically 1-3 epochs); (5) replay buffer — periodically sample from a general knowledge dataset during training. Measure forgetting by evaluating on both domain-specific metrics AND general benchmarks (MMLU, HumanEval) after each checkpoint. A 2-3% drop in general benchmarks is acceptable if domain performance improves significantly.
@@ -604,13 +615,13 @@ Catastrophic forgetting occurs when fine-tuning on new data causes the model to 
 Proper evaluation requires held-out test sets that match your production use case, not just training loss monitoring. Setup: (1) split your data into train/validation/test (80/10/10 minimum, never contaminate the test set); (2) define task-specific metrics — for classification: accuracy/F1; for generation: ROUGE, human preference, or LLM-as-judge scoring; (3) evaluate on the validation set every N steps (e.g., every 100 steps or 0.1 epochs); (4) implement early stopping when validation metrics plateau or degrade for 3+ evaluations; (5) track general capability regression by evaluating on MMLU or similar benchmarks alongside domain metrics. Common mistake: only monitoring training loss, which always decreases but does not indicate generalization. For LoRA fine-tuning, overfitting is especially fast with small datasets — a 7B model with rank 16 LoRA on 1K examples will overfit within 2-3 epochs.
 
 **Q: What are the key differences between full fine-tuning and LoRA fine-tuning for production use?**
-Full fine-tuning updates all model parameters and requires optimizer states for every parameter, consuming 4-16x the model size in GPU memory. LoRA adds small trainable matrices (0.1-1% of parameters) while freezing the base model. Key production differences: (1) memory — 7B full fine-tune needs approximately 4xA100 80GB; LoRA needs 1xA100; (2) training speed — LoRA is 2-3x faster per step due to fewer gradient computations; (3) quality — full fine-tune is 1-3% better on average but the gap shrinks with higher LoRA rank; (4) serving — multiple LoRA adapters can share a single base model in memory, which is critical for multi-tenant systems; (5) merging — LoRA weights can be merged into base weights for zero-overhead inference. Choose full fine-tune only when maximum quality is critical, you have abundant GPU resources, and you do not need multi-tenant serving. For the vast majority of production cases, LoRA or QLoRA is the right choice.
+Full fine-tuning updates all model parameters and requires optimizer states for every parameter, consuming 4-16x the model size in GPU memory. LoRA adds small trainable matrices (0.1-1% of parameters) while freezing the base model. Key production differences: (1) memory — a 7B full fine-tune needs ~56GB (one A100 80GB, or two 40GB cards); LoRA needs ~16GB, so a single 24GB consumer card; (2) training speed — LoRA is 2-3x faster per step due to fewer gradient computations; (3) quality — full fine-tune is 1-3% better on average but the gap shrinks with higher LoRA rank; (4) serving — multiple LoRA adapters can share a single base model in memory, which is critical for multi-tenant systems; (5) merging — LoRA weights can be merged into base weights for zero-overhead inference. Choose full fine-tune only when maximum quality is critical, you have abundant GPU resources, and you do not need multi-tenant serving. For the vast majority of production cases, LoRA or QLoRA is the right choice.
 
 **Q: How do you handle training data formatting for instruction fine-tuning?**
 Training data formatting must exactly match the model's chat template, including special tokens, role markers, and turn separators. Each model family has a specific template — LLaMA 3 uses `<|begin_of_text|><|start_header_id|>system<|end_header_id|>...`, ChatML uses `<|im_start|>system\n...<|im_end|>`. Formatting mistakes are the number one cause of poor fine-tuning results. Best practices: (1) use the tokenizer's built-in `apply_chat_template()` method; (2) verify token IDs manually for the first few examples; (3) ensure special tokens are not masked in the loss (some should be predicted, some should not); (4) include diverse conversation lengths (1-turn, 3-turn, 5-turn); (5) mask the user turns so the model only learns to predict assistant responses. Common mistake: fine-tuning on raw text without proper chat formatting, which confuses the model about when to stop generating and how to handle multi-turn conversations.
 
 **Q: Why does QLoRA use NF4 quantization instead of plain INT4?**
-NF4 (NormalFloat4) places its 16 quantization levels at the quantiles of a standard normal distribution, which matches the empirically near-Gaussian distribution of pre-trained weights — so each level is used about equally often, minimizing quantization error versus uniformly spaced INT4 levels. QLoRA adds double quantization (quantizing the per-block scaling constants themselves), saving roughly 0.37 bits/parameter, and paged optimizers that spill optimizer states to CPU RAM on memory spikes. Together these are why a 7B base fits in ~3.5GB with only ~1-2% benchmark degradation. Remember that gradients never flow into the 4-bit weights — they are dequantized on the fly for the forward pass while the BF16 LoRA adapters receive all the updates.
+NF4 (NormalFloat4) places its 16 quantization levels at the quantiles of a standard normal distribution, which matches the empirically near-Gaussian distribution of pre-trained weights — so each level is used about equally often, minimizing quantization error versus uniformly spaced INT4 levels. QLoRA adds double quantization (quantizing the per-block scaling constants themselves), saving roughly 0.37 bits/parameter, and paged optimizers that spill optimizer states to CPU RAM on memory spikes. Together these are why a 7B base fits in ~3.5GB while the paper reports no measurable quality loss versus 16-bit LoRA on its benchmark suite. Remember that gradients never flow into the 4-bit weights — they are dequantized on the fly for the forward pass while the BF16 LoRA adapters receive all the updates.
 
 **Q: How does multi-LoRA serving work, and when does it beat merging adapters?**
 Multi-LoRA serving (S-LoRA, vLLM's LoRA support, LoRAX) keeps one copy of the base model in GPU memory and hot-swaps many small adapters — tens of MB each — per request, batching requests for different adapters through the same base forward pass. This makes per-tenant fine-tunes economical: 100 customer adapters share one GPU instead of requiring 100 merged model replicas. The cost is a small per-token overhead for the unmerged B×A computation (typically single-digit percent) versus a merged model's zero overhead. Merge when you serve one adapter at high volume; serve unmerged when many low-traffic adapters share a base.
@@ -650,6 +661,8 @@ Each fine-tuning method has a comprehensive standalone reference with 10+ senior
 ---
 
 ## 14. Case Study: Fine-Tuning LLaMA 3 8B for SQL Generation
+
+*Illustrative worked example — the configuration is real and runnable, but the dataset, accuracy figures and costs are a composite, not a published deployment.*
 
 **Goal:** Build a model that converts natural language to SQL queries for a specific database schema. Target: 90%+ execution accuracy on a held-out test set.
 
@@ -691,18 +704,19 @@ hardware:
 
 ---
 
-**Additional war story — LoRA adapter rank mismatch causing silent quality regression after merge:**
+**Additional war story (illustrative composite) — merging a LoRA adapter into an already-quantized checkpoint:**
 
 A medical Q&A product fine-tuned a 7B model with LoRA rank=16. After merging the adapter into the base weights for serving (`model.merge_and_unload()`), inference latency dropped from 220ms to 140ms as expected. However, accuracy on the held-out medical eval set dropped from 91% to 83% — the team discovered that the merge was performed on a quantized (INT8) checkpoint rather than the original BF16 checkpoint. Quantization error compounded with LoRA weight injection caused silent degradation.
 
 ```python
 # BROKEN: merging LoRA adapter into a post-quantized model
 from peft import PeftModel
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 import torch
 
 base = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3-8B",
-    load_in_8bit=True,  # BUG: quantized before merge
+    "meta-llama/Meta-Llama-3-8B",
+    quantization_config=BitsAndBytesConfig(load_in_8bit=True),  # BUG: quantized before merge
     device_map="auto",
 )
 model = PeftModel.from_pretrained(base, "./medical_lora_adapter")
@@ -710,8 +724,8 @@ merged = model.merge_and_unload()  # merges into INT8 weights — precision loss
 
 # FIX: always merge in BF16, quantize after merge
 base_bf16 = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3-8B",
-    torch_dtype=torch.bfloat16,  # full precision for merge
+    "meta-llama/Meta-Llama-3-8B",
+    dtype=torch.bfloat16,  # `torch_dtype` was renamed `dtype`; full precision for merge
     device_map="cpu",
 )
 model_bf16 = PeftModel.from_pretrained(base_bf16, "./medical_lora_adapter")
@@ -734,7 +748,7 @@ merged_bf16.save_pretrained("./merged_bf16")
 | Approach | Best for | Trade-off |
 |---|---|---|
 | LoRA rank=8, alpha=16 | Style/instruction adaptation | Insufficient for heavy domain knowledge injection |
-| QLoRA (4-bit base + BF16 adapters) | Fine-tuning 70B models on single A100 | 15-20% slower training than BF16 full LoRA; merge step requires BF16 reconstruction |
+| QLoRA (4-bit base + BF16 adapters) | Fine-tuning 70B models on single A100 | Slower per step than BF16 LoRA (every forward pass dequantizes NF4 blocks); merge step requires BF16 reconstruction |
 | Full fine-tuning (last 2 layers only) | Adjusting output format/tokenizer head | Risks forgetting; only practical for models under 3B parameters |
 | Adapter merging with SLERP | Combining domain adapter + chat adapter | Interpolation ratio must be tuned (0.5 is not always optimal); evaluate both endpoints first |
 
@@ -750,15 +764,15 @@ config = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"])
 
 # FIX: increase rank to 16-32 for complex domain; target more modules
 config = LoraConfig(
-    r=32,                    # 4→32: 8× more trainable params
+    r=32,                    # rank 4→32 AND 2→4 modules: 16× more trainable params
     lora_alpha=64,           # keep alpha = 2× rank for stable training
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # all attention
     lora_dropout=0.1,
 )
-# Trainable params: 32M (0.4% of 7B) → validation accuracy 78% (+17pp)
+# Trainable params: 33.5M (0.5% of 6.74B) → validation accuracy 78% (+17pp)
 ```
 
-**How do you decide between LoRA, QLoRA, and full fine-tuning?** Full fine-tuning updates all parameters — highest accuracy ceiling but requires multi-GPU (70B model needs 560GB at FP32). LoRA adds low-rank adapters (0.1-1% of params) — fits in 1-2 GPUs for 7B, minimal accuracy loss for knowledge tasks. QLoRA applies LoRA on a 4-bit quantized base model — enables 70B fine-tuning on a single A100 80GB, 1-3pp accuracy loss vs. LoRA. Rule of thumb: QLoRA for resource-constrained fine-tuning of large models; LoRA for medium models (7B-13B) with moderate data; full fine-tuning only when you have both data (1M+ examples) and compute, and need maximum task-specific accuracy.
+**How do you decide between LoRA, QLoRA, and full fine-tuning?** Full fine-tuning updates all parameters — highest accuracy ceiling but requires multi-GPU (a 70B mixed-precision full fine-tune needs roughly 16 bytes/parameter once fp32 Adam moments and gradients are counted, i.e. >1TB of GPU memory). LoRA adds low-rank adapters (0.1-1% of params) — fits in 1-2 GPUs for 7B, minimal accuracy loss for knowledge tasks. QLoRA applies LoRA on a 4-bit quantized base model — enables 70B fine-tuning on a single A100 80GB, 1-3pp accuracy loss vs. LoRA. Rule of thumb: QLoRA for resource-constrained fine-tuning of large models; LoRA for medium models (7B-13B) with moderate data; full fine-tuning only when you have both data (1M+ examples) and compute, and need maximum task-specific accuracy.
 
 **What is catastrophic forgetting in fine-tuning and how do you mitigate it?** Catastrophic forgetting occurs when a model fine-tuned on a narrow task loses general capabilities — a medical LLM stops being able to write code or follow general instructions. Mitigations: (1) mix general instruction data (5-10%) with domain-specific data during fine-tuning; (2) use LoRA/PEFT — adapters preserve base model weights, so forgetting is limited to adapter behavior; (3) evaluate on a held-out general benchmark (MMLU, HellaSwag) alongside the domain task after each epoch — stop when general performance drops > 2pp.
 
@@ -788,7 +802,7 @@ config = LoraConfig(
 
 **How do you measure the real-world impact of a code generation feature beyond pass@k?** Track production metrics: (1) acceptance rate — what fraction of shown completions are accepted by developers (industry baseline: 25-35%); (2) retention rate — of accepted completions, how many survive the next commit without modification (high quality = > 70%); (3) time-to-completion — does the developer ship features faster? Measure via A/B test: feature team vs. control team, track story-point velocity over 8 weeks. These business metrics matter more than HumanEval pass@1 for evaluating real impact.
 
-**What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands use this pattern and achieve 20-35% solve rate on SWE-bench — dramatically higher than single-shot generation (~2%). The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
+**What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands introduced this pattern in 2024 at roughly 12-20% resolved on SWE-bench, versus low-single-digit percentages for single-shot generation; by mid-2026 frontier models running agentic loops score in the mid-90s on SWE-bench Verified, so that benchmark is close to saturated and newer suites (SWE-bench Pro, SWE-rebench) carry the signal. The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
 
 **Key metric targets for production LLM systems:**
 

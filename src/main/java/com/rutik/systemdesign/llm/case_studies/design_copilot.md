@@ -22,7 +22,7 @@
 ### Non-Functional Requirements
 - **Latency**: Inline completions < 300ms (imperceptible to typing pace)
 - **Availability**: 99.9% uptime (developer tools must be reliable)
-- **Scale**: 1M+ active developers; 20B+ completions per day
+- **Scale**: 1M+ active developers; ~400M completion requests per day (derived in §2)
 - **Privacy**: User code must not leak to other users; GDPR compliance
 - **Accuracy**: > 30% acceptance rate on suggestions (baseline quality metric)
 
@@ -37,7 +37,11 @@
 
 ### Traffic Estimates
 ```
-Active developers: 1M (GitHub Copilot reported 1.3M paid subscribers in 2023)
+Active developers: 1M (order-of-magnitude anchor: Microsoft disclosed 1.3M paid
+                     Copilot subscribers in Oct 2023 and 1.8M in early 2024;
+                     GitHub later reported tens of millions of all-time users.
+                     Treat every subscriber number in this document as a dated
+                     public disclosure, not a current figure.)
 IDE events per developer per hour: 500 (keystrokes, cursor moves)
 Completion requests triggered: 10% of events = 50 requests/hour/developer
 Daily (8-hour workday): 50 × 8 = 400 requests/developer/day
@@ -60,7 +64,7 @@ End-to-end budget: 300ms
 - Network round trip (edge proximity): 30ms
 - Request processing (auth, rate limit): 10ms
 - Context assembly (file parsing, token counting): 15ms
-- Inference (Codex/model): 120ms  ← dominant cost
+- Inference (FIM completion model): 120ms  ← dominant cost
 - Response decode + streaming: 10ms
 - IDE rendering: 20ms
 Total: ~280ms  ← under budget
@@ -114,8 +118,8 @@ IDE (VS Code / JetBrains / vim)
    |
    v
 [GPU Inference Cluster]
-  - Codex / GPT-4o (inline completions)
-  - GPT-4o (Copilot Chat)
+  - Purpose-trained FIM completion model (inline completions)
+  - Frontier instruction-tuned model (Copilot Chat)
   - vLLM / TRT-LLM with speculative decoding
    |
    v
@@ -191,7 +195,7 @@ Example:
         total = sum(numbers)
         return total / len(numbers)
 
-FIM training (StarCoder, Codex):
+FIM training (StarCoder, InCoder, and the original Codex FIM work):
   - During pre-training, randomly split code into prefix/suffix/middle
   - Two orderings: SPM (suffix-prefix-middle) and PSM (prefix-suffix-middle)
   - Model learns to complete any position, not just end-of-file
@@ -252,17 +256,38 @@ Solution: Speculative decoding
          Accept: all 8 correct → 8 tokens for price of 1 verification
          Reject at position k: discard tokens k+, regenerate from k
 
-Math:
+Math — and note the formula, because the intuitive one is wrong:
+
+  Expected accepted tokens per cycle is NOT p × gamma. Acceptance is sequential:
+  the first rejection ends the cycle, so the run length is geometric, and with a
+  bonus token sampled from the target on rejection the expectation is
+
+      E[tokens per cycle] = (1 - p^(gamma+1)) / (1 - p)
+
+  For p = 0.70, gamma = 8:  (1 - 0.70^9) / 0.30 = 3.2 tokens per cycle
+  (not 0.7 × 8 = 5.6 — that overstates throughput by ~75%).
+
   Without speculative: 40 tokens × 4ms/token = 160ms
   With speculative (70% accept rate on code):
-    Avg accepted per draft cycle: 0.7 × 8 = 5.6 tokens
-    Verification: 1 forward pass = 15ms per 8 drafts
-    Effective time: 40 tokens / 5.6 tokens × 15ms = 107ms
-  Speedup: 160ms → 107ms = 1.5× faster (additional savings at higher accept rates)
+    Draft: 8 tokens × ~0.5ms          =  4ms
+    Verify: 1 target forward pass     =  5ms   (memory-bandwidth-bound, so
+                                                verifying 8 costs about the
+                                                same as decoding 1)
+    Cycle: 9ms, yielding 3.2 tokens
+    Effective time: 40 / 3.2 = 12.5 cycles × 9ms = 113ms
+  Speedup: 160ms → 113ms = 1.4× faster
 
-Code-specific accept rates:
-  Repetitive patterns (loops, boilerplate): ~85% accept rate → 2-3× speedup
-  Novel logic: ~50% accept rate → 1.2× speedup
+Code-specific accept rates — and why gamma must be tuned per regime:
+  Repetitive patterns (loops, boilerplate), p ~0.85, gamma 8:
+    (1 - 0.85^9)/0.15 = 5.1 tokens/cycle → 40/5.1 × 9ms = 70ms → 2.3× speedup
+  Novel logic, p ~0.50, gamma 8:
+    (1 - 0.50^9)/0.50 = 2.0 tokens/cycle → 40/2.0 × 9ms = 180ms → SLOWER than
+    no speculation at all. The draft work is wasted faster than it pays off.
+    Drop to gamma 2: (1 - 0.5^3)/0.5 = 1.75 tokens/cycle, cycle = 6ms
+                     → 40/1.75 × 6ms = 137ms → 1.2× speedup
+
+  The trap: a fixed gamma tuned on boilerplate makes novel-logic completions
+  slower. Adapt gamma to the observed rolling accept rate.
 ```
 
 ### 4.5 License Filter
@@ -775,7 +800,7 @@ class SpeculativeDecoder:
         return "".join(output_tokens), stats
 ```
 
-**Concrete numbers:** P50 latency with speculative decoding = 185ms vs 310ms without (40% reduction). Acceptance rate in code completion context = 72% (higher than general text's 55% because code is locally predictable). At 15,000 completions/second, speculative decoding reduces target model compute by 72% × 5 = 3.6x, lowering GPU spend from an estimated $30,900/day to $8,600/day on inference alone.
+**Concrete numbers:** P50 latency with speculative decoding = 185ms vs 310ms without (40% reduction). Acceptance rate in code completion context = 72% (higher than general text's 55% because code is locally predictable). At p = 0.72 with gamma = 5 drafts, expected tokens per cycle = (1 - 0.72^6)/0.28 = 3.1, so the target model runs ~3.1x fewer forward passes than plain autoregressive decoding — lowering GPU spend from an estimated $30,900/day to roughly $10,100/day on inference alone. (The tempting shorthand "0.72 × 5 = 3.6x" is wrong for the same reason as above: acceptance is sequential, not independent per slot.)
 
 ---
 
@@ -791,8 +816,9 @@ import time
 
 @dataclass
 class PrefixCacheTracker:
-    # Rolling 1-hour hit rate. Copilot: 2,380 of 2,800 input tokens are prefix-cached.
-    # At 85% hit rate, 20M req/day: saves $40,460/day in GPU input-token cost.
+    # Rolling 1-hour hit rate. 2,380 of 2,800 input tokens are prefix-cacheable.
+    # At 85% hit rate on a 20M req/day shard: ~40.5B prefill tokens/day avoided.
+    # Dollarize with YOUR measured cost per prefill token, not a vendor list price.
     window_seconds: int = 3600
 
     def __post_init__(self) -> None:
@@ -828,7 +854,11 @@ class PrefixCacheTracker:
         return (self.prefix_tokens_saved_per_request / TOTAL_TOKENS) * 100
 ```
 
-**Formula:** `hit_ratio = hits / (hits + misses)` tracked over a rolling 1-hour window. At 85% hit rate with 20M requests/day: effective input tokens drop from 2,800 to 420 per request (2,380 prefix tokens skipped on cache hit). Cost saved = 20M × 0.85 × 2,380 / 1,000 × $0.001/1K tokens = **$40,460/day** ($14.8M/year). The system prompt (language instruction + file-type context block) is the cacheable prefix; the FIM prefix/suffix content changes per request and is never cached.
+**Formula:** `hit_ratio = hits / (hits + misses)` tracked over a rolling 1-hour window. At 85% hit rate on a 20M-request/day shard: effective input tokens drop from 2,800 to 420 per request (2,380 prefix tokens skipped on cache hit), i.e. 20M × 0.85 × 2,380 = **40.5B prefill tokens/day avoided**.
+
+Convert that to money carefully. Copilot self-hosts this model, so there is no per-token invoice — the saving is prefill GPU-time, and the conversion rate is your own amortized cost per prefill token, not a vendor list price. At an internal cost of $1 per million prefill tokens (a modelling assumption you should replace with your measured GPU-seconds-per-token × instance rate), 40.5B tokens/day ≈ $40,500/day. State the token saving as the primary result and the dollar figure as derived — the token number is a measured property of the workload, the dollar number is an assumption about your fleet.
+
+The system prompt (language instruction + file-type context block) is the cacheable prefix; the FIM prefix/suffix content changes per request and is never cached.
 
 See [Token Economics and Cost Optimization](../token_economics_and_cost_optimization/README.md) for the full provider prompt caching analysis.
 
@@ -1085,17 +1115,24 @@ function buildSecurePrompt(
 
 ### Final Metrics Summary
 
+Two figures below are public disclosures; the rest are estimates derived from the
+capacity math in this document. Where an earlier section used a different scenario
+(1M vs 1.4M vs 1.8M users), this table follows the **1.4M-user** scenario so the
+throughput, GPU, and revenue rows are mutually consistent — read the other sections
+as alternative scalings of the same model, not as competing claims about GitHub.
+
 | Metric | Value | Notes |
 |---|---|---|
-| GitHub Copilot paying users | 1.8M+ | As of Q1 2025 |
-| Daily completions served | 38M+ | Estimated |
-| Global acceptance rate | 30–35% | Varies by language/experience |
-| p50 completion latency | 95ms | IDE to first ghost-text character |
+| GitHub Copilot paid subscribers | 1.3M (Oct 2023) → 1.8M (early 2024) | Public Microsoft disclosures; GitHub has since reported tens of millions of all-time users and stopped breaking out a current paid count |
+| Copilot list pricing | Free $0 · Pro $10/mo · Pro+ $39/mo · Max $100/mo · Business and Enterprise priced separately per seat | Verified against GitHub's plans page, July 2026 |
+| Daily completion requests served | ~3.4B | Estimate, 1.4M-user scenario (§ Capacity Planning Math) |
+| Global acceptance rate | 30–35% | Varies by language and developer experience |
+| p50 completion latency | 95ms | IDE to first ghost-text character; design target |
 | p99 completion latency | 195ms | SLA target |
-| Highest acceptance rate | TypeScript | ~38% (strong typing aids FIM) |
-| Lowest acceptance rate | Shell scripting | ~18% (high ambiguity) |
-| A10G GPUs (FIM serving) | ~500 at peak | Estimated from throughput |
-| Annual revenue | ~$400M | 1.8M × $19/mo × 12 |
+| Highest acceptance rate | TypeScript | ~38% (strong typing aids FIM) — illustrative, not a published breakdown |
+| Lowest acceptance rate | Shell scripting | ~18% (high ambiguity) — illustrative |
+| A100-class GPUs (FIM serving) | ~810 at peak | Estimate; derived from 194K completions/sec peak at 400/sec/GPU with 40% headroom |
+| Annual revenue (modelled) | ~$319M | 1.4M seats × $19/mo × 12, i.e. modelled at the Business seat price. At the $10 Pro price the same seat count yields ~$168M — the seat mix, not the seat count, dominates this line |
 | GPU cost as % revenue | ~5% | Self-hosted FIM model efficiency |
 
 **Copilot competitive moat:** The primary moat is not model quality (open-source FIM models are within 5% of Copilot quality) — it is IDE integration depth. Copilot has 4 years of VS Code integration work: ghost text rendering, multi-file context awareness, inline diff review, terminal command suggestions, voice input, and workspace search. A new entrant with a better model still needs 12–18 months of integration engineering to match the user experience. The product-distribution moat (built into GitHub, used by 4M+ GitHub users without a separate purchase decision for enterprise) is the second moat.

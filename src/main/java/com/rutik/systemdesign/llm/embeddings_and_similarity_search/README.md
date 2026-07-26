@@ -37,12 +37,12 @@ Together, embeddings + similarity search power the retrieval component in [RAG s
 ### 4.1 Sentence Embeddings
 
 **all-MiniLM-L6-v2** (SentenceTransformers)
-- 384 dimensions, 80M params, extremely fast
-- Trained on 1B sentence pairs
+- 384 dimensions, 22.7M params, extremely fast; truncates input past 256 word pieces
+- Trained on 1B+ sentence pairs (1,170,060,424 tuples)
 - Best for low-latency production use
 
 **GTE (General Text Embeddings, Alibaba)**
-- GTE-base (768d), GTE-large (1024d), GTE-Qwen2-7B (4096d)
+- GTE-base (768d), GTE-large (1024d), gte-Qwen2-7B-instruct (3584d — Qwen2-7B's hidden size)
 - Strong multilingual performance
 
 **BGE (BAAI General Embeddings)**
@@ -118,7 +118,7 @@ The model already knows this. Training on it is wasted compute. Now swap in one 
 
 **This single comparison is why hard negatives dominate embedding quality.** A 0.05 difference in similarity between the positive and the hardest negative moved the loss from 0.000007 to 0.313. Easy negatives are already crushed by the exponential and contribute nothing; only candidates that come close to the positive produce gradient. Mining a handful of near-miss negatives per example is worth more than thousands of random ones.
 
-**What τ controls.** Temperature sets how brutally the exponential punishes the runner-up. Re-run the hard-negative case with `τ = 0.5` instead of `0.05` and `P(positive)` falls from 0.731 to about 0.377 — a softer, flatter distribution that spreads gradient across many candidates. Small tau produces sharp, confident, well-separated embeddings but can destabilize early training; large tau trains smoothly but leaves the space poorly separated. The 0.01-0.1 band is where almost every published recipe lands.
+**What τ controls.** Temperature sets how brutally the exponential punishes the runner-up. Re-run the hard-negative case with `τ = 0.5` instead of `0.05` and `P(positive)` falls from 0.731 to about 0.415 (`e^1.8 / (e^1.8 + e^1.7 + e^0.6 + e^0.2)` = 6.05 / 14.57) — a softer, flatter distribution that spreads gradient across many candidates. Small tau produces sharp, confident, well-separated embeddings but can destabilize early training; large tau trains smoothly but leaves the space poorly separated. The 0.01-0.1 band is where almost every published recipe lands.
 
 **SimCSE (2021)**: Uses the same sentence passed through the model twice with different dropout masks as a positive pair — extremely simple and effective self-supervised approach.
 
@@ -496,7 +496,8 @@ HNSW (M=32, ef=128):
   - Recall: ~98%
   - Latency: ~1ms per query
   - Build time: ~1 hour
-  - Memory: ~5GB (vs 3GB flat)
+  - Memory: ~3.3GB (vs 3.07GB flat) -- vectors dominate; M=32 adds
+    ~64 links x 4 bytes = 256 bytes/vector of graph, about +8%
 ```
 
 ### IVF Deep Dive — nlist and nprobe
@@ -537,7 +538,8 @@ That last clause is where the recall loss lives. IVF is not approximating distan
   1000         1,000     1000 x 1,000 = 1,000,000  1,001,000  100%       1.0x     100%
   ------   -------------   -----------------   ---------   --------    -------   ------
 
-  At the documented default (nprobe=10) you touch 11,000 of 1,000,000 vectors
+  At a common production setting (nprobe=10 -- FAISS's own default is nprobe=1)
+  you touch 11,000 of 1,000,000 vectors
   -- 1.1% of the corpus -- and still recover ~95% of the true neighbors.
 ```
 
@@ -601,27 +603,30 @@ Embeddings in production can drift when:
 ## 7. Real-World Examples
 
 ### Pinecone at Scale
-- Powers semantic search for thousands of production applications
-- Uses HNSW as the core index with metadata filtering
-- Handles 10B+ vectors across multiple namespaces
-- Typical latency: 2-5ms for 1M vectors, 5-20ms for 100M vectors
+- Managed vector database used by a large base of production applications
+- Graph-based (HNSW-family) index with metadata filtering
+- Marketed and documented for billion-scale indexes partitioned into namespaces
+- Latency is workload-dependent; benchmark your own corpus rather than trusting a
+  quoted per-scale number (see the followup note on vendor latency claims)
 
 ### OpenAI Embeddings
 - text-embedding-3-large: 3072 dimensions, Matryoshka training
-- Used by ChatGPT for file search, by thousands of RAG applications
-- Estimated 1B+ embedding API calls/day
-- Supports native dimension reduction via `dimensions` parameter (new in v3)
+- text-embedding-3-small: 1536 dimensions; text-embedding-ada-002 is now legacy
+- Supports native dimension reduction via `dimensions` parameter (new in v3);
+  3-large truncated to 256 dims still outscores ada-002 at its full 1536 on MTEB
 
-### Google Semantic Search
-- Universal Sentence Encoder (USE) powers Google's semantic search features
-- Deployed at web scale with custom hardware (TPUs) for embedding generation
-- Uses approximate search with learned quantization
+### Google Universal Sentence Encoder
+- USE (Cer et al., 2018) and the multilingual variant (2019) are Google's publicly
+  released sentence-embedding models for semantic retrieval, shipped via TF Hub
+- Google has not published that USE powers Google Search itself — treat it as a
+  developer-facing embedding family, not as web-search infrastructure
+- The multilingual variant embeds 16 languages into one shared space
 
 ### Facebook (Meta) FAISS
-- Open-sourced in 2017, powers billions of similarity searches internally
+- Open-sourced in 2017, used internally for large-scale similarity search
 - Used for recommendation systems (find similar content to what user engaged with)
 - Powers content moderation (find near-duplicate violating content)
-- Handles 1T+ vector operations per day
+- Ships flat, IVF, HNSW and PQ indexes with both CPU and GPU implementations
 
 ---
 
@@ -674,7 +679,7 @@ Embeddings in production can drift when:
 
 1. **Using the wrong embedding model for the task**: Embedding model trained on NLI may not work well for code retrieval. Match model to domain.
 2. **Not normalizing vectors**: If your similarity metric assumes unit vectors but you store raw embeddings, results are wrong.
-3. **Ignoring query/document asymmetry**: Models like E5 require specific prefixes ("query: " vs "passage: "). Skipping these degrades recall by 10-20%.
+3. **Ignoring query/document asymmetry**: Models like E5 require specific prefixes ("query: " vs "passage: "). Skipping these degrades recall silently — the model is used off-distribution from how it was trained. Measure the delta on your own eval set; published numbers vary by model and corpus.
 4. **Over-relying on ANN recall**: ANN recalls less than exact search. Set ef (HNSW) and nprobe (IVF) high enough for your recall target.
 5. **Not handling chunking**: A 10,000-word document as a single embedding loses information. Chunk first.
 6. **Stale embeddings**: If you update the embedding model, you must re-embed all documents in the index.
@@ -708,7 +713,7 @@ A: HNSW (Hierarchical Navigable Small World) is a graph-based index that creates
 A: Cosine similarity ignores vector magnitude, measuring only directional similarity. This is important when the magnitude isn't semantically meaningful (varies with text length, model confidence). Dot product is equivalent for unit-normalized vectors, and is faster to compute (no division). Most production systems normalize embeddings at index time to use faster dot product.
 
 **Q: Why do E5-style models require "query: " and "passage: " prefixes, and what happens if you skip them?**
-A: Skipping the prefixes silently degrades recall by 10-20% with no error raised. E5 (and other asymmetric embedding families) are trained with different representations for the query side and the passage side of a retrieval pair — the prefix tells the encoder which role the text plays, so a 5-word question and a 300-word passage about the same topic still land close together. Without the prefix, both sides collapse into a generic representation: the index builds fine, searches return plausible-looking results, and the failure only shows up in evaluation metrics. Always check the model card for required prefixes or instruction templates, and route indexing and serving text through the correct encode path.
+A: Skipping the prefixes silently degrades retrieval recall with no error raised. E5 (and other asymmetric embedding families) are trained with different representations for the query side and the passage side of a retrieval pair — the prefix tells the encoder which role the text plays, so a 5-word question and a 300-word passage about the same topic still land close together. Without the prefix, both sides collapse into a generic representation: the index builds fine, searches return plausible-looking results, and the failure only shows up in evaluation metrics. Always check the model card for required prefixes or instruction templates, and route indexing and serving text through the correct encode path.
 
 **Q: Can you mix vectors from two different embedding model versions in the same index?**
 A: No — embeddings from different models, or even different training runs of the same architecture, live in unrelated coordinate systems, so cross-version distances are meaningless even when the dimensions match. The failure is silent: the index accepts the vectors and queries return results, but relevance collapses for whichever part of the corpus was embedded with the other model — the Matryoshka war story in §14 (31% quality drop overnight from truncating a new model's vectors) is a variant of exactly this mistake. On any model change, re-embed the full corpus into a fresh index, tag every vector with a model_version in metadata, and cut traffic over atomically only after the new index passes your retrieval evaluation.
@@ -762,6 +767,8 @@ Post-filtering retrieves top-K by vector similarity first and then applies the m
 
 ## 14. Case Study: Semantic Search for 50M Product Catalog
 
+*Illustrative worked example — the architecture and the capacity arithmetic are real, the business-outcome percentages are constructed, not a published result.*
+
 **Problem:** E-commerce platform with 50M products. Users type natural language queries ("warm jacket for hiking in winter") but product descriptions use different vocabulary. BM25 keyword search misses semantically relevant results.
 
 **Architecture:**
@@ -777,7 +784,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    Q("Query:<br/>'warm jacket for hiking in winter'") --> EMB(BGE-M3 embedding<br/>1024 dim, query: prefix)
+    Q("Query:<br/>'warm jacket for hiking in winter'") --> EMB(BGE-M3 embedding<br/>1024 dim, dense mode)
     EMB --> IDX(HNSW Index in Milvus<br/>50M vectors, M=32, ef_construction=200)
     IDX --> C200(Top-200 candidates<br/>recall ~97%)
     C200 --> BM25(BM25 scores<br/>fetched from Elasticsearch)
@@ -806,7 +813,7 @@ flowchart LR
 
 ---
 
-**Additional war story — Matryoshka embedding dimension mismatch corrupting 500M-product search index:**
+**Additional war story — Matryoshka embedding dimension mismatch corrupting 500M-product search index** (illustrative composite; the failure mode is real, the specific percentages are not from a published incident report)**:**
 
 An e-commerce platform trained Matryoshka embeddings at dimension 768 but stored only the first 256 dimensions in Pinecone to reduce index cost. After a model update, the team forgot to re-embed the catalog and truncated the new 768-dim vectors to 256. However, the new model's dimension ordering was different from the old model (different training run), so the first 256 dimensions no longer carried the same semantic weight. Result: search quality dropped 31% overnight, detected only when a merchandiser noticed "sneakers" returning "formal shoes" results.
 
@@ -819,7 +826,7 @@ def index_product(product_id: str, text: str, model) -> None:
 
 # FIX: embed model version into vector metadata + gate re-indexing on version mismatch
 from dataclasses import dataclass
-import hashlib
+import numpy as np
 
 @dataclass
 class EmbeddingRecord:
@@ -860,7 +867,7 @@ def validate_matryoshka_ordering(old_model, new_model, test_texts: list[str]) ->
 
 **What are Matryoshka Representation Learning (MRL) embeddings and when are they worth the training cost?** MRL trains a single embedding model to produce vectors where any prefix of dimensions (e.g., first 64, 128, 256, 768 dimensions) is independently semantically meaningful. This allows serving a single model at multiple precision/cost points: a fast retrieval pass with 128-dim vectors, then full 768-dim reranking. The training cost is approximately the same as standard embedding training with an additional loss term over truncated dimensions. MRL is worth it when you have both high-volume retrieval (millions of queries/second needing low cost) and high-accuracy ranking in the same system.
 
-**How do you choose between HNSW and IVF-PQ for a 500M product vector index?** HNSW (Hierarchical Navigable Small World) graphs provide better recall-vs-latency trade-offs for indices under ~100M vectors and support incremental inserts without rebuilding; it is the default for mutable catalogs. IVF-PQ (Inverted File Index with Product Quantization) compresses vectors 4-16x in memory at the cost of 5-15% recall loss and requires periodic index rebuilding; it is preferable for datasets over 100M vectors with memory constraints or read-heavy workloads. For 500M products, IVF-PQ with 64-byte codes (512-dim → 64B) reduces index from 2TB to 32GB, enabling in-memory deployment.
+**How do you choose between HNSW and IVF-PQ for a 500M product vector index?** HNSW (Hierarchical Navigable Small World) graphs provide better recall-vs-latency trade-offs for indices under ~100M vectors and support incremental inserts without rebuilding; it is the default for mutable catalogs. IVF-PQ (Inverted File Index with Product Quantization) compresses vectors 8-32x in memory at the cost of 5-15% recall loss and requires periodic index rebuilding; it is preferable for datasets over 100M vectors with memory constraints or read-heavy workloads. For 500M products, IVF-PQ with 64-byte codes (512-dim FP32 = 2,048 B → 64 B, a 32x cut) reduces the raw vector store from ~1.02TB to 32GB, enabling in-memory deployment.
 
 **What is the embedding drift problem and how do you detect it in production?** Embedding drift occurs when the query distribution or product distribution shifts such that the embedding space no longer reflects user intent (e.g., seasonal vocabulary changes, new product categories added without re-embedding). Detection: track average cosine similarity between query embeddings and top-1 retrieval results (low similarity indicates drift); compare NDCG@10 on a weekly golden query set; monitor add-to-cart rate as a downstream proxy metric. Mitigation: incremental re-embedding of recently modified products (daily job), periodic full catalog re-embedding (monthly), and embedding model versioning with A/B shadowing before full rollout.
 
@@ -868,7 +875,7 @@ def validate_matryoshka_ordering(old_model, new_model, test_texts: list[str]) ->
 
 | Approach | Best for | Trade-off |
 |---|---|---|
-| HNSW (exact graph traversal) | Mutable catalogs <100M vectors; high recall requirement | Memory: ~8 bytes/dim × N vectors; rebuild not required on insert |
+| HNSW (approximate graph traversal) | Mutable catalogs <100M vectors; high recall requirement | Memory: 4 bytes/dim × N (FP32 vectors) plus ~2M × 4 bytes/vector of graph links; rebuild not required on insert |
 | IVF-PQ (compressed inverted index) | >100M vectors; memory-constrained deployment | 5-15% recall loss; requires periodic rebuilding; poor incremental insert support |
 | Matryoshka + two-stage retrieval | Systems needing both speed and accuracy | Model training complexity; dimension ordering must be validated on every update |
 | Hybrid BM25 + dense retrieval | Catalog with product codes, SKUs, model numbers | Fusion weight tuning required per category; adds BM25 infrastructure overhead |
@@ -876,13 +883,15 @@ def validate_matryoshka_ordering(old_model, new_model, test_texts: list[str]) ->
 **Pitfall — Embedding model trained on short sentences performs poorly on long documents.**
 
 ```python
-# BROKEN: using a sentence-transformer model (max 512 tokens) to embed
-# 5000-word product descriptions — truncation loses 90% of the content
+# BROKEN: using a sentence-transformer model whose max_seq_length is 256 word
+# pieces to embed 5000-word product descriptions — the tail is silently dropped
+import numpy as np
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("all-MiniLM-L6-v2")  # 256-token max practical limit
+model = SentenceTransformer("all-MiniLM-L6-v2")  # max_seq_length = 256
 embedding = model.encode(long_product_description)  # silently truncated!
-# Retrieval recall@10 for detailed queries: 34% (truncation loses key attributes)
+# Illustrative: recall@10 for detailed queries collapses because truncation
+# drops the attributes those queries are asking about.
 
 # FIX: chunk long documents; embed chunks; aggregate with mean pooling
 def embed_long_doc(text: str, model: SentenceTransformer,
@@ -892,12 +901,13 @@ def embed_long_doc(text: str, model: SentenceTransformer,
               for i in range(0, len(words), chunk_size - overlap)]
     chunk_embeddings = model.encode(chunks)   # (n_chunks, dim)
     return chunk_embeddings.mean(axis=0)      # mean-pool → single doc embedding
-# Recall@10: 34% → 71% after chunked mean-pooling
+# Chunked mean-pooling recovers the dropped attributes; measure the recall@10
+# delta on your own eval set rather than assuming a fixed improvement.
 ```
 
-**What is Matryoshka Representation Learning (MRL) and why does it matter for production?** MRL trains a single embedding model to produce representations that are useful at multiple dimensionalities — the first 64 dimensions are meaningful for coarse retrieval, the full 1024 dimensions for fine-grained reranking. At serving time, you can truncate the embedding to a smaller dimension for ANN index search (faster, cheaper) then use full-dimension embeddings for reranking the top candidates. At 10M documents: 64-dim FAISS index fits in 640MB RAM (vs. 10GB for 1024-dim), search is 8× faster, with < 2% recall loss. OpenAI's `text-embedding-3` family uses MRL natively.
+**What is Matryoshka Representation Learning (MRL) and why does it matter for production?** MRL trains a single embedding model to produce representations that are useful at multiple dimensionalities — the first 64 dimensions are meaningful for coarse retrieval, the full 1024 dimensions for fine-grained reranking. At serving time, you can truncate the embedding to a smaller dimension for ANN index search (faster, cheaper) then use full-dimension embeddings for reranking the top candidates. At 10M documents in FP32: a 64-dim FAISS index needs 10M × 64 × 4 = 2.56GB RAM versus 10M × 1024 × 4 = 41GB for 1024-dim, and each distance computation touches 16× fewer components. OpenAI's `text-embedding-3` family uses MRL natively.
 
-**How do you handle multilingual embeddings in a single search index?** Multilingual models (LaBSE, multilingual-e5) embed text from 100+ languages into a shared vector space where semantically equivalent texts in different languages are close. This enables cross-lingual search (query in English retrieves French documents). Trade-offs: multilingual models have lower quality than monolingual models on any single language (typically 5-10% lower NDCG). Production pattern: use a multilingual model for the primary retrieval index; add language-specific models for reranking within the retrieved set if the primary language is known.
+**How do you handle multilingual embeddings in a single search index?** Multilingual models (LaBSE, multilingual-e5) embed text from 100+ languages into a shared vector space where semantically equivalent texts in different languages are close. This enables cross-lingual search (query in English retrieves French documents). Trade-offs: multilingual models usually trail a strong monolingual model on that single language, because the same parameter budget is shared across 100+ languages — quantify the gap on your own eval set rather than assuming a fixed penalty. Production pattern: use a multilingual model for the primary retrieval index; add language-specific models for reranking within the retrieved set if the primary language is known.
 
 ---
 

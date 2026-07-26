@@ -99,6 +99,13 @@ L2 summaries, while a local "how do X and Y relate?" drills into L0.
 The resolution parameter slides you up and down this tree. That single knob is why Graph RAG
 can answer both pinpoint entity questions and sweeping corpus-level questions from one index.
 
+**Numbering convention — check it before you set a parameter.** This module labels the *finest*
+partition L0 and coarser roll-ups L1/L2. Microsoft's GraphRAG numbers the hierarchy the other
+way: in the paper and the library, C0 is the **root** (fewest, broadest communities) and each
+higher number is a finer level, down to the leaf communities Leiden can no longer split. So a
+`community_level` of 0 in the library is the *thematic* layer, not the specific one — translate
+before wiring the parameter up.
+
 **Step 4: Community Summarization**
 ```
 For each detected community, LLM generates a structured summary:
@@ -188,13 +195,15 @@ For a corpus of 1M tokens (approximately 750 pages):
   Entity extraction: 1000 LLM calls × 1000 tokens each = 1M tokens processed
   Community summaries: depends on graph size; assume 100 communities × 2K tokens = 200K tokens
 
-  At GPT-4o pricing ($5/1M input, $15/1M output):
-    Entity extraction: 1M input → $5; outputs ~500K tokens → $7.50 = $12.50
-    Community summaries: 100 × 2K input = 200K → $1; outputs 100 × 500 = 50K → $0.75 = $1.75
-    Total indexing cost: ~$14-15 for 1M tokens
+  At a mid-tier frontier price point of $2.50/1M input, $10/1M output
+  (GPT-4o and OpenAI's current gpt-5.6-terra tier both sit here as of
+   July 2026; re-check the vendor page before budgeting):
+    Entity extraction: 1M input → $2.50; outputs ~500K tokens → $5.00 = $7.50
+    Community summaries: 100 × 2K input = 200K → $0.50; outputs 100 × 500 = 50K → $0.50 = $1.00
+    Total indexing cost: ~$8-9 for 1M tokens
 
   For 100M tokens (full enterprise corpus):
-    Indexing cost: ~$1400-1500 (one-time)
+    Indexing cost: ~$800-900 (one-time)
     Query cost: 20-50 LLM calls per global query vs. 1-2 for standard RAG
 ```
 
@@ -204,8 +213,8 @@ For a corpus of 1M tokens (approximately 750 pages):
 |--------|------------|
 | `C` | Corpus size in tokens — 1,000,000 in the estimate above |
 | chunk size | 1000 tokens, so `C / 1000 = 1000` chunks, one extraction call each |
-| input price | `$5` per 1M tokens (GPT-4o) |
-| output price | `$15` per 1M tokens — 3x input, which is why output volume dominates |
+| input price | `$2.50` per 1M tokens (mid-tier frontier rate, July 2026) |
+| output price | `$10` per 1M tokens — 4x input, which is why output volume dominates |
 | `N_comm` | Communities detected, 100 here |
 | compression ratio | `C / (N_comm x summary tokens)` — how much smaller the summary layer is |
 
@@ -213,21 +222,21 @@ For a corpus of 1M tokens (approximately 750 pages):
 
 ```
   entity extraction
-    input  : 1000 chunks x 1000 tok = 1,000,000 tok -> 1.0  x $5  = $ 5.00
+    input  : 1000 chunks x 1000 tok = 1,000,000 tok -> 1.0  x $2.50 = $ 2.50
     output : ~500,000 tok (entities + relations as JSON)
-                                                   -> 0.5  x $15 = $ 7.50
-                                                            subtotal $12.50
+                                                   -> 0.5  x $10   = $ 5.00
+                                                            subtotal $ 7.50
 
   community summarization
-    input  : 100 communities x 2000 tok = 200,000  -> 0.2  x $5  = $ 1.00
-    output : 100 x 500 tok = 50,000                -> 0.05 x $15 = $ 0.75
-                                                            subtotal $ 1.75
+    input  : 100 communities x 2000 tok = 200,000  -> 0.2  x $2.50 = $ 0.50
+    output : 100 x 500 tok = 50,000                -> 0.05 x $10   = $ 0.50
+                                                            subtotal $ 1.00
 
-  total for 1M tokens                                              $14.25
-  per chunk: 12.50 / 1000 = $0.0125     scaled to 100M tokens: $1,425
+  total for 1M tokens                                              $ 8.50
+  per chunk: 7.50 / 1000 = $0.0075      scaled to 100M tokens: $850
 ```
 
-Notice where the money is: output tokens are 58% of the bill (`7.50 + 0.75 = 8.25` of `14.25`) while accounting for only 550,000 of the 1,750,000 tokens moved — purely from the 3x price. Extraction prompts that ask for verbose descriptions are therefore the single most expensive authoring choice in the pipeline.
+Notice where the money is: output tokens are 65% of the bill (`5.00 + 0.50 = 5.50` of `8.50`) while accounting for only 550,000 of the 1,750,000 tokens moved — purely from the 4x price. Extraction prompts that ask for verbose descriptions are therefore the single most expensive authoring choice in the pipeline.
 
 **Walk the compression ratio.** The summary layer is what makes global queries affordable:
 
@@ -238,13 +247,13 @@ Notice where the money is: output tokens are 58% of the bill (`7.50 + 0.75 = 8.2
   compression = 1,000,000 / 50,000 = 20x
 
   a global query that map-reduces over 50 communities reads
-    50 x 500 = 25,000 tokens -> 25,000/1e6 x $5 = $0.125 per query
+    50 x 500 = 25,000 tokens -> 25,000/1e6 x $2.50 = $0.0625 per query
 
   the same question answered by reading the corpus would need 1,000,000
   tokens of input -- 40x more, and past most context windows anyway.
 ```
 
-That 20x is the trade Graph RAG actually makes: `$14.25` paid once, so that thematic questions cost `$0.125` instead of being impossible. It only pays back if global queries are frequent — at 1-2 LLM calls, a standard RAG query costs a fraction of a cent, so a corpus asked only pinpoint questions never recovers the indexing spend.
+That 20x is the trade Graph RAG actually makes: `$8.50` paid once, so that thematic questions cost `$0.0625` instead of being impossible. It only pays back if global queries are frequent — at 1-2 LLM calls, a standard RAG query costs a fraction of a cent, so a corpus asked only pinpoint questions never recovers the indexing spend.
 
 ---
 
@@ -370,8 +379,8 @@ flowchart TD
 ## 8. Common Pitfalls
 
 **1. Graph indexing cost underestimated**
-Entity extraction requires one LLM call per chunk. For 1M-token corpus at $5/M tokens: $10-15 for extraction alone. At 100M tokens: $1000-1500 per full reindex.
-Fix: Estimate indexing cost before committing. For large corpora, use a smaller/cheaper model for entity extraction (GPT-4o-mini instead of GPT-4o) with acceptable quality tradeoff.
+Entity extraction requires one LLM call per chunk. For a 1M-token corpus at a mid-tier frontier rate ($2.50/M in, $10/M out): $7-9 for extraction alone. At 100M tokens: $700-900 per full reindex.
+Fix: Estimate indexing cost before committing. For large corpora, use a smaller/cheaper tier (a mini/nano model rather than the flagship) for entity extraction, with an acceptable quality tradeoff.
 
 **2. Community granularity mismatch**
 Leiden clustering with default parameters may produce communities too coarse (few large communities) or too fine (many small communities) for your use case.
@@ -422,7 +431,7 @@ A: The Leiden algorithm is a community detection algorithm for graphs that parti
 A: Global queries (thematic, corpus-spanning): map LLM calls generate partial answers from each relevant community summary, then a reduce LLM call synthesizes into a final answer. This is map-reduce over community summaries. Local queries (specific entities/relationships): identify the relevant entities in the query, extract the subgraph connecting them from the knowledge graph, retrieve associated source chunks, and generate from that specific context — similar to standard RAG but graph-guided. The query router that classifies queries as global vs. local is critical; misrouting hurts significantly.
 
 **Q: What are the main cost components of Graph RAG indexing?**
-A: Three cost components: (1) Entity extraction — one LLM call per text chunk; for a 1M-token corpus with 1K-token chunks, that's ~1000 LLM calls. At GPT-4o pricing, approximately $12-15 for 1M tokens. (2) Community summarization — one LLM call per community; for 100 communities at 2K tokens each input, approximately $1-2 additional cost. (3) Embedding — embed all entity descriptions and community summaries for the vector retrieval path; minor cost compared to LLM extraction. Total indexing cost: roughly $14-15 per million tokens of source documents (one-time).
+A: Three cost components: (1) Entity extraction — one LLM call per text chunk; for a 1M-token corpus with 1K-token chunks, that's ~1000 LLM calls. At a mid-tier frontier rate ($2.50/M input, $10/M output), approximately $7-8 for 1M tokens. (2) Community summarization — one LLM call per community; for 100 communities at 2K tokens each input, roughly $1 additional cost. (3) Embedding — embed all entity descriptions and community summaries for the vector retrieval path; minor cost compared to LLM extraction. Total indexing cost: roughly $8-9 per million tokens of source documents (one-time), and re-check the vendor price page before budgeting — this figure moves with the model tier you pick.
 
 **Q: Why is entity deduplication critical in Graph RAG?**
 A: Entity deduplication determines graph quality. If "Microsoft," "Microsoft Corp," and "MSFT" are treated as separate nodes, the graph fragments: connections are split across three nodes, community detection sees them as different entities, and community summaries are incoherent. Graph quality degrades proportionally with deduplication errors. Mitigation: combine string normalization (lowercase, remove punctuation), embedding similarity (cluster entities whose descriptions are semantically similar), and LLM-assisted resolution for ambiguous cases. The Microsoft GraphRAG library uses a two-phase approach: local deduplication within a document, then global deduplication across documents.
@@ -434,7 +443,7 @@ A: Full graph rebuild is prohibitive for daily updates. Incremental approach: (1
 A: Most benefit: (1) Thematic queries ("What are the major regulatory themes in our legal corpus?"); (2) Relationship queries ("Who are the key connections between Company X and investors in our deal documents?"); (3) Trend queries ("How has the discussion of AI safety evolved across our research corpus?"). Least benefit / potential degradation: (1) Specific factual lookups ("What was OpenAI's revenue in Q3 2024?") — community summaries add noise, standard RAG is faster; (2) Very recent information — Graph RAG indexing may lag behind document updates; (3) Code documentation queries — entity-relationship structure doesn't map well to code concepts.
 
 **Q: How does community resolution level selection affect query quality?**
-A: The Leiden algorithm produces a hierarchy of community levels: level 0 (many small specific communities) to level N (few large thematic communities). Selecting the wrong level degrades query quality significantly. Fine-grained communities (level 0) produce detailed but narrow answers — good for specific entity relationships. Coarse communities (high level) produce broad thematic answers — good for corpus-wide synthesis but lose detail. The Microsoft GraphRAG paper recommends using community level 0 for local queries and higher levels (2-3) for global thematic queries. In practice: evaluate which level produces the best answers on your specific query distribution.
+A: The Leiden algorithm produces a hierarchy of community levels: level 0 (many small specific communities) to level N (few large thematic communities). Selecting the wrong level degrades query quality significantly. Fine-grained communities produce detailed but narrow answers — good for specific entity relationships. Coarse communities produce broad thematic answers — good for corpus-wide synthesis but lose detail. The Microsoft GraphRAG paper (Edge et al., 2024) evaluates only *global* queries, across all four of its levels C0 (root) through C3 (leaf), and finds intermediate levels strongest on comprehensiveness — with root-level C0 the most token-efficient at competitive quality. It makes no local-query recommendation; local search arrived later, in the library rather than the paper. Note also that the paper's numbering runs root-to-leaf, the opposite of the L0-is-finest convention used above. In practice: evaluate which level produces the best answers on your specific query distribution.
 
 **Q: How do you evaluate Graph RAG quality?**
 A: Evaluation requires separate metrics for global and local query quality. For global queries: compare community summary quality (are the summaries coherent, accurate, comprehensive?) using LLM-as-judge on held-out community assessment criteria. For local queries: standard RAG metrics — context recall, faithfulness, answer relevance. For end-to-end quality: build a labeled test set with global queries + expected answer themes (human-labeled), then use LLM-as-judge to assess coverage. The Microsoft GraphRAG paper uses a novel "Comprehensiveness," "Diversity," and "Empowerment" framework for global query evaluation.
@@ -465,7 +474,7 @@ A: Graph RAG becomes impractical when entity extraction yields too much noise to
 ## 12. Best Practices
 
 1. **Estimate indexing cost before committing** — calculate entity extraction LLM cost for your full corpus size; ensure it's within budget.
-2. **Use cheaper models for entity extraction** — GPT-4o-mini or Haiku for entity extraction is 10-20× cheaper than GPT-4o with minimal quality loss.
+2. **Use cheaper models for entity extraction** — a mini tier is far cheaper than a flagship with minimal quality loss on this task. GPT-4o-mini vs GPT-4o is a clean 16.7x on both input ($0.15 vs $2.50 per 1M) and output ($0.60 vs $10.00); a Haiku-vs-Sonnet swap is a smaller ~3x. Price the specific pair you plan to use.
 3. **Build a query router** — classify queries as global vs. local before invoking Graph RAG; don't use global (community summary) path for specific factual lookups.
 4. **Invest in entity deduplication** — graph quality is directly proportional to deduplication accuracy; test with 100 sampled entity pairs.
 5. **Evaluate at multiple community levels** — test level 0, 1, 2 on your query distribution; different query types benefit from different levels.
@@ -570,8 +579,10 @@ def deduplicate_entities(entities: list[dict], embed_fn, llm) -> list[dict]:
 
 # Multi-hop graph traversal for entity chain queries
 def multi_hop_retrieve(query: str, entities: list[str], neo4j, depth: int = 3):
+    # NOTE: `end` is a reserved Cypher keyword (CASE ... END) and cannot be used
+    # as a variable name without backticks — name the far endpoint something else.
     cypher = """
-    MATCH path = (start)-[*1..{depth}]-(end)
+    MATCH path = (start)-[*1..{depth}]-(finish)
     WHERE start.name IN $entities
     RETURN path,
            [r IN relationships(path) | r.description] AS rel_descriptions,
@@ -585,9 +596,12 @@ def multi_hop_retrieve(query: str, entities: list[str], neo4j, depth: int = 3):
     # Assemble context from graph paths + source chunks
     context_parts = []
     for p in paths:
-        path_summary = " -> ".join([
-            f"{n} ({r})" for n, r in zip(p["node_descriptions"], p["rel_descriptions"])
-        ])
+        nodes, rels = p["node_descriptions"], p["rel_descriptions"]
+        # nodes has len(rels) + 1 elements — a plain zip() would silently drop
+        # the terminal node, which is usually the one the query was reaching for.
+        path_summary = " -> ".join(
+            [f"{n} ({r})" for n, r in zip(nodes, rels)] + [nodes[-1]]
+        )
         context_parts.append(path_summary)
 
     return "\n".join(context_parts)
@@ -597,14 +611,14 @@ def multi_hop_retrieve(query: str, entities: list[str], neo4j, depth: int = 3):
 
 | Metric | Vector-Only RAG | Graph RAG (Hybrid) |
 |--------|----------------|-------------------|
-| Multi-hop question accuracy | 31% | 71% (+40%) |
-| Cross-document reasoning score | 2.1/5 | 4.3/5 (3x better) |
+| Multi-hop question accuracy | 31% | 71% (+40 pp) |
+| Cross-document reasoning score | 2.1/5 | 4.3/5 (2.0x better) |
 | Single-entity lookup accuracy | 82% | 85% |
 | Thematic synthesis quality (LLM-judge) | 28% | 76% |
-| Initial indexing cost | $240 | $2,800 |
+| Initial indexing cost (model + embedding API only) | ~$15 | ~$70 |
 | Indexing time (parallelized) | 3 hours | 38 hours |
 | Global query latency (p50) | 1.1s | 14s |
 | Local query latency (p50) | 0.7s | 1.8s |
 | Consultant satisfaction (1-5) | 2.4 | 4.2 |
 
-**Tradeoffs**: The 38-hour initial indexing required a weekend batch job parallelized across 16 workers; incremental updates for new deliverables process nightly and re-summarize only affected communities (typically 10-20 per batch). Entity deduplication was the highest-leverage quality investment — without it, community detection produced fragmented clusters where the same client appeared in 3-4 separate communities, and community summaries contradicted each other. The firm considered a manually curated ontology but rejected it because consulting terminology evolves rapidly and a static ontology would require constant human maintenance. Graph RAG's global query latency of 14 seconds was acceptable for research workflows but required a caching layer for frequently asked executive briefing questions. The $2,800 indexing cost is amortized across 8,000 consultants — $0.35 per user for a system that replaced 4-6 hours of manual cross-referencing per research request.
+**Tradeoffs**: The 38-hour initial indexing required a weekend batch job parallelized across 16 workers; incremental updates for new deliverables process nightly and re-summarize only affected communities (typically 10-20 per batch). Entity deduplication was the highest-leverage quality investment — without it, community detection produced fragmented clusters where the same client appeared in 3-4 separate communities, and community summaries contradicted each other. The firm considered a manually curated ontology but rejected it because consulting terminology evolves rapidly and a static ontology would require constant human maintenance. Graph RAG's global query latency of 14 seconds was acceptable for research workflows but required a caching layer for frequently asked executive briefing questions. The API bill is small and is not the reason to hesitate: 120K chunks x 800 tokens = 96M input tokens of extraction on a mini tier ($0.15/1M in, $0.60/1M out, with JSON output running about half the input volume) is roughly $43; the 279 flagship summarization calls add about $3; embedding the chunks, entity descriptions and summaries adds roughly $15 — call it $70 one-time, under a cent per consultant across 8,000 users. The real costs are the 38 hours of wall-clock indexing across 16 workers, the graph and vector infrastructure, and the engineering time to build and maintain the deduplication pipeline — budget for those, not for the tokens.

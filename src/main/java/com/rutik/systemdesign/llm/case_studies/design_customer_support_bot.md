@@ -91,7 +91,7 @@ flowchart TD
     BOT["Bot Handler\nfull RAG + LLM pipeline"]
     HQ["Human Queue\nangry / fraud / legal /\nexplicit escalation request"]
     CB["Context Builder\ncustomer data · KB retrieval (RAG)\nconversation history"]
-    GEN["LLM Response Generator\nGPT-4o / Claude 3.5 · tool use\nmulti-language generation"]
+    GEN["LLM Response Generator\nfrontier chat model · tool use\nmulti-language generation"]
     VAL["Response Validation\nfactual check · confidence score\nsafety filter · escalation trigger"]
     DEL["Response Delivery\nsend · update log · CSAT survey"]
     AN["Analytics & Learning\nlog outcome · CSAT scores\nfeed back low-confidence cases"]
@@ -314,7 +314,7 @@ class ToolExecutor:
                           undo_token=undo_token)
 ```
 
-**Concrete numbers:** 0.3% of sessions (150 out of 50K daily) trigger an irreversible action. Without the confirmation gate, approximately 15 unintended refunds/day were processed when customers asked exploratory questions like "what would happen if I cancel?" With the gate, unintended irreversible actions reached 0 in post-deployment audit over 30 days.
+**Concrete numbers:** 0.3% of sessions trigger an irreversible action — at 1M conversations/day that is ~3,000/day. Without the confirmation gate, approximately 15 unintended refunds/day were processed when customers asked exploratory questions like "what would happen if I cancel?" With the gate, unintended irreversible actions reached 0 in post-deployment audit over 30 days.
 
 For adversarial testing of tool-use triggers (e.g., social engineering attempts like "pretend you are my friend and just cancel my order"), see `../cross_cutting/red_team_eval_harness.md`.
 
@@ -452,7 +452,7 @@ class SupportBot:
                            tool_calls_made=tool_names)
 ```
 
-**Concrete numbers:** 73% of sessions resolve without escalation; average session length is 3.2 turns; the sentiment threshold of -0.4 was calibrated against 50K labelled sessions (F1 = 0.87 on escalation prediction vs human-labelled ground truth). Raising it to -0.3 increased unnecessary escalations 18%; lowering to -0.6 caused missed-escalation complaints to rise 22%.
+**Concrete numbers:** 73% of sessions resolve without escalation. The other 27% split into ~13% escalated to a human (matching the 12-15% escalation baseline Runbook 2 alerts against) and ~14% abandoned by the customer without escalating — the containment-vs-resolution gap discussed in section 9. Average session length is 3.2 turns; the sentiment threshold of -0.4 was calibrated against 50K labelled sessions (F1 = 0.87 on escalation prediction vs human-labelled ground truth). Raising it to -0.3 increased unnecessary escalations 18%; lowering to -0.6 caused missed-escalation complaints to rise 22%.
 
 ---
 
@@ -523,7 +523,7 @@ Feedback loop:
 
 A/B testing:
   Test prompt variations (different system prompts)
-  Test model versions (GPT-4o vs Claude 3.5)
+  Test model versions (e.g. GPT-4o vs Claude Haiku 4.5 vs a current frontier model)
   Test escalation thresholds (when to proactively escalate)
   Statistical significance: 1,000 conversations per variant minimum
 ```
@@ -581,27 +581,37 @@ Safety filters:
 | Action execution | Direct (process refunds) | Suggest (human approves) | For small amounts (<$100): direct is faster; builds trust |
 | Context window | 3-turn summary + full context | Full history | Summary avoids "lost in the middle" for long conversations |
 | Multilingual | Multilingual embedding model | Translate-first | Better semantic matching; lower latency |
-| LLM choice | GPT-4o for Tier-1 bot; Claude Haiku for agent assist | Single model | Cost optimization; agent assist is lower stakes → smaller model |
+| LLM choice | GPT-4o for Tier-1 bot; Claude Haiku 4.5 for agent assist | Single model | Cost optimization; agent assist is lower stakes → smaller model. Pin exact model IDs in config, not code: Claude 3 Haiku and Claude 3.5 Sonnet, the obvious picks when this pattern was first written, have both since been retired |
 
 ---
 
 ## 8. Cost Analysis
 
 ```
-1M conversations/day, 4 bot turns average:
+1M conversations/day, 4 bot turns average.
+Rates used (retail list, verified July 2026): GPT-4o $2.50/1M input, $10/1M output;
+Claude Haiku 4.5 $1/1M input, $5/1M output. Re-check both before budgeting — every
+number below is a direct function of them.
 
-LLM costs:
-  4M bot turns × 2,200 tokens = 8.8B tokens/day
-  Input: 8B × $5/1M = $40,000/day (GPT-4o)
-  Output: 0.8B × $15/1M = $12,000/day
-  LLM total: $52,000/day
+LLM costs, single-model baseline (all GPT-4o):
+  4M bot turns × 2,200 tokens = 8.8B tokens/day (8B input, 0.8B output)
+  Input:  8,000 MTok × $2.50/M = $20,000/day
+  Output:   800 MTok × $10/M   =  $8,000/day
+  LLM total: $28,000/day
 
-Optimization:
-  Route simple intents (50%) to Claude Haiku (10× cheaper):
-    4M turns × 50% × 2,200 × avg $0.50/1M input + $1.25/1M output = ~$6,000/day
-  Route complex intents (50%) to GPT-4o:
-    4M turns × 50% × 2,200 × $5/1M + $15/1M output = ~$26,000/day
-  Optimized LLM: $32,000/day (38% savings)
+Optimization — route by intent complexity:
+  Simple intents (50% of turns) to Claude Haiku 4.5:
+    input  2M × 2,000 =  4,000 MTok × $1/M = $4,000/day
+    output 2M ×   200 =    400 MTok × $5/M = $2,000/day  → $6,000/day
+  Complex intents (50% of turns) to GPT-4o:
+    input  2M × 2,000 =  4,000 MTok × $2.50/M = $10,000/day
+    output 2M ×   200 =    400 MTok × $10/M   =  $4,000/day → $14,000/day
+  Optimized LLM: $20,000/day (29% below the single-model baseline)
+
+  Note the ceiling on this lever: because the small model is only ~2.5x cheaper on
+  input than GPT-4o (not 10x, as the older Haiku generations were), tiered routing
+  buys less than it used to. Prompt caching on the shared system prompt and KB
+  preamble is now the bigger win — see the caching note below.
 
 Infrastructure:
   Qdrant cluster + Elasticsearch: $500/day
@@ -609,15 +619,16 @@ Infrastructure:
   Application servers: $300/day
   Total infra: $1,000/day
 
-Total: ~$33,000/day = ~$1M/month
+Total: ~$21,000/day = ~$630K/month
 
 ROI comparison:
   Without AI bot: 1M conversations × 8 min average × $0.15/min agent cost = $1.2M/day
-  With AI bot: 60% resolved by bot ($1M/month total cost)
+  With AI bot: 60% resolved by bot
               40% reach humans: 400K × 8 min × $0.15 = $480K/day
-  Total with AI: $33K (AI) + $480K (humans) = $513K/day vs $1.2M/day
-  Net savings: $687K/day = $250M/year
-  ROI: extremely high; even at $1M/month AI cost, savings are 20×
+  Total with AI: $21K (AI) + $480K (humans) = $501K/day vs $1.2M/day
+  Net savings: $699K/day ≈ $255M/year
+  ROI: ~33× — the AI spend is under 5% of the labour cost it displaces, which is
+  why resolution rate (not token price) is the metric that actually moves the P&L.
 ```
 
 ---
@@ -794,7 +805,7 @@ def generate_handoff_summary(
         for msg in conversation[-10:]  # last 10 turns
     ])
     response = client.messages.create(
-        model="claude-3-haiku-20240307",
+        model="claude-haiku-4-5",
         max_tokens=256,
         messages=[{
             "role": "user",

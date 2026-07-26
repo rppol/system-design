@@ -12,11 +12,11 @@ Standard RAG loses all information in non-text content. Multimodal RAG preserves
 
 > **One-line analogy**: Multimodal RAG teaches the library catalog to index the pictures, diagrams, and tables in books, not just the text.
 
-**Mental model**: A financial analyst's report is 40% charts, 20% tables, and 40% text. Standard RAG indexes only the text portion; the charts showing revenue trends, the tables comparing quarterly metrics — all lost. Multimodal RAG extracts each chart and table, generates a rich text description using a vision LLM ("Bar chart showing Q1-Q4 2024 revenue: Q1 $2.1B, Q2 $2.4B, Q3 $2.8B, Q4 $3.2B, 53% YoY growth"), and includes those descriptions in the searchable index.
+**Mental model**: Picture a financial analyst's report — illustratively, say 40% charts, 20% tables, and 40% text (the exact mix varies by document; the point is that non-text is a large share). Standard RAG indexes only the text portion; the charts showing revenue trends, the tables comparing quarterly metrics — all lost. Multimodal RAG extracts each chart and table, generates a rich text description using a vision LLM ("Bar chart showing Q1-Q4 2024 revenue: Q1 $2.1B, Q2 $2.4B, Q3 $2.8B, Q4 $3.2B, 53% YoY growth"), and includes those descriptions in the searchable index.
 
 **Why it matters**: Critical information is often in non-text elements. A document saying "See Figure 3 for the performance comparison" is useless if Figure 3 isn't indexed. Multimodal RAG recovers this information and makes it retrievable.
 
-**Key insight**: Vision LLMs (GPT-4o, Claude 3.5, Gemini 1.5 Pro) are now capable of generating accurate, detailed descriptions of charts, tables, and diagrams — making vision-to-text conversion practical for production indexing pipelines.
+**Key insight**: Every current frontier LLM is natively vision-capable, and the flagship tiers generate accurate, detailed descriptions of charts, tables, and diagrams — making vision-to-text conversion practical for production indexing pipelines. Pick by measured quality on your own document types rather than by model name; the frontier lineup turns over every few months.
 
 ---
 
@@ -183,48 +183,63 @@ call per image; Strategy 2 buys throughput and low cost but inherits the alignme
 |--------|------------|
 | `pages x images_per_page` | Image count — 10,000 x 3 = 30,000 in Section 10's estimate |
 | `detail="low"` | 85 tokens per image, regardless of resolution |
-| `detail="high"` | Up to 2048 tokens per image — tiled at higher resolution |
-| price | `$5` per 1M tokens for GPT-4o image tokens |
+| `detail="high"` | 85 base + 170 per 512px tile — 765 tokens for a 1024x1024 image, 1,105 for a 2048x4096 page |
+| price | `$2.50` per 1M input tokens for GPT-4o; image tokens bill as input tokens |
 | `f` | Fraction of images routed to the expensive high-detail path |
 
 **Walk the indexing bill.** 30,000 images:
 
 ```
-  detail="low"  : 30,000 x    85 =  2,550,000 tok -> 2.55  x $5 = $ 12.75
-  detail="high" : 30,000 x 2,048 = 61,440,000 tok -> 61.44 x $5 = $307.20
+  detail="low"  : 30,000 x    85 =  2,550,000 tok -> 2.55  x $2.50 = $  6.38
+  detail="high" : 30,000 x 1,105 = 33,150,000 tok -> 33.15 x $2.50 = $ 82.88
 
-  ratio = 2048 / 85 = 24.1x, for one keyword argument
+  ratio = 1105 / 85 = 13.0x, for one keyword argument
 
-  at 100,000 pages x 3 images: 300,000 x 2048 x $5/1M = $3,072 one-time
+  at 100,000 pages x 3 images: 300,000 x 1,105 x $2.50/1M = $829 one-time
 ```
 
-**Walk the routing saving.** Section 12 reports a 65% cut from classifying images before processing — GPT-4o high-detail at `~$0.01` each for schematics, GPT-4o-mini low-detail at `~$0.001` each for photos. Solve for what fraction that implies:
+**Walk the routing saving.** Section 12 reports a 65% cut from classifying images before processing — GPT-4o high-detail at `~$0.003` each for schematics, a low-detail path at `~$0.0002` each for photos. Solve for what fraction that implies:
 
 ```
-  uniform high-detail : 30,000 x $0.010                 = $300.00
-  mixed               : 30,000 x (f x 0.010 + (1-f) x 0.001)
+  uniform high-detail : 30,000 x $0.0030                 = $90.00
+  mixed               : 30,000 x (f x 0.0030 + (1-f) x 0.0002)
 
-  target = 0.35 x $300 = $105.00
-    30,000 x (0.009f + 0.001) = 105
-             0.009f + 0.001   = 0.0035
-                          f   = 0.2778
+  target = 0.35 x $90 = $31.50
+    30,000 x (0.0028f + 0.0002) = 31.50
+             0.0028f + 0.0002   = 0.00105
+                          f     = 0.3036
 
-  So the classifier sends 27.8% of images down the expensive path. The
-  headline "65% cost reduction" is really the claim "only about a quarter
+  So the classifier sends ~30% of images down the expensive path. The
+  headline "65% cost reduction" is really the claim "only about a third
   of our images are schematics" -- a statement about the corpus, not the model.
+```
+
+**The trap in that cheap path: `detail`, not the model, is the lever.** The obvious move is to
+route photos to a mini tier, and for images specifically that is a *false economy*. GPT-4o-mini
+does not bill images on the 85/170 tile schedule at all — it bills **2,833 base tokens plus 5,667
+per tile**:
+
+```
+  one low-detail image
+    gpt-4o       :    85 tok x $2.50/1M  = $0.000213   <- cheapest
+    gpt-4o-mini  : 2,833 tok x $0.15/1M  = $0.000425   <- 2x MORE, despite the cheaper tier
+
+  gpt-4o-mini is ~17x cheaper per TEXT token and ~2x more expensive per
+  low-detail IMAGE. Mini tiers price images on their own schedule; never
+  assume the text discount carries over.
 ```
 
 **Walk the query-time budget.** The same token accounting reappears in the prompt, where it competes directly with text:
 
 ```
-  3 retrieved images, detail="high" : 3 x 2048 = 6,144 tokens
+  3 retrieved images, detail="high" : 3 x 1105 = 3,315 tokens
   3 retrieved images, detail="low"  : 3 x   85 =   255 tokens
 
-  at the case study's 800-token text chunks, those 6,144 tokens are
-  6,144 / 800 = 7.68 text chunks that no longer fit in the context
+  at the case study's 800-token text chunks, those 3,315 tokens are
+  3,315 / 800 = 4.14 text chunks that no longer fit in the context
 
   This is Pitfall "images consume context": three high-detail images
-  displace nearly eight text chunks. Retrieving the stored VLM description
+  displace more than four text chunks. Retrieving the stored VLM description
   instead of the pixels costs ~500 tokens for all three combined.
 ```
 
@@ -286,7 +301,7 @@ def generate_multimodal_answer(
     content.append({"type": "text", "text": f"Question: {query}"})
 
     response = llm_client.chat.completions.create(
-        model="gpt-4o",  # or claude-3-5-sonnet, gemini-1.5-pro
+        model="gpt-4o",  # or any current vision-capable frontier model
         messages=[
             {"role": "system", "content": "Answer based on the provided documents and images. Cite specific figures when referencing visual data."},
             {"role": "user", "content": content}
@@ -351,7 +366,7 @@ flowchart TD
     TK --> MRG["Merge + Rerank\ncross-encoder (text-only scorer)"]
     IK --> MRG
     MRG --> CA["Context Assembly\ntext chunks + images from blob"]
-    CA --> GEN["Vision-LLM Generation\nGPT-4o · Claude 3.5 · Gemini 1.5"]
+    CA --> GEN["Vision-LLM Generation\nany vision-capable frontier model"]
     GEN --> ANS(["Answer + source citations\n(doc, page, figure number)"])
 
     class Q,ANS io
@@ -375,10 +390,10 @@ flowchart TD
 - Used in production by enterprises indexing mixed-content PDFs
 - Integrates with all major vector DBs for element-level indexing
 
-### GPT-4o with File Attachments
-- OpenAI's file search tool (formerly Retrieval) uses vision capabilities for PDF processing
-- Extracts and indexes table and chart content; vision LLM generates descriptions
-- Powers enterprise knowledge bases with mixed-content documents
+### OpenAI Responses API — PDF File Inputs
+- On vision-capable models, the API extracts both the text and the rendered page images of a PDF and sends both to the model
+- Chart and table content that has no text layer is therefore still visible to the model, at the cost of extra image tokens
+- The file search tool (the Assistants Retrieval successor, now on the Responses API) provides the vector-store side of the same workflow
 
 ---
 
@@ -392,12 +407,23 @@ flowchart TD
 | CLIP direct embedding | Moderate | Low | Yes (native) | No |
 | Vision LLM + CLIP combined | Best | High | Best | Yes |
 
-| Vision Model | Quality | Cost | Latency |
+Image tokens bill as ordinary input tokens on every major provider, so the "cost" column is the
+input-token price. List prices move often — re-check the vendor pricing page before budgeting.
+
+| Vision Model | Quality | Input-token cost (per 1M, July 2026) | Latency |
 |-------------|---------|------|---------|
-| GPT-4o | Excellent | $5/1K img tokens | ~2s |
-| Claude 3.5 Sonnet | Excellent | $3/1K img tokens | ~2s |
-| Gemini 1.5 Pro | Excellent | $3.5/1M tokens | ~2s |
-| LLaVA 1.6 (self-hosted) | Good | GPU cost | ~1s |
+| OpenAI GPT-5.6 (sol / terra / luna tiers) | Excellent | $5.00 / $2.50 / $1.00 | provider-dependent; measure per model |
+| GPT-4o (2024 tier, still served but off OpenAI's headline price table) | Very good | $2.50 | provider-dependent; measure per model |
+| Claude Sonnet 5 | Excellent | $2.00 introductory through 2026-08-31, $3.00 after | provider-dependent; measure per model |
+| Gemini 3.5 Flash | Good/Excellent | $1.50 | provider-dependent; measure per model |
+| Open-weight VLM (self-hosted) | Good | GPU cost only | usually lowest, if the GPU is warm |
+
+**One caveat before you reuse the arithmetic below.** Every image-token calculation in this file
+uses GPT-4o's **tile** schedule (85 base + 170 per 512px tile). That schedule is specific to the
+GPT-4o and o-series family — OpenAI's GPT-5.x models tokenize images by **patches** with a
+per-model multiplier instead, and GPT-4o-mini uses the same tile shape but with a 2,833/5,667
+schedule. Re-derive the numbers against whichever model you actually deploy; do not carry the
+85/170 constants across families.
 
 ---
 
@@ -453,18 +479,17 @@ Fix: Include image quality checks; fall back to OCR text for images where vision
 | **PyMuPDF (fitz)** | PDF image/text extraction | Fast, reliable; good Python API |
 | **pdfplumber** | PDF table extraction | Best Python tool for precise table extraction |
 | **CLIP / SigLIP** | Image embedding | OpenAI CLIP (ViT-L); Google SigLIP for better quality |
-| **GPT-4o** | Vision LLM descriptions | Best quality for chart/diagram description |
-| **Claude 3.5 Sonnet** | Vision LLM descriptions | Strong quality; good at technical diagrams |
-| **LLaVA 1.6 / InternVL2** | Open-source vision LLM | Self-hosted; good for cost-sensitive indexing |
+| **Frontier hosted VLMs** (GPT-4o and the current GPT-5 tiers, Claude Sonnet/Opus 5, Gemini 3.x) | Vision LLM descriptions | Best quality for chart/diagram description; benchmark the current lineup on your own documents |
+| **Open-weight VLMs** (InternVL, Qwen-VL, LLaVA families) | Open-source vision LLM | Self-hosted; good for cost-sensitive indexing |
 | **Weaviate multi2vec** | Multimodal vector DB | Native multi-modal (text + image) in one index |
-| **LlamaIndex MultiModalVectorStore** | Multimodal RAG framework | Handles multi-modal retrieval and routing |
+| **LlamaIndex `MultiModalVectorStoreIndex`** | Multimodal RAG framework | Handles multi-modal retrieval and routing |
 
 ---
 
 ## 10. Interview Questions with Answers
 
 **Q: What are the two main strategies for indexing images in a RAG system?**
-A: The two strategies are vision-to-text conversion and direct image embedding. In vision-to-text: a vision LLM (GPT-4o, Claude 3.5) generates a detailed text description of each image, which is then embedded using a standard text embedding model and stored alongside text chunks. This leverages the full power of semantic text search and works with existing vector DBs. In direct image embedding: a multimodal embedding model (CLIP, SigLIP) encodes images directly into a vector space aligned with text embeddings, allowing cross-modal retrieval. Vision-to-text produces higher-quality descriptions for complex charts; CLIP is cheaper and faster. In production, combining both is most effective.
+A: The two strategies are vision-to-text conversion and direct image embedding. In vision-to-text: a vision-capable frontier LLM generates a detailed text description of each image, which is then embedded using a standard text embedding model and stored alongside text chunks. This leverages the full power of semantic text search and works with existing vector DBs. In direct image embedding: a multimodal embedding model (CLIP, SigLIP) encodes images directly into a vector space aligned with text embeddings, allowing cross-modal retrieval. Vision-to-text produces higher-quality descriptions for complex charts; CLIP is cheaper and faster. In production, combining both is most effective.
 
 **Q: What is CLIP and how does cross-modal retrieval work?**
 A: CLIP (Contrastive Language-Image Pretraining, OpenAI 2021) trains a text encoder and image encoder together using contrastive learning on 400M image-caption pairs. The result: text and image encoders produce vectors in the same high-dimensional space — "a photo of a dog" embeds close to an image of a dog. Cross-modal retrieval embeds a text query using CLIP's text encoder, then searches the image embedding collection for nearest neighbors. The alignment is imperfect for domain-specific content (scientific diagrams, financial charts) not well-represented in CLIP's training data. SigLIP (Google, 2023) uses sigmoid loss instead of contrastive softmax and achieves better alignment quality, particularly for web-scale images.
@@ -479,10 +504,10 @@ A: An isolated chart image often lacks the context needed for an accurate descri
 A: CLIP was trained on general web images — product photos, news images, general photographs. It has poor alignment for: (1) Scientific/technical diagrams — circuit diagrams, molecular structures, architectural drawings are rare in CLIP's training data; (2) Financial charts — specific chart types (candlestick, waterfall) may not align well with their text descriptions; (3) Medical imaging — CLIP was not trained on X-rays, MRIs, histology slides. For these domains, alternatives include: domain-specific CLIP fine-tuning (train on domain image-caption pairs), vision LLM description fallback (convert to text, then use text embeddings), or BiomedCLIP/ChemCLIP for specific scientific domains.
 
 **Q: How do you handle the cost of vision LLM calls during indexing?**
-A: At scale, vision LLM calls dominate indexing cost. Mitigation strategies: (1) Selective processing — only process images above a minimum size threshold (skip icons, logos under 100×100px); (2) Deduplication — identical or near-identical images across documents should be described only once; (3) Cheaper models for simple content — use GPT-4o-mini for simple tables and charts, reserve GPT-4o for complex diagrams; (4) Batch processing with rate limiting — process images in parallel with controlled concurrency; (5) Caching — cache descriptions for frequently re-indexed documents. For a 10,000-page document set with 3 images per page: 30,000 vision LLM calls at $5/1K image tokens = $150. Plan for this cost.
+A: At scale, vision LLM calls dominate indexing cost. Mitigation strategies: (1) Selective processing — only process images above a minimum size threshold (skip icons, logos under 100×100px); (2) Deduplication — identical or near-identical images across documents should be described only once; (3) Cheaper processing for simple content — lower `detail` for simple tables and charts and reserve high detail for complex diagrams; check a mini tier's image-token schedule before switching to it, since some mini tiers bill images far above their text discount; (4) Batch processing with rate limiting — process images in parallel with controlled concurrency; (5) Caching — cache descriptions for frequently re-indexed documents. For a 10,000-page document set with 3 images per page: 30,000 vision LLM calls at ~1,105 high-detail image tokens each, billed at GPT-4o's $2.50 per 1M input tokens, is roughly $83. Plan for this cost.
 
 **Q: How do you pass retrieved images to the generation LLM without exceeding context limits?**
-A: Images consume significant context window tokens. GPT-4o prices an image at 85-2048 tokens depending on resolution (detail="low" → 85 tokens; detail="high" → up to 2048). Strategies: (1) Limit retrieved images to 2-3 per query; prefer image descriptions as text when confidence is high; (2) Use detail="low" for retrieved images unless high resolution is critical; (3) Summarize image content (use the stored vision LLM description as context) and only pass the original image when the description alone is insufficient; (4) Prioritize by image relevance score — only retrieve images when the retriever confidence exceeds a threshold.
+A: Images consume significant context window tokens. GPT-4o charges a flat 85 tokens at detail="low", and at detail="high" charges 85 plus 170 per 512px tile — 765 tokens for a 1024x1024 image, 1,105 for a 2048x4096 page. Strategies: (1) Limit retrieved images to 2-3 per query; prefer image descriptions as text when confidence is high; (2) Use detail="low" for retrieved images unless high resolution is critical; (3) Summarize image content (use the stored vision LLM description as context) and only pass the original image when the description alone is insufficient; (4) Prioritize by image relevance score — only retrieve images when the retriever confidence exceeds a threshold.
 
 **Q: How would you evaluate multimodal RAG quality?**
 A: Evaluation requires modality-specific metrics plus end-to-end quality. For image description quality: compare vision LLM descriptions against human annotations on 100 sampled images using BERTScore and human ratings; check that key data values (numbers, labels) are correctly extracted. For retrieval quality: build a test set with (text query, expected image ID) pairs; measure retrieval recall@K for cross-modal queries. For end-to-end quality: questions that require chart interpretation ("What was the highest revenue quarter?"); verify that answers correctly read the chart data. Track image-answer attribution: for each image-based answer, verify the cited figure is the correct source.
@@ -500,7 +525,7 @@ A: The right strategy depends on table complexity and query type. For simple loo
 A: Image description quality is the primary bottleneck in vision-to-text multimodal RAG pipelines. A poor description (missing key data values, wrong chart type, missing axis labels) produces a text chunk that does not match user queries about that image, resulting in retrieval failure. Measurement: build a 100-image test set with manually verified ground-truth descriptions; score generated descriptions on (a) numeric accuracy — are the key data values present and correct? (b) semantic coverage — do the descriptions mention the key terms a user would use to query for this image? Use BERTScore for semantic similarity and exact-match for numeric values. Improvement strategies: add surrounding document context to the vision LLM prompt; use a multi-turn prompt that first asks "what type of chart is this?" then "list all data values visible"; for charts specifically, GPT-4o's detail="high" mode significantly outperforms detail="low" for reading axis values.
 
 **Q: What is the cost of VLM-based document processing at scale, and how do you budget for it?**
-A: VLM processing costs scale with the number of images in your corpus. GPT-4o charges approximately 85 tokens for a low-detail image and 2048 tokens for a high-detail image. At 10,000 pages with an average of 3 images per page (30,000 images), using detail="high": 30,000 × 2048 tokens × $5/1M tokens = $307. For 100,000 pages: ~$3,070 one-time indexing cost. Ongoing incremental costs apply when new documents are added. Cost reduction strategies: (1) use detail="low" for simple charts where data values are large and readable; (2) use a cheaper vision model (LLaVA 1.6 self-hosted, or Claude Haiku) for simple tables; (3) skip images below a minimum area threshold (icons, logos); (4) cache descriptions — if the same image appears in multiple documents (e.g., a standard company logo), describe it once. Benchmark the quality-cost tradeoff before committing to a specific model.
+A: VLM processing costs scale with the number of images in your corpus. GPT-4o charges 85 tokens for a low-detail image and 85 + 170 per 512px tile for a high-detail one — up to about 1,105 tokens for a full 2048x4096 page. At 10,000 pages with an average of 3 images per page (30,000 images), using detail="high": 30,000 × 1,105 tokens × $2.50/1M input tokens ≈ $83. For 100,000 pages: ~$830 one-time indexing cost. Ongoing incremental costs apply when new documents are added. Cost reduction strategies: (1) use detail="low" for simple charts where data values are large and readable; (2) drop `detail` to "low" before reaching for a cheaper model — on GPT-4o that is a flat 85 tokens (~$0.0002), whereas GPT-4o-mini bills 2,833 base tokens per image and is actually *more* expensive per low-detail image despite being ~17x cheaper per text token, so verify the small tier's image schedule before assuming it saves money; a self-hosted open-weight VLM is the reliable cheap path; (3) skip images below a minimum area threshold (icons, logos); (4) cache descriptions — if the same image appears in multiple documents (e.g., a standard company logo), describe it once. Benchmark the quality-cost tradeoff before committing to a specific model.
 
 **Q: How do you evaluate multimodal retrieval accuracy specifically for cross-modal queries?**
 A: Cross-modal retrieval accuracy — a text query successfully retrieving a relevant image — requires a dedicated evaluation protocol. Build a test set of (text query, expected image ID) pairs: 200-300 pairs covering chart queries ("which quarter had the highest revenue?"), diagram queries ("show the system architecture"), and table queries ("find the pricing comparison table"). Measure Recall@K: what fraction of expected images appear in the top-K retrieved results? Separate metrics for the CLIP path (direct image embedding retrieval) and the vision-LLM-description path (text embedding of descriptions). In practice, the description path typically achieves Recall@10 of 70-85% for well-described charts; the CLIP path achieves 50-70% for domain-specific technical diagrams. Combine both paths and re-rank to achieve best overall recall.
@@ -518,7 +543,7 @@ A: Standard token-based chunking destroys the semantic coherence of mixed-conten
 4. **Store original images in blob storage** — always preserve the original image even if you have a text description; the generation LLM benefits from seeing the actual image.
 5. **Validate extraction quality** — automated checks: does the description contain numeric values consistent with nearby text? Does the table have the expected number of rows/columns?
 6. **Limit images per generation call** — cap at 2-3 images per query; prefer text descriptions for routine queries, original images only for queries that explicitly need visual detail.
-7. **Benchmark vision LLM options** — accuracy and cost vary significantly; evaluate GPT-4o, Claude 3.5, and Gemini 1.5 Pro on your specific document types before committing.
+7. **Benchmark vision LLM options** — accuracy and cost vary significantly; evaluate the current frontier tiers from OpenAI, Anthropic, and Google, plus one self-hosted open-weight VLM, on your specific document types before committing.
 
 ---
 
@@ -545,7 +570,7 @@ flowchart TD
         TXT["Text blocks\nsection-aware chunking · 800 tokens\nrespect section boundaries"]
         TAB["Tables\nmarkdown conversion\npreserve headers, units, torque spec values"]
         FIG["Figures / Diagrams\nelement classifier — CLIP zero-shot:\nexploded-view, wiring schematic, flowchart,\nphotograph, data chart"]
-        VLM["Vision LLM Description\nGPT-4o detail=high for schematics\nGPT-4o-mini for simple photos"]
+        VLM["Vision LLM Description\nGPT-4o detail=high for schematics\nGPT-4o detail=low for simple photos"]
         CE["CLIP ViT-L/14 Image Embedding\n768-dim vectors"]
         TEMB["Text Embed\ntext-embedding-3-large"]
         PC["Pinecone: Text Index"]
@@ -592,10 +617,10 @@ flowchart TD
     class PC,WV frozen
 ```
 
-The element classifier routes schematics to GPT-4o detail="high" and simple photos to GPT-4o-mini, cutting vision indexing cost 65%; at query time the weighted dual-retrieval merge (text 0.6, image 0.4) plus figure-reference linking lifts image recall to 87% vs 52% for CLIP alone.
+The element classifier routes schematics to GPT-4o detail="high" and simple photos to GPT-4o detail="low", cutting vision indexing cost 65%; at query time the weighted dual-retrieval merge (text 0.6, image 0.4) plus figure-reference linking lifts image recall to 87% vs 52% for CLIP alone.
 
 **Key Design Decisions**:
-1. Element classification before vision LLM processing — not all images need the same treatment. Exploded-view diagrams and wiring schematics require GPT-4o with detail="high" (2048 tokens per image, ~$0.01 each) for accurate part number and torque specification extraction. Simple equipment photographs use GPT-4o-mini at detail="low" (~$0.001 each). CLIP zero-shot classification routes images to the appropriate model. This classification reduced vision LLM indexing cost by 65% compared to uniform GPT-4o high-detail processing.
+1. Element classification before vision LLM processing — not all images need the same treatment. Exploded-view diagrams and wiring schematics require GPT-4o with detail="high" (85 tokens plus 170 per 512px tile — up to ~1,105 tokens for a full page image, roughly $0.003 each at GPT-4o's $2.50 per 1M input tokens) for accurate part number and torque specification extraction. Simple equipment photographs stay on GPT-4o but drop to detail="low" (a flat 85 tokens, ~$0.0002 each). Note the counterintuitive part: routing those photos to GPT-4o-mini instead would have *raised* the per-image cost, because mini bills images at 2,833 base tokens rather than 85 — the `detail` parameter is the lever here, not the model tier. CLIP zero-shot classification routes images to the appropriate path. This classification reduced vision LLM indexing cost by 65% compared to uniform GPT-4o high-detail processing.
 2. 300 DPI extraction for all diagrams — initial prototype at 150 DPI produced vision LLM descriptions that missed 30% of part numbers and torque specifications in dense engineering drawings. Upgrading to 300 DPI increased storage 4x but improved specification extraction accuracy from 68% to 94%.
 3. Dual retrieval paths with figure-reference linking — CLIP retrieval alone achieved only 52% recall on domain-specific engineering diagrams (hydraulic schematics are poorly represented in CLIP's web-trained embedding space). Vision LLM text descriptions embedded in the text index achieved 78% recall. Combining both with weighted merge achieved 87%. Additionally, when a retrieved text chunk references "See Figure 12," the linked figure is automatically included in context assembly, ensuring the technician always sees referenced diagrams.
 4. Section-aware chunking preserving document structure — text chunks respect manual section boundaries (e.g., "3.2 Hydraulic Pump Disassembly" stays as one chunk even if slightly over 800 tokens) rather than splitting mid-procedure. Each chunk carries metadata linking to figures within that section.
@@ -644,10 +669,12 @@ def classify_and_describe_image(
             )
         )
     else:
-        # Standard processing for equipment photos
+        # Standard processing for equipment photos. Same model, cheap detail
+        # setting: gpt-4o at detail="low" is a flat 85 image tokens. Switching
+        # to gpt-4o-mini here would COST more per image (2,833 base tokens).
         description = vision_llm_describe(
             image_path, context,
-            model="gpt-4o-mini",
+            model="gpt-4o",
             detail="low",
             prompt_suffix=(
                 "Describe the equipment component shown, "
@@ -712,4 +739,4 @@ def retrieve_with_images(query: str, equipment_model: str = None):
 | Query latency (p95) | 1.8s | 4.1s |
 | Incremental cost per new manual | ~$0.10 | ~$1.50 |
 
-**Tradeoffs**: The $4,200 one-time indexing cost is justified against operational savings: with 1,200 technicians averaging 8 queries/day and a 35% MTTR reduction, the system saves approximately 1,400 technician-hours per month. The 52-hour initial indexing required batched weekend processing across 8 parallel workers; incremental indexing for new manuals (~200/year) costs $1-2 per manual. The 2.4s query latency (vs. 0.9s text-only) is acceptable for field technicians who previously spent 10-15 minutes searching physical manuals. The CLIP retrieval path underperforms on domain-specific engineering diagrams but catches equipment failure photographs that vision LLM descriptions sometimes inadequately describe — removing the CLIP path drops overall image recall from 87% to 78%. The element classifier occasionally misroutes complex hybrid diagrams (part schematic, part photograph) to the cheaper GPT-4o-mini path, causing 6% of those images to have incomplete descriptions; a manual review of misclassified images during the first indexing run identified the issue and led to adding a "hybrid diagram" classification category.
+**Tradeoffs**: The $4,200 one-time indexing cost is justified against operational savings: with 1,200 technicians averaging 8 queries/day and a 35% MTTR reduction, the system saves approximately 1,400 technician-hours per month. The 52-hour initial indexing required batched weekend processing across 8 parallel workers; incremental indexing for new manuals (~200/year) costs $1-2 per manual. The 2.4s query latency (vs. 0.9s text-only) is acceptable for field technicians who previously spent 10-15 minutes searching physical manuals. The CLIP retrieval path underperforms on domain-specific engineering diagrams but catches equipment failure photographs that vision LLM descriptions sometimes inadequately describe — removing the CLIP path drops overall image recall from 87% to 78%. The element classifier occasionally misroutes complex hybrid diagrams (part schematic, part photograph) to the cheap detail="low" path, causing 6% of those images to have incomplete descriptions; a manual review of misclassified images during the first indexing run identified the issue and led to adding a "hybrid diagram" classification category.

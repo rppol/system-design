@@ -46,11 +46,11 @@ Function-as-a-service with durable steps. `step.run()` checkpoints each step res
 
 ### 4.3 Restate Durable Promises
 
-Strong-consistency durable execution with Java/TS/Python SDKs. `ctx.run()` wraps each step. Designed for high-throughput, low-latency durability.
+Strong-consistency durable execution with first-class SDKs for TypeScript, Python, Java, Kotlin, Go and Rust. `ctx.run()` wraps each step. Designed for high-throughput, low-latency durability.
 
 ### 4.4 LangGraph + Checkpointing
 
-Purpose-built for LLM agents. StateGraph nodes; `MemorySaver`, `SqliteSaver`, `RedisSaver`, `PostgresSaver` checkpointers. Resume any thread by `thread_id`. `interrupt_before` for human-in-the-loop pauses.
+Purpose-built for LLM agents. StateGraph nodes; `InMemorySaver` (built in; `MemorySaver` is the legacy alias), plus `SqliteSaver`, `PostgresSaver` and `RedisSaver` from separate `langgraph-checkpoint-*` packages, each with an `Async*` variant for async graphs. Resume any thread by `thread_id`. `interrupt_before` for human-in-the-loop pauses.
 
 ---
 
@@ -156,8 +156,8 @@ The pause is a lifecycle transition, not a sleep: state persists, the process ex
 ```python
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.types import interrupt, Command
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # pip install langgraph-checkpoint-sqlite
+from langgraph.types import Command
 import operator
 import anthropic
 import json
@@ -174,7 +174,7 @@ class AgentState(TypedDict):
 async def agent_step(state: AgentState) -> dict:
     """Single LLM call + tool execution."""
     resp = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         max_tokens=2048,
         messages=state["messages"],
         tools=YOUR_TOOLS,
@@ -217,16 +217,23 @@ graph.add_edge(START, "agent")
 graph.add_conditional_edges("agent", check_budget, {"tools": "tools", END: END})
 graph.add_edge("tools", "agent")
 
-# Compile with checkpointer + interrupt points
-checkpointer = SqliteSaver.from_conn_string("agent_state.db")
-compiled = graph.compile(
-    checkpointer=checkpointer,
-    interrupt_before=["tools"],  # Pause before EVERY tool call (or specific ones)
-)
+# Compile with checkpointer + interrupt points.
+# from_conn_string() is a CONTEXT MANAGER — the saver is only valid inside the
+# `async with` block, so the compiled graph must be built and driven in there too.
+# The graph's nodes are async, so use the ASYNC saver (langgraph-checkpoint-sqlite);
+# the sync SqliteSaver will not work under astream().
+async def main(thread_id: str, user_input: str) -> None:
+    async with AsyncSqliteSaver.from_conn_string("agent_state.db") as checkpointer:
+        compiled = graph.compile(
+            checkpointer=checkpointer,
+            interrupt_before=["tools"],  # Pause before EVERY tool call (or specific ones)
+        )
+        await run_durable_agent(compiled, thread_id, user_input)
+        await resume_after_approval(compiled, thread_id, approved=True)
 
 
 # Run with thread_id for durability
-async def run_durable_agent(thread_id: str, user_input: str) -> dict:
+async def run_durable_agent(compiled, thread_id: str, user_input: str) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     
     initial_state = {
@@ -243,7 +250,7 @@ async def run_durable_agent(thread_id: str, user_input: str) -> dict:
 
 
 # Resume after human approval
-async def resume_after_approval(thread_id: str, approved: bool) -> dict:
+async def resume_after_approval(compiled, thread_id: str, approved: bool) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
     
     if approved:
@@ -262,7 +269,7 @@ async def resume_after_approval(thread_id: str, approved: bool) -> dict:
 
 
 # Crash recovery (separate process restart)
-async def recover_from_crash(thread_id: str) -> None:
+async def recover_from_crash(compiled, thread_id: str) -> None:
     """Just call the same agent with the same thread_id - it resumes from last checkpoint."""
     config = {"configurable": {"thread_id": thread_id}}
     
@@ -275,11 +282,12 @@ async def recover_from_crash(thread_id: str) -> None:
 
 ```python
 from temporalio import workflow, activity
+from temporalio.common import RetryPolicy   # NOT workflow.RetryPolicy — it does not exist
 from datetime import timedelta
 
 
 @activity.defn
-async def llm_call(messages: list, model: str = "claude-sonnet-4-6") -> dict:
+async def llm_call(messages: list, model: str = "claude-sonnet-5") -> dict:
     """Idempotent: only called once per attempt; result cached."""
     resp = await client.messages.create(model=model, max_tokens=2048, messages=messages)
     return {
@@ -315,7 +323,7 @@ class DurableAgentWorkflow:
             resp = await workflow.execute_activity(
                 llm_call, messages,
                 start_to_close_timeout=timedelta(seconds=120),
-                retry_policy=workflow.RetryPolicy(maximum_attempts=3),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
             messages.append({"role": "assistant", "content": resp["content"]})
             
@@ -327,8 +335,11 @@ class DurableAgentWorkflow:
             tool_results = []
             for tu in tool_uses:
                 idempotency_key = f"{workflow.info().run_id}:{tu['id']}"
+                # Only ONE activity argument may be passed positionally;
+                # multiple arguments MUST go through args=[...]
                 result = await workflow.execute_activity(
-                    execute_tool, tu["name"], tu["input"], idempotency_key,
+                    execute_tool,
+                    args=[tu["name"], tu["input"], idempotency_key],
                     start_to_close_timeout=timedelta(seconds=60),
                 )
                 tool_results.append({"type": "tool_result", "tool_use_id": tu["id"], "content": result})
@@ -346,7 +357,7 @@ class DurableAgentWorkflow:
 
 **Put simply.** "Three attempts do not make a flaky call three times more likely to work — they make it fail only as often as the failure rate cubed, which is a far bigger win than the number 3 suggests."
 
-`retry_policy=workflow.RetryPolicy(maximum_attempts=3)` is one line, and its payoff compounds in the same way plan steps compound, only in your favour.
+`retry_policy=RetryPolicy(maximum_attempts=3)` is one line, and its payoff compounds in the same way plan steps compound, only in your favour.
 
 | Symbol | What it is |
 |--------|------------|
@@ -374,15 +385,15 @@ class DurableAgentWorkflow:
 
 ## 7. Real-World Examples
 
-**Anthropic Research multi-agent** uses checkpointing patterns for week-long research tasks; subagents persist state in case of restart.
+**Anthropic's multi-agent research system** is publicly described as needing durable execution: because subagents run for long stretches, Anthropic's engineering write-up notes that errors compound and that the system needs the ability to resume from where an agent was when it failed rather than restarting. Treat the specific mechanism as unpublished — only the requirement is on the record.
 
 **OpenHands** (formerly OpenDevin) persists agent state per session; sessions can be paused and resumed days later.
 
 **Cursor Background Agents** run for hours editing entire codebases; checkpointed via internal storage.
 
-**Production legal contract analysis agent**: processes 10K contracts/day; each contract is a workflow that can run hours. Temporal workflow per contract; survives deployments and partial failures.
+**Production legal contract analysis agent** (illustrative composite, not a named public deployment): processes 10K contracts/day; each contract is a workflow that can run hours. Temporal workflow per contract; survives deployments and partial failures.
 
-**Customer onboarding agent (B2B SaaS)**: 30-day workflow that includes agent emails (with response waits up to 7 days), document processing, escalation. Built on Temporal with multiple wait conditions.
+**Customer onboarding agent (B2B SaaS)** (illustrative composite): 30-day workflow that includes agent emails (with response waits up to 7 days), document processing, escalation. Built on Temporal with multiple wait conditions.
 
 ---
 
@@ -390,7 +401,7 @@ class DurableAgentWorkflow:
 
 | Dimension | Temporal | Inngest | Restate | LangGraph Checkpointing |
 |---|---|---|---|---|
-| Polyglot | Yes (Java, Go, Python, TS, .NET) | TypeScript, Python | Java, TS, Python | Python only |
+| Polyglot | Yes (Java, Go, Python, TS, .NET) | TypeScript, Python | TS, Python, Java, Kotlin, Go, Rust | Python only |
 | Setup overhead | High (cluster or cloud) | Low (SaaS) | Medium | Lowest |
 | Best fit | Complex multi-system workflows | Webhook-driven | High-throughput | LLM agents specifically |
 | Local dev | Temporal CLI dev server | Inngest CLI | Restate CLI | Just sqlite file |
@@ -489,7 +500,7 @@ The Temporal activity above caches with `ttl=86400`. That number has to be compa
 
 The failure this produces is subtle because it is invisible in testing: short runs pass, and only the long-tail workflow retries a step whose cache entry has since expired, re-sending an email that went out three weeks ago. The rule is `ttl > max expected T_wf`, with margin — for the 30-day onboarding agent that means a 60-day TTL or, better, durable persistence of the dedup record in the workflow's own state rather than an expiring cache. Note that the human-in-the-loop pause is what makes this bite: `T_wf` is dominated by waiting, not computing, so the workflow is cheap and long-lived at the same time.
 
-**War story**: A B2B onboarding agent built without checkpointing crashed during a routine deployment. 47 in-flight workflows lost their state. Customers received partially completed onboarding (some emails sent, some not). 11 hours of engineering to manually reconcile. Migrated to Temporal: zero re-occurrences in 8 months across hundreds of deployments.
+**War story** (anonymized, illustrative — not a verified public record): A B2B onboarding agent built without checkpointing crashed during a routine deployment. 47 in-flight workflows lost their state. Customers received partially completed onboarding (some emails sent, some not). 11 hours of engineering to manually reconcile. Migrated to Temporal: zero re-occurrences in 8 months across hundreds of deployments.
 
 ---
 
@@ -499,9 +510,9 @@ The failure this produces is subtle because it is invisible in testing: short ru
 |---|---|---|
 | Temporal | Workflow orchestration | Polyglot, mature, free self-host or Temporal Cloud |
 | Inngest | Durable functions | TS/Python, SaaS-first |
-| Restate | Durable promises | Java/TS/Python, strong consistency |
+| Restate | Durable promises | TS/Python/Java/Kotlin/Go/Rust, strong consistency |
 | LangGraph + checkpointers | Agent-specific durability | SqliteSaver, RedisSaver, PostgresSaver, MongoDBSaver |
-| Cadence | Temporal predecessor | Used at Uber; mostly superseded |
+| Cadence | Temporal's predecessor | Created and still maintained at Uber; Temporal is the fork by its original authors |
 | AWS Step Functions | Cloud-native workflows | JSON-based, no code agent native |
 | Airflow / Prefect / Dagster | DAG schedulers | Less LLM-specific |
 
@@ -573,7 +584,7 @@ Per checkpoint: ~5-50KB (messages + state). For an agent running 50 iterations: 
 
 ## 14. Case Study
 
-**Patent Analysis Agent at a Law Firm**
+**Patent Analysis Agent at a Law Firm** (illustrative composite — the numbers below are representative, not a published case)
 
 **Problem**: Patent attorneys requested an agent to analyze patent applications: read the 50-page document, identify claims, check prior art (search USPTO + Google Patents + academic databases), produce a patentability opinion. Typical task: 30-90 minutes; involves dozens of tool calls. Initial in-memory implementation crashed mid-analysis ~5% of the time (deployments + OOM), losing 20+ minutes of work each time.
 

@@ -71,9 +71,12 @@ Adding input (1.2M x 600 = 720M tokens/day at $0.15/M = $108/day): ~$194/day tot
 
 ```
 CRM sync operations:
-  5M prospects x 2 state changes/day avg = 10M Salesforce/HubSpot API calls/day
-  Salesforce API limit: 100,000 calls/org/day
-  Max active prospects per Salesforce org: 50,000 before hitting API limit
+  A prospect generates ~12 CRM calls across a 42-day sequence (10 touchpoint activity
+  logs + 2 state changes) = 12 / 42 = 0.286 calls/prospect/day
+  5M prospects x 0.286 = 1.43M Salesforce/HubSpot API calls/day platform-wide
+  Salesforce API limit: 100,000 calls/org/day (edition- and licence-dependent; 100K is
+  the working assumption for a mid-size Enterprise Edition org)
+  Max active prospects per Salesforce org: 100,000 / 0.286 = 350,000 (matches Section 10)
   Mitigation: batch CRM updates, coalesce multiple state changes per prospect per hour
 
 Email sending:
@@ -81,9 +84,11 @@ Email sending:
   Per sending domain limit (warmed): 5,000-10,000 emails/domain/day
   Required: 1 sending domain per customer (well within per-domain limits)
 
-Reply volume:
-  1.2M emails/day x 20% open rate x 5% reply rate = 12,000 replies/day
-  Peak reply rate: 12,000 / 86,400 seconds = 0.14 replies/sec (trivial)
+Reply volume (reply rate is measured against emails SENT, not against opens):
+  1.2M emails/day x 5% reply rate = 60,000 replies/day
+  Per customer: 60,000 / 500 = 120 replies/day = ~5 replies/hour
+  (this is the "normal max is 5/hour" baseline the reply-flood runbook keys off)
+  Peak reply rate: 60,000 / 86,400 seconds = 0.69 replies/sec (trivial)
 ```
 
 ### State Storage Estimates
@@ -98,7 +103,8 @@ Per-prospect sequence state:
 
 Active sequences in Redis (hot):
   5M sequences x 4 KB = 20 GB
-  Redis cluster: 5 nodes x 8 GB RAM with replication = 40 GB headroom
+  Redis cluster: 3 primary + 3 replica x 8 GB RAM = 48 GB raw, 24 GB usable
+  (matches the Section 10 sizing; replication factor 2 halves usable capacity)
 
 Cold archival in Postgres:
   5M active + 20M completed sequences (6-month retention)
@@ -279,7 +285,7 @@ class SequenceStateMachine:
     """
 
     REDIS_KEY_PREFIX = "seq:"
-    REDIS_TTL_SECONDS = 90 * 24 * 3600  # 90 days = max sequence length
+    REDIS_TTL_SECONDS = 90 * 24 * 3600  # 90 days; comfortably exceeds the 42-day max sequence
 
     def __init__(self, redis_client: redis.Redis, pg_conn: psycopg2.extensions.connection) -> None:
         self._redis = redis_client
@@ -977,7 +983,7 @@ class DeliverabilityManager:
     async def _update_active_domain(self, account_id: str, domain: str) -> None: raise NotImplementedError
 ```
 
-Concrete numbers: a new sending domain is limited to 20 emails per day during the first 7 days of warmup to establish sender reputation with mailbox providers. A warmed domain (30+ days old) can safely send 5,000-10,000 emails per day. Bounce rate above 5% or spam complaint rate above 0.1% triggers immediate domain rotation. Industry benchmarks for AI-personalized outreach: 35-40% open rate (vs 20% for generic), 5-8% reply rate (vs 1-2% for generic).
+Concrete numbers: a new sending domain is limited to 20 emails per day during the first 7 days of warmup to establish sender reputation with mailbox providers. A warmed domain (30+ days old) can safely send 5,000-10,000 emails per day. Bounce rate above 5% or spam complaint rate above 0.1% triggers immediate domain rotation. Working targets used throughout this design for AI-personalized outreach (this platform's own operating assumptions, not a published industry benchmark): 35-40% open rate against 20% for generic mail-merge, and 5-8% reply rate against 1-2% for generic.
 
 ---
 
@@ -997,17 +1003,39 @@ Concrete numbers: a new sending domain is limited to 20 emails per day during th
 
 ## 6. Real-World Implementations
 
-**Sierra AI** (founded 2023): enterprise AI platform for customer service and outbound sales. Uses voice, email, and chat simultaneously. Known for production reliability at Fortune 500 clients. Raised $110M Series B in 2024 at a reported $4.5B valuation. Integrates with existing CRM workflows rather than replacing them — positioned as augmentation, not replacement, which reduces enterprise sales friction. Co-founded by former Salesforce and OpenAI executives.
+Funding rounds, valuations and self-reported performance figures for private companies change
+constantly and are frequently mis-stated in secondary coverage. The descriptions below are
+limited to publicly observable product architecture; specific round sizes, valuations and
+vendor-reported uplift numbers are deliberately omitted rather than asserted unverified.
 
-**11x / Alice SDR** (founded 2023): AI SDR product where Alice autonomously handles full outbound cycle from research to meeting booking. Raised $24M Series A in 2024. Reported 40% improvement in meeting booking rate versus human SDRs for targeted accounts with strong ICP fit. Uses a proprietary research layer rather than Clay. Targets mid-market SaaS companies where full-time SDR headcount is a significant cost center.
+**Sierra AI**: enterprise conversational-AI platform, primarily customer service, with voice,
+email, and chat on one agent runtime. Integrates with existing CRM workflows rather than
+replacing them — positioned as augmentation, not replacement, which reduces enterprise sales
+friction. Co-founded by Salesforce's former co-CEO Bret Taylor (also chair of OpenAI's board)
+and Clay Bavor, a longtime Google executive.
 
-**Artisan AI / Ava** (founded 2023): built an AI sales persona named Ava marketed as a fully autonomous AI SDR. Raised $12M seed round in 2024. Reported 200,000 sign-ups within 3 months of public launch. Primary market is SMB where a full-time SDR at $60K-$90K salary is cost-prohibitive; Ava runs at approximately $1,500/month. Ava handles personalized research, email drafting, LinkedIn outreach, and follow-up sequences.
+**11x / Alice SDR**: AI SDR product where the "Alice" agent handles the outbound cycle from
+research to meeting booking. Uses a proprietary research layer rather than Clay. Targets
+mid-market SaaS companies where full-time SDR headcount is a significant cost center. Vendor
+claims of uplift versus human SDRs are marketing figures with no published methodology.
 
-**Clay** (founded 2022): technically a data enrichment and workflow platform rather than a full AI sales agent, but powers the research layer for most AI SDR companies. Aggregates 100+ data sources with waterfall enrichment — if source A does not have the email, try B, then C. Raised $62M Series B in 2024. Used by over 100,000 sales teams. Provides the data layer that makes personalization possible at scale.
+**Artisan AI / Ava**: an AI sales persona ("Ava") marketed as a fully autonomous AI SDR
+handling research, email drafting, LinkedIn outreach and follow-up sequences. Primary market
+is SMB, where a full-time SDR salary is cost-prohibitive relative to a per-seat SaaS price.
 
-**Lindy** (founded 2023): general-purpose AI agent platform with strong sales workflow support. Trigger-based architecture: new lead appears in CRM -> research -> draft outreach -> schedule follow-up. No-code workflow builder. Integrates with 3,000+ tools via Zapier and Make equivalents. Positioned as the platform layer; sales automation is one of dozens of supported use cases.
+**Clay**: a data enrichment and workflow platform rather than a full AI sales agent, but it
+powers the research layer for many AI SDR products. Aggregates dozens of data sources with
+waterfall enrichment — if source A does not have the email, try B, then C. Provides the data
+layer that makes personalization possible at scale.
 
-**AiSDR** (founded 2023): dedicated AI SDR platform. Reported handling 1M+ emails sent per month across customer base as of mid-2024. Focuses on reply personalization — the system tailors follow-up content based on the specific language and tone of the prospect's reply, not just a canned objection handler.
+**Lindy**: general-purpose AI agent platform with strong sales workflow support. Trigger-based
+architecture: new lead appears in CRM -> research -> draft outreach -> schedule follow-up.
+No-code workflow builder with broad third-party integration coverage. Positioned as the
+platform layer; sales automation is one of many supported use cases.
+
+**AiSDR**: dedicated AI SDR platform. Focuses on reply personalization — the system tailors
+follow-up content based on the specific language and tone of the prospect's reply, rather than
+selecting from a fixed set of canned objection handlers.
 
 ---
 
@@ -1033,10 +1061,10 @@ Concrete numbers: a new sending domain is limited to 20 emails per day during th
 | Dedicated IP warmup support | Yes | Yes | Yes (paid plan) | Yes |
 | Bounce / complaint webhooks | Yes | Yes (SNS) | Yes | Yes |
 | Analytics depth | Comprehensive | Basic | Good | Good |
-| Cost per 1K emails | $0.89 (Pro) | $0.10 | $1.50 | $0.80 |
+| Cost per 1K emails (list, mid-tier plan) | ~$0.89 | $0.10 | ~$1.50 | ~$0.80 |
 | DKIM / DMARC support | Yes | Yes | Yes | Yes |
 | Best for outbound sales | Yes (SendGrid Marketing) | Cost-optimized high volume | Transactional; not ideal for outbound | Good alternative |
-| Rate limits (default) | 150K/day free; custom on paid | No hard limit (reputation-based) | 45K/month free | 5K/day free |
+| Sending caps | Plan-based monthly quota | No hard cap; reputation- and quota-based | Plan-based monthly quota | Plan-based monthly quota |
 
 ### Prospect Enrichment Comparison
 
@@ -1048,8 +1076,12 @@ Concrete numbers: a new sending domain is limited to 20 emails per day during th
 | Company news | Yes (via Clearbit + news APIs) | Limited | No | Some |
 | GDPR compliance | Yes (data residency options) | Partial | Yes | Yes (LinkedIn ToS) |
 | API rate limits | Generous (credit-based) | 10K records/export | 50 requests/month (free) | LinkedIn API restricted |
-| Cost | $149-$599/month | $49-$99/user/month | $49-$149/month | $99/seat/month |
+| Pricing model | Credit-based subscription | Per-seat subscription | Tiered by lookups/month | Per-seat subscription |
 | Best for | AI SDR research layer | Full sales prospecting DB | Email verification | LinkedIn-first prospecting |
+
+Match-rate and email-accuracy figures in this table are vendor-published marketing claims with
+no shared benchmark or methodology; treat them as relative ordering, not measurements. List
+prices for all four change frequently — check current plans before building a budget on them.
 
 ---
 
@@ -1115,9 +1147,15 @@ Reference [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_app
 
 ## 9. Common Pitfalls and War Stories
 
-**Cross-tool opt-out list fragmentation (2024)**: a B2B SaaS company used three outbound tools simultaneously — an AI SDR platform for email, a separate LinkedIn automation tool, and a manual CRM for call follow-ups. When a prospect unsubscribed from the AI SDR email sequence, that opt-out was recorded in the AI SDR platform's database. It was not synchronized to the LinkedIn automation tool or the CRM. The LinkedIn tool sent two more DMs. The CRM triggered a call three days later. The prospect filed a formal complaint. Resolution: all three tools were configured to read from a shared suppression list endpoint — a simple API that any tool checks before any outreach. The suppression list was owned by the data team, not any individual tool vendor.
+The five incidents below are **illustrative composites**, not verified public record. The
+failure mechanisms and the fixes are real and recurring in outbound tooling; the counts,
+dollar figures and impression numbers are constructed to make the blast radius concrete and
+should not be cited as data. Only the statutory penalty ranges (TCPA, CAN-SPAM) are drawn
+from law rather than invented.
 
-**TCPA SMS violation — consent record gap**: a sales AI platform added SMS as a channel to boost reply rates. The engineers correctly implemented the DNC federal registry check. They did not implement the TCPA express written consent requirement — which is separate from and additional to the DNC check. Being absent from the DNC registry does not authorize commercial SMS contact. Forty-seven prospects were sent SMS messages without verifiable express written consent records. Potential exposure: $500-$1,500 per message x 47 = $23,500-$70,500. Resolution: SMS channel requires a positive TCPA consent key in Redis (`dnc:tcpa_consent:{prospect_id}`) before any send — not just the absence of a DNC entry. Consent records are ingested from the customer's lead capture forms via API.
+**Cross-tool opt-out list fragmentation**: a B2B SaaS company used three outbound tools simultaneously — an AI SDR platform for email, a separate LinkedIn automation tool, and a manual CRM for call follow-ups. When a prospect unsubscribed from the AI SDR email sequence, that opt-out was recorded in the AI SDR platform's database. It was not synchronized to the LinkedIn automation tool or the CRM. The LinkedIn tool sent two more DMs. The CRM triggered a call three days later. The prospect filed a formal complaint. Resolution: all three tools were configured to read from a shared suppression list endpoint — a simple API that any tool checks before any outreach. The suppression list was owned by the data team, not any individual tool vendor.
+
+**TCPA SMS violation — consent record gap**: a sales AI platform added SMS as a channel to boost reply rates. The engineers correctly implemented the DNC federal registry check. They did not implement the TCPA express written consent requirement — which is separate from and additional to the DNC check. Being absent from the DNC registry does not authorize commercial SMS contact. Forty-seven prospects were sent SMS messages without verifiable express written consent records. TCPA statutory damages are $500 per violation under 47 U.S.C. 227(b)(3), trebled to $1,500 for a willful or knowing violation, so exposure would be $500-$1,500 per message x 47 = $23,500-$70,500. Resolution: SMS channel requires a positive TCPA consent key in Redis (`dnc:tcpa_consent:{prospect_id}`) before any send — not just the absence of a DNC entry. Consent records are ingested from the customer's lead capture forms via API.
 
 **CRM data poisoning blocking sequences**: a sequence personalization step read `last_contact_date` from Salesforce to avoid re-contacting recently engaged prospects (skip if contacted within 14 days). A Salesforce data quality issue — a batch import job with a bug — overwrote 2,000 prospect records with `last_contact_date = today()` when the actual last contact was 2+ years ago. The sequence engine interpreted all 2,000 prospects as "recently contacted" and paused their sequences. No emails were sent for 14 days while the pause condition persisted. Lost pipeline: estimated 20 meetings that would have been booked in that window. Resolution: `last_contact_date` is used for pacing adjustments only, never as a hard block. Hard blocks require explicit status flags (`OPTED_OUT`, `HARD_NO`) set by the sequence state machine itself — never by raw CRM field values.
 
@@ -1161,8 +1199,8 @@ Personalization generation:
   With peak 3x factor:         60 workers (autoscale Kubernetes deployment)
 
 Reply classification:
-  12,000 replies/day * 400 tokens avg = 4.8M tokens/day
-  Cost at gpt-4o-mini: ~$3/day (negligible)
+  60,000 replies/day * 400 tokens avg (mostly input) = 24M tokens/day
+  Cost at gpt-4o-mini ($0.15/M input): ~$4/day (negligible)
 ```
 
 ### State Storage Sizing
@@ -1252,4 +1290,4 @@ Three evaluation horizons with different metrics. Short term (weekly): open rate
 
 **Q: What architectural change would you make if the customer base grew from 500 to 5,000 enterprise customers?**
 
-Two bottlenecks become critical at 10x scale. First, the Postgres instance handling 50M active sequences (10x current 5M) at 500 bytes of writes per state transition x 1.2M transitions per day x 10 = 600MB writes per day; Postgres handles this comfortably, but the connection pool becomes the bottleneck at 5,000 customers each with connection pool workers. Solution: introduce PgBouncer connection pooling in transaction mode, reducing Postgres connections from 5,000 to 50-100. Second, the Redis cluster holding 200GB of active sequence state (10x current 20GB) needs horizontal sharding. Redis Cluster with hash slots across 10 shard nodes handles this transparently. The bigger architectural question: at 50M active sequences, migrate the sequence state machine to Temporal, which provides built-in history, versioning, and recovery that the Redis+Postgres combination emulates manually. Temporal's operational overhead (Cassandra backend, Temporal server cluster) becomes justified when the state management engineering cost exceeds the Temporal operational cost.
+Two bottlenecks become critical at 10x scale. First, the Postgres instance handling 50M active sequences (10x current 5M) at 500 bytes of writes per state transition x 1.2M transitions per day x 10 = 6 GB of writes per day; Postgres handles this comfortably, but the connection pool becomes the bottleneck at 5,000 customers each with connection pool workers. Solution: introduce PgBouncer connection pooling in transaction mode, reducing Postgres connections from 5,000 to 50-100. Second, the Redis cluster holding 200GB of active sequence state (10x current 20GB) needs horizontal sharding. Redis Cluster with hash slots across 10 shard nodes handles this transparently. The bigger architectural question: at 50M active sequences, migrate the sequence state machine to Temporal, which provides built-in history, versioning, and recovery that the Redis+Postgres combination emulates manually. Temporal's operational overhead (Cassandra backend, Temporal server cluster) becomes justified when the state management engineering cost exceeds the Temporal operational cost.

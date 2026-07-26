@@ -42,7 +42,7 @@ At LLM scale the loop must additionally handle: gradient accumulation to simulat
 
 **Gradient clipping (norm 1.0) prevents exploding gradients.** The global gradient norm is computed across all parameters; if it exceeds the threshold (almost universally 1.0 for LLM work), every gradient tensor is scaled down proportionally. This does not change gradient *direction*, only magnitude.
 
-**Checkpoint every N steps to bound lost compute.** With N=500 steps and a throughput of 1000 tokens/step on 512 GPUs, a failure at step N-1 costs ~8 minutes of 512-GPU time — roughly $200 at H100 spot pricing. With N=5000 the same failure costs $2,000.
+**Checkpoint every N steps to bound lost compute.** Take a large pre-training step of ~6 seconds on 512 H100s (10 steps/minute) and H100 spot at $2.50/GPU-hour — 512 GPUs cost $1,280/hour, or ~$21/minute. With N=500, a failure at step N-1 wastes ~50 minutes of cluster time, roughly $1,100. With N=5,000 the same failure wastes ~500 minutes, roughly $11,000. All the dollar figures below use this same $21/minute basis.
 
 **Cosine LR schedule with linear warmup is standard for LLMs.** The warmup phase (500-2000 steps) ramps from near-zero to peak LR, allowing the optimizer's moment estimates to stabilize before large updates begin. The cosine decay then smoothly reduces LR to 10% of peak by the end of training.
 
@@ -74,7 +74,7 @@ At LLM scale the loop must additionally handle: gradient accumulation to simulat
 
 | Optimizer | Extra memory per param | LLM adoption | Notes |
 |-----------|----------------------|-------------|-------|
-| AdamW | 2 momentum tensors (8 bytes/param in fp32) | Dominant | 8× memory multiplier vs weights alone |
+| AdamW | 2 momentum tensors (8 bytes/param in fp32) | Dominant | With the fp32 master copy, optimizer state is 12 bytes/param — 6× the 2 bytes/param the BF16 weights occupy |
 | SGD + momentum | 1 tensor | Rare | Needs careful LR tuning, slower convergence |
 | Adafactor | ~0.1 tensors (factored) | T5, PaLM | Reduces optimizer memory 5-8× at convergence cost |
 | CAME / Lion | 1 tensor | Emerging | Half the optimizer memory of AdamW |
@@ -287,6 +287,7 @@ def train_broken(model, dataloader, optimizer, config):
 ### Fixed Training Loop
 
 ```python
+import contextlib
 import math
 import os
 import threading
@@ -371,11 +372,15 @@ class TrainingLoop:
                 # to avoid premature gradient all-reduces between accumulation steps.
                 is_last_micro_step = (micro_step == self.config.gradient_accumulation_steps - 1)
                 ctx = (
-                    torch.no_grad.__class__()  # dummy context
+                    contextlib.nullcontext()
                     if is_last_micro_step
                     else self.model.no_sync()
                 )
 
+                # backward() MUST run inside the no_sync() scope — the gradient
+                # reduction is triggered by autograd hooks fired during backward,
+                # so calling .backward() outside the context silently re-enables
+                # the per-micro-step all-reduce that no_sync() exists to suppress.
                 with ctx:
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.config.bf16):
                         output = self.model(**batch)
@@ -383,8 +388,8 @@ class TrainingLoop:
                         # N micro-steps will then equal the gradient for one
                         # large batch of N * micro_batch_size sequences.
                         loss = output.loss / self.config.gradient_accumulation_steps
+                    loss.backward()
 
-                loss.backward()
                 accumulated_loss += loss.item()
 
             # --- post-accumulation: clip, step, schedule ---
@@ -629,9 +634,11 @@ def eval_step(
 
 ## 7. Real-World Examples
 
-**Meta OPT-175B (2022)** — Meta published the training log for OPT-175B, documenting 35 hardware failures over a 2-month run. Each failure required restoring from the most recent checkpoint. The team checkpointed every 450-500 steps and used a manual restart procedure. The log explicitly shows multiple instances where loss spiked, was diagnosed as a corrupt batch, and was resolved by rolling back 500 steps and skipping the offending data shard. The published log (available in the OPT github repo) is the most detailed public account of failure modes in frontier-scale training.
+**Meta OPT-175B (2022)** — Meta published the training log for OPT-175B, trained on 992 80GB A100 GPUs. The paper reports "at least 35 manual restarts and cycling over 100 hosts over the course of 2 months" attributable to hardware failures, on top of 70+ automatic restarts. Each failure required restoring from the most recent checkpoint. The log shows instances where loss spiked, was diagnosed, and was resolved by rolling back to an earlier checkpoint and skipping the offending data shard. The published logbook (in the `metaseq` GitHub repo) is the most detailed public account of failure modes in frontier-scale training.
 
-**Meta Llama 2 (2023)** — The Llama 2 technical report describes training on 2 trillion tokens across 2000 A100 GPUs. Mixed precision (bf16) was used throughout. The team used cosine LR schedule with 2000-step warmup and a peak LR of 3×10^-4 for the 7B model, decayed to 3×10^-5. Gradient clipping at norm 1.0 was applied at every step. Checkpoints were saved every 1000 steps (~30 minutes of training time on 2000 GPUs).
+**Meta Llama 2 (2023)** — The Llama 2 technical report describes training on 2 trillion tokens on A100-80GB hardware (clusters of up to 2,000 GPUs). Mixed precision (bf16) was used throughout. The team used a cosine LR schedule with 2,000-step warmup and a peak LR of 3×10^-4 for the 7B model, decaying the final LR to 10% of peak (3×10^-5). Gradient clipping at norm 1.0 and weight decay 0.1 were applied at every step. (The report does not publish a checkpoint interval; the numbers above are the ones it states.)
+
+**Meta Llama 3 405B (2024)** — the best-documented public failure-rate figure. Over a 54-day pre-training snapshot on up to 16K H100 GPUs, Meta recorded 466 job interruptions: 47 planned maintenance events and 419 unexpected. About 78% of the unexpected interruptions were confirmed hardware issues, with GPU problems alone accounting for 58.7% of all unexpected issues. Despite this, automated checkpointing and cluster maintenance kept effective training time above 90%. Meta reports an overall BF16 Model FLOPs Utilization of 38–43% — treat that band, not higher folklore numbers, as the realistic ceiling for dense pre-training at scale.
 
 **EleutherAI GPT-NeoX-20B (2022)** — Trained using DeepSpeed ZeRO-3 (FSDP's equivalent in the DeepSpeed stack) on 96 A100 GPUs. The team encountered a class of bugs where ZeRO-3 and gradient checkpointing interacted to produce OOM at specific sequence lengths. The fix required disabling full activation checkpointing and using selective checkpointing only on attention layers — a fix that is now standard practice when combining FSDP with gradient checkpointing.
 
@@ -655,12 +662,16 @@ def eval_step(
 
 ### Checkpoint Frequency Tradeoffs
 
-| Frequency | Lost compute on failure | Storage cost (70B checkpoint = ~140 GB) | Overhead |
+Same basis as Section 3: 512 H100s, ~6 s/step (10 steps/min = 14,400 steps/day), $21/minute of cluster time, 70B bf16 checkpoint = ~140 GB (weights only; with fp32 optimizer state it is ~1 TB).
+
+| Frequency | Lost compute on failure | Checkpoints written/day (140 GB each) | Overhead |
 |-----------|------------------------|----------------------------------------|----------|
-| Every 100 steps | ~10 min on 512 GPUs ≈ $50 | 1.4 TB/day at 100 steps/min | ~5% |
-| Every 500 steps | ~50 min on 512 GPUs ≈ $250 | ~280 GB/day | ~1% |
-| Every 1000 steps | ~100 min on 512 GPUs ≈ $500 | ~140 GB/day | <1% |
-| Every step | ~2 min on 512 GPUs ≈ $10 | ~20 TB/day | ~50% |
+| Every 100 steps | ~10 min on 512 GPUs ≈ $210 | 144/day = ~20 TB/day | ~5% |
+| Every 500 steps | ~50 min on 512 GPUs ≈ $1,100 | 29/day = ~4 TB/day | ~1% |
+| Every 1000 steps | ~100 min on 512 GPUs ≈ $2,100 | 14/day = ~2 TB/day | <1% |
+| Every step | ~6 s on 512 GPUs ≈ $2 | 14,400/day = ~2 PB/day | ~50% |
+
+Written-bytes/day is the pre-rotation figure. Production runs retain only the last 3–5 checkpoints plus periodic milestones, so steady-state storage is bounded at ~500 GB–1 TB regardless of frequency; the write bandwidth, not the capacity, is what makes high-frequency checkpointing expensive.
 
 ### BF16 vs FP32 vs FP8
 
@@ -679,12 +690,12 @@ def eval_step(
 - Fine-tuning a 70B+ model and per-GPU GPU memory in bf16 (140 GB) exceeds hardware (80 GB H100).
 - You want ZeRO-3-equivalent optimizer state sharding without installing DeepSpeed.
 - The model is a standard transformer — FSDP's `transformer_auto_wrap_policy` handles layer detection automatically.
-- Using PyTorch 2.x where FSDP2 (DTensor-based) is available for improved performance.
+- Starting new work on current PyTorch: prefer FSDP2 (`fully_shard`, DTensor-based), since FSDP1 is now deprecated in the PyTorch docs. Reach for FSDP1 only to stay compatible with an existing training repo.
 
 **Use DDP when:**
 - The full model fits in GPU memory on each device — DDP has lower communication overhead than FSDP.
 - Debugging multi-GPU training: DDP's communication patterns are simpler to reason about.
-- Running on ≤8 GPUs with models ≤13B in BF16 (13B × 2 bytes = 26 GB, fits in 40 GB A100).
+- Running on ≤8 GPUs with a model whose *full training footprint* fits per GPU. Size this on all four terms, not just weights: a 13B full fine-tune needs 26 GB BF16 weights + 26 GB grads + 52 GB FP32 master + 104 GB AdamW moments ≈ 208 GB/GPU — far past a 40 GB A100. DDP is the right choice for a 13B model only under LoRA/QLoRA, where the optimizer state covers a fraction of a percent of the parameters.
 
 **Use gradient accumulation when:**
 - Your target effective batch size (e.g., 256 sequences) does not fit in GPU memory in a single forward pass.
@@ -692,10 +703,10 @@ def eval_step(
 
 **Do NOT use bf16 for specific operations:**
 - Loss functions that compute small differences between large numbers (e.g., direct softmax cross-entropy over large vocabularies before log-space normalization). PyTorch's `CrossEntropyLoss` is numerically stable in bf16 because it uses log-sum-exp internally; direct logit subtraction is not.
-- Use `torch.autocast` exclude list: `with torch.autocast("cuda", dtype=torch.bfloat16, enabled=True)` already excludes known-unstable ops automatically. Custom ops need manual exclusion via `@torch.cuda.amp.custom_fwd`.
+- Use `torch.autocast` exclude list: `with torch.autocast("cuda", dtype=torch.bfloat16, enabled=True)` already excludes known-unstable ops automatically. Custom ops need manual exclusion via `@torch.amp.custom_fwd(device_type="cuda")` — the older `torch.cuda.amp.custom_fwd` / `torch.cuda.amp.GradScaler` spellings are deprecated in favour of the device-generic `torch.amp` namespace.
 
-**Do NOT use FSDP + full gradient checkpointing simultaneously without `limit_all_gathers=True`:**
-- FSDP's all-gather materializes all layer parameters. Gradient checkpointing re-materializes activations during backward. Without `limit_all_gathers`, both materialize at the same time, multiplying peak memory instead of reducing it. Solution: use selective gradient checkpointing (attention layers only) or set `limit_all_gathers=True`.
+**Do NOT assume `limit_all_gathers=True` is the fix for FSDP + full gradient checkpointing OOM:**
+- FSDP's all-gather materializes a unit's full parameters. Gradient checkpointing re-materializes activations during backward. `limit_all_gathers` throttles prefetch so at most two consecutive FSDP units are materialized at once — but it **defaults to `True` in FSDP1**, so if you are OOMing, it is already on and is not the lever. The real levers are: wrap at a finer granularity (per transformer block, not per model), use selective activation checkpointing (attention layers only, not FFN), or reduce micro-batch sequence length and compensate with more accumulation steps.
 
 ---
 
@@ -709,9 +720,9 @@ The root cause: without dividing by `gradient_accumulation_steps`, the gradients
 
 Fix: divide loss by `gradient_accumulation_steps` immediately after computing it, before calling `.backward()`. This is the single most common training bug in custom loops.
 
-**Pitfall 2: Meta OPT-175B — 35 failures and $50K-$100K in lost compute per event**
+**Pitfall 2: Meta OPT-175B — 100+ restarts and $8K-$16K in lost compute per slow-to-diagnose event**
 
-Over the 2-month OPT-175B training run on 992 A100 GPUs, hardware failures occurred at an average rate of once every 1-2 days. At 992 × $2/hr (2022 A100 on-demand pricing), one hour of lost training time cost ~$2,000. Failures that required 4-8 hours to diagnose and restore cost $8,000-$16,000 per event. The team checkpointed every ~450 steps (30-40 minutes of training time), bounding recovery cost to approximately $1,000-$2,000 in lost GPU time per failure. Without checkpointing, a single mid-run failure could have required restarting from scratch — 992 GPUs × $2/hr × 30 days × 24 hours ≈ $1.4M.
+Over the 2-month OPT-175B training run on 992 A100-80GB GPUs, the team logged at least 35 manual restarts, 70+ automatic restarts, and cycled over 100 hosts — an average of roughly two restarts per day. At 992 × $2/hr (2022 A100 on-demand pricing), one hour of lost training time cost ~$2,000. Failures that required 4-8 hours to diagnose and restore cost $8,000-$16,000 per event. The team checkpointed every ~450 steps (30-40 minutes of training time), bounding recovery cost to approximately $1,000-$2,000 in lost GPU time per failure. Without checkpointing, a single mid-run failure could have required restarting from scratch — 992 GPUs × $2/hr × 30 days × 24 hours ≈ $1.4M.
 
 Lesson: checkpoint frequency is not an engineering nicety. At scale, it is the primary cost control mechanism for hardware failure resilience.
 
@@ -719,9 +730,9 @@ Lesson: checkpoint frequency is not an engineering nicety. At scale, it is the p
 
 A team training a 70B model on 8× H100 (80 GB each) enabled both FSDP `FULL_SHARD` and PyTorch's full `gradient_checkpointing_enable()`. Expected peak memory: ~20 GB (sharded 70B in bf16). Actual peak memory: 78 GB — nearly OOM.
 
-The interaction: during FSDP's backward pass, `all_gather` materializes each layer's full parameters (16 GB for a large FFN layer). Simultaneously, gradient checkpointing re-materializes activations for that same layer. Both events occur in the same backward hook, causing a ~32 GB spike for a single layer. With `limit_all_gathers=True`, FSDP queues all-gathers sequentially instead of prefetching, capping peak memory to one layer at a time. Selective activation checkpointing (only attention layers, not FFN) further reduces the spike.
+The interaction: during FSDP's backward pass, `all_gather` materializes each unit's full parameters (16 GB for a large FFN layer). Simultaneously, gradient checkpointing re-materializes activations for that same layer. Both events occur in the same backward hook, causing a ~32 GB spike for a single unit. The team's first instinct — "set `limit_all_gathers=True`" — was a no-op: it is already the FSDP1 default, and it only bounds prefetch to two consecutive units, which is exactly the 32 GB they were already seeing.
 
-The fix: pass `limit_all_gathers=True` to the FSDP constructor and use `model.enable_input_require_grads()` with per-attention-block checkpointing, not full-model checkpointing.
+The fix that actually worked: wrap at transformer-block granularity via `transformer_auto_wrap_policy` so a single FSDP unit is one decoder layer rather than a coarse module, and switch from full-model checkpointing to selective activation checkpointing (attention layers only, not FFN). That halves the co-resident footprint at the peak.
 
 **Pitfall 4: Corrupt checkpoint from spot instance preemption**
 
@@ -737,7 +748,7 @@ Fix: write to a temp path, compute a SHA-256 checksum of the written file, store
 
 | Tool | Category | Notes |
 |------|----------|-------|
-| PyTorch FSDP | Distributed training | Built into PyTorch 1.12+; FSDP2 (DTensor) in PyTorch 2.3+ |
+| PyTorch FSDP | Distributed training | FSDP1 (`FullyShardedDataParallel`) shipped in PyTorch 1.11–1.12 and is now **deprecated** — the PyTorch docs direct new work to FSDP2 (`fully_shard`), which represents shards as DTensors and gives lower, deterministic memory and communication-free sharded state dicts. The FSDP1 code in Section 6 is shown because it is what most existing training repos still run |
 | PyTorch DDP | Distributed training | Stable, simple, use when model fits in single GPU |
 | Hugging Face Accelerate | Training abstraction | Wraps DDP/FSDP/DeepSpeed; `accelerate launch` replaces `torchrun` |
 | Hugging Face Trainer | High-level training loop | Correct gradient accumulation, FSDP support, W&B integration |
@@ -785,25 +796,25 @@ Profile peak memory per layer using `torch.cuda.memory_stats()` immediately befo
 AdamW tracks exponentially weighted moving averages of gradients (first moment) and squared gradients (second moment), initialized to zero. In the first steps, these estimates are biased toward zero — the effective LR implied by the moment estimates is much smaller than the nominal LR. Linear warmup (ramp from near-zero to peak over 500-2000 steps) keeps the *applied* learning rate low while the moment estimates build up, avoiding large erratic updates before the second moment has stabilized. Without warmup, the first few batches apply enormous updates (since the denominator of Adam's update — the second moment — is near zero), often pushing the model into a very high loss region from which it is difficult to recover.
 
 **Q: How does eval-during-training frequency affect training throughput and diagnosis latency?**
-Running eval every 100 steps on 500 examples at batch=8 takes ~30 seconds on 8× H100, adding roughly 2% overhead to total training time. The benefit: divergence is detected at step ~110 instead of step ~1100, saving 1000 steps × 8 GPUs × ~$3/hr ≈ $12 in GPU cost and hours of downstream debugging. For very long training runs (>10K steps), eval every 200-500 steps is the practical tradeoff. For fine-tuning runs under 1000 steps, eval every 10-20 steps is feasible with minimal overhead. Key metric: eval perplexity (exp of eval cross-entropy loss). Perplexity rising while train loss falls signals overfitting; perplexity rising alongside train loss signals divergence.
+Running eval every 100 steps on 500 examples at batch=8 takes ~30 seconds on 8× H100, adding roughly 2% overhead to total training time. The benefit: divergence is detected at step ~110 instead of step ~1100. At roughly 6 s/step, those 1,000 wasted steps are ~100 minutes of 8-GPU time — 13.3 GPU-hours, about $40 at $3/GPU-hour — plus hours of downstream debugging, which is the larger cost. For very long training runs (>10K steps), eval every 200-500 steps is the practical tradeoff. For fine-tuning runs under 1000 steps, eval every 10-20 steps is feasible with minimal overhead. Key metric: eval perplexity (exp of eval cross-entropy loss). Perplexity rising while train loss falls signals overfitting; perplexity rising alongside train loss signals divergence.
 
 **Q: How does the DPO training loop differ from the SFT training loop?**
-SFT (supervised fine-tuning) is a standard language modeling loop: compute cross-entropy loss between predicted logits and ground-truth tokens for chosen completions, backpropagate, step. DPO (Direct Preference Optimization) requires two forward passes per batch: one through the policy model (the model being trained) and one through a frozen reference model (the SFT checkpoint). The DPO loss is `log_sigmoid(beta * (log_pi_theta(chosen) - log_pi_ref(chosen) - log_pi_theta(rejected) + log_pi_ref(rejected)))` — a contrastive loss over paired (chosen, rejected) completions. The reference model adds ~2× memory. Common implementation: keep the reference model on CPU and move batches to CPU for the reference forward pass, accepting slower throughput in exchange for avoiding doubling GPU memory.
+SFT (supervised fine-tuning) is a standard language modeling loop: compute cross-entropy loss between predicted logits and ground-truth tokens for chosen completions, backpropagate, step. DPO (Direct Preference Optimization) requires two forward passes per batch: one through the policy model (the model being trained) and one through a frozen reference model (the SFT checkpoint). The DPO loss is `log_sigmoid(beta * (log_pi_theta(chosen) - log_pi_ref(chosen) - log_pi_theta(rejected) + log_pi_ref(rejected)))` — a contrastive loss over paired (chosen, rejected) completions. A separate frozen reference model would roughly double memory, which is why production implementations avoid materializing one. TRL's `DPOTrainer` exposes two documented routes: pass `ref_model=None` with a PEFT adapter, in which case the reference log-probabilities come from the *same* weights with the adapter disabled (zero extra memory); or set `precompute_ref_log_probs=True`, which runs the reference forward once over the dataset up front so the reference model never has to be resident during training. CPU-offloading a full reference model is not a documented or practical option at 70B+ scale.
 
 **Q: What is the no_sync() context manager in FSDP/DDP and when must you use it?**
-In DDP and FSDP, each `.backward()` call normally triggers a gradient all-reduce across all workers. During gradient accumulation, you want to accumulate gradients across N micro-steps *before* synchronizing. Calling `model.no_sync()` as a context manager suppresses the all-reduce for that forward-backward micro-step, letting gradients accumulate locally. You call it on all but the last micro-step. Missing `no_sync()` causes N all-reduces per optimizer step instead of 1 — N× the communication overhead, plus incorrect gradient scaling. In FSDP specifically, the all-reduce happens at the reduce-scatter step during backward; `no_sync()` defers this to the final micro-step.
+In DDP and FSDP, each `.backward()` call normally triggers a gradient all-reduce across all workers. During gradient accumulation, you want to accumulate gradients across N micro-steps *before* synchronizing. Calling `model.no_sync()` as a context manager suppresses that collective for the enclosed forward-backward micro-step, letting gradients accumulate locally; you use it on all but the last micro-step. Note carefully what is and is not at stake: because the collective computes a mean over ranks and summation commutes with that mean, accumulating N reduced gradients gives the same result as reducing one accumulated gradient — so **omitting `no_sync()` is a pure performance bug, not a correctness bug**. It costs N all-reduces per optimizer step instead of 1, which at 512 GPUs is the difference between a communication-bound and a compute-bound run. The one thing that *is* a correctness bug is calling `.backward()` outside the `no_sync()` block: the reduction is fired by autograd hooks during backward, so the context has no effect unless backward runs inside it. In FSDP the collective is the reduce-scatter during backward; `no_sync()` defers it to the final micro-step.
 
 **Q: How do you compute the effective batch size and why does it matter for reproducibility?**
 Effective batch size = `batch_size_per_gpu × num_gpus × gradient_accumulation_steps`. A published recipe that trains with effective batch 512 should be reproduced with the same effective batch even if hardware differs. Changing effective batch size changes the gradient noise and often requires rescaling the learning rate (linear scaling rule: `lr_new = lr_base × (effective_batch_new / effective_batch_base)`, valid roughly up to 4× baseline batch). Mismatched effective batch size is a common reason a reproduction achieves different eval metrics than the paper.
 
 **Q: What is the `use_orig_params=True` flag in FSDP and when is it required?**
-By default, FSDP flattens all parameters in a shard into a single 1D tensor, replacing the original parameter names with internal names. This breaks modules that inspect their parameter names (e.g., some LoRA implementations, gradient checkpointing hooks). `use_orig_params=True` preserves the original parameter names and shapes externally, while FSDP still shards internally. It is required when using FSDP with `torch.compile`, with gradient checkpointing, or with any PEFT library (LoRA, Adapters) that references parameters by name. The cost is a small overhead in FSDP's bookkeeping (~2% on typical workloads).
+By default (`use_orig_params=False` in FSDP1), FSDP flattens all parameters in a shard into a single 1D `FlatParameter`, replacing the original parameter names with internal names. This breaks modules that inspect their parameter names (e.g., some LoRA implementations, gradient checkpointing hooks) and prevents per-parameter optimizer hyperparameter groups. `use_orig_params=True` preserves the original parameter names and shapes externally, while FSDP still shards internally. Set it when using FSDP with `torch.compile`, with any PEFT library (LoRA, Adapters) that references parameters by name, or when your optimizer needs multiple param groups. The cost is extra bookkeeping in FSDP's views; measure it on your own workload rather than assuming a fixed percentage. In FSDP2 the distinction disappears — `fully_shard` always keeps original parameters, backed by DTensor.
 
 **Q: How does mixed precision autocast interact with FSDP's MixedPrecision policy?**
 FSDP's `MixedPrecision(param_dtype=torch.bfloat16)` casts parameters to bf16 during all-gather (when they are materialized for forward or backward computation). `torch.autocast("cuda", dtype=torch.bfloat16)` casts activations and most operations inside its scope to bf16. Both must be enabled together for full memory savings: without FSDP's `MixedPrecision`, parameters are stored in FP32 and only cast during computation, saving activation memory but not parameter memory. The combination: parameters stored as BF16 shards (half the memory), activations computed in BF16 (half the memory), gradients reduced in FP32 (`reduce_dtype=torch.float32`) for numerical precision before being sharded back. Net result: ~50% reduction in peak memory vs full FP32 training.
 
 **Q: What optimizer state sharding does FSDP provide and what memory saving does it give for a 70B model?**
-With `ShardingStrategy.FULL_SHARD`, FSDP shards parameters, gradients, and optimizer states across all workers. For AdamW, each parameter has two associated momentum tensors (first and second moment), both stored in FP32. For a 70B model: parameters in BF16 = 140 GB; AdamW moments in FP32 = 2 × 280 GB = 560 GB. Total without sharding: 700 GB across 8 GPUs = 87.5 GB/GPU — OOM on 80 GB H100. With FULL_SHARD across 8 GPUs: parameters 140/8 = 17.5 GB, moments 560/8 = 70 GB, total 87.5/8 = ~11 GB for sharded state. Peak memory is higher due to all-gather during forward/backward (briefly materializes one layer's full parameters), but stays under 40-50 GB per GPU with careful layer wrapping.
+With `ShardingStrategy.FULL_SHARD`, FSDP shards parameters, gradients, and optimizer states across all workers. Count the bytes for a 70B model under standard mixed precision: BF16 parameters 70B × 2 = 140 GB; BF16 gradients 140 GB; the FP32 master weight copy 280 GB; and AdamW's two FP32 moments 2 × 280 GB = 560 GB. That is 1,120 GB of persistent state. Unsharded, every GPU would need all 1,120 GB — hopeless. FULL_SHARD divides it by the world size: across 8 GPUs that is 140 GB/GPU (still OOM on an 80 GB H100), across 16 GPUs 70 GB/GPU (fits, but leaves nothing for activations), across 32 GPUs 35 GB/GPU (the realistic floor, leaving ~45 GB for activations and the all-gather transient). This is why full-parameter 70B fine-tuning is a 4-node job, not a single-node one — the common "70B fits on 8×H100" claim is only true for LoRA or inference, where there is no optimizer state to shard.
 
 ---
 
@@ -813,9 +824,9 @@ With `ShardingStrategy.FULL_SHARD`, FSDP shards parameters, gradients, and optim
 
 2. **Use atomic checkpoint writes: write to a `.tmp` path, verify checksum, then rename.** An OS-level rename on the same filesystem is atomic; the final checkpoint path is either fully valid or absent. Never overwrite the existing checkpoint in place — a preempted spot instance mid-write corrupts the only valid save.
 
-3. **Enable `model.no_sync()` for all but the last gradient accumulation micro-step.** Without it, FSDP/DDP performs N all-reduces per optimizer step instead of 1, multiplying inter-GPU communication by N and potentially producing incorrect gradient scaling.
+3. **Enable `model.no_sync()` for all but the last gradient accumulation micro-step — and call `.backward()` inside it.** Without `no_sync()`, FSDP/DDP performs N all-reduces per optimizer step instead of 1, multiplying inter-GPU communication by N (a throughput bug, not a numerical one). With `no_sync()` but `.backward()` outside the context, you get the communication cost anyway, because the reduction fires from autograd hooks during backward.
 
-4. **Set `limit_all_gathers=True` in FSDP when using gradient checkpointing.** This prevents FSDP from prefetching the next layer's all-gather while the current layer's gradient checkpointing is re-materializing activations — the overlap causes OOM on 80 GB GPUs for large layers.
+4. **Wrap at transformer-block granularity when using gradient checkpointing; do not reach for `limit_all_gathers`.** `limit_all_gathers` already defaults to `True` in FSDP1, so setting it changes nothing. What bounds the peak is the size of one FSDP unit: `transformer_auto_wrap_policy` with `transformer_layer_cls={LlamaDecoderLayer}` plus selective (attention-only) activation checkpointing.
 
 5. **Use `reduce_dtype=torch.float32` in FSDP's MixedPrecision policy.** Gradient accumulation across many micro-steps in BF16 loses precision in the lower 9 bits of the mantissa. Reducing in FP32 costs ~10% more memory for gradients but significantly improves convergence stability for long training runs.
 
@@ -843,7 +854,7 @@ The training loop uses FSDP with `FULL_SHARD` and the `AsyncCheckpointManager` d
 
 The ChatGPT training pipeline (as described in the InstructGPT paper) has two training loops: one for the reward model (RM) and one for the PPO policy update. The RM training loop is straightforward SFT: binary cross-entropy on (chosen, rejected) pairs with the same gradient accumulation + FSDP structure as Section 6. The PPO loop is significantly more complex: it requires four models in memory simultaneously — the actor (policy, being trained), the critic (value head, being trained), the reference policy (frozen SFT checkpoint), and the reward model (frozen). With 175B parameters per model at FP16, the naive approach requires 4 × 350 GB = 1.4 TB of GPU memory.
 
-The practical solution used by OpenAI and replicated in open implementations (TRL's `PPOTrainer`, OpenRLHF): run the actor and critic on the training cluster with FSDP; offload the frozen reference policy and reward model to CPU, batching reference/reward forward passes on CPU between PPO gradient steps. The PPO inner loop accumulates a rollout buffer of 1024-4096 (state, action, reward, value) tuples, then performs multiple epochs of PPO gradient updates on the buffer. Gradient clipping is set at norm 1.0 for both actor and critic; the critic's value loss is clipped with `clip_eps=0.2` (standard PPO hyperparameter). Eval-during-training measures reward model score distribution on a held-out prompt set every 50 PPO steps.
+Open implementations (TRL's `PPOTrainer`, OpenRLHF) handle this by keeping all four models on GPU but shrinking what has to exist: the reference policy is usually the base weights with the trained LoRA adapter disabled rather than a second copy, the critic shares the actor's trunk with a small value head, and the reward model runs on a separate inference pool addressed over RPC. OpenAI has not published the memory layout it used for InstructGPT, so treat any specific placement attributed to them as inference, not record. What is not viable is CPU-offloading a 175B reference or reward model: the per-batch host-device transfer alone would dominate the step time. The PPO inner loop accumulates a rollout buffer of 1024-4096 (state, action, reward, value) tuples, then performs multiple epochs of PPO gradient updates on the buffer. Gradient clipping is set at norm 1.0 for both actor and critic; the critic's value loss is clipped with `clip_eps=0.2` (standard PPO hyperparameter). Eval-during-training measures reward model score distribution on a held-out prompt set every 50 PPO steps.
 
 ### design_legal_ai_platform — Domain-Adaptive Continued Pre-Training on Legal Corpora
 

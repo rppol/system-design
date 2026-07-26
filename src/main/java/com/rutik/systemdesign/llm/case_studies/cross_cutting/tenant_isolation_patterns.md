@@ -18,7 +18,7 @@ Related modules:
 
 Tenant isolation in LLM applications is fundamentally harder than in traditional SaaS for four reasons that do not exist in relational-database multi-tenancy.
 
-First, vector similarity search is not row-level. A shared HNSW index stores all tenant embeddings in the same graph structure. Even with a metadata filter, the approximate nearest-neighbor search traverses graph nodes that belong to other tenants before discarding them. A misconfigured or omitted filter silently returns cross-tenant results with no error. Worse, an adversary with query access can determine with ~75% probability whether a specific document is indexed (membership inference) because similar embeddings cluster regardless of tenant ownership.
+First, vector similarity search is not row-level. A shared HNSW index stores all tenant embeddings in the same graph structure. Even with a metadata filter, the approximate nearest-neighbor search traverses graph nodes that belong to other tenants before discarding them. A misconfigured or omitted filter silently returns cross-tenant results with no error. Worse, a shared index is structurally vulnerable to membership inference: an adversary with query access can probe whether a specific document is indexed, because similar embeddings cluster in the graph regardless of tenant ownership and the score distribution for a near-exact match is visibly separated from that of unrelated text. Treat the specific success rates quoted for such attacks as setup-dependent — what matters architecturally is that the leak channel exists at all.
 
 Second, shared KV cache in LLM inference servers can expose system prompt content. vLLM's prefix caching re-uses the KV computation for identical prompt prefixes. If two tenants are routed to the same GPU worker and their system prompts share a prefix, vLLM may serve cached KV states computed from one tenant's context to another tenant's generation.
 
@@ -68,7 +68,7 @@ The critical weakness: the filter is a runtime software configuration. A single 
 
 Each tenant gets their own named collection with a dedicated HNSW graph. A tenant router maps incoming requests to the correct collection name. Cross-tenant queries are impossible at the API level — there is no filter to omit because each collection only contains one tenant's data.
 
-Cost: each collection requires its own HNSW graph in RAM. Qdrant uses approximately 50–100 MB of RAM per collection for the HNSW graph at 1M vectors. 1000 SMB tenants with 10k vectors each = ~50 GB RAM — feasible on a single large machine but not cost-effective.
+Cost: each collection requires its own HNSW graph in RAM. Qdrant's own sizing rule is roughly `vectors x dimensions x 4 bytes x 1.5`, so the footprint scales with the tenant's vector count, not with a flat per-collection constant: ~50–100 MB for a 1M-vector 768-dim collection, but only tens of MB for a 10k-vector one. 1000 SMB tenants at 10k vectors each is therefore tens of GB, not the ~50 GB a naive "50 MB per collection regardless of size" estimate would predict — the real cost driver at that end of the range is per-collection fixed overhead and segment count, which is why collection-per-tenant stops being cost-effective long before RAM runs out.
 
 ### Strategy 3: Per-Tenant Cluster
 
@@ -212,15 +212,20 @@ client = QdrantClient("localhost", port=6333)
 
 # BROKEN: omits tenant_id filter — returns results from ALL tenants
 def retrieve_broken(query_vector: list[float], limit: int = 10) -> list[ScoredPoint]:
-    results = client.search(
+    results = client.query_points(
         collection_name="shared_knowledge_base",
-        query_vector=query_vector,
-        limit=limit
+        query=query_vector,
+        limit=limit,
         # Missing: query_filter=Filter(must=[FieldCondition(...)])
     )
-    return results
+    return results.points
     # Returns docs from tenant_A, tenant_B, tenant_C indiscriminately
 ```
+
+Note the API surface: `QdrantClient.search()` was superseded by the universal
+`query_points()` endpoint and is no longer present on the current client, so the
+vector argument is `query=` (not `query_vector=`) and the hits live on
+`response.points` rather than the response itself.
 
 ### FIX: TenantAwareRetriever
 
@@ -235,6 +240,7 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
     ScoredPoint,
+    SearchParams,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,12 +286,13 @@ class TenantAwareRetriever:
             ]
         )
 
-        results = self._client.search(
+        results = self._client.query_points(
             collection_name=self._collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=tenant_filter,
             limit=limit,
-            search_params={"hnsw_ef": self._ef_search},  # compensate filter recall loss
+            # compensate filter recall loss; must be a SearchParams model
+            search_params=SearchParams(hnsw_ef=self._ef_search),
             with_payload=True,
         )
 
@@ -295,7 +302,7 @@ class TenantAwareRetriever:
                 metadata=r.payload,
                 score=r.score,
             )
-            for r in results
+            for r in results.points
         ]
 
         logger.info(
@@ -339,6 +346,10 @@ class ACLPushdownRetriever:
                     match=MatchValue(value=ctx.tenant_id),
                 ),
             ],
+            # `should` already means "at least one of these must match" when it
+            # appears alongside `must`. Qdrant's Filter model forbids extra
+            # fields, so a `minimum_should_match=` kwarg raises a validation
+            # error — the knob for a higher floor is `min_should=MinShould(...)`.
             should=[
                 FieldCondition(
                     key="allowed_users",
@@ -349,12 +360,11 @@ class ACLPushdownRetriever:
                     match=MatchAny(any=ctx.acl_teams),
                 ),
             ],
-            minimum_should_match=1,    # at least one `should` clause must match
         )
 
-        results = self._client.search(
+        results = self._client.query_points(
             collection_name=self._collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=acl_filter,
             limit=limit,
             with_payload=True,
@@ -366,7 +376,7 @@ class ACLPushdownRetriever:
                 metadata=r.payload,
                 score=r.score,
             )
-            for r in results
+            for r in results.points
         ]
 ```
 
@@ -404,10 +414,22 @@ class NoisyNeighborRateLimiter:
         cost_tokens: int = 1,
     ) -> None:
         """
-        Raises TenantQuotaExceeded if bucket does not have enough tokens.
-        Atomically consumes cost_tokens from the bucket.
+        Raises TenantQuotaExceeded if the bucket lacks enough tokens.
+
+        CAVEAT: this read-then-write is NOT atomic. A `MULTI`/`EXEC` pipeline only
+        batches commands; it does not close the gap between the GET round trip and
+        the SET round trip, so concurrent workers can both read the same balance
+        and both spend it. That is acceptable for coarse noisy-neighbour damping
+        (worst case a tenant briefly exceeds its quota by the number of concurrent
+        workers). For a hard limit, move the whole refill-check-consume into a Lua
+        script executed with EVAL, or use `WATCH` on the two keys and retry on
+        `WatchError`, so the sequence really is atomic.
         """
-        now = time.monotonic()
+        # time.time(), NOT time.monotonic(): the timestamp is written to Redis and
+        # read back by other processes and other replicas. Monotonic clocks have a
+        # process-local, arbitrary epoch, so a value written by one worker is
+        # meaningless to another — the elapsed-time refill would be garbage.
+        now = time.time()
         burst_capacity = rate_limit_rps * 2
 
         tokens_key = f"rl:{tenant_id}:tokens"
@@ -494,15 +516,15 @@ def sanitize_retrieved_chunks(
 
 ## 7. Real-World Examples
 
-**Glean** uses a hierarchical isolation model: org-level, team-level, and document-level permissions are all pushed into the retrieval layer. Every search query from an employee carries an ACL token encoding their team memberships and document-level access grants. Glean's vector index applies all three filter levels simultaneously — not sequentially — to avoid the recall problem of chained post-retrieval filtering.
+**Glean** builds enterprise search over connected SaaS sources and its documented product guarantee is that results respect each source system's existing permissions — a user never sees a document they could not open directly. Achieving that means pushing org-, team- and document-level permissions into the retrieval layer and evaluating all levels in one pass rather than chaining post-retrieval discards, which would bias recall toward whatever the highest-volume permission set contains. Glean's index internals are not published.
 
-**Notion AI** operates at workspace-level isolation as the primary boundary. Within a workspace, block-level permissions replicate Notion's existing permission graph into the vector metadata on ingestion. A user querying Notion AI sees only blocks they can view in the Notion UI. The ACL is kept in sync via a CDC pipeline from the Notion permission store to the vector DB metadata. Staleness: permission revocations propagate within ~30 seconds.
+**Notion AI** operates at workspace-level isolation as the primary boundary, and its documented product behaviour is that AI results respect the permissions a user already has — a user querying Notion AI sees only blocks they can view in the Notion UI. The natural implementation is to replicate the existing permission graph into retrieval metadata on ingestion and keep it current with a change-data-capture pipeline; Notion has not published its retrieval stack or its ACL propagation lag, so treat the specific pipeline and staleness figures below as the design pattern rather than a description of their system.
 
-**Harvey AI** applies per-matter isolation for legal data. Each legal matter (case) is a separate collection. An attorney's query is routed only to the collections corresponding to matters they are assigned to. The isolation is enforced at the Harvey API gateway, which resolves matter assignments from a separate authorization service before routing to the correct collections. Cross-matter contamination would constitute an attorney-client privilege violation — a regulatory breach, not just a product bug.
+**Legal AI platforms** apply per-matter isolation: each legal matter (case) is its own retrieval scope, and an attorney's query is routed only to the matters they are assigned to, with assignment resolved from an authorization service at query time rather than baked into a session at login. Harvey AI is the best-known vendor in this category, but its internal architecture is not public — what is not in doubt is the constraint that forces this design, since cross-matter contamination is an attorney-client privilege violation, a regulatory breach rather than merely a product bug.
 
-**Intercom** segments each customer's knowledge base into a per-account collection. When a support agent queries Fin (Intercom's AI), the query is scoped to the account's articles and resolved tickets. Intercom cites this isolation as a key part of their SOC2 Type II compliance controls.
+**Intercom's Fin** answers from the customer's own content — their help-centre articles and other sources they connect — so the retrieval scope is the account, not a shared corpus. Intercom publishes SOC 2 Type II attestation for its platform; the specific internal partitioning it uses to enforce that scope is not documented publicly.
 
-**Pinecone Namespaces** were introduced specifically to solve the noisy-neighbor problem in multi-tenant deployments. Pinecone's implementation gives each namespace its own segment of the index with independent compaction, making namespace-scoped queries independent of other namespaces' write load. The design document explains that namespaces are more than a metadata filter — they are a first-class index partitioning primitive.
+**Pinecone namespaces** are the vendor's documented mechanism for multitenancy: Pinecone partitions an index into namespaces and a query is scoped to a single namespace, so it never touches other namespaces' vectors. That is the operative difference from a metadata filter — the partition is a property of the index rather than a predicate evaluated over shared candidates — and it is why Pinecone recommends namespace-per-tenant rather than a `tenant_id` filter.
 
 ---
 
@@ -589,9 +611,9 @@ up in isolation strength costs roughly an order of magnitude more per 10k tenant
 
 ## 10. Common Pitfalls
 
-**Pitfall 1: Pinecone noisy-neighbor performance cliff at high filter cardinality (2023)**
+**Pitfall 1: the high-cardinality metadata-filter cliff (illustrative composite)**
 
-A SaaS platform serving 15,000 SMB tenants on a shared Pinecone index used the `tenant_id` metadata filter. At launch, p99 query latency was 120 ms. As the tenant count grew past 10,000, p99 climbed to 800 ms — a 6x degradation with no code change. Root cause: Pinecone's HNSW post-filter mechanism iterates through candidate nodes and discards those that do not match the filter. When 14,999 of 15,000 tenants' documents are discarded per query, the effective selectivity is 0.007% — the filter becomes nearly equivalent to a full scan. Fix: migrate to Pinecone namespaces (native index partitioning) so each tenant's query operates only on their namespace's graph segment. After migration, p99 returned to 130 ms across all tenants. Lesson: metadata filter is not a substitute for index partitioning at high cardinality.
+A SaaS platform serving tens of thousands of SMB tenants on one shared index scoped every query with a `tenant_id` metadata filter. Latency was fine at launch and degraded severely as tenant count grew, with no code change. The mechanism is general to graph-based ANN indexes: the filter is evaluated against candidates the graph traversal surfaces, so when the filter discards essentially every candidate the search degrades toward a scan. Note that this is a property of the *approach*, not of any one vendor — Pinecone does not publish its index internals, so do not assume it is plain HNSW. Fix: use a native partitioning primitive (Pinecone namespaces, Weaviate multi-tenancy, or a collection per tenant) so a tenant's query traverses only their own segment. Lesson: a metadata filter is not a substitute for index partitioning at high cardinality.
 
 **Pitfall 2: Qdrant scalar quantization breaking filter pushdown**
 
@@ -599,9 +621,9 @@ An engineering team enabled int8 scalar quantization on a 10M-vector Qdrant coll
 
 **Pitfall 3: Vector DB membership inference attack**
 
-A security researcher at a legal tech company demonstrated that a tenant with standard query access could determine with 73% confidence whether a specific document belonged to another tenant on the same Qdrant collection. The attack: generate an embedding for a known document phrase, query the collection with the tenant's metadata filter omitted (exploiting a bug), and observe the cosine similarity distribution. Documents from the target cluster around cosine similarity 0.92–0.97; random documents cluster around 0.55–0.65. The 73% confidence comes from the bimodal distribution being distinguishable even with filter enforcement, because the HNSW graph structure reflects document proximity regardless of tenant. Root cause: the shared HNSW graph encodes cross-tenant embedding relationships. Fix: per-tenant collections make cross-collection queries impossible at the Qdrant API level — the attacker cannot query another tenant's collection even if they know its name, because collection-level auth prevents it. Metadata filters do not protect against membership inference because they operate after graph traversal.
+The attack shape (illustrative, not a published incident): a tenant with standard query access embeds a phrase from a document they suspect exists, queries the shared collection, and reads the score distribution. A near-exact match returns a similarity far above the background distribution of unrelated text, so presence is inferable from the score alone even without seeing the payload — and if a filter is ever omitted by a bug, directly. Do not anchor on specific confidence percentages or score bands: they depend entirely on the embedding model, the corpus, and how much the attacker already knows. The structural point is that a shared HNSW graph encodes cross-tenant proximity, so the channel exists regardless of tuning. Root cause: the shared HNSW graph encodes cross-tenant embedding relationships. Fix: per-tenant collections make cross-collection queries impossible at the Qdrant API level — the attacker cannot query another tenant's collection even if they know its name, because collection-level auth prevents it. Metadata filters do not protect against membership inference because they operate after graph traversal.
 
-**Pitfall 4: LLM context cross-contamination from routing bug**
+**Pitfall 4: LLM context cross-contamination from a routing bug (illustrative)**
 
 A customer support platform for 200 enterprise accounts had a cache key collision in its tenant router. When the tenant router cached the collection name mapping, a bug caused the cache to store `tenant_id -> collection_name` pairs with a shared Redis key prefix that did not include environment (staging vs production). On Black Friday, a staging test that used `tenant_id = 1001` evicted the production entry for a real tenant with the same ID. For 47 minutes, tenant 1001's queries were routed to the staging collection (containing synthetic test data) and the staging tenant's queries were routed to production (containing real customer contracts). Three tenant 1001 users received responses that cited production contract terms from another company. The company received a breach notification obligation under their enterprise agreements. Fix: (1) cache keys must always include environment, region, and collection type as separate segments; (2) `sanitize_retrieved_chunks()` as a redundant gate — it would have caught the cross-tenant chunk in the context before it reached the LLM; (3) add a canary assertion that logs a SECURITY_ALERT if any retrieved chunk's `tenant_id` does not exactly match `ctx.tenant_id`.
 
@@ -614,7 +636,7 @@ A customer support platform for 200 enterprise accounts had a cache key collisio
 | Database | Namespace / Partition | Per-Collection | Payload Filter | Membership Inference Risk |
 |----------|-----------------------|---------------|----------------|--------------------------|
 | Qdrant | No native namespace; use collections | Yes — first-class | Yes — payload index | High (shared index) |
-| Pinecone | Yes — namespaces (native partitioning) | No (single index per project) | Yes | Medium (namespace isolates graph) |
+| Pinecone | Yes — namespaces (documented multitenancy primitive; a query is scoped to one namespace) | Multiple indexes per project are supported, but namespace-per-tenant is the recommended pattern | Yes — metadata filters | Medium (namespace scopes the query away from other tenants' vectors) |
 | Weaviate | Yes — multi-tenancy (isolated HNSW per tenant) | Yes | Yes | Low (isolated HNSW) |
 | Chroma | Collections | Yes | Yes | High (shared HNSW) |
 | pgvector | Row-level security (PostgreSQL RLS) | Schema per tenant | Yes (SQL WHERE) | Low (SQL isolation) |
@@ -644,13 +666,13 @@ A metadata filter is a runtime software configuration applied at query time; it 
 HNSW builds a graph connecting similar vectors regardless of tenant. When a tenant filter requires discarding 99.9% of graph candidates, the search algorithm traverses many irrelevant nodes before finding enough matching results. This degrades from sub-linear to near-linear scan at extreme filter selectivity. Compensation options: (1) raise `ef_search` from 128 to 256–512 to explore more candidates before filtering, accepting 1–3 ms additional latency; (2) enable payload indexing on `tenant_id` to pre-filter using a B-tree index before HNSW traversal; (3) switch to per-tenant collections or Pinecone namespaces, which eliminate the cross-tenant traversal entirely. The Pinecone namespace model is the most effective because it partitions the graph itself.
 
 **Q: What is vector DB membership inference and how do you defend against it?**
-Membership inference is an attack where a tenant with query access determines whether a specific document exists in the shared index by observing cosine similarity scores. Documents cluster at similarity 0.92–0.97 against their own embedding; random vectors cluster at 0.55–0.65. An attacker queries repeatedly with variants of a target phrase and uses the bimodal distribution to infer presence. Metadata filters do not defend against this because the HNSW graph structure encodes cross-tenant proximity — filter is applied after traversal. The only defense is architectural: per-tenant collections or dedicated clusters where the API itself blocks cross-tenant queries.
+Membership inference is an attack where a tenant with query access determines whether a specific document exists in the shared index by observing similarity scores. A near-exact match scores far above the background distribution of unrelated text, so an attacker who queries repeatedly with variants of a target phrase can read presence off the gap. The exact score bands and hit rates depend on the embedding model and corpus, so do not treat any published percentage as a constant. Metadata filters do not defend against this because the HNSW graph structure encodes cross-tenant proximity — filter is applied after traversal. The only defense is architectural: per-tenant collections or dedicated clusters where the API itself blocks cross-tenant queries.
 
 **Q: How do you safely propagate tenant_id through a Python request stack without trusting the caller?**
 Extract tenant_id from the validated JWT or session token in the authentication middleware — never from request body or query parameters. Store it in a frozen `TenantContext` dataclass and pass it explicitly as a parameter through every function that accesses tenant data. Alternatively, use a thread-local or contextvars context to store TenantContext for the duration of the request. Never re-derive tenant_id from user-supplied data downstream — an attacker who can inject a different tenant_id into a downstream function can access another tenant's data. The rule: tenant_id is a server-side claim, not a client-side claim.
 
 **Q: How do you implement noisy-neighbor mitigation for tenant QPS without introducing significant latency?**
-Use a per-tenant token bucket in Redis. At the start of each request, atomically check and consume tokens using a Redis pipeline (two commands: GET tokens + GET timestamp, then SET new_tokens + SET timestamp). The round-trip adds 0.3–0.8 ms. Bucket parameters: rate = plan_tier_rps, burst = rate * 2 (allow 2-second burst). Raise `TenantQuotaExceeded` if tokens are insufficient. This approach is O(1) per request regardless of number of tenants, and Redis pipeline ensures atomic read-modify-write without distributed locking. For very high QPS tenants (> 500 RPS), move to a local token bucket with periodic Redis sync to reduce Redis round-trips.
+Use a per-tenant token bucket in Redis. At the start of each request, atomically check and consume tokens using a Redis pipeline (two commands: GET tokens + GET timestamp, then SET new_tokens + SET timestamp). The round-trip adds 0.3–0.8 ms. Bucket parameters: rate = plan_tier_rps, burst = rate * 2 (allow 2-second burst). Raise `TenantQuotaExceeded` if tokens are insufficient. This approach is O(1) per request regardless of number of tenants. Be honest about the concurrency guarantee, though: a pipeline batches commands but does not make GET-then-SET atomic, so concurrent workers can double-spend a balance; for a hard limit, put the refill-check-consume in a Lua script run with EVAL (or WATCH the keys and retry). For very high QPS tenants (> 500 RPS), move to a local token bucket with periodic Redis sync to reduce Redis round-trips.
 
 **Q: How do you handle GDPR Article 17 (right to erasure) for a tenant leaving the platform?**
 With metadata filter: you must scan the entire collection for all vectors with `tenant_id == departing_tenant`, which is O(n) with n = total vectors across all tenants. For a 10M-vector shared collection, this can take 10–30 minutes and impacts other tenants' read performance during the scan. With per-tenant collection: drop the collection — O(1), completes in seconds, deletes all vectors atomically. With dedicated cluster: destroy the cluster and its storage volumes. The GDPR compliance argument strongly favors per-tenant collections or dedicated clusters over metadata filter for any data subject to right-to-erasure requests.
@@ -665,7 +687,7 @@ vLLM's prefix caching computes KV states for a prompt prefix once and reuses the
 Add a `sanitize_retrieved_chunks` gate before context assembly that compares each chunk's stored `tenant_id` against `ctx.tenant_id` and raises a structured SECURITY_ALERT log event for any mismatch. Route these logs to a high-priority alert channel (PagerDuty P1). Additionally, in output filtering, run a regex scan for known-sensitive patterns from neighboring tenants' data (company names, contract numbers) — this is a heuristic but catches routing bugs quickly. Set up a canary test suite that runs synthetic cross-tenant queries in production and asserts that zero cross-tenant results are returned; run this every 5 minutes and alert on any failure.
 
 **Q: What are the cost economics of hybrid isolation (SMB on namespace, enterprise on dedicated collection)?**
-A platform with 10,000 SMB tenants and 100 enterprise tenants: SMB tenants on shared Qdrant cluster at $500/month total = $0.05/tenant/month. Enterprise tenants each on dedicated Qdrant collection, allocated on a shared node (10 per node at $500/month per node): $5/tenant/month. Fortune 500 accounts on dedicated clusters at $200–2000/month depending on vector count. Weighted average blended cost: ~$0.5/tenant/month — achievable while providing the isolation guarantee that closes enterprise deals. The revenue difference between SMB ($50/month) and enterprise ($5000/month) justifies the 100x isolation cost difference.
+A platform with 10,000 SMB tenants and 100 enterprise tenants: SMB tenants on shared Qdrant cluster at $500/month total = $0.05/tenant/month. Enterprise tenants each on a dedicated Qdrant collection, packed onto shared nodes (100 collections per node at $500/month per node): $5/tenant/month. Fortune 500 accounts on dedicated clusters at $200–2000/month depending on vector count. Weighted average blended cost: (10,000 x $0.05 + 100 x $5) / 10,100 = ~$0.10/tenant/month — achievable while providing the isolation guarantee that closes enterprise deals. The revenue difference between SMB ($50/month) and enterprise ($5000/month) justifies the 100x isolation cost difference.
 
 **Q: How do you enforce data residency requirements in a vector DB deployment?**
 Data residency requires that tenant data is stored and processed only within a specified geographic region. Metadata filters cannot enforce this — the shared index is in one region. Per-tenant collections on a shared node cannot enforce this — the node is in one region. Only dedicated clusters support residency: deploy a Qdrant or Pinecone cluster in eu-central-1 for EU tenants, us-east-1 for US tenants. The API gateway must route each request to the correct regional cluster based on the tenant's registered data region, stored in the TenantContext. Never route EU tenants' queries to US clusters even for failover — a cross-region failover for a GDPR-regulated tenant is itself a data transfer that requires legal justification.
@@ -683,7 +705,7 @@ Create a synthetic test suite with three tenants (A, B, C) and known documents f
 When you fine-tune an embedding model on a new dataset, the embedding space shifts — cosine similarity between the same two texts changes. If tenant A fine-tuned on their legal corpus shifts the embedding space toward their terminology, queries from tenant B may now retrieve semantically "closer" results from tenant A's namespace than before the fine-tune, because the filter is based on exact tenant_id match but the retrieved content is selected by embedding similarity in the new space. This is not a tenant isolation bug in the traditional sense but can cause quality degradation masking as potential leakage in post-hoc analysis. Mitigation: re-index all tenants after embedding model updates, validate per-tenant retrieval quality before rolling out the new model, and use a model that was trained on diverse data rather than one tenant's corpus.
 
 **Q: How does Weaviate's multi-tenancy feature compare to Qdrant's collection-per-tenant approach?**
-Weaviate's multi-tenancy (introduced in 1.20) creates an isolated HNSW graph per tenant within a single class (equivalent to a table), with separate segment files on disk. This is closer to Qdrant's per-collection model than to a metadata filter: queries for tenant A only traverse tenant A's HNSW graph. Weaviate's approach adds ~5 MB overhead per tenant (vs Qdrant's 50–100 MB per collection) because Weaviate shares the schema and class definition while only isolating the data segments. Weaviate also supports tenant activation/deactivation — inactive tenants' data is offloaded to object storage, freeing RAM. For a platform with 10,000 tenants and variable activity, Weaviate's active/inactive management is significantly more cost-effective than Qdrant's always-in-RAM collection model.
+Weaviate's multi-tenancy (introduced in 1.20) creates an isolated HNSW graph per tenant within a single class (equivalent to a table), with separate segment files on disk. This is closer to Qdrant's per-collection model than to a metadata filter: queries for tenant A only traverse tenant A's HNSW graph. Weaviate's per-tenant overhead is lower than a full Qdrant collection's because the schema and class definition are shared and only the data segments are isolated; size it from your own measurements rather than a quoted constant, since both numbers move with vector count and dimensionality. Weaviate also supports tenant activation/deactivation — inactive tenants' data is offloaded to object storage, freeing RAM. For a platform with 10,000 tenants and variable activity, Weaviate's active/inactive management is significantly more cost-effective than Qdrant's always-in-RAM collection model.
 
 ---
 
@@ -713,13 +735,13 @@ Weaviate's multi-tenancy (introduced in 1.20) creates an isolated HNSW graph per
 
 ## 14. Case Study
 
-### Notion AI — Workspace-Scoped RAG with Block-Level ACL Pushdown
+### Notion-Style Workspace-Scoped RAG with Block-Level ACL Pushdown
 
-Notion AI serves workspace-scoped RAG over user documents. The primary isolation boundary is the workspace: each workspace is a separate Qdrant collection. Within a workspace, block-level permissions replicate Notion's existing ACL graph into the vector metadata on ingestion. Every block (page, database, table row) carries an `allowed_users` list and an `allowed_teams` list stored as Qdrant payload arrays. When a user queries Notion AI, the `ACLPushdownRetriever` constructs a compound Qdrant filter: `tenant_id == workspace_id AND (user_id in allowed_users OR team_id in allowed_teams)`. This single filter expression evaluates atomically inside Qdrant — no post-retrieval discard loop. The ACL is kept in sync via a CDC pipeline from Notion's PostgreSQL permission store: when a page is shared or unshared, Debezium publishes the change event, and a Flink job updates the Qdrant payload within ~30 seconds. For the small fraction of blocks where ACL staleness matters (e.g., immediately after a share revocation), Notion's application layer adds a hard lookup against the live permission store before including any retrieved block in the LLM context.
+This is a worked design for a Notion-shaped product, not a description of Notion's undisclosed internals. Workspace-scoped RAG runs over user documents; the primary isolation boundary is the workspace, with each workspace a separate Qdrant collection. Within a workspace, block-level permissions replicate Notion's existing ACL graph into the vector metadata on ingestion. Every block (page, database, table row) carries an `allowed_users` list and an `allowed_teams` list stored as Qdrant payload arrays. When a user queries Notion AI, the `ACLPushdownRetriever` constructs a compound Qdrant filter: `tenant_id == workspace_id AND (user_id in allowed_users OR team_id in allowed_teams)`. This single filter expression evaluates atomically inside Qdrant — no post-retrieval discard loop. The ACL is kept in sync via a CDC pipeline from the product's permission store: when a page is shared or unshared, a change-data-capture connector such as Debezium publishes the event and a stream job updates the Qdrant payload within tens of seconds. That window is the design's weak point, so for the small fraction of blocks where staleness matters (immediately after a share revocation) the application layer adds a hard lookup against the live permission store before including any retrieved block in the LLM context.
 
-### Harvey AI — Per-Matter Legal Data Isolation
+### Per-Matter Legal Data Isolation (Harvey-style)
 
-Harvey AI provides AI-assisted legal research and drafting for law firms. The isolation model is per-matter (legal case): each matter is a separate Qdrant collection named `firm_id:matter_id`. An attorney can only query collections corresponding to matters they are assigned to — this assignment is resolved from Harvey's matter management system at query time, not at login. The tenant router fetches the attorney's matter list from a dedicated authorization service (< 5 ms cached, 20 ms uncached), constructs the allowed collection list, and routes the query to the correct collection. Cross-matter contamination would constitute an attorney-client privilege violation — a regulatory breach with bar association reporting obligations. Harvey's defense-in-depth stack adds `sanitize_retrieved_chunks` and an output filter that scans for opposing-counsel names and case numbers from matters the attorney is not assigned to. Any detection fires an immediate P0 alert and quarantines the response.
+A legal AI platform of the kind Harvey AI offers provides AI-assisted research and drafting for law firms; the design below is the isolation model such a product requires, not a disclosure of Harvey's implementation. The isolation model is per-matter (legal case): each matter is a separate Qdrant collection named `firm_id:matter_id`. An attorney can only query collections corresponding to matters they are assigned to — this assignment is resolved from the matter management system at query time, not at login. The tenant router fetches the attorney's matter list from a dedicated authorization service (< 5 ms cached, 20 ms uncached), constructs the allowed collection list, and routes the query to the correct collection. Cross-matter contamination would constitute an attorney-client privilege violation — a regulatory breach with bar association reporting obligations. The defense-in-depth stack adds `sanitize_retrieved_chunks` and an output filter that scans for opposing-counsel names and case numbers from matters the attorney is not assigned to. Any detection fires an immediate P0 alert and quarantines the response.
 
 ### LLM Gateway — Per-Tenant Prompt Injection Defense and Rate Limiting
 

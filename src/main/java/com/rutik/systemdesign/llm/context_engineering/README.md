@@ -9,8 +9,9 @@ and RAG (retrieving documents) and addresses the meta-level problem: given a fix
 how do you allocate it optimally across system instructions, tools, retrieved content, memory,
 conversation history, and scratchpad space?
 
-The practical need arises because modern models have context windows from 128k (GPT-4o) to 1M+
-(Gemini 1.5 Pro) tokens, but larger context does not uniformly improve performance — there are
+The practical need arises because modern models have context windows from 128k (GPT-4o) to 1M
+(Claude Opus 5, Claude Sonnet 5, Claude Fable 5, and Gemini's Pro line) tokens, but larger context
+does not uniformly improve performance — there are
 reliability, cost, and latency penalties. Context engineering produces the smallest, most
 signal-dense context that answers the question.
 
@@ -150,10 +151,12 @@ actually trading is *recall risk against engineering cost*. Long context has rec
 construction: the answer is definitionally in the window. RAG multiplies two fallible terms:
 
 ```
+  ILLUSTRATIVE rates -- not measured; substitute your own eval numbers:
+
   RAG answer accuracy         = recall@k x accuracy_given_present
                               = 0.85    x 0.92                    = 0.782
 
-  long-context accuracy at 200k, key fact mid-window (the U-curve floor)
+  long-context accuracy at 200k, key fact mid-window
                               = 1.00    x 0.75                    = 0.750
 ```
 
@@ -221,7 +224,7 @@ produces truncated answers under exactly the conditions where the answer matters
 
 | Symbol | What it actually is |
 |--------|---------------------|
-| `total` | The model's full context window. 32,000 here; 128k on GPT-4o, 1M+ on Gemini 1.5 Pro |
+| `total` | The model's full context window. 32,000 here; 128k on GPT-4o, 1M on Claude Opus 5 |
 | `sum(zones)` | Everything you send. Input tokens, billed at the input rate |
 | `output_reserve` | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
 | `slack` | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
@@ -261,17 +264,18 @@ definitions after the retrieved context and the cacheable run collapses from 7,0
 
 ```mermaid
 xychart-beta
-    title "Lost in the Middle — accuracy vs position of key doc (Liu et al. 2023, 20 docs)"
-    x-axis ["doc 1", "doc 5", "doc 10", "doc 15", "doc 20"]
+    title "Lost in the Middle — GPT-3.5-Turbo, 20-document setting (Liu et al. 2023)"
+    x-axis ["doc 1", "doc 10", "doc 20"]
     y-axis "retrieval accuracy (%)" 40 --> 100
-    line [92, 70, 54, 69, 90]
+    line [75.8, 53.8, 63.2]
 ```
 
-The U-curve (Liu et al. 2023, 20-document retrieval setting): accuracy is ~92% when the key
-fact is in the first document and ~90% in the last, but drops to ~54% in the middle — exactly
-where naive RAG lands its retrieved docs (after 14k tokens of system+history), so critical
-facts there go unnoticed. Fix: place the most critical retrieved chunks BEFORE conversation
-history, immediately after the stable prefix.
+The U-curve (Liu et al. 2023, multi-document QA, 20 total documents, GPT-3.5-Turbo): accuracy is
+75.8% when the key fact is in the first document and 63.2% in the last, but drops to 53.8% in the
+middle — below that model's own 56.1% closed-book baseline, and exactly where naive RAG lands its
+retrieved docs (after 14k tokens of system+history), so critical facts there go unnoticed. Fix:
+place the most critical retrieved chunks BEFORE conversation history, immediately after the stable
+prefix.
 
 **Decoding the U-curve into a number you can act on.** The chart shows accuracy per position; what
 you actually care about is expected accuracy over your *placement policy*, which is a weighted
@@ -293,44 +297,44 @@ in a long context is positional: it decides *where in the U-curve* the right doc
 | Symbol | What it actually is |
 |--------|---------------------|
 | `i` | Which slot in the retrieved list the key document occupies. 1 = first, 20 = last |
-| `A(i)` | Measured accuracy at that slot. 92% at i=1, 54% at i=10, 90% at i=20 |
-| `P(...)` | Your placement policy. Random ordering = 1/20 everywhere; a good reranker concentrates it at i=1 |
+| `A(i)` | Measured accuracy at that slot. 75.8% at i=1, 53.8% at i=10, 63.2% at i=20 |
+| `P(...)` | Your placement policy. Random ordering spreads it uniformly; a good reranker concentrates it at i=1 |
 | `E[A]` | Accuracy averaged over where the doc actually lands. The number your eval harness reports |
 | `lift` | Accuracy gained purely by reordering. No new documents, no bigger model, no extra tokens |
 
-**Walk one example.** 20 retrieved documents, one of which contains the answer, using the five
-sampled points from the chart above as the curve:
+**Walk one example.** 20 retrieved documents, one of which contains the answer, using the three
+measured points from the chart above as the curve:
 
 ```
   random placement -- the key doc is equally likely to be anywhere:
 
-      position       i=1     i=5     i=10    i=15    i=20
-      A(i)            92%     70%     54%     69%     90%
-      weight         0.20    0.20    0.20    0.20    0.20
-      contribution   18.4    14.0    10.8    13.8    18.0
+      position       i=1      i=10     i=20
+      A(i)          75.8%    53.8%    63.2%
+      weight        0.333    0.333    0.333
+      contribution  25.27    17.93    21.07
 
-      E[A] = 18.4 + 14.0 + 10.8 + 13.8 + 18.0 = 75.0%
+      E[A] = 25.27 + 17.93 + 21.07 = 64.3%
 
   ranked placement -- reranker puts the key doc first 80% of the time,
   and it lands mid-list the other 20%:
 
-      contribution   0.80 x 92%  = 73.6
-                     0.20 x 54%  = 10.8
+      contribution   0.80 x 75.8%  = 60.64
+                     0.20 x 53.8%  = 10.76
 
-      E[A] = 73.6 + 10.8 = 84.4%
+      E[A] = 60.64 + 10.76 = 71.4%
 
-  lift = 84.4 - 75.0 = 9.4 accuracy points, for zero extra tokens
+  lift = 71.4 - 64.3 = 7.1 accuracy points, for zero extra tokens
 
   Worst case -- Pitfall 1, chunks dumped after 5,000 tokens of history so the key
   doc reliably lands mid-context:
 
-      E[A] = 54.0%    -> 30.4 points BELOW ranked placement
+      E[A] = 53.8%    -> 17.6 points BELOW ranked placement
 ```
 
 **Why the curve is a U and not a slope.** Two separate mechanisms pin up the ends. The start is
 privileged by attention sinks and the recency of the instruction framing; the end is privileged
 because it is nearest the generation point. The middle has neither, so it decays to roughly the
-54% floor. This is why "just put it at the end" and "just put it at the start" are both defensible
+53.8% floor measured above. This is why "just put it at the end" and "just put it at the start" are both defensible
 and "put it wherever the retriever emitted it" is not — the only genuinely bad position is the one
 naive RAG picks by default.
 
@@ -546,25 +550,32 @@ Pitfall 4 is what stops you: past roughly 5-8x, entity-centric summaries start d
 specifics (names, agreed numbers, earlier decisions) that make the summary useful at all, and the
 model begins contradicting commitments it made twenty turns ago. The `R = 5.67x` above sits
 deliberately at the top of the safe band. Treat R as a quality budget you spend down, not a cost
-knob you turn up: the marginal saving from 5x to 10x is $0.0175 per turn, which is nowhere near
-worth an agent that forgets the customer's name.
+knob you turn up: on the 17,000-token portion, going from 5x (3,400 tokens) to 10x (1,700 tokens)
+saves 1,700 tokens, or 1,700 x $2.50/1M = $0.004 per turn, which is nowhere near worth an agent
+that forgets the customer's name.
 
 ---
 
 ## 7. Real-World Examples
 
-**Cursor (AI code editor)** uses a layered context strategy: editor configuration and language
-server output are at the front (cached); recent file edits are retrieved by recency and relevance;
-the cursor position (current user query) is always last. Approximately 70% of input tokens are
-served from the KV cache even for novel queries.
+**Coding assistants (Cursor, Claude Code and similar)** use a layered context strategy: editor
+configuration and language server output are at the front (cached); recent file edits are retrieved
+by recency and relevance; the cursor position (current user query) is always last. Vendors do not
+publish cache hit rates for these products, so treat any specific percentage you see as unverified
+and measure your own.
 
-**Perplexity AI** compresses conversation history aggressively after 4 turns: older turns are
-summarized to a 2-sentence entity-and-intent summary. This keeps context under 8k tokens for most
-queries while preserving the key facts from earlier in the session.
+**Answer engines (Perplexity and similar)** compress conversation history aggressively after a few
+turns, replacing older turns with a short entity-and-intent summary. This keeps context small for
+most queries while preserving the key facts from earlier in the session; the exact turn threshold
+and summary length are not published.
 
-**Anthropic extended thinking** uses a designated scratchpad zone at the end of the context that
-is allocated specifically for chain-of-thought. The budget for this zone is separate from the
-user-visible response budget, ensuring reasoning tokens do not compete with context tokens.
+**Anthropic thinking** places Claude's reasoning in thinking blocks that precede the final answer
+inside the same assistant turn — and that budget is NOT separate from the response budget. On
+models with manual extended thinking, `budget_tokens` must be less than `max_tokens` because
+thinking tokens count toward `max_tokens`, and `max_tokens` stays the hard ceiling on total output.
+Claude Opus 4.7 and later reject `thinking.type: "enabled"` outright and use adaptive thinking with
+an `effort` setting instead. Either way, budget reasoning tokens out of your output reserve, not on
+top of it.
 
 ---
 
@@ -656,8 +667,9 @@ include and where to put it.
 
 **Q: What is the "lost in the middle" problem and how do you address it?**
 Liu et al. (2023) showed that LLMs reliably attend to information at the start and end of the
-context but under-attend to information in the middle. Content at position 10k in a 20k-token
-context is much less likely to influence the output than the same content placed at position 500.
+context but under-attend to information in the middle. In their 20-document multi-document-QA
+setting, GPT-3.5-Turbo scored 75.8% when the answer document was first, 63.2% when it was last,
+and 53.8% when it sat in the middle — below its own 56.1% closed-book baseline.
 The fix is positional placement: put the most critical retrieved chunks and instructions at the top
 (after the system prompt) and the current user query at the end. Avoid sandwiching critical
 information between long conversation history and verbose tool outputs.
@@ -705,8 +717,9 @@ automatic prefix caching both work on this principle.
 
 **Q: How does provider prompt caching pricing change how you lay out context?**
 It makes the stable prefix literally cheaper, not just faster. Anthropic prompt caching charges
-roughly 25% extra to write a cache segment and about 90% less to read it (5-minute default TTL),
-and OpenAI applies an automatic ~50% discount to cached prefixes of 1,024+ tokens — so a
+1.25x base input to write a 5-minute cache segment (2.0x for the 1-hour TTL) and 0.1x to read it —
+a 90% discount — and OpenAI automatically caches prefixes of 1,024+ tokens, billing cached input at
+50% of the normal rate on GPT-4o and 10% of it on the current GPT-5 series — so a
 5,000-token system-plus-tools prefix reused across requests costs a fraction of its nominal price.
 This flips the economics of few-shot examples: a large stable example block is nearly free after
 the first request, while the same tokens placed after dynamic content are billed in full every
@@ -805,6 +818,9 @@ proactively — every 20-30 turns or at 60-70% window fill — instead of waitin
 
 **Problem Statement**
 
+*Illustrative composite — the numbers below describe a representative deployment, not a published
+result.*
+
 An enterprise legal research agent achieves 92% task completion on single-document questions but
 drops to 61% on multi-document questions requiring synthesis of information from 5+ retrieved
 documents. Context window is 128k tokens (GPT-4o); total context used is 90k tokens. Analysis
@@ -816,7 +832,7 @@ reveals all 5 documents are placed after 40k tokens of system prompt + conversat
 Before (broken context layout):
 =================================
 [0 – 3,000]     System prompt
-[3,000 – 18,000]  Tool definitions (15 schemas, all included)
+[3,000 – 18,000]  Tool definitions (15 verbose schemas @ ~1,000t — far above the 100-300t typical)
 [18,000 – 40,000]  Conversation history (22 turns verbatim)
 [40,000 – 90,000]  5 retrieved legal documents (10k tokens each)
 [90,000 – 90,200]  Current question
@@ -826,7 +842,7 @@ After (context engineering):
 ==============================
 [0 – 3,000]     System prompt
 [3,000 – 6,000]   Top-3 tool definitions (RAG-over-tools, 3 of 15)
-[6,000 – 31,000]  Top-5 retrieved documents (placed BEFORE history)
+[6,000 – 31,000]  Top-5 documents, section-trimmed to 5k each (placed BEFORE history)
 [31,000 – 37,000]  Compressed history (22 turns -> entity-centric summary)
 [37,000 – 37,200]  Current question
 Output reserve: 90,800 tokens
@@ -835,7 +851,8 @@ Output reserve: 90,800 tokens
 **Key Design Decisions**
 
 Tool retrieval: cuts tool zone from 15,000 to 3,000 tokens. Retrieved documents moved before
-history: position shifts from 40k-90k to 6k-31k (peak attention zone). History compressed from
+history and section-trimmed from 10k to 5k each by a secondary within-document retrieval step:
+position shifts from 40k-90k to 6k-31k (peak attention zone). History compressed from
 22k to 6k tokens via entity-centric summarization (names of documents reviewed, agreed legal
 theories, prior questions answered).
 

@@ -14,9 +14,9 @@ Third, LLM requests fan out. A single user query may trigger a retrieval span (v
 
 Fourth, LLM agents span service and process boundaries. An orchestrator agent running in one container may delegate to a sub-agent running in another, passing context via HTTP or message queue. Without explicit trace context propagation, traces fragment into unrelated orphan spans.
 
-OpenTelemetry (OTel) version 1.27+ (2024) introduced the **GenAI Semantic Conventions** (`gen_ai.*` attribute namespace) through the OpenTelemetry Generative AI SIG. These conventions define a standard vocabulary for LLM spans: which attributes to record, how to model streaming responses as span events, and how to propagate context across agent boundaries using W3C TraceContext headers. They are the shared observability primitive that makes LLM traces comparable across providers, frameworks, and tooling vendors.
+OpenTelemetry (OTel) introduced the **GenAI Semantic Conventions** (`gen_ai.*` attribute namespace) through the OpenTelemetry Generative AI SIG; the token-usage attributes settled on `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` in semconv 1.27 (2024), and the conventions were later split into their own `open-telemetry/semantic-conventions-genai` repository. These conventions define a standard vocabulary for LLM spans: which attributes to record, how to represent request/response content, and how to propagate context across agent boundaries using W3C TraceContext headers. They are the shared observability primitive that makes LLM traces comparable across providers, frameworks, and tooling vendors.
 
-**Current specification status**: OpenTelemetry GenAI SIG semantic conventions are in `experimental` maturity as of OpenTelemetry specification v1.30 (2025). The `opentelemetry-instrumentation-openai` package implements them.
+**Current specification status**: every `gen_ai.*` attribute carries a **Development** stability badge (the successor of the old `experimental` label) in the `semantic-conventions-genai` repository as of July 2026 — names still change between releases. Two renames matter for existing code: `gen_ai.system` was replaced by `gen_ai.provider.name`, and the finish reason is the plural string-array `gen_ai.response.finish_reasons`. The `opentelemetry-instrumentation-openai-v2` package (opentelemetry-python-contrib) implements the conventions.
 
 ---
 
@@ -24,11 +24,11 @@ OpenTelemetry (OTel) version 1.27+ (2024) introduced the **GenAI Semantic Conven
 
 **One-line analogy**: OTel for LLM apps is like adding a flight recorder to every AI call — you capture not just whether the plane landed, but airspeed, altitude, and fuel consumption at every moment of the flight.
 
-**Mental model**: Every LLM request is a tree of nested work units. The root span is the user-facing HTTP request. It contains child spans: a retrieval span, an embedding span, an LLM span. The LLM span contains span events, one per streaming token chunk. The tool-call spans are siblings of the LLM span, linked by parent-child relationships. Each span carries attributes: model name, token counts, cost, finish reason. This tree is what OTel preserves and ships to your backend.
+**Mental model**: Every LLM request is a tree of nested work units. The root span is the user-facing HTTP request. It contains child spans: a retrieval span, an embedding span, an LLM span. The LLM span records first-token timing and, if you choose, per-chunk events. The tool-call spans are siblings of the LLM span, linked by parent-child relationships. Each span carries attributes: model name, token counts, cost, finish reasons. This tree is what OTel preserves and ships to your backend.
 
 **Why it matters**: Without standard instrumentation, every LLM application vendor (LangSmith, Langfuse, Arize, Honeycomb) uses a proprietary schema. Switching vendors requires re-instrumenting your entire codebase. With `gen_ai.*` semantic conventions, your instrumentation code is vendor-neutral — you write it once and route to any backend that speaks OTLP.
 
-**Key insight**: The span is the unit of cost. Every `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` attribute on an LLM span is the raw material for cost attribution. Aggregate these attributes by `gen_ai.request.model`, tenant ID, and feature name using your backend's query language — no secondary billing API join required.
+**Key insight**: The span is the unit of cost. Every `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` attribute on an LLM span is the raw material for cost attribution. Aggregate these attributes by `gen_ai.request.model`, tenant ID, and feature name using your backend's query language — no secondary billing API join required. The GenAI conventions also ship a `gen_ai.client.token.usage` histogram metric for the pre-aggregated view.
 
 ---
 
@@ -38,9 +38,9 @@ OpenTelemetry (OTel) version 1.27+ (2024) introduced the **GenAI Semantic Conven
 
 **Span = one unit of work**: A span is a named, timed operation with a parent. Each span has a `span_id`, `trace_id`, `parent_span_id`, start time, end time, status (OK / ERROR / UNSET), and a set of key-value attributes. For LLM calls, the span covers the entire inference call from request dispatch to final token receipt.
 
-**Attributes carry business metadata**: Attributes are key-value pairs on a span. The `gen_ai.*` namespace defines which attributes LLM spans must carry: `gen_ai.system` (the provider: `openai`, `anthropic`, `google`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`. These are the inputs to cost calculations and quality dashboards.
+**Attributes carry business metadata**: Attributes are key-value pairs on a span. The `gen_ai.*` namespace defines which attributes LLM spans must carry: `gen_ai.provider.name` (the provider: `openai`, `anthropic`, `gcp.gen_ai` — this replaced the older `gen_ai.system`), `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` (a string **array**). These are the inputs to cost calculations and quality dashboards.
 
-**Span events capture streaming**: A span event is a timestamped log entry attached to a span. For streaming LLM responses, each token chunk arrival is a span event with `gen_ai.content.completion` and a timestamp. This lets you compute TTFT (time from span start to first event) and inter-token latency from the event sequence.
+**Timing streaming responses**: the conventions define a dedicated server metric, `gen_ai.server.time_to_first_token`, for TTFT. If you also want per-chunk detail on the trace, attach span events — a span event is a timestamped log entry attached to a span — and compute inter-token latency from the event timestamps. Note that the old `gen_ai.content.prompt` / `gen_ai.content.completion` attributes were replaced by `gen_ai.input.messages` / `gen_ai.output.messages`, so custom event attributes for chunk text are now your own namespace, not a standard one.
 
 **Sampling keeps cost manageable**: Recording every span for a 10 million request/day application at P99 = 8 seconds produces 80 million span-seconds of data per day. Sampling strategies (head-based: decide at trace root; tail-based: decide after seeing full trace; adaptive: vary rate by endpoint or error status) reduce data volume while preserving the traces you care about.
 
@@ -54,7 +54,7 @@ OpenTelemetry (OTel) version 1.27+ (2024) introduced the **GenAI Semantic Conven
 
 | Approach | How it works | Effort | Coverage |
 |----------|-------------|--------|----------|
-| Auto-instrumentation (`opentelemetry-instrumentation-openai`) | Monkey-patches the OpenAI Python SDK; wraps `client.chat.completions.create` | Near-zero code changes | OpenAI only; limited attribute set |
+| Auto-instrumentation (`opentelemetry-instrumentation-openai-v2`) | Wraps the OpenAI Python SDK's `client.chat.completions.create` | Near-zero code changes | OpenAI only; limited attribute set |
 | Manual SDK instrumentation | Explicit `tracer.start_as_current_span()` calls in your code | Medium | Full control; any provider |
 | Proxy-level tracing (LLM gateway) | Gateway intercepts all LLM calls; adds spans without touching app code | Zero app-side code | All providers; no per-app setup |
 | Framework-native tracing (LangSmith, Langfuse) | Framework emits OTel-compatible traces automatically | Near-zero with framework | Framework-specific; OTLP export supported |
@@ -71,7 +71,7 @@ OpenTelemetry (OTel) version 1.27+ (2024) introduced the **GenAI Semantic Conven
 
 Three patterns for streaming LLM responses:
 
-1. **Single span with events** (recommended): Open one span for the entire LLM call. Emit one span event per token chunk with `gen_ai.content.completion` attribute and chunk timestamp. Close the span after the final chunk. TTFT = timestamp of first event minus span start time.
+1. **Single span with events** (recommended): Open one span for the entire LLM call. Emit one span event per token chunk carrying the chunk timestamp (the chunk-text attribute is application-defined — the conventions no longer standardize a per-chunk content attribute). Close the span after the final chunk. TTFT = timestamp of first event minus span start time.
 
 2. **Single span with final attributes only**: Open one span. Do not emit per-token events. Close the span after final chunk, recording total tokens and finish reason. Simpler but loses TTFT data.
 
@@ -98,7 +98,7 @@ Trace: user-query-a3f2b1
     |   |   retrieval.result_count: 8
     |   |
     |   +-- [embedding span] embed_query  (35ms)
-    |           gen_ai.system: openai
+    |           gen_ai.provider.name: openai
     |           gen_ai.request.model: text-embedding-3-small
     |           gen_ai.usage.input_tokens: 12
     |
@@ -108,17 +108,18 @@ Trace: user-query-a3f2b1
     |       reranking.output_count: 3
     |
     +-- [LLM span] openai.chat  (1.85s)
-            gen_ai.system: openai
-            gen_ai.request.model: gpt-4o
+            gen_ai.provider.name: openai
+            gen_ai.operation.name: chat
+            gen_ai.request.model: gpt-5.4
             gen_ai.usage.input_tokens: 3142
             gen_ai.usage.output_tokens: 287
-            gen_ai.response.finish_reason: stop
-            gen_ai.cost_usd: 0.0204
+            gen_ai.response.finish_reasons: ["stop"]
+            gen_ai.cost_usd: 0.0122   (custom — not in the spec)
             |
-            event[0]: gen_ai.content.completion (t+310ms, first token)
-            event[1]: gen_ai.content.completion (t+345ms)
+            event[0]: chunk (t+310ms, first token)
+            event[1]: chunk (t+345ms)
             ...
-            event[N]: gen_ai.content.completion (t+1850ms, final token)
+            event[N]: chunk (t+1850ms, final token)
 ```
 
 ### Multi-Agent Trace Tree
@@ -132,7 +133,7 @@ Trace: agent-run-7c9d4e
     |   agent.run_id: run-8821
     |
     +-- [LLM span] openai.chat (planning call)  (450ms)
-    |       gen_ai.request.model: gpt-4o
+    |       gen_ai.request.model: gpt-5.4
     |       gen_ai.usage.input_tokens: 892
     |
     +-- [tool span] tool.web_search  (340ms)
@@ -143,7 +144,7 @@ Trace: agent-run-7c9d4e
     |   |   traceparent: 00-7c9d4e...-child123-01  (propagated W3C header)
     |   |
     |   +-- [LLM span] anthropic.chat  (sub-agent service)  (820ms)
-    |   |       gen_ai.system: anthropic
+    |   |       gen_ai.provider.name: anthropic
     |   |       gen_ai.request.model: claude-opus-4-6
     |   |       gen_ai.usage.input_tokens: 4201
     |   |
@@ -152,7 +153,7 @@ Trace: agent-run-7c9d4e
     |           tool.exit_code: 0
     |
     +-- [LLM span] openai.chat (synthesis call)  (670ms)
-            gen_ai.request.model: gpt-4o
+            gen_ai.request.model: gpt-5.4
             gen_ai.usage.input_tokens: 6104
             gen_ai.usage.output_tokens: 512
 ```
@@ -250,24 +251,26 @@ from opentelemetry.trace import StatusCode
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-# Per-token pricing table (USD per token) — update when providers change rates
+# Per-token pricing table (USD per token) — list rates as of July 2026.
+# Provider rates change often; re-check the vendor pricing pages before trusting
+# any cost dashboard built on this table.
 PRICING: dict[str, dict[str, float]] = {
-    "gpt-4o":                 {"input": 5e-6,   "output": 15e-6},
-    "gpt-4o-mini":            {"input": 0.15e-6, "output": 0.6e-6},
-    "claude-opus-4-6":        {"input": 15e-6,  "output": 75e-6},
-    "claude-sonnet-4-6":      {"input": 3e-6,   "output": 15e-6},
+    "gpt-5.4":                {"input": 2.5e-6,  "output": 15e-6},
+    "gpt-5.4-mini":           {"input": 0.75e-6, "output": 4.5e-6},
+    "claude-opus-4-6":        {"input": 5e-6,    "output": 25e-6},
+    "claude-sonnet-4-6":      {"input": 3e-6,    "output": 15e-6},
     "text-embedding-3-small": {"input": 0.02e-6, "output": 0.0},
 }
 
 def trace_llm_call(
-    system: str,          # "openai" | "anthropic" | "google"
+    provider: str,        # "openai" | "anthropic" | "gcp.gen_ai" (gen_ai.provider.name)
     operation: str = "chat",
 ) -> Callable[[F], F]:
     """
     Decorator that wraps any LLM call function and records gen_ai.* attributes.
 
     Usage:
-        @trace_llm_call(system="openai")
+        @trace_llm_call(provider="openai")
         def call_openai(model: str, messages: list, **kwargs):
             return openai_client.chat.completions.create(model=model, messages=messages, **kwargs)
     """
@@ -280,15 +283,16 @@ def trace_llm_call(
                 kind=trace.SpanKind.CLIENT,
             ) as span:
                 # Required gen_ai.* semantic convention attributes
-                span.set_attribute("gen_ai.system", system)
+                span.set_attribute("gen_ai.provider.name", provider)
                 span.set_attribute("gen_ai.operation.name", operation)
                 span.set_attribute("gen_ai.request.model", model)
 
-                # Optional request attributes — truncate prompt to avoid 140KB OTLP limit
+                # Optional request attributes — the SDK's default attribute-value
+                # length limit is unlimited, so truncate explicitly (see Pitfall 4)
                 messages = kwargs.get("messages", [])
                 if messages:
                     prompt_preview = str(messages)[:500]  # 500-char preview only
-                    span.set_attribute("gen_ai.request.message_preview", prompt_preview)
+                    span.set_attribute("app.request.message_preview", prompt_preview)
 
                 try:
                     response = fn(*args, **kwargs)
@@ -308,10 +312,11 @@ def trace_llm_call(
                         )
                         span.set_attribute("gen_ai.cost_usd", round(cost_usd, 8))
 
-                    # Finish reason — critical for detecting truncation or safety filters
+                    # Finish reasons — critical for detecting truncation or safety
+                    # filters. The convention attribute is a plural string ARRAY.
                     if hasattr(response, "choices") and response.choices:
-                        finish_reason = response.choices[0].finish_reason or "unknown"
-                        span.set_attribute("gen_ai.response.finish_reason", finish_reason)
+                        reasons = [c.finish_reason or "unknown" for c in response.choices]
+                        span.set_attribute("gen_ai.response.finish_reasons", reasons)
 
                     span.set_status(StatusCode.OK)
                     return response
@@ -348,7 +353,7 @@ def call_openai_streaming(
         "gen_ai.chat",
         kind=trace.SpanKind.CLIENT,
     ) as span:
-        span.set_attribute("gen_ai.system", "openai")
+        span.set_attribute("gen_ai.provider.name", "openai")
         span.set_attribute("gen_ai.operation.name", "chat")
         span.set_attribute("gen_ai.request.model", model)
         span.set_attribute("tenant_id", tenant_id)
@@ -387,21 +392,24 @@ def call_openai_streaming(
                     chunk_ts_ns = time.time_ns()
 
                     if not first_token_recorded:
-                        # Time-to-first-token in milliseconds
+                        # Time-to-first-token. The convention's own TTFT signal is the
+                        # gen_ai.server.time_to_first_token histogram metric; this span
+                        # attribute is an application-defined convenience for drill-down.
                         ttft_ms = (chunk_ts_ns - span_start_ns) / 1_000_000
-                        span.set_attribute("gen_ai.ttft_ms", round(ttft_ms, 1))
+                        span.set_attribute("app.ttft_ms", round(ttft_ms, 1))
                         first_token_recorded = True
 
-                    # One span event per chunk — carries content and timestamp
-                    # Limit content to 200 chars to stay within OTLP span event limits
+                    # One span event per chunk — carries content and timestamp.
+                    # Keep chunk text short: the SDK's default attribute-value length
+                    # limit is unlimited, so nothing truncates this for you.
                     span.add_event(
-                        "gen_ai.content.completion",
-                        attributes={"gen_ai.content.completion": content[:200]},
+                        "app.gen_ai.chunk",
+                        attributes={"app.gen_ai.chunk.text": content[:200]},
                         timestamp=chunk_ts_ns,
                     )
 
                 if finish_reason:
-                    span.set_attribute("gen_ai.response.finish_reason", finish_reason)
+                    span.set_attribute("gen_ai.response.finish_reasons", [finish_reason])
 
             # Record final usage and cost
             span.set_attribute("gen_ai.usage.input_tokens", total_input_tokens)
@@ -482,7 +490,7 @@ On the sub-agent side, extract context from the incoming `traceparent` header us
 
 ### Cost Attribution Function
 
-Accumulate cost per `(tenant_id, feature, model)` from span attributes after each LLM call returns. Emit the running total as an OTel `Counter` metric so the OTel Collector's `spanmetrics` processor can publish it to Prometheus. Typical numbers: 1000 calls/day × (3142 input + 287 output tokens) × GPT-4o pricing ($5/$15 per 1M tokens) = $20/day per tenant feature. Alert when the 24-hour counter for any tenant exceeds $50.
+Accumulate cost per `(tenant_id, feature, model)` from span attributes after each LLM call returns. Emit the running total as an OTel `Counter` metric that Prometheus can scrape. (If you prefer to derive the metric in the Collector rather than the app, the component that sums a numeric span attribute is the **`sum` connector**, not `spanmetrics` — `spanmetrics` only produces R.E.D. call-count and duration metrics from spans, with attributes used as dimensions.) Typical numbers: 1000 calls/day × (3142 input + 287 output tokens) at $2.50/$15 per 1M tokens = ~$12/day per tenant feature. Alert when the 24-hour counter for any tenant exceeds $50.
 
 ```python
 from collections import defaultdict
@@ -511,9 +519,9 @@ def record_llm_cost(
 
 **Arize Phoenix**: Phoenix instruments LLM calls using OpenInference, a schema closely aligned with OTel GenAI semantic conventions. Phoenix spans carry `llm.token_count.prompt`, `llm.token_count.completion`, `llm.model_name`, and `retrieval.documents` attributes. Arize supports OTLP ingest, enabling Phoenix traces to flow into any OTLP-compatible backend. A Phoenix trace for a RAG pipeline shows the full tree: retrieval span with document scores, embedding span with latency, LLM span with token counts and cost.
 
-**Anthropic Claude API**: The Claude API response object carries `usage.input_tokens` and `usage.cache_read_input_tokens` (for prompt caching). A well-instrumented wrapper records both on the span: `gen_ai.usage.input_tokens` (total input) and `gen_ai.usage.cache_read_input_tokens` (from cache at 10% of standard price). The difference, `gen_ai.usage.cache_miss_tokens`, is what you pay full price for. Tracking the cache hit rate per tenant reveals whether long system prompts are being effectively cached — a ratio below 80% on a high-volume path indicates a caching configuration problem.
+**Anthropic Claude API**: The Claude API response object carries `usage.input_tokens`, `usage.cache_creation_input_tokens` and `usage.cache_read_input_tokens` (for prompt caching). A well-instrumented wrapper maps these onto the convention attributes `gen_ai.usage.input_tokens`, `gen_ai.usage.cache_creation.input_tokens` and `gen_ai.usage.cache_read.input_tokens` — note the dot before `input_tokens`, which is easy to get wrong. Cache reads are billed at 0.1x the base input rate, and a 5-minute cache write at 1.25x, so a cache read pays for its write after a single hit. Tracking the cache hit rate per tenant reveals whether long system prompts are being effectively cached — a low ratio on a high-volume path indicates a caching configuration problem.
 
-**Cost attribution dashboard design**: A production cost dashboard for a multi-tenant LLM platform queries the trace backend for spans with `gen_ai.cost_usd` attributes, groups by `tenant_id`, `feature`, and `gen_ai.request.model`, and aggregates over rolling 24-hour windows. Alert thresholds: tenant daily cost > $50 triggers a Slack alert; model cost per call > $0.10 triggers a review (indicates unexpectedly long prompts). The dashboard also shows TTFT P50/P95/P99 per model, broken down by streaming vs non-streaming requests.
+**Cost attribution dashboard design**: A production cost dashboard for a multi-tenant LLM platform queries the trace backend for spans with the application's cost attribute (cost is not a `gen_ai.*` convention attribute — derive it from the token-usage attributes and your own price table), groups by `tenant_id`, `feature`, and `gen_ai.request.model`, and aggregates over rolling 24-hour windows. Alert thresholds: tenant daily cost > $50 triggers a Slack alert; model cost per call > $0.10 triggers a review (indicates unexpectedly long prompts). The dashboard also shows TTFT P50/P95/P99 per model, broken down by streaming vs non-streaming requests.
 
 ---
 
@@ -574,11 +582,11 @@ def record_llm_cost(
 
 **Pitfall 1: Prompt content in span attributes triggering GDPR violations**
 
-In 2023, Samsung engineers accidentally pasted proprietary chip design schematics into ChatGPT prompts. This became the canonical enterprise example: the fear is not ChatGPT storing data (that can be opted out) — it is that the observability layer stores it permanently. A team at a European bank instrumented their LLM RAG pipeline with full prompt content in `gen_ai.request.prompt` span attributes. Langfuse retained spans for 90 days. A routine audit found patient-adjacent PII (derived from HR queries) in trace data. The fix required: (1) OTel Collector attribute processor to drop `gen_ai.request.prompt` and `gen_ai.content.completion` in production, (2) replace with a hashed prompt ID referencing an encrypted sidecar store, (3) retroactive deletion of 90 days of span data from the backend. The incident cost 3 engineering weeks and a compliance audit. Rule: never log raw prompt or completion content in span attributes in production — use a hashed prompt ID from day one.
+In 2023, Samsung engineers accidentally pasted proprietary chip design schematics into ChatGPT prompts. This became the canonical enterprise example: the fear is not ChatGPT storing data (that can be opted out) — it is that the observability layer stores it permanently. A team at a European bank instrumented their LLM RAG pipeline with full prompt content in span attributes. Langfuse retained spans for 90 days. A routine audit found patient-adjacent PII (derived from HR queries) in trace data. The fix required: (1) OTel Collector attribute processor to drop the content attributes (`gen_ai.input.messages` / `gen_ai.output.messages`, and any legacy `gen_ai.content.*` keys) in production, (2) replace with a hashed prompt ID referencing an encrypted sidecar store, (3) retroactive deletion of 90 days of span data from the backend. The incident cost 3 engineering weeks and a compliance audit. Rule: never log raw prompt or completion content in span attributes in production — use a hashed prompt ID from day one.
 
 **Pitfall 2: Missing TTFT data due to single span without events**
 
-A team recorded one span per streaming LLM call with only final token counts and end time. The P99 latency metric looked fine (8.2 seconds). Users were complaining about "slow responses." The actual problem: TTFT P99 was 4.1 seconds — users waited 4 seconds before seeing the first word. Without per-chunk span events, TTFT was invisible. The fix: add `span.add_event("gen_ai.content.completion", timestamp=time.time_ns())` on the first token chunk and record `gen_ai.ttft_ms` as a span attribute. After the fix, the dashboard showed TTFT and total latency separately, revealing that 90% of perceived latency was TTFT — a retrieval pre-processing step was the bottleneck, not the LLM.
+A team recorded one span per streaming LLM call with only final token counts and end time. The P99 latency metric looked fine (8.2 seconds). Users were complaining about "slow responses." The actual problem: TTFT P99 was 4.1 seconds — users waited 4 seconds before seeing the first word. Without per-chunk span events, TTFT was invisible. The fix: add `span.add_event("app.gen_ai.chunk", timestamp=time.time_ns())` on the first token chunk, record the `gen_ai.server.time_to_first_token` histogram, and mirror TTFT onto the span as an application attribute. After the fix, the dashboard showed TTFT and total latency separately, revealing that 90% of perceived latency was TTFT — a retrieval pre-processing step was the bottleneck, not the LLM.
 
 **Pitfall 3: Baggage not propagated across Celery/Redis worker queues**
 
@@ -611,9 +619,9 @@ def run_tool(tool_name: str, tool_args: dict, otel_ctx: dict):
         context.detach(token)
 ```
 
-**Pitfall 4: OTLP span attribute size limit causing silent trace truncation**
+**Pitfall 4: unbounded span attributes hitting a transport limit, not an SDK one**
 
-The OTLP default maximum attribute value length is 4096 bytes. The maximum span size is approximately 140KB in most collectors. A team stored the full 8000-token system prompt (about 32KB of text) in `gen_ai.request.system_prompt`. The collector silently dropped the attribute without an error — the span arrived at the backend with the attribute missing. The team debugged missing cost data for 2 days before discovering that `gen_ai.usage.input_tokens` was also being dropped (it was near the end of a very large span). Fix: truncate any prompt-derived attribute to 500 characters maximum; store the full prompt in a separate content store keyed by `sha256(prompt)[:16]`; configure the OTel Collector attribute processor with explicit size limits to log a warning rather than silently truncate.
+The trap here is the opposite of what most teams assume. The OpenTelemetry SDK specification sets `AttributeValueLengthLimit` to **Infinity** by default (and `AttributeCountLimit` to **128**) — nothing truncates a giant string for you unless you configure it. What does bite is the transport: the OTLP/gRPC receiver enforces a maximum message size (4 MiB by default in the Collector), and a batch containing an oversized span is rejected wholesale rather than trimmed. A team stored a full 8000-token system prompt (about 32KB of text) on every span; batches grew until the exporter started failing, and spans — including the `gen_ai.usage.*` attributes the cost dashboard depended on — stopped arriving at all. Fix: set an explicit `AttributeValueLengthLimit` (e.g. 500 characters) in the SDK rather than relying on a nonexistent default; store the full prompt in a separate content store keyed by `sha256(prompt)[:16]`; and alert on the exporter's failure counters instead of assuming silent truncation.
 
 ---
 
@@ -622,13 +630,13 @@ The OTLP default maximum attribute value length is 4096 bytes. The maximum span 
 | Tool | Category | Key Facts |
 |------|----------|-----------|
 | `opentelemetry-sdk` (Python) | Core SDK | TracerProvider, BatchSpanProcessor, OTLP exporter; install: `opentelemetry-sdk opentelemetry-exporter-otlp` |
-| `opentelemetry-instrumentation-openai` | Auto-instrumentation | Patches OpenAI Python SDK; emits `gen_ai.*` spans automatically; version: 0.1.x (2024) |
-| OTel Collector | Telemetry pipeline | Receives OTLP, applies processors (batch, tail-sample, attribute-redact), exports to backends; run as sidecar or daemonset |
+| `opentelemetry-instrumentation-openai-v2` | Auto-instrumentation | Contrib package; wraps the OpenAI Python SDK and emits `gen_ai.*` spans automatically; still 0.x and tracks the Development-stage conventions, so pin the version |
+| OTel Collector | Telemetry pipeline | Receives OTLP (gRPC 4317 / HTTP 4318, 4 MiB default max message size), applies processors (batch, tail-sample, attribute-redact) and connectors (`sum`, `span_metrics`), exports to backends; run as sidecar or daemonset |
 | Langfuse | LLM-native observability | OTel-compatible ingest; built-in eval datasets, LLM-as-judge, prompt versioning; open-source (self-host) or cloud |
 | Arize Phoenix | LLM observability | OpenInference schema; root cause analysis; supports embedding drift visualization; open-source |
-| Jaeger | Distributed tracing backend | OTLP ingest; good for trace search and service maps; free, open-source; 16GB storage for 7 days at 100K spans/day |
+| Jaeger | Distributed tracing backend | OTLP ingest; good for trace search and service maps; free, open-source; size storage from your own measured span size and retention window |
 | Grafana Tempo | Distributed tracing backend | OTLP ingest; integrates with Grafana dashboards and Loki logs; cheap object storage (S3); recommended for high volume |
-| Honeycomb | Cloud observability | OTLP ingest; excellent query language for trace analysis; $0.10/GB ingested; tail-based sampling built-in |
+| Honeycomb | Cloud observability | OTLP ingest; excellent query language for trace analysis; usage-based pricing by event volume (check current tiers); tail-based sampling built-in |
 | Prometheus + Grafana | Metrics | OTel SDK emits OTLP metrics; Prometheus scrapes via OTel Collector Prometheus exporter; alert on `gen_ai_cost_usd_total > 50` |
 
 ### OTel Collector Configuration for LLM Apps
@@ -655,11 +663,13 @@ processors:
   # Redact sensitive LLM content from span attributes
   attributes/redact_llm_content:
     actions:
-      - key: gen_ai.request.messages
+      - key: gen_ai.input.messages
         action: delete
-      - key: gen_ai.response.text
+      - key: gen_ai.output.messages
         action: delete
-      # Keep: gen_ai.system, gen_ai.request.model, gen_ai.usage.*, gen_ai.cost_usd
+      - key: gen_ai.system_instructions
+        action: delete
+      # Keep: gen_ai.provider.name, gen_ai.request.model, gen_ai.usage.*, gen_ai.cost_usd
 
   tail_sampling:
     decision_wait: 30s
@@ -698,10 +708,10 @@ service:
 ## 12. Interview Questions with Answers
 
 **Q: What are the OpenTelemetry GenAI semantic conventions and why were they introduced?**
-The GenAI semantic conventions (`gen_ai.*` attribute namespace) were introduced by the OpenTelemetry Generative AI SIG (2024) to standardize how LLM calls are represented as spans. Before them, every observability vendor used a different schema: LangSmith used `prompts`/`completions`; Arize used `llm.token_count.prompt`; custom setups used arbitrary keys. The conventions define required attributes — `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason` — so that any OTel-compatible backend can interpret LLM traces correctly without vendor-specific parsers.
+The GenAI semantic conventions (`gen_ai.*` attribute namespace) were introduced by the OpenTelemetry Generative AI SIG to standardize how LLM calls are represented as spans. Before them, every observability vendor used a different schema: LangSmith used `prompts`/`completions`; Arize used `llm.token_count.prompt`; custom setups used arbitrary keys. The conventions define the attributes an LLM span carries — `gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` — so that any OTel-compatible backend can interpret LLM traces correctly without vendor-specific parsers. They are still at Development stability, and have already renamed attributes once (`gen_ai.system` became `gen_ai.provider.name`), so pin the semconv version your instrumentation targets.
 
 **Q: How do you design a span for a streaming LLM response?**
-Open one span for the entire streaming call at the start of inference. As token chunks arrive, emit one span event per chunk with the `gen_ai.content.completion` attribute and the current `time.time_ns()` timestamp. Record `gen_ai.ttft_ms` on the span when the first chunk arrives. After the final chunk, set `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`, and `gen_ai.cost_usd` as span attributes, then close the span. This produces one span with N events (one per chunk), from which you can compute TTFT, inter-token latency, and total duration — all from the event timestamps.
+Open one span for the entire streaming call at the start of inference. As token chunks arrive, emit one span event per chunk with the current `time.time_ns()` timestamp and an application-namespaced text attribute (the conventions no longer standardize per-chunk content). Record TTFT when the first chunk arrives — the convention signal is the `gen_ai.server.time_to_first_token` histogram metric, with a span attribute as an optional drill-down aid. After the final chunk, set `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and the string-array `gen_ai.response.finish_reasons`, plus your own cost attribute, then close the span. This produces one span with N events, from which you can compute TTFT, inter-token latency, and total duration — all from the event timestamps.
 
 **Q: What is the W3C TraceContext header and why does it matter for LLM agents?**
 The W3C TraceContext specification defines the `traceparent` HTTP header format: `00-<trace_id>-<span_id>-<flags>`. When a service makes an HTTP call to another service, it injects the current span's `trace_id` and `span_id` into this header. The receiving service extracts the header and creates its spans as children of the referenced parent span. For LLM agents, this is critical: when an orchestrator delegates to a sub-agent over HTTP, the `traceparent` header links sub-agent spans into the orchestrator's trace. Without it, sub-agent spans appear as unrelated orphan traces, making multi-hop agent debugging impossible.
@@ -712,11 +722,11 @@ OTel context is stored in Python `contextvars`, which are process-local. When a 
 **Q: What is tail-based sampling and when is it preferable to head-based sampling for LLM apps?**
 Head-based sampling decides at the trace root before any child spans exist — it is simple but drops errors and slow traces at the same rate as fast, successful traces. Tail-based sampling buffers a complete trace for 30 seconds and decides after seeing all spans, enabling rules like "keep all ERROR traces and all traces with TTFT > 2 seconds; sample 5-10% of the rest." For high-traffic LLM production paths, tail-based is preferable because the most interesting traces (errors, slow responses, `content_filter` finish reasons) are guaranteed to be kept, while routine fast traces are aggressively sampled down.
 
-**Q: What is the OTel OTLP span attribute size limit and how does it affect LLM instrumentation?**
-The OTLP default maximum attribute value length is 4096 bytes (configurable); the maximum recommended span size is around 140KB. LLM prompts can be tens of thousands of tokens, easily exceeding these limits. Exceeding the limit causes the OTel Collector or SDK to silently truncate or drop the attribute — the span arrives at the backend with the attribute missing but no error is logged by default. Mitigations: (1) never store raw prompt content in span attributes — use a hashed prompt ID instead; (2) set explicit `AttributeLengthLimit` in the SDK: 500 characters for any string attribute; (3) configure the OTel Collector attribute processor to log a warning when truncation occurs.
+**Q: What span attribute size limits apply in OTel and how do they affect LLM instrumentation?**
+The SDK spec defaults `AttributeValueLengthLimit` to Infinity and `AttributeCountLimit` to 128, so nothing truncates a long prompt unless you configure it. That default is the trap: LLM prompts of tens of thousands of tokens ride along in full until they hit a transport limit instead — the Collector's OTLP/gRPC receiver caps message size at 4 MiB by default, and an oversized batch is rejected rather than trimmed, so whole spans disappear. Mitigations: (1) never store raw prompt content in span attributes — use a hashed prompt ID instead; (2) set an explicit `AttributeValueLengthLimit` in the SDK (500 characters for any string attribute); (3) monitor the exporter's failure counters so rejected batches surface as an alert rather than as missing data.
 
 **Q: How do you attribute LLM cost per tenant across multiple services?**
-Instrument every LLM span with `tenant_id` from the request context (typically from a JWT claim or session). Use OTel Baggage to propagate `tenant_id` across service boundaries without reading from a database at each hop. Record `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and `gen_ai.cost_usd` on every LLM span. In the backend (Tempo, Jaeger, Langfuse), query for spans grouped by `tenant_id` and summed by `gen_ai.cost_usd`. Alert when a tenant's rolling 24-hour cost exceeds a threshold. Typical numbers: GPT-4o at 3000 input / 300 output tokens per call × $5/1M input + $15/1M output = $0.0195/call; 1000 calls/day = $19.50/day per tenant.
+Instrument every LLM span with `tenant_id` from the request context (typically from a JWT claim or session). Use OTel Baggage to propagate `tenant_id` across service boundaries without reading from a database at each hop. Record `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, and a derived cost attribute on every LLM span. In the backend (Tempo, Jaeger, Langfuse), query for spans grouped by `tenant_id` and summed by the cost attribute. Alert when a tenant's rolling 24-hour cost exceeds a threshold. Typical numbers: a mid-tier model at 3000 input / 300 output tokens per call, priced at $2.50/1M input + $15/1M output, costs $0.012/call; 1000 calls/day = $12/day per tenant.
 
 **Q: What is the difference between OTLP and Zipkin as trace export formats?**
 Zipkin is an older trace format with a simpler JSON schema; it predates the OpenTelemetry specification. OTLP (OpenTelemetry Protocol) is the native OTel wire format, using Protocol Buffers over gRPC (port 4317) or HTTP (port 4318). OTLP supports traces, metrics, and logs in one protocol; Zipkin only supports traces. OTLP preserves all span attributes, events, and links; Zipkin has limited attribute cardinality. For LLM apps, use OTLP: the `gen_ai.*` semantic convention attributes require OTLP's arbitrary key-value attribute model, which Zipkin does not support. Most modern backends (Tempo, Jaeger 1.35+, Honeycomb) accept OTLP natively.
@@ -734,16 +744,16 @@ Add the evaluation score as a span attribute after evaluation completes. For syn
 OTel Baggage is a key-value store propagated alongside the `traceparent` header in the `baggage` HTTP header. Every downstream service receives it automatically without a database lookup. It is designed for low-cardinality context needed by all services: `tenant_id`, `user_id`, `feature_flag_variant`. Span attributes are local to one span — they are not forwarded. The pattern: inject `tenant_id` into Baggage at the API gateway; every downstream LLM span reads `baggage.get("tenant_id")` and sets it as a local span attribute for cost attribution.
 
 **Q: How does PII in span attributes violate GDPR and what is the correct architecture?**
-GDPR Article 17 (right to erasure) requires that you can delete all personal data for a user on request. Span data in Jaeger, Tempo, or Honeycomb is typically not individually addressable — you cannot delete one user's spans without deleting all spans for that time window. If raw prompts containing user names, medical history, or financial details are stored in span attributes, you cannot honor a deletion request. The correct architecture: (1) assign each prompt a `prompt_id = sha256(prompt)[:16]`; (2) store the full prompt in an encrypted content store (S3 + KMS) keyed by `prompt_id`, with per-user deletion support; (3) store only `prompt_id` on the span; (4) configure the OTel Collector to drop `gen_ai.request.messages` and `gen_ai.content.completion` attributes before export.
+GDPR Article 17 (right to erasure) requires that you can delete all personal data for a user on request. Span data in Jaeger, Tempo, or Honeycomb is typically not individually addressable — you cannot delete one user's spans without deleting all spans for that time window. If raw prompts containing user names, medical history, or financial details are stored in span attributes, you cannot honor a deletion request. The correct architecture: (1) assign each prompt a `prompt_id = sha256(prompt)[:16]`; (2) store the full prompt in an encrypted content store (S3 + KMS) keyed by `prompt_id`, with per-user deletion support; (3) store only `prompt_id` on the span; (4) configure the OTel Collector to drop `gen_ai.input.messages` and `gen_ai.output.messages` attributes before export.
 
 **Q: How do you alert on LLM quality regression using OTel telemetry?**
-Define quality as a numeric span attribute: `eval.faithfulness_score` (0.0–1.0) recorded by an inline LLM-as-judge. Export this attribute as an OTel metric via the Collector's `spanmetrics` connector, which converts span attributes to Prometheus histograms. Create a Grafana alert: `histogram_quantile(0.5, eval_faithfulness_score_bucket) < 0.75` triggers a PagerDuty alert. The advantage over threshold-based latency alerts: you are alerting on answer quality degradation, not just slowness. A model routing change or a bad prompt change that degrades quality but not latency will be caught by this alert within the next evaluation window (typically 5 minutes if running inline evals on 10% of traffic).
+Define quality as a numeric span attribute: `eval.faithfulness_score` (0.0–1.0) recorded by an inline LLM-as-judge. Export it as a metric: record it directly as an OTel histogram in the app, or derive a Collector-side series with the `sum` connector (`spanmetrics` cannot do this — it emits only call counts and duration, with span attributes as dimensions). Create a Grafana alert: `histogram_quantile(0.5, eval_faithfulness_score_bucket) < 0.75` triggers a PagerDuty alert. The advantage over threshold-based latency alerts: you are alerting on answer quality degradation, not just slowness. A model routing change or a bad prompt change that degrades quality but not latency will be caught by this alert within the next evaluation window (typically 5 minutes if running inline evals on 10% of traffic).
 
 **Q: What is the correct OTel span kind for an LLM call and why?**
 Use `SpanKind.CLIENT` for LLM inference calls — the application is the client making a request to an external LLM API server. `SpanKind.CLIENT` signals to the backend that this span is an outbound call, which affects how service maps are rendered (the LLM provider appears as a downstream dependency). Use `SpanKind.SERVER` for spans created at your API gateway receiving inbound user requests. Use `SpanKind.INTERNAL` for spans representing internal computation (reranking, cost calculation). Use `SpanKind.PRODUCER`/`CONSUMER` for message queue producer/consumer spans (Celery tasks, Kafka messages). Misclassifying span kinds breaks service dependency maps and can cause the backend to miscalculate error rates.
 
-**Q: How does the OTel `spanmetrics` connector enable cost monitoring dashboards without a dedicated billing pipeline?**
-The `spanmetrics` connector in the OTel Collector converts span attributes into Prometheus metrics in real time. Configure it to extract `gen_ai.cost_usd` from every LLM span and emit a `gen_ai_cost_usd_total` counter metric labeled by `tenant_id`, `feature`, and `gen_ai.request.model`. Prometheus scrapes this counter from the Collector's metrics endpoint; Grafana queries it with `sum by (tenant_id) (rate(gen_ai_cost_usd_total[1h]))` to produce a real-time cost-per-tenant chart. Alert rule: `sum by (tenant_id) (increase(gen_ai_cost_usd_total[24h])) > 50` fires when any tenant exceeds $50/day. This eliminates the need for a separate billing pipeline — the trace data and the cost metric come from the same OTel instrumentation.
+**Q: Which OTel Collector connector turns a per-span cost attribute into a Prometheus counter, and why is it not `spanmetrics`?**
+The `sum` connector is the right component: it sums a numeric attribute value found on spans into a metric time series. `spanmetrics` (renamed `span_metrics`) produces only R.E.D. metrics — a call count and a duration histogram — using span attributes as *dimensions*, so it can tell you how many LLM spans a tenant produced but never how many dollars they cost. Configure `sum` with `source_attribute: gen_ai.cost_usd` and dimensions `tenant_id`, `feature`, `gen_ai.request.model`. Prometheus scrapes the resulting counter from the Collector; Grafana queries `sum by (tenant_id) (rate(gen_ai_cost_usd_total[1h]))` for a real-time cost-per-tenant chart, and `sum by (tenant_id) (increase(gen_ai_cost_usd_total[24h])) > 50` fires when a tenant exceeds $50/day. Trace data and cost metric then come from the same instrumentation, with no separate billing pipeline.
 
 ---
 
@@ -753,21 +763,21 @@ The `spanmetrics` connector in the OTel Collector converts span attributes into 
 
 2. **Record `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` on every LLM span without exception.** These two attributes are the inputs to your cost allocation model. Missing them on even 5% of spans makes your cost dashboard unreliable and tenant billing potentially inaccurate.
 
-3. **Record `gen_ai.ttft_ms` as a span attribute on every streaming LLM span.** Streaming P99 latency and TTFT P99 are different metrics and require separate monitoring. Users perceive TTFT as "response time." A 4-second TTFT with fast streaming thereafter feels slower than a 2-second TTFT with slower total throughput.
+3. **Emit the `gen_ai.server.time_to_first_token` metric, and mirror TTFT onto every streaming LLM span as an application attribute.** Streaming P99 latency and TTFT P99 are different metrics and require separate monitoring. Users perceive TTFT as "response time." A 4-second TTFT with fast streaming thereafter feels slower than a 2-second TTFT with slower total throughput.
 
 4. **Always propagate trace context across service and queue boundaries using W3C TraceContext.** For HTTP: use `propagate.inject(headers)`. For message queues (Celery, Kafka, SQS): serialize the carrier dict into message metadata. Without propagation, multi-agent traces fragment into unrelated orphan spans.
 
-5. **Set an explicit attribute value length limit of 500 characters on LLM spans.** Configure `AttributeLengthLimit=500` in the SDK to prevent accidental large-attribute storage that hits the 4096-byte OTLP limit or 140KB span size limit, either of which causes silent attribute or span truncation.
+5. **Set an explicit attribute value length limit of 500 characters on LLM spans.** The SDK's default `AttributeValueLengthLimit` is Infinity, so nothing truncates for you; configure the limit explicitly to keep spans from growing until they blow past the Collector's 4 MiB OTLP message size and get whole batches rejected.
 
 6. **Use tail-based sampling in the OTel Collector for high-traffic production paths.** Keep 100% of error traces and traces with TTFT > 2 seconds. Sample 5-10% of successful, fast traces. This preserves the traces you need for debugging while reducing storage and ingest costs by 90%.
 
-7. **Emit `gen_ai.cost_usd` as both a span attribute and an OTel metric counter.** The span attribute enables per-request analysis. The metric counter (via the Collector's `spanmetrics` connector) enables real-time Grafana dashboards and Prometheus alerting without querying the trace backend for aggregates.
+7. **Emit `gen_ai.cost_usd` as both a span attribute and an OTel metric counter.** The span attribute enables per-request analysis. The metric counter (emitted by the app, or derived in the Collector with the `sum` connector) enables real-time Grafana dashboards and Prometheus alerting without querying the trace backend for aggregates.
 
-8. **Configure the OTel Collector's `attributes` processor to redact `gen_ai.request.messages` and `gen_ai.content.completion` before export.** Make this a Collector-level policy, not an application-level policy. Application teams will forget; the Collector enforces uniformly across all services.
+8. **Configure the OTel Collector's `attributes` processor to redact `gen_ai.input.messages` and `gen_ai.output.messages` before export.** Make this a Collector-level policy, not an application-level policy. Application teams will forget; the Collector enforces uniformly across all services.
 
 9. **Add `tenant_id` and `feature` to OTel Baggage at the API gateway and read them from Baggage in every downstream service.** This eliminates the need to re-extract tenant context from JWTs at each service hop, and ensures that every LLM span carries the attribution metadata required for cost reporting.
 
-10. **Set up the `spanmetrics` connector alert `eval.faithfulness_score P50 < 0.75` before launching any LLM feature to production.** Quality alerts catch model changes, prompt regressions, and retrieval degradation that latency and error-rate alerts miss entirely.
+10. **Set up the `sum`-connector-derived alert `eval.faithfulness_score P50 < 0.75` before launching any LLM feature to production.** Quality alerts catch model changes, prompt regressions, and retrieval degradation that latency and error-rate alerts miss entirely.
 
 ---
 
@@ -779,7 +789,7 @@ The `../design_llm_gateway.md` case study describes a gateway that routes LLM re
 
 ### ChatGPT-Scale — Tracing Streaming Responses and TTFT
 
-The `../design_chatgpt.md` case study shows how a ChatGPT-scale system measures and optimizes time-to-first-token across 100 million daily requests. Every streaming inference call creates an OTel span with span events for each token chunk. The TTFT metric is extracted from these events in the OTel Collector's `spanmetrics` processor and emitted as a Prometheus histogram. The P99 TTFT alert threshold is 1.5 seconds — above that, on-call engineers investigate the inference cluster's KV cache hit rate, queuing delay, and GPU utilization. The OTel trace links the user-facing HTTP span to the inference span to the streaming event sequence, so engineers can drill into any high-latency request and see exactly where the delay occurred: pre-processing, queue wait, KV cache miss, or decode step. Without per-token span events, this drill-down is impossible.
+The `../design_chatgpt.md` case study shows how a ChatGPT-scale system measures and optimizes time-to-first-token across 100 million daily requests. Every streaming inference call creates an OTel span with span events for each token chunk. TTFT is emitted as the `gen_ai.server.time_to_first_token` histogram and scraped by Prometheus. The P99 TTFT alert threshold is 1.5 seconds — above that, on-call engineers investigate the inference cluster's KV cache hit rate, queuing delay, and GPU utilization. The OTel trace links the user-facing HTTP span to the inference span to the streaming event sequence, so engineers can drill into any high-latency request and see exactly where the delay occurred: pre-processing, queue wait, KV cache miss, or decode step. Without per-token span events, this drill-down is impossible.
 
 ### Autonomous SWE Agent — 50+ Tool Calls Across a Single Trace
 
@@ -787,4 +797,4 @@ The `../design_ai_coding_assistant.md` case study (the closest existing study to
 
 ### AI Search Engine — Retrieval-Rerank-Generate Pipeline
 
-The `../design_ai_search_engine.md` case study uses OTel to profile a retrieval-rerank-generate (RRG) pipeline serving 500,000 daily search queries. The pipeline produces four spans per request: `vector_search` (embedding + ANN retrieval), `rerank` (Cohere reranker), `llm.chat` (answer synthesis), and the root `search.request` HTTP span. The OTel Collector's `spanmetrics` processor extracts P50/P95/P99 latency for each span type and emits them as separate Prometheus metrics. This revealed that reranking (Cohere API latency P95 = 380ms) was the pipeline bottleneck, not the LLM (GPT-4o-mini P95 = 310ms). Without per-span latency metrics, the dashboard showed only end-to-end latency, which masked the reranker as the source of variance. After switching to a local reranking model (latency P95 = 45ms), end-to-end P95 latency dropped from 920ms to 580ms — a 37% improvement discovered directly from the OTel span data.
+The `../design_ai_search_engine.md` case study uses OTel to profile a retrieval-rerank-generate (RRG) pipeline serving 500,000 daily search queries. The pipeline produces four spans per request: `vector_search` (embedding + ANN retrieval), `rerank` (Cohere reranker), `llm.chat` (answer synthesis), and the root `search.request` HTTP span. The OTel Collector's `spanmetrics` connector extracts P50/P95/P99 duration for each span type and emits them as separate Prometheus metrics. This revealed that reranking (Cohere API latency P95 = 380ms) was the pipeline bottleneck, not the LLM (a small chat model at P95 = 310ms). Without per-span latency metrics, the dashboard showed only end-to-end latency, which masked the reranker as the source of variance. After switching to a local reranking model (latency P95 = 45ms), end-to-end P95 latency dropped from 920ms to 580ms — a 37% improvement discovered directly from the OTel span data.

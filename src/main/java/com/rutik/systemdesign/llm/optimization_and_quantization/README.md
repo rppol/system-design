@@ -400,7 +400,10 @@ With INT4 KV quantization:
   → 75% reduction
   → Some quality loss; monitor perplexity carefully
 
-vLLM supports: --kv-cache-dtype int8 or fp8
+vLLM's --kv-cache-dtype accepts: auto, float16, bfloat16, fp8, fp8_e4m3,
+fp8_e5m2 (plus newer per-token-head variants such as int8_per_token_head
+and int4_per_token_head). There is no plain "int8" value -- FP8 is the
+mainstream 1-byte KV path on Hopper and later.
 ```
 
 **In plain terms.** "For every token you have ever seen, every layer stored one key vector and one value vector — so cache memory is the product of how deep the model is, how wide its attention is, how long the conversation is, and how many bytes each number takes."
@@ -457,15 +460,20 @@ That last line is the crossover the Section 13 Q&A refers to: `context_length > 
 
 llama.cpp's quantization format optimized for CPU/metal inference:
 
-| Format | Bits | Quality | Speed | Size (7B) |
+| Format | Bits/weight | Quality | Speed | Size (7B) |
 |--------|------|---------|-------|-----------|
-| Q2_K | 2.5 | Lowest | Fastest | 2.7GB |
-| Q3_K_M | 3.3 | Low | Fast | 3.3GB |
-| Q4_0 | 4 | Good | Fast | 3.8GB |
-| Q4_K_M | 4.5 | Very good | Medium | 4.1GB |
-| Q5_K_M | 5.3 | Excellent | Medium | 4.8GB |
-| Q6_K | 6.6 | Near perfect | Slower | 5.5GB |
-| Q8_0 | 8 | Near BF16 | Slowest | 7.2GB |
+| Q2_K | 2.56 | Lowest | Fastest | 2.8GB |
+| Q3_K_M | 3.44 | Low | Fast | 3.3GB |
+| Q4_0 | 4.5 | Good | Fast | 3.8GB |
+| Q4_K_M | 4.5 (mixed) | Very good | Medium | 4.1GB |
+| Q5_K_M | 5.5 (mixed) | Excellent | Medium | 4.8GB |
+| Q6_K | 6.56 | Near perfect | Slower | 5.5GB |
+| Q8_0 | 8.5 | Near BF16 | Slowest | 7.2GB |
+
+Bits/weight are the llama.cpp block-format figures (Q4_0 stores 32 4-bit values plus one
+FP16 scale = 4.5 bpw; Q8_0 stores 32 bytes plus a scale = 8.5 bpw). The `_M` mixes keep
+some tensors at a higher bit width, so the realized file size can sit slightly above the
+base format's bpw. Sizes are for a 7B Llama-class model.
 
 `Q4_K_M` is the community standard recommendation: best quality/size/speed balance.
 
@@ -623,7 +631,7 @@ Key: by tracking (m, l) incrementally, softmax is computed without
 | `m` | Largest score seen so far in this row. Subtracted before `exp` so nothing overflows |
 | `l` | Running softmax denominator: the sum of all `exp` terms seen so far |
 | `exp(m - m_new)` | The rescaling correction. Always ≤ 1 — it shrinks stale accumulations |
-| `B_r`, `B_c` | Tile sizes chosen so `Q,K,V` tiles fit in ~20 MB of SRAM |
+| `B_r`, `B_c` | Tile sizes chosen so `Q,K,V` tiles fit one SM's SRAM (192KB on A100, 228KB on H100) |
 | `O_accum` | Partial output, rescaled at every block, divided by `l` exactly once at the end |
 
 **Walk one example — one query row, two blocks of scores.**
@@ -763,7 +771,10 @@ If an expert is at capacity when a token routes to it:
   Option 1: Drop the token (token receives zero expert contribution)
             — fast but noisy; acceptable loss at large scale
   Option 2: Route to next-best expert (auxiliary routing)
-            — preserves quality; used in DeepSeek-V3
+            — preserves quality; costs a second dispatch
+  Option 3: Impose no capacity limit at all — DeepSeek-V3 reports dropping
+            no tokens in training or inference, and Megatron-LM leaves
+            --moe-expert-capacity-factor unset by default
 
 Load balancing loss coefficient controls the imbalance penalty:
   Too high: all tokens routed to same 1-2 experts (expert collapse)
@@ -818,15 +829,17 @@ The capacity buffer exists because GPUs need **statically shaped** tensors. You 
 **Fine-grained vs coarse-grained MoE:**
 ```
 Coarse-grained (Mixtral 8x7B):
-  8 experts, each has full FFN hidden_dim × 4 = 14B params each
+  8 experts per layer, each a full FFN: 3 matrices of 4096 × 14336
+  = ~176M params per expert per layer, ~5.6B summed over all 32 layers
   2 experts active per token → large per-expert contribution
   Routing: binary (in or out per expert)
 
 Fine-grained (DeepSeek-V3):
-  256 experts, each is smaller (1/8 the FFN width of Mixtral's experts)
+  256 routed experts, each far smaller (expert intermediate dim 2048
+  vs Mixtral's 14336 — about 1/7 the width)
   8 experts active per token (top-8 of 256)
-  Plus 2 SHARED experts always active for every token (capture common patterns)
-  Total active experts per token: 8 routed + 2 shared = 10
+  Plus 1 SHARED expert always active for every token (captures common patterns)
+  Total active experts per token: 8 routed + 1 shared = 9
 
 Advantages of fine-grained:
   More diverse routing → better specialization
@@ -1043,7 +1056,8 @@ Micro-batching: split batch into micro-batches to fill the pipeline
   Stage 1: process micro-batch 1 + stage 0 starts micro-batch 2
   ...
 
-Latency: high (pipeline bubble ~(num_stages-1)/num_stages compute)
+Latency: high (bubble fraction = (stages-1)/(microbatches + stages - 1);
+         with 1 microbatch that degenerates to (stages-1)/stages)
 Throughput: high with enough micro-batches
 Best for: throughput-sensitive serving (large batch sizes)
 Scales: across nodes (P2P transfers, not all-reduce)
@@ -1062,7 +1076,8 @@ Train a small student model to mimic a large teacher (deep dive: [Knowledge Dist
 Standard distillation:
   Loss = α × cross_entropy(student, labels) + (1-α) × KL(student, teacher)
   Teacher outputs: soft probability distribution (richer signal than hard labels)
-  Example: DistilBERT (66M) → 97% of BERT (110M) quality at 60% speed
+  Example: DistilBERT (66M) → retains 97% of BERT's language-understanding
+           performance, 40% smaller and 60% FASTER than BERT-base (110M)
 
 Sequence-level distillation:
   Teacher generates training data: 100K (prompt, teacher_response) pairs
@@ -1226,22 +1241,22 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 
 ## 8. Real-World Examples
 
-### Together AI GPTQ/AWQ Serving
-- Serves models at INT4 (AWQ) for most 70B+ models
-- 4× memory reduction enables serving 70B on 2×A100 instead of 4×A100
-- Quality difference: <2% on MMLU; acceptable for most applications
+### INT4 (AWQ/GPTQ) serving of 70B-class models
+- INT4 weight-only quantization is the standard way providers fit a 70B on 2×A100 instead of 4×A100
+- 4× weight-memory reduction (2 bytes/param → 0.5), before group-scale overhead
+- Quality cost is calibration- and benchmark-dependent; the vendor-agnostic rule is to re-run your own eval rather than trusting a published delta
 
 ### Mixtral 8x7B (Mistral AI)
 - 46.7B total params, 12.9B active per token
 - 2 out of 8 experts active per token
-- Quality: exceeds LLaMA 2 70B on most benchmarks
-- Cost: inference at ~2.5× the cost of 7B model (not 7× like dense 46B)
+- Mistral's release claim: outperforms Llama 2 70B on most benchmarks with 6× faster inference
+- Cost: ~1.8× the per-token FLOPs of a dense 7B (12.9B active / 7.24B), not the ~6.5× a dense 46.7B would cost
 
 ### DeepSeek-V3 (2024)
 - 671B total params, 37B active
-- 64 experts, 8 active per token
-- Fine-grained expert routing with auxiliary-loss-free load balancing
-- Trained for $5.5M total (H100 clusters)
+- 256 routed experts + 1 shared expert per MoE layer, 8 routed experts active per token
+- Fine-grained expert routing with auxiliary-loss-free load balancing (bias update speed 0.001, sequence-wise balance loss alpha 0.0001)
+- 2.788M H800 GPU-hours of training; the widely quoted "$5.5M" is that figure at the paper's assumed $2/GPU-hour, and the hardware was H800, not H100
 - Per-token inference cost comparable to a ~40B dense model
 
 ---
@@ -1285,7 +1300,7 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 
 1. **Evaluating only on general benchmarks**: INT4 may lose only 1% on MMLU but 10% on your domain task. Always evaluate on domain benchmarks.
 2. **Wrong calibration data**: GPTQ/AWQ quality is calibration-data-dependent. Calibrate on data similar to your use case.
-3. **Forgetting KV cache quantization**: Quantizing weights but not KV cache misses 30-50% of memory savings.
+3. **Forgetting KV cache quantization**: Weight quantization caps out at a fixed saving, while KV cache grows with batch × context — at long context the cache can exceed the weights entirely (Section 4.3 works the crossover: ~107K tokens for a 70B at INT4). Quantize both, and compute which term dominates at your context length rather than assuming.
 4. **MoE expert imbalance**: Without load balancing loss, some experts get all traffic; others get none. Always use auxiliary loss during MoE training.
 5. **Applying pruning without NVIDIA 2:4 sparsity**: Random unstructured pruning on GPU ≠ speedup. Only structured pruning (or 2:4 sparsity on A100+) gives actual speedup.
 
@@ -1295,8 +1310,8 @@ Popular examples: Mistral community models on HuggingFace (OpenHermes, Nous-Herm
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **AutoGPTQ** | GPTQ quantization | pip install auto-gptq |
-| **AutoAWQ** | AWQ quantization | pip install autoawq |
+| **GPTQModel** | GPTQ quantization | `pip install gptqmodel`; the maintained successor to AutoGPTQ, whose last release (auto-gptq 0.7.1) is from 2024 |
+| **llm-compressor** | AWQ / GPTQ / FP8 / sparsity | `pip install llmcompressor`; vLLM-project library that absorbed AutoAWQ. **AutoAWQ (`pip install autoawq`, last release 0.2.9) is officially deprecated and unmaintained** — its last tested stack was torch 2.6.0 / transformers 4.51.3 |
 | **bitsandbytes** | INT4/INT8 load-time quantization | Used by QLoRA; easy API |
 | **llama.cpp** | GGUF quantization | Best for CPU/metal |
 | **Flash Attention** | Efficient attention | pip install flash-attn |
@@ -1323,10 +1338,10 @@ A: Calibration data mismatch. GPTQ and AWQ calibration on general text (C4, wiki
 A: QAT (Quantization-Aware Training) simulates quantization noise during the forward pass using fake-quantized weights — the model sees quantized values and adapts its weight distribution to be robust to quantization. The backward pass uses a straight-through estimator (gradient passes through the rounding operation as if it were identity) because the true gradient of a step function is zero. Cost: requires training compute, typically 1-10% of original training. Worth it when: INT4 PTQ quality is insufficient on your task, you have GPU training infrastructure, and the model will serve production traffic long-term. PTQ (GPTQ/AWQ) is always the first attempt — only escalate to QAT if PTQ quality is unacceptable after domain-specific calibration.
 
 **Q: How does Flash Attention reduce memory from O(n²) to O(n)?**
-A: Standard attention materializes the full [seq × seq] score matrix in HBM before applying softmax and computing the weighted sum — that is O(n²) memory. Flash Attention tiles Q, K, V into blocks that fit in on-chip SRAM (~20MB on A100). It processes attention block by block using an online softmax algorithm: for each block, it computes a partial softmax using a numerically stable incremental update (tracking running maximum and sum), accumulating the output without ever writing the full n×n matrix to HBM. Only the final output O (shape [seq × d]) is written back — O(n) total HBM storage. Speed improves because HBM bandwidth (2TB/s on A100) is roughly 150× slower than SRAM throughput; reducing HBM round-trips directly reduces wall-clock time.
+A: Standard attention materializes the full [seq × seq] score matrix in HBM before applying softmax and computing the weighted sum — that is O(n²) memory. Flash Attention tiles Q, K, V into blocks that fit in on-chip SRAM (~20MB on A100). It processes attention block by block using an online softmax algorithm: for each block, it computes a partial softmax using a numerically stable incremental update (tracking running maximum and sum), accumulating the output without ever writing the full n×n matrix to HBM. Only the final output O (shape [seq × d]) is written back — O(n) total HBM storage. Speed improves because on-chip SRAM delivers roughly an order of magnitude more bandwidth than HBM (the FlashAttention paper's A100 figures are ~19 TB/s SRAM versus ~1.5-2 TB/s HBM, and capacity is 192KB per SM, ~20MB aggregate); reducing HBM round-trips directly reduces wall-clock time.
 
 **Q: What is the difference between tensor parallelism and pipeline parallelism? When would you use each for serving?**
-A: Tensor parallelism splits each weight matrix across GPUs horizontally — each GPU holds a shard of every layer and requires an all-reduce communication after each layer. This is low-latency but communication-heavy, and is practical only within a node where GPUs are connected via NVLink (typically ≤8 GPUs). Pipeline parallelism splits layers vertically across GPUs (GPU 0 handles layers 0-19, GPU 1 handles layers 20-39) — no per-layer communication, but pipeline bubbles introduce latency proportional to (stages - 1) / stages of idle time. For serving: use tensor parallelism within a node for latency-sensitive workloads. Combine tensor × pipeline (TP within a node, PP across nodes) for multi-node deployments of very large models (>200B parameters). Data parallelism (full model replicas) is used when the model fits on one node and you need to scale concurrency.
+A: Tensor parallelism splits each weight matrix across GPUs horizontally — each GPU holds a shard of every layer and requires an all-reduce communication after each layer. This is low-latency but communication-heavy, and is practical only within a node where GPUs are connected via NVLink (typically ≤8 GPUs). Pipeline parallelism splits layers vertically across GPUs (GPU 0 handles layers 0-19, GPU 1 handles layers 20-39) — no per-layer communication, but pipeline bubbles introduce idle time equal to (stages - 1) / (microbatches + stages - 1), which is why enough in-flight microbatches is what makes PP efficient. For serving: use tensor parallelism within a node for latency-sensitive workloads. Combine tensor × pipeline (TP within a node, PP across nodes) for multi-node deployments of very large models (>200B parameters). Data parallelism (full model replicas) is used when the model fits on one node and you need to scale concurrency.
 
 **Q: What is Grouped Query Attention (GQA) and how does it reduce inference cost?**
 A: GQA uses fewer K/V heads than Q heads. For example, LLaMA 3 70B uses 64 Q heads but only 8 K/V heads — each K/V head is shared across 8 Q heads. The KV cache size scales with K/V head count, not Q head count. With 8 K/V heads instead of 64, the KV cache is 8× smaller than Multi-Head Attention (MHA) for the same model. This is an architectural decision made at pre-training time and cannot be applied post-hoc — it permanently reduces KV cache memory, enabling more concurrent users at the same GPU memory. GQA gives near-MHA quality (validated in LLaMA 2/3, Mistral 7B) while dramatically reducing the KV cache pressure that limits concurrency in production.
@@ -1344,13 +1359,13 @@ A: Quantization is fast (30 minutes to 3 hours for a 70B model), requires no ret
 A: FP8 is a floating-point format with two variants: E4M3 (4 exponent bits, 3 mantissa) for weights and activations, and E5M2 (5 exponent, 2 mantissa) for gradients. Unlike INT8 (a uniform integer grid), FP8 represents numbers in floating-point — the exponent provides a wider dynamic range that handles activation outliers naturally. LLM activations have outlier values in specific channels that saturate INT8's fixed range and require careful per-channel or per-token scaling to manage; FP8 accommodates these via its exponent without special handling. Requires H100 Tensor Cores with native FP8 support. Used in DeepSeek-V3 training and NVIDIA TransformerEngine. Gives ~2× memory reduction vs BF16 with near-BF16 quality — better than INT8 for activation quantization on models with outlier activations.
 
 **Q: How does GPTQ's Hessian-based error compensation work, and why is it better than round-to-nearest?**
-A: Round-to-nearest quantizes each weight independently — the quantization error of one weight has no effect on how neighboring weights are quantized. GPTQ computes the Hessian H = 2XX^T (the second-order sensitivity of the layer's output error to weight perturbations) for each layer using calibration data. As it quantizes each column, it redistributes the quantization error to the remaining unquantized columns using H^-1: if weight w_i is rounded and introduces error e_i, then remaining weights w_{i+1} through w_n are adjusted by -e_i × H^-1_{i+1:n,i} to compensate. This means later weights absorb and correct for the errors of earlier weights, resulting in much lower total layer-level reconstruction error. At INT4, GPTQ can achieve the same perplexity as INT8 round-to-nearest because of this error propagation.
+A: Round-to-nearest quantizes each weight independently — the quantization error of one weight has no effect on how neighboring weights are quantized. GPTQ computes the Hessian H = 2XX^T (the second-order sensitivity of the layer's output error to weight perturbations) for each layer using calibration data. As it quantizes each column, it redistributes the quantization error to the remaining unquantized columns using H^-1: if weight w_i is rounded and introduces error e_i, then remaining weights w_{i+1} through w_n are adjusted by -e_i × H^-1_{i+1:n,i} to compensate. This means later weights absorb and correct for the errors of earlier weights, resulting in much lower total layer-level reconstruction error. The published gap, on the setup it was measured on: OPT-175B WikiText2 perplexity, 4-bit GPTQ 8.37 versus 4-bit round-to-nearest 10.54 (Frantar et al., ICLR 2023) — and at 3-bit RTN collapses entirely while GPTQ stays within a point of FP16. The advantage shrinks on smaller models, so quote the model and dataset with the number.
 
 **Q: Why does Flash Attention improve both memory and speed?**
 A: Standard attention materializes the full `[seq × seq]` attention matrix in HBM (GPU slow memory): O(n²) memory. Flash Attention tiles the computation using SRAM (GPU fast memory) — it never writes the full attention matrix to HBM, only the final output. This reduces memory from O(n²) to O(n). Speed improves because fewer HBM reads/writes (the bottleneck) are needed; all attention math happens in faster on-chip SRAM. For seq_len=8192, this eliminates 134MB of HBM traffic per head per layer.
 
 **Q: What is Mixture of Experts and what's its key benefit?**
-A: MoE replaces the FFN in each transformer block with N expert FFNs and a router that selects K experts per token. Total model parameters are N times larger than a dense model, but only K/N fraction of parameters are computed per token. This gives large model capacity (better quality than a comparably-sized dense model) at much lower inference compute (similar to a smaller dense model). DeepSeek-V3 takes this further with fine-grained MoE: 256 smaller experts (each ~1/8 the size of Mixtral's experts) plus 2 shared experts that activate for every token, giving more granular routing and better load distribution. The trade-off: all experts must fit in memory even if only K are active; load balancing across experts requires auxiliary loss during training.
+A: MoE replaces the FFN in each transformer block with N expert FFNs and a router that selects K experts per token. Total model parameters are N times larger than a dense model, but only K/N fraction of parameters are computed per token. This gives large model capacity (better quality than a comparably-sized dense model) at much lower inference compute (similar to a smaller dense model). DeepSeek-V3 takes this further with fine-grained MoE: 256 routed experts (intermediate dim 2048 versus Mixtral's 14336) plus 1 shared expert that activates for every token, giving more granular routing and better load distribution. The trade-off: all experts must fit in memory even if only K are active; load balancing across experts requires auxiliary loss during training.
 
 **Q: What is knowledge distillation and when would you use it over fine-tuning?**
 A: Knowledge distillation trains a small student model using a large teacher model's soft probability outputs (not just hard labels) as training signal. The soft probabilities carry richer information about the teacher's confidence and uncertainty across all classes. Use distillation when: (1) you want a smaller, permanently-deployed model with high quality; (2) you can generate teacher outputs at scale; (3) the target architecture is different from the teacher. Use fine-tuning when adapting an existing model's behavior for a new domain rather than creating a smaller permanent version. Use quantization when the bottleneck is memory and the architecture must remain the same.
@@ -1360,7 +1375,7 @@ A: Knowledge distillation trains a small student model using a large teacher mod
 
 ## 14. Case Study
 
-**Scenario:** An AI inference company deploys Llama-3-70B for a code generation product. Current state: FP16 model on 8×A100 80GB (TP=4, 2 replicas), throughput 80 RPS, GPU cost $12,400/month. Goal: apply AWQ 4-bit quantization to reduce GPU count by 50%, maintain MBPP (code benchmark) score within 2% of FP16 baseline, achieve 160+ RPS on reduced hardware, monthly savings > $5,000.
+**Scenario (illustrative — the benchmark scores, RPS and latency figures below are this scenario's own load-test numbers, not published Llama-3-70B results):** An AI inference company deploys Llama-3-70B for a code generation product. Current state: FP16 model on 8×A100 80GB (TP=4, 2 replicas), throughput 80 RPS, GPU cost $11,680/month at $2/GPU-hour. Goal: apply AWQ 4-bit quantization to reduce GPU count by 50%, maintain MBPP (code benchmark) score within 2% of FP16 baseline, achieve 160+ RPS on reduced hardware, monthly savings > $5,000.
 
 **Architecture:**
 
@@ -1369,9 +1384,9 @@ A: Knowledge distillation trains a small student model using a large teacher mod
   ┌─────────────────────────────────────────────────────────────┐
   │  8 × A100 80GB (2 replicas × TP=4)                         │
   │  Model VRAM: 70B × 2 bytes = 140 GB (4 GPUs = 35 GB each)  │
-  │  KV cache: 80 GB per replica (limited by weight footprint)  │
+  │  KV headroom: 320 GB - 140 GB = 180 GB/replica (45 GB/GPU) │
   │  MBPP score: 62.4%                                          │
-  │  Cost: $12,400/month (8 GPUs × $2/hr × 730 hrs)            │
+  │  Cost: $11,680/month (8 GPUs × $2/hr × 730 hrs)            │
   └─────────────────────────────────────────────────────────────┘
            |
            v AWQ 4-bit Quantization
@@ -1740,4 +1755,4 @@ Three categories: (1) Embedding layer (embed_tokens) — directly maps token IDs
 They are orthogonal optimizations: Flash Attention 2 optimizes the attention computation (memory-efficient attention with tiling), while INT4 quantization reduces weight memory and speeds up weight-bounded matrix multiplications. Both can be applied simultaneously. Flash Attention 2 operates on the attention kernel (QK^T V computation) and requires FP16/BF16 inputs — it does NOT quantize Q, K, V matrices themselves. The benefit of Flash Attention 2 is most significant for long contexts (reduces attention memory from O(N²) to O(N)); INT4 benefits are most significant for the FFN layers (which dominate compute). Combined, they achieve 3-4× throughput improvement over vanilla FP16 with standard attention.
 
 **Q: When should you choose FP8 quantization over INT4 (AWQ/GPTQ)?**
-FP8 is preferable when: (1) Hardware supports it natively (H100 has FP8 tensor cores at 1979 TFLOPS peak vs 312 TFLOPS BF16); (2) Quality tolerance is very strict (FP8 loses 0.2-0.5% vs INT4's 1-2%); (3) You need the full dynamic range of floating-point representation (important for fine-tuned models with non-Gaussian weight distributions). INT4 is preferable when: (1) You need maximum compression (4× vs 2× for FP8); (2) GPU does not have native FP8 support (A100 can run FP8 via emulation but gains are modest); (3) Cost reduction is the primary goal. For Llama-3-70B on A100: use INT4 (AWQ). On H100: FP8 often preferred for its native support and minimal quality loss.
+FP8 is preferable when: (1) Hardware supports it natively — on an H100 SXM, dense FP8 tensor-core peak is 1,979 TFLOPS against 989 TFLOPS dense BF16, exactly 2× (the 3,958 and 1,979 figures on the datasheet are the *with-sparsity* numbers for the same two precisions, and 312 TFLOPS is A100 BF16, a different chip); (2) Quality tolerance is very strict (FP8 loses 0.2-0.5% vs INT4's 1-2%); (3) You need the full dynamic range of floating-point representation (important for fine-tuned models with non-Gaussian weight distributions). INT4 is preferable when: (1) You need maximum compression (4× vs 2× for FP8); (2) GPU does not have native FP8 support (A100 can run FP8 via emulation but gains are modest); (3) Cost reduction is the primary goal. For Llama-3-70B on A100: use INT4 (AWQ). On H100: FP8 often preferred for its native support and minimal quality loss.

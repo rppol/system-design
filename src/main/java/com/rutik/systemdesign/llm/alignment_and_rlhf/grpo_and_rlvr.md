@@ -8,7 +8,7 @@ Deep-dive sub-file of [Alignment & RLHF](README.md). Covers Group Relative Polic
 
 GRPO (Group Relative Policy Optimization) is a critic-free RL algorithm introduced in the DeepSeekMath paper (February 2024) and scaled to frontier size in DeepSeek-R1 (January 2025). It replaces PPO's learned value function with a simple statistical baseline: sample a *group* of G responses to the same prompt, score each one, and use the group's mean and standard deviation to normalize each response's reward into an advantage. Removing the critic eliminates an entire policy-sized network from the training loop — roughly halving trainer memory — and removes the hardest-to-tune component of PPO.
 
-RLVR (Reinforcement Learning from Verifiable Rewards, named in Allen AI's Tulu 3, November 2024) is the reward-side counterpart: instead of a learned reward model, use a *program* that checks correctness — exact answer matching for math, unit tests for code, format validators for structured output. A rule-based verifier cannot be sycophancy-hacked the way a learned reward model can, which is why RLVR scales to hundreds of thousands of RL steps where RLHF saturates or collapses.
+RLVR (Reinforcement Learning from Verifiable Rewards, named in Allen AI's Tulu 3, November 2024) is the reward-side counterpart: instead of a learned reward model, use a *program* that checks correctness — exact answer matching for math, unit tests for code, format validators for structured output. A rule-based verifier cannot be sycophancy-hacked the way a learned reward model can, which is why RLVR sustains tens of thousands of RL steps (DeepSeek trained their Qwen2.5-32B RL ablation for over 10K steps) where RLHF against a learned RM saturates or collapses much sooner.
 
 GRPO + RLVR together are the recipe behind DeepSeek-R1, and variants of this recipe power essentially every open reasoning model since: Qwen3 (GSPO), Kimi k-series, Llama reasoning fine-tunes, and the open replications of OpenAI's o-series test-time-compute behavior.
 
@@ -126,7 +126,7 @@ flowchart TD
     S1["Stage 1: Cold-start SFT\n~1000s curated long-CoT examples"]
     S2["Stage 2: Reasoning RL\nGRPO + accuracy / format / language rewards"]
     S3["Stage 3: Rejection sampling\n600K reasoning + 200K general = 800K SFT samples"]
-    S4["Stage 4: SFT on 800K (2 epochs)"]
+    S4["Stage 4: SFT on 800K (2-3 epochs)"]
     S5["Stage 5: All-scenario RL\nreasoning + helpfulness + harmlessness rewards"]
     R1["DeepSeek-R1"]
     DIST["Distillation\nSFT Qwen2.5 / Llama on 800K samples\n1.5B · 7B · 8B · 14B · 32B · 70B  (no RL on small models)"]
@@ -402,7 +402,7 @@ Operationally: rollout generation dominates (often 70–85% of step time at 8K-t
 
 ### 6.4 Results that anchor the numbers
 
-- R1-Zero: AIME 2024 pass@1 went 15.6% → 71.0% over pure RL; 86.7% with majority voting over 64 samples. Response length grew from hundreds to ~10K tokens *without anyone asking for it* — thinking longer was simply reinforced.
+- R1-Zero: AIME 2024 pass@1 went 15.6% → 77.9% over pure RL; 86.7% with self-consistency (majority voting). Response length grew from hundreds to ~10K tokens *without anyone asking for it* — thinking longer was simply reinforced.
 - R1: AIME 79.8% pass@1, MATH-500 97.3%, Codeforces ~96th percentile — matching o1-level reasoning with a published recipe.
 - Distillation: the 800K R1 samples SFT'd into Qwen2.5-14B beat QwQ-32B-Preview; DeepSeek's ablation showed direct RL on Qwen-32B-base reached only QwQ-level, far below distilling from the big teacher. Lesson: **for small models, distill from a strong reasoner; don't RL from scratch.**
 
@@ -561,7 +561,7 @@ The critic exists to reduce variance of the policy gradient by estimating expect
 RLVR replaces the learned reward model with a deterministic verifier — exact-match for math, unit tests for code, constraint checkers for instruction following. A learned RM is a smooth proxy with exploitable gradients everywhere (length, confidence, sycophancy); a verifier has a narrow attack surface limited to its actual bugs. That is why RLVR runs sustain tens of thousands of steps while RLHF against a learned RM typically over-optimizes within a few thousand (Goodhart). The caveat: the verifier becomes a security boundary — weak answer extraction or visible test cases get gamed just like a weak RM.
 
 **Q4: Walk me through the DeepSeek-R1 training pipeline. Why not just ship R1-Zero?**
-R1-Zero is pure GRPO on V3-Base with accuracy + format rewards — it proved emergent reasoning (AIME 15.6%→71.0%) but produced unreadable, language-mixing chains of thought. R1 fixes this with five stages: (1) cold-start SFT on a few thousand curated long-CoT examples; (2) reasoning RL with an added language-consistency reward; (3) rejection sampling from that checkpoint to build 800K SFT samples (600K reasoning + 200K general); (4) SFT on those samples; (5) a second all-scenario RL stage mixing verifiable rewards with helpfulness/harmlessness reward models. The pattern to remember: RL discovers capability, SFT distills and stabilizes it, then RL again aligns the whole assistant.
+R1-Zero is pure GRPO on V3-Base with accuracy + format rewards — it proved emergent reasoning (AIME 15.6%→77.9%) but produced unreadable, language-mixing chains of thought. R1 fixes this with five stages: (1) cold-start SFT on a few thousand curated long-CoT examples; (2) reasoning RL with an added language-consistency reward; (3) rejection sampling from that checkpoint to build 800K SFT samples (600K reasoning + 200K general); (4) SFT on those samples; (5) a second all-scenario RL stage mixing verifiable rewards with helpfulness/harmlessness reward models. The pattern to remember: RL discovers capability, SFT distills and stabilizes it, then RL again aligns the whole assistant.
 
 **Q5: Why did DeepSeek abandon process reward models (PRMs) and MCTS?**
 Three reasons for PRMs: defining a "correct step" in general reasoning is ill-posed; step-level annotation is expensive (human) or unreliable (automated); and a learned PRM reintroduces exactly the reward hacking that verifiable rewards avoid, plus a model that must be continuously retrained as the policy improves. MCTS failed because token-level search space is exponentially larger than board games and the value model guiding the search is itself hard to train. Both remain useful at *inference* (PRM-guided best-of-N), just not as the training signal.

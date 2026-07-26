@@ -54,9 +54,10 @@ Model fleet:
 
 ### GPU Fleet Sizing
 ```
-H100 SXM5 (80 GB HBM3) throughput at 65% MBU:
+H100 SXM5 (80 GB HBM3) decode throughput at 65% model-bandwidth utilization,
+large batch (these are aggregate tokens/sec across all concurrent sequences):
   7B model (FP8):  ~3,500 tokens/sec per GPU
-  70B model (FP8): ~2,000 tokens/sec per 4-GPU tensor-parallel pod
+  70B model (FP8): ~2,000 tokens/sec per GPU (~8,000/sec per 4-GPU TP pod)
 
 Daily token demand: 40B tokens/day
 Per-second average: 40B / 86,400 = 463K tokens/sec
@@ -66,7 +67,7 @@ At 70% utilization target:
   H100s for 7B workloads (60% of traffic):
     0.6 x 1.39M tokens/sec / 3,500 tokens/sec/GPU = 238 H100s
   H100 pods for 70B workloads (40% of traffic):
-    0.4 x 1.39M tokens/sec / (2,000 x 4 GPUs) = 70 pods = 280 H100s
+    0.4 x 1.39M tokens/sec / 8,000 tokens/sec/pod = 70 pods = 280 H100s
 
   Minimum H100s: 518 → round to 550 with HA headroom
 
@@ -85,7 +86,9 @@ Revenue:
   40B tokens/day x 30 days = 1.2T tokens/month
   Blended price $0.80/M tokens = $960,000/month
   Gross margin: ($960K - $409K) / $960K = 57%
-  (After adding networking, storage, eng cost: ~40% gross margin, consistent with Fireworks/Together reported economics)
+  (After adding networking, storage, eng cost: ~40% gross margin. Neither
+   Fireworks nor Together publishes gross margin; treat 40% as this design's
+   own model, not a reported industry figure.)
 ```
 
 ### Storage Estimates
@@ -96,8 +99,8 @@ Model weight storage:
   S3 cold:  total 20 models x avg 50 GB = 1 TB in S3
 
 LoRA adapter storage:
-  Avg adapter size (rank-64 FP16): 640 MB
-  1,000 adapters: 640 GB → S3 + LRU NVMe cache (top-60 adapters = 38 GB NVMe)
+  Avg adapter size (rank-64 FP16, all linear projections on a 70B base): 1.5 GB
+  1,000 adapters: 1.5 TB → S3 + LRU NVMe cache (top-60 adapters = 90 GB NVMe)
 
 KV cache HBM:
   200 H100 x 80 GB = 16 TB HBM total fleet-wide
@@ -223,8 +226,10 @@ class NaiveModelRouter:
         return pods[self._rr_counter % len(pods)]  # cache thrash guaranteed
 
 # Every request gets a different pod; system-prompt KV cache is never reused.
-# At 500 tenants x 2K-token system prompt: 500 x 2K x 49K bytes/token = 49 GB
-# of redundant prefill computation per hour.
+# Llama-3-70B KV cost per token: 80 layers x 2 (K,V) x 8 KV heads x 128 head_dim
+#   x 2 bytes (FP16) = 327,680 bytes/token (~320 KB).
+# At 500 tenants x 2K-token system prompt, every pod that sees a tenant must
+# re-prefill 500 x 2,048 x 327,680 bytes = 328 GB of KV state.
 ```
 
 ```python
@@ -250,7 +255,7 @@ class PodEndpoint:
     host: str
     port: int
     gpu_type: str
-    mbu: float          # model buffer utilization 0.0-1.0
+    mbu: float          # KV-cache utilization 0.0-1.0 (see 4.4 on the MBU naming)
 
 
 class ModelRouter:
@@ -288,11 +293,11 @@ class ModelRouter:
         return pods[h % len(pods)]
 ```
 
-KV-cache affinity via consistent hashing achieves 72-78% prefix cache hit rate for tenants with fixed system prompts (measured on Together AI public benchmark data), reducing TTFT by 35-50% for long-system-prompt workloads.
+KV-cache affinity via consistent hashing typically achieves a 70-80% prefix cache hit rate for tenants with fixed system prompts, cutting TTFT substantially on long-system-prompt workloads. These are internal-observation ranges, not a published vendor benchmark — measure them on your own traffic before committing to an SLA.
 
 ### 4.2 LoRA Multiplexing (S-LoRA Style)
 
-Serving 1,000 customer LoRA adapters is the defining challenge of a multi-tenant inference platform. Naive model duplication is mathematically impossible: 1,000 adapters × 70 GB base model = 70 TB of GPU HBM required — the entire world's H100 fleet cannot hold this.
+Serving 1,000 customer LoRA adapters is the defining challenge of a multi-tenant inference platform. Naive model duplication is economically absurd: 1,000 adapters × 70 GB base model = 70 TB of GPU HBM, which is 875 dedicated H100s to serve adapters whose own weights total 1.5 TB — a ~47x hardware multiplier for zero added model capability.
 
 S-LoRA (Stanford, 2023) solves this by storing all adapter weights in CPU RAM or NVMe and swapping them into HBM on demand, batching requests that share the same adapter. Only the base model weights plus a hot set of adapter weights live in HBM at any time.
 
@@ -485,7 +490,7 @@ class ModelLoader:
         async def dl(uri: str, idx: int) -> None:
             async with sem:
                 await self._s3_download(uri, f"{self.NVME_BASE_PATH}/{spec.model_id}/shard_{idx:04d}.bin")
-        await asyncio.gather(*[dl(uri, i) for i, uri in enumerate(spec.shards)])
+        await asyncio.gather(*[dl(uri, i) for i, uri in enumerate(spec.s3_shards)])
         self._staged[spec.model_id] = True
 
     async def _nvme_to_hbm(self, model_id: str, gpu_ids: list[int]) -> None:
@@ -502,7 +507,7 @@ Speculative pre-warming: the autoscaler predicts traffic spikes using a 7-day tr
 
 ### 4.4 Token-Throughput Autoscaler
 
-RPS-based autoscaling is wrong for LLM inference. A 7B model at batch size 64 with 2,000-token outputs generates 64 × 2,000 = 128,000 tokens per request batch — the same GPU is "serving one request" (RPS=1) and "saturated" simultaneously. Model Buffer Utilization (MBU) — fraction of KV-cache pages occupied — is the correct signal.
+RPS-based autoscaling is wrong for LLM inference. A 7B model at batch size 64 with 2,000-token outputs generates 64 × 2,000 = 128,000 tokens per request batch — the same GPU is "serving one request" (RPS=1) and "saturated" simultaneously. KV-cache utilization — the fraction of PagedAttention KV pages occupied, exposed by vLLM as `vllm:gpu_cache_usage_perc` — is the correct signal. This design abbreviates it **MBU** throughout; note that in the published literature MBU conventionally means *Model Bandwidth Utilization* (achieved memory bandwidth / peak), which is the sense used for the throughput figures in Section 2. They are different quantities and are not interchangeable.
 
 ```yaml
 # autoscaler-config.yaml
@@ -704,7 +709,8 @@ ClickHouse query for tenant daily usage:
     tenant_id,
     model_id,
     toDate(fromUnixTimestamp(timestamp_utc)) AS usage_date,
-    sum(billable_input_tokens())             AS total_input_tokens,
+    sum(input_tokens - cached_input_tokens
+        + cached_input_tokens * 0.1)         AS total_input_tokens,
     sum(output_tokens)                       AS total_output_tokens,
     count()                                  AS request_count,
     avg(latency_ms)                          AS avg_latency_ms,
@@ -724,7 +730,7 @@ ClickHouse query for tenant daily usage:
 | Shared vs. per-tenant vLLM | Shared engine (namespace isolation) for < 10M tokens/day/tenant | Per-tenant engine | Per-tenant = 500 pods = $300K+/month GPU waste; shared = 17 pods at same throughput |
 | KV cache management | PagedAttention (vLLM) — non-contiguous 16-token pages | Naive contiguous KV cache | Naive: 30% of HBM wasted to fragmentation; PagedAttention recovers that capacity, enabling 2-4x more concurrent requests per GPU |
 | LoRA serving | S-LoRA multiplexing (1 base model + hot adapter set in HBM) | Separate model copy per adapter | 1,000 adapters x 70 GB = 70 TB HBM required with duplication; S-LoRA uses 80 GB + 90 GB NVMe for same coverage |
-| Spot instance blending | 70% spot H100, 30% on-demand; checkpointed streaming for preemption | 100% on-demand | H100 spot at $2.50/hr vs $7.00/hr on-demand; 3-8% preemption rate manageable with stateless retry; saves ~$1.2M/year at 200-GPU fleet size |
+| Spot instance blending | 70% spot H100, 30% on-demand; checkpointed streaming for preemption | 100% on-demand | H100 spot at $2.50/hr vs ~$3.50/hr on-demand (2026 neocloud market median is $2.30-$3.10/hr; AWS p5 is ~$3.90/GPU-hr); 3-8% preemption rate manageable with stateless retry; 140 spot GPUs x $1.00/hr x 8,760 hr saves ~$1.2M/year at 200-GPU fleet size |
 | Autoscaling metric | MBU (model buffer utilization = KV-cache occupancy %) | RPS | RPS is not correlated with GPU saturation for variable-length LLM workloads; MBU directly measures the bottleneck resource |
 | API compatibility | OpenAI-compatible REST API (drop-in base_url swap) | Proprietary API | 80% of target customers use existing OpenAI SDK; zero client-side migration cost is a critical go-to-market advantage |
 
@@ -762,7 +768,7 @@ ClickHouse query for tenant daily usage:
 | Throughput | ~50 tokens/sec per stream | 5-10x higher (offline batching) |
 | GPU efficiency | 60-70% MBU | 90%+ MBU (fully packed batches) |
 | Use case | Chatbots, APIs, real-time agents | Eval pipelines, document processing |
-| Price | Standard rate | 50% discount (Fireworks/Together pricing pattern) |
+| Price | Standard rate | 50% discount (the batch-API discount OpenAI, Anthropic and the open-weight hosts all converged on) |
 
 ---
 
@@ -866,7 +872,7 @@ DCGM (NVIDIA Data Center GPU Manager) exports per-GPU metrics to Prometheus at 5
 - `dcgm_fb_used` — HBM used in MB
 - `dcgm_nvlink_bandwidth_total` — inter-GPU NVLink bandwidth (health indicator for TP pods)
 
-MBU is computed as: `vllm_gpu_cache_usage_perc` (exposed by vLLM's `/metrics` Prometheus endpoint).
+MBU as used here is read directly from `vllm:gpu_cache_usage_perc` (exposed by vLLM's `/metrics` Prometheus endpoint) — it is KV-cache occupancy, not memory-bandwidth utilization.
 
 ### Incident Playbook
 
@@ -962,7 +968,7 @@ Three layers: (1) Pre-inference quota check — Redis token bucket per tenant; q
 
 **Q: Why is the cold start problem harder for 70B models than 7B models?**
 
-Three compounding factors: (1) Weight size: 70 GB vs 7 GB — 10x more bytes to transfer. (2) Tensor parallelism: 70B requires TP=4 (4 GPUs gang-scheduled); Karpenter must find 4 co-located GPUs simultaneously, which may require waiting for capacity. A 7B model starts on any single GPU with no coordination. (3) NVMe staging footprint: 70 GB of staged weights leaves less NVMe headroom for other model caches on the same node, cascading cold-start rates for less-popular 70B variants. Practical fix: always maintain 2 warm 70B pods (never scale to zero for 70B) — the $180/day idle cost is cheap cold-start insurance.
+Three compounding factors: (1) Weight size: 70 GB vs 7 GB — 10x more bytes to transfer. (2) Tensor parallelism: 70B requires TP=4 (4 GPUs gang-scheduled); Karpenter must find 4 co-located GPUs simultaneously, which may require waiting for capacity. A 7B model starts on any single GPU with no coordination. (3) NVMe staging footprint: 70 GB of staged weights leaves less NVMe headroom for other model caches on the same node, cascading cold-start rates for less-popular 70B variants. Practical fix: always maintain 2 warm 70B pods (never scale to zero for 70B) — 2 pods x 4 GPUs x 24 h x $2.50/hr = $480/day of idle cost, cheap cold-start insurance.
 
 **Q: How do you handle the thundering herd when 50 customers all request the same rarely-used model simultaneously?**
 
@@ -970,7 +976,7 @@ Without mitigation: 50 × 8 = 400 simultaneous S3 shard downloads compete for 6 
 
 **Q: What is the break-even point where a customer should switch from your platform to self-hosted GPUs?**
 
-Rule of thumb math: an H100 on-demand at $7/hr = $5,040/month produces 3.36B tokens/month (70B model, 65% utilization). Our platform charges $0.80/M tokens = $2,688/month from that GPU's output — below raw hardware cost. We survive through shared tenancy (17 tenants per pod) and spot pricing. A single customer needs ~$20K/month in platform spend (self-hosted H100 + prorated ops salary) before self-hosting saves money — approximately 25B tokens/month. Below that threshold we win on cost; above it we must win on zero-ops value or they churn. This is why inference platforms introduce dedicated-tier pricing at enterprise scale: match self-hosted cost while retaining the simplicity proposition.
+Rule of thumb math: an H100 on-demand at ~$3.50/hr = $2,520/month produces 3.36B tokens/month (70B model at 2,000 tok/sec/GPU, 65% utilization). Our platform charges $0.80/M tokens = $2,688/month from that GPU's output — roughly at parity with raw on-demand hardware, before any networking, storage, or engineering cost. We survive through shared tenancy (17 tenants per pod) and spot pricing, not on the sticker spread. A single customer needs ~$20K/month in platform spend (self-hosted H100 + prorated ops salary) before self-hosting saves money — approximately 25B tokens/month. Below that threshold we win on cost; above it we must win on zero-ops value or they churn. This is why inference platforms introduce dedicated-tier pricing at enterprise scale: match self-hosted cost while retaining the simplicity proposition.
 
 **Q: How does LoRA adapter hot-swap work without interrupting other in-flight requests?**
 
@@ -982,7 +988,7 @@ vLLM's scheduler operates at the granularity of one decode step (one forward pas
 
 **H100 Pod OOM Mid-Stream**
 
-Scenario: a tenant sends a 32,000-token context (legal document analysis) with `max_tokens=4096`. The total KV reservation (32K + 4K = 36K tokens × 49,152 bytes/token for Llama-70B = 1.77 GB) exceeds the available KV-cache pages on a pod already at 78% MBU. PagedAttention's pre-admission check should have rejected this request, but a race condition allowed it through when a concurrent request finished and freed pages between the check and the KV allocation. The pod allocates aggressively, hits 100% HBM, and the CUDA allocator throws OOM. The pod crashes; the client receives HTTP 500 mid-stream.
+Scenario: a tenant sends a 32,000-token context (legal document analysis) with `max_tokens=4096`. The total KV reservation (32K + 4K = 36K tokens × 327,680 bytes/token for Llama-3-70B FP16 = 11.8 GB, sharded across the TP=4 pod at ~3 GB/GPU) exceeds the available KV-cache pages on a pod already at 78% MBU. PagedAttention's pre-admission check should have rejected this request, but a race condition allowed it through when a concurrent request finished and freed pages between the check and the KV allocation. The pod allocates aggressively, hits 100% HBM, and the CUDA allocator throws OOM. The pod crashes; the client receives HTTP 500 mid-stream.
 
 Detection: `vllm_pod_oom_total` counter fires PagerDuty alert within 30 seconds.
 
@@ -1012,7 +1018,7 @@ Detection: eval pipeline fires quality regression alert (8.3% degradation on mat
 
 Recovery: (1) Drain pod `h100-node-17` immediately (stop routing new requests). (2) Evict all shards from `h100-node-17` NVMe. (3) Re-download all 8 shards from S3 with SHA-256 verification. (4) Return pod to rotation.
 
-Prevention: add SHA-256 checksum verification at every NVMe→HBM load (not just at S3→NVMe staging). Store checksums in the model registry. Load-time verification adds 2 s overhead (SHA-256 of 70 GB at 4 GB/s CPU hash rate = 17.5 s — acceptable at cold start, unacceptable inline; use a background integrity scrubber that runs SHA-256 on NVMe shards weekly and evicts on mismatch).
+Prevention: add SHA-256 checksum verification at every NVMe→HBM load (not just at S3→NVMe staging). Store checksums in the model registry. SHA-256 of 70 GB at a 4 GB/s CPU hash rate costs 17.5 s — acceptable at cold start, unacceptable inline on a warm path; pair it with a background integrity scrubber that runs SHA-256 on NVMe shards weekly and evicts on mismatch.
 
 ---
 
@@ -1028,7 +1034,7 @@ Where:
   peak_tokens_per_sec     = avg_rps * avg_output_tokens * peak_factor
   avg_compute_fraction    = fraction of time GPU spends on active computation
                             (vs. memory bandwidth bound; typically 0.85 for H100)
-  tokens_per_gpu_per_sec  = model-specific (3,500 for 7B FP8 on H100; 500 for 70B FP8 per GPU)
+  tokens_per_gpu_per_sec  = model-specific (3,500 for 7B FP8 on H100; 2,000 for 70B FP8 per GPU)
   target_mbu              = 0.65 (65% KV-cache target — allows headroom for bursts)
 ```
 
@@ -1047,18 +1053,22 @@ H100s for 7B (with A10G offset for 40% of 7B traffic):
   A10G: 525,000 * 0.40 / (1,400 * 0.65) = 231 A10Gs
   H100: 525,000 * 0.60 / (3,500 * 0.65) = 138 H100s
 
-H100s for 70B (TP=4 pod = 2,000 tok/sec):
-  269 pods = 1,076 H100s  [dominant cost driver]
+H100s for 70B (TP=4 pod = 8,000 tok/sec):
+  350,000 / 8,000 = 44 pods = 176 H100s  [dominant cost driver]
 
-Total: 138 + 1,076 = 1,214 H100s at peak.
-  At 25% 70B traffic (more typical): ~760 H100s — matches Section 2 estimate.
+Total: 138 + 176 = 314 H100s + 231 A10Gs at peak.
+  At 25% 70B traffic (more typical): 285 H100s + 288 A10Gs.
+  (Section 2 sizes off total tokens including prefill, so its 518-H100 figure is
+   the higher of the two envelopes; provision to the larger one.)
 
-Heterogeneous fleet savings:
-  All-H100 cost:  1,214 * $2.50 * 720 = $2,185,200/month
-  Swap 231 H100 → A10G: saves $231 * ($2.50-$0.75) * 720 = $290,000/month (13%)
+Heterogeneous fleet savings — an A10G is NOT a 1:1 substitute for an H100
+(1,400 vs 3,500 tokens/sec), so 231 A10Gs replace only ~92 H100s of capacity:
+  All-H100 equivalent: (138 + 92 + 176) = 406 H100s * $2.50 * 720 = $730,800/month
+  Heterogeneous:  314 * $2.50 * 720 + 231 * $0.75 * 720      = $689,940/month
+  Saving: $40,860/month (5.6% of fleet cost; 25% off the slice that moves)
 ```
 
-At production scale (500+ active tenants), heterogeneous GPU fleet composition reduces total GPU cost by 13-22% when 7B models serve 60%+ of traffic volume.
+At production scale (500+ active tenants), heterogeneous GPU fleet composition reduces total GPU cost by roughly 5-6% at this traffic mix — a ~25% saving on the ~23% of spend that shifts to A10G. Sizing the saving by counting GPUs rather than tokens overstates it by ~4x.
 
 ---
 

@@ -4,7 +4,7 @@
 
 > **Design intuition**: An LLM eval platform is the Datadog of AI — just as Datadog ingests billions of metrics and traces to tell you when your service is degrading, an eval platform ingests LLM traces, runs automated quality checks, and alerts when your model's output quality is regressing, before your users notice. The hard part is not the metrics themselves but the evaluation infrastructure: LLM-as-judge is expensive and noisy, human labels are slow and costly, and regressions on subjective quality metrics are genuinely hard to detect with statistical confidence.
 
-**Key insight**: the fundamental tension in LLM eval is coverage vs cost. Running GPT-4o as a judge on every production response would cost 3-5x the inference cost itself. The platform must implement a sampling strategy — online eval at 2-5% of traffic — combined with an offline golden dataset eval on every deploy, that together give high-confidence regression detection at a fraction of full-coverage cost. The platform's value is not any single eval metric but the infrastructure that makes eval cheap, reproducible, and trustworthy enough to block production deploys.
+**Key insight**: the fundamental tension in LLM eval is coverage vs cost. Running a flagship model as a judge on every production response would cost several times the inference cost itself. The platform must implement a sampling strategy — online eval at 2-5% of traffic — combined with an offline golden dataset eval on every deploy, that together give high-confidence regression detection at a fraction of full-coverage cost. The platform's value is not any single eval metric but the infrastructure that makes eval cheap, reproducible, and trustworthy enough to block production deploys.
 
 ---
 
@@ -50,13 +50,14 @@ Daily raw trace throughput:   10B x 2KB = 20TB/day
 
 Online eval sampling rate:    2% of traces → 200,000,000 eval runs/day
   - 90% heuristic evals (ExactMatch, ROUGE, JSON validity): $0.0001/eval
-  - 10% LLM-as-judge (GPT-4o-mini):                       $0.001/eval
-  Blended online eval cost:   200M x (0.9 x $0.0001 + 0.1 x $0.001)
-                            = 200M x $0.00019 = $38,000/day
-  Full GPT-4o coverage cost:  10B x $0.01/eval = $100,000,000/day (100x more)
+  - 10% LLM-as-judge (mini-tier judge):                    $0.0015/eval
+  Blended online eval cost:   200M x (0.9 x $0.0001 + 0.1 x $0.0015)
+                            = 200M x $0.00024 = $48,000/day
+  Full flagship-judge coverage: 10B x $0.01/eval = $100,000,000/day (2,080x more)
 
-Human annotation escalation:  1% of LLM-judge evals → 2M annotations/day
-  At $0.05/annotation:        $100,000/day (dominant cost for enterprise tier)
+Human annotation escalation:  1% of LLM-judge evals
+  20M judge evals/day x 1% =  200,000 annotations/day
+  At $0.05/annotation:        $10,000/day
 
 Offline eval (CI/CD gate):    500 customers x avg 2 deploys/day = 1,000 eval runs/day
   Each run: 500-example dataset x 5 eval functions = 2,500 eval calls/run
@@ -79,7 +80,7 @@ Trace full-text (on demand, not always stored):
   (Customers opt-in per project; default is metadata-only)
 
 Annotation queue:
-  2M annotations/day x 500 bytes = 1GB/day → PostgreSQL (hot); S3 (archive)
+  200,000 annotations/day x 500 bytes = 100MB/day → PostgreSQL (hot); S3 (archive)
 ```
 
 ### Compute Sizing
@@ -438,7 +439,7 @@ Respond with JSON only: {{"score": <0-10 integer>, "reasoning": "<one sentence>"
     def __init__(
         self,
         criteria: str,
-        judge_model: str = "gpt-4o-mini-2024-07-18",
+        judge_model: str = "gpt-5.4-mini-2026-05-14",  # dated snapshot, never a bare alias
         api_key: str | None = None,
     ) -> None:
         self._criteria = criteria
@@ -640,13 +641,15 @@ class RegressionResult:
     effect_size: float | None          # Cohen's d for continuous; risk difference for binary
     confidence_interval: tuple[float, float] | None   # 95% CI on the difference
     recommended_action: str
-    insufficient_data: bool = False    # True if n < 50 (80% power threshold)
+    insufficient_data: bool = False    # True if n < 50 (minimum-viability floor)
 
 
 class RegressionDetector:
     """
     Continuous scores: Welch's t-test + Cohen's d. Binary: Wilson score CI on proportion diff.
-    Min 50 examples for 80% power at effect size d=0.1, p<0.05. Below 50: "insufficient data",
+    MIN_SAMPLE_SIZE=50 is a floor for the test to be meaningful at all, NOT the sample
+    that gives 80% power at d=0.1 — that needs ~1,600 per arm (n = 16/d^2). At n=50 you
+    have 80% power only for a large effect, d~0.57. Below 50: "insufficient data",
     never "no regression" — false safety is worse than false alarm.
     Concrete: n=30 dataset gave p=0.18 on a real regression; at n=200 the same drop was p=0.003.
     """
@@ -831,10 +834,10 @@ GitHub Actions integration: `ev gate --dataset golden-v3 --candidate $SHA --base
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|----------------|----------------------|-----------|
-| Judge cost management | 90% heuristic evals + 10% LLM judge; online 2% sampling | 100% LLM judge on 100% of traffic | Full GPT-4o coverage = $100M/day at 10B traces; blended approach = $38K/day; 2,600x cheaper; regression sensitivity is equivalent when combined with offline golden set |
+| Judge cost management | 90% heuristic evals + 10% LLM judge; online 2% sampling | 100% LLM judge on 100% of traffic | Full flagship-judge coverage = $100M/day at 10B traces; blended approach = $48K/day; ~2,100x cheaper; regression sensitivity is equivalent when combined with offline golden set |
 | Online vs offline eval | Both: online 2% real-time + offline 100% on golden set per deploy | Online only (miss model regressions); offline only (miss distribution shift) | Online catches production drift (prompt injection spike, user behavior change); offline catches model/prompt regressions on fixed distribution; neither alone is sufficient |
 | Sampling strategy | Stratified sampling (oversample edge cases, low-confidence, user-reported) | Pure random 2% sample | Stratified sampling detects regressions 3x faster on edge-case-sensitive tasks by ensuring rare failure modes are represented; random sampling may miss low-frequency but high-severity failure categories |
-| Judge model version | Pinned to exact model version (e.g., gpt-4o-mini-2024-07-18) | Always latest | Changing judge model version shifts scores 8-12% on same data; pinned version means historical eval series are comparable; treat judge upgrade as a new eval function version requiring re-baselining |
+| Judge model version | Pinned to an exact dated snapshot, never an undated alias | Always latest | Changing judge model version shifts scores materially on the same data; pinned version means historical eval series are comparable; treat judge upgrade as a new eval function version requiring re-baselining |
 | Multi-judge vs single | Single judge (primary); multi-judge (3-judge majority vote) for annotation escalation | Multi-judge for all evals | Single judge: $0.001/eval; multi-judge: $0.003/eval (3x cost); 40% variance reduction from majority voting; reserved for high-stakes disagreement resolution, not routine scoring |
 | Regression test type | Welch's t-test (unequal variance) for continuous; Wilson score CI for binary | Student's t-test (equal variance assumed) | Welch's t-test does not assume equal variances between candidate and baseline — correct because prompt changes often shift score variance not just mean; Student's t-test gives 30% higher false-negative rate under unequal variances |
 | Trace storage | Hash-only metadata in ClickHouse; full text opt-in to S3 | Store all full text always | Full text for 10B/day traces = 50TB/day uncompressed; hash-only metadata = 20TB/day; customers opt-in to full-text storage per project (adds 10x cost); 80% of eval use cases need only metadata |
@@ -843,15 +846,15 @@ GitHub Actions integration: `ev gate --dataset golden-v3 --candidate $SHA --base
 
 ## 6. Real-World Implementations
 
-**Braintrust** (YC W23, $36M Series A, 2024): eval-first philosophy — every experiment is a first-class versioned object. Key differentiator: "diffs" show exactly which examples changed between two prompt versions (improved, degraded, or unchanged), not just aggregate scores. Eval results post as GitHub PR comments automatically, blocking merges on regression. Engineers at Stripe, Notion, and Zapier use Braintrust as the source of truth for prompt version approval. Dataset versioning stores full prompt/response text (not hashes), enabling replay: run a new model against historical production responses to estimate quality change before deploying.
+**Braintrust** (YC W23; raised a Series A led by a16z in 2024): eval-first philosophy — every experiment is a first-class versioned object. Key differentiator: "diffs" show exactly which examples changed between two prompt versions (improved, degraded, or unchanged), not just aggregate scores. Eval results post as GitHub PR comments automatically, blocking merges on regression. Engineers at Stripe, Notion, and Zapier use Braintrust as the source of truth for prompt version approval. Dataset versioning stores full prompt/response text (not hashes), enabling replay: run a new model against historical production responses to estimate quality change before deploying.
 
-**LangSmith** (LangChain, 2023): dominant among LangChain/LangGraph users because tracing is zero-configuration — any instrumented chain emits traces automatically. Pricing: free at 5,000 traces/month; enterprise at $0.0001/trace. Developers often capture 100% of traffic (not 2%) because LangChain's async tracing overhead is negligible, yielding the highest trace density of any eval platform. Human annotation queue routes low-confidence evals. SOC2 + HIPAA compliance available.
+**LangSmith** (LangChain, 2023): dominant among LangChain/LangGraph users because tracing is zero-configuration — any instrumented chain emits traces automatically. Pricing: the Developer plan includes 5,000 base traces/month free (Plus: 10,000), then usage-based billing in LangChain Compute and Storage Units rather than a flat per-trace rate; base traces carry 14-day retention, extended traces 180-day at additional cost. Developers often capture 100% of traffic (not 2%) because LangChain's async tracing overhead is negligible, yielding the highest trace density of any eval platform. Human annotation queue routes low-confidence evals. SOC2 + HIPAA compliance available.
 
 **Arize Phoenix** (open source, 2023): OTel-native — ingests traces via OTLP, so any app already emitting OTel traces requires no additional SDK. Built-in RAG metrics: NDCG@k for retrieval quality, citation faithfulness, context relevance. Open-source version runs locally (`pip install arize-phoenix && phoenix serve`) — critical for regulated industries with data residency requirements. Cloud version backed by managed ClickHouse.
 
-**Patronus AI** (2023, $17M Series A): SOC2 Type II + HIPAA; domain-specific evaluators for finance ("does this response constitute investment advice?") and healthcare (HIPAA content detection, medical accuracy) that outperform generic LLM-as-judge by 15-22% on human agreement rate. Eval functions run in the customer's VPC — sensitive prompts never leave the customer's network.
+**Patronus AI** (raised a $17M Series A): SOC2 Type II + HIPAA; domain-specific evaluators for finance ("does this response constitute investment advice?") and healthcare (HIPAA content detection, medical accuracy) that the company positions as outperforming generic LLM-as-judge on human agreement rate; it publishes no independently reproduced margin. Eval functions run in the customer's VPC — sensitive prompts never leave the customer's network.
 
-**Confident AI / DeepEval** (2023, $4.1M seed): library-first (`pip install deepeval`) with 14+ built-in metric types: G-Eval (chain-of-thought rubric), RAGAS-compatible metrics (faithfulness, answer relevance, context recall), DAG-based metrics for agentic workflows. Strong community adoption among RAG-product startups; cloud platform adds team collaboration and CI integration.
+**Confident AI / DeepEval** (seed-stage; library-first): library-first (`pip install deepeval`) with 14+ built-in metric types: G-Eval (chain-of-thought rubric), RAGAS-compatible metrics (faithfulness, answer relevance, context recall), DAG-based metrics for agentic workflows. Strong community adoption among RAG-product startups; cloud platform adds team collaboration and CI integration.
 
 ---
 
@@ -862,7 +865,7 @@ GitHub Actions integration: `ev gate --dataset golden-v3 --candidate $SHA --base
 | Platform | Open Source | Pricing Model | Judge Models | CI/CD Gate | Human Annotation | Enterprise |
 |----------|-------------|---------------|--------------|-----------|-----------------|-----------|
 | Braintrust | No | Per-experiment + seat | OpenAI, Anthropic, custom | Yes (GitHub PR comments) | Yes (built-in queue) | SOC2, SSO |
-| LangSmith | No | Per-trace ($0.0001) | Any via LangChain | Yes (pytest integration) | Yes | SOC2, HIPAA |
+| LangSmith | No | Usage-based (compute + storage units) | Any via LangChain | Yes (pytest integration) | Yes | SOC2, HIPAA |
 | Arize Phoenix | Yes (core) | Cloud: per-trace | OpenAI, custom | Via API | Limited | SOC2 |
 | DeepEval | Yes | Cloud: per-eval | OpenAI, Anthropic, Ollama | Yes (pytest plugin) | No | Roadmap |
 | Patronus AI | No | Enterprise contract | Proprietary + OpenAI | Yes | Yes | SOC2, HIPAA |
@@ -871,13 +874,19 @@ GitHub Actions integration: `ev gate --dataset golden-v3 --candidate $SHA --base
 
 ### Judge Model Quality vs Cost
 
+Agreement rates and bias magnitudes below are this platform's own measurements on its
+200-example human-labelled calibration set, not published vendor or academic results.
+Self-preference in LLM judges is an established finding (Panickssery et al., "LLM
+Evaluators Recognize and Favor Their Own Generations", 2024); the specific percentages
+are not. Re-measure on your own rubric before trusting any of them.
+
 | Judge Model | Agree w/ Human Labels | Cost/1K Evals | P90 Latency | Known Bias |
 |-------------|----------------------|---------------|-------------|-----------|
-| GPT-4o-2024-08-06 | 85-88% Spearman | $10.00 | 4,200ms | Self-preference for GPT-4o outputs: +12-18% |
-| GPT-4o-mini-2024-07-18 | 80-83% Spearman | $1.50 | 800ms | Mild self-preference: +5-8% |
-| Claude claude-sonnet-4-6 | 84-87% Spearman | $3.00 | 1,200ms | Verbosity preference: longer responses score +3-5% |
+| Flagship tier (e.g. GPT-5.4, $2.50/$15 per M) | 85-88% Spearman | $10.00 | 4,200ms | Self-preference for same-family outputs |
+| Mini tier (e.g. GPT-5.4-mini, $0.75/$4.50 per M) | 80-83% Spearman | $1.50 | 800ms | Mild self-preference |
+| Claude Sonnet 4.6 | 84-87% Spearman | $3.00 | 1,200ms | Verbosity preference: longer responses score higher |
 | Llama-3-70B-Instruct | 76-79% Spearman | $0.90 (self-hosted) | 600ms | Recency bias; underestimates concise answers |
-| Gemini 1.5 Flash | 79-82% Spearman | $0.75 | 700ms | Markdown preference: +6% for formatted responses |
+| Gemini 3.6 Flash | 79-82% Spearman | $0.75 | 700ms | Markdown preference: formatted responses score higher |
 
 ### Trace Storage Backend Comparison
 
@@ -886,7 +895,7 @@ GitHub Actions integration: `ev gate --dataset golden-v3 --candidate $SHA --base
 | Query latency at 1B rows | 200-800ms | 2-8s | 500ms-5s (RAM-bound) |
 | Ingestion throughput | 1M rows/sec (native batch) | 100K rows/sec (streaming) | File-based only |
 | Real-time ingestion | Yes (Kafka → ClickHouse Kafka engine) | Via Dataflow (adds 30-60s lag) | No |
-| Cost at 1TB/month | $50 (self-hosted) / $500 (cloud) | $5 query + $20 storage | Compute only |
+| Cost at 1TB/month | $50 (self-hosted) / $500 (cloud) | ~$6.25/TB scanned on-demand + ~$20 active storage | Compute only |
 | Aggregation SQL | Full SQL + extensions | Full SQL | Full SQL |
 | Best for | Eval platform core (this use case) | Ad-hoc analytics on large exports | Local development |
 
@@ -931,7 +940,7 @@ Trace: eval_run (eval_run_id, dataset_id, experiment_id, triggered_by)
   |     +-- Span: eval.example.abc123
   |           attrs:
   |             eval.function = "llm_judge"
-  |             eval.function_version = "v1-gpt-4o-mini-2024-07-18-a3f9b2c1"
+  |             eval.function_version = "v1-gpt-5.4-mini-2026-05-14-a3f9b2c1"
   |             eval.score = 0.82
   |             eval.reasoning_tokens = 45
   |             eval.latency_ms = 1240
@@ -952,7 +961,7 @@ See also: [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_app
 
 **Runbook 1 — LLM Judge API Outage**
 
-Symptoms: `eval.judge_api_error_rate > 10%`; LLM-judge evals returning `value=None`; CI gates stuck in "evaluating" state. Diagnosis: check OpenAI/Anthropic status page; check `eval_judge_error_total` by error type. Mitigation: switch online LLM-judge traffic to backup provider (e.g., if OpenAI down, route to Claude claude-sonnet-4-6); fall back to cached scores (TTL 7 days) for CI gates; auto-unblock blocked gates with "eval degraded, manual approval required." Resolution: re-run eval runs that returned >20% null scores; validate backup provider scores are within 5% of primary on calibration set before switching back.
+Symptoms: `eval.judge_api_error_rate > 10%`; LLM-judge evals returning `value=None`; CI gates stuck in "evaluating" state. Diagnosis: check OpenAI/Anthropic status page; check `eval_judge_error_total` by error type. Mitigation: switch online LLM-judge traffic to backup provider (e.g., if OpenAI down, route to Claude Sonnet 4.6); fall back to cached scores (TTL 7 days) for CI gates; auto-unblock blocked gates with "eval degraded, manual approval required." Resolution: re-run eval runs that returned >20% null scores; validate backup provider scores are within 5% of primary on calibration set before switching back.
 
 **Runbook 2 — False Regression Alert Blocking Valid Deploy**
 
@@ -970,9 +979,9 @@ Symptoms: `eval_judge_cost_usd_per_hour` alert fires (threshold $500/hr = $12K/d
 
 ## 9. Common Pitfalls & War Stories
 
-**Judge Self-Preference Bias (Series B startup, 2024)**
+**Judge Self-Preference Bias (illustrative composite)**
 
-GPT-4o rated its own outputs 15.3% higher than equivalent Claude outputs (human raters confirmed: Spearman 0.42 for cross-provider judge vs 0.83 within-provider). The team shipped GPT-4o believing it was objectively better. User CSAT dropped 8% in 30 days, costing $180K in churn (12 enterprise accounts × $15K ARR). Fix: always use a judge from a different provider family; or use a 3-judge ensemble with at least 2 providers. The platform now warns when judge model and inference model share the same provider.
+A judge model rated its own family's outputs materially higher than a competing provider's on the same responses, and human raters did not reproduce the gap. Self-preference in LLM judges is a documented effect (Panickssery et al., 2024); the specific percentages and the churn figure here are illustrative, not measured public results. The team shipped the favoured model believing it was objectively better; user CSAT fell over the following month and several enterprise accounts churned. Fix: always use a judge from a different provider family; or use a 3-judge ensemble with at least 2 providers. The platform now warns when judge model and inference model share the same provider.
 
 **Goodhart's Law in Eval Optimization (Internal incident, 2025)**
 
@@ -984,11 +993,11 @@ A RAG system's golden dataset was created from a Q1 knowledge base version. By Q
 
 **Eval Cost Explosion After Sampling Rate Misconfiguration (YC startup, 2024)**
 
-A 4-engineer team set `online_eval_sampling_rate = 1.0` during development. After a Product Hunt launch, LLM calls grew from 4,000/day to 360,000/day. At $0.01/eval (GPT-4o judge), eval costs hit $3,600/day — 3x total inference cost — and $36,000 in one month. The startup nearly ran out of runway due to eval costs alone. Fix: platform default of 2% max sampling; GPT-4o-mini as default judge (85% cost reduction); hard cap of $100/hour per project with immediate alert.
+A 4-engineer team set `online_eval_sampling_rate = 1.0` during development. After a Product Hunt launch, LLM calls grew from 4,000/day to 360,000/day. At $0.01/eval (flagship judge), eval costs hit $3,600/day — roughly 3x total inference cost — which is $108,000 in a 30-day month. The startup nearly ran out of runway due to eval costs alone. Fix: platform default of 2% max sampling; a mini-tier default judge (85% cost reduction); hard cap of $100/hour per project with immediate alert.
 
 **Judge Version Drift Breaking Historical Comparisons (Mid-size AI startup, 2025)**
 
-A team ran 8 months of eval history using `gpt-4o-mini`. In May 2025, OpenAI silently updated `gpt-4o-mini` to a new version; scores shifted +9% (more lenient). The dashboard showed a massive "improvement" coinciding with zero code changes — 8 months of history was non-comparable and the team could not answer "is our product better than 6 months ago?" Fix: pin to exact dated version (`gpt-4o-mini-2024-07-18`); treat judge upgrade as a new eval function version requiring re-baselining; platform resolves `gpt-4o-mini` to its pinned alias at registration time.
+A team ran 8 months of eval history against an undated model alias. Providers repoint undated aliases to new snapshots without a version bump visible to the caller, and when that happened here scores shifted several points more lenient overnight. (Illustrative composite — no provider publishes alias-repointing dates, which is precisely the problem.) The dashboard showed a massive "improvement" coinciding with zero code changes — 8 months of history was non-comparable and the team could not answer "is our product better than 6 months ago?" Fix: pin to an exact dated snapshot rather than an undated alias; treat a judge upgrade as a new eval function version requiring re-baselining; the platform resolves any alias to a concrete snapshot at registration time and stores that.
 
 ---
 
@@ -1017,10 +1026,12 @@ Concurrent workers: 2,315 * 0.209 = 484 workers → 1,936 vCPUs
 Judge API cost:    2,315 * 10% * $0.0015/call = $0.347/sec = $29,980/day = $899K/month
 Kafka:             115,741 * 2KB = 231MB/sec → 32 partitions; MSK ~$15K/month
 ClickHouse:        3-node r6i.4xlarge ($1.00/hr): $2,160/month; 40GB/day results
-Human annotation:  200,000/day at $0.05 = $10K/day (enterprise only, contract-gated)
-Total COGS:        ~$975,000/month at 10B traces/day
+Human annotation:  200,000/day at $0.05 = $10K/day = $300K/month
+                   (enterprise only, contract-gated — recharged, so excluded below)
+Platform COGS:     $59,265 + $899K + $15K + $2,160 = ~$975,000/month
+                   (+$300K/month annotation if absorbed rather than recharged)
 Revenue model:     $0.0001/trace × 10B/day × 30 days = $30M/month gross
-Gross margin:      ($30M - $975K) / $30M = 96.75%  (platform economics scale well)
+Gross margin:      ($30M - $975K) / $30M = 96.8%; 95.8% if annotation is absorbed
 ```
 
 ---
@@ -1029,7 +1040,7 @@ Gross margin:      ($30M - $975K) / $30M = 96.75%  (platform economics scale wel
 
 **Q: Why does LLM-as-judge have self-preference bias, and how do you mitigate it?**
 
-LLM judges prefer outputs matching their own training distribution. GPT-4o rates GPT-4o outputs 12-18% higher than equivalent Claude outputs because the model treats its own stylistic patterns (formal tone, disclaimer phrasing) as quality markers — measurable with human raters (Spearman 0.42 between GPT-4o-judging-cross-provider vs 0.83 within-provider). Mitigation: use a judge from a different provider than the model under evaluation; or use a 3-judge ensemble with at least 2 provider families and take majority vote. The platform warns users when judge model and inference model share the same provider.
+LLM judges prefer outputs matching their own training distribution. A model rates its own family's outputs higher than an equivalent competitor's because it treats its own stylistic patterns (formal tone, disclaimer phrasing) as quality markers; the effect is documented in Panickssery et al., "LLM Evaluators Recognize and Favor Their Own Generations" (2024), and the magnitude varies by rubric, so measure it on your own calibration set rather than assuming a fixed percentage. Mitigation: use a judge from a different provider than the model under evaluation; or use a 3-judge ensemble with at least 2 provider families and take majority vote. The platform warns users when judge model and inference model share the same provider.
 
 **Q: How do you detect when a golden dataset is stale?**
 
@@ -1049,7 +1060,7 @@ Teams that optimize prompts against their judge rubric see judge scores rise whi
 
 **Q: Why does judge model version pinning matter for historical comparability?**
 
-An eval score is only meaningful relative to scores computed with the same judge. OpenAI, Anthropic, and Google silently update models behind stable-seeming names — `gpt-4o-mini` on 2024-07-18 vs 2024-11-05 shifts scores 8-12% on the same data, breaking 8 months of eval history. The platform pins judge version at eval function registration time using `(function_name, judge_model_exact_version, prompt_hash)` as the version identity. Upgrading the judge is treated as a new eval function version requiring a re-baselining run before historical comparisons resume.
+An eval score is only meaningful relative to scores computed with the same judge. Providers repoint undated aliases to new snapshots without notice, and two snapshots behind the same alias can shift scores by several points on identical data, breaking months of eval history. The platform pins judge version at eval function registration time using `(function_name, judge_model_exact_version, prompt_hash)` as the version identity. Upgrading the judge is treated as a new eval function version requiring a re-baselining run before historical comparisons resume.
 
 **Q: How do you handle eval of open-ended creative tasks with no single correct answer?**
 
@@ -1065,7 +1076,7 @@ Three distinct measurements: (1) Retrieval quality — NDCG@k, Recall@k, MRR on 
 
 **Q: How do you optimize LLM-as-judge cost at production scale?**
 
-Three-layer strategy: (1) Routing — heuristic evals (exact match, ROUGE, JSON validity) handle 90% of cases at $0.0001/eval; only route to judge when reasoning about quality is required. (2) Judge model selection — GPT-4o-mini at $0.0015/call achieves 80-83% human agreement vs GPT-4o at $0.01/call for 85-88%; the 5% quality difference does not justify 6.7x cost for most tasks. (3) Sampling — 2-5% online rate plus 100% offline golden-set eval per deploy catches both distribution drift and model regression without per-trace judge cost. Blended: $38K/day at 10B traces vs $100M/day for full GPT-4o coverage — 2,600x cost reduction with equivalent regression detection sensitivity.
+Three-layer strategy: (1) Routing — heuristic evals (exact match, ROUGE, JSON validity) handle 90% of cases at $0.0001/eval; only route to judge when reasoning about quality is required. (2) Judge model selection — a mini-tier judge at $0.0015/call achieves 80-83% human agreement vs a flagship at $0.01/call for 85-88%; the ~5-point quality difference does not justify 6.7x cost for most tasks. (3) Sampling — 2-5% online rate plus 100% offline golden-set eval per deploy catches both distribution drift and model regression without per-trace judge cost. Blended: $48K/day at 10B traces vs $100M/day for full flagship-judge coverage — a ~2,100x cost reduction with equivalent regression detection sensitivity.
 
 **Q: How does the CI eval gate work with fast-moving pipelines shipping 20 times per day?**
 

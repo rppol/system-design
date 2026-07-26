@@ -27,7 +27,14 @@
 - **Availability**: 99.9% uptime
 
 ### Out of Scope
-- Building our own web crawler (use Bing Search API or Google Custom Search)
+- Building our own web crawler (use a commercial search API). **Note on provider
+  choice:** Microsoft **retired the standalone Bing Search APIs in 2025** — the
+  documentation is now archived under `learn.microsoft.com/previous-versions/`.
+  Search-API-backed designs must now target a surviving provider (Brave Search
+  API, Google Programmable Search / Serper, Exa, Tavily) or Microsoft's
+  replacement, Grounding with Bing Search inside Azure AI Agents. "Bing Search
+  API" below is retained as the generic stand-in for a paid web-search API; the
+  architecture is provider-independent, only the price per query changes.
 - Social media real-time indexing
 - Video transcription and indexing
 
@@ -110,7 +117,7 @@ User Query
     |
     v
 [LLM Synthesis Engine]
-  - GPT-4o / Claude 3.5 streaming
+  - Frontier model, streaming (gpt-5.4 / Claude Sonnet 5 class)
   - Generate grounded answer with inline citations
   - Stream tokens as generated
     |
@@ -213,7 +220,8 @@ Stage 1: BM25 passage ranking (fast, keyword-based)
 
 Stage 2: Neural reranker (accurate, semantic)
   Input: query + top-30 passages
-  Model: Cohere Rerank 3 or bge-reranker-large
+  Model: Cohere Rerank 4 (Fast or Pro; Rerank 3.5 is the prior generation)
+         or a self-hosted cross-encoder (bge-reranker-large)
   Process: cross-encoder scores each (query, passage) pair
   Output: top-8 passages for LLM context
 
@@ -245,7 +253,7 @@ cite the source using [1], [2], etc. Do not make claims not supported
 by the provided sources. If sources conflict, present both perspectives.
 
 [Sources]
-[1] Title: "AI Act Passes EU Parliament" | Source: reuters.com | Date: 2024-03-14
+[1] Title: "AI Act Passes EU Parliament" | Source: reuters.com | Date: 2024-03-13
 Content: The European Union's Artificial Intelligence Act passed with 523 votes
 in favor... [key relevant excerpt]
 
@@ -258,7 +266,7 @@ Content: High-risk AI systems must implement risk management systems... [excerpt
 What are the main requirements of the EU AI Act?
 
 [Expected output]
-The EU AI Act, passed by the European Parliament in March 2024 [1], introduces
+The EU AI Act, adopted by the European Parliament on 13 March 2024 [1], introduces
 a risk-based framework for AI regulation. High-risk AI systems must implement
 risk management systems and maintain technical documentation [2]...
 
@@ -320,15 +328,17 @@ L2: URL → Extracted content cache (Redis + S3)
 L3: Search query → URLs cache (Redis)
   TTL: 1 hour for news, 6 hours for factual
   Key: hash(search_query)
-  Cache the Bing API response (list of URLs + snippets)
+  Cache the search API response (list of URLs + snippets)
   Saves $0.005 per cached query
-  Hit rate: ~30% (reduces Bing API calls by 30%)
+  Hit rate: ~30% (reduces search API calls by 30%)
 
 Cost impact:
-  Without caching: 50M queries × $0.005 (Bing) = $250K/day
+  Without caching: 50M queries × $0.005 (search API) = $250K/day
   With L3 cache: 50M × 70% miss rate × $0.005 = $175K/day
   L1 cache: 50M × 80% miss rate for LLM costs
-    = $0.03/query × 50M × 80% = $1.2M/day (still a lot!)
+    LLM cost per query at gpt-5.4 rates ($2.50/M in, $15/M out):
+      2,000 in × $2.50/M + 400 out × $15/M = $0.005 + $0.006 = $0.011/query
+    = $0.011/query × 50M × 80% = $440K/day (still the dominant line item)
   Best savings: L1 cache for repeat popular queries
 ```
 
@@ -363,7 +373,7 @@ For health/medical queries:
 | Web search | Bing API | Build own crawler | Time to market; freshness; breadth |
 | Content fetch | On-demand per query | Pre-crawl all URLs | Only fetch what's needed; scale with queries |
 | Retrieval | Neural reranker | BM25 only | +30% answer quality; +100ms acceptable |
-| LLM | GPT-4o streaming | Specialized model | Quality; speed; reliability |
+| LLM | Frontier general model, streaming (gpt-5.4 / Claude Sonnet 5 class) | Specialized model | Quality; speed; reliability |
 | Citations | Inline [1][2] | Footnotes | Inline builds trust during reading |
 | Caching | Multi-tier (L1-L3) | No cache | 60% cost reduction; freshness preserved by TTL |
 | Context window | Top-8 sources × ~250 tokens | More/fewer | Empirical: 8 sources balance quality vs latency |
@@ -430,32 +440,42 @@ Session continuity:
 ```
 50M queries/day, optimized pipeline:
 
-Search API (Bing): 50M × 70% miss rate × $0.005 = $175,000/day
+Search API: 50M × 70% miss rate × $0.005 = $175,000/day
 Content fetching: server costs for parsing 50M × 3 URL fetches = ~$10,000/day
-LLM synthesis (GPT-4o):
-  50M × 80% non-cached × 2,000 input tokens × $5/1M = $400,000/day
-  50M × 80% non-cached × 400 output tokens × $15/1M = $240,000/day
-  LLM total: $640,000/day
-Reranking (Cohere Rerank): 50M × 30 passages × $0.001/1K = $1,500/day
+LLM synthesis (gpt-5.4 at $2.50/1M input, $15/1M output):
+  50M × 80% non-cached × 2,000 input tokens × $2.50/1M = $200,000/day
+  50M × 80% non-cached × 400 output tokens × $15/1M   = $240,000/day
+  LLM total: $440,000/day
+Reranking: self-hosted cross-encoder, ~$0.0002/query = $10,000/day
+  IMPORTANT UNIT TRAP: Cohere Rerank bills per *search unit* -- one query with
+  up to 100 documents -- not per passage. Multiplying a per-passage rate by
+  30 passages understates the bill by orders of magnitude, because 50M
+  queries/day is 50M search units/day regardless of passage count. At this
+  volume a managed reranker is not competitive with self-hosting; check the
+  live vendor rate before assuming otherwise.
 Infrastructure (servers, Redis, CDN): ~$20,000/day
 
-TOTAL: ~$846,500/day ≈ $25.4M/month
+TOTAL: ~$655,000/day ≈ $19.7M/month
 
-Revenue model (Perplexity pricing):
+Revenue model (Perplexity's public consumer tier is $20/month):
   Free tier: ad-supported, limited queries
-  Pro: $20/month, unlimited queries, GPT-4 class model
+  Pro: $20/month, higher limits and frontier-class models
   Enterprise: custom pricing
 
 With 10% paying Pro users:
   1M users × $20/month = $20M/month
-  Cost: $25.4M/month
-  Still slightly loss-making at these numbers — need scale or cost reduction
+  Cost: $19.7M/month
+  Roughly break-even on infra alone -- before salaries, publisher
+  revenue-share, or sales and marketing. The business is not viable at
+  this cost structure without the levers below.
 
 Cost reduction levers:
-  - Claude Haiku or Llama 3 for simple queries (10× cheaper LLM)
+  - Route simple queries to a small-tier model (Claude Haiku 4.5 at $1/$5,
+    gpt-5.4-nano at $0.20/$1.25) — 3-10× cheaper per token than the
+    frontier tier
   - Better caching (get hit rate to 50%) → cut LLM costs in half
-  - Self-host reranker model → eliminate Cohere cost
-  Optimized: ~$10M/month at 50M queries/day → profitable at scale
+  - Self-host the reranker → avoid per-search-unit managed pricing
+  Optimized: ~$8-10M/month at 50M queries/day → workable at scale
 ```
 
 ---
@@ -504,7 +524,7 @@ Trigger: faithfulness score alert fires (daily eval faithfulness < 0.90 or unver
 
 Steps:
 1. Check if LLM model version changed in the last 24 hours. Compare `model_version` tag in generation spans vs. yesterday's baseline.
-2. If model version changed: roll back to previous model version in the LLM gateway config. Faithfulness regressions from model updates are common when moving between minor versions (e.g., GPT-4o-2024-05-13 → GPT-4o-2024-08-06 can shift citation behavior).
+2. If model version changed: roll back to previous model version in the LLM gateway config. Faithfulness regressions from model updates are common when moving between point releases of the same family (a minor version bump can shift citation behavior), which is why the gateway must pin an exact model ID rather than a floating alias.
 3. If model version unchanged: diff the citation prompt template against the last known-good hash in the prompt registry. A prompt drift (whitespace or instruction reordering) can cause citation suppression.
 4. Tighten the citation enforcement instruction: add "You MUST include at least one [N] citation per sentence containing a factual claim" to the system prompt.
 5. Re-run the 50-query golden eval. If faithfulness recovers above 0.90, deploy the prompt update and close the incident.
@@ -529,7 +549,7 @@ Steps:
 1. Check reranker queue depth from the `reranking` span histogram. If cross-encoder queue depth > 100 requests, the reranker is the bottleneck.
 2. Scale the cross-encoder fleet horizontally: trigger manual HPA scale-out from 4 pods to 8 pods (`kubectl scale deployment cross-encoder --replicas=8`). Target: queue drains within 2 minutes.
 3. As an immediate load-shedding measure while pods scale: reduce `top_k` in the retrieval config from 50 to 30. This cuts cross-encoder work by 40% at the cost of marginally lower recall (NDCG@10 drops from 0.87 to 0.84 — acceptable during incidents).
-4. If the bottleneck is in generation (check `generation` span p99): the LLM provider may be experiencing degraded performance. Switch the LLM gateway to the fallback model (Claude Haiku instead of Sonnet — 3x faster TTFT). Faithfulness may drop slightly; acceptable during a latency incident.
+4. If the bottleneck is in generation (check `generation` span p99): the LLM provider may be experiencing degraded performance. Switch the LLM gateway to the small-tier fallback (Claude Haiku 4.5 instead of Claude Sonnet 5 — markedly faster TTFT). Faithfulness may drop slightly; acceptable during a latency incident.
 5. Alert on-call. Page the infrastructure team if fleet scale-out does not reduce P99 below 4 seconds within 5 minutes. Cross-reference: See [Multi-Region LLM Topology](./cross_cutting/multi_region_llm_topology.md) for failover routing.
 
 ---
@@ -542,7 +562,7 @@ Steps:
 
 **Citation as a trust mechanism.** The most important UX innovation of AI search over chatbots is citations. Without citations, users can't verify claims. With citations, users can spot-check answers and build trust. This also limits hallucination: the model is instructed to only use provided sources, and claims are attributable to sources.
 
-**Scaling the search API cost.** At 50M queries/day × $0.005/query = $250K/day in search API costs alone. This forces either a deal with a search provider (Perplexity uses Bing in a partnership) or building a crawling infrastructure. At scale, most AI search companies are moving toward hybrid: commercial API for rare queries, proprietary crawler for high-volume query patterns.
+**Scaling the search API cost.** At 50M queries/day × $0.005/query = $250K/day in search API costs alone. This forces either a deal with a search provider or building crawling infrastructure. Perplexity operates its own crawler (PerplexityBot) alongside commercial APIs; the retirement of the standalone Bing Search APIs in 2025 removed the default third-party option and pushed the whole category further toward owning the index. At scale, most AI search companies are moving toward hybrid: commercial API for rare queries, proprietary crawler for high-volume query patterns.
 
 ---
 
@@ -584,7 +604,7 @@ client = anthropic.Anthropic()
 def expand_query(raw_query: str, intent: str) -> list[str]:
     """Generate 3 semantically diverse query variants for broader retrieval coverage."""
     response = client.messages.create(
-        model="claude-3-haiku-20240307",  # fast, cheap for query expansion
+        model="claude-haiku-4-5",  # fast, cheap for query expansion
         max_tokens=256,
         system="You are a search query optimizer. Generate diverse query variants.",
         messages=[{
@@ -778,7 +798,7 @@ def generate_with_strict_grounding(
     ])
 
     response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
+        model="claude-sonnet-5",
         max_tokens=1024,
         system="""You are a search assistant that answers questions based ONLY on provided sources.
 RULES:
@@ -867,7 +887,7 @@ class GroundedAnswerGenerator:
         )
 
         response = self._client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-5",
             max_tokens=1024,
             system=(
                 "You are a search assistant. Answer using ONLY the provided sources. "
@@ -908,7 +928,7 @@ class GroundedAnswerGenerator:
 
 **Failure 1 — Search API Rate Limiting During Traffic Spike Causing 503 Errors**
 
-During a major news event (election results, sports championship), query volume spiked 8x in 10 minutes. The Bing Search API's rate limit (10,000 queries/second for the subscribed tier) was hit within 2 minutes. Queries that exceeded the limit received 429 errors; the system propagated these as 503 errors to users.
+During a major news event (election results, sports championship), query volume spiked 8x in 10 minutes. The search API's contracted rate limit (1,000 queries/second on the subscribed tier -- the same cap referenced in the stale-knowledge incident below) was hit within 2 minutes. Queries that exceeded the limit received 429 errors; the system propagated these as 503 errors to users.
 
 **Detection:** Search API error rate alert fired at 2% (threshold: 0.5%). Correlated with traffic spike in CDN logs.
 
@@ -932,7 +952,7 @@ The cross-encoder was deployed on CPU-only pods (cost optimization) with 4GB RAM
 
 **How do you measure retrieval quality in production when you don't have ground truth relevance labels for most queries?** Proxy metrics: (1) citation click-through rate (CTR) — if users click the cited source after reading the AI answer, the source was likely relevant; track CTR per source per intent category; (2) follow-up query rate — if users immediately ask a follow-up question, the initial answer likely failed to satisfy the information need (poor retrieval quality); (3) LLM-as-judge on a sampled 5% of queries — an LLM scores retrieved documents for relevance to the query; (4) implicit dwell time — users who spend >30 seconds reading the answer (long dwell) vs those who immediately bounce (short dwell, likely irrelevant result). Establish weekly baselines for all four metrics and alert on >10% regression.
 
-**What is the cost breakdown for a 100M query/month AI search product and where are the optimization levers?** Cost per query (rough): search API ($0.003/query) + embedding model ($0.0001) + cross-encoder rerank ($0.0002) + LLM generation at 2,000 tokens average ($0.006) = ~$0.009/query. At 100M queries/month: $900,000/month. Optimization levers: (1) cache popular queries (top 20% of queries are typically repeated — semantic cache reduces LLM calls by 25-30%); (2) use cheaper models for simple queries (intent classifier routes factual/short queries to Claude Haiku instead of Sonnet — 50% cost reduction for routed queries); (3) reduce LLM output length (most answers can be 400 tokens, not 1,000 — constrain max_tokens); (4) pre-embed a high-quality curated document set and reduce live web fetching for evergreen queries.
+**What is the cost breakdown for a 100M query/month AI search product and where are the optimization levers?** Cost per query (rough): search API ($0.003/query) + embedding model ($0.0001) + self-hosted cross-encoder rerank ($0.0002) + LLM generation at 2,000 in / 400 out on a small-tier model such as Claude Haiku 4.5 at $1/$5 per M ($0.004) = ~$0.0073/query. At 100M queries/month: ~$730,000/month. Note the search-API line is a placeholder: Microsoft retired the standalone Bing Search APIs in 2025, so the real per-query rate now depends on which surviving provider (Brave, Serper, Exa, Tavily, or Azure's Grounding with Bing Search) you contract with. Optimization levers: (1) cache popular queries (top 20% of queries are typically repeated — semantic cache reduces LLM calls by 25-30%); (2) use cheaper models for simple queries (intent classifier routes factual/short queries to Claude Haiku 4.5 ($1/$5 per M) instead of Claude Sonnet 5 ($3/$15 per M) — about a 3x per-token reduction for routed queries); (3) reduce LLM output length (most answers can be 400 tokens, not 1,000 — constrain max_tokens); (4) pre-embed a high-quality curated document set and reduce live web fetching for evergreen queries.
 
 ---
 
@@ -940,7 +960,7 @@ The cross-encoder was deployed on CPU-only pods (cost optimization) with 4GB RAM
 
 ### Incident: Stale Knowledge Served for Rapidly-Changing Topics
 
-**What happened:** A breaking news event (major corporate acquisition) generated 800,000 queries within 2 hours. The web retrieval pipeline hit rate limits on the search API (Bing: 1,000 queries/second cap). The semantic cache returned answers based on pre-acquisition content for 40% of queries, because the cache TTL for "technology company" queries was set at 7 days. Users received confidently stated false information.
+**What happened:** A breaking news event (major corporate acquisition) generated 800,000 queries within 2 hours. The web retrieval pipeline hit rate limits on the search API (1,000 queries/second contracted cap). The semantic cache returned answers based on pre-acquisition content for 40% of queries, because the cache TTL for "technology company" queries was set at 7 days. Users received confidently stated false information.
 
 **Fix applied:**
 ```python
@@ -976,15 +996,15 @@ Cost per query at peak:
   Web retrieval API (Bing/SerpAPI): $0.003/query × 386 = $1.16/s
   Embedding (query + 20 retrieved docs): $0.00025/query
   Cross-encoder reranking (top 20): self-hosted, $0.0002/query
-  LLM generation (Claude Haiku, avg 800 output tokens):
-    $0.0008/1k input × 3k tok + $0.004/1k output × 0.8k tok = $0.0056/query
-  Total per query: ~$0.009/query
-  Monthly cost: 100M × $0.009 = $900K/month
+  LLM generation (Claude Haiku 4.5 at $1/M input, $5/M output; avg 800 output tokens):
+    $0.001/1k input × 3k tok + $0.005/1k output × 0.8k tok = $0.007/query
+  Total per query: ~$0.0105/query
+  Monthly cost: 100M × $0.0105 = $1.05M/month
 
 Search API rate limit mitigations:
-  Semantic cache (25% hit rate): saves 25M queries × $0.009 = $225K/month
+  Semantic cache (25% hit rate): saves 25M queries × $0.0105 = $262K/month
   Popular query pre-fetching (top 10K queries pre-run nightly): saves $30K/month
-  Net cost: $645K/month
+  Net cost: ~$758K/month
 
 Infrastructure for self-hosted components:
   Embedding server: 2 × A10G (batch embedding), $1,200/month
@@ -1063,4 +1083,4 @@ def blend_relevance_and_freshness(
 ```
 
 **Q: How do you handle paywalled content that appears in web search results?**
-Three-tier handling: (1) detect paywalled content by HTTP status patterns (200 with snippet but redirect on click, 402, or metered paywall signals in HTML); (2) if content is paywalled, do not attempt to extract full text — use only the publicly-visible snippet + metadata in retrieval; (3) in the answer, cite the source but include a note: "[Source: WSJ — subscription may be required for full article]." Never present paywalled content as if it were fully accessible. For quality: paywalled sources often have higher credibility scores — preserve them in retrieval ranking but adjust the answer generation to acknowledge limited content access.
+Detect it, degrade to the public snippet, and disclose the limitation in the answer. (1) Detect paywalled content by HTTP status patterns (200 with snippet but redirect on click, 402, or metered paywall signals in HTML); (2) if content is paywalled, do not attempt to extract full text — use only the publicly-visible snippet + metadata in retrieval; (3) in the answer, cite the source but include a note: "[Source: WSJ — subscription may be required for full article]." Never present paywalled content as if it were fully accessible. For quality: paywalled sources often have higher credibility scores — preserve them in retrieval ranking but adjust the answer generation to acknowledge limited content access.

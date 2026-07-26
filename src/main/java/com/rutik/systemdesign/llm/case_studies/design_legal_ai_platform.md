@@ -65,12 +65,19 @@ Daily token consumption:
 ### LLM Cost Estimation
 
 ```
-Token cost (GPT-4o at $0.015/1K tokens blended input+output):
-  4.0B tokens/day × $0.015/1K = $60,000/day = $1.8M/month LLM cost
+Input and output must be priced separately — input dominates this workload 10:1,
+and blending them at the output rate overstates cost by ~4x.
+  Input tokens/day:  2.50B (review) + 1.00B (Q&A) + 0.125B (redline) = 3.625B
+  Output tokens/day: 0.25B (review) + 0.10B (Q&A) + 0.025B (redline) = 0.375B
+
+Token cost (GPT-5.4, July 2026: $2.50/1M input, $15.00/1M output):
+  Input:  3.625B × $0.0000025 = $9,063/day
+  Output: 0.375B × $0.0000150 = $5,625/day
+  Total:                        $14,688/day = $441,000/month LLM cost
 
 Revenue model: $500/seat/month × 10,000 seats = $5M/month
-Gross margin after LLM cost: ($5M - $1.8M) / $5M = 64%
-(After infrastructure, external legal DB APIs, eng: ~35% gross margin)
+Gross margin after LLM cost: ($5M - $441K) / $5M = 91%
+(After infrastructure, external legal DB APIs at $360K/month, and eng: ~60% gross margin)
 
 External legal DB API cost:
   Citation verification: 200K Q&A/day × 3 citations avg × $0.02/lookup = $12,000/day
@@ -83,10 +90,11 @@ External legal DB API cost:
 Document storage:
   500 firms × 10TB avg firm document corpus = 5PB total (S3 with per-firm encryption keys)
 
-Embedding storage:
-  5PB / (500 tokens/chunk × 4 bytes/token) = 2.5B chunks
+Embedding storage (derive from matters, not from raw bytes — the 5PB figure is
+mostly scanned PDFs and images, whose extracted text is a small fraction of it):
+  50,000 matters × 10,000 chunks/matter = 500M chunks
   Each embedding: 1536 dimensions × 4 bytes = 6KB
-  Total: 2.5B × 6KB = 15TB vector storage (Qdrant)
+  Total: 500M × 6KB = 3TB of vectors (5.5TB with chunk text; see Section 10)
 
 Audit log storage:
   4B tokens/day × 0.1KB/token (query + metadata log) = 400GB/day
@@ -105,8 +113,9 @@ Q&A queries: 200,000/day / 86,400s = 2.3 QPS average; 23 QPS peak (10x spike)
 Per query: 10 vector lookups (top-10 chunks retrieved)
 Vector search QPS: 23 QPS × 10 lookups = 230 lookups/sec peak
 
-Qdrant node capacity: ~10,000 QPS for HNSW search on 512-dim vectors
-→ 1 Qdrant node sufficient for search throughput
+Qdrant node capacity: low thousands of QPS for HNSW search on 1536-dim vectors
+  (benchmark on your own data — throughput is dominated by ef_search and payload size)
+→ 1 Qdrant node sufficient for search throughput at 230 lookups/sec
 → 16 Qdrant nodes needed for HNSW index memory:
     50,000 collections × 5MB RAM avg for HNSW graph = 250GB RAM
     16 nodes × 32GB each = 512GB available (2x headroom)
@@ -174,7 +183,7 @@ flowchart TD
     subgraph US["us-east-1 (US firms, default)"]
         USGW["API Gateway"]
         USMCE["Matter Context Enforcer"]
-        USLLM["LLM Router<br/>(GPT-4o)"]
+        USLLM["LLM Router<br/>(GPT-5.4)"]
         USQ["Qdrant cluster<br/>(US data)"]
         uspg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>primary", pos: "b", h: 44 }
         USLN["LexisNexis<br/>API endpoint"]
@@ -185,7 +194,7 @@ flowchart TD
     subgraph EU["eu-west-1 (EU firms, GDPR)"]
         EUGW["API Gateway"]
         EUMCE["Matter Context Enforcer"]
-        EULLM["LLM Router<br/>(GPT-4o EU)"]
+        EULLM["LLM Router<br/>(GPT-5.4 EU)"]
         EUQ["Qdrant cluster<br/>(EU data)"]
         eupg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>replica", pos: "b", h: 44 }
         EULN["LexisNexis<br/>EU endpoint"]
@@ -275,7 +284,8 @@ class MatterVectorStore:
     Cross-matter retrieval is physically impossible — not policy-enforced.
     """
 
-    VECTOR_DIM = 1536   # text-embedding-3-large
+    VECTOR_DIM = 1536   # text-embedding-3-large truncated via dimensions=1536
+                        # (its native output is 3072 — do not assume 1536 by default)
 
     def __init__(self, client: QdrantClient) -> None:
         self._client = client
@@ -325,12 +335,14 @@ class MatterVectorStore:
         in contexts where they should not be surfaced (e.g., e-discovery production).
         """
         name = self._collection_name(firm_id, matter_id)
-        results = self._client.search(
+        # qdrant-client deprecated `search()` in favour of `query_points()` in 1.10;
+        # `query_points` returns a response object whose `.points` holds the hits.
+        results = self._client.query_points(
             collection_name=name,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=top_k,
             with_payload=True,
-        )
+        ).points
         output = []
         for r in results:
             if exclude_privilege_levels and r.payload.get("privilege_level") in exclude_privilege_levels:
@@ -350,7 +362,7 @@ class MatterVectorStore:
         return output
 ```
 
-The collection-per-matter design adds operational overhead: 50,000 Qdrant collections across 500 firms × 100 matters average. Qdrant handles up to 200,000 collections per cluster. The tradeoff is correct: operational complexity is manageable; a matter isolation breach is a law firm's existential event.
+The collection-per-matter design adds real operational cost, and it fights the vendor's own guidance: Qdrant explicitly recommends a single collection with payload-based partitioning for multitenancy, warns that "it is not recommended to create hundreds and thousands of collections per cluster", and Qdrant Cloud caps a cluster at 1,000 collections. 50,000 matters therefore cannot live in one cluster. Two supported ways to get physical isolation at this scale: (a) shard firms across ~50 clusters at 1,000 collections each — the route this design takes, with the sharding plan in Section 10; or (b) use Qdrant's tiered multitenancy (v1.16+), which gives large tenants dedicated shards inside one collection and pools the rest, with its own recommended ceiling of ~1,000 dedicated shards per cluster. The tradeoff is still worth making — a matter isolation breach is a law firm's existential event — but "just make 50,000 collections" is not a configuration Qdrant supports.
 
 See also: [Tenant Isolation Patterns](./cross_cutting/tenant_isolation_patterns.md) for the isolation hierarchy (hardware → process → collection → row-level) and when each is required.
 
@@ -428,7 +440,9 @@ class CitationVerifier:
         return resp.json()["entailment_score"]
 
     def _validate_external_citation(self, citation_reference: str) -> bool:
-        """LexisNexis primary; Westlaw fallback on timeout/429. ~200 ms."""
+        """LexisNexis primary; Westlaw fallback on timeout/429. ~200 ms.
+        Endpoint paths below are illustrative — both vendors gate their citation
+        APIs behind contracted, per-customer endpoints, not a public URL."""
         try:
             r = httpx.get("https://api.lexisnexis.com/v1/validate",
                 params={"citation": citation_reference},
@@ -473,7 +487,7 @@ class PrivilegeClassifier:
     """
     Dual-model classification for defense-in-depth:
     Model 1: rule-based signals (attorney email domains, 'privileged and confidential' header, draft markers)
-    Model 2: LLM classifier (GPT-4o with privilege rubric)
+    Model 2: LLM classifier (frontier model with privilege rubric)
     Agreement → confidence 0.95. Disagreement → more protective label, human review queue, confidence 0.60.
     CRITICAL: any status change (UNPRIVILEGED → PRIVILEGED or reverse) always routes to human review.
     """
@@ -484,7 +498,7 @@ class PrivilegeClassifier:
 
     def classify(self, doc_id: str, raw_text: str, author: str | None, recipients: list[str]) -> PrivilegeClassification:
         rule_level = self._rule_signals(raw_text, author, recipients)
-        llm_level = self._llm_classify(raw_text)    # GPT-4o with privilege rubric
+        llm_level = self._llm_classify(raw_text)    # frontier model with privilege rubric
         if rule_level == llm_level:
             return PrivilegeClassification(doc_id, rule_level, 0.95, "Both models agree", False)
         # Disagreement: use more protective label, flag for human review
@@ -509,7 +523,7 @@ class PrivilegeClassifier:
         return PrivilegeLevel.UNPRIVILEGED
 
     def _llm_classify(self, text: str) -> PrivilegeLevel:
-        raise NotImplementedError  # GPT-4o call; returns PrivilegeLevel enum value
+        raise NotImplementedError  # frontier-model call; returns PrivilegeLevel enum value
 ```
 
 Legal-section-aware chunking is critical. A standard fixed-token chunker splits a 200-word Indemnity clause across two chunks — the first chunk misses the liability cap sentence, the second misses the trigger conditions. Legal chunking uses section boundary detection:
@@ -668,7 +682,7 @@ class PlaybookPosition:
 class RedlineItem:
     clause_type: str
     original_text: str
-    proposed_text: str      # GPT-4o generated revision
+    proposed_text: str      # LLM-generated revision
     rationale: str          # "Clause contradicts firm position: unlimited liability"
     precedent_source: str   # citation or matter reference
     risk_level: str         # "HIGH", "MEDIUM", "LOW"
@@ -699,7 +713,7 @@ class RedliningEngine:
         return sorted(results, key=lambda r: r.original_text)  # caller re-sorts by clause order
 
     def _redline_clause(self, clause: dict, position: PlaybookPosition) -> RedlineItem | None:
-        proposed, rationale = self._llm_redline(clause["text"], position)  # GPT-4o call
+        proposed, rationale = self._llm_redline(clause["text"], position)  # frontier-model call
         return RedlineItem(
             clause_type=clause["type"],
             original_text=clause["text"],
@@ -721,11 +735,11 @@ Concrete performance: average 30-page contract has 200 clauses; ~50 match playbo
 
 | Decision | Chosen Approach | Alternative Considered | Rationale |
 |----------|----------------|------------------------|-----------|
-| Matter isolation mechanism | Collection-per-matter in Qdrant (50,000 collections) | Shared collection with matter_id metadata filter | Post-filter can fail silently; collection boundary is physically enforced by Qdrant. A matter isolation breach is an existential event; operational complexity of 50K collections is manageable |
+| Matter isolation mechanism | Collection-per-matter in Qdrant, sharded across ~50 clusters (1,000 collections each) | Shared collection with matter_id metadata filter | Post-filter can fail silently; collection boundary is physically enforced by Qdrant. A matter isolation breach is an existential event. Cost: Qdrant caps a cluster at 1,000 collections and recommends payload partitioning instead, so this design pays for cluster sprawl to buy a physical boundary |
 | Citation verification timing | Synchronous (blocks response) | Async (fire-and-forget, flag later) | An unverified citation returned to a lawyer will be used. By the time the async check flags it, it may be in a court filing. Synchronous is mandatory despite 280 ms overhead |
-| LLM choice | GPT-4o (general) with retrieval grounding | Legal-fine-tuned Llama 3 | Fine-tuned models outperform on core US/UK law but underperform on rare jurisdictions, multilingual EU law, and emerging regulatory areas. GPT-4o's broader training coverage wins when grounded with good retrieval |
+| LLM choice | Current frontier general model (GPT-5.4) with retrieval grounding | Legal-fine-tuned open-weight model | Fine-tuned models outperform on core US/UK law but underperform on rare jurisdictions, multilingual EU law, and emerging regulatory areas. Broader pretraining coverage wins when grounded with good retrieval |
 | Privilege classification | Dual-model (rule + LLM) with human review on disagreement | Single LLM classifier | Single model mispredictions silently reclassify documents. Dual-model disagreement triggers human review — defense-in-depth for a consequence that can result in mistrial |
-| Conflict check entity matching | Three-tier: exact → alias expansion → fuzzy 0.85 | Exact match only | "ACME Holdings Ltd" vs "ACME Holdings" is a real failure mode (Section 9 war story). Exact-only matching has produced confirmed ethics violations in practice |
+| Conflict check entity matching | Three-tier: exact → alias expansion → fuzzy 0.85 | Exact match only | "ACME Holdings Ltd" vs "ACME Holdings" is a real failure mode (Section 9). Exact-only matching is a well-known source of missed conflicts |
 | External legal DB | LexisNexis primary, Westlaw fallback | Internal corpus only | Internal corpus covers uploaded documents only; citation verification requires authoritative external validation of case existence. Without it, the platform cannot detect hallucinated citations |
 | Deployment topology | Regional per-firm with data residency enforcement | Single global cluster | GDPR requires EU data to stay in EU. US BigLaw requires data to stay in US. Single global cluster cannot satisfy both without complex routing that introduces failure modes |
 
@@ -733,8 +747,8 @@ Concrete performance: average 30-page contract has 200 clauses; ~50 match playbo
 
 ## 6. Real-World Implementations
 
-**Harvey AI** (2023, $100M Series B, $3B valuation 2025):
-GPT-4 fine-tuned on legal data, focusing on M&A due diligence, contract review, and litigation research. Used by A&O Shearman (5,000 attorneys), PwC Legal, and Macfarlanes. Pricing: $2,000-$5,000/seat/year. Known for integration with deal management tools (Datasite, Intralinks). Harvey's competitive moat is training data: access to proprietary legal datasets from partner firms produces a model with better legal reasoning than pure GPT-4o for core US/UK law. Weakness: limited jurisdiction coverage outside English-speaking common law systems.
+**Harvey AI** (founded 2022; $200M growth round at an $11B valuation co-led by GIC and Sequoia in March 2026, taking total capital raised to ~$1B on roughly $190M ARR):
+Frontier models fine-tuned and orchestrated on legal data, focusing on M&A due diligence, contract review, and litigation research. Used by A&O Shearman, PwC, and other large firms. Per-seat pricing is not published — figures circulating in the press are estimates. Known for integration with deal management tools (Datasite, Intralinks). Harvey's competitive moat is training data: access to proprietary legal datasets from partner firms produces better legal reasoning than an ungrounded general model for core US/UK law. Weakness: limited jurisdiction coverage outside English-speaking common law systems.
 
 **Hebbia** (Matrix product, $700M valuation 2024, $130M Series B):
 Multi-document analysis engine for complex deal rooms. Loads 1,000+ documents simultaneously into a structured analysis grid; answers questions across the entire document set with precise source citations per cell. Strong in private equity due diligence (analyze 500 data room documents in parallel) and financial covenant analysis. Differentiator: structured output (table format with one answer per document per question) rather than conversational output — designed for diligence workflows, not chat. Architecture relies on long-context LLMs (128K+ context) to avoid retrieval quality issues on complex cross-document questions.
@@ -742,11 +756,11 @@ Multi-document analysis engine for complex deal rooms. Loads 1,000+ documents si
 **Robin AI** (UK-focused, Series B 2024):
 Contract review and negotiation engine fine-tuned on English law. Integrates redlining directly into Microsoft Word as a native add-in. Used by both law firms and in-house legal teams at FTSE 100 companies. Focus on speed: standard NDA reviewed in under 60 seconds. Revenue model: flat monthly subscription per team rather than per-seat — makes it accessible to in-house teams with variable usage. Jurisdiction limitation: optimized for English law; performance degrades on Scottish law and non-UK jurisdictions.
 
-**Spellbook** (in-Word drafting, $10M+ ARR):
+**Spellbook** (in-Word drafting; ARR not publicly disclosed):
 Lives inside Microsoft Word as a sidebar. Context-aware drafting suggestions that understand the surrounding contract text. Uses OpenAI API (not fine-tuned). Fastest to integrate for existing workflows — no document upload, no matter management, just a Word add-in. Dominates the drafting workflow at small-to-mid law firms. Does not compete on research or review; wins purely on "the lawyer never leaves Word." Limitation: no matter isolation, no citation verification — suited for drafting assistance, not research grounding.
 
-**Thomson Reuters CoCounsel** (2023, backed by Westlaw's 200-year legal content library):
-The most conservative product in the category. Every answer is grounded exclusively in Westlaw sources — 40,000+ databases including primary law, secondary sources, law reviews, and treatises. Westlaw citation validation is built-in: CoCounsel cannot cite a source that is not in Westlaw's corpus. Trusted by BigLaw for research because the liability is bounded: if Westlaw says the case exists, it exists. Weakness: Westlaw database coverage is US-heavy; international law research is limited. Pricing: bundled with Westlaw subscription ($600-$800/seat/month — highest cost in market). Thomson Reuters' competitive moat is content, not model quality.
+**Thomson Reuters CoCounsel** (2023, backed by the Westlaw content library that West Publishing has been building since 1872):
+The most conservative product in the category. Every answer is grounded exclusively in Westlaw sources — 40,000+ databases including primary law, secondary sources, law reviews, and treatises. Westlaw citation validation is built-in: CoCounsel cannot cite a source that is not in Westlaw's corpus. Trusted by BigLaw for research because the liability is bounded: if Westlaw says the case exists, it exists. Weakness: Westlaw database coverage is US-heavy; international law research is limited. Pricing is bundled with a Westlaw subscription and negotiated per firm — Thomson Reuters publishes no rate card, and it sits at the top of the market. Thomson Reuters' competitive moat is content, not model quality.
 
 **Leya** (Sweden, EU-focused):
 Swedish and EU law specialist. Regulatory compliance focus (GDPR, AI Act, ESG reporting). Strong multilingual support (Swedish, German, French legal documents). Architecture: jurisdiction-specific fine-tuned models routing to jurisdiction-specific corpora. Illustrates the market fragmentation: no single legal AI dominates across all jurisdictions; regional specialists serve local markets better than global generalists.
@@ -760,13 +774,13 @@ Swedish and EU law specialist. Regulatory compliance focus (GDPR, AI Act, ESG re
 | Capability | Qdrant (collections) | Pinecone (namespaces) | Weaviate (multi-tenancy) | pgvector (RLS) |
 |------------|---------------------|-----------------------|--------------------------|----------------|
 | Isolation mechanism | Separate collection per matter | Namespace within index | Multi-tenancy per class | Row-level security per user |
-| Max collections/namespaces | ~200,000 | 100 (namespaces per index, hard limit) | Unlimited tenants | Unlimited (table rows) |
+| Max collections/namespaces | 1,000 per cluster (Qdrant Cloud); vendor advises against hundreds+ | 10,000 namespaces per serverless index (100 on Starter; million-scale on request) | Unlimited tenants | Unlimited (table rows) |
 | Isolation strength | Physical (separate HNSW graph) | Logical (shared index, filtered search) | Physical (separate HNSW per tenant) | Logical (shared B-tree) |
 | Query latency at 50K collections | 5-15 ms | 5-10 ms (but filter risk) | 5-15 ms | 20-50 ms (JOIN overhead) |
 | Cost at 5.5TB storage | ~$4,000/month (managed) | ~$8,000/month | ~$5,500/month | ~$1,500/month (RDS) |
 | Suitable for legal? | Yes — physical isolation | No — namespace is logical filter, same isolation bug as shared collection | Yes — strongest isolation | Only for small deployments |
 
-**Winner for legal**: Qdrant (collection-per-matter) or Weaviate (tenant-per-matter). Pinecone namespaces have the same logical-filter problem as the broken approach in Section 4.1.
+**Winner for legal**: Qdrant (collection-per-matter, sharded across clusters) or Weaviate (tenant-per-matter, which scales to far more tenants per cluster). Pinecone namespaces are a logical partition inside one index, so they carry the same class of risk as the broken approach in Section 4.1 — namespace scale is not the constraint, isolation strength is.
 
 ### Legal Data Sources
 
@@ -785,13 +799,17 @@ Swedish and EU law specialist. Regulatory compliance focus (GDPR, AI Act, ESG re
 
 | Model | Citation Accuracy (internal benchmark) | Context Window | Cost (input/output per M tokens) | Jurisdiction Coverage |
 |-------|---------------------------------------|---------------|-----------------------------------|----------------------|
-| GPT-4o | 94% with RAG grounding | 128K tokens | $5 / $15 | Global, strong |
-| Claude claude-opus-4-7 | 93% with RAG grounding | 200K tokens | $15 / $75 | Global, strong |
-| Harvey fine-tuned (not public) | 97% on US/UK law | 32K tokens | Not available | US/UK strong; others weak |
-| Llama 3 legal fine-tune | 88% on US law | 128K tokens | $0.20 / $0.60 (self-hosted) | US only |
-| Gemini 1.5 Pro | 92% with RAG grounding | 1M tokens | $3.50 / $10.50 | Global |
+Citation-accuracy figures are this platform's own internal benchmark on its golden set, not vendor or third-party published results; prices are July 2026 list, per 1M tokens.
 
-**Recommendation**: GPT-4o as primary LLM with RAG grounding. Legal fine-tuned models outperform on core jurisdictions but degrade unpredictably outside training distribution. GPT-4o's broader training wins when compensated with strong retrieval. Use Claude claude-opus-4-7 for long-document analysis (200K context avoids chunking for full contracts).
+| Model | Citation Accuracy (internal benchmark) | Context Window | Cost (input/output per M tokens) | Jurisdiction Coverage |
+|-------|---------------------------------------|---------------|-----------------------------------|----------------------|
+| GPT-5.4 | 94% with RAG grounding | 400K tokens | $2.50 / $15 | Global, strong |
+| Claude Opus 4.8 | 93% with RAG grounding | 1M tokens | $5 / $25 | Global, strong |
+| Harvey fine-tuned (not public) | 97% on US/UK law | Not published | Not available | US/UK strong; others weak |
+| Llama legal fine-tune | 88% on US law | 128K tokens | $0.20 / $0.60 (self-hosted) | US only |
+| Gemini 3.1 Pro | 92% with RAG grounding | 1M tokens | $2 / $12 | Global |
+
+**Recommendation**: a current frontier model (GPT-5.4 here) as primary LLM with RAG grounding. Legal fine-tuned models outperform on core jurisdictions but degrade unpredictably outside training distribution; broader pretraining wins when compensated with strong retrieval. Use Claude Opus 4.8 for long-document analysis (1M context avoids chunking for full contracts).
 
 ---
 
@@ -837,7 +855,7 @@ Trace: legal_ai_request (trace_id: abc123)
   +-- Span: matter_context_enforcer   (1 ms)   isolation_check=pass, collection=firm_X_matter_Y
   +-- Span: retrieval.matter_scoped   (12 ms)  top_k=10, top_score=0.89, privileged_excluded=2
   +-- Span: llm.generate             (4,200 ms)
-  |     gen_ai.system=openai, gen_ai.request.model=gpt-4o
+  |     gen_ai.system=openai, gen_ai.request.model=gpt-5.4
   |     gen_ai.usage.input_tokens=4312, gen_ai.usage.output_tokens=487
   |     legal.jurisdiction=US_FEDERAL, legal.query_type=research
   +-- Span: citation_verifier         (280 ms)
@@ -855,7 +873,7 @@ See also: [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_for_llm_app
 Symptoms: `citation.hallucinated_count` counter > 0 for > 2% of requests in a 15-minute window; PagerDuty P1 alert fires.
 
 Diagnosis:
-1. Check if LLM model version changed in the last 24 hours (OpenAI may update GPT-4o silently)
+1. Check if the LLM model version changed in the last 24 hours (a provider can repoint an undated alias)
 2. Check if the retrieval top_score distribution shifted downward (poor retrieval → LLM fills gaps with hallucinations)
 3. Check if the spike is jurisdiction-specific (new regulatory area not covered by internal corpus)
 
@@ -865,7 +883,7 @@ Mitigation (immediate, < 10 minutes):
 3. Route affected query types to human review queue with 30-minute SLA
 
 Resolution (within 24 hours):
-1. If LLM model changed: pin OpenAI API to specific model version (`gpt-4o-2024-11-20`)
+1. If the LLM model changed: pin the API call to a dated snapshot rather than an undated alias
 2. If retrieval quality degraded: check Qdrant HNSW index health; rebuild if ef_construction drifted
 3. If jurisdiction gap: ingest new regulatory corpus and re-index before lowering threshold
 
@@ -908,13 +926,13 @@ Resolution: monitor LexisNexis status page; re-enable as primary when restored. 
 
 **Air Canada chatbot liability parallel (February 2024)**: Air Canada's AI chatbot gave a customer incorrect bereavement fare policy information; the BC Civil Resolution Tribunal ruled Air Canada liable for the chatbot's statements (Moffatt v. Air Canada, 2024). The legal AI parallel is higher-stakes by an order of magnitude. A chatbot giving wrong travel policy costs hundreds of dollars. A legal AI citing a non-existent statute in a court brief costs the client's case and exposes the attorney to bar discipline. The architectural lesson: legal AI must present hallucinated or low-confidence responses to lawyer review — never to the client's brief — until verified. Every FLAGGED_FOR_REVIEW citation is a human review queue item, not a suppressed response.
 
-**Harvey AI citation misquoting (2023 scrutiny)**: Early Harvey AI demos showed the model citing cases that existed but were taken out of context or misquoted — the model paraphrased a holding in a way that favored the client's position beyond what the case actually said. A&O Shearman's deployment protocol required mandatory lawyer review of every cited source. The lesson: citation verification must check not just that the source exists (external API) but that the specific claim is supported by the source text (NLI entailment). A case can exist and still not support the claim made about it.
+**Citation misquoting — the "case exists but does not say that" failure**: Legal AI systems reliably produce citations to real cases whose holdings are paraphrased beyond what the opinion supports. This class of error is well documented in courts' own sanctions opinions against filings containing AI-assisted citations; the specific vendor demos sometimes cited for it are second-hand accounts, so treat it as a category, not an attributed event. Firm deployment protocols respond by requiring lawyer review of every cited source. The lesson: citation verification must check not just that the source exists (external API) but that the specific claim is supported by the source text (NLI entailment). A case can exist and still not support the claim made about it.
 
-**Privilege log contamination incident (production pattern, 2022)**: A privilege classifier bug marked 12 documents tagged PRIVILEGED as UNPRIVILEGED due to a regex error in the rule-based tier. The LLM's dual-model verification tier was bypassed by a deployment that hot-patched the rule model without re-running classifier agreement checks. The 12 documents were included in an e-discovery production set. Opposing counsel received attorney-client communications. The firm spent $2M in legal fees litigating a privilege clawback motion. The architectural fix: any document changing privilege status (PRIVILEGED → anything, WORK_PRODUCT → UNPRIVILEGED) is always routed to human review before the status change is persisted. No deployment can bypass this gate.
+**Privilege log contamination (illustrative composite, not a reported public incident)**: A privilege classifier bug marked 12 documents tagged PRIVILEGED as UNPRIVILEGED due to a regex error in the rule-based tier. The LLM's dual-model verification tier was bypassed by a deployment that hot-patched the rule model without re-running classifier agreement checks. The 12 documents were included in an e-discovery production set. Opposing counsel received attorney-client communications. The firm faced a privilege clawback motion — the kind of dispute that routinely runs into seven figures of legal fees. The architectural fix: any document changing privilege status (PRIVILEGED → anything, WORK_PRODUCT → UNPRIVILEGED) is always routed to human review before the status change is persisted. No deployment can bypass this gate.
 
-**Multi-matter context window injection (2023 production incident)**: A lawyer's browser session retained context from a previous query about a different client. The query "based on the previous analysis, what are the risks for our client?" included the previous client's matter context in the prompt. The LLM incorporated both contexts and generated an answer that referenced confidential information from Matter B in a response about Matter A. A professional conduct complaint was filed. The fix: the system prompt injects a strict matter boundary instruction at every LLM call: "You may only use information from the documents explicitly provided in this request context. You have no prior conversation context. Matter identifier: [matter_id]." The Matter Context Enforcer validates that no prior session state persists across matter boundaries at the application layer — not the browser layer.
+**Multi-matter context window injection (illustrative composite)**: A lawyer's browser session retained context from a previous query about a different client. The query "based on the previous analysis, what are the risks for our client?" included the previous client's matter context in the prompt. The LLM incorporated both contexts and generated an answer that referenced confidential information from Matter B in a response about Matter A. A professional conduct complaint was filed. The fix: the system prompt injects a strict matter boundary instruction at every LLM call: "You may only use information from the documents explicitly provided in this request context. You have no prior conversation context. Matter identifier: [matter_id]." The Matter Context Enforcer validates that no prior session state persists across matter boundaries at the application layer — not the browser layer.
 
-**Conflict check entity aliasing failure (confirmed ethics violation pattern)**: A firm's conflict system searched for "ACME Holdings Ltd" when the new engagement counterparty was listed as such. The firm already represented "ACME Holdings" (registered without "Ltd" suffix) in a directly adverse matter. The conflict check returned no results because exact-match-only search missed the suffix variation. Both matters proceeded simultaneously for 6 months until opposing counsel identified the conflict. The state bar opened an ethics investigation; the firm withdrew from both matters. The fix is the three-tier matching in Section 4.4: tier-3 fuzzy matching with 0.85 threshold catches this case (SequenceMatcher ratio("acme holdings ltd", "acme holdings") = 0.96). The subsidiary alias expansion (tier 2) catches trade name variations.
+**Conflict check entity aliasing failure (illustrative composite of a well-known failure mode)**: A firm's conflict system searched for "ACME Holdings Ltd" when the new engagement counterparty was listed as such. The firm already represented "ACME Holdings" (registered without "Ltd" suffix) in a directly adverse matter. The conflict check returned no results because exact-match-only search missed the suffix variation. Both matters proceeded simultaneously for 6 months until opposing counsel identified the conflict. The state bar opened an ethics investigation; the firm withdrew from both matters. The fix is the three-tier matching in Section 4.4. Suffix stripping alone reduces both names to "acme holdings", so tier 1 catches it outright; if the suffix list misses a variant, tier-3 fuzzy matching still clears the 0.85 threshold — `SequenceMatcher(None, "acme holdings ltd", "acme holdings").ratio()` is 2*13/30 = 0.867, not the 0.96 that a naive character-overlap intuition suggests. That margin is thin: pick the threshold against a real name corpus, not by intuition. The subsidiary alias expansion (tier 2) catches trade name variations. This scenario is a widely-discussed failure mode in conflicts practice, described here as an illustrative composite rather than a specific reported matter.
 
 See also: [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for adversarial legal prompt testing including cross-matter injection attempts, citation hallucination probes, and privilege bypass attacks.
 
@@ -962,15 +980,16 @@ Document review:
   50,000 reviews/day / 86,400 s = 0.58 reviews/sec average
   Each review: 60 s LLM wall time, 55K tokens
   Concurrent reviews: 0.58 x 60 = 35 concurrent reviews at peak
-  GPT-4o capacity: ~100 concurrent requests per org at enterprise tier
-  → No bottleneck with GPT-4o enterprise; buffer: 65% spare capacity
+  Provider limits are expressed as requests/min and tokens/min, not a concurrency
+  cap; 35 concurrent 55K-token reviews is ~1.9M input tokens/min, which needs an
+  enterprise-tier TPM allocation but is not close to a hard ceiling
 
 Q&A queries:
   200,000/day / 86,400 s = 2.3 queries/sec average, 23 QPS peak
   Each query: ~5K tokens, ~8 s LLM time
   Concurrent queries at peak: 23 x 8 = 184 concurrent queries
-  → At peak this approaches GPT-4o enterprise limits; mitigate with:
-    (a) Claude claude-opus-4-7 as overflow (200K context, different rate limit pool)
+  → At peak this pressures the primary provider's TPM allocation; mitigate with:
+    (a) Claude Opus 4.8 as overflow (1M context, separate provider rate-limit pool)
     (b) Queue depth monitoring with exponential backoff retry
 
 Citation verification:
@@ -982,16 +1001,22 @@ Citation verification:
 ### Growth Projection
 
 ```
-Year 1: 500 firms, 50K collections, 5.5 TB Qdrant, $1.8M/month LLM cost
-Year 2: 2,000 firms, 200K collections (Qdrant capacity: 200K max → need sharding)
-         At 200K collections: partition by firm_id into 4 Qdrant clusters (50K each)
-         Storage: 22 TB Qdrant; $7.2M/month LLM cost at same pricing
-         Revenue: 40,000 seats x $500 = $20M/month; gross margin improves to ~64%
-         (LLM cost/token decreases as GPT-4o pricing declines ~30%/year historically)
+Year 1: 500 firms, 50K collections, 5.5 TB Qdrant, $441K/month LLM cost
+        Qdrant Cloud caps a cluster at 1,000 collections, so 50K collections is
+        already ~50 clusters on day one — sharding is a launch requirement here,
+        not a Year-2 milestone.
+Year 2: 2,000 firms, 200K collections → ~200 clusters at the 1,000-collection cap
+         Storage: 22 TB Qdrant; $1.76M/month LLM cost at 4x volume, same pricing
+         Revenue: 40,000 seats x $500 = $20M/month; gross margin holds at ~91%
+         before infra (LLM cost scales linearly with seats, so margin is flat,
+         not improving — the leverage comes from infra and eng, not tokens)
 
-Qdrant sharding trigger at Year 2:
-  Hash firm_id to 4 shards: shard = hash(firm_id) % 4
-  Each shard: 500 firms x 100 matters = 50,000 collections
+Qdrant sharding (from launch, not Year 2):
+  Hash firm_id to N clusters, each holding <= 1,000 collections
+  Year 1: 50 clusters x 1,000 collections; Year 2: ~200 clusters
+  Alternative: Qdrant tiered multitenancy (v1.16+) — dedicated shards for the
+  largest firms plus a shared shard for the long tail, ~1,000 dedicated shards
+  per cluster recommended, which cuts cluster count by an order of magnitude
   Cross-shard queries: conflict check only (reads multiple firms' matter indices)
   → Conflict checker queries all 4 shards in parallel; 4x latency increase mitigated by
      partitioned PostgreSQL party index (SQL query, not vector search, for conflict check)
@@ -1003,7 +1028,7 @@ Qdrant sharding trigger at Year 2:
 
 **Q: Why use a collection-per-matter design instead of a shared collection with a matter_id metadata filter?**
 
-The metadata filter approach has a single point of failure: if the filter is absent, malformed, or contains a bug, documents from every matter in the database are returned to every query. In a legal context this is a privilege breach — confidential communications from one client are exposed to another. The collection-per-matter design makes cross-matter retrieval physically impossible. A query on `firm_acme_matter_42` cannot return results from `firm_acme_matter_43` because those documents are not in that collection. The operational cost is 50,000 Qdrant collections, which is within Qdrant's supported limits. A matter isolation breach is an existential event for a law firm and a platform; 50,000 collections is a manageable operational challenge.
+The metadata filter approach has a single point of failure: if the filter is absent, malformed, or contains a bug, documents from every matter in the database are returned to every query. In a legal context this is a privilege breach — confidential communications from one client are exposed to another. The collection-per-matter design makes cross-matter retrieval physically impossible. A query on `firm_acme_matter_42` cannot return results from `firm_acme_matter_43` because those documents are not in that collection. The operational cost is real and larger than it first looks: Qdrant Cloud caps a cluster at 1,000 collections and its own multitenancy guidance recommends payload-based partitioning instead, so 50,000 matters means roughly 50 clusters (or Qdrant's tiered multitenancy, v1.16+). You are buying a physical boundary with cluster sprawl. A matter isolation breach is an existential event for a law firm and a platform, so the trade is still worth making — but answer it as a cost, not as a free win.
 
 **Q: How does citation verification prevent the Air Canada chatbot pattern in a legal context?**
 
@@ -1023,7 +1048,7 @@ The async alternative — return the response and flag citations as unverified l
 
 **Q: How do you detect if the LLM misquotes a case even though the case exists?**
 
-External validation (LexisNexis/Westlaw API) confirms the case exists but does not check whether the quoted holding is accurate. The NLI entailment check addresses this: it tests whether the specific claim in the response is entailed by the retrieved source text (the actual case text from the vector store). If the LLM says "In Smith v. Jones, the court held that X" but the retrieved chunk from Smith v. Jones says the court held Y, the entailment score is low and the citation is flagged. This is the Harvey AI 2023 failure mode — existing cases misquoted or taken out of context — and the NLI check is the direct fix. The system must retrieve the actual source text and run entailment against it, not just verify the citation reference string.
+External validation (LexisNexis/Westlaw API) confirms the case exists but does not check whether the quoted holding is accurate. The NLI entailment check addresses this: it tests whether the specific claim in the response is entailed by the retrieved source text (the actual case text from the vector store). If the LLM says "In Smith v. Jones, the court held that X" but the retrieved chunk from Smith v. Jones says the court held Y, the entailment score is low and the citation is flagged. This is the "case exists but does not support the claim" failure mode described in Section 9, and the NLI check is the direct fix. The system must retrieve the actual source text and run entailment against it, not just verify the citation reference string.
 
 **Q: What happens when LexisNexis is down and a lawyer needs urgent research results before a 2am filing deadline?**
 
@@ -1033,13 +1058,13 @@ Three-tier fallback activates. Tier 1: switch to Westlaw API (pre-configured bac
 
 The query is routed to both the US federal/state corpus and the UK corpus simultaneously. Each corpus retrieval returns the top-10 most relevant chunks from its jurisdiction. The system prompt instructs the LLM to clearly delineate US and UK holdings, cite each separately with jurisdiction labels, and explicitly note where the two systems diverge. Citation verification runs separately for each jurisdiction's citations: LexisNexis for US references, BAILII for UK references. The response includes a jurisdiction header per section ("Under US law (SDNY): ..."; "Under English law (CA): ..."). Lawyers working on cross-border M&A transactions are the primary users of multi-jurisdiction queries; the structured separation of jurisdictions is more useful than a blended synthesis.
 
-**Q: Why is a legal-fine-tuned Llama model not always better than GPT-4o for legal applications?**
+**Q: Why is a legal-fine-tuned open-weight model not always better than a general frontier model for legal applications?**
 
-Fine-tuned models are optimized for the distribution of their training data. Harvey's fine-tune performs best on US M&A and corporate law — the domains with abundant training data — but degrades on rare jurisdictions, emerging regulatory areas (EU AI Act, new state privacy statutes), and non-English legal systems where training data is sparse. GPT-4o's broader pretraining captures these areas reasonably well. When grounded with strong retrieval (good chunking, high similarity threshold, NLI re-ranking), GPT-4o's citation accuracy approaches fine-tuned models on core domains and exceeds them on rare domains. The correct architecture is retrieval-first: the quality of retrieved context matters more than the base model for citation accuracy. A fine-tuned model with poor retrieval produces confidently wrong citations; GPT-4o with good retrieval produces accurate grounded citations.
+Fine-tuned models are optimized for the distribution of their training data. Harvey's fine-tune performs best on US M&A and corporate law — the domains with abundant training data — but degrades on rare jurisdictions, emerging regulatory areas (EU AI Act, new state privacy statutes), and non-English legal systems where training data is sparse. A frontier model's broader pretraining captures these areas reasonably well. When grounded with strong retrieval (good chunking, high similarity threshold, NLI re-ranking), its citation accuracy approaches fine-tuned models on core domains and exceeds them on rare domains. The correct architecture is retrieval-first: the quality of retrieved context matters more than the base model for citation accuracy. A fine-tuned model with poor retrieval produces confidently wrong citations; a general model with good retrieval produces accurate grounded citations.
 
 **Q: What does the bar exam benchmark measure, and what does it not measure about legal AI quality?**
 
-GPT-4o scores in the 90th percentile on the bar exam (July 2023 measurement). This measures general legal knowledge and reasoning in a multiple-choice format. It does not measure: citation accuracy on real cases (bar exam is closed-book, no citations required); jurisdiction-specific document drafting quality; ability to apply law to novel facts in a complex transaction (bar exam facts are simplified); privilege classification accuracy; conflict detection precision; or latency under production load. A legal AI platform could score in the 95th percentile on the bar exam and still be unusable in practice if its citation verification fails, its matter isolation has a bug, or its document review takes 10 minutes per contract. The bar exam benchmark is useful for marketing and as a lower bound on legal reasoning capability — it is not a production quality metric.
+Less than the headline suggests — OpenAI's widely quoted "90th percentile on the UBE" for GPT-4 (March 2023) was benchmarked against February Illinois test-takers, a pool skewed toward repeat takers who failed in July. Martínez, "Re-evaluating GPT-4's bar exam performance" (Artificial Intelligence and Law, 2024), re-scored it at roughly the 68th percentile against July takers, 62nd against first-time takers, and 48th against those who actually passed — 15th percentile on the essay component. The benchmark measures general legal knowledge and reasoning in a largely multiple-choice format. It does not measure: citation accuracy on real cases (bar exam is closed-book, no citations required); jurisdiction-specific document drafting quality; ability to apply law to novel facts in a complex transaction (bar exam facts are simplified); privilege classification accuracy; conflict detection precision; or latency under production load. A legal AI platform could score in the 95th percentile on the bar exam and still be unusable in practice if its citation verification fails, its matter isolation has a bug, or its document review takes 10 minutes per contract. The bar exam benchmark is useful for marketing and as a lower bound on legal reasoning capability — it is not a production quality metric.
 
 **Q: How do you prevent a lawyer from inadvertently querying across matter boundaries through prompt injection?**
 

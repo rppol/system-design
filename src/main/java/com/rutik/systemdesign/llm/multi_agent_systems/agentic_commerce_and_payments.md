@@ -129,8 +129,12 @@ requests a resource; the server responds `402` with **payment requirements** in 
 a payment authorization, retries the request with the payment proof attached as a header; the
 server (often via a **facilitator** service that verifies and submits the on-chain transaction)
 validates payment and returns the resource with `200 OK`. This is designed for **per-call API
-monetization** — an agent paying $0.001 per inference call to a tool-provider, where card-network
-interchange fees (often $0.30 + a percentage) would make such micropayments uneconomical.
+monetization** — an agent paying $0.001 per inference call to a tool-provider, where card-payment
+processing fees would make such micropayments uneconomical. The relevant number is the *merchant
+discount rate*, the all-in per-transaction cost a merchant pays: for standard US online card
+payments that is around **2.9% + $0.30** (Stripe's published flat rate), of which the interchange
+component paid to the issuing bank is only a part. It is the fixed $0.30 term, not the
+percentage, that kills sub-dollar payments.
 
 ### 3.6 Identity as a Separate Layer (Skyfire's KYA)
 
@@ -280,7 +284,14 @@ class IntentMandate:
     signature: str = ""
 
     def sign(self, user_secret: bytes) -> None:
-        payload = f"{self.user_id}|{self.max_price_usd}|{self.category}|{self.expires_at}"
+        # Every field the bounds-check reads must be inside the signed payload,
+        # merchant_allowlist included -- otherwise an attacker who can reach the
+        # mandate object appends a merchant and within_bounds() still passes.
+        allowlist = ",".join(sorted(self.merchant_allowlist))
+        payload = (
+            f"{self.user_id}|{self.max_price_usd}|{self.category}"
+            f"|{allowlist}|{self.expires_at}"
+        )
         self.signature = hmac.new(user_secret, payload.encode(), hashlib.sha256).hexdigest()
 
     def is_valid(self) -> bool:
@@ -323,10 +334,18 @@ from dataclasses import dataclass
 
 @dataclass
 class X402PaymentRequirements:
-    amount: str            # e.g. "0.01"
-    currency: str          # e.g. "USDC"
-    network: str           # e.g. "base"
-    recipient: str         # on-chain address
+    """One entry of the `accepts` array, using the spec's own field names.
+
+    The real PaymentRequirements object also carries `resource`, `description`,
+    `mimeType`, `outputSchema` and `extra`; only the settlement-relevant fields
+    are modelled here.
+    """
+    scheme: str                # e.g. "exact"
+    network: str               # CAIP-2 chain id, e.g. "eip155:8453" for Base
+    maxAmountRequired: str     # atomic units of `asset`, as a string
+    asset: str                 # token contract address (e.g. the USDC contract)
+    payTo: str                 # recipient on-chain address
+    maxTimeoutSeconds: int
 
 
 def fetch_with_x402(url: str, wallet) -> requests.Response:
@@ -335,19 +354,30 @@ def fetch_with_x402(url: str, wallet) -> requests.Response:
     if response.status_code != 402:
         return response               # no payment required, or already paid
 
-    requirements = X402PaymentRequirements(**response.json()["accepts"][0])
+    # Pick a requirement you can actually satisfy, then map only the fields
+    # you model -- constructing the dataclass with ** would raise TypeError on
+    # the spec fields omitted above.
+    accepted = response.json()["accepts"][0]
+    requirements = X402PaymentRequirements(
+        scheme=accepted["scheme"],
+        network=accepted["network"],
+        maxAmountRequired=accepted["maxAmountRequired"],
+        asset=accepted["asset"],
+        payTo=accepted["payTo"],
+        maxTimeoutSeconds=accepted["maxTimeoutSeconds"],
+    )
 
     # Sign an on-chain payment authorization (e.g., EIP-3009 transferWithAuthorization)
     # WITHOUT broadcasting it yet -- the facilitator submits it on verification.
     signed_payment = wallet.sign_transfer_authorization(
-        amount=requirements.amount,
-        currency=requirements.currency,
-        recipient=requirements.recipient,
+        amount=requirements.maxAmountRequired,
+        asset=requirements.asset,
+        recipient=requirements.payTo,
         network=requirements.network,
     )
 
-    # Retry with payment proof attached
-    return requests.get(url, headers={"X-Payment": signed_payment})
+    # Retry with payment proof attached, in the spec's X-PAYMENT header
+    return requests.get(url, headers={"X-PAYMENT": signed_payment})
 ```
 
 ### 6.3 BROKEN -> FIX: Unscoped Payment Credential vs. Mandate-Bounded Spend
@@ -467,8 +497,11 @@ is the property that makes it trustworthy.
 
 ## 7. Real-World Examples
 
-- **Coinbase x402 (2025)** — launched as an open spec with reference facilitator
-  implementations; rapidly adopted by AI infrastructure providers for **per-call API monetization**
+- **Coinbase x402 (May 2025)** — launched as an open spec with reference facilitator
+  implementations; governance has since moved out of Coinbase, with the x402 Foundation announced
+  jointly with Cloudflare in September 2025 and formalized under the Linux Foundation in April 2026
+  alongside launch members including AWS, Circle, Google, Mastercard, Shopify, Stripe and Visa.
+  Adopted by AI infrastructure providers for **per-call API monetization**
   — an agent paying fractions of a cent per tool invocation, economically viable only because
   stablecoin transfer fees on L2s like Base are a small fraction of a cent, unlike card-network
   interchange.
@@ -500,7 +533,7 @@ is the property that makes it trustworthy.
 
 | | Stablecoin (x402, Skyfire) | Card Network (ACP, Visa IC, Mastercard Agent Pay) |
 |---|---|---|
-| Per-transaction fee at small amounts (<$1) | Near-zero (L2 gas fees) — viable for micropayments | Interchange fees (often $0.30 + %) make sub-$1 transactions uneconomical |
+| Per-transaction fee at small amounts (<$1) | Near-zero (L2 gas fees) — viable for micropayments | Merchant discount rate (~2.9% + $0.30 for standard US online cards) makes sub-$1 transactions uneconomical |
 
 **What it means.** "A card fee has a fixed floor of about thirty cents no matter how small the
 purchase is, so below a few dollars you are not paying a fee on the transaction — the fee *is*
@@ -706,7 +739,7 @@ Giving an agent raw payment credentials means any tool call the agent's reasonin
 The Intent Mandate (§3.1) captures *general, advance authorization* — "shoes, size 9, under $150" — signed once, often well before any specific purchase opportunity exists. The Cart Mandate captures the *specific transaction* an agent later assembles — exact item, exact price, exact merchant — checked against the Intent Mandate's bounds. The Payment Mandate is a *signal to the payment network* that an AI agent initiated this, separate from authorization itself, enabling agent-aware risk scoring. Separating these lets the Intent Mandate be signed once and reused for many Cart Mandates (enabling human-not-present flows, §3.2) while still producing, for each individual transaction, a specific auditable record of exactly what was bought and at what price — collapsing them into one mandate would either require re-authorization per transaction (defeating automation) or lose the per-transaction audit trail.
 
 **Q3: Why does x402 use stablecoins rather than existing card-network rails for machine-to-machine micropayments?**
-Card-network interchange fees are typically a fixed component (often around $0.30) plus a percentage — for a $0.001 API call, the fee would be orders of magnitude larger than the transaction itself, making such micropayments economically impossible on card rails. Stablecoin transfers on low-fee L2 networks (e.g., Base) have per-transaction costs that are a small fraction of a cent, making sub-cent payments viable. This is the core economic argument for x402's design choice — it's not about avoiding card networks generally, but specifically about a transaction-size regime (sub-dollar, often sub-cent, machine-initiated, high-frequency) where card economics simply don't work.
+Card-payment processing costs a merchant a fixed component plus a percentage — for standard US online cards, roughly 2.9% + $0.30 all-in, of which interchange to the issuing bank is one part — so for a $0.001 API call the fee is orders of magnitude larger than the transaction itself, making such micropayments economically impossible on card rails. Stablecoin transfers on low-fee L2 networks (e.g., Base) have per-transaction costs that are a small fraction of a cent, making sub-cent payments viable. This is the core economic argument for x402's design choice — it's not about avoiding card networks generally, but specifically about a transaction-size regime (sub-dollar, often sub-cent, machine-initiated, high-frequency) where card economics simply don't work.
 
 **Q4: How does AP2 relate to x402 — are they competitors?**
 They're complementary, not competitors — AP2 is explicitly designed as **rail-agnostic**, with x402 as one of its supported payment-rail extensions specifically for the machine-to-machine micropayment case (§3.3). A system could use AP2's mandate chain for the authorization layer (Intent → Cart → Payment Mandate, capturing what was authorized and by whom) while settling the actual transaction via x402 (for an agent-to-agent API payment) or via a card-network token (for a consumer purchase) — same authorization structure, different settlement rail depending on the transaction's economics. This layered design (§5.4) is precisely what lets AP2 partner with both card networks (Mastercard, PayPal) and crypto infrastructure (Coinbase) simultaneously.
@@ -765,6 +798,10 @@ A long-running procurement agent operating under a human-not-present Intent Mand
 ---
 
 ## 14. Case Study
+
+> Illustrative composite. The mandate mechanics and the bounds arithmetic are
+> real; the company, the incident, and the escalation statistics are a worked
+> scenario, not a published deployment.
 
 **Scenario**: A mid-size manufacturing company deploys an autonomous procurement agent to handle
 routine restocking of shop-floor consumables (fasteners, lubricants, safety equipment) across

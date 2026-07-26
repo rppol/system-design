@@ -58,42 +58,67 @@ Peak videos/hour:            1.5M / 16 active hours * 3 = ~281,000 videos/hour
 ```
 Stage           Model           Hardware       Compute time
 TTS (60s audio) Custom/ElevenLabs  A10G (24 GB)  2s (real-time factor 0.03x)
-Lip-sync (60s)  SadTalker          A10G           5.4s (60s * 30fps * 3ms/frame)
-Compositing     FFmpeg GPU          A10G           12s (1080p H.264 GPU encode)
-Upload to S3    --                 network         3s (150 MB at ~50 MB/s)
+Lip-sync (60s)  Wav2Lip            A10G           5.4s (60s * 30fps * 3ms/frame)
+Lip-sync (60s)  SadTalker          A10G          27.0s (60s * 30fps * 15ms/frame)
+Compositing     FFmpeg GPU          A10G           4s (1080p h264_nvenc encode)
+Upload to S3    --                 network         1s (35 MB at ~50 MB/s)
 ------------------------------------------------------------
-Total sequential wall time: ~23s compute + queuing overhead
+Free tier (Wav2Lip):  ~12s compute + queuing overhead
+Paid tier (SadTalker): ~33s compute + queuing overhead
+
+The 3 ms/frame figure belongs to Wav2Lip, not SadTalker -- pairing SadTalker's
+name with Wav2Lip's per-frame cost understates the paid-tier bottleneck 5x and
+is the easiest way to under-provision the fleet.
 ```
 
 ### GPU Fleet Sizing
 ```
-1.5M videos/day * 20s GPU-seconds each = 30M GPU-seconds/day
+Paid tier (SadTalker at 15 ms/frame) is the sizing case:
+  Per video: 2s TTS + 27s lip-sync + 4s encode = 33 GPU-seconds
+  1.5M videos/day * 33 GPU-seconds = 49.5M GPU-seconds/day
 
 A10G utilization at 70%: 3,600s/hour * 0.70 = 2,520 GPU-seconds/GPU/hour
-GPU-hours needed: 30M / 2,520 = 11,905 A10G-hours/day
+GPU-hours needed: 49.5M / 2,520 = 19,643 A10G-hours/day
+Fleet size if run 24h/day: 19,643 / 24 = ~818 A10Gs
 
-At $1.30/A10G-hour on AWS: $15,476/day GPU cost
-
-Distribution across pipeline stages:
+Distribution across pipeline stages (rounded to the ~900-GPU fleet used
+consistently in Section 10):
   TTS fleet:         ~100 A10Gs (fast stage, 2s/video, shares GPU with other small jobs)
   Lip-sync fleet:    ~670 A10Gs (dominant bottleneck: 15ms/frame on SadTalker)
   Compositor fleet:  ~130 A10Gs (GPU-accelerated FFmpeg encode)
   Total:             ~900 A10Gs
+
+At $1.30/A10G-hour on-demand (g5.12xlarge is $5.672/hour for 4x A10G =
+$1.42/GPU-hour; g5.xlarge is $1.006/hour; spot runs ~$0.65-1.09/GPU-hour):
+  900 * 24 * $1.30 = $28,080/day GPU cost
+This is the number Section 10 uses. A per-GPU-hour figure computed from
+19,643 GPU-hours instead of the provisioned 21,600 GPU-hours understates the
+bill by ~10% -- always budget the provisioned fleet, not the busy hours.
 ```
 
 ### Storage and CDN Estimates
 ```
-Output video size: 60s * 1080p H.264 CRF 23 = ~150 MB/video
-Daily output:      1.5M * 150 MB = 225 TB/day written to S3
+Output video size: 60s * 1080p30 H.264 CRF 23, single-speaker talking head
+                   (very low motion) encodes at ~4-5 Mbps = ~35 MB/video.
+                   150 MB would imply ~20 Mbps, which is broadcast-grade
+                   sports footage, not a static-background avatar.
+Daily output:      1.5M * 35 MB = 52.5 TB/day written to S3
 
 Retention policy:  30 days on origin S3 (then deleted; customer must download)
-CDN egress:        Assume 80% of videos downloaded at least once = 180 TB/day
-                   At $0.02/GB = $3,600/day CDN cost
+CDN egress:        Assume 80% of videos downloaded at least once = 42 TB/day
+                   At $0.02/GB (committed-volume CloudFront rate; the
+                   on-demand first-10TB rate is $0.085/GB) = $840/day
 
-Unit economics:
-  Total infra:  ~$5,000/day ($15K GPU + $3.6K CDN + ~$1K misc)
+Unit economics (paid tier on SadTalker -- see Section 10 for the fleet math):
+  GPU:          ~$28,100/day (900 A10G x 24h x $1.30)
+  CDN:          ~$840/day
+  Misc (S3, DB, network): ~$1,000/day
+  Total infra:  ~$29,900/day
   Revenue:      500K DAU * 20% paid * $30/month = $100K/day gross revenue
-  Gross margin: ~95% at scale -- GPU cost is the dominant variable cost
+  Gross margin: ~70% at scale -- GPU cost is the dominant variable cost.
+  (An earlier draft of this design totalled the same three line items as
+  "~$5,000/day" and claimed 95% margin; the components do not sum to that.
+  Recompute the total every time a component changes.)
 ```
 
 ---
@@ -491,7 +516,10 @@ class VideoCompositor:
             "-map", video_stream,
             "-map", audio_stream,
             "-c:v", "h264_nvenc",   # GPU encode
-            "-crf", str(inp.crf),
+            # h264_nvenc does NOT implement -crf. Rate control is -rc/-cq.
+            # Passing -crf to nvenc is silently ignored, so every output
+            # lands at the default bitrate regardless of the tier setting.
+            "-rc", "vbr", "-cq", str(inp.crf),
             "-s", inp.resolution,
             "-c:a", "aac",
             "-b:a", "192k",
@@ -506,6 +534,13 @@ class VideoCompositor:
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
+
+    # Two ffmpeg gotchas this builder has to respect and which bite in prod:
+    #  1. `-map` takes a bracketed label ONLY for filtergraph outputs. A raw
+    #     input stream is `-map 0:v`, never `-map [0:v]`. When no filter runs,
+    #     strip the brackets before mapping.
+    #  2. `-filter_complex null` is not a no-op you can pass unconditionally --
+    #     omit `-filter_complex` entirely when `filter_chains` is empty.
 
     def _hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
         h = hex_color.lstrip("#")
@@ -586,6 +621,9 @@ are applied in order of increasing cost.
 ```python
 import asyncio
 from dataclasses import dataclass
+from typing import Any   # required: DeepfakeAbuseDetector.__init__ annotates
+                         # face_encoder/blocklist_index as Any, and annotations
+                         # are evaluated at def time -> NameError without this
 
 import numpy as np
 
@@ -682,24 +720,29 @@ class DeepfakeAbuseDetector:
 | Avatar base video | Pre-rendered looping clip cached on NVMe | Render avatar from static image per job | Caching eliminates 60% of GPU work for stock avatars; image-to-video is slow | Custom avatars still need per-user rendering; 10x cost vs stock |
 | TTS provider | Hybrid: self-hosted Piper/Coqui for standard, ElevenLabs API for premium | All self-hosted or all ElevenLabs | Self-hosted at $0.0001/s audio is 10x cheaper than ElevenLabs at $0.001/s | Quality gap is visible; premium upsell covers ElevenLabs margin |
 | Consent verification | Selfie-to-video face match at enrollment (threshold 0.85) | Document ID verification | Selfie match is fast (< 2s), scales to millions of users, does not require ID upload | False rejection rate ~2%; users with heavy makeup or unusual lighting may need retake |
-| Output storage | S3 origin + CDN, 30-day retention then deletion | Permanent storage | Storage cost ($225 TB/day * 30 days = 6.75 PB) is dominated by CDN egress, not S3 ($0.023/GB vs $0.02/GB); 30-day TTL cuts S3 bill 10x | Users who need permanent archives must self-download; API includes webhook for download notification |
+| Output storage | S3 origin + CDN, 30-day retention then deletion | Permanent storage | At ~35 MB/video the origin accrues 52.5 TB/day, so a 30-day window is ~1.6 PB standing (~$36K/month at S3 Standard $0.023/GB-month); the 30-day TTL is what keeps that from growing without bound | Users who need permanent archives must self-download; API includes webhook for download notification |
 
 ---
 
 ## 6. Real-World Implementations
 
-**HeyGen** (founded 2020, HQ San Mateo): 40,000+ paying customers as of 2024, raised $35M Series A
-(2023) and $56M Series B (2024) at a $500M valuation. Uses a proprietary lip-sync model trained on
-50,000+ hours of video. Introduced the "Talking Photo" feature (still image input, not video) which
-went viral in late 2023 and drove consumer adoption. In 2024, a Biden campaign-style deepfake
-generated using HeyGen technology circulated on social media, forcing the company to add mandatory
-C2PA watermarks on all outputs and expand its celebrity blocklist from 10,000 to 100,000 faces,
-diverting approximately three months of engineering capacity and incurring ~$2M in legal fees and
-PR response costs.
+**HeyGen** (founded 2020 by Joshua Xu and Wayne Liang; originally Surreal, then Movio; HQ moved to
+Los Angeles in 2022): raised a $5.6M Series A led by Conviction in November 2023, then a $60M round
+led by Benchmark in June 2024 at a $500M valuation, with Conviction, Bond and Thrive participating.
+Reported more than 40,000 customers and ~$35M annualized recurring revenue as of mid-2024.
+Introduced the "Talking Photo" feature (still image input, not video) which went viral in late 2023
+and drove consumer adoption. Its enrollment flow requires verbal consent plus a spoken passphrase
+for identity verification, backed by human moderators and automated filters. Documented misuse
+nonetheless spans consumer scams, deceptive health content, and geopolitical propaganda — Group-IB
+and multiple outlets have reported unauthorized use of real people's faces in fraudulent ads. Note
+that the January 2024 Biden robocall, frequently mis-attributed to video avatar vendors, was an
+**audio-only** voice clone unrelated to HeyGen.
 
-**Synthesia** (founded 2017, HQ London): 50,000+ enterprise customers, raised $90M Series C (2023)
-at a $1B valuation. Focuses on corporate learning-and-development video (replacing PowerPoint-based
-training). Offers 230+ stock avatars in 140+ languages. Integrates natively with LMS platforms
+**Synthesia** (founded 2017, HQ London): states it is trusted by 50,000+ teams and serves over 90%
+of the Fortune 100. Raised a $90M Series C in 2023 at roughly $1B, and by January 2026 had doubled
+its valuation to **$4 billion** in a round backed by Nvidia's and Alphabet's venture arms. Focuses
+on corporate learning-and-development video (replacing PowerPoint-based training). Offers 240+ stock
+avatars and 160+ languages. Integrates natively with LMS platforms
 (Workday Learning, Cornerstone OnDemand) via SCORM/xAPI output. Synthesia does not offer voice
 cloning on the standard plan, positioning the platform as B2B-safe: no custom face or voice upload
 reduces abuse surface dramatically at the cost of personalization features.
@@ -711,15 +754,16 @@ $0.002/second of video. Powers a large portion of third-party integrations (chat
 e-learning thumbnail animators). D-ID's differentiation is API-first design with sub-60s latency
 for short videos, targeting developers who want programmatic generation without a monthly seat fee.
 
-**Runway ML** (Gen-2 / Gen-3): does not focus on avatar lip-sync but is relevant as the reference
+**Runway ML** (Gen-2/Gen-3 era, since succeeded by later Gen-N releases): does not focus on avatar lip-sync but is relevant as the reference
 implementation for GPU-intensive video generation infrastructure. Runway runs inference on a mix of
 A100 and H100 clusters, uses S3 for intermediate frame storage between pipeline stages, and uses
 per-user queue depth as the autoscaling signal rather than raw GPU utilization, which provides
 smoother scale-up during the burst following a viral feature launch.
 
 **Lumen5** (older generation): text-to-slide-video tool, not avatar-based, but is instructive as a
-cautionary tale — its lack of lip-sync capability meant it was fully displaced in its core use case
-(marketing video creation) within 18 months of HeyGen's consumer launch. The lesson: once the
+cautionary tale for the *category* — a stock-footage-and-text tool with no lip-sync has no answer to
+a talking-avatar competitor in the marketing-video use case (the specific displacement timeline often
+quoted for it is not something either company has published). The lesson: once the
 quality bar for avatar realism crosses the threshold of "good enough for internal training video,"
 the market migrates rapidly.
 
@@ -729,12 +773,22 @@ the market migrates rapidly.
 
 ### Lip-Sync Model Comparison
 
-| Model | Quality (MOS) | Speed (ms/frame, A10G) | Max Resolution | Head Pose Freedom | Open Source | VRAM (1080p) |
+**Licensing is a hard gate here, not a footnote.** The Wav2Lip repository
+(Rudrabha/Wav2Lip) publishes no OSI licence and states in its README: "This
+repository can only be used for personal/research/non-commercial purposes...
+for commercial requests, please contact us directly." GitHub reports no
+detected licence for it. Shipping Wav2Lip in a paid product — including as the
+free tier of a paid product — requires a commercial licence from the authors
+(now Sync Labs). SadTalker (Apache 2.0, Tencent) and AniPortrait (Apache 2.0)
+are the commercially usable open options. MOS values below are directional
+comparisons, not published benchmark results.
+
+| Model | Quality (MOS) | Speed (ms/frame, A10G) | Max Resolution | Head Pose Freedom | Commercial use | VRAM (1080p) |
 |---|---|---|---|---|---|---|
-| Wav2Lip | 3.4 | 3 ms | 720p native | None (mouth only) | Yes (MIT) | 4 GB |
+| Wav2Lip | 3.4 | 3 ms | 720p native | None (mouth only) | Source-available, **NOT commercial-use** | 4 GB |
 | SadTalker | 4.1 | 15 ms | 1080p | Full head + expression | Yes (Apache 2) | 10 GB |
 | DiffTalk | 4.6 | 50 ms | 1080p | Full head + expression | Partial (research) | 20 GB |
-| AniPortrait | 4.3 | 35 ms | 1080p | Full body pose | Yes (Apache 2) | 16 GB |
+| AniPortrait | 4.3 | 35 ms | 1080p | Full head + upper body | Yes (Apache 2.0) | 16 GB |
 | HeyGen proprietary | ~4.7 (est.) | Unknown | 4K | Full head | No | Unknown |
 
 ### Supporting Infrastructure
@@ -742,10 +796,10 @@ the market migrates rapidly.
 | Component | Chosen Tool | Alternative | Decision Rationale |
 |---|---|---|---|
 | Job queue | Redis Streams + consumer groups | SQS, Kafka | Redis fits sub-100ms dispatch latency; Kafka adds broker overhead for job-level workloads |
-| GPU orchestration | Kubernetes + NVIDIA GPU Operator | Ray, bare-metal Slurm | K8s supports mixed CPU/GPU nodes; NVIDIA operator handles MIG partitioning for TTS on A10G |
+| GPU orchestration | Kubernetes + NVIDIA GPU Operator | Ray, bare-metal Slurm | K8s supports mixed CPU/GPU nodes. Note: **the A10G does not support MIG** — NVIDIA lists MIG support only on A100, A30, H100/H200, H20 and Blackwell datacenter parts. To share an A10G across small TTS jobs, use time-slicing or MPS via the GPU Operator, not MIG |
 | Video encode | FFmpeg with h264_nvenc | CPU x264 | GPU encode is 4-6x faster and keeps CPU free for Python orchestration |
 | Object storage | AWS S3 + CloudFront | GCS + Cloud CDN | S3 Transfer Acceleration used for EU data residency via S3 Replication Rules |
-| Face recognition | FaceNet (TF) + FAISS IVF256 | DeepFace, AWS Rekognition | Self-hosted FAISS for blocklist avoids per-call API cost at 1.5M enrollments/day |
+| Face recognition | FaceNet (TF) + FAISS IVF256 | DeepFace, AWS Rekognition | Self-hosted FAISS for blocklist avoids per-call API cost. Note the volume is *avatar enrollments*, not the 1.5M/day video count — most generations reuse an already-enrolled avatar, so enrollment QPS is orders of magnitude lower and the index is cheap to hold in memory |
 | C2PA signing | c2patool (Adobe/CAI) | Custom HMAC metadata | C2PA is the emerging industry standard; third-party validators (browsers, social platforms) support it |
 
 ---
@@ -828,35 +882,45 @@ Cross-reference: [./cross_cutting/red_team_eval_harness.md](./cross_cutting/red_
 ## 9. Common Pitfalls & War Stories
 
 **Pitfall 1: Lip-sync drift on long videos**
-In early production, 5-minute videos consistently showed audio-visual sync drift of 200ms by the
+In early production, 5-minute videos consistently showed visible audio-visual sync drift by the
 final scene. For a 30-second video the drift was imperceptible; at 5 minutes it was clearly visible
-(mouths finishing words before audio ended). Root cause: floating-point rounding in frame-count
-arithmetic accumulated 0.04ms of error per 3-second segment; across 100 segments this totaled
-4ms — but the lip-sync model used integer frame indices, discarding the fractional part, producing
-0.67 dropped frames per segment or 67 dropped frames total (over 2 seconds of drift at 30 fps).
-Fix: switched frame-count arithmetic to exact rational arithmetic (`fractions.Fraction`), added an
-audio onset re-anchor every 30 seconds using librosa onset detection. Affected ~12% of videos longer
-than 2 minutes; approximately 180,000 videos were re-generated, costing $9,000 in GPU compute.
+(mouths finishing words before audio ended). Root cause: integer truncation, not floating-point
+noise. Each 3-second chunk should map to 3.0 * 30 = 90 frames, but a TTS chunk whose real duration
+is 3.013s needs 90.39 frames; the renderer used `int()` and dropped 0.39 frames every segment.
+Across 100 segments (a 5-minute video) that is 39 dropped frames = 1.3 seconds of drift at 30 fps.
+Fix: switched frame-count arithmetic to exact rational arithmetic (`fractions.Fraction`) so the
+fractional remainder carries into the next segment, and added an audio onset re-anchor every 30
+seconds using librosa onset detection. Roughly 12% of videos longer than 2 minutes were affected
+and were re-generated. Re-render cost is bounded by GPU time, not headline numbers: at 33 GPU-
+seconds and $1.30/GPU-hour, each re-render is ~$0.012, so 180,000 re-renders is ~$2,150 — worth
+computing rather than quoting, because the intuitive estimate runs several times high.
 
-**Pitfall 2: HeyGen Biden deepfake incident (2024)**
-A political deepfake styled as a Biden campaign ad was circulated on social media and traced back to
-a HeyGen account. Despite HeyGen's terms of service prohibiting political content, no automated
-enforcement existed. The incident forced a 3-month engineering sprint: adding a celebrity/politician
-blocklist (100,000 faces via FaceNet + FAISS), mandatory C2PA watermarks on all outputs, and a
-real-time social media monitoring feed scanning for HeyGen C2PA manifests on flagged content.
-Legal and PR response cost approximately $2M; the engineering diversion delayed the company's
-multi-language lip-sync feature by one quarter.
+**Pitfall 2: Abuse enforcement is a product surface, not a policy document**
+*(Illustrative composite. The specific "HeyGen Biden campaign deepfake" story that circulates in
+system-design write-ups is not supported by the public record — the January 2024 Biden robocall was
+an audio voice clone, not an avatar video. What IS documented for HeyGen is a pattern of misuse
+across consumer scams, deceptive health content, and geopolitical propaganda, reported by Group-IB
+and others, despite terms of service prohibiting it.)* The failure mode is generic and repeatable:
+a platform bans political and impersonation content in its ToS but ships no automated enforcement,
+so the first real incident lands as a press story rather than a blocked upload. The retrofit is
+always the same three-part sprint — a celebrity/politician face blocklist (FaceNet embeddings in a
+FAISS index), provenance signing on every output (C2PA), and a monitoring feed that scans flagged
+social content for your own manifests. Budget it before launch: retrofitting under press pressure
+costs a quarter of engineering capacity and diverts the roadmap, and the legal and PR response is
+the smaller line item.
 
 **Pitfall 3: GPU OOM during high-resolution rendering**
-Enterprise customers began uploading 4K reference videos, expecting 4K output. SadTalker's attention
-layers hold `O(n^2)` memory in frame count; at 4K (8.3 megapixels per frame) and 30 fps for 60
-seconds the VRAM requirement exceeded 24 GB on an A10G, causing jobs to fail with CUDA OOM after
-3 minutes of compute already spent. No budget was refunded to customers at this point. Fix: add a
-resolution gate before model dispatch — inputs > 1080p are downscaled to 1080p before lip-sync,
-then upscaled to original resolution using Real-ESRGAN in a post-processing step. The upscale step
-adds 8 seconds of compute but saves 3 minutes of wasted GPU time on failed jobs. Approximately
-2,400 enterprise jobs failed before the gate was added; each represented ~$0.40 of wasted GPU cost
-($960 total) plus customer escalations.
+Enterprise customers began uploading 4K reference videos, expecting 4K output. The OOM is driven by
+per-frame spatial resolution, not by sequence length: SadTalker renders frame-by-frame from a 3DMM
+coefficient sequence, so memory scales with pixels per frame (4K is 8.3 MP, ~4x 1080p's 2.1 MP)
+and with batch size — it does not hold `O(n^2)` attention across the frame axis, and describing it
+that way sends you looking for a sequence-length fix that does not exist. At 4K the working set
+exceeded the A10G's 24 GB, and jobs failed with CUDA OOM after minutes of compute already spent,
+with no budget refunded. Fix: add a resolution gate before model dispatch — inputs > 1080p are
+downscaled to 1080p before lip-sync, then upscaled using Real-ESRGAN in post-processing. The
+upscale step adds ~8 seconds of compute but avoids minutes of wasted GPU time on failed jobs.
+Roughly 2,400 enterprise jobs failed before the gate landed; the direct GPU waste is small (a few
+minutes of A10G at $1.30/hour is cents per job) — the real cost is the customer escalations.
 
 **Pitfall 4: Voice clone quality collapse on non-English scripts**
 The self-hosted speaker encoder was trained primarily on LibriSpeech (English). When French or
@@ -927,12 +991,15 @@ Add compositor fleet: 130 A10Gs
 Total:                900 A10Gs
 
 Daily GPU cost: 900 GPUs * 24 hours * $1.30/GPU-hour = $28,080/day
-Monthly GPU cost: $842,400/month
+Monthly GPU cost: $28,080 * 30 = $842,400/month
+($1.30/GPU-hour is the on-demand planning rate: g5.12xlarge is $5.672/hour
+for 4x A10G = $1.42/GPU-hour, g5.xlarge is $1.006/hour; spot on the same
+family runs ~$0.65-1.09/GPU-hour and would cut this roughly in half.)
 ```
 
 **Scaling levers at 3x current volume (4.5M videos/day)**:
 - Switch free-tier lip-sync from SadTalker to Wav2Lip (3 ms/frame vs 15 ms/frame) — reduces free-tier GPU requirement by 5x; free-tier typically 60% of volume so overall GPU requirement drops 40%
-- Introduce fractional GPU sharing for TTS using NVIDIA MIG (split A10G into 3x 10GB instances) — increases TTS GPU utilization from 40% to 85%, reducing TTS fleet from 100 to 50 GPUs
+- Introduce fractional GPU sharing for TTS. **MIG is not an option on the A10G** (NVIDIA supports MIG on A100/A30/H100/H200/H20/Blackwell only, and 3x 10 GB would exceed the A10G's 24 GB anyway) — use the GPU Operator's time-slicing or CUDA MPS instead, or move the TTS fleet onto A30/A100 parts if hard partitioning is required. Either way the goal is to lift TTS GPU utilization from ~40% to ~85%, halving the TTS fleet from 100 to 50 GPUs
 - Pre-render common "intro/outro" script segments (company name, call-to-action phrases) shared across customers — reduces unique lip-sync compute by estimated 15%
 
 Cross-reference: [./cross_cutting/gpu_pool_economics.md](./cross_cutting/gpu_pool_economics.md)
@@ -959,11 +1026,14 @@ For a 60-second video the wall-clock saving is approximately 7 seconds (70% of t
 duration), reducing p50 pipeline time from ~30s to ~23s.
 
 **Q: Why is the choice between Wav2Lip and SadTalker a business tier decision, not a quality decision?**
-Both models are technically capable of producing acceptable output. The decision is driven by unit
-economics: Wav2Lip at 3 ms/frame costs 5x less GPU than SadTalker at 15 ms/frame. If all users
-ran SadTalker, the GPU fleet cost would be approximately $140,000/day instead of $28,000/day at
-current volume. Offering Wav2Lip to free-tier users lets the platform acquire users at near-zero
-marginal cost while using the quality gap as an upsell lever. This is the same tiering logic as
+It is both, and the licence decides it before the economics do. Wav2Lip is source-available for
+personal/research/non-commercial use only, so putting it in a free tier of a commercial product
+requires a paid licence from its authors — that gate comes first. Given a licence, the economics
+follow: Wav2Lip at 3 ms/frame costs 5x less GPU than SadTalker at 15 ms/frame. The ~900-GPU,
+$28,080/day fleet in Section 10 is already sized for *all* traffic on SadTalker; moving the ~60%
+free-tier share onto a 3 ms/frame model cuts the lip-sync fleet from ~670 to ~295 GPUs and the
+total fleet bill to roughly $16,600/day. Offering the cheap model to free-tier users lets the
+platform acquire users at low marginal cost while using the quality gap as an upsell lever. This is the same tiering logic as
 compression quality tiers in image platforms (JPEG quality 60 vs 90).
 
 **Q: How do C2PA watermarks enable deepfake attribution rather than just prevention?**
@@ -1002,18 +1072,27 @@ the timeline while audio continues normally, producing perceived drift. Re-ancho
 uses audio onset detection (librosa) to find the nearest hard onset point (a consonant burst, silence
 start) and realigns the frame pointer to that timestamp, resetting the accumulated error to zero.
 
-**Q: Why is CDN egress often more expensive than GPU compute for video generation platforms at scale?**
-At $0.02/GB and an average file size of 150 MB, each video download costs $0.003. At 1.5M downloads
-per day, CDN egress totals $4,500/day — which is comparable to the TTS fleet GPU cost ($1,300/day)
-and roughly 30% of the lip-sync fleet GPU cost ($15,000/day). For platforms where most content is
+**Q: When does CDN egress rival GPU compute for a video generation platform, and does it here?**
+For this design it does not — GPU dominates by roughly 30x, and the arithmetic is worth doing rather
+than assuming. At $0.02/GB (committed CloudFront volume; the on-demand first-10TB rate is $0.085/GB)
+and a realistic 35 MB per 60-second 1080p talking-head file, each download costs $0.0007. At 1.5M
+downloads/day that is ~$1,050/day, against a lip-sync fleet of 670 A10Gs x 24h x $1.30 = ~$20,900/day
+and a TTS fleet of 100 A10Gs x 24h x $1.30 = ~$3,120/day. Egress only rivals compute if you assume
+a 150 MB file (~20 Mbps, which a static-background avatar never needs) or the un-committed $0.085/GB
+rate, or if content gets re-watched many times per generation. For platforms where most content is
 consumed once (corporate training videos not re-watched repeatedly), CDN egress scales linearly with
 video count but GPU compute scales with generation volume, not download volume. Reducing CDN cost
 requires either compressing outputs more aggressively (CRF 28 instead of 23 cuts file size ~40% but
 reduces visual quality), tiering CDN regions to serve EU traffic from eu-west-1 at lower inter-region
 transfer rates, or pushing enterprise bulk consumers to use S3 direct download.
 
-**Q: How does HeyGen justify a $500M valuation against open-source Wav2Lip?**
-Open-source Wav2Lip requires significant MLOps infrastructure to operate reliably at scale: GPU
+**Q: How does a hosted avatar platform justify its valuation against open-source lip-sync models?**
+Start with the licence, because it removes most of the "just self-host Wav2Lip" argument outright:
+Wav2Lip is source-available for personal, research, and non-commercial use only, so a commercial
+product needs a paid licence from its authors. The commercially usable open options (SadTalker,
+AniPortrait, both Apache 2.0) are 5-12x slower per frame than Wav2Lip, which changes the unit
+economics before any platform work. Beyond licensing, self-hosting requires significant MLOps
+infrastructure to operate reliably at scale: GPU
 provisioning, job queuing, CDN delivery, storage management, consent verification, abuse detection,
 and multi-language support must all be built and maintained. HeyGen's value is the integrated
 platform — a single API call that handles the full pipeline with 99.9% uptime SLA, content safety,

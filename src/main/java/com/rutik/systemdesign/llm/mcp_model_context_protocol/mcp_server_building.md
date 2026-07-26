@@ -6,7 +6,7 @@
 
 MCP servers expose data, capabilities, and prompts to LLM clients (Claude Desktop, Cursor, custom agents) through a standardized protocol. A well-built MCP server is the canonical way to make a tool, dataset, or API LLM-accessible — any MCP-aware client can use it without bespoke integration code.
 
-This deep-dive covers building MCP servers from scratch: the four primitives (Resources, Tools, Prompts, Sampling), the lifecycle (initialize → operate → shutdown), the Python and TypeScript SDKs, common server patterns (filesystem, database, web search, internal API wrappers), and testing with MCP Inspector. A minimal Python MCP server is ~50 lines; a production server with auth, logging, and error handling is 200-400 lines.
+This deep-dive covers building MCP servers from scratch: the three server primitives (Resources, Tools, Prompts) plus the client-side features a server can call back into (Sampling, Roots, Elicitation), the lifecycle (initialize → operate → close the transport), the Python and TypeScript SDKs, common server patterns (filesystem, database, web search, internal API wrappers), and testing with MCP Inspector. A minimal Python MCP server is ~50 lines; a production server with auth, logging, and error handling is 200-400 lines.
 
 ---
 
@@ -24,13 +24,13 @@ This deep-dive covers building MCP servers from scratch: the four primitives (Re
 
 ## 3. Core Principles
 
-- **Four primitives**: Resources (data), Tools (actions), Prompts (templates), Sampling (server-requested LLM call).
+- **Three server primitives**: Resources (data), Tools (actions), Prompts (templates). Servers may also call back into three *client* features — Sampling (server-requested LLM call), Roots (which directories/URIs it may touch) and Elicitation (ask the user for more input) — each only if the client declared it at initialize.
 - **JSON-RPC 2.0**: protocol message format (request, response, notification) — wire-level detail in [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md).
 - **Capability negotiation**: server declares what it supports at initialize.
 - **Strongly typed schemas**: tool input_schema with JSON Schema; LLM uses it for arg construction.
 - **Idempotent reads, side-effecting writes**: Resources should be safe to re-read; Tools may have effects.
 - **Clear error semantics**: distinguish protocol errors (4xx/5xx-like) from tool errors (returned in result).
-- **Lifecycle correct**: initialize → ready → operate → shutdown.
+- **Lifecycle correct**: initialize → ready → operate → transport close. MCP has no `shutdown` message; a stdio server exits on stdin EOF.
 
 ---
 
@@ -42,7 +42,7 @@ Subprocess launched by client; communicates via stdin/stdout. Most secure (no ne
 
 ### 4.2 Remote HTTP Server (Streamable HTTP)
 
-HTTP service; clients connect via URL. Supports both stateless and stateful sessions. Best for cloud services accessed by many users.
+HTTP service exposing one MCP endpoint that serves both POST and GET; clients connect via URL. Supports both stateless and stateful sessions. Best for cloud services accessed by many users. Validate the `Origin` header and bind to localhost when the server is not meant to be reachable off-box.
 
 ### 4.3 Resource-Focused Server (Read-Only Data)
 
@@ -58,7 +58,7 @@ Hosts prompt templates clients can invoke. Examples: code review prompt, SQL gen
 
 ### 4.6 Composite Server
 
-All four primitives. Examples: AWS MCP server with EC2 resources + actions + setup prompts + sampling-driven analysis.
+All three server primitives plus client callbacks. Examples: a cloud MCP server exposing instance resources + action tools + setup prompts, using sampling for analysis when the client supports it.
 
 ---
 
@@ -88,12 +88,11 @@ sequenceDiagram
     Note over C,S: server may emit notifications
     S-->>C: notifications/tools/list_changed
 
-    C->>S: shutdown
-    S-->>C: shutdown ack
-    Note over C,S: connection close
+    Note over C,S: no shutdown message exists in MCP
+    C->>S: close transport (stdio: EOF on stdin · HTTP: close conn)
 ```
 
-The lifecycle is initialize (capability negotiation) → operate (list/call tools, read resources, server-emitted notifications) → shutdown; every message on the wire is JSON-RPC 2.0.
+The lifecycle is initialize (capability negotiation) → operate (list/call tools, read resources, server-emitted notifications) → transport close; every message on the wire is JSON-RPC 2.0. Unlike LSP there is no `shutdown` request and no `exit` notification — a stdio server must exit cleanly on stdin EOF, and an HTTP server must reclaim session state on idle timeout because it may never be told goodbye.
 
 ### Server Composition
 
@@ -309,7 +308,7 @@ npx @modelcontextprotocol/inspector python my_server.py
 
 ## 7. Real-World Examples
 
-**Official servers** (anthropics/mcp-servers, Anthropic-maintained): filesystem, github, gitlab, postgres, sqlite, slack, brave-search, sequential-thinking, puppeteer.
+**Reference servers** (`github.com/modelcontextprotocol/servers`, managed by Anthropic with the community). Only seven are still maintained: **everything, fetch, filesystem, git, memory, sequential-thinking, time**. The original github, gitlab, postgres, sqlite, slack, brave-search, google-drive, redis, sentry and puppeteer servers were archived during 2025 and their npm packages carry a deprecation notice — use the vendor's own server instead (for example `github/github-mcp-server`, `@playwright/mcp`).
 
 **Community servers**: Linear, Notion, Jira, Confluence, AWS, GCP, Stripe, Square, Snowflake, BigQuery, MongoDB, Redis, Elasticsearch, Cloudflare, Vercel, Sentry, PagerDuty, Datadog, hundreds more.
 
@@ -441,15 +440,16 @@ is withholding the information that determines whether the retry succeeds.
 | FastMCP (Python) | Higher-level decorator API |
 | MCP Inspector | Interactive testing UI |
 | `mcp-cli` | Command-line client for testing |
-| Smithery | Server registry / install CLI |
+| Official MCP Registry (`registry.modelcontextprotocol.io`) | Canonical server metadata; publish your `server.json` here (in preview) |
+| Smithery | Third-party registry / install CLI |
 | GitHub `modelcontextprotocol/servers` | Reference implementations |
 
 ---
 
 ## 12. Interview Questions with Answers
 
-**Q: What are the four MCP primitives and how do they differ?**
-Resources (URI-addressable read-only data — files, records); Tools (callable functions with potential side effects — actions); Prompts (reusable prompt templates clients can invoke); Sampling (server requests client to call an LLM on its behalf). Resources are for "show me X"; Tools are for "do X".
+**Q: What are the MCP primitives and how do they differ?**
+Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer three back to servers: Sampling (the server asks the client to run an LLM call on its behalf), Roots (the server asks which URI or filesystem boundaries it may operate in), and Elicitation (added in 2025-06-18: the server asks the user for extra input mid-task). Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability at initialize.
 
 **Q: What's the difference between FastMCP and the bare Python SDK?**
 FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resource()`) — closer to FastAPI ergonomics. Bare SDK gives you direct access to request handlers (more code, more control). FastMCP is recommended for most server implementations.
@@ -458,7 +458,7 @@ FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resourc
 Client sends `initialize` with protocolVersion and its capabilities (e.g., sampling support). Server responds with its capabilities (resources/tools/prompts available). Both parties know what the other supports. Notifications about list changes (e.g., `notifications/tools/list_changed`) are only sent if the recipient supports them.
 
 **Q: Why use stdio vs HTTP transport?**
-Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools. HTTP (Streamable HTTP, since 2025): server runs as HTTP service; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
+Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP, since the 2025-03-26 revision): server runs as an HTTP service on a single MCP endpoint; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
 
 **Q: What's the right way to describe a tool?**
 Description should answer: what does this tool do? When should the LLM use it? What does it return? Include example use cases. The LLM reads the description to decide when to call — vague descriptions cause missed or wrong calls. Augment with type hints + Pydantic Field descriptions for parameters.
@@ -470,13 +470,13 @@ Return the error as the tool's result text (so the LLM sees and can react), not 
 Inspector is a browser-based testing UI: launches your server, lets you call tools, inspect resources, view raw JSON-RPC traffic. Essential for development — much faster than testing through a real LLM client.
 
 **Q: How do you secure an MCP server?**
-For stdio servers: rely on subprocess privileges (server runs as user that launched it). For HTTP servers: authenticate clients (OAuth 2.0 per 2025 spec, API keys, mTLS). Validate all tool inputs. Never trust tool descriptions from untrusted servers (prompt injection risk) — the full threat model is in [MCP Security](mcp_security.md).
+For stdio servers: rely on subprocess privileges (the server runs as the user that launched it) and take credentials from the environment — the authorization spec explicitly does not apply to stdio. For HTTP servers: authenticate clients (OAuth 2.1 with mandatory PKCE `S256` per the current spec, or API keys/mTLS), validate the `Origin` header, and validate that every access token was issued for *this* server (RFC 8707 audience binding) rather than passing it through. Validate all tool inputs. Never trust tool descriptions or annotations from untrusted servers (prompt injection risk) — the full threat model is in [MCP Security](mcp_security.md).
 
 **Q: Can MCP servers have state across calls?**
 Yes — server is a long-running process; you can hold state in memory or external storage. Example: cache database connections, maintain session tokens. Be careful with state in HTTP servers if you have multiple instances (use Redis/external store).
 
 **Q: How do you handle long-running operations?**
-Per MCP spec, tools should return within a reasonable timeout. For longer operations (>30s): (1) submit operation, return task_id immediately; (2) provide a separate tool to poll task status; (3) consider sending progress notifications (some clients support).
+Per MCP spec, senders should set request timeouts and cancel with a `notifications/cancelled` when they lapse, so tools should return within a reasonable window. For longer operations (>30s): (1) submit the operation and return a task_id immediately; (2) provide a separate tool to poll status; (3) send progress notifications, which may reset the caller's timeout clock. The 2025-11-25 revision adds an experimental **Tasks** utility that standardizes exactly this — a tool declares `execution.taskSupport`, and the client polls for the deferred result instead of you inventing your own task_id convention.
 
 **Q: What's prompt sampling and when do servers use it?**
 Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server might ask the client's LLM to summarize a diff (using the client's model + auth). Lets servers use AI capabilities without bundling their own API keys.
@@ -506,7 +506,7 @@ MCP supports binary content via base64-encoded resources or tool results. For la
 7. Use idempotency keys for side-effecting tools to be safe under retry.
 8. Distinguish Resources (read-only) from Tools (actions) — don't blur the line.
 9. Version your server; bump major on breaking changes to tool schemas.
-10. Publish to Smithery (or similar — see [MCP Registries & Ecosystem](mcp_registries_and_ecosystem.md)) if useful broadly; reuse community servers when possible.
+10. Publish to the official MCP Registry (and/or a downstream marketplace like Smithery — see [MCP Registries & Ecosystem](mcp_registries_and_ecosystem.md)) if useful broadly; reuse community servers when possible.
 
 ---
 

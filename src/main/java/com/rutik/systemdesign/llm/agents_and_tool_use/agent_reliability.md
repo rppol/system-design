@@ -378,12 +378,17 @@ class AgentState(TypedDict):
 # LangGraph automatically checkpoints after every node
 # With PostgresSaver, state survives crashes and can be resumed
 
-checkpointer = PostgresSaver.from_conn_string(os.environ["DATABASE_URL"])
-app = graph.compile(checkpointer=checkpointer)
+# NOTE: from_conn_string is a @contextmanager, not a plain factory — it yields
+# the saver and closes the connection on exit. Assigning its return value
+# directly gives you a context-manager object, not a PostgresSaver, and
+# graph.compile() will fail. Always use `with`.
+with PostgresSaver.from_conn_string(os.environ["DATABASE_URL"]) as checkpointer:
+    checkpointer.setup()          # creates the checkpoint tables; first run only
+    app = graph.compile(checkpointer=checkpointer)
 
-# Each invoke with the same thread_id resumes from last checkpoint
-config = {"configurable": {"thread_id": f"task-{task_id}"}}
-result = await app.ainvoke(initial_state, config=config)
+    # Each invoke with the same thread_id resumes from last checkpoint
+    config = {"configurable": {"thread_id": f"task-{task_id}"}}
+    result = await app.ainvoke(initial_state, config=config)
 
 # Manual JSON snapshot for non-LangGraph agents
 import json
@@ -409,6 +414,7 @@ class ProgressCheckpointer:
 
 ```python
 import hashlib
+import json
 from collections import deque
 
 class DeadLoopDetector:
@@ -499,11 +505,11 @@ async def search_with_fallback(query: str) -> str:
 
 ## 7. Real-World Examples
 
-**Devin (Cognition AI) SWE-Agent Reliability**: Devin operates a software engineering agent with a code sandbox (terminal, file system). Reliability mechanisms: (1) sandbox timeout — each shell command has a 120s timeout; long-running builds are detected and the agent is notified; (2) test-driven recovery — if tests fail, the agent retries with a different approach rather than retrying the exact same code; (3) session persistence — the workspace is preserved so a crash doesn't lose all file edits; (4) the agent emits a confidence score after each action, and low-confidence actions trigger a confirmation step.
+**Devin (Cognition AI) SWE-Agent Reliability**: Devin operates a software engineering agent with a code sandbox (terminal, file system). The following mechanisms are inferred from Cognition's public write-ups and demos, not from published configuration — treat the specific timeout value as indicative: (1) sandbox timeout — shell commands are bounded (a two-minute order of magnitude) so long-running builds are detected and the agent notified; (2) test-driven recovery — if tests fail, the agent retries with a different approach rather than retrying the exact same code; (3) session persistence — the workspace is preserved so a crash doesn't lose all file edits; (4) low-confidence actions trigger a confirmation step.
 
-**Anthropic Computer Use Retry Logic**: The [Computer Use](computer_use_and_browser_agents.md) API (Claude 3.5 Sonnet controlling a desktop) implements: (1) screenshot-based progress detection — if the screen hasn't changed after an action, the action likely failed; retry with a modified approach; (2) element detection fallback — if coordinate-based clicking fails (element moved), fall back to accessibility-tree-based selection; (3) explicit error injection — if an action fails, inject the failure screenshot as an observation so the model can reason about what went wrong rather than repeating blindly.
+**Computer-use agent retry logic**: Screen-controlling agents built on the [Computer Use](computer_use_and_browser_agents.md) tool (still a beta tool across providers) typically implement: (1) screenshot-based progress detection — if the screen hasn't changed after an action, the action likely failed; retry with a modified approach; (2) element detection fallback — if coordinate-based clicking fails (element moved), fall back to accessibility-tree-based selection; (3) explicit error injection — if an action fails, inject the failure screenshot as an observation so the model can reason about what went wrong rather than repeating blindly.
 
-**SWE-bench Agents**: Top-performing SWE-bench agents (Agentless, SWE-agent) achieve 30-50% resolution rates partly through reliability engineering: (1) multi-attempt with different strategies — run the same issue through 3 different code paths, use the one that passes tests; (2) test-time compute — run solutions against a subset of test cases to verify correctness before finalizing; (3) rollback on test failure — if a code edit breaks existing tests, revert the edit and try a different approach.
+**SWE-bench Agents**: Reliability engineering is a large share of the gap between a bare model and a leaderboard system — the top SWE-bench Verified submissions reached 396/500 = 79.2% by December 2025 (live-SWE-agent and Sonar Foundation Agent, both on Claude Opus 4.5), against roughly 12-18% for the 2024-era SWE-agent and Agentless harnesses. The mechanisms that close that gap: (1) multi-attempt with different strategies — run the same issue through several code paths, keep the one that passes tests; (2) test-time compute — run candidate solutions against a subset of test cases to verify correctness before finalizing; (3) rollback on test failure — if a code edit breaks existing tests, revert the edit and try a different approach.
 
 ---
 
@@ -551,14 +557,17 @@ async def search_with_fallback(query: str) -> str:
 ## 10. Common Pitfalls
 
 **Pitfall 1: Retry amplification storm**
-Production incident: a web search tool returned 503 for 2 hours during a traffic spike. The agent had `max_retries=10` with 1s backoff. For 1000 concurrent agent runs, this created 10,000 retries/second to an already overloaded search API — worsening the outage. Fix: (1) circuit breaker — after 5 failures, stop calling; (2) jitter — add `random.uniform(0, 1)` to backoff to spread retries; (3) per-service rate limit on retry volume.
+Illustrative incident (composite, not a published postmortem): a web search tool returned 503 for 2 hours during a traffic spike. The agent had `max_retries=10` with 1s backoff. For 1000 concurrent agent runs, this created 10,000 retries/second to an already overloaded search API — worsening the outage. Fix: (1) circuit breaker — after 5 failures, stop calling; (2) jitter — add `random.uniform(0, 1)` to backoff to spread retries; (3) per-service rate limit on retry volume.
 
 ```python
+from tenacity import retry, stop_after_attempt, wait_fixed, wait_exponential, wait_random
+
 # BROKEN: fixed 1s backoff, 10 attempts, no jitter — 1000 agents synchronize into 10,000 retries/s
 @retry(stop=stop_after_attempt(10), wait=wait_fixed(1))
 async def search(query): ...
 
 # FIXED: 3 attempts, exponential backoff + jitter, circuit breaker gates the call entirely
+# (tenacity wait strategies compose with `+`, summing their delays)
 @retry(stop=stop_after_attempt(3),
        wait=wait_exponential(multiplier=1, min=1, max=10) + wait_random(0, 1))
 async def search(query):
@@ -576,7 +585,7 @@ async def search(query):
 | `W` | Width, in seconds, of the window those `A x R` calls actually spread across |
 | `A x R / W` | Requests per second arriving at the already-degraded service |
 
-**Walk one example.** The 500-agent case from this pitfall, both configs:
+**Walk one example.** The 500-agent / 5-retry case from the Section 12 retry-amplification Q&A (the incident above is 1000 agents at 10 retries — same shape, twice the numbers), both configs:
 
 ```
   fixed 1s backoff, no jitter
@@ -595,7 +604,7 @@ Note what backoff does *not* do: the total call count is unchanged at 2500. Back
 A step counter prevents infinite loops at the step level, but not at the retry level. An agent with `max_retries=∞` on each tool call can run a single tool call indefinitely. Always set `stop_after_attempt(3)` in tenacity and cap total task wall time with an outer timeout.
 
 **Pitfall 3: Checkpoint storage cost blowup**
-A research agent with 50 steps and 50KB state per step (retrieved documents included) × 10,000 daily tasks = 25GB/day of checkpoint data in Postgres. Fix: (1) store only IDs in state, not full document content; (2) compress checkpoints (zstd: 10× compression on JSON); (3) TTL-expire checkpoints older than 7 days; (4) only checkpoint at N-step intervals for short, cheap tasks.
+A research agent with 50 steps and 50KB state per step (retrieved documents included) × 10,000 daily tasks = 25GB/day of checkpoint data in Postgres. Fix: (1) store only IDs in state, not full document content; (2) compress checkpoints (zstd typically gives 8-12× on serialized agent JSON; this file uses 12× in the Section 14 sizing); (3) TTL-expire checkpoints older than 7 days; (4) only checkpoint at N-step intervals for short, cheap tasks.
 
 **Put simply.** "Daily checkpoint volume is three numbers multiplied together — bytes per step, steps per task, tasks per day — so halving any one of them halves the bill, and the cheapest one to attack is bytes."
 
@@ -693,7 +702,7 @@ Core metrics: (1) task success rate — binary per task; alert on >5% drop from 
 Three-layer defense: (1) schema validation before injection — parse tool result against expected schema; if invalid, inject a structured error observation ("Tool returned malformed response: {details}") instead of the raw corrupted output; (2) consistency check for high-stakes results — for critical data (prices, legal clauses, medical info), call the tool twice and compare; if results differ by more than a threshold, flag as unreliable and escalate; (3) circuit breaker on schema violation rate — if 20% of responses fail schema validation, open the circuit even if HTTP status is 200. Corrupted results are often worse than no results because they cause confident-but-wrong model reasoning.
 
 **Q: How do production research agents like Devin handle reliability for long multi-step tasks?**
-Devin's key reliability mechanisms (inferred from public information): (1) workspace persistence — the development environment (file system, installed packages, terminal history) is checkpointed between steps; a crash does not lose code changes; (2) test-driven recovery — after each code edit, run the relevant test suite; if tests fail, the failure output is injected as an observation for the model to reason about, not retried blindly; (3) confidence-gated actions — high-risk actions (running untested code, deleting files) require an explicit confidence check; low confidence triggers a verification step or human handoff; (4) step budget with adaptation — the step budget is not fixed; Devin adjusts it based on task complexity estimated at planning time, preventing premature timeouts on legitimately complex tasks.
+Four mechanisms recur, though the Devin specifics below are inferred from public write-ups rather than published configuration: (1) workspace persistence — the development environment (file system, installed packages, terminal history) is checkpointed between steps; a crash does not lose code changes; (2) test-driven recovery — after each code edit, run the relevant test suite; if tests fail, the failure output is injected as an observation for the model to reason about, not retried blindly; (3) confidence-gated actions — high-risk actions (running untested code, deleting files) require an explicit confidence check; low confidence triggers a verification step or human handoff; (4) step budget with adaptation — the step budget is not fixed; Devin adjusts it based on task complexity estimated at planning time, preventing premature timeouts on legitimately complex tasks.
 
 **Q: What is the human handoff design pattern and what information should the escalation payload contain?**
 Human handoff pauses the agent and routes to a human when automated recovery has failed. The escalation payload should contain: (1) `task_description` — original goal, verbatim; (2) `completed_steps` — summary of what was accomplished before getting stuck; (3) `last_actions` — last 3-5 tool calls with args and results, raw; (4) `stuck_reason` — specific triggering condition (max steps, dead loop, tool failure); (5) `suggested_options` — ["continue with guidance", "abort", "retry from step N"]; (6) `estimated_resume_steps` — how much work remains if the human provides guidance. This gives a human reviewer enough context to make a decision in 2-3 minutes. Present it in a Slack message or a UI modal, not as a raw JSON dump.
@@ -819,8 +828,10 @@ async def tool_node(state: ResearchState) -> dict:
             }
     return {"messages": results}
 
-checkpointer = PostgresSaver.from_conn_string(os.environ["DATABASE_URL"])
-app = graph.compile(checkpointer=checkpointer)
+# from_conn_string is a @contextmanager — bind it with `with`, not assignment
+with PostgresSaver.from_conn_string(os.environ["DATABASE_URL"]) as checkpointer:
+    checkpointer.setup()
+    app = graph.compile(checkpointer=checkpointer)
 ```
 
 ### Results After Deploying Reliability Stack

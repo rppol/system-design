@@ -6,9 +6,9 @@
 
 GPU inference for LLMs operates under fundamentally different constraints than CPU workloads. A CPU-bound service scales by adding cores and threads; an LLM inference cluster scales by managing High Bandwidth Memory (HBM) and compute FLOPS as two independent bottlenecks that must be balanced simultaneously.
 
-The two dominant phases of LLM inference have opposing resource profiles. Prefill (processing the input prompt) is compute-bound: the GPU must perform a full forward pass through all layers for every token in the prompt simultaneously, generating the initial KV cache. Decode (autoregressive token generation) is memory-bandwidth-bound: each step reads the entire model weight matrix plus the accumulated KV cache from HBM to produce a single new token. The H100 SXM5 delivers 989 TFLOPS of FP16 compute but only 3.35 TB/s of HBM3 bandwidth. A single decode step for a 70B model at batch size 1 uses roughly 140GB of reads (weights) + growing KV cache, saturating bandwidth while leaving compute at 5-10% utilization.
+The two dominant phases of LLM inference have opposing resource profiles. Prefill (processing the input prompt) is compute-bound: the GPU must perform a full forward pass through all layers for every token in the prompt simultaneously, generating the initial KV cache. Decode (autoregressive token generation) is memory-bandwidth-bound: each step reads the entire model weight matrix plus the accumulated KV cache from HBM to produce a single new token. The H100 SXM5 delivers 989 TFLOPS of dense FP16 tensor-core compute (NVIDIA's headline 1,979 TFLOPS figure is the with-sparsity number — always halve it for dense inference) but only 3.35 TB/s of HBM3 bandwidth. A single decode step for a 70B FP16 model reads roughly 140GB of weights + growing KV cache; because 140GB does not fit in one 80GB H100, that read is spread over at least two GPUs, and it saturates bandwidth while leaving compute at 5-10% utilization.
 
-This memory-bound nature means the economics of GPU inference are driven by batch size. One GPU idle costs the same per hour whether it is processing 1 request or 256. Continuous batching — the practice of filling in-flight requests into decode slots as they complete — is the single most impactful operational decision for GPU pool economics. Without it, a $5.00/hr H100 on-demand instance generating 30 tokens/second for one user costs $0.28 per 1M tokens at 15% MBU. With continuous batching at batch size 64 and 65% MBU, the same GPU generates 1,920 tokens/second and costs $0.0043 per 1M tokens — a 65x reduction.
+This memory-bound nature means the economics of GPU inference are driven by batch size. One GPU idle costs the same per hour whether it is processing 1 request or 256. Continuous batching — the practice of filling in-flight requests into decode slots as they complete — is the single most impactful operational decision for GPU pool economics. Without it, a $5.00/hr H100 on-demand instance generating 30 tokens/second for one user costs $46.30 per 1M tokens. With continuous batching at batch size 64 and 65% MBU, the same GPU generates 1,920 tokens/second and costs $0.72 per 1M tokens — a 64x reduction.
 
 **References**: [vLLM deep dive](../../vllm_deep_dive/README.md) | [Inference engines](../../inference_engines/README.md) | [Quantization](../../optimization_and_quantization/README.md)
 
@@ -20,7 +20,7 @@ This memory-bound nature means the economics of GPU inference are driven by batc
 
 **Mental model**: Think of each GPU's HBM as a conveyor belt with a fixed speed limit (3.35 TB/s for H100). Every token generated requires one pass of all model weights across that belt. The revenue per hour is proportional to how many tokens cross the belt per second. Batch size determines how many tokens ride together on each pass — if only one token rides, you pay full belt cost for 30 tokens/second; if 256 ride, you pay the same belt cost for 7,680 tokens/second.
 
-**Why it matters**: At 10M daily active users (ChatGPT scale), a 2x throughput improvement via better batching saves roughly $50M-$150M/year in GPU costs. For a startup running $200K/month in GPU spend at 15% utilization, switching to continuous batching can reduce that to $40K/month with the same traffic — preserving 24 months of runway.
+**Why it matters**: At consumer-assistant scale (~10M daily active users), a 2x throughput improvement via better batching halves the fleet — order tens of millions of dollars a year in GPU spend. For a startup running $200K/month in GPU spend at 15% utilization, switching to continuous batching can reduce that to $40K/month with the same traffic — preserving 24 months of runway.
 
 **Key insight**: Token throughput (tokens/second across all requests), not requests per second (RPS), is the correct scaling metric for GPU pools. A 10-token request and a 2000-token request consume wildly different GPU time. Size your pool by total tokens/second capacity, track cost per million tokens, and alert on MBU falling below 50% during production hours.
 
@@ -30,7 +30,7 @@ This memory-bound nature means the economics of GPU inference are driven by batc
 
 **MFU (Model FLOP Utilization)**: The ratio of observed compute throughput to theoretical peak. A 70B parameter model requires roughly 2 × 70B = 140 GFLOP per token per forward pass (the factor of 2 is for multiply-accumulate). At batch size 1, decode on H100 at 30 tokens/second = 30 × 140G / 989T = 0.42% MFU. At batch size 256 with continuous batching, 7,680 tokens/second = 7,680 × 140G / 989T = 108% apparent MFU — which shows MFU is misleading for decode because compute is not the bottleneck. Target MFU of 30-45% for prefill-heavy workloads; it means you are at or near the compute-bound ceiling.
 
-**MBU (Memory Bandwidth Utilization)**: The ratio of bytes read per second from HBM to theoretical peak bandwidth. For decode, each step reads model weights (140GB for FP16 70B) + KV cache. At batch size 1 and 30 tokens/second: 30 × 140GB = 4.2 TB/s required — already exceeding H100's 3.35 TB/s, which means H100 is actually memory-bandwidth-limited. MBU target for decode: 60-80%. Below 60% means batch size is too small; above 80% means you are at the wall and should add GPUs.
+**MBU (Memory Bandwidth Utilization)**: The ratio of bytes read per second from HBM to theoretical peak bandwidth. For decode, each *step* reads the model weights once (140GB for FP16 70B) plus the KV cache — the read is per step, not per token, which is exactly why batching is free throughput. A 70B FP16 model needs at least TP=2, so each H100 reads 70GB per step; at 30 steps/second that is 2.1 TB/s of the 3.35 TB/s available, or 63% MBU. The same 63% MBU at batch size 64 yields 1,920 tokens/second. MBU target for decode: 60-80%. Below 60% means batch size is too small; above 80% means you are at the wall and should add GPUs.
 
 **Decode is memory-bandwidth-bound; prefill is compute-bound**: This asymmetry is the core reason disaggregated serving exists. Mixing prefill and decode on the same GPU forces both to compete for different resources at different times.
 
@@ -46,11 +46,11 @@ This memory-bound nature means the economics of GPU inference are driven by batc
 
 | Architecture | Cost | Complexity | Latency | Utilization | Preemption Risk |
 |---|---|---|---|---|---|
-| Homogeneous on-demand | $3.50-5.00/hr per H100 | Low | Predictable | Medium (60-75%) | None |
-| Homogeneous spot | $2.00-3.50/hr per H100 | Medium | Variable (+cold start) | Medium | 3-8% peak hours |
+| Homogeneous on-demand | $3.50-5.00/hr per H100 on GPU clouds (Lambda H100 SXM $3.99-4.29; AWS p5 is ~$6.9/GPU-hr) | Low | Predictable | Medium (60-75%) | None |
+| Homogeneous spot | $2.00-3.50/hr per H100 | Medium | Variable (+cold start) | Medium | Provider- and AZ-specific |
 | Disaggregated prefill/decode | Same hw cost, 2x complexity | High | Lower p50 decode TTFT | High (75-85%) | Architecture risk |
 | Heterogeneous (H100+A10G+T4) | 30-50% savings | High | Variable by tier | High with good routing | Tier-specific |
-| Serverless GPU (Modal/Replicate) | $4-8/hr billed/second | Low | High cold start (30-300s) | ~100% (per-request) | None (new pod) |
+| Serverless GPU (Modal/Replicate) | H100 $3.95/hr (Modal) to $5.49/hr (Replicate), billed per second | Low | High cold start (30-300s) | ~100% (per-request) | None (new pod) |
 
 ### Model-to-GPU Tier Mapping for Heterogeneous Pools
 
@@ -82,11 +82,11 @@ Each H100: 80 GB HBM3
 |  Model weights (tensor parallel shard): 17.5 GB  |
 |  [140 GB total / 8 GPUs = 17.5 GB per GPU]       |
 |                                                   |
-|  KV cache (per request, per layer on this shard):|
-|  2 * 80_layers * 8_kv_heads_per_gpu * 128_dim   |
+|  KV cache (fleet total, all layers, all shards): |
+|  2 * 80_layers * 8_kv_heads_total * 128_dim     |
 |  * context_len * batch_size * 2_bytes            |
 |  At ctx=4096, batch=32: 2*80*8*128*4096*32*2    |
-|  = ~34 GB (distributed across 8 GPUs = 4.25 GB) |
+|  = ~43 GB (distributed across 8 GPUs = 5.4 GB)  |
 |                                                   |
 |  Activations (transient, peak):        ~2-4 GB   |
 |  CUDA kernels / fragmentation:         ~1-2 GB   |
@@ -118,7 +118,7 @@ Client Request
       |                            Produces: KV cache tensor
       |                                  |
       |                           [KV Cache Transfer]
-      |                           NVLink (within rack): ~600 GB/s
+      |                           NVLink 4.0 (H100, in-node): ~900 GB/s
       |                           InfiniBand HDR (across racks): ~200 Gbps
       |                                  |
       +------ decode? <-----------[Decode Cluster]
@@ -132,8 +132,9 @@ Client Request
 
 Prefill cluster size: ~20% of GPUs (compute-intensive but short-duration)
 Decode cluster size:  ~80% of GPUs (long-running per request)
-KV transfer overhead: 40KB/token/layer * 80 layers = 3.2 MB/token for 70B
-  At 4096-token prompt: 13.1 GB to transfer (~22ms on 600 GB/s NVLink)
+KV transfer overhead: 4 KiB/token/layer * 80 layers = 328 KB/token for 70B
+  At 4096-token prompt: 1.34 GB to transfer (~1.5ms on 900 GB/s NVLink,
+  but ~54ms on a 200 Gbps InfiniBand HDR link between racks)
 ```
 
 ### Spot / On-Demand Hybrid Pool with Failover
@@ -222,10 +223,10 @@ def calculate_gpu_memory(
 
     Example — Llama-3 70B, FP16, ctx=4096, batch=32:
         weights_gb  = 70 * 1e9 * 2 / 1e9 = 140.0 GB
-        kv_cache_gb = 2 * 80 * 8 * 128 * 4096 * 32 * 2 / 1e9 = 34.36 GB
+        kv_cache_gb = 2 * 80 * 8 * 128 * 4096 * 32 * 2 / 1e9 = 42.95 GB
         activations = ~3.5 GB
         system      = ~4.5 GB
-        total       = 182.4 GB  -> needs 3x H100 80GB (with TP=4 recommended)
+        total       = 190.9 GB  -> needs 3x H100 80GB (with TP=4 recommended)
     """
     bytes_per_element = BYTES_PER_DTYPE[dtype]
 
@@ -286,8 +287,8 @@ result = calculate_gpu_memory(
     head_dim=128,
 )
 # result.weights_gb       = 140.0
-# result.kv_cache_gb      = 34.36  (2*80*8*128*4096*32*2 / 1e9)
-# result.total_gb         = 182.4
+# result.kv_cache_gb      = 42.95  (2*80*8*128*4096*32*2 / 1e9)
+# result.total_gb         = 190.95
 # result.fits_on_n_h100_80gb = 3  (need TP=4 for clean parallelism)
 ```
 
@@ -302,27 +303,29 @@ def calculate_mfu(
     """
     Model FLOP Utilization (MFU) for prefill-dominant workloads.
 
-    Formula: MFU = (observed_tokens_per_sec * 6 * model_params * 1e9) / (gpu_flops * 1e12)
+    Formula: MFU = (observed_tokens_per_sec * 2 * model_params * 1e9) / (gpu_flops * 1e12)
 
-    The factor 6 accounts for:
-      - 2x for multiply-accumulate (FMA = 1 multiply + 1 add)
-      - 3x for forward pass (QKV projection, attention, FFN) approximated as 2 matmuls per layer
-      But the standard approximation used by PaLM paper is 6 * N flops per token.
+    The factor is 2 for INFERENCE: one multiply and one add per parameter per token
+    (a single forward pass). The widely-quoted 6 * N figure from the scaling-law
+    literature is TRAINING FLOPs — 2N forward plus 4N backward — and using it here
+    would overstate inference MFU by 3x.
 
     Args:
         observed_tokens_per_sec: Measured throughput in tokens/second
         model_params_b: Parameter count in billions
-        gpu_flops_tflops: GPU peak FLOPS in TFLOPS (H100 SXM5 FP16 = 989)
+        gpu_flops_tflops: GPU peak DENSE FLOPS in TFLOPS (H100 SXM5 FP16 = 989 dense;
+                          do not use NVIDIA's 1,979 with-sparsity figure here)
 
     Returns:
-        MFU as a float (0.0 to 1.0+; >1.0 means memory-bound, not compute-bound)
+        MFU as a float (0.0 to 1.0+; >1.0 is physically impossible on one GPU and
+        means the throughput figure spans multiple GPUs)
 
     Examples:
-        H100, 70B model, batch=1, decode: 30 tok/s -> MFU = 0.0042 (0.42%) — memory-bound
-        H100, 70B model, batch=256, prefill: 15000 tok/s -> MFU = 0.212 (21.2%) — compute-bound
-        A100, 7B model, batch=512: 120000 tok/s -> MFU = 0.486 (48.6%) — good
+        H100, 70B model, batch=1, decode: 30 tok/s -> 30*1.4e11/9.89e14 = 0.0042 (0.42%) — memory-bound
+        H100, 7B model, prefill: 25,000 tok/s -> 25000*1.4e10/9.89e14 = 0.354 (35.4%) — compute-bound
+        A100 (312 TFLOPS dense), 7B model, prefill: 10,000 tok/s -> 0.449 (44.9%) — at the ceiling
     """
-    flops_per_token = 6 * model_params_b * 1e9
+    flops_per_token = 2 * model_params_b * 1e9
     peak_flops = gpu_flops_tflops * 1e12
     return (observed_tokens_per_sec * flops_per_token) / peak_flops
 
@@ -332,31 +335,46 @@ def calculate_mbu(
     model_params_b: float,
     dtype: str,
     gpu_bandwidth_tbps: float,
+    batch_size: int = 1,
+    tp_degree: int = 1,
 ) -> float:
     """
     Memory Bandwidth Utilization (MBU) for decode workloads.
 
-    For decode, each token step reads all model weights from HBM once.
-    MBU = (observed_tokens_per_sec * model_size_bytes) / (peak_bandwidth_bytes_per_sec)
+    One decode STEP reads every weight shard on the GPU exactly once and emits
+    batch_size tokens. So the per-GPU byte rate is driven by steps/second, not
+    tokens/second — dividing by batch_size is what keeps MBU inside [0, 1]:
+
+        steps_per_sec = observed_tokens_per_sec / batch_size
+        bytes_per_step_per_gpu = model_size_bytes / tp_degree
+        MBU = steps_per_sec * bytes_per_step_per_gpu / peak_bandwidth
 
     Args:
-        observed_tokens_per_sec: Measured decode throughput
+        observed_tokens_per_sec: Aggregate decode throughput across the batch
         model_params_b: Parameter count in billions
         dtype: Weight dtype (determines bytes per parameter)
-        gpu_bandwidth_tbps: HBM bandwidth in TB/s (H100 SXM5 = 3.35, A100 = 2.0)
+        gpu_bandwidth_tbps: HBM bandwidth in TB/s (H100 SXM5 = 3.35, H200 = 4.8, A100 = 2.0)
+        batch_size: Concurrent sequences decoding in the same forward pass
+        tp_degree: Tensor-parallel degree — weights are sharded, so each GPU
+                   reads model_size_bytes / tp_degree per step
 
     Returns:
-        MBU as float (target: 0.60 to 0.80 for healthy decode utilization)
+        MBU as float in [0, 1] (target: 0.60 to 0.80 for healthy decode utilization)
 
     Examples:
-        H100, 70B FP16, batch=1: 30 tok/s -> MBU = 30*140e9 / 3.35e12 = 1.25 (>1 = saturated)
-        H100, 70B FP16, batch=8: 200 tok/s -> MBU = 200*140e9 / 3.35e12 = 8.36 (>>1 = needs TP)
-        Note: With TP=2, bandwidth doubles, MBU halves; with TP=4, MBU is further halved.
+        H100 TP=2, 70B FP16, batch=1, 30 tok/s:
+          (30/1) * (140e9/2) / 3.35e12 = 0.63 (63%) — healthy
+        H100 TP=2, 70B FP16, batch=64, 1,920 tok/s:
+          (1920/64) * 70e9 / 3.35e12 = 0.63 (63%) — same MBU, 64x the tokens
+        H100 TP=2, 70B FP16, batch=64, 2,600 tok/s:
+          (2600/64) * 70e9 / 3.35e12 = 0.85 (85%) — at the bandwidth wall, add GPUs
     """
     bytes_per_element = BYTES_PER_DTYPE[dtype]
     model_size_bytes = model_params_b * 1e9 * bytes_per_element
+    bytes_per_step_per_gpu = model_size_bytes / tp_degree
+    steps_per_sec = observed_tokens_per_sec / max(batch_size, 1)
     peak_bandwidth = gpu_bandwidth_tbps * 1e12
-    return (observed_tokens_per_sec * model_size_bytes) / peak_bandwidth
+    return (steps_per_sec * bytes_per_step_per_gpu) / peak_bandwidth
 
 
 def calculate_cost_per_million_tokens(
@@ -381,10 +399,12 @@ def calculate_cost_per_million_tokens(
         Spot H100 @ $2.50/hr, continuous batching 1920 tok/s:
           -> $2.50 / (1920 * 3600) * 1e6 = $0.36 per million tokens
 
-    Compare to API pricing:
-        GPT-4o output: $15.00 per million tokens
-        Claude Sonnet: $15.00 per million tokens
-        Self-hosted at $0.36: 42x cheaper at scale (but no SLA, ops burden)
+    Compare to API pricing (list prices checked July 2026):
+        Claude Sonnet 5 output: $15.00 per million tokens
+        Claude Opus 5 output:   $25.00 per million tokens
+        Together AI serverless Llama-3.3-70B: $1.04 per million tokens (in or out)
+        Self-hosted at $0.36: ~42x cheaper than a $15/M frontier API, and ~3x
+        cheaper than a managed open-model endpoint — before SLA and ops burden.
     """
     tokens_per_hour = tokens_per_sec * 3600
     return (gpu_hourly_cost_usd / tokens_per_hour) * 1_000_000
@@ -477,8 +497,10 @@ class SpotBlendedPool:
     def get_preemption_rate(self) -> float:
         """
         Preemption rate over the last hour.
-        H100 spot preemption: 3-8% during peak (9am-6pm US East),
-        0.5-2% during off-peak.
+        Spot preemption rates are provider-, region-, AZ- and instance-type
+        specific and move with market demand — measure your own rather than
+        hard-coding a published figure. Use this metric to drive the circuit
+        breaker in Section 13, not to predict absolute risk.
         """
         now = time.time()
         one_hour_ago = now - 3600
@@ -585,8 +607,9 @@ import time
 from queue import Queue, Empty
 
 # BROKEN: Naive pool — one request per GPU at a time
-# MBU: ~8%  (HBM bandwidth wasted because only 1 sequence loaded per pass)
-# Throughput: 30 tokens/sec on H100 for 70B model
+# Bandwidth is saturated (~63% MBU) but yields only ONE token per full weight read,
+# so every byte moved is amortized across a single token instead of 64.
+# Throughput: 30 tokens/sec on 2x H100 (TP=2) for a 70B FP16 model
 # Cost: $5.00/hr / (30 * 3600) * 1e6 = $46.30 per million tokens
 
 class NaiveGPUScheduler:  # BROKEN
@@ -597,7 +620,8 @@ class NaiveGPUScheduler:  # BROKEN
         # BROKEN: Sends one request at a time, waits for completion before next
         # GPU finishes generating 200 tokens in ~6.7 seconds (30 tok/s)
         # During those 6.7 seconds, the GPU rejects all other requests
-        # Utilization: 1 request * 30 tok/s = 30 tok/s (8% MBU on H100 for 70B)
+        # Utilization: 1 request * 30 tok/s = 30 tok/s — 1/64th of the tokens
+        # the same weight reads could have produced at batch 64
         response = call_gpu_api(self._endpoint, prompt, max_tokens)  # blocking
         return response
 
@@ -681,13 +705,13 @@ class ContinuousBatchingScheduler:  # FIX
 
 ## 7. Real-World Examples
 
-**Together AI** (public engineering blog, 2023): Together operates a multi-model inference fleet across A100 and H100 clusters. Their published throughput for Llama-2 70B on 4x A100 80GB reached 450 tokens/second with their FlashAttention-2 + continuous batching stack, versus ~120 tokens/second with naive batching. They reported GPU utilization improving from 22% to 68% after migrating to iteration-level scheduling. Their cost model targets $0.90/million tokens for 70B models, down from $5.00/million with the naive scheduler.
+**Together AI** (public pricing page, checked July 2026): Together operates a multi-model inference fleet and publishes both serverless per-token and dedicated per-hour rates. Serverless Llama-3.3-70B lists at **$1.04 per million tokens** (input or output); dedicated single-tenant hardware lists at **$5.49/hour for an HGX H100** and **$8.99/hour for an HGX B200**. Those two numbers bound the make-vs-buy decision directly: a dedicated H100 at $5.49/hr only beats $1.04/M once you sustain more than 5.49/(1.04) × 1e6/3600 ≈ 1,466 tokens/second on it — which is roughly what continuous batching at batch 64 delivers, and nothing close to what a naive one-request-at-a-time server delivers.
 
-**Modal** (engineering blog, 2024): Modal's serverless GPU platform uses volume caching to reduce cold start for large models. A 70B model loaded from Modal volumes (network-attached NVMe) achieves first-token latency of 18-25 seconds on first cold start, versus 240+ seconds from S3. Subsequent cold starts on the same worker use NVMe cache and start in 3-5 seconds. Modal bills per second of GPU time, making it cost-effective for low-traffic models (<500 requests/day) that do not justify a dedicated always-on instance.
+**Modal** (public pricing page, checked July 2026): Modal's serverless GPU platform bills **per second** — H100 at $0.001097/s ($3.95/hr), H200 at $0.001261/s ($4.54/hr), B200 at $0.001736/s ($6.25/hr), A100 80GB at $0.000694/s ($2.50/hr). Per-second billing is what makes serverless cost-effective for low-traffic models that cannot justify a dedicated always-on instance; the tradeoff is cold start, which for a 70B model is dominated by pulling ~140GB of weights onto the worker (see the cold-start arithmetic in Section 6).
 
-**Baseten** (engineering blog, 2024): Baseten's GPU pool uses a two-tier model: a "hot" tier of on-demand H100s for latency-sensitive production traffic, and a "warm" tier of spot A10Gs for batch workloads and evaluation runs. They reported that 73% of their customers' traffic runs on spot instances with their checkpoint-and-resume mechanism. For streaming requests, they pin to on-demand exclusively. Their spot preemption rate on A10G averages 4.2% during US business hours.
+**Two-tier hot/warm pools** (illustrative composite, not a specific vendor disclosure): a common production shape is a "hot" tier of on-demand H100s for latency-sensitive traffic plus a "warm" tier of cheaper spot GPUs (A10G/L4 class) for batch workloads and evaluation runs, with checkpoint-and-resume on the spot tier and streaming requests pinned to on-demand. Treat any specific spot-preemption percentage as workload-, region- and provider-specific — measure it in your own AZ rather than adopting a published figure.
 
-**Replicate** (public pricing page): Replicate charges $0.000725/second for A100 40GB, which at continuous batching throughput of ~800 tokens/second for a 13B model equates to roughly $0.91/million tokens. Their cold start for SDXL (diffusion model) is typically 8-15 seconds from their cached NVMe volumes, versus 90-120 seconds from scratch.
+**Replicate** (public pricing page, checked July 2026): Replicate bills per second of GPU time — **$0.001400/s for an A100 80GB** ($5.04/hr) and $0.001525/s for an H100 ($5.49/hr); there is no A100 40GB tier. At a continuous-batching throughput of ~800 tokens/second for a 13B model, the A100 80GB rate works out to (0.0014 / 800) × 1e6 = **$1.75 per million tokens** — a useful reminder that per-second serverless pricing is only competitive with per-token APIs when the underlying throughput is high.
 
 ---
 
@@ -697,24 +721,29 @@ class ContinuousBatchingScheduler:  # FIX
 
 | Attribute | On-Demand H100 | Spot H100 | Reserved H100 (1yr) | Serverless GPU |
 |---|---|---|---|---|
-| Cost (H100 80GB) | $3.50-5.00/hr | $2.00-3.50/hr | $2.20-3.00/hr | $4-8/hr (billed/sec) |
-| Reliability | High (99.9%+) | Medium (92-97%) | High (99.9%+) | High (new pod) |
+| Cost (H100 80GB) | $3.50-5.00/hr on GPU clouds; ~$6.9/GPU-hr on AWS p5 | $2.00-3.50/hr | $2.20-3.00/hr (quoted on request, not published) | $3.95/hr (Modal) - $5.49/hr (Replicate), billed/sec |
+| Reliability | High (99.9%+) | Medium | High (99.9%+) | High (new pod) |
 | Cold start | 5-30s (warm) | 5-30s (warm) | 5-30s (warm) | 10-300s |
 | Min billing unit | 1 minute | 1 minute | 1 year | 1 second |
-| Preemption risk | None | 3-8%/hr peak | None | None (pod lifecycle) |
+| Preemption risk | None | Provider/AZ-specific — measure it | None | None (pod lifecycle) |
 | Best for | Real-time prod | Batch, fine-tuning | Baseline steady traffic | Spiky/low-traffic |
 
 ### GPU Hardware Comparison
 
-| Attribute | A100 SXM4 80GB | H100 SXM5 80GB | H200 SXM5 141GB |
-|---|---|---|---|
-| FP16 TFLOPS | 312 | 989 | 989 |
-| HBM Bandwidth | 2.0 TB/s (HBM2e) | 3.35 TB/s (HBM3) | 4.8 TB/s (HBM3e) |
-| VRAM | 80 GB | 80 GB | 141 GB |
-| NVLink bandwidth | 600 GB/s | 900 GB/s | 900 GB/s |
-| On-demand price | $2.00-3.50/hr | $3.50-5.00/hr | $5.00-8.00/hr |
-| $/TFLOPS | ~$0.010 | ~$0.004 | ~$0.006 |
-| Best for | 13-34B models | 70B models, FP8 | 405B models, long ctx |
+All FLOPS figures below are **dense**. NVIDIA's datasheets headline the with-sparsity numbers,
+which are exactly 2x these — conflating the two is the most common sizing error in GPU capacity
+planning (an H100 is 989 dense FP16 TFLOPS, not the 1,979 on the spec sheet).
+
+| Attribute | A100 SXM4 80GB | H100 SXM5 80GB | H200 SXM5 141GB | B200 SXM |
+|---|---|---|---|---|
+| FP16 TFLOPS (dense) | 312 | 989 | 989 | ~2,250 |
+| FP8 TFLOPS (dense) | n/a | 1,979 | 1,979 | ~4,500 |
+| HBM Bandwidth | 2.0 TB/s (HBM2e) | 3.35 TB/s (HBM3) | 4.8 TB/s (HBM3e) | ~8 TB/s (HBM3e) |
+| VRAM | 80 GB | 80 GB | 141 GB | ~180 GB |
+| NVLink bandwidth | 600 GB/s | 900 GB/s | 900 GB/s | 1.8 TB/s |
+| On-demand price | $2.79/hr (Lambda A100 SXM) | $3.99-4.29/hr (Lambda SXM) | $4.54/hr (Modal) | $6.25/hr (Modal) - $8.99/hr (Together HGX) |
+| $/dense-TFLOPS-hour | ~$0.0089 | ~$0.0042 | ~$0.0046 | ~$0.0028 |
+| Best for | 13-34B models | 70B models, FP8 | Long context, larger KV | Largest models, FP4/FP8 |
 
 ### Pool Architecture Tradeoffs
 
@@ -754,17 +783,17 @@ class ContinuousBatchingScheduler:  # FIX
 
 ## 10. Common Pitfalls
 
-**Pitfall 1 — ChatGPT-scale routing bug compounded by spot preemptions (Nov 2023 pattern)**
+**Pitfall 1 — Routing bug compounded by spot preemptions (illustrative failure pattern, not a specific public incident)**
 The incident pattern: a routing layer bug sent all traffic to a single availability zone when another AZ became unavailable. The AZ receiving 3x its normal traffic had a mix of spot and on-demand H100s. The sudden load spike triggered spot preemptions (AWS reclaims spot capacity under high regional demand). Preemptions removed 30% of capacity, routing more requests to fewer GPUs, raising utilization further, triggering further preemptions — a cascading failure. The fix requires routing to be AZ-aware (never send >60% of traffic to any single AZ) and preemption circuit breakers (if preemption rate >5%/5min, automatically shift traffic to on-demand fleet). Spot blending without AZ-aware routing is incomplete.
 
-**Pitfall 2 — Startup burning $500K/month at 15% GPU utilization**
-A well-funded startup serving a 70B model had 40 H100 on-demand instances at $4.50/hr each = $43,200/day. Their inference framework issued one request per GPU at a time (naive HTTP round-robin). 30 tokens/second per GPU at $4.50/hr = $41.67/million tokens. With continuous batching (64 concurrent) achieving 1,920 tokens/second: same 40 GPUs, same cost, but $0.65/million tokens — 64x cheaper. The same traffic volume that needed 40 GPUs naive needed only 1 GPU with proper batching. They moved from 40 to 3 on-demand H100s for the same throughput, cutting cost from $43,200/day to $3,240/day.
+**Pitfall 2 — Startup burning ~$130K/month on GPUs it was barely using**
+A well-funded startup serving a 70B model had 40 H100 on-demand instances at $4.50/hr each: 40 × $4.50 × 24 = **$4,320/day**, about $130K/month. Their inference framework issued one request per GPU at a time (naive HTTP round-robin). 30 tokens/second per GPU at $4.50/hr = $41.67/million tokens. With continuous batching (64 concurrent) achieving 1,920 tokens/second: same 40 GPUs, same cost, but $0.65/million tokens — 64x cheaper. The same traffic volume that needed 40 GPUs naive fits on a single 2-GPU TP group with proper batching. They moved from 40 to 3 on-demand H100s for the same throughput, cutting cost from $4,320/day to **$324/day**.
 
 **Pitfall 3 — Cold-start loop on infrequently-used models**
 A serverless GPU deployment for a niche fine-tuned 13B model had a container TTL of 5 minutes. Average request spacing for this model was 8 minutes (low traffic). Result: every request triggered a cold start (60-second model load from S3). Users experienced a 60-second TTFT before the first token. At 8-minute spacing, the 5-minute TTL never kept the container warm. Fix: set TTL to 15 minutes for any model with traffic, even if sparse. Reserve one minimum warm instance in the pool for any model that has had at least one request in the last 24 hours. The $0.50/hr cost of one warm T4 for a low-traffic 13B model is far cheaper than the user experience cost of 60-second cold starts.
 
 **Pitfall 4 — KV cache OOM under prompt injection burst**
-A production deployment allowed up to 128K context length (long-context model) but did not enforce it at the GPU memory reservation layer. A prompt injection attack sent requests with 100K+ token prompts. The KV cache formula for 100K tokens on a 70B model: `2 * 80 * 8 * 128 * 100000 * batch_size * 2 bytes = 419 GB per batch item`. The first such request caused immediate GPU OOM, crashing the vLLM process. The crash triggered a restart, which did not have the model in VRAM, so all in-flight normal requests also failed. Fix: enforce `max_prompt_tokens` at the API gateway layer (reject at ingress, never reach GPU) AND at the vLLM layer (`--max-model-len 8192` or appropriate limit). PagedAttention allocates KV cache blocks lazily, but OOM on extreme sequences still crashes the server without explicit limits.
+A production deployment allowed up to 128K context length (long-context model) but did not enforce it at the GPU memory reservation layer. A prompt injection attack sent requests with 100K+ token prompts. The KV cache formula for 100K tokens on a 70B model: `2 * 80 * 8 * 128 * 100000 * 2 bytes = 32.8 GB per sequence` — more than a third of a single H100's 80GB, for one request. The first such request caused immediate GPU OOM, crashing the vLLM process. The crash triggered a restart, which did not have the model in VRAM, so all in-flight normal requests also failed. Fix: enforce `max_prompt_tokens` at the API gateway layer (reject at ingress, never reach GPU) AND at the vLLM layer (`--max-model-len 8192` or appropriate limit). PagedAttention allocates KV cache blocks lazily, but OOM on extreme sequences still crashes the server without explicit limits.
 
 ---
 
@@ -799,52 +828,52 @@ A production deployment allowed up to 128K context length (long-context model) b
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between MFU and MBU, and which dominates LLM decode?**
-MFU measures how much of the GPU's compute (FLOPS) is utilized; MBU measures how much of the HBM bandwidth is utilized. For LLM decode, MBU dominates because each decode step generates exactly one token by reading the entire model weight matrix from HBM — this is an O(N_params) memory read for O(N_params) compute, making it inherently memory-bandwidth-bound. On an H100 with a 70B FP16 model, each decode step requires reading 140 GB from HBM. At 3.35 TB/s bandwidth, this can complete in ~42ms per step maximum — matching observed 24 tokens/second at batch size 1. Target MBU 60-80% for decode; below 60% means batch size is too small.
+MFU measures how much of the GPU's compute (FLOPS) is utilized; MBU measures how much of the HBM bandwidth is utilized. For LLM decode, MBU dominates because each decode step reads the entire model weight matrix from HBM to produce just one token per sequence — an O(N_params) memory read for O(N_params) compute, making it inherently memory-bandwidth-bound. A 70B FP16 model is 140 GB, which does not fit in one 80GB H100, so it runs at TP=2 or higher: each GPU reads 70 GB per step, and at 3.35 TB/s that step cannot finish faster than ~21ms, capping the pair at ~48 steps/second. A healthy production system runs around 30 steps/second (63% MBU) and multiplies that by the batch size to get tokens/second. Target MBU 60-80% for decode; below 60% means batch size is too small.
 
 **Q: Write the KV cache memory formula and compute it for Llama-70B, 4096 tokens, batch 32.**
-KV cache bytes = 2 (K+V) x num_layers x num_kv_heads x head_dim x context_len x batch_size x bytes_per_element. For Llama-3 70B: 2 x 80 x 8 x 128 x 4096 x 32 x 2 = 34,359,738,368 bytes = 34.4 GB. Note the GQA reduction: Llama-3 70B uses 8 KV heads versus 64 query heads, which reduces KV cache by 8x compared to MHA (Multi-Head Attention). Without GQA, KV cache would be 274 GB for the same settings — exceeding total H100 VRAM.
+KV cache bytes = 2 (K+V) x num_layers x num_kv_heads x head_dim x context_len x batch_size x bytes_per_element. For Llama-3 70B: 2 x 80 x 8 x 128 x 4096 x 32 x 2 = 42,949,672,960 bytes = 42.9 GB. Note the GQA reduction: Llama-3 70B uses 8 KV heads versus 64 query heads, which reduces KV cache by 8x compared to MHA (Multi-Head Attention). Without GQA, KV cache would be 343 GB for the same settings — more than four H100s' worth of VRAM before you have loaded a single weight.
 
 **Q: Why does batch size matter so much for GPU utilization?**
-LLM decode is memory-bandwidth-bound. At batch size 1, the GPU reads 140 GB of weights to produce 1 token. At batch size 64, the GPU reads 140 GB of weights to produce 64 tokens simultaneously — the same memory bandwidth produces 64x more output. Cost per million tokens drops by 64x because the fixed HBM read cost is amortized across more output tokens. The catch: KV cache grows linearly with batch size, so at batch size 64 with 4096-token context, KV cache alone consumes 34 GB, and you need enough HBM for both weights and KV cache to co-exist.
+LLM decode is memory-bandwidth-bound. At batch size 1, the GPU reads 140 GB of weights to produce 1 token. At batch size 64, the GPU reads 140 GB of weights to produce 64 tokens simultaneously — the same memory bandwidth produces 64x more output. Cost per million tokens drops by 64x because the fixed HBM read cost is amortized across more output tokens. The catch: KV cache grows linearly with batch size, so at batch size 64 with 4096-token context, KV cache alone consumes 86 GB, and you need enough HBM for both weights and KV cache to co-exist.
 
 **Q: What is disaggregated prefill/decode serving and when does it improve performance?**
-In disaggregated serving, prefill (processing the input prompt) runs on dedicated GPU nodes optimized for high TFLOPS, while decode (autoregressive generation) runs on separate nodes optimized for HBM bandwidth. The KV cache produced by prefill is transferred via NVLink or InfiniBand to the decode nodes. This improves performance when prompts are long (>1K tokens) and prefill would otherwise block decode slots on the same GPU. The transfer cost is roughly 40KB per token per layer for a 70B model; at a 4096-token prompt, that is 13 GB of KV cache to transfer. On NVLink at 600 GB/s, this takes ~22ms — acceptable for workloads where prefill itself takes seconds.
+In disaggregated serving, prefill (processing the input prompt) runs on dedicated GPU nodes optimized for high TFLOPS, while decode (autoregressive generation) runs on separate nodes optimized for HBM bandwidth. The KV cache produced by prefill is transferred via NVLink or InfiniBand to the decode nodes. This improves performance when prompts are long (>1K tokens) and prefill would otherwise block decode slots on the same GPU. The transfer cost for a 70B GQA model is 2 x 8 KV heads x 128 dims x 2 bytes = 4 KiB per token per layer, or 328 KB per token across 80 layers; at a 4096-token prompt that is 1.34 GB of KV cache to move. On 900 GB/s NVLink inside a node that is ~1.5ms and effectively free, but across racks on a 200 Gbps InfiniBand HDR link it is ~54ms — which is why disaggregation is a within-rack topology decision, not a cluster-wide one.
 
 **Q: How would you handle spot GPU preemption for a streaming inference request?**
 Streaming requests should never be routed to spot instances. The reason: a preemption mid-stream produces a broken SSE/WebSocket connection with a truncated response that cannot be resumed (the KV cache is on the preempted GPU). Route all streaming requests exclusively to on-demand instances. For non-streaming requests on spot, implement a 2-minute preemption warning handler (AWS/GCP provide this): drain the node immediately (stop new routing), allow in-flight requests to complete naturally up to 90 seconds, then forcibly migrate remaining requests to on-demand with full regeneration. The cost of regeneration is cheaper than the on-demand cost for all traffic.
 
 **Q: How do you calculate cost per million tokens for a self-hosted GPU cluster?**
-cost_per_million = (gpu_hourly_cost_usd / (tokens_per_sec x 3600)) x 1,000,000. For an H100 on-demand at $5.00/hr running at 1920 tokens/second with continuous batching: $5.00 / (1920 x 3600) x 1,000,000 = $0.72/million tokens. Compare to GPT-4o API at $15.00/million output tokens — self-hosting is 21x cheaper at this throughput. But the break-even requires sustained high utilization: at 30 tokens/second (no batching), self-hosted costs $46.30/million tokens — 3x more expensive than the API.
+cost_per_million = (gpu_hourly_cost_usd / (tokens_per_sec x 3600)) x 1,000,000. For an H100 on-demand at $5.00/hr running at 1920 tokens/second with continuous batching: $5.00 / (1920 x 3600) x 1,000,000 = $0.72/million tokens. Compare to a frontier API at $15.00/million output tokens (Claude Sonnet 5 list, July 2026) — self-hosting is ~21x cheaper at this throughput, though only ~1.4x cheaper than a managed open-model endpoint such as Together's Llama-3.3-70B at $1.04/million. But the break-even requires sustained high utilization: at 30 tokens/second (no batching), self-hosted costs $46.30/million tokens — 3x more expensive than the frontier API and 45x more than the managed endpoint.
 
 **Q: Why is LLM decode memory-bandwidth-bound rather than compute-bound?**
 Each decode step generates exactly one output token. This requires a full forward pass through all model layers, reading all weights from HBM. For a 70B FP16 model, that is 140 GB of reads per step. The arithmetic intensity (FLOPS per byte) for this operation is approximately 1-2 FLOPS/byte, while the H100's compute-to-bandwidth ratio is 989 TFLOPS / 3.35 TB/s = ~295 FLOPS/byte. The operation requires far fewer FLOPS than the GPU can supply given the bandwidth required — it will always be bottlenecked by bandwidth, not compute, until batch size is large enough to raise arithmetic intensity.
 
 **Q: Compare tensor parallelism (TP) and pipeline parallelism (PP) for a 70B model on 8 H100s.**
-Tensor parallelism splits each layer's weight matrices across GPUs (e.g., attention heads split across 8 GPUs). Each forward pass requires all-reduce communication after every layer — high-bandwidth, low-latency NVLink is required. TP latency overhead: ~1-3ms per layer for all-reduce on NVLink, so ~80-240ms total for 70B. Pipeline parallelism splits layers across GPUs (GPU 0 runs layers 1-10, GPU 1 runs 11-20, etc.). PP has lower communication overhead (just activation tensors between stages) but suffers from pipeline bubbles during prefill and poor utilization if batch size is small. In practice: use TP=4 or TP=8 for latency-sensitive serving (NVLink required), use PP only for training or when nodes are connected over Ethernet (lower bandwidth, TP all-reduce becomes a bottleneck).
+Tensor parallelism splits each layer's weight matrices across GPUs (e.g., attention heads split across 8 GPUs). Each forward pass requires all-reduce communication after every layer — high-bandwidth, low-latency NVLink is required. Size the overhead from the payload, not from a rule of thumb: a decode-step all-reduce moves batch x hidden_size x 2 bytes, so at batch 64 and hidden 8192 that is 1 MB, which crosses 900 GB/s NVLink in ~1 microsecond and is dominated by kernel-launch and sync overhead of roughly 10-30 microseconds. Across 80 layers (two all-reduces each) that is ~2-3ms per decode step — a real but tolerable tax. Pipeline parallelism splits layers across GPUs (GPU 0 runs layers 1-10, GPU 1 runs 11-20, etc.). PP has lower communication overhead (just activation tensors between stages) but suffers from pipeline bubbles during prefill and poor utilization if batch size is small. In practice: use TP=4 or TP=8 for latency-sensitive serving (NVLink required), use PP only for training or when nodes are connected over Ethernet (lower bandwidth, TP all-reduce becomes a bottleneck).
 
 **Q: When does serverless GPU make economic sense versus a dedicated pool?**
-Serverless GPU (Modal, Replicate, RunPod) makes sense when: (1) traffic is spiky or unpredictable, averaging fewer than 1,000 requests/day for a given model; (2) you need to serve 10+ different models with no single model justifying a dedicated GPU; (3) cold start latency (10-300s) is acceptable for your use case. Dedicated pools make sense when: (1) a single model serves >5,000 requests/day — the always-on cost is amortized across enough traffic; (2) P99 latency SLA is <2 seconds (cold start violates this); (3) you need continuous batching efficiency (serverless containers serve one request at a time by default). Crossover point: for a model with 200 requests/day at 5-minute average duration — serverless costs 200 x 5 x ($4/3600) = $1.11/day; dedicated T4 at $0.50/hr = $12/day. Serverless wins below ~700 requests/day for lightweight models.
+Serverless GPU wins when traffic is spiky and low-volume; a dedicated pool wins once one model sustains enough traffic to amortize an always-on GPU. Serverless GPU (Modal, Replicate, RunPod) makes sense when: (1) traffic is spiky or unpredictable, averaging fewer than 1,000 requests/day for a given model; (2) you need to serve 10+ different models with no single model justifying a dedicated GPU; (3) cold start latency (10-300s) is acceptable for your use case. Dedicated pools make sense when: (1) a single model serves >5,000 requests/day — the always-on cost is amortized across enough traffic; (2) P99 latency SLA is <2 seconds (cold start violates this); (3) you need continuous batching efficiency (serverless containers serve one request at a time by default). Crossover point: for a model with 200 requests/day at 5-second average GPU time — serverless costs 200 x 5 x ($4/3600) = $1.11/day; a dedicated T4 at ~$0.50/hr costs $12/day whether or not it serves anything. Break-even is $12 / ($4/3600 x 5) ≈ 2,160 requests/day, so serverless wins below roughly 2,000 requests/day for lightweight models — and the crossover moves down sharply as per-request GPU time grows.
 
 **Q: How do you size a GPU pool for 10,000 requests per hour at 500 tokens average output?**
-Total tokens/hour = 10,000 x 500 = 5M tokens/hour = 1,389 tokens/second. At MBU target 65% on H100 with continuous batching for 70B model (theoretical max ~3,350 tokens/sec x 0.65 = 2,178 tok/s): need 1,389 / 2,178 = 0.64 H100s. Round up to 1 H100 with headroom. For a 7B model on A10G (theoretical ~800 tok/s at 65% MBU): need 1,389 / 800 = 1.74 A10Gs — use 2 with a 70/30 spot/on-demand split. Always add 30% overhead for burst (1.3x multiplier) and preemption headroom (spot preemption replaces 10% capacity momentarily).
+Total tokens/hour = 10,000 x 500 = 5M tokens/hour = 1,389 tokens/second. A 70B FP16 model on a 2x H100 TP=2 node reads 70 GB per GPU per step, so its ceiling is 3.35e12 / 70e9 = 48 steps/second; at a 65% MBU target that is 31 steps/second, and at batch 64 that node delivers ~1,990 tokens/second. Need 1,389 / 1,990 = 0.70 nodes — round up to one 2-GPU node with headroom. For a 7B model on A10G (~800 tok/s at 65% MBU): need 1,389 / 800 = 1.74 A10Gs — use 2 with a 70/30 spot/on-demand split. Always add 30% overhead for burst (1.3x multiplier) and preemption headroom (spot preemption replaces 10% capacity momentarily).
 
 **Q: What is PagedAttention and how does it improve GPU memory utilization?**
 PagedAttention (vLLM) manages KV cache memory in fixed-size "pages" (typically 16 tokens per page) rather than pre-allocating contiguous memory for the full maximum context length. Without PagedAttention, serving 100 concurrent requests at max 4096 tokens each requires pre-allocating 100 x 4096 token slots of KV cache — even if 80 of those requests only use 128 tokens. This internal fragmentation wastes 80% of KV memory. PagedAttention allocates pages on demand as tokens are generated, and reclaims them as requests complete. Practical result: vLLM achieves 2-4x more concurrent requests in the same VRAM compared to HuggingFace transformers with naive KV allocation.
 
 **Q: How do you select H100 versus A100 for a new deployment?**
-Use H100 when: serving 70B+ parameter models (bandwidth bottleneck is decisive; H100 at 3.35 TB/s vs A100 at 2.0 TB/s gives ~67% more decode throughput for same model); running FP8 quantization (H100 Transformer Engine provides 2x FP8 throughput over A100 FP16); or total fleet size exceeds 20 GPUs (H100 ROI positive within 3-6 months). Use A100 when: serving 13-34B models where A100 bandwidth is sufficient and unit cost is 30-40% lower; running mixed workloads (training + inference) where A100 is available in reserved pools; or budget-constrained with guaranteed traffic patterns that do not require maximum throughput. Key number: H100 on-demand is ~$4.00-5.00/hr versus A100 $2.50-3.50/hr — the throughput premium of H100 for 70B is 67% while the cost premium is only 30-60%, making H100 the better value for 70B+ workloads.
+Pick H100 for 70B-and-larger models and anything using FP8; pick A100 for 13-34B models where its lower bandwidth is still sufficient and unit cost is lower. Use H100 when: serving 70B+ parameter models (bandwidth bottleneck is decisive; H100 at 3.35 TB/s vs A100 at 2.0 TB/s gives ~67% more decode throughput for same model); running FP8 quantization (H100 Transformer Engine provides 2x FP8 throughput over A100 FP16); or total fleet size exceeds 20 GPUs (H100 ROI positive within 3-6 months). Use A100 when: serving 13-34B models where A100 bandwidth is sufficient and unit cost is 30-40% lower; running mixed workloads (training + inference) where A100 is available in reserved pools; or budget-constrained with guaranteed traffic patterns that do not require maximum throughput. Key number: on Lambda (July 2026 list) an H100 SXM is $3.99-4.29/hr versus $2.79/hr for an A100 SXM 80GB — a 43-54% cost premium against a 67% decode-throughput premium, making H100 the better value per token for 70B+ workloads.
 
 **Q: What monitoring metrics should every GPU inference cluster emit?**
-Required metrics: (1) `tokens_per_second` per GPU and aggregate — primary health signal; (2) `mbu_percent` per GPU — decode utilization; (3) `mfu_percent` per GPU — prefill utilization; (4) `kv_cache_utilization_percent` — approaching 100% means OOM imminent; (5) `queue_depth` — requests waiting for a GPU slot; (6) `ttft_ms` p50/p95/p99 — time to first token; (7) `cost_per_million_tokens` — business metric computed from GPU cost and throughput; (8) `preemption_events_per_hour` for spot nodes; (9) `cold_start_duration_seconds` per model; (10) `gpu_memory_used_gb` — distinguish weights vs KV cache vs activations using DCGM.
+Emit token throughput, MBU and MFU, KV-cache utilization, queue depth, TTFT percentiles, and cost per million tokens — throughput and cost are the two that drive decisions. Required metrics: (1) `tokens_per_second` per GPU and aggregate — primary health signal; (2) `mbu_percent` per GPU — decode utilization; (3) `mfu_percent` per GPU — prefill utilization; (4) `kv_cache_utilization_percent` — approaching 100% means OOM imminent; (5) `queue_depth` — requests waiting for a GPU slot; (6) `ttft_ms` p50/p95/p99 — time to first token; (7) `cost_per_million_tokens` — business metric computed from GPU cost and throughput; (8) `preemption_events_per_hour` for spot nodes; (9) `cold_start_duration_seconds` per model; (10) `gpu_memory_used_gb` — distinguish weights vs KV cache vs activations using DCGM.
 
 **Q: How does prefix caching (SGLang RadixAttention) reduce GPU compute costs?**
 Prefix caching stores the KV cache for common prompt prefixes (system prompts, few-shot examples, tool definitions) and reuses them across requests. For an agent with a 2,000-token system prompt, each new request normally requires a 2,000-token prefill costing ~2,000 x 140 GFLOP = 280 TFLOP. With prefix caching: if the system prompt is cached, only the new user turn (typically 50-200 tokens) requires prefill — an 8-15x compute reduction. SGLang's RadixAttention uses a radix tree to store KV cache segments addressable by token sequence hash. Cache hit rates of 60-85% are typical for agent workloads with shared system prompts.
 
 **Q: What is the KV cache memory cost per token per layer for Llama-70B and why does it matter?**
-Per-token, per-layer KV cost = 2 (K+V) x num_kv_heads x head_dim x bytes_per_element = 2 x 8 x 128 x 2 = 4,096 bytes = 4 KB. Over 80 layers: 4 KB x 80 = 320 KB per token in the context window. At 4,096-token context: 320 KB x 4,096 = 1.31 GB per sequence. At batch size 64: 83.9 GB — exceeding a single H100's remaining capacity after weights (140 GB weights + 84 GB KV = 224 GB, requiring TP=4 at minimum). This is why KV cache size is the primary driver of effective batch size and why GQA (reducing KV heads from 64 to 8) is critical for 70B+ models.
+Per-token, per-layer KV cost = 2 (K+V) x num_kv_heads x head_dim x bytes_per_element = 2 x 8 x 128 x 2 = 4,096 bytes = 4 KiB. Over 80 layers: 4,096 x 80 = 327,680 bytes = 0.33 MB per token in the context window. At 4,096-token context: 1.34 GB per sequence. At batch size 64: 85.9 GB — so 140 GB of weights plus 86 GB of KV is 226 GB, requiring TP=4 (4 x 80 = 320 GB) at minimum. This is why KV cache size is the primary driver of effective batch size and why GQA (reducing KV heads from 64 to 8) is critical for 70B+ models.
 
 **Q: How does continuous batching differ from static batching, and what throughput improvement should you expect?**
-Static batching collects a fixed number of requests, runs them as a batch, and waits for ALL to complete before starting the next batch. Long requests block short ones from completing — the batch is only as fast as its slowest member. Continuous batching (iteration-level scheduling) runs one decode step for all active sequences simultaneously, then immediately evicts completed sequences and admits new ones for the next step. Short requests complete in their natural time without being held back. Throughput improvement: 4-10x for typical production workloads with a mix of short (50-token) and long (1000-token) responses. vLLM's continuous batching versus HuggingFace text-generation-inference static batching: in benchmarks by Anyscale (2023), vLLM achieved 23x throughput improvement at high concurrency for mixed-length requests.
+Static batching collects a fixed number of requests, runs them as a batch, and waits for ALL to complete before starting the next batch. Long requests block short ones from completing — the batch is only as fast as its slowest member. Continuous batching (iteration-level scheduling) runs one decode step for all active sequences simultaneously, then immediately evicts completed sequences and admits new ones for the next step. Short requests complete in their natural time without being held back. Throughput improvement: 4-10x for typical production workloads with a mix of short (50-token) and long (1000-token) responses. Anyscale's 2023 continuous-batching benchmark (OPT-13B on a single A100 40GB, 1,000 sequences of 512 input tokens with exponentially distributed output lengths) reported up to 23x throughput over *naive static* batching using vLLM's continuous batching plus PagedAttention, and 8x over naive static batching for continuous batching alone (Ray Serve and HuggingFace text-generation-inference). The 23x figure is the vLLM-vs-naive gap, not the vLLM-vs-TGI gap.
 
 ---
 
@@ -860,13 +889,13 @@ Static batching collects a fixed number of requests, runs them as a batch, and w
 
 5. **Pre-warm the top-3 models by traffic volume on every node startup** — a node that takes 224 seconds to load a 70B model from S3 cannot serve requests during that window. Use NVMe-cached volumes (Modal, vast.ai, or self-managed EBS io2) to reduce cold start from 224s to 15-30s. Reserve one warm instance per model with any recurring traffic.
 
-6. **Use TP (tensor parallelism) within a node over NVLink, never over Ethernet** — TP requires all-reduce after every layer (~80 all-reduces for 70B). Over NVLink (600-900 GB/s), each all-reduce takes 1-3ms. Over Ethernet (100 Gbps = 12.5 GB/s), the same all-reduce takes 50-100ms — 80 layers = 4-8 seconds of communication overhead per forward pass, making TP over Ethernet non-viable for serving.
+6. **Use TP (tensor parallelism) within a node over NVLink, never over Ethernet** — TP requires an all-reduce after every layer (~160 for a 70B model at two per layer). Work the numbers from the payload: a decode all-reduce at batch 64 and hidden 8192 is 1 MB, which is ~1 microsecond of wire time on 900 GB/s NVLink and is dominated by ~10-30 microseconds of launch/sync cost, giving ~2-3ms per decode step. Over 100 Gbps Ethernet (12.5 GB/s) the same 1 MB takes ~80 microseconds of wire time plus far higher per-hop latency, pushing the same step to ~20-30ms — a doubling of decode latency. Prefill is worse still: a 4,096-token all-reduce moves 67 MB, which is ~75 microseconds on NVLink but ~5ms on Ethernet, roughly a second of pure communication per prefill.
 
 7. **Set a spot preemption circuit breaker at 5% preemption rate / 5 minutes** — if preemptions exceed this rate, your AZ is under capacity pressure. Automatically shift 100% of new routing to on-demand until the rate drops. Without this, cascading preemptions can take down 70% of your spot fleet before human intervention.
 
 8. **Audit KV cache growth weekly with DCGM** — the `DCGM_FI_DEV_MEM_COPY_UTIL` and memory-used metrics distinguish model weight memory from dynamic KV allocation. If KV cache is growing without proportional throughput growth, you likely have stalled requests holding KV slots. Set per-request timeout at the GPU scheduler layer (`--request-timeout-s` in vLLM) to reclaim stalled KV cache pages.
 
-9. **Use FP8 on H100 for throughput-critical 70B+ models** — H100 FP8 throughput is ~1,979 TFLOPS versus 989 TFLOPS for FP16. For 70B models, FP8 reduces weight memory to 70 GB (versus 140 GB), freeing 70 GB per two H100s for KV cache — enabling 2x more concurrent sequences. Quality regression is typically <1% on standard benchmarks with FP8 E4M3 format.
+9. **Use FP8 on H100 for throughput-critical 70B+ models** — H100 FP8 throughput is 1,979 dense TFLOPS versus 989 dense TFLOPS for FP16 (the spec sheet's 3,958 and 1,979 are the with-sparsity figures). For 70B models, FP8 reduces weight memory to 70 GB (versus 140 GB), freeing 70 GB per two H100s for KV cache — enabling 2x more concurrent sequences. Quality regression is typically <1% on standard benchmarks with FP8 E4M3 format.
 
 10. **Size your GPU pool by sustained P95 load, not peak** — GPU pools are not elastic in milliseconds (node startup takes 60-300 seconds). Size for P95 traffic and use request queuing to absorb spikes. A queue depth of 10-20 requests with <30-second expected wait is better than over-provisioning 2x GPUs for rare spikes.
 
@@ -878,17 +907,17 @@ Static batching collects a fixed number of requests, runs them as a batch, and w
 
 **Referenced by**: [`../design_gpu_inference_platform.md`](../design_gpu_inference_platform.md)
 
-A platform serving 50 enterprise customers, each with a fine-tuned LoRA adapter on top of Llama-3 70B, faces a fundamental economics problem: serving 50 separate 70B model replicas requires 150+ H100s (3 per model for TP=4), but most customers have sporadic traffic. The solution is LoRA multiplexing: one set of 4 H100s loads the base 70B model weights permanently, and LoRA adapters (each 100-500 MB versus 140 GB base model) are swapped per-request using vLLM's multi-LoRA support.
+A platform serving 50 enterprise customers, each with a fine-tuned LoRA adapter on top of Llama-3 70B, faces a fundamental economics problem: serving 50 separate 70B model replicas requires 200 H100s (4 per model at TP=4), but most customers have sporadic traffic. The solution is LoRA multiplexing: one set of 4 H100s loads the base 70B model weights permanently, and LoRA adapters (each 100-500 MB versus 140 GB base model) are swapped per-request using vLLM's multi-LoRA support.
 
-At any moment, the GPU holds the base model (140 GB weights) plus up to 4 active LoRA adapters in VRAM (4 x 500 MB = 2 GB), leaving 78 GB for KV cache — enough for batch size 32 at 4096 tokens. Requests from different tenants are batched together using the appropriate per-request LoRA adapter ID. vLLM's `--enable-lora --max-loras 4 --max-lora-rank 64` enables this. Result: 50 customers served with 4 H100s (versus 150+), reducing GPU cost per customer by 37x. The cost per million tokens drops from $46.30 (naive single-tenant) to $1.24 (LoRA-multiplexed with continuous batching), well below the $15/million of API providers.
+At any moment, the 4-GPU group holds 320 GB of VRAM total: the base model (140 GB weights) plus up to 4 active LoRA adapters (4 x 500 MB = 2 GB), plus roughly 32 GB of activation and CUDA/system reserve across the four GPUs — leaving about 145 GB for KV cache. At 1.34 GB per 4,096-token sequence that supports a batch of roughly 100 concurrent sequences. Requests from different tenants are batched together using the appropriate per-request LoRA adapter ID. vLLM's `--enable-lora --max-loras 4 --max-lora-rank 64` enables this. Result: 50 customers served with 4 H100s instead of 200, a 50x reduction in GPU cost per customer. The cost per million tokens drops from $46.30 (naive single-tenant) to $1.24 (LoRA-multiplexed with continuous batching), well below the $15/million output price of frontier APIs.
 
 ### Case Study 2: GPU Utilization at ChatGPT Scale
 
 **Referenced by**: [`../design_chatgpt.md`](../design_chatgpt.md)
 
-At 10 million concurrent conversations (ChatGPT peak 2023-2024), the engineering challenge is not serving one conversation well — it is keeping thousands of H100 nodes at 65-80% MBU simultaneously. OpenAI's public disclosures (Sam Altman 2023 interviews, Microsoft BUILD keynotes) indicate their GPU fleet uses aggressive continuous batching with token streaming to maximize throughput.
+Take a hypothetical 10 million concurrent conversations — the order of magnitude a top-tier consumer assistant operates at. The engineering challenge is not serving one conversation well; it is keeping thousands of GPU nodes at 65-80% MBU simultaneously. No frontier lab publishes its fleet size or batching configuration, so treat the numbers below as a sizing exercise from first principles rather than a description of any specific deployment.
 
-At 10M concurrent conversations averaging 50 tokens/minute each, total token throughput = 10M x 50 / 60 = 8.3M tokens/second. At 1,920 tokens/second per H100 with continuous batching (65% MBU, GPT-4-class model on TP=8): 8.3M / 1,920 = 4,323 H100 equivalent units continuously active. The AZ-aware routing (minimum 3 AZs, maximum 40% traffic per AZ) and preemption circuit breakers (described in Pitfall 1) become critical — a single routing bug at this scale can cause a global outage within minutes as preemption cascades compound.
+At 10M concurrent conversations averaging 50 tokens/minute each, total token throughput = 10M x 50 / 60 = 8.3M tokens/second. Using the 2x H100 TP=2 node from Section 3 as the unit — ~1,920 tokens/second at 63% MBU and batch 64 — that is 8.3M / 1,920 = 4,323 such nodes, or roughly 8,650 H100s continuously active. A larger frontier model on TP=8 needs proportionally more. The AZ-aware routing (minimum 3 AZs, maximum 40% traffic per AZ) and preemption circuit breakers (described in Pitfall 1) become critical — a single routing bug at this scale can cause a global outage within minutes as preemption cascades compound.
 
 ### Case Study 3: GPU Scheduling — Training vs Inference on a Shared Pool
 
@@ -902,9 +931,9 @@ The solution: time-multiplex the pool. Training jobs run exclusively on spot ins
 
 **Referenced by**: [`../design_video_generation_platform.md`](../design_video_generation_platform.md)
 
-Video diffusion models (Sora-class, SDXL Video, Wan2.1) have fundamentally different GPU economics than LLM token generation. Instead of tokens/second, the primary metric is frames/second or seconds-of-video/hour. Diffusion models run 20-50 denoising steps per image frame; each step is a full UNet or DiT forward pass over the entire latent — compute-bound, not memory-bandwidth-bound. For SDXL at 1024x1024, each denoising step costs approximately 15 GFLOP. At 50 steps for a batch of 4 images: 50 x 15 GFLOP x 4 = 3,000 GFLOP per batch. On H100 at 989 TFLOPS (FP16): 3,000 / 989,000 = 3ms compute time. Actual latency is 800-1200ms due to memory transfers and kernel launch overhead — meaning H100 for SDXL is actually under-utilized at batch size 4.
+Video diffusion models (Sora-class, SDXL Video, Wan2.1) have fundamentally different GPU economics than LLM token generation. Instead of tokens/second, the primary metric is frames/second or seconds-of-video/hour. Diffusion models run 20-50 denoising steps per image frame; each step is a full UNet or DiT forward pass over the entire latent — compute-bound, not memory-bandwidth-bound, which is the mirror image of LLM decode. SDXL's UNet is roughly 2.6B parameters, so a single denoising step costs at minimum 2 x 2.6e9 = 5.2 TFLOP and in practice around 6 TFLOP once the convolutional stack's spatial reuse is counted — six *thousand* times the per-token compute of an LLM decode step, which is why the bottleneck flips.
 
-The optimal batch size for diffusion is much higher (16-64 images per batch) to amortize memory transfer overhead. At batch 64: H100 achieves ~6 images/second for SDXL, costing $5.00 / (6 x 3600) x 1000 = $0.23 per 1000 images. The key difference from LLM serving: spot preemption is fully recoverable for diffusion (generation is stateless — restart the denoise steps from step 0 on a new GPU). This means video generation platforms can run 90%+ spot, achieving costs of $0.10-0.15 per 1000 images — significantly below API pricing of $0.02-0.04 per image (which implies providers target 5-20x margins on GPU cost).
+Work the batch arithmetic: 50 steps for a batch of 4 images is 50 x 6 TFLOP x 4 = 1,200 TFLOP. On an H100 at 989 dense FP16 TFLOPS that is 1.2 seconds at theoretical peak and roughly 3-4 seconds at a realistic 30-40% MFU. There is no idle compute to reclaim here — unlike LLM decode, the GPU is genuinely saturated, and larger batches (16-64) buy kernel efficiency rather than a bandwidth amortization. At 35% MFU an H100 sustains about 350 TFLOPS of useful work, or 350 / (50 x 6) = ~1.2 images/second at 50 steps, costing $5.00 / (1.2 x 3600) x 1000 = **$1.16 per 1,000 images**. The key difference from LLM serving: spot preemption is fully recoverable for diffusion (generation is stateless — restart the denoise steps from step 0 on a new GPU). Running 90%+ spot at ~$2.50/hr brings that to roughly **$0.60 per 1,000 images**, or $0.0006 per image, against per-image API list prices in the $0.002-0.04 range depending on tier — so the markup providers charge over raw GPU cost spans roughly 3x at the budget end to 60x+ at the premium end, and quoting a single "typical margin" for image APIs is not meaningful.
 
 ---
 

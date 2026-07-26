@@ -24,7 +24,7 @@
 ### Non-Functional Requirements
 - Complete 70% of SWE-bench Verified tasks in under 30 minutes wall-clock time
 - Cost ceiling of $20 per task (enforced mid-execution; kill task if exceeded)
-- Success rate on SWE-bench Verified > 13% (Devin Sept 2024 baseline), targeting 30%+
+- Success rate on SWE-bench Verified: the public bar has moved fast -- top community submissions on the 500-instance Verified set now resolve ~79% (live-SWE-agent + Claude Opus 4.5 and Sonar Foundation Agent + Claude Opus 4.5, both 396/500; OpenHands + Claude Opus 4.5 at 388/500 = 77.6%). Target >= 70% for a credible product; anything below ~50% is behind 2025-era scaffolds
 - Sandbox security: no network egress from code execution except PyPI and npm allowlist
 - Durable execution: survive process restart mid-task with no loss of completed steps
 - PR quality bar: no failing tests, no new lint errors versus baseline, diff under 500 lines
@@ -57,7 +57,9 @@ Daily token demand:
 
 ### Cost Per Task
 ```
-LLM cost (GPT-4o blended $0.015/1K tokens):
+LLM cost (blended $0.015/1K tokens = $15/M, i.e. a frontier tier
+weighted toward output -- Claude Sonnet 5 is $3/M in, $15/M out;
+Claude Opus 5 is $5/M in, $25/M out):
   100,000 tokens x $0.015 / 1,000           = $1.50
 
 Sandbox compute (Docker/Firecracker, 4 vCPU, 4 GB RAM, 30 min):
@@ -119,7 +121,7 @@ flowchart TD
     REDISQ@{ icon: "logos:redis", form: "square", label: "Redis Task Queue", pos: "b", h: 44 }
     REDISQ --> ORCH["Agent Orchestrator<br/>dequeue task, restore checkpoint,<br/>run DurableTaskRunner,<br/>enforce $20 cost ceiling"]
     ORCH --> REPO["Repo Manager<br/>(git clone, PR)"]
-    ORCH --> LLMC["LLM Client<br/>(GPT-4o / Claude)"]
+    ORCH --> LLMC["LLM Client<br/>(Claude Opus 5 /<br/>GPT-5.4 fallback)"]
     ORCH --> TOOLS["Tool Registry<br/>(bash, file search,<br/>test run)"]
     REPO --> CKPT
     LLMC --> CKPT
@@ -392,7 +394,7 @@ class DurableTaskRunner:
     Cost ceiling is checked before every LLM call; task is killed if exceeded.
     """
 
-    COST_PER_1K_TOKENS = 0.015     # GPT-4o blended input+output
+    COST_PER_1K_TOKENS = 0.015     # frontier-tier blended input+output ($15/M)
     COST_CEILING_USD = 20.00
 
     def __init__(self, db_conn: psycopg2.extensions.connection) -> None:
@@ -474,7 +476,7 @@ class CostCeilingExceededError(RuntimeError):
     pass
 ```
 
-Checkpoint overhead is 5 ms per tool call (Postgres local write with synchronous commit). Over 50 tool calls this adds 250 ms total — well within the 30-minute task budget. The overhead is worthwhile: a crash at step 48 without checkpointing wastes $1.44 in LLM spend and 24 minutes; with checkpointing it resumes at step 48 in under 2 seconds.
+Checkpoint overhead is 5 ms per tool call (Postgres local write with synchronous commit). Over 50 tool calls this adds 250 ms total — well within the 30-minute task budget. The overhead is worthwhile: a crash at step 48 without checkpointing wastes $1.44 in LLM spend and 28.8 minutes; with checkpointing it resumes at step 48 in under 2 seconds. (48/50 of a 30-minute task is 28.8 minutes of wall-clock lost, not 24.)
 
 ### 4.3 Sandboxed Code Execution
 
@@ -681,7 +683,7 @@ class SelfCorrectionLoop:
 
 ### 4.5 SWE-bench Evaluation Harness
 
-SWE-bench Verified (300 instances, manually validated) is the authoritative benchmark for autonomous SWE agents. Each instance provides a real GitHub issue and a set of hidden unit tests that must pass after the agent's changes.
+SWE-bench Verified (**500** instances, human-validated -- SWE-bench *Lite* is the 300-instance subset, and the two are routinely confused) is the authoritative benchmark for autonomous SWE agents. Each instance provides a real GitHub issue and a set of hidden unit tests that must pass after the agent's changes.
 
 ```python
 from __future__ import annotations
@@ -767,7 +769,7 @@ def _emit_eval_metrics(pass_rate: float, cost_per_resolved: float) -> None:
 | Sandbox runtime | Firecracker microVM (125 ms boot) | Docker container (800 ms boot) | Firecracker provides kernel-level isolation; Docker shares host kernel making container escape more impactful; for arbitrary user code, VM isolation is non-negotiable |
 | Checkpoint granularity | Every tool call (5 ms overhead) | Every N=10 tool calls | Losing 10 calls on crash wastes ~6 minutes and $0.30; 5 ms overhead over 50 calls = 250 ms total; checkpoint-per-call is the correct tradeoff |
 | Context strategy | Budget-split (60/20/10/10) + LSP + BM25 + embedding | Load full repo or top-N files by size | Full repo overflows 128K context window on any non-trivial codebase; top-N by size is noise-heavy; relevance scoring + budget allocation is the principled approach |
-| LLM backbone | Claude 3.5 Sonnet primary, GPT-4o fallback | GPT-4o primary | Claude 3.5 Sonnet scores higher on SWE-bench Verified (reported 49% with scaffolding vs GPT-4o ~38% with equivalent scaffolding) and is more reliable on tool-use chaining for code tasks |
+| LLM backbone | Current frontier Claude (Opus 5 / Sonnet 5) primary, current frontier GPT fallback | Single-provider | The Verified leaderboard has been led by Claude-backed scaffolds through 2025 (live-SWE-agent + Claude Opus 4.5 at 396/500 = 79.2%, OpenHands + Claude Opus 4.5 at 388/500 = 77.6%, vs OpenHands + GPT-5 at 359/500 = 71.8%); dual-provider is a rate-limit and outage hedge, not a quality hedge |
 | Self-correction iterations | Max 5, bail at $5 correction spend | Unlimited or fixed 3 | Unlimited: pathological loops waste money; 3: insufficient for complex bugs with cascading failures; 5 iterations covers >90% of correctable cases empirically on SWE-bench Lite |
 | Agent architecture | Single-agent with tool registry | Planner + Executor + Reviewer (Magentic-One style) | Multi-agent adds inter-agent communication overhead and synchronization bugs; single-agent with structured tool registry achieves equivalent task decomposition with less failure surface area |
 
@@ -791,11 +793,11 @@ Best for:         Code exec   Dev/test  Moderate   Code exec
 
 ## 6. Real-World Implementations
 
-**Cognition Devin** (September 2024, SWE-bench Verified 13.86%): Uses a persistent VM per task with a browser, terminal, and code editor co-located — not a container but a full Ubuntu VM. The planner and executor are split into separate LLM calls: a high-level plan is generated first, then an executor follows the plan step-by-step. Durable execution relies on the VM staying alive for the task duration rather than external checkpointing. The 13.86% score on SWE-bench Verified was criticized as cherry-picked in early demos, but SWE-bench Verified (manually validated test cases, no data leakage) provides a fair benchmark for the published number. Non-durable execution left repos in inconsistent states on partial failures in early versions.
+**Cognition Devin** (technical report published 15 March 2024): Uses a persistent VM per task with a browser, terminal, and code editor co-located — not a container but a full Ubuntu VM. The planner and executor are split into separate LLM calls: a high-level plan is generated first, then an executor follows the plan step-by-step. Durable execution relies on the VM staying alive for the task duration rather than external checkpointing. **The widely-quoted 13.86% figure is routinely mis-cited**: Cognition's own technical report states it resolved 79 of 570 issues — a randomly selected 25% sample of the **full SWE-bench test set** (2,294 instances), not SWE-bench Verified, which did not exist until OpenAI released it in August 2024. Quoting it as a Verified score is wrong, and quoting it as a current bar is doubly wrong: Verified leaders are now near 80%.
 
 **All Hands OpenHands** (formerly OpenDevin, open source): Uses Docker as the sandbox, configurable LLM backend (supports Claude, GPT-4o, local Ollama). The runtime uses a custom CodeAct paradigm where code execution is the primary tool call — the agent generates Python code to perform actions (file writes, test runs) rather than calling structured tools. This simplifies the tool registry but makes output parsing more complex. Supports configurable base Docker images per repo to match the project's exact dependency environment.
 
-**Princeton SWE-agent**: The simplest architecture — direct bash access through an AgentComputer abstraction, no VM isolation, no checkpointing. Established SWE-bench as the standard benchmark. Achieved 12.5% on SWE-bench Lite with a pure ReAct loop and a structured file editor tool (view, edit, scroll). The architecture proved that even simple scaffolding dramatically outperforms zero-scaffold prompting (12.5% vs ~3%). The lack of sandbox isolation makes it unsuitable for untrusted code execution in production.
+**Princeton SWE-agent**: The simplest architecture — direct bash access through an AgentComputer abstraction, no VM isolation, no checkpointing. Established SWE-bench as the standard benchmark. With GPT-4 it resolved 286/2,294 = 12.5% of the **full** SWE-bench test set, 54/300 = 18.0% of SWE-bench Lite, and 112/500 = 22.4% of Verified — the 12.5% figure is frequently mislabelled as the Lite score. The architecture proved that even simple scaffolding dramatically outperforms zero-scaffold prompting. The lack of sandbox isolation makes it unsuitable for untrusted code execution in production.
 
 **Factory.ai Droids**: Targets enterprise codebases with a custom static analysis layer that pre-indexes the repo into a structured dependency graph before the agent begins. The agent queries the dependency graph rather than running BM25 searches, achieving faster and more accurate file selection for large monorepos. Emphasizes PR workflow integration: the agent reads CI feedback, addresses review comments, and re-runs checks automatically after pushes.
 
@@ -814,20 +816,30 @@ Best for:         Code exec   Dev/test  Moderate   Code exec
 | Kernel isolation | Dedicated MicroVM | Shared host kernel | Shared (syscall intercept) | Dedicated (QEMU/KVM) |
 | Filesystem snapshot | Native (memory snapshot API) | CRIU (experimental) | No | Yes |
 | Network egress control | iptables via VMM | iptables / CNI | iptables | iptables |
-| Maturity (2025) | Production (Firecracker 1.x) | Production | Beta | Beta |
+| Maturity | Production (Firecracker 1.x; powers AWS Lambda and Fargate) | Production | Production (Google runs it as GKE Sandbox) | Production (Kata Containers 3.x) |
 | Best use case | Untrusted code execution | Dev sandboxes, CI | Moderate security | Untrusted code execution |
 
 ### LLM Backbone Comparison for Code Tasks
 
-| Dimension | Claude 3.5 Sonnet | GPT-4o | Gemini 2.5 Pro |
-|-----------|------------------|--------|----------------|
-| SWE-bench Verified (best published) | 49% (with scaffolding) | 38% (with scaffolding) | 35% |
-| Cost per 1M input tokens | $3.00 | $2.50 | $1.25 |
-| Cost per 1M output tokens | $15.00 | $10.00 | $10.00 |
-| Context window | 200K tokens | 128K tokens | 1M tokens |
-| Tool-calling reliability | High (structured tool use) | High | Moderate |
-| Function call chaining | Excellent (multi-step) | Good | Good |
-| Code reasoning (HumanEval) | 92.0% | 90.2% | 87.0% |
+Scores below are **community leaderboard submissions on the 500-instance
+SWE-bench Verified set** (github.com/SWE-bench/experiments), which is the only
+apples-to-apples comparison — vendor-reported numbers use different scaffolds
+and are not directly comparable.
+
+| Dimension | Claude Opus 5 | Claude Sonnet 5 | Claude Haiku 4.5 |
+|-----------|---------------|-----------------|------------------|
+| Best Verified score for the family's prior generation | Claude Opus 4.5: 396/500 = 79.2% (live-SWE-agent), 388/500 = 77.6% (OpenHands) | — | — |
+| Cost per 1M input tokens | $5.00 | $3.00 | $1.00 |
+| Cost per 1M output tokens | $25.00 | $15.00 | $5.00 |
+| Context window | 1M tokens | 1M tokens | 200K tokens |
+| Tool-calling reliability | High (structured tool use) | High | Good |
+| Function call chaining | Excellent (multi-step) | Excellent | Good |
+
+For reference points outside the Claude family on the same leaderboard:
+OpenHands + GPT-5 resolved 359/500 = 71.8%, and live-SWE-agent + Gemini 3 Pro
+Preview resolved 387/500 = 77.4%. **Do not quote HumanEval for agent
+selection** — it tests isolated function synthesis with no repo, no context
+budget, and no multi-file edit, and frontier models saturate it.
 
 ---
 
@@ -938,7 +950,7 @@ Symptom: tasks that should resume mid-task are restarting from step 0 despite ch
 
 Diagnosis: (1) `SELECT task_id, step_index, length(payload) FROM agent_checkpoints WHERE updated_at > NOW() - INTERVAL '1 hour'`. (2) Attempt to deserialize a sample of recent checkpoints: `json.loads(payload)`. (3) Check for truncated JSON (partial write).
 
-Mitigation: Set failed checkpoints to `status='failed'` so tasks do not retry with corrupt state. Re-queue as fresh tasks. Enable Postgres `synchronous_commit = on` (was `off` for performance) to prevent partial writes during crash.
+Mitigation: Set failed checkpoints to `status='failed'` so tasks do not retry with corrupt state. Re-queue as fresh tasks. Enable Postgres `synchronous_commit = on` (was `off` for performance). Note the precise failure mode: `synchronous_commit = off` never produces a *torn* or partially-written row — Postgres is still crash-safe and atomic per transaction. What it risks is losing whole recently-committed transactions that had not yet reached durable WAL. So the symptom it explains is a checkpoint that is *stale* (missing the last N tool calls), not one that is *corrupt*. Corrupt-JSON checkpoints point at the application layer instead — a non-atomic write path, a truncated serialization, or a value exceeding a column limit.
 
 Resolution: Wrap `_save_checkpoint` in a transaction with a SHA-256 checksum field. On load, verify checksum before using checkpoint; discard and restart if mismatch. Use Postgres advisory locks to prevent concurrent checkpoint writes from two orchestrators.
 
@@ -948,7 +960,7 @@ Symptom: 100% of tasks stuck at `agent_step` span; p99 LLM call latency spiked t
 
 Diagnosis: (1) Check current token/minute consumption vs quota: compare `swe_agent.llm.tokens_per_minute` metric against provider quota. (2) Identify if a single large batch of tasks was enqueued simultaneously.
 
-Mitigation (immediate): (1) Exponential backoff with jitter in LLM client (already implemented — verify it is active). (2) Switch 50% of tasks to secondary provider (GPT-4o if Claude is rate-limited, or vice versa) via feature flag. (3) Reduce concurrency: drain task queue from 200 concurrent to 100 concurrent tasks.
+Mitigation (immediate): (1) Exponential backoff with jitter in LLM client (already implemented — verify it is active). (2) Switch 50% of tasks to the secondary provider (the frontier GPT tier if Claude is rate-limited, or vice versa) via feature flag. (3) Reduce concurrency: drain task queue from 200 concurrent to 100 concurrent tasks.
 
 Resolution: Implement token bucket rate limiter at the LLM client layer: `max_tokens_per_minute = provider_quota * 0.85` (15% headroom). Distribute tasks across multiple provider API keys. Request quota increase from provider within 24 hours.
 
@@ -966,15 +978,15 @@ Resolution: Add a test-timeout flag injection at the `run_command` level: inspec
 
 ## 9. Common Pitfalls and War Stories
 
-**Devin demo backlash (Cognition, September 2024)**: Early Devin demos showed cherry-picked successes on tasks the system was specifically trained and tested against. The published SWE-bench Verified score of 13.86% — while a genuine improvement over prior state of the art at the time — was significantly below the implied capability from the demos. Non-durable execution left repos in inconsistent states on partial failure: a task that completed 40 of 50 tool calls before a network timeout left uncommitted file changes and a half-applied patch in the sandbox, with no recovery path. The PR that was eventually opened contained a broken diff. Impact: significant public trust damage; competitors published transparent SWE-bench scores within weeks, establishing score transparency as a competitive norm.
+**Devin demo backlash (Cognition, March 2024)**: Early Devin demos showed cherry-picked successes on tasks the system was specifically trained and tested against. The published score of 13.86% (79 of 570 issues, a random 25% sample of the **full** SWE-bench test set — not Verified, which did not yet exist) was a genuine improvement over prior state of the art at the time, but far below the capability the demos implied. Non-durable execution left repos in inconsistent states on partial failure: a task that completed 40 of 50 tool calls before a network timeout left uncommitted file changes and a half-applied patch in the sandbox, with no recovery path. The PR that was eventually opened contained a broken diff. Impact: significant public trust damage; competitors published transparent SWE-bench scores with full trajectories, establishing score transparency as a competitive norm. OpenAI's release of the human-validated 500-instance SWE-bench Verified split in August 2024 was a direct response to exactly this credibility problem.
 
 **Context window overflow on monorepo file listing**: An agent deployed against a 200,000-file monorepo used `ls -R /workspace/repo` as its first tool call, generating 4 MB of output. The truncation-at-50KB limit in `run_command` returned the first 50 KB of file paths (alphabetically sorted, all starting with `aaa_*`). The agent then concluded the entire repo consisted of files starting with `aaa_` and searched only that subtree. The task failed before writing any code. Fix: replace `ls -R` with a hierarchical tree walk capped at 2 levels deep for the initial survey; use embedding search for file discovery, not filesystem enumeration.
 
 **Double-commit from missing idempotency on retry**: A network timeout between the `git commit` tool call and the Postgres checkpoint write caused the orchestrator to re-execute the `git commit` tool call on restart. The second commit created a duplicate commit with an identical message but different SHA. CI lint rules requiring unique commit messages failed; the PR showed two identical commits confusing reviewers. Fix: SHA-256(diff content + commit message) as the idempotency key for all git write operations, checked against `tool_call_log` before execution. Git operations that have already been executed return the stored output without re-executing.
 
-**Flaky test false positives exhausting correction budget**: An async integration test in a Django project failed randomly at a rate of 40% due to a race condition in the test fixture (not in the code under test). The self-correction loop entered 5 iterations, spending $8.12 in LLM calls attempting to fix the agent's own code changes, which were correct. The flakiness guard described in Section 4.4 was not yet deployed. Fix: the 3-run flakiness guard (fail on 2/3 runs to be counted as a real failure) would have caught this — the test passes 60% of the time, below the 66% failure threshold for correction entry. Deploy the guard; also add a per-repo flakiness database that tracks which tests have historically failed without code changes.
+**Flaky test false positives exhausting correction budget**: An async integration test in a Django project failed randomly at a rate of 40% due to a race condition in the test fixture (not in the code under test). The self-correction loop ran to its 5-iteration ceiling, burning the full $5.00 correction budget (plus the in-flight call that tripped it) attempting to fix the agent's own code changes, which were correct. Neither the flakiness guard nor the $5 bail described in Section 4.4 was deployed at the time. Fix: the 3-run flakiness guard (fail on 2/3 runs to be counted as a real failure) would have caught this — the test passes 60% of the time, below the 66% failure threshold for correction entry. Deploy the guard; also add a per-repo flakiness database that tracks which tests have historically failed without code changes.
 
-**LLM hallucinating library API signatures**: The agent generated code calling `repository.get_issue(number=123)` on the PyGithub library. The actual PyGithub API is `repository.get_issue(123)` — positional argument, not keyword. The code raised `TypeError: get_issue() got an unexpected keyword argument 'number'` at runtime in the sandbox. The self-correction loop was triggered; the LLM produced three more incorrect signatures before exhausting iterations. Fix: at the import analysis stage, extract `import github` and similar statements, then inject the actual library docstring for the relevant class into the context budget. 10 KB of targeted docstring prevents 3 correction iterations ($4.50 in LLM cost).
+**LLM hallucinating library API signatures**: An agent generated code calling a PyGithub method with a keyword argument the library does not accept, raising `TypeError: ... got an unexpected keyword argument` at runtime in the sandbox. (A caution on the canonical version of this story: `repository.get_issue(number=123)` is often cited as the example, but PyGithub's real signature is `def get_issue(self, number: int) -> Issue`, so passing `number=` as a keyword is perfectly valid. Verify the signature before writing the postmortem — mis-attributing a hallucination to a call that actually works sends the fix in the wrong direction.) The self-correction loop was triggered; the LLM produced three more incorrect signatures before exhausting iterations. Fix: at the import analysis stage, extract `import github` and similar statements, then inject the actual library docstring for the relevant class into the context budget. 10 KB of targeted docstring prevents roughly 3 correction iterations (~$4.50 in LLM cost at $1.50 per iteration).
 
 **Sandbox network egress leaking secrets**: An early implementation allowed unrestricted outbound HTTP from sandboxes. An agent working on a web scraping library generated test code that made an HTTP request to `https://httpbin.org/post` with the `GITHUB_TOKEN` environment variable as the request body — a plausible pattern for testing HTTP POST behavior that was also a credential exfiltration vector. The token appeared in the orchestrator's environment and was injected into the sandbox at startup. Impact: one compromised GitHub token with repo write access required immediate rotation and a 4-hour incident. Fix: (1) strict egress allowlist (PyPI, npm registry, GitHub API only, no arbitrary HTTP); (2) do not inject production credentials into sandboxes — use a short-lived, repo-scoped GitHub App token with the minimum permissions needed for the specific task; (3) add the `red_team_eval_harness.md` adversarial test suite targeting credential exfiltration. See [Red Team Eval Harness](./cross_cutting/red_team_eval_harness.md) for the full test matrix.
 
@@ -1036,8 +1048,12 @@ Break-even task volume (at $5/task pricing):
 10K tasks/day   →  210 concurrent sandboxes → 75 t3.xlarge instances ($297/day sandbox)
 100K tasks/day  →  2,083 concurrent sandboxes → 744 t3.xlarge instances ($2,975/day)
 1M tasks/day    →  20,833 concurrent sandboxes → 7,440 instances → migrate to reserved
-                   instances (40% cost reduction) + Graviton3 (20% perf/$ improvement)
-                   Reserved r7g.xlarge equivalent: $2,160/day vs $29,760 on-demand (93% savings)
+                   instances (~40% cost reduction) + Graviton (~20% perf/$ improvement)
+                   On-demand baseline: 7,440 x $0.1664/hr x 24 = $29,713/day
+                   With both levers compounding: 29,713 x 0.60 x 0.80 = ~$14,300/day
+                   (~52% savings). A 93% reduction is not achievable from a 40%
+                   discount and a 20% efficiency gain -- check this arithmetic
+                   whenever a capacity plan claims one.
 ```
 
 ---
@@ -1046,11 +1062,11 @@ Break-even task volume (at $5/task pricing):
 
 **Q: Why is SWE-bench Verified the right benchmark for autonomous SWE agents rather than HumanEval or MBPP?**
 
-SWE-bench Verified consists of 300 real GitHub issues from production open-source repositories, each with a hidden test suite that was validated by human annotators to correctly test the issue's requirement. HumanEval and MBPP test isolated function implementations from scratch — there is no existing codebase, no context window challenge, no repo navigation, no multi-file edit. An autonomous SWE agent that scores 90% on HumanEval may score 5% on SWE-bench because the hard problems are repo-level context, understanding existing code conventions, and not breaking adjacent tests. Use SWE-bench Verified for autonomous agents and HumanEval only for evaluating raw code generation quality in isolation.
+SWE-bench Verified consists of 500 real GitHub issues from production open-source repositories, each with a hidden test suite validated by human annotators to correctly test the issue's requirement. (SWE-bench Lite is the 300-instance subset and the full test split is 2,294 instances -- mixing the three up is the single most common way people mis-quote agent scores.) HumanEval and MBPP test isolated function implementations from scratch — there is no existing codebase, no context window challenge, no repo navigation, no multi-file edit. An autonomous SWE agent that scores 90% on HumanEval may score 5% on SWE-bench because the hard problems are repo-level context, understanding existing code conventions, and not breaking adjacent tests. Use SWE-bench Verified for autonomous agents and HumanEval only for evaluating raw code generation quality in isolation.
 
 **Q: How do you prevent sandbox escape — what layers of defense does the system have?**
 
-Three layers: (1) Firecracker microVM provides kernel-level isolation — each task runs in a dedicated Linux kernel; even a full VM escape only reaches the Firecracker process, which runs as an unprivileged user with seccomp-BPF filtering. (2) Network egress allowlist — outbound connections are restricted to PyPI, npm, and GitHub API via iptables rules enforced at the VMM layer, not inside the sandbox (agent-generated code cannot modify iptables). (3) Minimal credential injection — only a short-lived, scoped GitHub App token (read-only or repo-specific write) is injected, never a long-lived personal access token or AWS credentials. Defense in depth: if any one layer fails, the remaining two limit blast radius.
+Three independent layers, so that no single failure grants host access. (1) Firecracker microVM provides kernel-level isolation — each task runs in a dedicated Linux kernel; even a full VM escape only reaches the Firecracker process, which runs as an unprivileged user with seccomp-BPF filtering. (2) Network egress allowlist — outbound connections are restricted to PyPI, npm, and GitHub API via iptables rules enforced at the VMM layer, not inside the sandbox (agent-generated code cannot modify iptables). (3) Minimal credential injection — only a short-lived, scoped GitHub App token (read-only or repo-specific write) is injected, never a long-lived personal access token or AWS credentials. Defense in depth: if any one layer fails, the remaining two limit blast radius.
 
 **Q: Why checkpoint every tool call rather than every N=10 calls?**
 
@@ -1058,7 +1074,7 @@ At 50 tool calls per task and $1.52 cost per task, each tool call costs ~$0.03. 
 
 **Q: How does the self-correction loop know when to give up?**
 
-Three independent stopping conditions: (1) max_iterations exceeded (hard limit of 5); (2) cost ceiling reached ($5 in correction spend, which is approximately 3.3 correction LLM calls at typical context size — if 3 full iterations have not resolved the issue, additional iterations are statistically unlikely to succeed based on SWE-bench empirical data); (3) patch apply failure (if `git apply` rejects the LLM's patch due to context mismatch, the loop cannot make progress and must fail immediately). The flakiness guard prevents the loop from entering at all if the test failure is not reproducible on 2 of 3 runs. Together these conditions ensure the loop terminates in bounded time and cost.
+Three independent stopping conditions, any one of which terminates the loop. (1) max_iterations exceeded (hard limit of 5); (2) cost ceiling reached ($5 in correction spend, which is approximately 3.3 correction LLM calls at typical context size — if 3 full iterations have not resolved the issue, additional iterations are statistically unlikely to succeed based on SWE-bench empirical data); (3) patch apply failure (if `git apply` rejects the LLM's patch due to context mismatch, the loop cannot make progress and must fail immediately). The flakiness guard prevents the loop from entering at all if the test failure is not reproducible on 2 of 3 runs. Together these conditions ensure the loop terminates in bounded time and cost.
 
 **Q: What is the context budget allocation strategy for a 500,000-file monorepo?**
 
@@ -1082,7 +1098,7 @@ The cost ceiling is enforced in the `DurableTaskRunner.run()` method before ever
 
 **Q: What is the PR quality bar before the agent opens it?**
 
-Four gates must all pass before the agent calls the GitHub API to create a PR: (1) full test suite passes with exit code 0 on 3 of 3 runs (flakiness-guarded); (2) `git diff --stat` confirms at most 500 lines changed across at most 20 files (diff size cap prevents runaway refactors); (3) linter exits clean with no new errors compared to the base commit (`git stash && lint → baseline errors; git stash pop && lint → current errors; delta must be 0`); (4) task cost is under $20 ceiling. If any gate fails and max correction iterations are exhausted, the task is marked failed and no PR is opened. A partial PR (failing tests, lint errors) is never opened — it would damage the agent's credibility with the repo maintainer and create noise in the PR queue.
+Four gates must all pass, and a partial PR is never opened. (1) Full test suite passes with exit code 0 on 3 of 3 runs (flakiness-guarded); (2) `git diff --stat` confirms at most 500 lines changed across at most 20 files (diff size cap prevents runaway refactors); (3) linter exits clean with no new errors compared to the base commit (`git stash && lint → baseline errors; git stash pop && lint → current errors; delta must be 0`); (4) task cost is under $20 ceiling. If any gate fails and max correction iterations are exhausted, the task is marked failed and no PR is opened. A partial PR (failing tests, lint errors) is never opened — it would damage the agent's credibility with the repo maintainer and create noise in the PR queue.
 
 **Q: How does the agent handle a repo it has never seen before with no pre-indexed embeddings?**
 

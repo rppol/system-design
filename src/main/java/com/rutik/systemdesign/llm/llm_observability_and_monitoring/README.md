@@ -89,12 +89,13 @@ Token-based pricing requires granular cost tracking:
 Cost calculation at the gateway layer:
 
 ```python
-# Per-model pricing table (as of 2024, per 1M tokens)
+# Per-model pricing table, per 1M tokens (list prices as of July 2026 --
+# treat this table as configuration, not a constant: providers reprice often)
 PRICING = {
-    "gpt-4o":       {"input": 2.50,  "output": 10.00},
-    "gpt-4o-mini":  {"input": 0.15,  "output": 0.60},
-    "claude-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-haiku":  {"input": 0.25, "output": 1.25},
+    "gpt-4o":         {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini":    {"input": 0.15, "output": 0.60},
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00},  # introductory through 2026-08-31, then 3.00 / 15.00
+    "claude-haiku-4.5": {"input": 1.00, "output": 5.00},
 }
 
 def calculate_cost(model, input_tokens, output_tokens):
@@ -214,7 +215,7 @@ Two distinct dashboard audiences:
 flowchart TD
     User([User / Client]) --> Gateway
     Gateway["API Gateway / LLM Proxy Layer\n(token counting, cost calc, trace init, rate limiting)"] --> Embed & VDB & Rerank & LLMProv
-    Embed["Embedding Model\n(ada-002, Cohere)"]
+    Embed["Embedding Model\n(text-embedding-3-small, Cohere)"]
     VDB[("Vector DB\n(Pinecone, Weaviate)")]
     Rerank["Reranker\n(Cohere, BGE)"]
     LLMProv["LLM Provider\n(OpenAI, Anthropic, self-hosted)"]
@@ -260,7 +261,7 @@ Trace: "user asks about refund policy"
 |   |   results_returned=10, min_score=0.72, max_score=0.94
 |   |
 |   +-- [Span: Reranking] latency=85ms
-|   |   model="cohere-rerank-v3"
+|   |   model="rerank-v4.0-fast"
 |   |   input_candidates=10, output_selected=3
 |   |   top_score=0.91, cost=$0.00005
 |   |
@@ -329,14 +330,16 @@ OpenTelemetry (OTel) is the standard for distributed tracing. LLM observability 
 
 ```python
 from opentelemetry import trace
-from opentelemetry.semconv.ai import SpanAttributes
 
+# Attribute names below follow the OpenTelemetry GenAI semantic conventions.
+# They are still marked Development/experimental, so pin the convention version
+# you emit and use OTEL_SEMCONV_STABILITY_OPT_IN when migrating.
 tracer = trace.get_tracer("llm-app")
 
 def call_llm(prompt, model="gpt-4o", temperature=0.1):
     with tracer.start_as_current_span("llm.generation") as span:
         # Set LLM-specific attributes before the call
-        span.set_attribute("gen_ai.system", "openai")
+        span.set_attribute("gen_ai.provider.name", "openai")
         span.set_attribute("gen_ai.request.model", model)
         span.set_attribute("gen_ai.request.temperature", temperature)
         span.set_attribute("gen_ai.request.max_tokens", 1024)
@@ -571,22 +574,22 @@ enough that a fraction still adds up; for rare events, the fraction *is* the who
 ## 7. Real-World Examples
 
 ### LangSmith (LangChain)
-LangChain's observability and evaluation platform. Captures full trace trees for chains and agents, including every LLM call, retrieval, and tool invocation. Key features: visual trace debugging, human feedback collection, dataset curation from production traces, online evaluation with custom evaluators, prompt versioning and A/B comparison. Pricing: free tier up to 5K traces/month; paid plans from $39/seat/month. Limitation: tightly coupled to LangChain ecosystem -- instrumenting non-LangChain code requires manual span creation.
+LangChain's observability and evaluation platform. Captures full trace trees for chains and agents, including every LLM call, retrieval, and tool invocation. Key features: visual trace debugging, human feedback collection, dataset curation from production traces, online evaluation with custom evaluators, prompt versioning and A/B comparison. Pricing (July 2026): a free Developer tier, then a Plus tier at $39/seat/month with an included trace allowance and usage-based overage per 1K traces. Limitation: tightly coupled to LangChain ecosystem -- instrumenting non-LangChain code requires manual span creation.
 
 ### Langfuse
-Open-source LLM observability platform. Deploys self-hosted or as a managed service. Captures traces with nested spans, tracks cost per trace, supports prompt management with versioning, and provides evaluation pipelines (both model-based and human). Integrates via Python/JS SDKs or OpenTelemetry. Key differentiator: open-source with full data ownership. ~15K GitHub stars. Supports LangChain, LlamaIndex, OpenAI SDK, and custom frameworks via decorator-based instrumentation. Self-hosted cost: ~$200/month on AWS for moderate traffic (50K traces/day).
+Open-source LLM observability platform. Deploys self-hosted or as a managed service. Captures traces with nested spans, tracks cost per trace, supports prompt management with versioning, and provides evaluation pipelines (both model-based and human). Integrates via Python/JS SDKs or OpenTelemetry. Key differentiator: open-source with full data ownership. Supports LangChain, LlamaIndex, OpenAI SDK, and custom frameworks via decorator-based instrumentation. Self-hosted cost: roughly a couple hundred dollars a month on AWS for moderate traffic (50K traces/day). ClickHouse acquired Langfuse in January 2026; the project remains open source and self-hostable and Langfuse Cloud continues to operate.
 
 ### Helicone
-API proxy model -- sits between your application and the LLM provider as a transparent proxy. No SDK changes required; just change the base URL. Logs every request with token counts, latency, cost, and caching status. Built-in request caching (saves ~20% on repeated identical prompts), rate limiting, and cost alerts. Limitation: proxy model adds 5-15ms latency per request; cannot capture internal application spans (retrieval, reranking) since it only sees the final LLM call.
+API proxy model -- sits between your application and the LLM provider as a transparent proxy. No SDK changes required; just change the base URL. Logs every request with token counts, latency, cost, and caching status. Built-in request caching, rate limiting, and cost alerts. Limitation: the proxy model adds a few milliseconds of latency per request and cannot capture internal application spans (retrieval, reranking) since it only sees the final LLM call. Status note: Mintlify acquired Helicone in March 2026 and the standalone product moved to maintenance mode (security and bug fixes only) -- treat it as a pattern to study rather than a platform to adopt for new work.
 
 ### Arize Phoenix
 Open-source tool focused on embedding-level observability. Computes embedding drift between reference (training/validation) and production datasets. Visualizes clusters using UMAP projections. Supports LLM trace capture and evaluation workflows. Key strength: identifying when input distributions shift -- for example, detecting that production queries have drifted into a topic cluster the system handles poorly. Self-hostable, integrates with OpenTelemetry.
 
-### Weights and Biases Prompts
-Extension of the W&B MLOps platform for LLM workflows. Tracks prompt versions as artifacts, logs LLM completions with full metadata, and supports evaluation scoring. Strongest for teams already using W&B for ML experiment tracking. Provides chain/agent trace visualization. Pricing: free for individual use; team plans from $50/seat/month.
+### W&B Weave (Weights & Biases)
+The LLM/agent arm of the W&B platform, and the successor to the earlier "W&B Prompts" feature. Tracks prompt objects and versions, logs LLM completions with full metadata, and supports evaluation scoring. Strongest for teams already using W&B for ML experiment tracking. Provides chain/agent trace visualization. Pricing is metered rather than purely per-seat -- storage plus Weave trace ingestion on top of a Free/Pro/Enterprise tier split.
 
-### Datadog LLM Monitoring
-Enterprise APM vendor's LLM offering. Auto-instruments OpenAI, Anthropic, and AWS Bedrock calls. Correlates LLM traces with infrastructure metrics (CPU, GPU, memory) in a single pane. Supports LLM-as-judge evaluations and token cost tracking. Key strength: enterprises already on Datadog get LLM observability without a new vendor. Key weakness: cost -- Datadog ingestion pricing makes high-volume LLM logging expensive (~$0.10 per GB ingested).
+### Datadog LLM / Agent Observability
+Enterprise APM vendor's LLM offering (now surfaced as "Agent Observability"). Auto-instruments popular LLM SDKs and frameworks -- OpenAI, Amazon Bedrock, Google Vertex AI and others -- for Python, Node.js, and Java, with no code changes. Correlates LLM traces with infrastructure metrics (CPU, GPU, memory) in a single pane. Supports LLM-as-judge evaluations and token cost tracking. Key strength: enterprises already on Datadog get LLM observability without a new vendor. Key weakness: cost -- Datadog log ingestion is billed per GB (list price $0.10/GB), which makes high-volume prompt/response logging expensive.
 
 ---
 
@@ -605,7 +608,7 @@ Enterprise APM vendor's LLM offering. Auto-instruments OpenAI, Anthropic, and AW
 
 ### Self-Hosted vs. SaaS Observability
 
-| Dimension | Self-Hosted (Langfuse, Phoenix) | SaaS (LangSmith, Helicone, Datadog) |
+| Dimension | Self-Hosted (Langfuse, Phoenix) | SaaS (LangSmith, Braintrust, Datadog) |
 |-----------|-------------------------------|--------------------------------------|
 | **Data privacy** | Full control -- data never leaves your infrastructure | Vendor stores your prompts and responses |
 | **Setup cost** | 2-4 weeks engineering effort | Hours to integrate SDK |
@@ -669,7 +672,7 @@ Enterprise APM vendor's LLM offering. Auto-instruments OpenAI, Anthropic, and AW
 
 **3. Not attributing costs to features, leading to invisible budget overruns.** A mid-size SaaS company shared a single OpenAI API key across 6 product features. Monthly bill: $45K. After instrumenting per-feature cost attribution, they discovered that an internal document summarization tool used by 12 people was consuming 60% ($27K) of the budget because it sent entire 50-page documents as context for every query. The fix: implement chunking for the summarization tool (reduced its cost to $4K/month) and set per-feature budget caps with alerts at 80% of cap.
 
-**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-4 as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with GPT-4o-mini as the judge (300ms, 90% agreement with GPT-4 judge), sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
+**4. Quality scoring pipeline that is slower than inference, causing queue backup.** A healthcare company ran synchronous LLM-as-judge evaluation on 100% of responses using GPT-4 as the judge. Judge latency: 1.5-3 seconds. At 2K requests/hour, the scoring queue backed up within 2 hours and reached a 6-hour delay by end of day. Stale quality scores meant alerts fired on data that was half a day old. The fix: switch to async scoring with a small, cheap judge model, calibrated against the large judge on a held-out set before rollout, sample at 10%, and use a dedicated scoring worker pool that auto-scales based on queue depth.
 
 **5. Dashboard overload -- 50 metrics, nobody looks at any of them.** A platform team built a comprehensive Grafana dashboard with 50+ panels covering every conceivable LLM metric. Usage analytics showed the dashboard had 3 views per week, all from the person who built it. Nobody else could find the signal in the noise. The fix: create two focused dashboards. Ops dashboard: 6 panels (request volume, error rate, P95 latency, cost burn rate, active alerts, provider status). Product dashboard: 6 panels (quality score trend, user satisfaction, top failure modes, feature usage, cost per conversation, prompt version comparison). Total views jumped to 40+ per week.
 
@@ -681,14 +684,14 @@ Enterprise APM vendor's LLM offering. Auto-instruments OpenAI, Anthropic, and AW
 
 | Tool | Type | Key Feature | Open Source | Pricing Model |
 |------|------|-------------|-------------|---------------|
-| **Langfuse** | Full platform | Traces, cost, prompts, evals | Yes | Free self-hosted; cloud from $0 (free tier) |
+| **Langfuse** | Full platform | Traces, cost, prompts, evals | Yes | Free self-hosted; cloud free tier + usage tiers (ClickHouse-owned since Jan 2026) |
 | **Arize Phoenix** | Evaluation + drift | Embedding drift, UMAP viz, evals | Yes | Free self-hosted |
-| **Helicone** | API proxy | Zero-code integration, caching | Partially | Free tier 100K logs; paid from $120/mo |
-| **LangSmith** | Full platform | LangChain native, datasets, evals | No | Free 5K traces/mo; paid from $39/seat/mo |
-| **W&B Prompts** | Eval + tracking | Prompt versioning, experiment tracking | No | Free individual; team from $50/seat/mo |
+| **Helicone** | API proxy | Zero-code integration, caching | Partially | Maintenance mode only since the Mar 2026 Mintlify acquisition -- not a choice for new builds |
+| **LangSmith** | Full platform | LangChain native, datasets, evals | No | Free Developer tier; Plus from $39/seat/mo plus per-1K-trace usage |
+| **W&B Weave** | Eval + tracking | Prompt versioning, experiment tracking | Partially | Free tier; Pro subscription plus metered trace ingestion and storage |
 | **OpenLLMetry** | OTel instrumentation | Auto-instruments 20+ LLM libraries | Yes | Free (instrumentation only) |
-| **Traceloop** | Full platform | Built on OpenLLMetry, SaaS dashboard | Partially | Free tier; paid from $99/mo |
-| **Datadog LLM Monitoring** | Enterprise APM | Full infra correlation, auto-instrument | No | Per-host + per-GB ingestion pricing |
+| **Traceloop** | Full platform | Built on OpenLLMetry, SaaS dashboard | Partially | Free tier; paid usage tiers |
+| **Datadog LLM / Agent Observability** | Enterprise APM | Full infra correlation, auto-instrument | No | Per-host + per-GB ingestion pricing |
 | **Braintrust** | Eval platform | CI/CD for prompts, scoring, logging | No | Free tier; paid from usage-based |
 | **Custom OTel** | DIY | Full control, any backend | Yes | Cost of infra (Jaeger + Prometheus + Grafana) |
 
@@ -709,11 +712,12 @@ Are you using LangChain heavily?
   NO  --> Continue
 
 Do you want zero code changes?
-  YES --> Helicone (proxy model)
+  YES --> Put a drop-in LLM proxy/gateway in front of the provider
+          (only a base_url change; you lose internal retrieval/rerank spans)
   NO  --> Continue
 
 Are you already on Datadog?
-  YES --> Datadog LLM Monitoring (single pane of glass)
+  YES --> Datadog LLM / Agent Observability (single pane of glass)
   NO  --> Langfuse (best balance of features, cost, openness)
 ```
 
@@ -728,7 +732,7 @@ Start with three layers: a lightweight synchronous instrumentation layer in the 
 Five categories. Latency: Time to First Token (target <500ms), total response time (P95 <3s), inter-token latency (<30ms for smooth streaming). Quality: groundedness score (>0.90 for RAG), relevance score, hallucination rate (<5%), instruction compliance rate. Cost: cost per conversation (track trend over time), cost per user, daily/monthly spend vs. budget. Engagement: conversation completion rate, user thumbs-up/down ratio, average turns per conversation, escalation-to-human rate. Errors: API error rate, safety filter trigger rate, context length exceeded rate, empty response rate. The most important single metric is often the user satisfaction proxy (thumbs up/down ratio) because it integrates quality, relevance, and helpfulness into one signal.
 
 **Q: How do you implement cost attribution across teams in a shared LLM platform?**
-Implement a gateway layer that every LLM request must pass through. The gateway requires a team_id and feature_id tag on every request (enforced at the SDK level -- requests without tags are rejected). The gateway counts tokens, looks up the per-model pricing table, calculates the cost, and writes a cost event to a metrics store (Prometheus counter with team and feature labels, or a cost ledger in PostgreSQL). Build a daily aggregation job that rolls up per-request costs to per-team and per-feature totals. Set per-team monthly budgets with alerts at 80% consumption and hard throttling at 100%. Expose a self-service cost dashboard where team leads can see their spend broken down by feature, model, and day. At a company with $50K/month LLM spend, this approach typically reveals that 20% of features consume 80% of cost.
+Implement a gateway layer that every LLM request must pass through. The gateway requires a team_id and feature_id tag on every request (enforced at the SDK level -- requests without tags are rejected). The gateway counts tokens, looks up the per-model pricing table, calculates the cost, and writes a cost event to a metrics store (Prometheus counter with team and feature labels, or a cost ledger in PostgreSQL). Build a daily aggregation job that rolls up per-request costs to per-team and per-feature totals. Set per-team monthly budgets with alerts at 80% consumption and hard throttling at 100%. Expose a self-service cost dashboard where team leads can see their spend broken down by feature, model, and day. In practice this almost always reveals a heavily skewed distribution, with a small number of features accounting for most of the spend -- which is exactly what makes the exercise worth doing.
 
 **Q: What are the privacy and compliance risks of logging prompts and responses, and how do you mitigate them?**
 Full prompt/response logging turns the observability store into a second PII database subject to the same GDPR/CCPA obligations as the primary system -- users paste names, account numbers, and health details into chat boxes. Mitigations: run PII redaction (regex + NER) before text reaches the trace store; sample text logging at 10-20% to shrink the exposure surface while still logging 100% of metadata, which contains no content; set retention lifecycle policies (raw text deleted or moved to restricted cold storage after ~30 days); and apply RBAC so trace text is visible to far fewer people than trace metadata. In regulated industries, prefer self-hosted backends (Langfuse, Phoenix) so prompts never leave your cloud account. Deletion requests must propagate to traces -- index stored text by user_id so a GDPR erasure request can actually find it.
@@ -752,7 +756,7 @@ Treat explicit feedback as a free, high-precision sampling trigger: a thumbs-dow
 Prioritize alerts by blast radius and urgency. Critical (page immediately): error rate >5% in a 5-minute window; safety filter triggers >5x baseline in 15 minutes (possible adversarial attack); monthly cost projected to exceed budget by >200%. High (page during business hours): P95 TTFT >2 seconds sustained for 30 minutes; hallucination rate >10% over a 1-hour window; empty/truncated response rate >3%. Medium (Slack notification): daily cost >150% of 7-day rolling average; quality score mean drops >1 standard deviation from 7-day baseline; new error type appears that was never seen before. Low (weekly digest): prompt version performance comparison results; embedding drift score trend; per-team cost breakdown changes. The key principle: every alert must have a documented runbook with a specific action. If you cannot write a runbook for an alert, it should be a dashboard metric, not an alert.
 
 **Q: How do you debug a bad LLM response using traces?**
-Start with the trace ID from the user's session. Open the trace in your observability UI (Langfuse, LangSmith, Jaeger). Walk through spans in order: (1) Check the query understanding span -- did the system correctly classify the user's intent? (2) Check the embedding span -- was the embedding model correct and did it complete successfully? (3) Check the retrieval span -- did the vector DB return relevant documents? Look at similarity scores; if the top score is below 0.75, retrieval quality is the likely culprit. (4) Check the reranking span -- did reranking correctly promote the best documents? (5) Check the prompt assembly span -- look at the actual assembled prompt including system prompt, context, and user query. Is the context relevant? Is the system prompt correctly formatted? (6) Check the generation span -- what model, temperature, and tokens were used? Was the finish_reason "stop" (normal) or "length" (truncated)? (7) Check the quality eval span if available -- what were the groundedness and relevance scores? In practice, 60% of bad responses trace back to retrieval quality (wrong documents retrieved), 25% to prompt engineering issues, and 15% to model limitations.
+Start with the trace ID from the user's session. Open the trace in your observability UI (Langfuse, LangSmith, Jaeger). Walk through spans in order: (1) Check the query understanding span -- did the system correctly classify the user's intent? (2) Check the embedding span -- was the embedding model correct and did it complete successfully? (3) Check the retrieval span -- did the vector DB return relevant documents? Look at similarity scores; if the top score is below 0.75, retrieval quality is the likely culprit. (4) Check the reranking span -- did reranking correctly promote the best documents? (5) Check the prompt assembly span -- look at the actual assembled prompt including system prompt, context, and user query. Is the context relevant? Is the system prompt correctly formatted? (6) Check the generation span -- what model, temperature, and tokens were used? Was the finish_reason "stop" (normal) or "length" (truncated)? (7) Check the quality eval span if available -- what were the groundedness and relevance scores? In RAG systems retrieval quality is usually the largest single bucket of bad responses, with prompt-assembly problems second and genuine model limitations last -- but measure that split on your own traces rather than assuming an industry-wide ratio.
 
 **Q: How do you monitor prompt drift over time?**
 Prompt drift has two dimensions: template drift (your prompt changes) and input drift (user queries change). For template drift, version every prompt template in a prompt registry (Langfuse, LangSmith, or a simple Git-tracked YAML file). Tag every LLM call with the prompt version. Diff quality metrics between prompt versions using a statistical significance test (chi-squared for categorical outcomes, t-test for continuous scores). For input drift, compute embeddings of user queries and track the distribution centroid over time. Use a two-sample test (MMD -- Maximum Mean Discrepancy, or a simpler cosine distance from a reference centroid) to detect when query distribution shifts. Alert when the rolling mean distance exceeds 2 standard deviations from baseline for more than 4 hours. Input drift often correlates with quality drops because the system was optimized for the original query distribution.
@@ -767,7 +771,7 @@ Build three components. First, an experiment router in the gateway layer that as
 Instrument the agent loop with per-trace iteration count, cumulative token count, and cumulative cost as span attributes, then enforce limits at two layers: a hard max_iterations in the agent code (typically 10-15) and a gateway-level cost circuit breaker that kills any trace exceeding a per-request budget (e.g., $0.50). Runaway signatures are visible in traces before the invoice arrives: repeated identical tool calls with the same arguments, oscillation between two tools, or context growth without new information -- alert when iterations exceed 2x the P95 for that agent type. A single unbounded agent retrying a failing tool at 3 calls/second can burn hundreds of dollars per hour. Log the termination reason (completed, max_iterations, budget_kill) as a span attribute so you can track what fraction of agent runs end abnormally.
 
 **Q: How do you measure and reduce Time to First Token (TTFT)?**
-TTFT is measured at the client side -- the time from sending the request to receiving the first byte of the streamed response. Typical TTFT breakdown: network latency (10-50ms), request queuing at the provider (0-500ms, highly variable), prompt processing / prefill phase (50-500ms depending on input length), and first token decode (5-20ms). To reduce TTFT: (1) Use streaming endpoints -- non-streaming forces the client to wait for the full response. (2) Reduce input token count -- every 1,000 extra input tokens adds ~50-100ms to prefill time on most providers. (3) Use prompt caching (Anthropic, OpenAI) -- cached prefixes skip the prefill phase, reducing TTFT by 60-80% for repeated system prompts. (4) Choose providers/models with lower TTFT -- smaller models have faster prefill. GPT-4o-mini TTFT: ~200ms; GPT-4o TTFT: ~400ms; Claude Sonnet TTFT: ~300ms. (5) Deploy a model closer to users (edge inference) for latency-sensitive applications. Monitor TTFT at P50, P95, and P99 -- P99 is often 3-5x worse than P50 due to provider-side queuing.
+TTFT is measured at the client side -- the time from sending the request to receiving the first byte of the streamed response. Typical TTFT breakdown: network latency (10-50ms), request queuing at the provider (0-500ms, highly variable), prompt processing / prefill phase (50-500ms depending on input length), and first token decode (5-20ms). To reduce TTFT: (1) Use streaming endpoints -- non-streaming forces the client to wait for the full response. (2) Reduce input token count -- every 1,000 extra input tokens adds ~50-100ms to prefill time on most providers. (3) Use prompt caching (Anthropic, OpenAI) -- cached prefixes skip the prefill phase, reducing TTFT by 60-80% for repeated system prompts. (4) Choose providers/models with lower TTFT -- smaller models have faster prefill, and the small tier of a family typically lands a few hundred milliseconds ahead of its flagship. Measure this yourself per model, per region, and per prompt length; published TTFT figures go stale with every model and serving-stack revision. (5) Deploy a model closer to users (edge inference) for latency-sensitive applications. Monitor TTFT at P50, P95, and P99 -- P99 is often 3-5x worse than P50 due to provider-side queuing.
 
 ---
 
@@ -775,7 +779,7 @@ TTFT is measured at the client side -- the time from sending the request to rece
 
 1. **Instrument at the gateway, not the application.** Place your observability instrumentation in a shared gateway/proxy layer that all LLM requests pass through. This guarantees every call is captured regardless of which application or team made it. Application-level instrumentation is fragile -- one team forgets to add the SDK, and you have blind spots.
 
-2. **Start with cost visibility before anything else.** Cost attribution is the easiest observability feature to implement (just count tokens and multiply by price) and delivers the highest immediate ROI. Teams routinely discover 30-50% cost savings opportunities within the first week of visibility. Implement per-team, per-feature cost tracking before investing in quality evaluation.
+2. **Start with cost visibility before anything else.** Cost attribution is the easiest observability feature to implement (just count tokens and multiply by price) and delivers the highest immediate ROI. The first week of visibility usually surfaces obvious savings -- an oversized model on a trivial feature, an unbounded context, a retry storm -- because nobody was looking before. Implement per-team, per-feature cost tracking before investing in quality evaluation.
 
 3. **Use a tiered logging strategy from day one.** Log 100% of metadata (tokens, latency, model, cost, status) at ~50 bytes per call. Log full prompt+response text for a configurable sample (default 10%). Log expensive quality evaluations for 1-2%. Set these sampling rates as runtime configuration, not compile-time constants, so you can increase sampling during incidents.
 
@@ -806,7 +810,7 @@ TTFT is measured at the client side -- the time from sending the request to rece
 flowchart TD
     Cust(["Customers<br/>10K conv/day"]) --> Frontend["Chat Frontend<br/>session_id, user_id tags"]
     Frontend --> Gateway["LLM Gateway<br/>token counting - cost calc<br/>budget enforcement - trace ID<br/>prompt version tag"]
-    Gateway --> Embed["Embedding API<br/>ada-002"] & VDB2[("Vector DB<br/>Pinecone")] & Rerank2["Rerank API<br/>Cohere"] & LLMProv2["LLM Provider<br/>GPT-4o-mini"]
+    Gateway --> Embed["Embedding API<br/>text-embedding-3-small"] & VDB2[("Vector DB<br/>Pinecone")] & Rerank2["Rerank API<br/>Cohere"] & LLMProv2["LLM Provider<br/>GPT-4o-mini"]
     Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> TraceCollector["Trace Collector<br/>Langfuse - self-hosted"]
     Embed & VDB2 & Rerank2 & LLMProv2 -- telemetry --> QualEval2["Quality Eval Workers - async<br/>groundedness, safety"]
     TraceCollector --> pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL", pos: "b", h: 44 }
@@ -834,7 +838,7 @@ flowchart TD
 2. **Gateway-level instrumentation.** All LLM calls route through a thin Python gateway that adds trace context, counts tokens, calculates cost, and enforces a $12K/month hard budget cap. Gateway overhead: 3ms per request (well under the 5% target on a typical 1.2s response).
 
 3. **Tiered quality evaluation:**
-   - 100% of responses: safety classifier (self-hosted Llama Guard 3 on a g5.xlarge GPU, $0.00003/eval, ~80ms)
+   - 100% of responses: safety classifier (self-hosted Llama Guard 4 on a g5.xlarge GPU, $0.00003/eval, ~80ms)
    - 15% of responses: groundedness scoring via GPT-4o-mini as judge (~$0.0002/eval, ~400ms async)
    - 100% of responses with user feedback: full rubric evaluation triggered by any thumbs-down
    - Monthly cost of quality evaluation: ~$380
@@ -899,33 +903,27 @@ def generate_text(prompt: str) -> str:
 
 # FIX: enforce all LLM calls through a platform gateway with mandatory tracing
 # platform/llm_gateway.py
-import httpx
-from langfuse import Langfuse
 from functools import wraps
-import os
+from langfuse import get_client, observe
 
-langfuse = Langfuse(
-    public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
-    secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-)
+# Langfuse Python SDK v3 is OpenTelemetry-based: get_client() reads
+# LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY from the environment, and @observe
+# creates a span that nests under whatever span is already current. The v2
+# client API (langfuse.trace(...) / trace.generation(...)) was removed in v3, and
+# v4 renames several helpers again -- pin the SDK major version you code against.
+langfuse = get_client()
 
 def traced_completion(service_name: str, feature_name: str):
     """Decorator that wraps any LLM call with cost attribution tracing."""
     def decorator(fn):
+        @observe(as_type="generation")
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            trace = langfuse.trace(
+            langfuse.update_current_trace(
                 name=f"{service_name}/{feature_name}",
                 metadata={"service": service_name, "feature": feature_name},
             )
-            generation = trace.generation(name="llm_call", model=kwargs.get("model"))
-            try:
-                result = fn(*args, **kwargs)
-                generation.end(output=result, usage=result.usage.__dict__)
-                return result
-            except Exception as e:
-                generation.end(level="ERROR", status_message=str(e))
-                raise
+            return fn(*args, **kwargs)
         return wrapper
     return decorator
 

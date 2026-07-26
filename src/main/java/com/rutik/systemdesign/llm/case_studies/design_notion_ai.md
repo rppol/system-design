@@ -26,7 +26,7 @@
 - **Scale**: 30M+ monthly active users; 4M+ workspaces; billions of content blocks
 - **Freshness**: new/edited content searchable within 5 minutes
 - **Availability**: 99.95% uptime (workspace AI is a paid feature)
-- **Throughput**: 50,000 AI queries per minute at peak
+- **Throughput**: ~31,000 AI queries per minute at peak (~520 req/sec; see Section 2)
 
 ### Out of Scope
 - The Notion editor itself (block-based editor already exists)
@@ -95,7 +95,7 @@ Daily token volume:
 ### Storage Summary
 ```
 Embedding store: 260TB (distributed across Qdrant cluster)
-Permission cache: 30M users x 4KB average permission bitmap = 120GB (Redis)
+Permission cache: 30M users x 6.25KB bloom filter (see 4.1) = 187GB (Redis)
 Content cache (hot pages): 500GB (Redis cluster)
 Metadata store: 2TB (PostgreSQL sharded by workspace_id)
 Change event queue: 50M events/day x 2KB = 100GB/day throughput (Kafka)
@@ -125,7 +125,7 @@ flowchart TD
     merge(("Hybrid Merge<br/>RRF"))
     rerank["Reranking Service<br/>cross-encoder top-50 to top-8<br/>+ permission re-validation"]
     ctx["Context Assembly<br/>expand to parent page context,<br/>breadcrumb, linked snippets, citations"]
-    llm["LLM Generation Service<br/>GPT-4o / Claude 3.5 Sonnet<br/>streaming, grounded in context"]
+    llm["LLM Generation Service<br/>GPT-4o / Claude Sonnet 5<br/>streaming, grounded in context"]
     post["Response Post-Processing<br/>citations, source links,<br/>safety filter, hallucination check"]
     resp(["User Response<br/>answer + page links"])
 
@@ -477,14 +477,14 @@ Writing assist modes:
    Prompt: "Continue writing the following document naturally.
             Match the existing tone, style, and topic."
    Latency target: < 1 second to first token (streaming)
-   Model: Claude 3.5 Haiku (fast, cost-effective for generation)
+   Model: Claude Haiku 4.5 (fast, cost-effective for generation)
 
 2. Summarize selection
    Context: selected text + page title + heading hierarchy
    Prompt: "Summarize the following text concisely. Preserve key facts
             and action items."
    Output: 1-3 sentences
-   Model: Claude 3.5 Haiku
+   Model: Claude Haiku 4.5
 
 3. Translate
    Context: selected text + target language
@@ -496,7 +496,7 @@ Writing assist modes:
    Context: selected text + target tone (professional/casual/friendly/direct)
    Prompt: "Rewrite the following in a {tone} tone. Preserve the meaning
             and key information."
-   Model: Claude 3.5 Haiku
+   Model: Claude Haiku 4.5
 
 5. Page Q&A ("Ask AI about this page")
    Context: full page content + linked pages
@@ -536,25 +536,33 @@ async def block_stream_handler(
     async def event_generator() -> AsyncIterator[str]:
         seq = 0
         check_counter = 0
-        task = asyncio.create_task(
-            llm_client.stream_completion(context_tokens, instruction, max_tokens=1024)
+        completed = False
+        # stream_completion returns an async iterator of token strings.
+        # Do NOT wrap it in asyncio.create_task(): an async generator is not a
+        # coroutine (create_task would raise), and even for a coroutine that
+        # *returns* an iterator the task is already done by the time tokens
+        # flow -- so task.cancel() would be a no-op and would never free the GPU.
+        # Closing the iterator is what actually propagates cancellation upstream.
+        stream = llm_client.stream_completion(
+            context_tokens, instruction, max_tokens=1024
         )
         try:
-            async for token in await task:
+            async for token in stream:
                 seq += 1
                 check_counter += 1
-                if check_counter >= 5:          # check every 5 tokens
+                if check_counter >= 5:          # check every 5 tokens (~125ms)
                     check_counter = 0
                     if await request.is_disconnected():
-                        task.cancel()           # free GPU immediately
-                        return
+                        break                   # aclose() below frees the GPU
                 yield f"id: {seq}\ndata: {token}\n\n"
-            yield f"id: {seq + 1}\ndata: [DONE]\n\n"
-        except asyncio.CancelledError:
-            return
+            else:
+                completed = True
+            if completed:
+                yield f"id: {seq + 1}\ndata: [DONE]\n\n"
         finally:
-            if not task.done():
-                task.cancel()
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     return StreamingResponse(
         event_generator(),
@@ -610,12 +618,13 @@ Cross-workspace isolation guarantees:
 
 Enforce the permission model at the vector DB routing layer, not as a post-retrieval metadata filter. `WorkspaceRetriever` routes every query to the correct per-workspace Qdrant collection — making cross-workspace contamination architecturally impossible.
 
-Storage math: 1M workspaces x 50MB avg collection = 50TB vector storage. Qdrant collections are lightweight (~4KB overhead) — 1M collections feasible on a sharded cluster.
+Storage math, consistent with Section 2 (4M workspaces, 40B chunks, 260TB): 40B / 4M = ~10,000 chunks per workspace x 6.5KB = ~65MB average collection; 4M x 65MB = 260TB. Qdrant collections are lightweight per-collection, but 4M of them is a real operational load — see the sizing tiers in 4.6, where only small workspaces get their own collection on a shared node.
 
 BROKEN pattern (single shared collection with metadata filter):
 ```python
 # BROKEN: a prompt-injection attack that influences query-rewriting bypasses the filter.
-qdrant_client.search(collection_name="all_workspaces", ...)  # wrong
+qdrant_client.search(collection_name="all_workspaces",
+                     query_vector=embed(query), limit=50)   # wrong
 # BUG 1: filter bypass -> any workspace content returned.
 # BUG 2: HNSW scan over 40B vectors across all tenants on every query.
 ```
@@ -828,7 +837,7 @@ Query rewriting for workspace context:
 | Permission caching | Redis bloom filter + exact PG check | Recompute on every query | 2-5ms vs 50-200ms; acceptable staleness with 5-min TTL + event-driven invalidation |
 | Database queries | Hybrid: semantic + structured filter | Semantic only | Precise property filters ("P0 bugs") fail on semantic search alone |
 | Indexing latency | 2-5 minute SLA via Kafka CDC | Synchronous indexing on write | Async avoids write-path latency; 5 min is acceptable for AI search freshness |
-| Writing assist model | Claude 3.5 Haiku (fast tasks) + GPT-4o (translation, reasoning) | Single model for all | Cost optimization: Haiku is 10x cheaper, adequate for summarize/continue/tone |
+| Writing assist model | Claude Haiku 4.5 (fast tasks) + GPT-4o (translation, reasoning) | Single model for all | Cost optimization: Haiku is 10x cheaper, adequate for summarize/continue/tone |
 | Linked page context | Include in writing assist with permission check | Exclude linked pages | Significantly improves context-aware generation; permission check prevents leakage |
 | Change propagation for permissions | Deny-by-default during propagation | Allow-by-default during propagation | Security: briefly denying access to a chunk is better than briefly leaking it |
 
@@ -856,15 +865,15 @@ LLM generation costs:
     Subtotal: $117,500/day
 
   Writing assist (5M requests):
-    4M via Claude 3.5 Haiku ($0.25/1M input, $1.25/1M output):
-      Input: 4M x 3,000 tokens x $0.25/1M = $3,000/day
-      Output: 4M x 500 tokens x $1.25/1M = $2,500/day
+    4M via Claude Haiku 4.5 ($1/1M input, $5/1M output):
+      Input: 4M x 3,000 tokens = 12,000 MTok x $1 = $12,000/day
+      Output: 4M x 500 tokens =  2,000 MTok x $5 = $10,000/day
     1M via GPT-4o (translation, complex tasks):
-      Input: 1M x 3,000 tokens x $2.50/1M = $7,500/day
-      Output: 1M x 500 tokens x $10/1M = $5,000/day
-    Subtotal: $18,000/day
+      Input: 1M x 3,000 tokens = 3,000 MTok x $2.50 = $7,500/day
+      Output: 1M x 500 tokens =   500 MTok x $10   = $5,000/day
+    Subtotal: $34,500/day
 
-  Total LLM: $135,500/day
+  Total LLM: $152,000/day
 
 Infrastructure:
   Qdrant cluster (260TB): 40 nodes x $200/day = $8,000/day
@@ -875,20 +884,29 @@ Infrastructure:
   Application servers: $2,000/day
   Total infra: $17,500/day
 
-TOTAL: ~$155,000/day = ~$4.65M/month
+TOTAL: $152,000 + $17,500 + $15 + $1,920 + $800 = ~$172,000/day = ~$5.16M/month
 
-Revenue estimation:
-  Notion AI add-on: $10/user/month
-  30M MAU, assume 15% AI subscribers: 4.5M paying users
-  Revenue: 4.5M x $10 = $45M/month
-  Margin: ($45M - $4.65M) / $45M = ~90% gross margin
+Revenue estimation (illustrative attribution, not Notion's actual reporting):
+  Notion AI is no longer a separate $10/user/month add-on — it is bundled into
+  the paid plans (Plus $10/member/month, Business $20, Enterprise custom), with
+  Custom Agents metered separately on a credits system. There is therefore no
+  standalone AI line item to point at. For this model, attribute $10/month of
+  paid-seat revenue to AI.
+  Assume 30M MAU and 15% on AI-carrying paid seats: 4.5M seats
+  Attributed revenue: 4.5M x $10 = $45M/month
+  Margin: ($45M - $5.16M) / $45M = ~89%
+  (MAU and the 15% attach rate are assumptions for this exercise, not published
+   Notion figures — the margin is only as good as those two inputs.)
 
 Cost optimization levers:
-  - Semantic cache (20% hit rate) -> save $27,100/day
-  - Route 40% of AI search to Claude Haiku -> save $40,000/day
+  - Semantic cache (20% hit rate) -> 0.20 x $152,000 = save $30,400/day
+  - Route 40% of AI search to Claude Haiku 4.5:
+      per query GPT-4o = 3,500 x $2.5e-6 + 300 x $1e-5 = $0.01175
+      per query Haiku 4.5 = 3,500 x $1e-6 + 300 x $5e-6 = $0.00500
+      4M queries x $0.00675 = save $27,000/day
   - Quantize Qdrant float32 -> int8 (4x reduction) -> 40 nodes -> 12, save $5,600/day
   - Local embedding model (e5-small-v2 on GPU) -> eliminate embedding API costs
-  Optimized total: ~$80,000/day = ~$2.4M/month
+  Optimized total: ~$109,000/day = ~$3.27M/month
 ```
 
 ---
@@ -1039,7 +1057,7 @@ Cross-reference: See [OpenTelemetry for LLM Apps](./cross_cutting/opentelemetry_
 
 **Scope detection is the most impactful latency optimization.** Detecting a current-page query ("summarize this") skips workspace-wide vector search and serves a response in under 1 second. Permissive errors waste compute; restrictive errors return incomplete answers. A rule-based first pass with LLM fallback balances speed and recall.
 
-**The cost structure is dominated by LLM generation, not embeddings or vector search.** At $135K/day for LLM generation vs. $17.5K/day for all infrastructure, the obvious optimization target is the LLM. Model routing (Haiku for simple tasks, GPT-4o for complex reasoning), semantic caching for repeated queries, and scope detection (current-page queries skip RAG entirely) can reduce LLM costs by 50-60%. The $10/user/month pricing works at scale because the per-query marginal cost is low (under $0.01/query after optimization) and most users make fewer than 50 AI queries per month.
+**The cost structure is dominated by LLM generation, not embeddings or vector search.** At $152K/day for LLM generation vs. $17.5K/day for all infrastructure, the obvious optimization target is the LLM. Model routing (Haiku 4.5 for simple tasks, GPT-4o for complex reasoning), semantic caching for repeated queries, and scope detection (current-page queries skip RAG entirely) cut LLM cost by roughly 38% in the Section 7 model. The bundled ~$10/seat/month attribution works at scale because the per-query marginal cost is low (about $0.006/query after optimization) and most users make fewer than 50 AI queries per month.
 
 ---
 

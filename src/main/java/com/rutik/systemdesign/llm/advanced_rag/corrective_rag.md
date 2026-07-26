@@ -163,7 +163,9 @@ Web search:
      or add recency filter: "Apple earnings report 2024 Q3"
 
   2. Execute web search
-     Google Search API, Bing Search API, Serper.dev, Tavily
+     Google Programmable Search JSON API, Serper.dev, Tavily, Brave Search API
+     (Microsoft's Bing Search APIs were retired on 2025-08-11; the successor is
+      Grounding with Bing Search inside Azure AI Foundry, not a drop-in API)
 
   3. Parse web results
      Fetch top-3 URLs, extract text, clean HTML
@@ -291,7 +293,7 @@ CRAG:
 
 ### CRAG with LangGraph (Community Implementation)
 - Widely implemented as a LangGraph workflow: retrieval → grading node → conditional web search → generation
-- Grading uses LLM (GPT-4o-mini) to classify documents as relevant or not
+- Grading uses a small, cheap LLM tier (the reference notebooks have tracked whatever the current mini/nano tier is) to classify documents as relevant or not
 - Used in enterprise pipelines where knowledge base freshness is a concern
 
 ### Enterprise Knowledge Base with Time-Sensitive Queries
@@ -381,7 +383,7 @@ Fix: Tag each context chunk with its source (KB document ID, URL for web results
 | **Cohere Rerank API** | Managed relevance evaluator | Best managed option; returns relevance scores per document |
 | **Tavily Search API** | Web search for RAG | RAG-optimized web search; returns clean text; respects content |
 | **Serper.dev** | Google Search API wrapper | Low-cost Google search; needs HTML parsing layer |
-| **Bing Web Search API** | Web search | Reliable; better enterprise terms than scraping |
+| **Brave Search API** | Web search | Independent index; common Bing-API replacement since Bing Search APIs were retired 2025-08-11 |
 | **RAGAS** | Evaluate CRAG quality | Context relevance, faithfulness for CRAG-specific evaluation |
 
 ---
@@ -473,14 +475,14 @@ flowchart TD
     UKB --> GEN1["LLM Generation"]
     GEN1 --> ANS1(["Answer with<br/>guideline citations"])
 
-    RE -->|"MIXED<br/>(some above 0.4, some below)"| SLR["Sentence-level refinement<br/>Extract relevant sentences from<br/>ambiguous documents"]
+    RE -->|"MIXED<br/>(some above 0.35, some below)"| SLR["Sentence-level refinement<br/>Extract relevant sentences from<br/>ambiguous documents"]
     SLR --> GEN2["LLM Generation"]
     GEN2 --> ANS2(["Answer with<br/>refined context"])
 
-    RE -->|"All INCORRECT<br/>(scores < 0.4)"| PMF["PubMed Search Fallback<br/>Query reformulation: strip clinical<br/>context artifacts, add MeSH terms"]
+    RE -->|"All INCORRECT<br/>(scores < 0.35)"| PMF["PubMed Search Fallback<br/>Query reformulation: strip clinical<br/>context artifacts, add MeSH terms"]
     PMF --> PAPI["PubMed API<br/>clinical Boolean query search"]
     PAPI --> FETCH["Fetch top-3 abstracts<br/>+ results sections"]
-    FETCH --> FILT["Apply relevance evaluator<br/>to PubMed results; keep score > 0.4"]
+    FETCH --> FILT["Apply relevance evaluator<br/>to PubMed results; keep score > 0.35"]
     FILT --> COMB["Combine relevant<br/>KB + PubMed content"]
     COMB --> GEN3["LLM Generation<br/>explicit source labeling:<br/>'Based on PubMed literature<br/>(not official guidelines)'"]
     GEN3 --> DISC["Safety Disclaimer<br/>PubMed-only answers append a<br/>mandatory guideline-check notice"]
@@ -503,13 +505,15 @@ flowchart TD
 
 **Implementation**:
 ```python
-from transformers import CrossEncoder
+from sentence_transformers import CrossEncoder   # NOT transformers — CrossEncoder lives in sentence-transformers
 
-# Fine-tuned medical relevance evaluator
+# Fine-tuned medical relevance evaluator.
+# num_labels=1 makes this a regression head, and sentence-transformers then
+# applies nn.Sigmoid() by default, so predict() returns scores in (0, 1).
 evaluator = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
     num_labels=1,
-    max_length=512
+    max_length=512      # renamed to max_seq_length in sentence-transformers 5.4+; both accepted
 )
 # Fine-tuned on 500 physician-labeled (query, chunk, score) triples
 # Thresholds calibrated on held-out 100-example validation set:
@@ -579,6 +583,6 @@ def medical_crag(query: str) -> dict:
 
 **Tradeoffs and Alternatives**:
 - PubMed fallback adds 3.2s latency for 22% of queries; physicians accepted this because slow-but-accurate is preferable to fast-but-wrong in a clinical context.
-- Considered UpToDate and DynaMed (premium clinical decision support databases) as the web fallback instead of raw PubMed; rejected due to API licensing cost at $80K/year; PubMed is free with sufficient quality.
+- Considered UpToDate and DynaMed (premium clinical decision support databases) as the web fallback instead of raw PubMed; rejected on enterprise API licensing cost (both are quoted per-institution and are not publicly priced — budget for a five- to six-figure annual contract and confirm with the vendor). PubMed's E-utilities API is free and proved sufficient in quality.
 - The sentence-level refinement step recovers useful content from 55% of ambiguous documents, saving PubMed API calls for 8% of queries that would otherwise have triggered the fallback.
 - Threshold calibration required 3 rounds of adjustment over 6 weeks as production query distribution proved more diverse than the development test set.

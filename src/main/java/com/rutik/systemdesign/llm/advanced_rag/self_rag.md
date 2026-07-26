@@ -34,19 +34,24 @@ The model learns to generate special tokens — [Retrieve], [Relevant], [Support
 
 ### 3.1 Special Reflection Tokens
 
-Self-RAG introduces four types of reflection tokens:
+Self-RAG introduces four types of reflection tokens. The paper (Asai et al. 2023, Table 1) names them `Retrieve`, `IsREL`, `IsSUP` and `IsUSE`; this page uses the readable bracket labels below for the same four categories:
 
 ```
+Retrieve  {yes, no, continue}
 [Retrieve]       — should the model retrieve external passages for this segment?
 [No Retrieve]    — no retrieval needed (parametric knowledge sufficient)
+[Continue]       — keep using the passages already retrieved; do not retrieve again
 
+IsREL  {relevant, irrelevant}
 [Relevant]       — retrieved passage is relevant to the query and useful
 [Irrelevant]     — retrieved passage is not relevant; ignore it
 
+IsSUP  {fully supported, partially supported, no support}
 [Supported]      — generated statement is fully supported by the retrieved context
 [Partially Supported] — generated statement is partially supported
 [No Support]     — generated statement is not supported by the retrieved context (potential hallucination)
 
+IsUSE  {5, 4, 3, 2, 1}
 [Utility]        — overall utility of the response (scale 1-5)
 ```
 
@@ -92,7 +97,9 @@ Self-RAG requires a fine-tuned model. Training data is generated synthetically:
 Step 1: Sample (input, output) pairs from existing datasets
   (question, answer), (instruction, response), etc.
 
-Step 2: For each pair, use a critic LLM (GPT-4) to insert reflection tokens:
+Step 2: For each pair, a critic model inserts reflection tokens. In the paper, GPT-4
+  is prompted to produce reflection tokens and that knowledge is distilled into an
+  in-house critic (Llama 2-7B), which does the bulk annotation:
   - Should retrieval be triggered here? → insert [Retrieve] or [No Retrieve]
   - Given the actual retrieved passages: are they relevant?
     → insert [Relevant] or [Irrelevant] before each passage
@@ -103,8 +110,9 @@ Step 3: Fine-tune base LLM on this annotated corpus
   Standard supervised fine-tuning on (input → annotated output) pairs
   The model learns to generate reflection tokens as natural part of output
 
-Training scale: ~150K-300K annotated examples
-Base model: LLaMA 7B, 13B, or Mistral 7B
+Training scale: 150K instruction-output pairs for the generator; 4K-20K supervised
+                examples per reflection-token type for the critic (Asai et al. 2023)
+Base model: Llama 2 7B or 13B (generator); Llama 2 7B (critic)
 ```
 
 ### 3.4 Inference Algorithm
@@ -167,7 +175,7 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
 | `utility` | The `[Utility]` reflection token, an integer 1-5 — is the answer any good as an answer |
 | `support x utility` | The ranking key; range `[0, 5]` because support is normalized and utility is not |
 | `beam_width` | How many candidate drafts are scored before the max is taken |
-| `0.85` | The confidence cut Section 12 applies to `support_score` alone, after selection |
+| `0.85` | The confidence cut the Section 13 case study applies to `support_score` alone, after selection |
 
 **Walk one example.** Three candidate responses, each generated against a different relevant passage. `S` = `[Supported]`, `P` = `[Partially Supported]`, `N` = `[No Support]`:
 
@@ -185,7 +193,7 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
   C3 wins although it is first on neither factor. C2 is perfectly grounded
   but says less; C1 is useful but a quarter of its sentences are unsupported.
 
-  Section 12's confidence label reads support_score only, not the product:
+  Section 13's confidence label reads support_score only, not the product:
     C3 : 0.90 > 0.85 -> "high"     C2 : 1.00 -> "high"     C1 : 0.62 -> "medium"
 ```
 
@@ -269,11 +277,12 @@ flowchart LR
 
 ## 5. Real-World Examples
 
-### Original Self-RAG Paper Results (Asai et al. 2023)
-- Self-RAG 7B outperformed ChatGPT (GPT-3.5) on multiple fact-checking and open-domain QA benchmarks
-- On PopQA (open-domain QA): Self-RAG 13B achieved 54.9% vs. standard RAG 46.3%
-- On PubMedQA (medical): Self-RAG showed significantly better support token alignment vs. standard RAG
-- Retrieval rate: ~50-70% of queries triggered retrieval (vs. 100% for standard RAG)
+### Original Self-RAG Paper Results (Asai et al. 2023, arXiv:2310.11511)
+- Self-RAG 7B and 13B outperformed ChatGPT and retrieval-augmented Llama2-chat on open-domain QA, reasoning and fact verification (paper abstract)
+- On PopQA (open-domain QA): Self-RAG 13B 55.8% and Self-RAG 7B 54.9%, vs. 45.7% for retrieval-augmented Llama2-13B and 50.8% for retrieval-augmented ChatGPT
+- On PubHealth (fact verification): Self-RAG 13B 74.5% and 7B 72.4%, vs. 70.1% for ChatGPT and 54.7% for retrieval-augmented ChatGPT
+- The paper's six evaluation tasks are PopQA, TriviaQA-unfiltered, PubHealth, ARC-Challenge, biography generation and ALCE-ASQA
+- Retrieval frequency is not a fixed rate: it is controlled by an adjustable retrieval threshold on the `Retrieve` token probability (the paper uses 0.2 for most tasks, 0 for ALCE), which trades retrieval calls against accuracy at inference time
 
 ### Production Adaptations
 - Self-RAG's reflection tokens are adapted in production by replacing fine-tuned tokens with prompted chain-of-thought reasoning in capable LLMs
@@ -286,14 +295,14 @@ flowchart LR
 
 | Dimension | Standard RAG | Self-RAG |
 |-----------|-------------|---------|
-| Retrieval frequency | Always | Adaptive (50-70% of queries) |
+| Retrieval frequency | Always | Adaptive (tuned by the retrieval threshold) |
 | Faithfulness | Moderate | High (statement-level checking) |
 | Requires fine-tuning | No | Yes |
 | Can use any LLM | Yes | No (needs Self-RAG fine-tuned model) |
 | Simple query latency | Higher (unnecessary retrieval) | Lower (skips retrieval) |
 | Complex query accuracy | Good | Better |
 | Debugging | Simple | Complex (trace reflection tokens) |
-| Training data needed | None | 150K-300K annotated examples |
+| Training data needed | None | 150K annotated instruction-output pairs |
 
 ---
 
@@ -312,7 +321,7 @@ flowchart LR
 - Team lacks ML engineering capacity for fine-tuning
 
 ### Use Self-RAG Concepts Without Full Fine-Tuning:
-- Prompt capable LLMs (GPT-4o, Claude 3.5) to perform retrieval-need assessment and support checking
+- Prompt a current frontier LLM (e.g. GPT-5.4, Claude Opus 5) to perform retrieval-need assessment and support checking
 - Use RAGAS faithfulness metric as a post-generation filter to catch unsupported statements
 - These approximations capture some Self-RAG benefits without fine-tuning overhead
 
@@ -326,7 +335,7 @@ Fix: Use a properly fine-tuned Self-RAG variant (or use RAGAS faithfulness check
 
 **2. Training data quality for reflection tokens**
 If the critic LLM (used to generate training data) incorrectly labels passages as [Relevant] when they're not, the fine-tuned model learns bad relevance judgment.
-Fix: Validate training data quality: sample 200 examples and manually verify [Relevant] / [Irrelevant] labels. Use GPT-4 (strongest critic) for annotation even if deploying a smaller model.
+Fix: Validate training data quality: sample 200 examples and manually verify [Relevant] / [Irrelevant] labels. Use the strongest model you can afford as the annotator even if deploying a smaller model.
 
 **3. No fallback when all passages are [Irrelevant]**
 If the model retrieves 5 passages and marks all as [Irrelevant], the generation pipeline has no context to use.
@@ -346,12 +355,12 @@ Fix: Evaluate fine-tuned model on general benchmarks (MMLU, HellaSwag) alongside
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **Self-RAG GitHub** (AkariAsai/self-rag) | Reference implementation | Original paper code; LLaMA 7B/13B fine-tuned models |
+| **Self-RAG GitHub** (AkariAsai/self-rag) | Reference implementation | Original paper code; Llama 2 7B/13B fine-tuned models |
 | **HuggingFace PEFT** | LoRA fine-tuning for Self-RAG | Use LoRA to fine-tune base model on annotated Self-RAG data |
 | **RAGAS faithfulness** | Approximate [Supported] checking | Post-generation support verification without fine-tuning |
 | **TRL SFTTrainer** | Supervised fine-tuning | Standard tool for SFT on annotated examples |
 | **Axolotl** | Fine-tuning framework | Flexible YAML config; easy data format for Self-RAG training |
-| **GPT-4 API** | Training data annotation | Use as critic LLM to generate [Relevant]/[Supported] labels |
+| **Frontier LLM API** | Training data annotation | The paper prompts GPT-4 to produce reflection tokens, then distills that into a Llama 2-7B critic |
 
 ---
 
@@ -361,16 +370,16 @@ Fix: Evaluate fine-tuned model on general benchmarks (MMLU, HellaSwag) alongside
 A: Self-RAG solves two problems standard RAG ignores: (1) retrieval necessity — standard RAG always retrieves even when the LLM could answer from parametric knowledge (e.g., "What is 2+2?"), wasting latency and context window; Self-RAG decides per-query whether retrieval is needed. (2) Faithfulness verification — standard RAG generates an answer but doesn't check whether each statement is actually supported by the retrieved context; Self-RAG checks support at the statement level, enabling selective filtering of unsupported claims. The tradeoff is that Self-RAG requires fine-tuning a specific model variant; it's not applicable to API-only LLMs.
 
 **Q: What are the four main reflection token types in Self-RAG and what does each control?**
-A: [Retrieve] — triggers retrieval when the model determines external knowledge is needed. [No Retrieve] — skips retrieval when parametric knowledge is sufficient. [Relevant]/[Irrelevant] — evaluates each retrieved passage for usefulness relative to the query; irrelevant passages are excluded from the generation context. [Supported]/[Partially Supported]/[No Support] — assesses whether each generated statement is backed by the retrieved passage, providing statement-level faithfulness verification. There is also [Utility] (1-5 scale) scoring the overall response quality, used to select between multiple candidate responses generated from different relevant passages.
+A: [Retrieve] (paper name `Retrieve`, values yes/no/continue) — triggers retrieval when external knowledge is needed, skips it when parametric knowledge suffices, or continues with passages already retrieved. [Relevant]/[Irrelevant] (`IsREL`) — evaluates each retrieved passage for usefulness relative to the query; irrelevant passages are excluded from the generation context. [Supported]/[Partially Supported]/[No Support] (`IsSUP`) — assesses whether each generated statement is backed by the retrieved passage, providing statement-level faithfulness verification. [Utility] (`IsUSE`, 1-5 scale) — the fourth type, scoring overall response quality and used to select between multiple candidate responses generated from different relevant passages.
 
 **Q: How is Self-RAG training data generated?**
-A: Training data is generated synthetically using a critic LLM (typically GPT-4). For each (input, output) pair from existing datasets, GPT-4 inserts reflection tokens: deciding whether retrieval was needed at each generation step, whether each retrieved passage is relevant, and whether each generated sentence is supported by the retrieved passage. This annotation produces (input → reflection-token-annotated output) training pairs. The fine-tuned model learns to generate these reflection tokens as a natural part of its output sequence. Approximately 150K-300K annotated examples are used for fine-tuning LLaMA 7B or 13B, taking 1-3 days on 8× A100 GPUs.
+A: Training data is generated synthetically by a critic model. In the paper, GPT-4 is prompted to produce reflection tokens and that knowledge is distilled into an in-house Llama 2-7B critic, which does the bulk annotation. For each (input, output) pair from existing datasets, the critic inserts reflection tokens: deciding whether retrieval was needed at each generation step, whether each retrieved passage is relevant, and whether each generated sentence is supported by the retrieved passage. This annotation produces (input → reflection-token-annotated output) training pairs. The fine-tuned model learns to generate these reflection tokens as a natural part of its output sequence. The paper uses 150K instruction-output pairs (sampled from Open-Instruct plus knowledge-intensive datasets) to fine-tune Llama 2 7B and 13B; multi-GPU training time is implementation-specific and not something to quote as a fixed figure.
 
 **Q: How does Self-RAG's adaptive retrieval affect inference efficiency?**
-A: Standard RAG calls the retriever for 100% of queries. Self-RAG's [Retrieve] / [No Retrieve] decision results in retrieval for approximately 50-70% of queries in practice (depending on query distribution). Queries answerable from parametric knowledge (definitions, simple facts, reasoning questions) skip retrieval entirely. This reduces retrieval API calls, embedding computation, and context window usage for simple queries. On mixed query distributions, Self-RAG is 30-50% cheaper and faster than standard RAG, while achieving better accuracy on complex queries that do trigger retrieval.
+A: Standard RAG calls the retriever for 100% of queries. Self-RAG's [Retrieve] / [No Retrieve] decision makes that frequency a tunable knob rather than a constant: the paper thresholds the `Retrieve` token probability (0.2 for most tasks, 0 for ALCE) and shows retrieval frequency trading off against task accuracy. Queries answerable from parametric knowledge (definitions, simple facts, reasoning questions) skip retrieval entirely. This reduces retrieval API calls, embedding computation, and context window usage for simple queries. The size of the saving depends entirely on your query mix and threshold — measure it rather than assuming a headline percentage, and note that skipped retrievals are partly offset by the extra reflection-token forward passes.
 
 **Q: Can you achieve Self-RAG-like behavior through prompting without fine-tuning?**
-A: Partially. A capable LLM (GPT-4o, Claude 3.5 Sonnet) can be prompted to assess retrieval necessity ("Should you search for external information to answer this query?") and perform faithfulness checking ("Does each statement in your response align with the provided context?"). This approximates Self-RAG's adaptive retrieval and support checking. However, the approximation is less reliable than fine-tuned behavior: the prompted checks may be inconsistent, the model may still generate unsupported claims and then rationalize them as supported. For production systems where faithfulness is critical, using RAGAS as a post-generation faithfulness filter is a more reliable alternative.
+A: Partially. A capable current LLM (e.g. GPT-5.4, Claude Opus 5) can be prompted to assess retrieval necessity ("Should you search for external information to answer this query?") and perform faithfulness checking ("Does each statement in your response align with the provided context?"). This approximates Self-RAG's adaptive retrieval and support checking. However, the approximation is less reliable than fine-tuned behavior: the prompted checks may be inconsistent, the model may still generate unsupported claims and then rationalize them as supported. For production systems where faithfulness is critical, using RAGAS as a post-generation faithfulness filter is a more reliable alternative.
 
 **Q: What happens when all retrieved passages are marked [Irrelevant] in Self-RAG?**
 A: When all retrieved passages are [Irrelevant], the model has no external context to use for generation. The Self-RAG paper handles this with a fallback: if no passages are marked relevant after retrieval, the model generates a response from parametric knowledge alone (similar to [No Retrieve] path), with reduced confidence. In production implementations, the correct behavior is: generate a response marked as based-on-training-only with an explicit uncertainty statement, or report inability to answer if the query is factual. This failure mode highlights the importance of having a diverse, high-recall retrieval system — if the right passages aren't retrieved, the relevance check cannot save the pipeline.
@@ -388,35 +397,39 @@ A: Fine-tuning on the Self-RAG training corpus — which is composed of specific
 A: The faithfulness/support checking mechanism provides the most immediate value because it addresses the #1 RAG failure mode: hallucinated or unsupported answers. Even without fine-tuning, you can implement an approximation using a post-generation faithfulness filter: for each generated sentence, use a cross-encoder or RAGAS faithfulness checker to verify it's supported by the retrieved context. Statements below a threshold are flagged or removed. This is deployable with any LLM without fine-tuning and directly reduces the hallucination rate that damages user trust. The adaptive retrieval ([Retrieve]/[No Retrieve]) provides efficiency benefits but doesn't improve answer quality for queries that do require retrieval.
 
 **Q: How do you build the annotation pipeline for reflection tokens and what quality controls are required?**
-A: The annotation pipeline is the most labor-intensive part of Self-RAG. The process: (1) Collect 150K-300K (input, output) pairs from existing QA, instruction-following, and retrieval datasets (Natural Questions, TriviaQA, ASQA, FEVER); (2) For each pair, run a critic LLM (GPT-4) with a carefully designed prompt that asks it to determine whether retrieval was needed, whether retrieved passages are relevant, and whether generated sentences are supported; (3) The critic inserts reflection tokens into the output sequence; (4) The annotated pairs become supervised fine-tuning data. Quality controls: (a) validate 5% of annotations manually — inter-annotator agreement between the critic LLM and a human should exceed 80% for [Retrieve]/[No Retrieve] decisions; (b) balance the training set so [Retrieve] and [No Retrieve] examples are roughly 60/40 (reflecting real query distributions); (c) ensure [Supported] examples have explicit textual overlap between the generated statement and the passage, not just thematic similarity.
+A: The annotation pipeline is the most labor-intensive part of Self-RAG. The process: (1) Collect on the order of 150K (input, output) pairs from existing instruction-following and knowledge-intensive datasets (the paper samples from Open-Instruct plus KILT-style knowledge-intensive sets and ASQA); (2) For each pair, run a critic model — the paper prompts GPT-4 and distills it into a Llama 2-7B critic — with a carefully designed prompt that asks it to determine whether retrieval was needed, whether retrieved passages are relevant, and whether generated sentences are supported; (3) The critic inserts reflection tokens into the output sequence; (4) The annotated pairs become supervised fine-tuning data. Quality controls: (a) validate 5% of annotations manually — inter-annotator agreement between the critic LLM and a human should exceed 80% for [Retrieve]/[No Retrieve] decisions; (b) balance the training set so [Retrieve] and [No Retrieve] examples are roughly 60/40 (reflecting real query distributions); (c) ensure [Supported] examples have explicit textual overlap between the generated statement and the passage, not just thematic similarity.
 
 **Q: How does Self-RAG complexity and training cost compare to CRAG's benefits, and when does each approach win?**
-A: Self-RAG requires 150K+ training examples, 1-3 days of fine-tuning on 8× A100 GPUs ($500-2000 in compute), an inference-time reflection token generation step that adds 20-40% latency, and an ongoing model maintenance burden when base models are updated. CRAG requires only a relevance evaluator (a cross-encoder, which can be pre-trained or lightly fine-tuned on 200-500 labeled pairs in hours), a web search API integration, and no model fine-tuning. Self-RAG wins when: you have a stable, small LLM you can fine-tune and maintain; query distribution is mixed (many simple queries that benefit from skipping retrieval); and statement-level faithfulness checking is essential. CRAG wins when: you use a proprietary API LLM that cannot be fine-tuned; your primary problem is retrieval gaps (out-of-KB queries) rather than faithfulness; and implementation speed matters. For most production teams, CRAG is the pragmatic first choice; Self-RAG is for teams with dedicated ML engineering capacity.
+A: Self-RAG requires roughly 150K annotated training examples, a multi-GPU fine-tuning run, an inference-time reflection-token step that adds on the order of 20-30% latency, and an ongoing model maintenance burden when base models are updated. CRAG requires only a relevance evaluator (a cross-encoder, which can be pre-trained or lightly fine-tuned on 200-500 labeled pairs in hours), a web search API integration, and no model fine-tuning. Self-RAG wins when: you have a stable, small LLM you can fine-tune and maintain; query distribution is mixed (many simple queries that benefit from skipping retrieval); and statement-level faithfulness checking is essential. CRAG wins when: you use a proprietary API LLM that cannot be fine-tuned; your primary problem is retrieval gaps (out-of-KB queries) rather than faithfulness; and implementation speed matters. For most production teams, CRAG is the pragmatic first choice; Self-RAG is for teams with dedicated ML engineering capacity.
 
 **Q: What are the fine-tuning data requirements for Self-RAG and how do they affect base model selection?**
-A: Self-RAG training requires 150K-300K annotated examples to learn reliable reflection token generation. With fewer examples, the model learns inconsistent patterns — sometimes generating [Retrieve] for trivial queries, sometimes [No Retrieve] for complex ones. Data composition matters as much as volume: the training set must include diverse query types (factual, reasoning, creative, multi-hop), diverse retrieval scenarios (relevant passages, irrelevant passages, no good passages), and balanced [Supported] / [No Support] examples. Base model selection: Self-RAG works best with models that already have strong instruction-following capabilities — LLaMA 2-7B/13B and Mistral 7B are the standard base models from the original paper. Larger models (13B vs. 7B) show better reflection token calibration (fewer false [Supported] labels) at the cost of 2× inference latency. Models under 3B parameters struggle to maintain response quality while generating reliable reflection tokens.
+A: Self-RAG training requires roughly 150K annotated instruction-output pairs to learn reliable reflection token generation. With fewer examples, the model learns inconsistent patterns — sometimes generating [Retrieve] for trivial queries, sometimes [No Retrieve] for complex ones. Data composition matters as much as volume: the training set must include diverse query types (factual, reasoning, creative, multi-hop), diverse retrieval scenarios (relevant passages, irrelevant passages, no good passages), and balanced [Supported] / [No Support] examples. Base model selection: Self-RAG works best with models that already have strong instruction-following capabilities — the original paper uses Llama 2-7B and Llama 2-13B for the generator and Llama 2-7B for the critic (Mistral is not used in the paper; community ports exist but are not part of it). Larger models (13B vs. 7B) show better reflection token calibration (fewer false [Supported] labels) at the cost of 2× inference latency. Models under 3B parameters struggle to maintain response quality while generating reliable reflection tokens.
 
 **Q: What is the inference overhead of reflection token generation in Self-RAG and how does it affect production latency?**
 A: Reflection token generation adds overhead at each decision point. [Retrieve] / [No Retrieve] is a single additional token prediction before retrieval — adds ~5-10ms. [Relevant] / [Irrelevant] evaluation per passage adds one LLM forward pass per retrieved passage — for 5 passages, approximately 50-100ms total. [Supported] / [Partially Supported] / [No Support] checking per generated sentence adds one prediction per sentence — for a 5-sentence response, approximately 50-100ms. Total reflection overhead: 150-250ms per query that triggers retrieval, compared to standard RAG's single generation pass. This is 20-30% additional latency, which is acceptable for most use cases. Optimization: batch [Relevant] evaluations for all passages in parallel (the evaluations are independent); generate response candidates in parallel when beam width > 1; use speculative decoding for reflection token prediction if the base model supports it.
 
 **Q: How do you adapt Self-RAG for production systems that cannot afford full fine-tuning?**
-A: Several production-viable adaptations capture Self-RAG benefits without fine-tuning. (1) Prompted adaptive retrieval: add a pre-retrieval step where a strong LLM (GPT-4o) decides "Does this query require external knowledge?" with a structured JSON output; route accordingly. This captures ~70% of Self-RAG's retrieval efficiency benefit. (2) Post-generation support checking: after standard RAG generation, run each sentence through RAGAS faithfulness or a cross-encoder to score support against the retrieved context; flag or remove low-support statements. This captures ~80% of Self-RAG's faithfulness benefit. (3) Retrieve-then-score: always retrieve, then score passage relevance with a cross-encoder before passing to the LLM — this is CRAG's approach and approximates Self-RAG's [Relevant] evaluation. (4) Confidence-based retrieval triggering: use the LLM's logprob on its initial (no-context) answer as a proxy for certainty — if the LLM is confident, skip retrieval; if uncertain (low logprob on key tokens), retrieve. This requires logprob access (not available on all APIs).
+A: Several production-viable adaptations capture Self-RAG benefits without fine-tuning. (1) Prompted adaptive retrieval: add a pre-retrieval step where a strong current LLM (e.g. GPT-5.4 or Claude Opus 5) decides "Does this query require external knowledge?" with a structured JSON output; route accordingly. This captures ~70% of Self-RAG's retrieval efficiency benefit. (2) Post-generation support checking: after standard RAG generation, run each sentence through RAGAS faithfulness or a cross-encoder to score support against the retrieved context; flag or remove low-support statements. This captures ~80% of Self-RAG's faithfulness benefit. (3) Retrieve-then-score: always retrieve, then score passage relevance with a cross-encoder before passing to the LLM — this is CRAG's approach and approximates Self-RAG's [Relevant] evaluation. (4) Confidence-based retrieval triggering: use the LLM's logprob on its initial (no-context) answer as a proxy for certainty — if the LLM is confident, skip retrieval; if uncertain (low logprob on key tokens), retrieve. This requires logprob access (not available on all APIs).
 
 ---
 
 ## 12. Best Practices
 
 1. **Use LoRA for Self-RAG fine-tuning** — prevents catastrophic forgetting; preserves base model capabilities; reduces compute cost.
-2. **Generate high-quality training data** — use GPT-4 as critic LLM; validate 10% of annotations manually before training.
+2. **Generate high-quality training data** — use the strongest available model to produce the critic's reflection-token labels; validate 10% of annotations manually before training.
 3. **Implement the fallback path** — always handle the all-[Irrelevant] case; never silently fail when no relevant passage is found.
 4. **Evaluate each reflection token separately** — retrieval decision accuracy, relevance accuracy, and support accuracy each require their own test sets.
 5. **Use RAGAS faithfulness as an approximation** — for teams that can't fine-tune, RAGAS faithfulness checking post-generation captures much of Self-RAG's faithfulness benefit.
-6. **Monitor reflection token distribution in production** — what fraction of queries trigger retrieval? If >90%, your model has learned to always retrieve; if <20%, it may be over-relying on parametric knowledge. Target 50-70% for mixed query distributions.
+6. **Monitor reflection token distribution in production** — what fraction of queries trigger retrieval? If >90%, your model has learned to always retrieve; if <20%, it may be over-relying on parametric knowledge. Tune the retrieval threshold against your own accuracy/cost curve rather than a fixed target rate.
 7. **Include Self-RAG support score in the API response** — expose [Supported] / [No Support] token distribution per statement to downstream applications, enabling them to display confidence levels to users.
 
 ---
 
 ## 13. Case Study: Self-RAG for a Legal Research Assistant
+
+> **Illustrative composite.** The firm, the metrics, the costs and the quoted model
+> output below are a worked teaching example, not a published or verifiable
+> engagement. Use the shape of the reasoning, not the numbers.
 
 **Problem Statement**: A mid-size law firm employs 80 attorneys who perform case law research. The firm's knowledge base contains 2.2M legal documents: federal and state case law, statutes, regulatory guidance, and firm-authored memos. Attorneys ask two types of questions: (1) recall questions ("Find cases where a breach of fiduciary duty was established despite an exculpatory clause"); (2) synthesis questions ("What is the current judicial consensus on the scope of attorney-client privilege for in-house counsel in regulatory investigations?"). The challenge: attorneys need every cited case to be a real, retrievable case — fabricated citations are a professional responsibility violation. Standard RAG hallucinated case citations in 14% of responses, requiring attorneys to manually verify every citation before use. Self-RAG's per-statement support verification directly addressed this.
 
@@ -425,10 +438,11 @@ A: Several production-viable adaptations capture Self-RAG benefits without fine-
 Attorney Query
     |
     v
-[Self-RAG Model: LLaMA 13B fine-tuned]
+[Self-RAG Model: Llama 2 13B fine-tuned]
   LoRA fine-tuning on 180K legal (query, passage, annotated_output) pairs
-  Critic LLM (GPT-4): generated [Retrieve]/[Relevant]/[Supported] labels
-  Fine-tuning: 4 days on 8x A100 80GB (Azure ND96asr v4)
+  Critic LLM: generated [Retrieve]/[Relevant]/[Supported] labels
+  Fine-tuning: 4 days on 8x A100 80GB (Azure NDm A100 v4, Standard_ND96amsr_A100_v4
+  — note the 40GB ND A100 v4 / Standard_ND96asr_v4 is a different SKU)
     |
     v
 [Retrieval Decision Token]
@@ -488,7 +502,7 @@ Attorney Query
 ```
 
 **Key Design Decisions**:
-1. LoRA fine-tuning on LLaMA 13B rather than full fine-tuning — full fine-tuning would require 40GB VRAM per GPU and risk degrading the model's legal reasoning from pre-training; LoRA (rank=16, alpha=32) reduced trainable parameters to 1.5% of total, preserved base reasoning capabilities, and completed training in 4 days on 8× A100s.
+1. LoRA fine-tuning on Llama 2 13B rather than full fine-tuning — full fine-tuning of a 13B model in mixed precision needs far more than 40GB of VRAM per GPU once optimizer state is counted, and risks degrading the model's legal reasoning from pre-training; LoRA (rank=16, alpha=32) applied to every linear projection trains roughly 63M parameters, about 0.5% of the model, preserved base reasoning capabilities, and completed training in 4 days on 8× A100s.
 2. Hybrid BM25 + dense retrieval — legal research requires exact citation matching (case names, docket numbers, statutory references) where BM25 excels; semantic understanding for conceptual retrieval where dense retrieval excels; hybrid (RRF fusion) outperformed either alone by 18% Recall@5 on the firm's legal retrieval benchmark.
 3. Citation verification post-generation — the Self-RAG model's [Supported] tokens prevent hallucinated claims but cannot detect a case name that is real but miscited (wrong year, wrong court); a separate citation validator cross-references all cited cases against a Westlaw-format citation database, adding a second line of defense against citation errors.
 4. [No Support] statement removal rather than regeneration — when a statement receives [No Support], removing it from the output (or flagging it) is safer than attempting to regenerate; regeneration loops can produce confidently wrong alternatives; attorneys prefer gaps over hallucinations.
@@ -583,7 +597,7 @@ def legal_self_rag_generate(query: str) -> LegalResponse:
 
 **Results**:
 
-| Metric | Standard RAG | Self-RAG (LLaMA 13B LoRA) |
+| Metric | Standard RAG | Self-RAG (Llama 2 13B LoRA) |
 |--------|-------------|--------------------------|
 | Citation hallucination rate | 14% | 2.1% |
 | Fully supported responses (all statements) | 61% | 84% |
@@ -591,10 +605,10 @@ def legal_self_rag_generate(query: str) -> LegalResponse:
 | Average query latency | 1.8s | 2.6s |
 | Attorney verification time per response | 18 min | 7 min |
 | Retrieval Recall@5 (hybrid vs. dense only) | 71% | 89% |
-| Fine-tuning compute cost | N/A | $2,400 (8x A100, 4 days) |
+| Fine-tuning compute cost | N/A | $2,400 (8x A100 80GB, 4 days, reserved rate) |
 
 **Tradeoffs and Alternatives**:
-- Fine-tuning cost of $2,400 was justified by the citation hallucination reduction (14% → 2.1%), which represented a compliance risk reduction; the firm's general counsel estimated each attorney verification of a hallucinated citation cost $85 in attorney time; at 200 queries/day, the ROI breakeven was 3.2 weeks.
+- Fine-tuning cost of $2,400 was justified by the citation hallucination reduction (14% → 2.1%), which represented a compliance risk reduction; the firm's general counsel estimated each attorney verification of a hallucinated citation cost $85 in attorney time; at 200 queries/day the 14% → 2.1% reduction avoids about 23.8 such verifications per day (200 × 0.119), roughly $2,020/day, so the $2,400 fine-tuning spend pays back in a little over one day of use.
 - The LoRA rank=16 choice required 3 experiments (rank=8, 16, 32); rank=16 achieved the best balance of [Supported] token accuracy (88%) vs. inference speed overhead (22%); rank=32 improved accuracy to 90% but added 35% inference latency.
 - Considered using RAGAS faithfulness as an approximation (no fine-tuning) before committing to Self-RAG; RAGAS reduced citation hallucinations from 14% to 8% — significant but insufficient for the firm's risk tolerance; Self-RAG reduced to 2.1%.
 - The citation verification layer (Westlaw-format validator) caught an additional 0.9% of errors that Self-RAG's [Supported] tokens missed (correctly cited case names but wrong year or wrong court); the two-layer approach (Self-RAG + citation validator) achieved the 2.1% final error rate.

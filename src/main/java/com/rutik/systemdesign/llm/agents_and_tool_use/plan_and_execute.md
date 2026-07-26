@@ -324,8 +324,8 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     TASK["Input: Task"]
-    PLAN["Phase 1 — Planner\nGPT-4o / Claude Opus\nstrategic planning\n→ Step 1…Step N"]
-    EXEC["Phase 2 — Executor\nGPT-4o-mini (per step)\nexecute with tools available"]
+    PLAN["Phase 1 — Planner\nfrontier model (e.g. GPT-5.6 Sol / Claude Opus 5)\nstrategic planning\n→ Step 1…Step N"]
+    EXEC["Phase 2 — Executor\ncheap model per step (e.g. GPT-5.6 Luna)\nexecute with tools available"]
     VAL{"Validate step output\nShould replan?"}
     REPLAN["Replan\n(revise remaining steps)"]
     SYNTH["Phase 3 — Synthesis\ncombine all step outputs\n→ final deliverable"]
@@ -411,23 +411,24 @@ Devin uses implicit Plan-and-Execute for software engineering tasks:
 - Each step is executed with a sub-agent (terminal, browser, editor)
 - Automatic replanning when a step reveals unexpected codebase structure
 - Human can inject feedback at plan step boundaries
-- Average: 5-8 steps per issue, ~$0.50-$2 in API costs per issue
+- Per-issue cost is not publicly broken out. Devin is now sold on quota-based subscriptions (Free, Pro $20/mo, Max $200/mo; Teams $80/mo plus $40 per developer seat) rather than the earlier ACU metering, and Cognition states cost per message varies by model, task size and reasoning required
 
-### OpenAI o1's Internal Chain of Thought
+### Reasoning models' internal chain of thought
 
-o1's extended reasoning is structurally similar to Plan-and-Execute:
+Extended internal reasoning is structurally similar to Plan-and-Execute:
 - The model generates a hidden "thinking" phase (planning) before visible output
-- Thinking budget: 1,000-100,000 tokens depending on task difficulty
-- This internal planning dramatically improves performance on math (AIME), coding (SWE-bench), and multi-step reasoning
-- Not user-configurable; the model manages its own thinking budget
+- Thinking length scales with task difficulty, from a few hundred to tens of thousands of tokens
+- This internal planning improves performance on math, coding and multi-step reasoning benchmarks
+- It is only coarsely steerable: providers expose a knob (OpenAI's `reasoning.effort`, Anthropic's `effort`) rather than an exact token budget, and on current Claude models thinking is adaptive and on by default
 
 ### LangGraph's Plan-and-Execute Template
 
-LangGraph provides a reference implementation:
-- GitHub: `langgraph/examples/plan-and-execute`
-- Uses GPT-4 for planning, GPT-3.5-turbo for execution (cost optimization)
-- Includes replanning trigger and human-in-the-loop approval gate
-- Used as the foundation for many production research agents
+LangGraph ships a reference implementation as a tutorial in its docs (search the
+LangGraph docs for "plan-and-execute"). It:
+- Splits a planner node from an executor agent and adds a replan step
+- Pairs a stronger planner model with a cheaper executor model for cost optimization
+- Includes a replanning trigger and a human-in-the-loop approval gate
+- Is widely used as the foundation for production research agents
 
 ---
 
@@ -466,7 +467,7 @@ The table's last row says Plan-and-Execute costs more, which is true only agains
   ratio = 0.750 / 0.080 = 9.38x cheaper
 ```
 
-The break-even is immediate: the split arrangement wins for any `N >= 2`, and its advantage grows linearly with plan length because the fixed `C_plan` term is amortized while the `N x C_exec` term stays cheap. This is the whole reason the LangGraph template pairs GPT-4 planning with GPT-3.5-turbo execution. The failure mode to watch is the one the loop-count decoder exposed: replans re-run the *expensive* model, so three replans on this task add `3 x 0.05 = $0.15`, nearly tripling the `$0.080` baseline. Capping `max_replan` is a cost control before it is a correctness control.
+The break-even is immediate: the split arrangement wins for any `N >= 2`, and its advantage grows linearly with plan length because the fixed `C_plan` term is amortized while the `N x C_exec` term stays cheap. This is the whole reason the LangGraph template pairs a strong planner model with a cheap executor model. The failure mode to watch is the one the loop-count decoder exposed: replans re-run the *expensive* model, so three replans on this task add `3 x 0.05 = $0.15`, nearly tripling the `$0.080` baseline. Capping `max_replan` is a cost control before it is a correctness control.
 
 ---
 
@@ -507,8 +508,8 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 |------|---------|-------|
 | [**LangGraph**](../agentic_frameworks/langgraph.md) | Plan-and-execute implementation | Reference template; stateful |
 | **LangChain Plan-and-Execute** | Legacy implementation | Deprecated; use LangGraph |
-| **OpenAI o1/o3** | Built-in planning | Internal CoT is implicit P&E |
-| **Claude extended thinking** | Built-in planning | `thinking` parameter |
+| **OpenAI reasoning models** | Built-in planning | Internal CoT is implicit P&E; steer with `reasoning.effort` |
+| **Claude thinking** | Built-in planning | `thinking` parameter — `adaptive` on current models |
 | **BabyAGI** | Task queue management | Early Plan-and-Execute variant |
 | **Devin** | Software engineering P&E | Commercial; explicit plan UI |
 
@@ -529,7 +530,7 @@ A: HTN decomposes a high-level goal into sub-goals recursively until every task 
 A: Steps marked as independent (no data dependency between them) can execute simultaneously. The planner identifies parallel opportunities and marks them: "Step 2 [PARALLEL with Step 3]: search competitor A" and "Step 3 [PARALLEL with Step 2]: search competitor B." The orchestrator groups parallel steps and executes them with `asyncio.gather()` or a thread pool. The executor receives its specific step with its specific context; results are collected and merged before Step 4 proceeds. Parallelism speedup: if 3 steps each take 10s and are independent, parallelism reduces wall time from 30s to 10s. Implementation note: each parallel executor needs isolated context — ensure they don't share mutable state.
 
 **Q: How do you choose the right model for planner vs executor roles?**
-A: The planner requires strong strategic reasoning — assign the highest-quality model available (GPT-4o, Claude Opus, o1). Planning quality directly determines overall task success; the additional cost is worth it. The executor handles focused, scoped sub-tasks — a smaller, cheaper model (GPT-4o-mini, Claude Haiku) is often sufficient. Cost impact: if you have a 15-step plan with an expensive planner ($0.05) and cheap executors ($0.002/step = $0.03 total), total cost is $0.08 vs. using a large model for everything ($0.05 × 15 = $0.75). The quality trade-off: executor model quality matters most for complex tool use and reasoning-heavy steps; routing critical steps to the large model is a valid optimization.
+A: The planner requires strong strategic reasoning — assign the highest-quality model available (GPT-5.6 Sol, Claude Opus 5). Planning quality directly determines overall task success; the additional cost is worth it. The executor handles focused, scoped sub-tasks — a smaller, cheaper model (GPT-5.6 Luna, Claude Haiku 4.5) is often sufficient. Cost impact: if you have a 15-step plan with an expensive planner ($0.05) and cheap executors ($0.002/step = $0.03 total), total cost is $0.08 vs. using a large model for everything ($0.05 × 15 = $0.75). The quality trade-off: executor model quality matters most for complex tool use and reasoning-heavy steps; routing critical steps to the large model is a valid optimization.
 
 **Q: What is the maximum number of steps before Plan-and-Execute breaks down?**
 A: Context accumulation is the primary limit: each completed step's result is added to the context, and after 20-30 steps, the context window is nearly full (~100K tokens). Mitigations: (1) summarize step results rather than including full outputs (30-word summary vs. 500-word raw result); (2) hierarchical execution — the top-level plan has 5 sub-goals, each sub-goal runs its own plan with 5-10 steps, and only summaries bubble up; (3) external state storage — persist step results to disk or vector DB, retrieve only what the current step needs. Practically, 10-20 steps is the reliable range without these optimizations; with hierarchical execution and summarization, 50-100 steps is achievable.
@@ -541,7 +542,7 @@ A: Each plan step should specify expected output: "Expected output: structured l
 A: LangGraph's `interrupt_before` and `interrupt_after` mechanisms enable precise human approval gates. Common patterns: (1) Plan approval: after the planner generates a plan, pause and present it to a human before executing; (2) Step approval: for high-risk steps (delete file, send email, make purchase), interrupt before execution and require human confirmation; (3) Exception handling: when a step fails and replanning is triggered, show the human the new plan before proceeding. Implementation: `graph.compile(interrupt_before=["execute_risky_step"])` — the graph pauses at that node, surfaces state to the user, resumes when the user approves via `graph.update_state()`. The `checkpointer` persists state between the interrupt and resume, enabling asynchronous approval workflows.
 
 **Q: What is the cost model of Plan-and-Execute compared to direct ReAct?**
-A: Plan-and-Execute has an additional planning call (typically 1,000-3,000 tokens with a large model). At GPT-4o pricing ($5/1M input): planning call costs ~$0.005-$0.015. For a 15-step task using GPT-4o-mini executors (~1K tokens/step × $0.60/1M): execution costs ~$0.009. Total P&E: ~$0.015-$0.025. ReAct with the same large model for all steps: 15 steps × 2K tokens × $5/1M = ~$0.15. P&E is typically cheaper because it routes executor work to smaller models. However, if replanning triggers multiple times, each replan adds another large-model call — keep replan count ≤ 3.
+A: Plan-and-Execute has an additional planning call (typically 1,000-3,000 tokens with a large model). At GPT-5.6 Sol pricing ($5/1M input): planning call costs ~$0.005-$0.015. For a 15-step task using GPT-5.6 Luna executors (~1K tokens/step × $1.00/1M): execution costs ~$0.015. Total P&E: ~$0.020-$0.030. ReAct with the same large model for all steps: 15 steps × 2K tokens × $5/1M = ~$0.15. P&E is typically cheaper because it routes executor work to smaller models. However, if replanning triggers multiple times, each replan adds another large-model call — keep replan count ≤ 3.
 
 **Q: How do you validate a generated plan before beginning execution?**
 A: Plan validation runs immediately after the planner generates the plan and before any executor call. Validation checks: (1) tool availability — every action in the plan must reference a tool that exists; if the plan says "query the analytics database" but no `run_sql` tool is available, flag the step before wasting execution budget; (2) dependency ordering — verify that no step references information that will only be produced by a later step; (3) completeness — does the plan include a synthesis step that produces the required deliverable format?; (4) step count sanity — a plan with 50 steps is likely over-decomposed; a plan with 2 vague steps is under-specified; (5) parallelism validity — verify that steps marked [PARALLEL] have no data dependency between them. Implementation: a lightweight validator LLM call ("Does this plan have any obvious issues? List problems.") or deterministic checks against the tool registry. A bad plan caught before execution saves the cost of all executor calls that would run before the inevitable failure.
@@ -553,13 +554,13 @@ A: Dynamic plan revision (replanning) is triggered when a step's actual output c
 A: Each plan step should map to a single executor invocation — approximately one tool call or one synthesis action. Too coarse: "Research all competitors" as one step gives the executor insufficient guidance on which competitors, which sources, and what format; the executor must make many implicit decisions, leading to inconsistent results across runs. Too fine: "Search Google for Stripe pricing page URL, click the first result, read the pricing table, copy the table to text" as four micro-steps creates a 50-step plan for a 10-step task, makes replanning expensive (one failure cascades to many steps), and fills the plan with orchestration noise rather than strategic content. Optimal granularity: "Search for Stripe's pricing page and extract all tier names and prices as structured JSON — Expected output: {tier: string, monthly_price: number, features: [string]}[]". This gives the executor enough guidance to complete the step reliably while preserving planner authority over strategy.
 
 **Q: What are the known limitations of LLM planning and how do they affect plan quality?**
-A: LLMs have four consistent planning failure modes: (1) optimism bias — the planner assumes every step will succeed and doesn't include contingency branches; fix by prompting "For each step, briefly note what to do if it fails or returns no results"; (2) tool hallucination — the planner invents tool names that don't exist ("use the competitor_analysis_api"); fix by including the exact tool list in the planner prompt; (3) dependency blindness — the planner marks steps as [PARALLEL] when they actually share a data dependency; fix with a dependency validation pass after plan generation; (4) scope creep — plans for open-ended research tasks expand to 30+ steps as the planner tries to be thorough; fix with a step budget cap in the planner prompt ("Generate a plan with at most 12 steps"). Current frontier models (GPT-4o, Claude 3.5 Sonnet) produce plans with ~85% step validity on structured tasks; on open-ended tasks, validity drops to 60-70%, making replanning more common.
+A: LLMs have four consistent planning failure modes: (1) optimism bias — the planner assumes every step will succeed and doesn't include contingency branches; fix by prompting "For each step, briefly note what to do if it fails or returns no results"; (2) tool hallucination — the planner invents tool names that don't exist ("use the competitor_analysis_api"); fix by including the exact tool list in the planner prompt; (3) dependency blindness — the planner marks steps as [PARALLEL] when they actually share a data dependency; fix with a dependency validation pass after plan generation; (4) scope creep — plans for open-ended research tasks expand to 30+ steps as the planner tries to be thorough; fix with a step budget cap in the planner prompt ("Generate a plan with at most 12 steps"). As a working planning assumption — not a published benchmark — frontier models produce plans with roughly 85% step validity on structured tasks and 60-70% on open-ended ones, which is why replanning is more common on open-ended work. Measure the rate on your own task distribution.
 
 **Q: How does Plan-and-Execute compare to pure ReAct on long multi-step tasks?**
 A: On tasks requiring 15+ steps, Plan-and-Execute outperforms ReAct on goal adherence (the agent completes the intended task rather than drifting to a related but different task), completeness (all required sections produced), and efficiency (fewer redundant steps because the planner identifies which work is needed upfront). ReAct outperforms Plan-and-Execute on adaptability (tasks where new information dramatically changes what should be done next), latency-to-first-result (ReAct produces partial results after each step; P&E waits for the whole plan), and simplicity of implementation. Empirically, for research and report generation tasks (10-20 steps with known structure), Plan-and-Execute achieves ~20-30% higher quality ratings in human evaluation. For debugging and exploratory tasks (unknown structure, requiring many hypothesis-test cycles), ReAct is more effective. The practical recommendation: start with ReAct; migrate to Plan-and-Execute when tasks consistently exceed 10 steps and analysts report that the agent "lost the thread."
 
 **Q: What is the cost of the planning step itself and when is it not worth paying?**
-A: A planning call uses a large model (GPT-4o, Claude Opus) and generates 300-800 tokens of plan text at ~1,500-2,500 input tokens of context. At GPT-4o pricing: planning costs $0.008-$0.020 per task. This overhead is not worth paying when: (a) the task is always 3-5 steps with obvious structure — "answer this question by searching and summarizing" needs no formal plan; (b) task success rate with pure ReAct is already above 90% — the planning overhead buys no quality improvement; (c) latency matters — the planning call adds 2-4 seconds of wall time before the first executor call begins. The overhead is worthwhile when: task quality with ReAct is below 80%, tasks frequently have parallel opportunities that ReAct cannot exploit, or the task has human approval gates where an explicit plan is required for the approval workflow. Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself in execution efficiency.
+A: A planning call uses a large model (GPT-5.6 Sol, Claude Opus 5) and generates 300-800 tokens of plan text at ~1,500-2,500 input tokens of context. At GPT-5.6 Sol pricing ($5/1M input, $30/1M output): planning costs roughly $0.017-$0.037 per task. This overhead is not worth paying when: (a) the task is always 3-5 steps with obvious structure — "answer this question by searching and summarizing" needs no formal plan; (b) task success rate with pure ReAct is already above 90% — the planning overhead buys no quality improvement; (c) latency matters — the planning call adds 2-4 seconds of wall time before the first executor call begins. The overhead is worthwhile when: task quality with ReAct is below 80%, tasks frequently have parallel opportunities that ReAct cannot exploit, or the task has human approval gates where an explicit plan is required for the approval workflow. Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself in execution efficiency.
 
 ---
 
@@ -602,7 +603,7 @@ The `25` is derived from this file's own observation that context is nearly full
 
 ## 14. Case Study: Automated Code Migration Agent
 
-**Problem Statement**: A fintech company needs to migrate 200,000 lines of Python 2 code across 140 modules to Python 3. Manual migration takes 3 developer-months. The migration must: identify affected files, map deprecated API calls to Python 3 equivalents, apply transforms, run the test suite, and roll back on failures. Mistakes in financial calculation code are unacceptable — correctness is more important than speed.
+**Problem Statement** (illustrative composite — the metrics in Results are representative, not a published case): A fintech company needs to migrate 200,000 lines of Python 2 code across 140 modules to Python 3. Manual migration takes 3 developer-months. The migration must: identify affected files, map deprecated API calls to Python 3 equivalents, apply transforms, run the test suite, and roll back on failures. Mistakes in financial calculation code are unacceptable — correctness is more important than speed.
 
 **Architecture Overview**:
 
@@ -611,7 +612,7 @@ Task: "Migrate module payments/core.py from Python 2 to Python 3"
       |
       v
 ┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 1: PLANNER (Claude Opus)                                 │
+│  PHASE 1: PLANNER (Claude Opus 5)                               │
 │                                                                 │
 │  Step 1: Read payments/core.py — Expected: file contents        │
 │  Step 2: Identify Python 2 patterns — Expected: pattern list    │
@@ -624,7 +625,7 @@ Task: "Migrate module payments/core.py from Python 2 to Python 3"
       |
       v
 ┌─────────────────────────────────────────────────────────────────┐
-│  PHASE 2: EXECUTOR LOOP (GPT-4o-mini per step)                  │
+│  PHASE 2: EXECUTOR LOOP (GPT-5.6 Luna per step)                 │
 │                                                                 │
 │  Step 1: read_file("payments/core.py")                          │
 │  Step 2: analyze_patterns(content) → [print_stmt, dict_items,  │
@@ -654,7 +655,7 @@ Migration committed to git with report attached
 
 3. Parallel pattern lookup: Python 2 modules typically have 4-8 distinct deprecated patterns. Looking them up sequentially wastes time; they are independent and run in parallel (step 3 is marked [PARALLEL]). This reduces pattern lookup from ~8s sequential to ~2s parallel.
 
-4. Executor model routing: steps 1-2 (read + identify patterns) use GPT-4o-mini (cheap, low complexity). Step 4 (apply transforms with correctness requirements) uses GPT-4o (higher quality for code modification). Step 5 (test diagnosis) uses Claude Opus (best reasoning for understanding why tests fail in financial code).
+4. Executor model routing: steps 1-2 (read + identify patterns) use a cheap model such as GPT-5.6 Luna (low complexity). Step 4 (apply transforms with correctness requirements) uses a mid-tier model such as GPT-5.6 Terra (higher quality for code modification). Step 5 (test diagnosis) uses a frontier model such as Claude Opus 5 (best reasoning for understanding why tests fail in financial code).
 
 5. Planner tool list constraint: the planner prompt includes the exact tool list: `read_file, write_file, run_tests, git_commit, git_rollback, apply_2to3, lookup_migration, generate_report`. The planner cannot hallucinate a `deploy_to_production` step because that tool does not exist.
 
@@ -727,7 +728,7 @@ async def migrate_module(filepath: str) -> MigrationResult:
 
 - Migration success rate (all tests pass, no rollback): 91% of modules on first attempt
 - Average steps per module: 8.3 (target was <= 10)
-- Average cost per module: $0.18 (GPT-4o-mini executors, GPT-4o for transforms, Opus for diagnosis)
+- Average cost per module: $0.18 (cheap-model executors, mid-tier model for transforms, frontier model for diagnosis)
 - Replanning triggered: 23% of modules (mostly due to implicit Python 2 assumptions in financial logic)
 - Total 140-module migration: completed in 4 days vs. 3-month manual estimate
 - Zero production incidents post-deployment (financial calculations verified by full test suite)
@@ -735,5 +736,5 @@ async def migrate_module(filepath: str) -> MigrationResult:
 **Tradeoffs and Alternatives**:
 
 - Pure ReAct was prototyped first: it achieved 74% success rate but frequently "lost the thread" after step 8 and began repeating pattern lookups without making progress. Plan-and-Execute improved success rate to 91%.
-- Using `2to3` CLI directly without an LLM planner was considered for simple files: implemented as a fast path — files with only syntactic changes (print statements, integer division) skip the LLM planner entirely and use the CLI tool. The LLM planner handles only files with semantic changes.
+- Using `2to3` CLI directly without an LLM planner was considered for simple files: implemented as a fast path — files with only syntactic changes (print statements, integer division) skip the LLM planner entirely and use the CLI tool. Note that `2to3` and its `lib2to3` backend were removed from the Python standard library in Python 3.13, so this fast path now needs the separately packaged tool or an equivalent such as `pyupgrade`. The LLM planner handles only files with semantic changes.
 - Human review gate was added after Step 4 (apply transforms) for files touching the core payment calculation engine — the plan pauses and emails a diff to the team lead before running tests. This added 2-4 hours per such file but eliminated the risk of merging semantically incorrect financial logic.

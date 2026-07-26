@@ -79,7 +79,7 @@ def route_request(query: str, user_tier: str) -> str:
     elif complexity < 0.7:
         return "gpt-4o"        # Medium complexity
     else:
-        return "o1"            # Complex reasoning
+        return "gpt-5.6-sol"   # Complex reasoning (frontier tier)
 
 def estimate_complexity(query: str) -> float:
     # Options:
@@ -220,7 +220,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     DEV["Development\nprompt iteration (LangSmith) · PR review"]
-    STG["Staging\nMMCL/domain benchmarks · safety · regression tests\npass threshold: no regression > 2%"]
+    STG["Staging\nMMLU/domain benchmarks · safety · regression tests\npass threshold: no regression > 2%"]
     SHADOW["Shadow Mode (optional)\nnew model runs in parallel, results NOT served\ncompare offline vs. production"]
     CAN["Production Canary (1–5% traffic)\n24–48h monitoring: P99 latency · quality score · error rate · safety"]
     ROLLBACK["Auto rollback\n(P99 > 2×, quality −5%, error > 1%, safety violation)"]
@@ -273,7 +273,8 @@ flowchart TD
 
 ```
 Self-hosted model cost breakdown:
-  GPU cost:           60-80% (H100 at $3-4/hr)
+  GPU cost:           60-80% (H100 at ~$3/hr on a specialized GPU cloud;
+                              $7-12/hr per GPU on hyperscaler on-demand)
   Storage (model):    5-10% (SSD for model weights)
   Network egress:     5-15% (output tokens sent to clients)
   CPU/memory:         5-10% (gateway, preprocessing)
@@ -285,8 +286,9 @@ Cost per token estimation:
   = $0.00083 per 1000 tokens
 
   Compare to OpenAI gpt-4o-mini: $0.15/1M input, $0.60/1M output
-  Self-hosted 7B: ~$0.83 per 1M tokens = 40% cheaper for output
-  But GPT-4o-mini is much higher quality than 7B
+  Self-hosted 7B: ~$0.83 per 1M tokens = 38% MORE expensive than
+                  gpt-4o-mini's output price, and 5.5x its input price
+  And gpt-4o-mini is much higher quality than a 7B
 
   Sweet spot: use self-hosted models where quality is sufficient,
               API models where quality is critical
@@ -298,7 +300,7 @@ That framing matters because the numerator (rent) is fixed the moment you provis
 
 | Symbol | What it is |
 |--------|------------|
-| `$3/hr` | On-demand rent for one H100 80GB. Spot pricing cuts this 60-70% |
+| `$3/hr` | On-demand rent for one H100 80GB on a specialized GPU cloud (2026 median ~$2.99/hr; hyperscalers charge $7-12/hr). Spot cuts this 60-70% |
 | `tokens/sec` | Sustained output throughput of the whole GPU, all concurrent requests summed |
 | `3600` | Seconds in an hour. The unit bridge between "$/hr" and "$/token" |
 | `$0.00000083` | Cost of one token. Too small to reason about — always restate per 1M |
@@ -335,7 +337,8 @@ Traditional ML metrics (accuracy, F1) don't apply to free-form LLM output. Use:
    Sample 1-2% of production traffic
 
 2. LLM-as-judge (automated):
-   Use GPT-4 to score responses on:
+   Use a model stronger than the one under test, and from a different
+   family where possible, to score responses on:
    - Helpfulness (1-5)
    - Accuracy (1-5)
    - Safety (0 or 1)
@@ -658,12 +661,14 @@ actually fire on, and then stress-tested with one long-context arrival:
   at peak KV cache        = 30 GB  ->  total 78 GB / 80 GB = 97.5% utilization
                                        -> past the 95% EMERGENCY threshold
 
-  now add one 128K-token request (4-8 GB of KV per Common Pitfalls #8):
+  now add one 20K-token request (320 KiB/token on a 70B => ~6 GB of KV):
     78 GB + 6 GB = 84 GB  >  80 GB     -> OOM, and every in-flight request dies
+  (a 128K-token request would need ~40 GB and cannot fit on this card at all)
 ```
 
 Compare the 8B FP16 row: a 16 GB fixed floor leaves 64 GB for KV cache, so peak occupancy is
-`(16 + 40 + 3 + 2) / 80 = 76%` and the same 6 GB long-context arrival lands at 84% — inside
+`(16 + 40 + 3 + 2) / 80 = 76%` and the same 6 GB long-context arrival (an 8B costs only
+128 KiB/token, so 6 GB buys it ~48K tokens rather than 20K) lands at 84% — inside
 the CRITICAL alert band but still alive. Same GPU, same request; the difference is entirely
 how much of the drawer the weights claimed up front.
 
@@ -694,7 +699,9 @@ Monitoring Strategy:
     4. Reject new requests with 503 (last resort)
 
   Common OOM causes:
-    - Long context request: single 128K-token request consumes 4-8 GB KV cache
+    - Long context request: KV cache is linear in tokens. Llama-3-70B (80 layers,
+      8 KV heads, head_dim 128, FP16 KV) costs 2*80*8*128*2 = 320 KiB/token, so a
+      20K-token request is ~6 GB and a 128K-token request would need ~40 GB
     - Batch size spike: burst of concurrent requests fills KV cache
     - Memory leaks in custom pre/post-processing code
     - Model loaded at higher precision than expected (FP16 instead of INT4)
@@ -721,7 +728,7 @@ Request tagging:
   Gateway enriches with cost data:
     { ...metadata,
       "model": "gpt-4o", "input_tokens": 1200, "output_tokens": 450,
-      "cost_usd": 0.0105, "cache_hit": false,
+      "cost_usd": 0.0075, "cache_hit": false,
       "timestamp": "2025-03-15T14:30:00Z" }
 
 Cost aggregation pipeline:
@@ -760,9 +767,10 @@ class CostTracker:
     """Per-request cost tracking at the gateway layer."""
 
     MODEL_PRICING = {
-        "gpt-4o":      {"input": 2.50, "output": 10.00},   # per 1M tokens
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-        "claude-3.5":  {"input": 3.00, "output": 15.00},
+        "gpt-4o":          {"input": 2.50, "output": 10.00},   # per 1M tokens
+        "gpt-4o-mini":     {"input": 0.15, "output": 0.60},
+        "claude-sonnet-5": {"input": 3.00, "output": 15.00},
+        "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
     }
 
     def track(self, request: LLMRequest, response: LLMResponse):
@@ -820,32 +828,40 @@ context saves single-digit percentages.
 ## 7. Real-World Examples
 
 ### OpenAI's Infrastructure
-- Thousands of H100s across Azure regions
-- Custom model routing: trivial queries → smaller cached model; complex → full model
-- Semantic caching for common prompts at scale
-- Real-time cost tracking per API key; rate limiting by tier
-- Dashboard shows per-model latency and utilization in real time
+- Multi-cloud since the 2025 Microsoft contract renegotiation: Azure remains the largest
+  commitment, alongside Oracle/Stargate, CoreWeave, and a $38B AWS agreement for
+  GB200/GB300 capacity. Stargate's first gigawatt is slated for NVIDIA Vera Rubin in H2 2026
+- Publicly documented API-surface controls: per-key usage and cost reporting, tier-based
+  rate limits, prompt caching with automatic discounted cached-input pricing, and a Batch API
+- Internal routing and caching policies are not published; treat any specific claim about
+  them as unverified
 
 ### Anthropic's Claude Deployment
-- Multi-region for latency (US, EU, APAC)
-- Progressive rollouts for new Claude versions (internal → beta → production)
-- Extensive safety monitoring: harmful output rate, refusal calibration
-- A/B testing of system prompt changes across user cohorts
+- Published model lifecycle: models move Active -> Legacy -> Deprecated -> Retired, with at
+  least 60 days' notice before retirement and a named replacement model for each deprecation
+- Published deprecation table gives every model a tentative retirement date, so callers can
+  plan migrations (e.g. `claude-opus-4-1-20250805` retires 2026-08-05, replaced by `claude-opus-4-8`)
+- API parameters are versioned the same way: `temperature`/`top_p`/`top_k` return 400 on
+  Claude Opus 4.7 and later rather than being silently ignored
+- Rollout mechanics and internal safety-monitoring thresholds are not published
 
-### Netflix LLM Platform
-- Internal LLM gateway for all ML teams — the central metering point for cost attribution
-- Model catalog: approved models + their cost/quality characteristics
-- Shared observability: all teams' LLM usage in one dashboard
-- Chargeback by team: each team sees their LLM cost, broken down by model and project
-- Budget alerts at 80% of monthly allocation; hard caps enforced at the gateway level
-- Fine-tuned models for specific use cases (content recommendation copy, A/B test variants)
+### Netflix LLM Platform (per the Netflix Tech Blog, "In-House LLM Serving at Netflix", 2026)
+- Inference is delegated to an internal Model Scoring Service (MSS) built on NVIDIA Triton
+- vLLM is the paved-path engine, run through Triton's vLLM backend; chosen over TensorRT-LLM
+  for custom-model loading, custom decoding, debuggability, and practitioner familiarity
+- Two front doors: an internal gRPC interface plus an OpenAI-compatible HTTP API, so teams
+  prototyping against hosted models can move to self-hosted without rewriting call sites
+- Red-black deployments for stable interfaces; versioned deployments when the interface
+  changes, which temporarily doubles GPU cost
+- Models pre-materialized on high-performance storage to cut cold-start latency; a single
+  unified metrics endpoint merges vLLM and Triton telemetry
 
-### Stripe's Prompt Management
+### Prompt Management at a Payments Company (illustrative composite, not a published case)
 - All production prompts stored in a versioned registry with metadata (model, temperature, author)
 - Prompt changes require PR approval from both engineering and product
 - A/B testing framework splits traffic between prompt versions, measuring task completion rate
-- Rollback capability: revert to any previous prompt version in under 60 seconds without redeployment
-- Shadow mode for new models: run alongside production for 48 hours before any traffic shift
+- Rollback flips a registry pointer rather than redeploying, so reverting is seconds not minutes
+- Shadow mode for new models: run alongside production before any traffic shift
 
 ---
 
@@ -853,7 +869,7 @@ context saves single-digit percentages.
 
 | Decision | Self-Hosted | Managed API |
 |----------|------------|-------------|
-| Cost at scale | Low (amortized GPU) | High ($0.01-0.10/1K tokens) |
+| Cost at scale | Low (amortized GPU) | Per-token ($0.0006/1K out on a small model like gpt-4o-mini up to $0.03/1K out on a frontier model) |
 | Setup complexity | High | None |
 | Latency | Low (no external calls) | Variable (network + queuing) |
 | Model quality | Limited to open models | Best models available |
@@ -893,7 +909,9 @@ context saves single-digit percentages.
 
 ### Use Managed API When:
 - <1M tokens/day (API is cheaper than idle GPU time)
-- Need cutting-edge model quality (GPT-4o, Claude 3.5)
+- Need cutting-edge model quality (frontier tiers such as GPT-5.6 or Claude Opus 5); note that
+  older API names age out fast — Claude 3.5 Sonnet retired 2025-10-28 and Claude 3.5 Haiku
+  retired 2026-02-19, so pin against the vendor's live model list, never against a tutorial
 - Don't have ML infrastructure expertise
 - Fast time-to-market is the priority
 
@@ -909,7 +927,11 @@ context saves single-digit percentages.
 
    ```yaml
    # BROKEN: scale-to-zero HPA — first request after an idle period waits 3+ min
-   # while the 70B model downloads and loads into GPU memory
+   # while the 70B model downloads and loads into GPU memory.
+   # NOTE: HPA `resource` metrics cover only cpu and memory. GPU utilization must
+   # arrive via the custom.metrics.k8s.io / external.metrics.k8s.io APIs (e.g.
+   # dcgm-exporter -> Prometheus -> prometheus-adapter, or KEDA). The
+   # `targetGPUUtilization` shorthand below stands in for that external metric.
    minReplicas: 0
    targetGPUUtilization: 80
    ```
@@ -921,9 +943,9 @@ context saves single-digit percentages.
    ```
 6. **No rate limiting per user**: One user floods the system with requests, degrading experience for others.
 7. **Skipping canary for "minor" model updates**: A team deployed a quantized model variant directly to 100% traffic. The INT4 quantization introduced subtle quality regressions in math tasks that only appeared under production query distribution. Always canary model changes, even minor ones -- start at 1-5% traffic, monitor for 24-48 hours, compare quality metrics against the baseline.
-8. **GPU OOM from long-context requests**: A single 128K-token request consumed 6 GB of KV cache and OOM-killed the serving process, dropping all 47 concurrent requests on that node. Set per-request context length limits, monitor GPU memory at 85% threshold, and implement graceful degradation (reduce batch size before rejecting requests).
+8. **GPU OOM from long-context requests**: A single 20K-token request consumed 6 GB of KV cache (a Llama-3-70B costs 320 KiB/token in FP16) and OOM-killed the serving process, dropping all 47 concurrent requests on that node. Set per-request context length limits, monitor GPU memory at 85% threshold, and implement graceful degradation (reduce batch size before rejecting requests).
 9. **Cost allocation without enforcement**: Dashboards showing per-team costs were ignored for months until the monthly LLM bill hit $180K. Showback (visibility) alone is not enough -- implement budget alerts and, eventually, hard caps or automatic routing to cheaper models when budgets are exhausted.
-10. **No shadow mode before major model swaps**: Switching from GPT-4 to GPT-4o directly in production revealed prompt incompatibilities that caused 8% of responses to be malformed JSON. Shadow mode (running the new model in parallel without serving results) would have caught this offline.
+10. **No shadow mode before major model swaps**: Switching model generations directly in production revealed prompt incompatibilities that caused 8% of responses to be malformed JSON. Shadow mode (running the new model in parallel without serving results) would have caught this offline.
 
 ---
 
@@ -971,19 +993,19 @@ A: (1) Traffic splitting — route N% of users to model B using consistent hashi
 Blue-green deployment for LLMs maintains two identical production environments (blue and green), routing traffic to one while updating the other. The LLM-specific challenges: (1) model loading takes 2-10 minutes for large models (loading weights into GPU memory), so the new environment must be pre-warmed before traffic switch; (2) KV cache and prefix cache on the old environment are lost during switch — plan for a temporary latency spike; (3) model quality validation must happen before switching — run an automated eval suite on the green environment with 100+ test cases covering key use cases. Implementation: use Kubernetes with two deployments behind an Ingress or service mesh (Istio), switch traffic via label selector update. Canary variant: route 5% of traffic to the new model first, monitor quality metrics (LLM-as-judge scores, user feedback, latency) for 1-2 hours, then gradually increase to 100%. Rollback: keep the old deployment running for 24 hours after full switch.
 
 **Q: What is shadow mode deployment and when is doubling your inference cost worth it?**
-Shadow mode runs a candidate model or prompt on a copy of production traffic without serving its outputs — responses are logged and compared offline against the live system. It catches distribution-specific failures that offline benchmarks miss: the GPT-4 to GPT-4o swap in Common Pitfalls above produced malformed JSON in 8% of responses only under the production query distribution, which shadow mode would have surfaced with zero user impact. The cost is running inference twice, so in practice shadow a 5-20% traffic sample rather than 100% to bound spend. Use it for major model swaps, provider migrations, and prompt overhauls; skip it for parameter tweaks where a 1-5% canary carries acceptable risk.
+Shadow mode runs a candidate model or prompt on a copy of production traffic without serving its outputs — responses are logged and compared offline against the live system. It catches distribution-specific failures that offline benchmarks miss: the model-generation swap in Common Pitfalls above produced malformed JSON in 8% of responses only under the production query distribution, which shadow mode would have surfaced with zero user impact. The cost is running inference twice, so in practice shadow a 5-20% traffic sample rather than 100% to bound spend. Use it for major model swaps, provider migrations, and prompt overhauls; skip it for parameter tweaks where a 1-5% canary carries acceptable risk.
 
 **Q: How does semantic caching work for LLM applications and when is it cost-effective?**
 Semantic caching stores LLM responses keyed by the semantic meaning of the query (not exact string match), returning cached responses for semantically similar queries. Implementation: embed each query, search a vector index of previous queries, and if similarity exceeds a threshold (cosine > 0.95), return the cached response. Cost-effective when: (1) queries are repetitive — customer support bots see 30-60% repeated questions; (2) responses are deterministic — factual lookups, not creative generation; (3) LLM cost is high — caching saves $0.01-$0.10 per cached hit. Not effective when: responses must be personalized, queries are unique (research, coding), or freshness matters (news, stock prices). Cache invalidation is the hard part — when underlying data changes, semantically cached responses become stale. Set TTLs based on data change frequency: 24 hours for product info, 1 hour for pricing, no caching for real-time data. GPTCache is an open-source implementation. At 50% cache hit rate with GPT-4o, semantic caching reduces LLM costs by 40-50%.
 
 **Q: How do you design a model routing system for multi-model deployments?**
-Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (GPT-4o-mini, LLaMA 8B) for simple queries or expensive model (GPT-4o, Claude 3.5 Sonnet) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Martian and Unify offer managed routing; for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
+Model routing directs each query to the optimal model based on complexity, cost budget, and quality requirements. Architecture: (1) a lightweight classifier (fine-tuned BERT or rule-based) analyzes the incoming query; (2) routes to cheap model (GPT-4o-mini, LLaMA 8B) for simple queries or expensive model (GPT-4o, Claude Sonnet 5) for complex ones. Routing signals: query length, topic classification, required reasoning depth (presence of "compare," "analyze," "why"), user tier (premium vs free). Implementation pattern: route 70-80% of traffic to the cheap model, 20-30% to the expensive model. Quality control: run a random 5% of cheap-model responses through the expensive model to verify quality isn't degrading. Cost impact: routing saves 50-70% vs sending everything to the expensive model, with only 2-5% quality degradation on average. Not Diamond, OpenRouter, and Unify offer managed routing (Martian, an early entrant, has since refocused on interpretability research); for custom routing, train a classifier on (query, best_model) pairs collected from A/B testing.
 
 **Q: How do you estimate and optimize GPU cost for LLM serving?**
-GPU cost estimation starts with throughput capacity: an A100 80GB serving LLaMA 3 8B with vLLM achieves ~1,200 tokens/second throughput. At $2/hour (cloud spot pricing), that's $0.0017 per 1K tokens. Compare to GPT-4o-mini at $0.60 per 1M output tokens ($0.0006/1K) — API is cheaper at low volume. Break-even calculation: self-hosted becomes cheaper when monthly volume exceeds the point where (GPU_cost_per_month) < (API_cost_per_token * monthly_tokens). For A100 at $1,500/month vs GPT-4o-mini: break-even at ~2.5B tokens/month (~83M tokens/day). Optimization strategies: (1) right-size GPU — use T4 for small models, A10G for medium, A100/H100 for large; (2) spot instances for batch workloads (60-70% savings); (3) quantization — FP8 or INT4 models serve from smaller/fewer GPUs; (4) batching — higher batch sizes increase throughput linearly up to memory limits; (5) auto-scaling — scale to zero during off-hours if traffic permits.
+GPU cost estimation starts with throughput capacity: an A100 80GB serving LLaMA 3 8B with vLLM achieves ~1,200 tokens/second throughput. At $2/hour on-demand (2026 median A100 80GB list is ~$1.81/hr; spot runs $0.60-1.20), a fully saturated GPU costs $2 / (1,200 x 3,600) = $0.00046 per 1K tokens. Compare to GPT-4o-mini at $0.60 per 1M output tokens ($0.0006/1K) — API is cheaper at low volume. Break-even calculation: self-hosted becomes cheaper when monthly volume exceeds the point where (GPU_cost_per_month) < (API_cost_per_token * monthly_tokens). For A100 at $1,500/month vs GPT-4o-mini: break-even at ~2.5B tokens/month (~83M tokens/day). Optimization strategies: (1) right-size GPU — use T4 for small models, A10G for medium, A100/H100 for large; (2) spot instances for batch workloads (60-70% savings); (3) quantization — FP8 or INT4 models serve from smaller/fewer GPUs; (4) batching — higher batch sizes increase throughput sublinearly up to memory limits (the Section 6 table shows 32x batch buying 12.8x throughput); (5) auto-scaling — scale to zero during off-hours if traffic permits.
 
 **Q: How do you prevent GPU OOM crashes in self-hosted LLM serving?**
-A single OOM kills every in-flight request on the node, so prevention is layered: (1) cap per-request context length — one 128K-token request consumes 4-8 GB of KV cache; (2) alert on GPU memory at 75% (warning) and 85% (critical), watching early signals like rising KV-cache eviction rate and batch-size auto-reduction in the inference engine; (3) implement a graceful degradation chain — shrink max batch size, then reject long-context requests, then route overflow to an API provider, and only then return 503s. Budget memory explicitly before deploying: an A100 80GB serving a 70B INT4 model runs with only 2-15 GB of peak headroom, while an 8B FP16 model leaves a comfortable 19-30 GB. Use DCGM/dcgm-exporter for production telemetry rather than polling nvidia-smi.
+A single OOM kills every in-flight request on the node, so prevention is layered. Start with the four controls below: (1) cap per-request context length — a Llama-3-70B costs 320 KiB/token in FP16, so a 20K-token request already claims ~6 GB of KV cache; (2) alert on GPU memory at 75% (warning) and 85% (critical), watching early signals like rising KV-cache eviction rate and batch-size auto-reduction in the inference engine; (3) implement a graceful degradation chain — shrink max batch size, then reject long-context requests, then route overflow to an API provider, and only then return 503s. Budget memory explicitly before deploying: an A100 80GB serving a 70B INT4 model runs with only 2-15 GB of peak headroom, while an 8B FP16 model leaves a comfortable 19-30 GB. Use DCGM/dcgm-exporter for production telemetry rather than polling nvidia-smi.
 
 **Q: How do you implement cost attribution for LLM usage across many teams?**
 Meter at the LLM gateway — the single choke point every request already passes through. Tag each request with team/project/cost-center metadata, enrich with model and token counts and computed cost, then stream events (Kafka, then aggregation, then a cost DB) into daily per-team rollups. Start with showback (dashboards only) to build awareness, then graduate to chargeback (actual budget debits) once the numbers are trusted: enforcement without visibility first creates revolt, and visibility without enforcement creates $180K/month surprises. The key design decision is granularity — per-team suffices for accountability, per-user enables abuse detection, per-feature enables ROI analysis.
@@ -992,7 +1014,7 @@ Meter at the LLM gateway — the single choke point every request already passes
 LLM observability requires tracking both traditional service metrics and LLM-specific quality signals. Traditional: latency (TTFT, TPOT, end-to-end), throughput, error rates, availability. LLM-specific: (1) output quality — run LLM-as-judge scoring on a sample of responses (5-10%) using a stronger model; (2) hallucination detection — compare generated facts against retrieved context (faithfulness scoring); (3) token usage — track input/output tokens per request for cost monitoring; (4) drift detection — monitor embedding distribution of queries and responses over time; (5) user feedback — thumbs up/down, regeneration rate (users clicking "try again" indicates poor quality). Tools: LangSmith, Langfuse, or Arize Phoenix for LLM tracing; Prometheus + Grafana for service metrics. Critical alerts: response latency P99 > SLO, hallucination rate > threshold, cost per query spike, model error rate increase. Store full request/response pairs (with PII redaction) for debugging — LLM failures are often content-dependent and impossible to reproduce without the exact input.
 
 **Q: How do you implement graceful degradation when an LLM provider has an outage?**
-Graceful degradation requires a fallback chain and circuit breaker pattern. Implementation: (1) primary model (e.g., GPT-4o) → (2) secondary model (e.g., Claude 3.5 Sonnet) → (3) tertiary fallback (e.g., self-hosted LLaMA 70B) → (4) cached responses or static fallback. Circuit breaker: after N consecutive failures or error rate > threshold within a time window, stop sending requests to the failing provider and switch to the next in the chain. Practical considerations: (1) prompt compatibility — different models may need prompt adjustments (maintain provider-specific prompt templates); (2) quality monitoring — track quality metrics per provider to detect degradation before full outage; (3) cost implications — fallback models may be more expensive; (4) latency — secondary providers may have different latency profiles. Use LiteLLM or a custom gateway that abstracts provider-specific APIs behind a unified interface. Test failover regularly — run chaos engineering exercises that simulate provider outages monthly.
+Graceful degradation requires a fallback chain and circuit breaker pattern. Implementation: (1) primary model (e.g., GPT-4o) → (2) secondary model (e.g., Claude Sonnet 5) → (3) tertiary fallback (e.g., self-hosted LLaMA 70B) → (4) cached responses or static fallback. Circuit breaker: after N consecutive failures or error rate > threshold within a time window, stop sending requests to the failing provider and switch to the next in the chain. Practical considerations: (1) prompt compatibility — different models may need prompt adjustments (maintain provider-specific prompt templates); (2) quality monitoring — track quality metrics per provider to detect degradation before full outage; (3) cost implications — fallback models may be more expensive; (4) latency — secondary providers may have different latency profiles. Use LiteLLM or a custom gateway that abstracts provider-specific APIs behind a unified interface. Test failover regularly — run chaos engineering exercises that simulate provider outages monthly.
 
 ---
 
@@ -1015,7 +1037,7 @@ Graceful degradation requires a fallback chain and circuit breaker pattern. Impl
 
 **Scenario**
 
-A B2B SaaS platform serving 5,000 enterprise customers routes 40 million LLM requests per month across GPT-4o, Claude-3.5-Sonnet, and a self-hosted Llama-3-70B cluster. Requirements:
+A B2B SaaS platform serving 5,000 enterprise customers routes 40 million LLM requests per month across GPT-4o, Claude Sonnet 5, and a self-hosted Llama-3-70B cluster. Requirements:
 - Baseline cost: $180k/month running all requests on GPT-4o
 - Target: reduce to under $55k/month with no measurable quality regression (< 1% drop in user satisfaction)
 - p50 latency SLA: < 800ms; p99 < 3,000ms
@@ -1045,16 +1067,16 @@ A B2B SaaS platform serving 5,000 enterprise customers routes 40 million LLM req
                         │  │  FAISS)     │      │   70B self-host  │  │ Compare: ││
                         │  │ cosine>0.95 │      │   $0.0009/1k tok │  │ routed   ││
                         │  │ TTL-aware   │      │                  │  │ vs GPT4o ││
-                        │  └─────────────┘      │ Tier 2: Claude-  │  │ LLM judge││
-                        │         │             │   3.5-Haiku      │  └──────────┘│
-                        │    hit  │             │   $0.0025/1k out │              │
+                        │  └─────────────┘      │ Tier 2: Claude   │  │ LLM judge││
+                        │         │             │   Haiku 4.5      │  └──────────┘│
+                        │    hit  │             │   $0.005/1k out  │              │
                         │         │             │                  │              │
                         │         │             │ Tier 3: GPT-4o   │              │
-                        │         │             │   $0.015/1k out  │              │
+                        │         │             │   $0.010/1k out  │              │
                         │         │             │                  │              │
-                        │         │             │ Tier 4: Claude-  │              │
-                        │         │             │   3.5-Sonnet     │              │
-                        │         │             │   (128k ctx)     │              │
+                        │         │             │ Tier 4: Claude   │              │
+                        │         │             │   Sonnet 5       │              │
+                        │         │             │   (1M ctx)       │              │
                         │         │             └──────────────────┘              │
                         │         │                      │                        │
                         │         └──────────────────────┘                        │
@@ -1087,9 +1109,9 @@ import redis.asyncio as aioredis
 
 class Tier(str, Enum):
     SELF_HOSTED = "llama-3-70b"
-    HAIKU = "claude-haiku-4"
+    HAIKU = "claude-haiku-4-5-20251001"
     GPT4O = "gpt-4o"
-    SONNET = "claude-3-5-sonnet-20241022"  # large-context tier
+    SONNET = "claude-sonnet-5"  # large-context tier (1M window)
 
 
 @dataclass
@@ -1101,17 +1123,17 @@ class RoutingDecision:
 
 
 COST_PER_1K_OUT: dict[Tier, float] = {
-    Tier.SELF_HOSTED: 0.0009,
-    Tier.HAIKU: 0.0025,
-    Tier.GPT4O: 0.015,
-    Tier.SONNET: 0.015,
+    Tier.SELF_HOSTED: 0.0009,   # amortized GPU rent, see the final Q&A
+    Tier.HAIKU: 0.005,          # Claude Haiku 4.5: $5 / 1M output
+    Tier.GPT4O: 0.010,          # GPT-4o: $10 / 1M output
+    Tier.SONNET: 0.015,         # Claude Sonnet 5: $15 / 1M output (list price)
 }
 
 CONTEXT_LIMIT: dict[Tier, int] = {
-    Tier.SELF_HOSTED: 8_192,
+    Tier.SELF_HOSTED: 8_192,    # Llama 3 70B; Llama 3.1+ raises this to 128k
     Tier.HAIKU: 200_000,
     Tier.GPT4O: 128_000,
-    Tier.SONNET: 200_000,
+    Tier.SONNET: 1_000_000,
 }
 
 
@@ -1136,7 +1158,7 @@ def _classify_request(prompt: str, token_count: int) -> RoutingDecision:
         r"prove|derive|explain why|step.by.step|analyze|debug", prompt, re.IGNORECASE
     ))
 
-    # Long-context requests → Sonnet (200k window; GPT-4o capped at 128k)
+    # Long-context requests → Sonnet (1M window; GPT-4o capped at 128k)
     if needs_long_ctx:
         est = _estimate_tokens(prompt)
         return RoutingDecision(Tier.SONNET, "long_context", est * COST_PER_1K_OUT[Tier.SONNET] / 1000, est)
@@ -1343,7 +1365,9 @@ broken. Normalizing by window size makes the breaker behave identically at 5 RPS
 # FIX: add unicode math and formal reasoning signals to classifier
 _MATH_UNICODE = re.compile(r"[∫∑∂∀∃√≈≠≤≥∈∉⊂⊃∪∩]")
 _FORMAL_REASONING = re.compile(
-    r"\b(prove|derive|disprove|theorem|lemma|corollary|QED|iff|iff|∴|∵)\b",
+    # note: \b would never match around ∴ / ∵ (they are not word characters),
+    # so the symbols sit outside the word-boundary alternation
+    r"\b(prove|derive|disprove|theorem|lemma|corollary|QED|iff)\b|[∴∵]",
     re.IGNORECASE,
 )
 
@@ -1376,9 +1400,10 @@ def build_system_prompt_with_cache_warning(cached_at_ts: float) -> str:
 **Pitfall 3 — Shadow evaluation uses the same model family as the routed model, masking quality gaps.**
 
 ```python
-# BROKEN: Claude-3.5-Haiku (routed) quality judged by Claude-3.5-Sonnet
-# Same training data and RLHF distribution → judge scores inflated by ~12%
-# A quality regression to Haiku is invisible because Sonnet rates its sibling favorably
+# BROKEN: Claude Haiku 4.5 (routed) quality judged by Claude Sonnet 5
+# Same vendor, overlapping training and RLHF distribution → same-family judges are
+# known to favour their own outputs; treat any specific inflation figure as unmeasured
+# until you calibrate it on your own data. A regression to Haiku can go unseen.
 
 # FIX: always use a cross-family judge for shadow evaluation
 async def shadow_eval_quality(
@@ -1389,7 +1414,7 @@ async def shadow_eval_quality(
 ) -> float:
     """Returns quality score 0-1 for routed_response relative to reference."""
     # Use GPT-4o as judge when routed tier is Anthropic; use Claude as judge for OpenAI
-    judge_model = "gpt-4o" if "claude" in routed_tier.value else "claude-3-5-sonnet-20241022"
+    judge_model = "gpt-4o" if "claude" in routed_tier.value else "claude-sonnet-5"
     rubric = (
         "Rate the quality of Response A vs Reference B on a scale 0-10 "
         "for accuracy, completeness, and helpfulness. "
@@ -1418,7 +1443,7 @@ async def shadow_eval_quality(
 
 Reading the table this way matters because the -73.8% headline is not one optimization. It is
 three multiplicative effects (cache removes requests, routing downgrades the survivors, the
-self-hosted tier is 16x cheaper than the tier it replaced) that compound.
+self-hosted tier is 11x cheaper than the GPT-4o tier it replaced) that compound.
 
 | Symbol | What it is |
 |--------|------------|
@@ -1440,7 +1465,7 @@ self-hosted tier is 16x cheaper than the tier it replaced) that compound.
   where it came from, applied in order:
     34% cache hit rate     -> 40.0M requests become 26.4M billable   (-34.0%)
     61% to self-hosted     -> 16.1M of those at $0.0009/1k out
-    remainder to API tiers ->  10.3M at Haiku $0.0025 / GPT-4o $0.015
+    remainder to API tiers ->  10.3M at Haiku $0.005 / GPT-4o $0.010 per 1k out
 
   LATENCY
   p50: (780 - 2,100) / 2,100 x 100 = -1,320 / 2,100 x 100 = -62.9%
@@ -1457,7 +1482,7 @@ it while every model in the fleet is behaving perfectly normally.
 
 **Interview Q&As**
 
-**How do you validate that cheaper routed models meet quality SLAs before full rollout?** Shadow evaluation: route 1% of production traffic to both the candidate cheap model and the premium reference model simultaneously, then use a cross-family LLM judge to score both responses. Set a quality-delta threshold (for example, < 5%) and run for at least 10,000 shadow pairs before promoting the routing rule. Using a cross-family judge (GPT-4o judging Claude outputs, Claude judging GPT outputs) prevents model-family bias from inflating scores by 10-15%.
+**How do you validate that cheaper routed models meet quality SLAs before full rollout?** Shadow evaluation: route 1% of production traffic to both the candidate cheap model and the premium reference model simultaneously, then use a cross-family LLM judge to score both responses. Set a quality-delta threshold (for example, < 5%) and run for at least 10,000 shadow pairs before promoting the routing rule. Using a cross-family judge (GPT-4o judging Claude outputs, Claude judging GPT outputs) removes same-family self-preference from the score; measure the size of that bias on your own data rather than assuming a published figure.
 
 **What signals does a heuristic routing classifier use and what are its failure modes?** Common signals: token count, regex for code/math markers, instruction-type prefix (classify vs. explain vs. prove), context-window requirement. Failure mode 1: short-but-complex prompts (9-token math expressions) misclassified as simple — fix by adding unicode math symbol detection. Failure mode 2: domain-specific jargon that resembles simple text — fix with an embedding-based secondary classifier when heuristics are ambiguous (confidence < 0.7).
 
@@ -1467,4 +1492,4 @@ it while every model in the fleet is behaving perfectly normally.
 
 **How do you handle multi-tenant cost attribution and per-customer budget enforcement?** Each request carries a tenant_id. Increment a per-tenant Redis counter (INCRBYFLOAT) with the estimated cost in USD on every LLM call. Check the counter against the tenant's monthly budget before processing. If the counter exceeds 90% of budget, downgrade routing tier by one level (GPT-4o → Haiku). At 100%, return a 429 with Retry-After header. Reset counters on the 1st of each month via a scheduled job. This prevents one large customer from monopolizing GPU capacity and causing latency spikes for others.
 
-**What is the operational cost of running self-hosted Llama-3-70B vs API providers and when does it break even?** Llama-3-70B on 4×A100 80GB SXM5 (tensor-parallel TP=4): 8×A100 spot at $2.50/GPU/hr = $20/hr, serving ~500 RPS at 800ms avg latency, handling roughly 1.5 billion tokens/day. Cost per 1k output tokens: ~$0.0009. GPT-4o API equivalent: $15/1k output tokens. Break-even volume: above ~3 million output tokens/day, self-hosting is cheaper. At 61% of 40M monthly requests routed to self-hosted Llama (~24M requests × avg 300 output tokens = 7.2B tokens/month), the monthly GPU cost is $14,400 vs API equivalent $108,000 — 7.5× savings at scale.
+**What is the operational cost of running self-hosted Llama-3-70B vs API providers and when does it break even?** One node is 4×A100 80GB SXM (tensor-parallel TP=4) at ~$1.25/GPU/hr spot = $5.00/hr, sustaining ~1,500 output tokens/sec with continuous batching. Do the unit conversion: $5.00 / (1,500 × 3,600) = **$0.0009 per 1k output tokens**, and 1,500 × 86,400 = ~130M output tokens/day if the node is saturated. At 300 output tokens per request that is only ~5 completed requests/sec per node — a 70B is throughput-rich and request-poor, which is exactly why fleet sizing must use Little's Law, not a tokens/sec headline. GPT-4o's list output price is $10/1M = $0.010/1k, so one node at $120/day breaks even at ~12M output tokens/day; below that the API is cheaper because you pay for idle GPU either way. In the case study, 61% of the 26.4M post-cache requests (16.1M × 300 output tokens = 4.8B tokens/month) run on 3 replicas costing 3 × $5.00 × 720 = **$10,800/month**, against a GPT-4o equivalent of 4.8B × $10/1M = **$48,300/month** — about **4.5×** cheaper, not the 10×+ that peak-throughput arithmetic suggests.

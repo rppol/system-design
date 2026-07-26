@@ -16,7 +16,7 @@ The patterns compose. A real production pipeline may chain a router into a paral
 
 **Mental model**: Think of a single LLM call as a single function. A workflow is a program made of those functions. Prompt chaining is function composition. Routing is a switch statement. Parallelization is goroutines. Orchestrator-workers is a manager delegating to a team. Evaluator-optimizer is a code review loop. The difference from true agents: in workflows, the developer writes the control flow; the LLM only fills in content at each step.
 
-**Why it matters**: Single-prompt LLM calls fail in predictable ways — they lose context on long inputs, they do too many things at once, they can't verify their own output, they use GPT-4o for tasks that GPT-4o-mini handles fine. Each workflow pattern addresses exactly one of these failure modes with measurable, reproducible improvement.
+**Why it matters**: Single-prompt LLM calls fail in predictable ways — they lose context on long inputs, they do too many things at once, they can't verify their own output, they use a frontier model for tasks a cheap-tier model handles fine. Each workflow pattern addresses exactly one of these failure modes with measurable, reproducible improvement.
 
 **Key insight**: The most reliable LLM systems use the simplest pattern that works. Anthropic's guidance is explicit: start with a single prompt, then promote to a workflow only when you can articulate which failure mode you are solving. Complexity has real costs — 200-500ms latency per hop, token doubling in evaluator loops, debugging difficulty that scales with pattern depth.
 
@@ -30,7 +30,7 @@ The patterns compose. A real production pipeline may chain a router into a paral
 
 **Gates between steps**: Prompt chaining is not useful without gates — programmatic or LLM-based checks that verify the output of step N before passing it to step N+1. A gate that catches a malformed extraction at step 2 prevents cascading errors through steps 3, 4, and 5.
 
-**Cheap models for routing, expensive models for reasoning**: The cost saving in a routing pattern comes entirely from using a small classifier (GPT-4o-mini at $0.15/1M tokens) to decide which tasks go to GPT-4o ($5/1M tokens). If everything routes to the expensive model, you have added a step and gained nothing.
+**Cheap models for routing, expensive models for reasoning**: The cost saving in a routing pattern comes entirely from using a small classifier on a cheap-tier model to decide which tasks go to a frontier model. Every worked cost example in this module uses one illustrative price pair — **$0.15 per 1M input tokens** (cheap tier) and **$5 per 1M input tokens** (frontier tier; $5/1M is the July 2026 Claude Opus 4.5 and Opus 5 input rate). Substitute your own providers' rates before quoting any of these figures. If everything routes to the expensive model, you have added a step and gained nothing.
 
 **Parallelization is not free**: Spawning N parallel calls reduces wall-clock latency by approximately N× but multiplies token cost by N. Voting on the same task N times also requires a synthesis step. The latency gain must be worth the cost and the added synthesis complexity.
 
@@ -46,7 +46,7 @@ Sequential LLM calls where the output of step N becomes input to step N+1. Gates
 
 **Use case**: Long document processing, multi-stage writing, structured data extraction pipelines where each stage refines or transforms the prior output.
 
-**Performance**: Each hop adds 200-500ms network + inference latency. On a 5-step chain with GPT-4o, expect 1-2.5 seconds of added wall-clock time versus a single call. Hallucination rate on complex long-document tasks drops approximately 70% compared to a single monolithic prompt, because each LLM call operates on a smaller, cleaner input.
+**Performance**: Each hop adds 200-500ms network + inference latency. On a 5-step chain with a frontier model, expect 1-2.5 seconds of added wall-clock time versus a single call. Hallucination rate on complex long-document tasks falls relative to a single monolithic prompt, because each LLM call operates on a smaller, cleaner input — no vendor publishes a general reduction figure, so measure it on your own eval set rather than quoting a number.
 
 **Reliability compounds multiplicatively — the single most important number in this module.** A chain succeeds only if *every* step succeeds, so per-step reliabilities multiply:
 
@@ -157,7 +157,7 @@ A classifier (LLM or programmatic) inspects the input and dispatches it to a spe
 
 **Use case**: Customer support (billing vs technical vs general), document processing (contracts vs invoices vs emails), query complexity routing (simple lookups vs multi-hop reasoning).
 
-**Cost reduction**: Routing 60% of queries to GPT-4o-mini ($0.15/1M input tokens) and 40% to GPT-4o ($5/1M input tokens) gives a blended cost of $0.15×0.6 + $5×0.4 = $2.09/1M tokens, versus $5/1M for all-GPT-4o. That is a 58% cost reduction.
+**Cost reduction**: Routing 60% of queries to a cheap-tier model ($0.15/1M input tokens) and 40% to a frontier model ($5/1M input tokens) gives a blended cost of $0.15×0.6 + $5×0.4 = $2.09/1M tokens, versus $5/1M for all-frontier. That is a 58% cost reduction.
 
 ```python
 import anthropic
@@ -308,7 +308,7 @@ async def sectioning_pipeline(document: str, num_chunks: int = 4) -> str:
     chunk_size = len(document) // num_chunks
     chunks = [document[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(None, summarize_chunk, chunk, i)
         for i, chunk in enumerate(chunks)
@@ -342,7 +342,7 @@ def classify_once(text: str) -> str:
     return response.content[0].text.strip().lower()
 
 async def voting_pipeline(text: str, num_votes: int = 5) -> str:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     tasks = [loop.run_in_executor(None, classify_once, text) for _ in range(num_votes)]
     votes: list[str] = await asyncio.gather(*tasks)
     majority, _ = Counter(votes).most_common(1)[0]
@@ -681,7 +681,7 @@ flowchart TD
     class VOTE mathOp
 ```
 
-Improves accuracy by 5–15% on reasoning tasks; cost = N × tokens per call.
+Self-consistency (Wang et al., ICLR 2023) reports absolute gains of +3.9% to +17.9% across reasoning benchmarks — +17.9% GSM8K, +12.2% AQuA, +11.0% SVAMP, +6.4% StrategyQA, +3.9% ARC-challenge; cost = N × tokens per call.
 
 ---
 
@@ -773,7 +773,8 @@ def parse_json_gate(raw: str, expected_keys: list[str]) -> dict[str, Any] | None
     except (json.JSONDecodeError, TypeError):
         return None
 
-# Pattern B: LLM gate (flexible, costs ~$0.0001 per check with haiku)
+# Pattern B: LLM gate (flexible; ~$0.0005 per check with claude-haiku-4-5 —
+# roughly 500 input tokens at $1 per 1M input plus a few output tokens at $5 per 1M)
 def llm_gate(output: str, criteria: str) -> bool:
     client = anthropic.Anthropic()
     response = client.messages.create(
@@ -876,8 +877,11 @@ client = anthropic.Anthropic()
 def parallel_section_summarize(chunks: list[str], max_workers: int = 8) -> list[str]:
     """
     max_workers=8 is safe for most Anthropic tier limits.
-    Anthropic default rate limit: 4000 RPM for claude-haiku-4-5.
-    At 8 parallel workers with ~500ms per call: 8/0.5s = 16 RPS = 960 RPM — well under limit.
+    Anthropic RPM for claude-haiku-4-5 (July 2026): 1,000 on Start, 5,000 on Build,
+    10,000 on Scale.
+    At 8 parallel workers with ~500ms per call: 8/0.5s = 16 RPS = 960 RPM — right at
+    the Start-tier ceiling, comfortable on Build or Scale. Size max_workers against
+    your own tier, not this default.
     """
     def summarize(args: tuple[int, str]) -> tuple[int, str]:
         idx, chunk = args
@@ -942,17 +946,19 @@ def evaluate_structured(task: str, output: str, threshold: int = 8) -> Structure
 
 ## 7. Real-World Examples
 
-**Prompt chaining**: Stripe's invoice processing pipeline. Step 1 extracts raw fields from PDF text. Step 2 normalizes currencies and dates. Step 3 validates totals (programmatic gate — no LLM needed). Step 4 maps to internal account codes. Each step's LLM operates on clean, structured input from the prior step rather than raw PDF text, reducing hallucination on numeric fields by ~65%.
+The first five entries below are **illustrative deployment shapes**, not published case studies — the pattern and the architecture are what generalize; treat every number as a worked example to be re-measured on your own workload, not as a vendor-reported result. Only the orchestrator-workers entry names a real, publicly documented product.
 
-**Routing**: Intercom's customer support triage. A claude-haiku-4-5 classifier routes incoming tickets: billing questions (40% of volume) go to a RAG system over billing docs without touching an LLM for generation; technical issues (35%) go to claude-opus-4-5 with a technical system prompt; general questions (25%) go to claude-haiku-4-5. Result: 52% reduction in inference cost with no measurable drop in CSAT.
+**Prompt chaining**: invoice-processing pipelines at payment platforms. Step 1 extracts raw fields from PDF text. Step 2 normalizes currencies and dates. Step 3 validates totals (programmatic gate — no LLM needed). Step 4 maps to internal account codes. Each step's LLM operates on clean, structured input from the prior step rather than raw PDF text, which is where the reduction in numeric-field hallucination comes from.
 
-**Parallelization — sectioning**: Legal document review at a Big 4 firm. A 200-page contract is split into 20 sections of ~10 pages each. All 20 sections are reviewed in parallel by claude-opus-4-5. Wall-clock time drops from ~40 minutes sequential to ~3 minutes parallel. The merge step synthesizes risk flags across sections.
+**Routing**: customer-support ticket triage. A claude-haiku-4-5 classifier routes incoming tickets: billing questions go to a RAG system over billing docs without touching an LLM for generation; technical issues go to claude-opus-4-5 with a technical system prompt; general questions go to claude-haiku-4-5. Because roughly two thirds of tickets never touch the expensive model, blended inference cost falls by roughly half with no drop in CSAT.
 
-**Parallelization — voting**: Medical coding at a health insurance company. The same clinical note is sent to claude-opus-4-5 five times with temperature=0.6. The majority ICD-10 code across five votes is accepted. Accuracy on a held-out test set: single call 87.3%, 5-vote majority 93.1%. Cost: 5× per coding decision, justified by audit cost avoidance.
+**Parallelization — sectioning**: legal document review at a large professional-services firm. A 200-page contract is split into 20 sections of ~10 pages each. All 20 sections are reviewed in parallel by claude-opus-4-5. Wall-clock time drops from ~40 minutes sequential to ~3 minutes parallel — the 13.3x speedup derived in Section 4, not 20x, because the merge step is serial. The merge step synthesizes risk flags across sections.
 
-**Orchestrator-workers**: GitHub Copilot Workspace. A user describes a feature. The orchestrator LLM generates a plan: which files to edit, what each edit should accomplish, what tests to write. Worker LLMs execute each edit independently. The orchestrator synthesizes the diff and runs a final consistency check.
+**Parallelization — voting**: medical coding at a health insurer. The same clinical note is sent to claude-opus-4-5 five times with temperature=0.6. The majority ICD-10 code across five votes is accepted. Majority voting reduces sampling variance on borderline codes; the published self-consistency result it rests on is Wang et al. (ICLR 2023), which reports +3.9% to +17.9% absolute across reasoning benchmarks. Cost: 5× per coding decision, justified by audit cost avoidance.
 
-**Evaluator-optimizer**: Jasper AI's long-form blog generation. A generator produces a 2,000-word post. An evaluator scores it on SEO density, readability (Flesch-Kincaid target 60-70), and brand tone adherence. Average rounds to approval: 2.3. Posts that skip the loop have 34% higher editorial rejection rate.
+**Orchestrator-workers**: GitHub's Copilot coding agent (GA since September 2025; it succeeded the Copilot Workspace technical preview, which GitHub sunset on 30 May 2025). A user describes a feature or assigns an issue. The agent plans which files to edit, what each edit should accomplish, and what tests to write, executes the edits in a cloud environment, and opens a pull request for review.
+
+**Evaluator-optimizer**: long-form marketing-copy generation. A generator produces a 2,000-word post. An evaluator scores it on keyword density, readability (Flesch Reading Ease target 60-70 — the 0-100 "plain English" scale, not the Flesch-Kincaid grade-level score), and brand tone adherence. Well-tuned loops of this shape approve in 2-3 rounds; posts that skip the loop are rejected by human editors noticeably more often.
 
 ---
 
@@ -963,7 +969,7 @@ def evaluate_structured(task: str, output: str, threshold: int = 8) -> Structure
 | Single prompt | Low (baseline) | Low (1x) | Low (~400ms) | Minimal | Simple tasks |
 | Prompt chaining | High (gates catch errors) | Medium (Nx model calls) | Medium (+200-500ms/hop) | Low-Medium | Sequential refinement, long docs |
 | Routing | Medium (classifier errors propagate) | Low-Medium (60-70% cost reduction possible) | Low (+1 cheap call) | Low | Mixed-complexity workloads |
-| Parallelization (sectioning) | Medium (merge can fail) | Same as sequential | Low (N× speedup) | Medium | Large input processing |
+| Parallelization (sectioning) | Medium (merge can fail) | Slightly above sequential (+1 merge call) | Low (speedup always < N — see Section 4) | Medium | Large input processing |
 | Parallelization (voting) | High (variance reduction) | High (Nx cost) | Low (same as single) | Medium | High-stakes classification |
 | Orchestrator-workers | High (dynamic decomposition) | High (orchestrator + workers) | Medium-High (coordination overhead) | High | Complex, variable-structure tasks |
 | Evaluator-optimizer | Very High (iterative correction) | Very High (2-6x per loop) | High (+1-3 extra rounds) | Medium | Quality-critical generation |
@@ -1083,7 +1089,7 @@ def fixed_evaluator_optimizer(task: str, max_rounds: int = 4) -> str:
     return output  # Return best-effort after max rounds — never hang
 ```
 
-Production incident: A content moderation pipeline ran an evaluator-optimizer loop without a cap. An adversarial input caused the evaluator to produce contradictory feedback on alternating rounds. The loop ran for 47 rounds over 94 seconds before the request timed out at the API gateway, triggering a cascade of retries.
+Incident pattern (illustrative composite, not a published incident): a content moderation pipeline ran an evaluator-optimizer loop without a cap. An adversarial input caused the evaluator to produce contradictory feedback on alternating rounds. The loop ran for dozens of rounds until the request timed out at the API gateway, triggering a cascade of retries.
 
 ---
 
@@ -1114,13 +1120,13 @@ def fixed_router(query: str) -> str:
     return handler(query)
 ```
 
-Production incident: A classifier fine-tuned on English inputs was deployed to a multilingual support pipeline. Non-English inputs returned label "other" — not in the handlers dict — causing KeyError for 23% of queries for 4 hours before the bug was caught.
+Incident pattern (illustrative composite, not a published incident): a classifier fine-tuned on English inputs was deployed to a multilingual support pipeline. Non-English inputs returned label "other" — not in the handlers dict — causing a KeyError on a large share of queries until the bug was caught.
 
 ---
 
 ### Pitfall 3: Parallelization with shared mutable state
 
-**Broken code** — race condition on results list:
+**Broken code** — results collected in completion order, not input order. Note the failure mode precisely: `list.append` *is* atomic in CPython (it compiles to a single bytecode executed under the GIL, and remains thread-safe in the free-threaded builds), so the list itself is never corrupted. What breaks is the mapping from chunk index to result, which silently scrambles any downstream merge that assumes positional order:
 
 ```python
 results = []  # Shared mutable list
@@ -1130,7 +1136,10 @@ def broken_parallel(chunks: list[str]) -> list[str]:
 
     def process(chunk: str) -> None:
         result = call_llm(chunk)
-        results.append(result)  # Thread-unsafe: list.append is NOT atomic in CPython under GIL stress
+        results.append(result)  # list.append IS atomic in CPython (single bytecode under
+                                # the GIL; still safe in free-threaded builds) — nothing
+                                # is corrupted. The bug is ORDER: appends land in
+                                # completion order, so results no longer line up with chunks.
 
     threads = [threading.Thread(target=process, args=(c,)) for c in chunks]
     for t in threads: t.start()
@@ -1221,8 +1230,8 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 **Anthropic SDK (Python)**
 - `anthropic.Anthropic()` — synchronous client; `anthropic.AsyncAnthropic()` — async client
 - `client.messages.create()` — standard call; use `stream=True` for streaming in long chains
-- Models: `claude-haiku-4-5` for routing/classification (~$0.08/1M input), `claude-opus-4-5` for orchestration/evaluation (~$3/1M input)
-- Rate limits: 4000 RPM for claude-haiku-4-5, 2000 RPM for claude-opus-4-5 (Tier 2); plan parallelization accordingly
+- Models: `claude-haiku-4-5` for routing/classification ($1/1M input, $5/1M output), `claude-opus-4-5` for orchestration/evaluation ($5/1M input, $25/1M output) — July 2026 list prices
+- Rate limits (July 2026, Claude API usage tiers are Start / Build / Scale / Custom): 1,000 RPM on Start, 5,000 on Build, 10,000 on Scale — the same RPM for claude-haiku-4-5 and for Opus. Note the Opus RPM is a *combined* bucket shared across Opus 4.8/4.7/4.6/4.5, while Opus 5 has its own. Plan parallelization against your own tier, and remember cache reads do not count toward the input-token-per-minute limit
 
 **Concurrency in Python**
 - `concurrent.futures.ThreadPoolExecutor` — best for I/O-bound LLM calls; GIL is not a bottleneck for network I/O
@@ -1253,16 +1262,16 @@ def safe_orchestrate(objective: str, retry: bool = True) -> list[dict] | None:
 In a workflow, the developer defines the control flow in code — which LLM calls happen, in what order, based on what conditions. In an agent, the LLM itself decides the control flow at runtime — it determines what to do next based on observations. Workflows are predictable and debuggable; agents are flexible but harder to constrain. Choose workflows by default and promote to agents only when the task structure cannot be known in advance.
 
 **Q: Why does prompt chaining reduce hallucination rates?**
-Each LLM call in a chain operates on a smaller, more focused input. A single monolithic prompt asking an LLM to extract entities, normalize them, and classify their relationships is asking three cognitively distinct tasks simultaneously. Breaking this into three sequential calls means each LLM receives a clean, well-defined input and produces a focused output. Anthropic's internal benchmarks show approximately 70% hallucination reduction on long-document tasks when using chaining versus single-call approaches.
+Each LLM call in a chain operates on a smaller, more focused input. A single monolithic prompt asking an LLM to extract entities, normalize them, and classify their relationships is asking three cognitively distinct tasks simultaneously. Breaking this into three sequential calls means each LLM receives a clean, well-defined input and produces a focused output. No vendor publishes a general hallucination-reduction figure for chaining — Anthropic's "Building Effective Agents" makes no quantitative claim at all — so measure the reduction on your own long-document eval set rather than quoting a number.
 
 **Q: What is a gate in a prompt chain and why is it necessary?**
 A gate is a validation check between steps in a prompt chain. It can be programmatic (parse JSON, check numeric range, run a regex) or LLM-based (ask a cheap model "does this output satisfy criterion X?"). Gates are necessary because errors in step N amplify through subsequent steps. A malformed JSON extraction at step 1 that passes unchecked will corrupt every downstream step. Gates fail fast and prevent cascading garbage.
 
 **Q: How does routing reduce cost and what is the key risk?**
-Routing reduces cost by directing low-complexity queries to cheaper models (e.g., claude-haiku-4-5 at $0.08/1M tokens) and reserving expensive models (claude-opus-4-5 at $3/1M tokens) for complex queries. A system routing 60% of traffic to the cheap model saves roughly 50-60% on inference cost. The key risk is classifier error: if 10% of complex queries are misclassified as simple and sent to the cheap model, those 10% get degraded quality. The classifier must be validated on a representative sample with precision and recall measured per route.
+Routing reduces cost by directing low-complexity queries to cheaper models and reserving expensive models for complex queries. On July 2026 list prices, claude-haiku-4-5 is $1/1M input tokens and claude-opus-4-5 is $5/1M — a 5x ratio, so routing 60% of traffic to Haiku gives a blended $1×0.6 + $5×0.4 = $2.60/1M versus $5/1M all-Opus, a 48% saving. Cheaper classifier tiers widen that ratio and the saving with it. The key risk is classifier error: if 10% of complex queries are misclassified as simple and sent to the cheap model, those 10% get degraded quality. The classifier must be validated on a representative sample with precision and recall measured per route.
 
 **Q: What is the difference between sectioning and voting in parallelization?**
-Sectioning splits a single large input into N independent chunks, processes each in parallel, and merges results. It reduces latency by N× without increasing cost. Voting sends the same prompt to the LLM N times with non-zero temperature and picks the majority result. It does not reduce latency (all calls start at the same time and finish at similar times) but reduces variance — it is useful when a single call might produce different correct-looking but wrong answers due to sampling randomness.
+Sectioning splits a single large input into N independent chunks, processes each in parallel, and merges results. Speedup is always less than N, because the serial merge step sets a latency floor — with 20 chunks, 2 minutes each and a 1-minute merge, the win is 13.3x, not 20x — and total cost rises only by that one extra merge call. Voting sends the same prompt to the LLM N times with non-zero temperature and picks the majority result. It does not reduce latency (all calls start at the same time and finish at similar times) but reduces variance — it is useful when a single call might produce different correct-looking but wrong answers due to sampling randomness.
 
 **Q: When does voting fail to improve accuracy?**
 Voting reduces variance but does not fix bias. If the model systematically makes the same type of error on a particular input (e.g., consistently misidentifying a rare ICD-10 code), all N votes will agree on the same wrong answer. Majority vote in this case confidently returns the wrong answer. Voting is only effective when errors are random (stochastic) rather than systematic.
@@ -1280,7 +1289,7 @@ Each round costs 1 generation call + 1 evaluation call = 2 calls. Three rounds =
 Parse the orchestrator output with a try/except around json.loads(). On ParseError, retry the orchestration call once with an explicit instruction appended to the prompt ("respond with JSON only, no prose"). Log the raw string that failed to parse for debugging. If the retry also fails, either raise to the caller or fall back to a hardcoded default decomposition. Never pass invalid JSON downstream — it will silently corrupt every worker.
 
 **Q: What concurrency primitive should you use for parallel LLM calls in Python?**
-Use `concurrent.futures.ThreadPoolExecutor` for synchronous calls or `asyncio.gather()` with `AsyncAnthropic` for async calls. Both release the GIL during network I/O, so multiple threads or coroutines can make LLM API calls truly concurrently. Do not use `multiprocessing` — the overhead of spawning processes and serializing LLM client state is not justified for I/O-bound network calls. Set max_workers to a value that respects your API rate limit: at 2000 RPM, 8 workers each taking 400ms averages 8/0.4 = 20 RPS = 1200 RPM — safely under the limit.
+Use `concurrent.futures.ThreadPoolExecutor` for synchronous calls or `asyncio.gather()` with `AsyncAnthropic` for async calls. The two get concurrency by different mechanisms: threads release the GIL while blocked on a socket, so other threads run; asyncio is single-threaded and never blocks, suspending each coroutine at its `await` so the event loop can start the next request. Do not use `multiprocessing` — the overhead of spawning processes and serializing LLM client state is not justified for I/O-bound network calls. Set max_workers to a value that respects your API rate limit: against a 5,000 RPM Build-tier limit, 8 workers each taking 400ms averages 8/0.4 = 20 RPS = 1,200 RPM — safely under it, but over the 1,000 RPM Start-tier limit, so the same worker count is not portable across tiers.
 
 **Q: How do you decide which pattern to use for a new task?**
 Start with a single prompt. If it fails due to context confusion on long inputs, use prompt chaining. If the task population has distinct complexity tiers, add routing. If the bottleneck is latency and the input is large, use sectioning parallelization. If the task is high-stakes and variance is the problem, use voting. If the decomposition varies per input and cannot be hardcoded, use orchestrator-workers. If quality is the bottleneck and cost budget allows iteration, use evaluator-optimizer. Apply the simplest pattern that solves the observed failure mode.
@@ -1305,7 +1314,7 @@ The evaluator-optimizer inference loop is a lightweight, inference-time analog o
 
 **Use cheap models for control, expensive models for content**: Route classification, gate checks, and orchestration decomposition are control-plane operations. Use claude-haiku-4-5 or similar cheap models for these. Reserve claude-opus-4-5 for content generation, reasoning, and evaluation where quality matters.
 
-**Define gates as code, not LLM calls, when possible**: A JSON schema validator, a regex, or a numeric range check is deterministic, free, and instant. An LLM gate adds ~100-200ms and ~$0.0001 per check. Use programmatic gates whenever the validation criterion can be expressed as code.
+**Define gates as code, not LLM calls, when possible**: A JSON schema validator, a regex, or a numeric range check is deterministic, free, and instant. An LLM gate adds ~100-200ms and roughly $0.0005 per check on claude-haiku-4-5 (~500 input tokens at $1 per 1M). Use programmatic gates whenever the validation criterion can be expressed as code.
 
 **Set explicit max_tokens per step**: Never rely on the model's default stopping. Each step in a chain should have a max_tokens budget matched to its expected output size. Overshooting wastes cost and may push the next step over context limits.
 
@@ -1327,9 +1336,9 @@ The evaluator-optimizer inference loop is a lightweight, inference-time analog o
 
 ### Enterprise Document Processing Pipeline
 
-**Scenario**: A large financial services firm processes 50,000 contract documents per month. Each contract is 20-80 pages. The firm needs to: (1) extract key terms (parties, dates, payment amounts, governing law), (2) classify contracts by risk tier (low/medium/high), (3) flag non-standard clauses for legal review, and (4) generate a structured summary for the deal team. Contracts vary enormously in structure — NDAs, MSAs, SOWs, loan agreements, derivatives contracts.
+**Scenario** (a worked example, not a published deployment — the architecture is the transferable part; every figure below is derived from the July 2026 list prices and the model in Section 4, and should be re-measured on your own corpus): A large financial services firm processes 50,000 contract documents per month. Each contract is 20-80 pages. The firm needs to: (1) extract key terms (parties, dates, payment amounts, governing law), (2) classify contracts by risk tier (low/medium/high), (3) flag non-standard clauses for legal review, and (4) generate a structured summary for the deal team. Contracts vary enormously in structure — NDAs, MSAs, SOWs, loan agreements, derivatives contracts.
 
-**Problem with single-prompt approach**: A single GPT-4o prompt on an 80-page contract (approximately 60K tokens) exceeds context limits, costs ~$0.30 per document at $5/1M tokens, and produces extraction errors on numeric fields (amounts, dates) at a 12% error rate.
+**Problem with single-prompt approach**: A single frontier-model prompt on an 80-page contract (approximately 60K tokens) costs ~$0.30 per document at $5/1M input tokens, and produces extraction errors on numeric fields (amounts, dates) at roughly a 12% error rate. Note that 60K tokens fits comfortably inside a modern 200K-or-larger context window — the problem is accuracy and cost under a single monolithic prompt, not a hard context-limit failure.
 
 ---
 
@@ -1370,7 +1379,7 @@ flowchart TD
 Three patterns composed in one pipeline: 8-way sectioning parallelization for extraction,
 a 60/40 risk-routing split that reserves claude-opus-4-5 for medium/high-risk contracts, and
 a 3-round-capped evaluator-optimizer for clause flags — together cutting cost per document
-from $0.30 to $0.09 and latency from 38s to 6s.
+from $0.30 to about $0.13 and latency from 38s to 6s.
 
 ---
 
@@ -1512,23 +1521,37 @@ def process_contract(pdf_text: str) -> dict:
 
 ---
 
-**Measured outcomes** after deploying the combined pipeline versus the prior single-prompt approach:
+**Modeled outcomes** for the combined pipeline versus the prior single-prompt approach. The quality rows are illustrative targets for this workload shape; the cost row is computed below from July 2026 list prices:
 
 | Metric | Single Prompt | Workflow Pipeline | Improvement |
 |---|---|---|---|
 | Extraction error rate (numeric fields) | 12% | 2.1% | 83% reduction |
-| Cost per document | $0.30 | $0.09 | 70% reduction |
+| Cost per document | $0.30 | ~$0.13 | ~57% reduction |
 | Wall-clock latency (80-page doc) | 38s | 6s | 84% reduction |
 | Clause flag false positive rate | 34% | 11% | 68% reduction |
 | Legal review escalation accuracy | 71% | 94% | 32% improvement |
+
+Cost derivation, at claude-haiku-4-5 $1/$5 per 1M input/output and claude-opus-4-5 $5/$25:
+
+```
+  extraction (haiku)     60K in x $1/1M          = $0.060
+                         ~4K out x $5/1M         = $0.020    -> $0.080 every document
+  risk classify (haiku)                                      -> $0.001
+  low-risk summary (haiku, 60% of docs)                      -> $0.004
+  clause flags (opus, 40% of docs, avg 1.8 rounds x 2 calls) -> $0.115
+
+  low-risk doc    = 0.080 + 0.001 + 0.004                    = $0.085
+  med/high doc    = 0.085 + 0.115                            = $0.200
+  blended         = 0.6 x 0.085 + 0.4 x 0.200                = $0.131
+```
 
 **Key architectural decisions**:
 
 1. Sectioning parallelization on chunks of 10 pages keeps each chunk well within claude-haiku-4-5's context window (200K tokens) while enabling 8× parallel speedup.
 
-2. Routing on risk tier concentrates claude-opus-4-5 spend on medium and high risk contracts (40% of volume) — low risk contracts get a haiku-generated summary only, cutting cost per low-risk doc to ~$0.02.
+2. Routing on risk tier concentrates claude-opus-4-5 spend on medium and high risk contracts (40% of volume) — low risk contracts get a haiku-generated summary only, holding cost per low-risk doc to ~$0.085 (the haiku extraction pass dominates; see the derivation above).
 
-3. Evaluator-optimizer on clause flagging limited to 3 rounds with a hard cap. Average rounds to approval: 1.8. The 3-round cap has never been hit in production after prompt tuning.
+3. Evaluator-optimizer on clause flagging limited to 3 rounds with a hard cap. Modeled average rounds to approval: 1.8, consistent with the geometric-convergence model in Section 4. A well-tuned loop should rarely hit the cap — but the cap must stay in place regardless, because its purpose is to bound the pathological inputs, not the typical ones.
 
 4. Programmatic gate after parallel extraction: if the merged JSON is missing parties or effective_date, the document is flagged for manual review rather than continuing through the pipeline.
 

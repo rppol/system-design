@@ -6,7 +6,7 @@ Training large language models requires coordinating thousands of GPUs across hu
 
 A single H100 GPU can train roughly 1B tokens/day on a 7B model. Training LLaMA 3 405B on 15T tokens required ~16,000 H100 GPUs running for 2+ months. The infrastructure challenge is keeping all these GPUs busy (high utilization), communicating efficiently (minimizing bandwidth bottlenecks), and recovering gracefully from the inevitable hardware failures.
 
-Modern training infrastructure centers on three forms of parallelism: splitting the model across devices (model parallelism), splitting the data across devices (data parallelism), and overlapping computation with communication. Getting this right is the difference between 50% GPU utilization and 90%+ MFU (Model FLOP Utilization).
+Modern training infrastructure centers on three forms of parallelism: splitting the model across devices (model parallelism), splitting the data across devices (data parallelism), and overlapping computation with communication. Getting this right is the difference between a run stuck in the teens and one at the 40-60% MFU (Model FLOP Utilization) band that well-tuned large pretraining runs actually reach — Meta reported 38-43% BF16 MFU across the Llama 3 405B pre-training stages.
 
 ---
 
@@ -258,7 +258,7 @@ The multiplication is the useful part: the three axes are orthogonal, so the clu
     total        = TP x PP x DP =  8 x  8 x 16   = 1,024 GPUs
     replicas     = DP           = 16 copies, each on 64 GPUs, all averaged by AllReduce
 
-  LLaMA 3 405B (Section 7)
+  LLaMA 3 405B, 8K-sequence stage (Section 7; context parallel CP = 1 here)
     TP = 8, PP = 16, DP = 128
     model group  =  8 x 16              =    128 GPUs per full model copy
     total        =  8 x 16 x 128        = 16,384 GPUs   <- matches the 2048 nodes x 8
@@ -441,7 +441,7 @@ The 33% falls straight out of the 6N rule: the forward pass is 2 of the 6 units,
 
 ```
 Within node (8× H100):
-  NVLink bandwidth: 900 GB/s total
+  NVLink bandwidth: 900 GB/s per GPU (bidirectional, via NVSwitch)
   All-Reduce of 1GB: ~2ms (all-reduce = 2× ring latency)
 
 Across nodes (InfiniBand):
@@ -494,9 +494,13 @@ Gradient accumulation: FP32 (numerical stability for small gradients)
 Optimizer states (Adam m, v): FP32 (important: m,v must be precise)
 Master weights: FP32 copy alongside BF16 (updated in FP32, cast to BF16 for compute)
 
-FP8 training (emerging, H100+ only):
-  FP8 forward/backward: 1 byte/param -- 2x faster than BF16
-  Requires careful scaling; used by DeepSeek-V3
+FP8 training (H100 and later; now production-proven, not experimental):
+  FP8 forward/backward: 1 byte/param -- up to 2x the BF16 tensor-core rate
+  Requires careful per-tensor scaling; DeepSeek-V3 pretrained this way
+
+FP4 training (Blackwell and later):
+  NVIDIA's NVFP4 recipe pretrained a 12B model on 10T tokens with validation
+  loss within ~1% of an FP8 baseline, at 1.3-1.7x FP8 training throughput
 ```
 
 ---
@@ -504,24 +508,23 @@ FP8 training (emerging, H100+ only):
 ## 7. Real-World Examples
 
 ### Meta LLaMA 3 405B Training Infrastructure
-- 16,384 H100 GPUs (2048 nodes × 8 GPUs)
-- 3D parallelism: TP=8 (within node), PP=16, DP=128
-- FSDP + custom all-to-all for MoE layers (future)
-- NVLink within node + InfiniBand HDR-400 across nodes
-- Checkpoint every 30 minutes to distributed filesystem
-- Training time: ~77 days
+- 16,384 H100 80GB GPUs (2048 nodes × 8 GPUs), 700W TDP each
+- 4D parallelism at the main 8K-sequence stage: TP=8 (within node), CP=1, PP=16, DP=128 — 400 TFLOPs/GPU, 41% BF16 MFU. The 128K-context stage switched to TP=8, CP=16, PP=16, DP=4 at 380 TFLOPs/GPU and 38% MFU
+- NVLink within node + 400 Gbps across nodes; Meta ran both a RoCE fabric and an InfiniBand fabric, and the 405B run used the RoCE cluster
+- Frequent checkpointing to a distributed filesystem, with explicit work to cut GPU pause time so checkpoint frequency could be raised
+- Total pre-training compute: 30.84M H100 GPU-hours (Llama 3.1 405B model card)
 
 ### Google TPU Pod Architecture
 - TPU v5e: 256 chips per pod connected via high-bandwidth TPU interconnect
 - Multi-pod training using DCN (Data Center Network) for inter-pod communication
 - XLA compilation for efficient computation graphs
-- Gemini Ultra trained across multiple pod-scale supercomputers
+- Google trains its Gemini models across multiple pod-scale TPU supercomputers, spanning several datacenters for the largest runs; later TPU generations (v5p, v6e/Trillium, v7/Ironwood) scale the same pod-and-DCN model to larger pods
 
 ### Microsoft/OpenAI Azure AI Infrastructure
-- Custom ND-series Azure VMs with InfiniBand HDR-400 networking
+- Custom ND-series Azure VMs with 400 Gbps NDR InfiniBand networking (earlier ND A100 generations used 200 Gbps HDR)
 - PyTorch + DeepSpeed with ZeRO-3
 - Distributed optimizer with parameter server components
-- Estimated 10,000-25,000 H100s for GPT-4 training
+- Widely reported third-party estimate for GPT-4 pre-training: roughly 25,000 A100s (not H100s, which were not yet deployed at that scale) at 32-36% MFU; OpenAI has never published the figure
 
 ---
 
@@ -534,12 +537,17 @@ FP8 training (emerging, H100+ only):
 | Pipeline Parallel | Minimal communication | Pipeline bubble waste | Large models across nodes |
 | ZeRO-3/FSDP | Maximum memory efficiency | All-gather overhead | When GPU memory is the limit |
 
-| Hardware | Memory | FP16 TFLOPS | Price |
+Dense (non-sparsity) BF16/FP16 tensor-core throughput — vendor datasheets usually headline the
+2x "with sparsity" number, which no dense LLM training run achieves. Cloud prices are on-demand
+list rates from GPU-cloud aggregators in mid-2026 and move constantly; hyperscaler list prices
+run several times higher.
+
+| Hardware | Memory | Dense FP16/BF16 TFLOPS | Price |
 |---------|--------|------------|-------|
-| A100 80GB | 80 GB | 312 | ~$2/hr cloud |
-| H100 80GB SXM | 80 GB | 1979 | ~$3-4/hr cloud |
-| H200 141GB | 141 GB | 1979 + faster HBM | ~$5-6/hr cloud |
-| B200 192GB | 192 GB | ~4500 | New; ~$8-10/hr est |
+| A100 80GB | 80 GB | 312 (624 w/ sparsity) | ~$1-2/hr cloud |
+| H100 80GB SXM | 80 GB | 989 (1979 w/ sparsity) | ~$2-4/hr cloud |
+| H200 141GB | 141 GB | 989 — same compute as H100, faster/larger HBM | ~$3-5/hr cloud |
+| B200 192GB | 192 GB | ~2250 (~4500 w/ sparsity) | ~$5-9/hr cloud |
 
 ---
 
@@ -572,13 +580,13 @@ FP8 training (emerging, H100+ only):
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | **DeepSpeed** | ZeRO optimization, mixed precision | Microsoft; most widely used at scale |
-| **FSDP** | PyTorch-native ZeRO-3 | Facebook; increasingly preferred |
+| **FSDP** | PyTorch-native ZeRO-3 | Meta; now the default choice. The original `FullyShardedDataParallel` wrapper is deprecated — new work uses FSDP2's `torch.distributed.fsdp.fully_shard` |
 | **Megatron-LM** | Tensor/pipeline parallelism | NVIDIA; used for Megatron-Turing NLG |
 | **Nanotron** | Modern training framework | HuggingFace; clean 3D parallel support |
 | **Ray Train** | Distributed training orchestration | Abstracts cluster management |
 | **SkyPilot** | Multi-cloud GPU orchestration | Run on cheapest available cloud GPUs |
 | **NCCL** | GPU collective communication | NVIDIA; AllReduce, AllGather, ReduceScatter |
-| **Flash Attention 2** | Memory-efficient attention | Tri Dao; required for long-context training |
+| **Flash Attention 2 / 3** | Memory-efficient attention | Tri Dao et al.; required for long-context training. FA3 is the Hopper-optimized successor; FA2 remains the portable baseline |
 | **Weights & Biases** | Training monitoring | Loss curves, gradient norms, GPU utilization |
 | **LLM-Foundry** | MosaicML training stack | Now part of Databricks |
 
@@ -593,7 +601,7 @@ A: Tensor parallelism (TP) splits individual matrix operations across GPUs — e
 A: ZeRO (Zero Redundancy Optimizer) eliminates the memory redundancy in data parallel training. In standard DDP, each GPU stores full copies of model weights, gradients, and optimizer states — 16 bytes/param. ZeRO Stage 3 shards all three across GPUs: each GPU stores 1/N of each. Memory per GPU drops from O(total) to O(total/N). Trade-off: requires all-gather before each layer's forward pass (communication overhead ~20-30%).
 
 **Q: How do you handle hardware failures during multi-week LLM training?**
-A: Checkpoint model state (weights, optimizer state, dataloader position) every 30-60 minutes to a parallel filesystem (Lustre, GPFS). When a node fails, kill the job, replace the node, reload the last checkpoint, and resume. With 10K+ GPUs, expect 1-2 hardware failures per day. Advanced: elastic training frameworks (Torch Elastic) that can continue with N-1 nodes while a replacement is provisioned.
+A: Checkpoint model state (weights, optimizer state, dataloader position) every 30-60 minutes to a parallel filesystem (Lustre, GPFS). When a node fails, kill the job, replace the node, reload the last checkpoint, and resume. Failure rates at this scale are high: Meta logged 466 job interruptions during a 54-day snapshot of Llama 3 405B pre-training on 16K H100s, 419 of them unexpected — roughly one unplanned interruption every three hours. Advanced: elastic training frameworks (Torch Elastic) that can continue with N-1 nodes while a replacement is provisioned.
 
 **Q: What is gradient checkpointing and what is the tradeoff?**
 A: Gradient checkpointing (activation recomputation) saves memory by NOT storing intermediate activations during the forward pass. During backpropagation, it recomputes the forward pass from checkpoints to get the activations needed for gradients. Memory: reduces activation memory from O(layers) to O(√layers). Cost: adds ~33% computation overhead. Essential for training large models or with long sequences.
@@ -608,7 +616,7 @@ A: The GPU only computes as fast as batches arrive, and a synchronous dataloader
 ZeRO partitions optimizer states, gradients, and parameters across data-parallel GPUs. For a model with P parameters in FP16: baseline (no ZeRO) per GPU = 2P (params) + 2P (grads) + 12P (Adam states: FP32 params + FP32 momentum + FP32 variance) = 16P bytes. ZeRO-1 shards optimizer states: 2P + 2P + 12P/N. ZeRO-2 shards optimizer states + gradients: 2P + 2P/N + 12P/N. ZeRO-3 shards everything: 2P/N + 2P/N + 12P/N = 16P/N. For a 7B model (P=7B): baseline = 112GB per GPU; ZeRO-3 with 8 GPUs = 14GB per GPU. The tradeoff: ZeRO-3 requires all-gather communication to reconstruct parameters for each forward/backward pass, adding ~10-20% communication overhead.
 
 **Q: When should you use tensor parallelism vs pipeline parallelism vs data parallelism?**
-Use data parallelism (DP) when the model fits on a single GPU — it scales linearly with minimal communication (gradient all-reduce once per step). Use tensor parallelism (TP) when the model doesn't fit on one GPU and you have fast interconnects (NVLink at 900GB/s) — TP splits each layer across GPUs and requires all-reduce after every layer. Use pipeline parallelism (PP) when spanning multiple nodes with slow interconnects (InfiniBand at 200-400GB/s) — PP splits layers across stages and only sends activations between stages. Production pattern for large models: TP within a node (fast NVLink), PP across nodes (slower network), DP across replica groups. LLaMA 3 405B used TP=8 within a node, PP=4 across nodes, DP across the remaining GPUs. Rule: TP degree = GPUs per node, PP degree = number of nodes needed, DP fills the rest.
+Use data parallelism (DP) when the model fits on a single GPU — it scales linearly with minimal communication (gradient all-reduce once per step). Use tensor parallelism (TP) when the model doesn't fit on one GPU and you have fast interconnects (NVLink at 900GB/s) — TP splits each layer across GPUs and requires all-reduce after every layer. Use pipeline parallelism (PP) when spanning multiple nodes with slow interconnects (InfiniBand at 200-400GB/s) — PP splits layers across stages and only sends activations between stages. Production pattern for large models: TP within a node (fast NVLink), PP across nodes (slower network), DP across replica groups. LLaMA 3 405B used TP=8 within a node, PP=16 across nodes, and DP=128 filling out the 16,384-GPU cluster (plus context parallelism, CP, once sequences reached 128K). Rule: TP degree = GPUs per node, PP degree = number of nodes needed, DP fills the rest.
 
 **Q: What are the key differences between FSDP (PyTorch) and DeepSpeed ZeRO?**
 FSDP is PyTorch's native implementation of ZeRO-3 (full sharding), while DeepSpeed is Microsoft's library offering ZeRO stages 1-3 plus additional optimizations. Key differences: (1) FSDP is integrated into PyTorch core (no separate library), making it easier to adopt and debug; (2) DeepSpeed offers ZeRO-Infinity (offload to NVMe), ZeRO++ (quantized communication), and more granular memory optimization; (3) FSDP uses PyTorch's autograd natively while DeepSpeed wraps the engine; (4) DeepSpeed has better support for MoE training; (5) FSDP has better composability with PyTorch features (compile, DTensor). In practice: use FSDP for models up to 30B on standard GPU clusters (simpler setup), use DeepSpeed for 70B+ models or when you need ZeRO-Infinity offloading. Meta uses FSDP internally; Microsoft uses DeepSpeed.
@@ -639,7 +647,7 @@ Communication overhead in distributed training comes from gradient synchronizati
 2. **Maximize MFU** — aim for >40% Model FLOP Utilization; <30% indicates a communication or scheduling problem.
 3. **Use 3D parallelism** — TP within node, PP across nodes, DP as the outer loop.
 4. **Gradient checkpointing + Flash Attention** for any model above 13B parameters.
-5. **Asynchronous checkpointing** — write checkpoints in background threads to avoid blocking training.
+5. **Asynchronous checkpointing** — write checkpoints in background threads to avoid blocking training. PyTorch Distributed Checkpoint's `async_save` does exactly this: the state_dict construction and the GPU-to-CPU copy happen up front, and the actual write is handed to a background thread so the training loop resumes immediately.
 6. **Warmup cluster** — run all-reduce benchmarks before starting training to catch networking issues early.
 
 ---
@@ -1044,7 +1052,7 @@ MFU is the ratio of actual training FLOP throughput to theoretical GPU peak FLOP
 Normally, all activations from the forward pass are kept in GPU memory to compute gradients during backprop. For a 7B model with batch size 4 and sequence length 4096, activations require ~32 GB per GPU — exceeding available memory. Gradient checkpointing drops intermediate activations during the forward pass and recomputes them during backprop when needed. Memory reduction: ~8× for typical transformer layers. Compute overhead: ~33% more FLOPs (one extra forward pass per checkpoint boundary). The tradeoff — 33% more compute, 8× less activation memory — is almost always worthwhile for large models.
 
 **Q: Why is learning rate warmup essential for large model training?**
-At initialization, model weights are random and the loss landscape is highly irregular — large gradient magnitudes in some directions, small in others. Starting at the full learning rate (3e-4) causes parameter updates too large for the random initialization to handle, often causing NaN loss within 100-500 steps. Warmup ramps the learning rate from 0 to max_lr over 2,000 steps (a small fraction of total training), allowing the optimizer to settle into a stable region of the loss landscape before taking full-sized steps. Without warmup, approximately 30% of training runs fail to survive the first 1,000 steps.
+At initialization, model weights are random and the loss landscape is highly irregular — large gradient magnitudes in some directions, small in others. Starting at the full learning rate (3e-4) causes parameter updates too large for the random initialization to handle, often causing NaN loss within 100-500 steps. Warmup ramps the learning rate from 0 to max_lr over 2,000 steps (a small fraction of total training), allowing the optimizer to settle into a stable region of the loss landscape before taking full-sized steps. Skipping warmup makes early divergence a routine failure mode rather than a rare one, which is why every published large-model recipe includes a warmup phase.
 
 **Q: How do you diagnose and handle a straggler GPU in distributed training?**
 A straggler is a GPU running significantly slower than peers, causing AllReduce operations to wait at the slowest participant and throttling the entire run. Diagnosis: monitor per-GPU utilization via DCGM/Prometheus; a straggler shows consistently lower compute utilization (< 85%) compared to peers. Common causes: faulty NVLink link, thermal throttling (GPU overheating), slow NFS data path, CPU bottleneck on data preprocessing. Resolution: identify the node, pause training at the next checkpoint, hot-swap the node (replace with a healthy node), resume from checkpoint. The 20-minute interruption is preferable to sustained MFU degradation.

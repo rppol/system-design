@@ -6,7 +6,7 @@
 
 A production LLM evaluation harness is a systematic infrastructure layer that continuously measures whether an LLM-powered application is producing outputs of acceptable quality. It spans three environments: offline (pre-deploy), CI/CD (gate before merge), and online (sample from live traffic). The harness is the quality control layer that makes model upgrades, prompt changes, and RAG tuning safe to ship.
 
-Offline unit-test-style evaluation breaks for LLMs for three structural reasons. First, non-determinism: two identical API calls to GPT-4o may return outputs that differ in phrasing, ordering, and length while being equally correct — simple string equality fails. Second, subjective quality: "good" often means "helpful, accurate, and appropriately concise" — none of these are computable from ground truth strings. Third, emergent capabilities and regressions: a model update that improves factual accuracy may silently degrade instruction-following on long prompts — only a layered metric suite catches both.
+Offline unit-test-style evaluation breaks for LLMs for three structural reasons. First, non-determinism: two identical API calls to any frontier model may return outputs that differ in phrasing, ordering, and length while being equally correct — simple string equality fails. Second, subjective quality: "good" often means "helpful, accurate, and appropriately concise" — none of these are computable from ground truth strings. Third, emergent capabilities and regressions: a model update that improves factual accuracy may silently degrade instruction-following on long prompts — only a layered metric suite catches both.
 
 The eval harness solves these problems by composing multiple measurement layers: lexical metrics (ROUGE, BLEU, exact match) for cases where ground truth is deterministic; semantic metrics (embedding cosine similarity, BERTScore) for paraphrase-tolerant correctness; LLM-as-judge for subjective quality and reasoning; and human raters as the calibration source for the LLM judge. Each layer has different cost, latency, and reliability characteristics. A production harness runs all layers in the right contexts — not blindly applying the most expensive to every trace.
 
@@ -143,13 +143,14 @@ flowchart LR
   │  version:  "v2.1.0"                            │
   │  sha256:   "a3f9...c81d"                       │
   │  created:  2025-03-14T10:00:00Z                │
+  │  total:    500 examples                        │
   │  splits:                                        │
   │    train:  400 examples (80%)                  │
   │    eval:   100 examples (20%)                  │
-  │  composition:                                   │
-  │    routine:     60%  (120 examples)            │
-  │    adversarial: 20%  ( 40 examples)            │
-  │    edge_cases:  20%  ( 40 examples)            │
+  │  composition (of all 500, held in both splits): │
+  │    routine:     60%  (300 examples)            │
+  │    adversarial: 20%  (100 examples)            │
+  │    edge_cases:  20%  (100 examples)            │
   └────────────────────────────────────────────────┘
 ```
 
@@ -165,7 +166,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -186,7 +187,10 @@ class EvalDataset:
     name: str
     version: str
     records: list[GoldenRecord]
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    # datetime.utcnow() is deprecated from Python 3.12 — use an aware UTC timestamp
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
     @property
     def content_hash(self) -> str:
@@ -213,7 +217,7 @@ class EvalDataset:
 
 ```python
 import re
-from openai import OpenAI
+from anthropic import Anthropic
 
 JUDGE_PROMPT_TEMPLATE = """You are an expert evaluator. Score the model response on a 1-5 scale.
 
@@ -234,16 +238,29 @@ REASON: <one sentence explanation>"""
 
 
 class LLMJudge:
-    """LLM-as-judge with agreement scoring across N samples."""
+    """
+    LLM-as-judge with agreement scoring across N samples.
+
+    Model choice is load-bearing twice over. First, pin it (Best Practice 2) —
+    a floating alias silently re-baselines every score. Second, the agreement
+    check below needs a non-zero sampling temperature, and the newest frontier
+    models no longer expose one: Claude Opus 5 and Opus 4.7/4.8 reject
+    `temperature` outright, and Claude Sonnet 5 rejects any non-default value.
+    A cheap, sampling-capable model such as Claude Haiku 4.5 is both the right
+    judge for routine regression checks on cost grounds and one that still
+    supports the temperature knob this design depends on. If you must judge
+    with a top-tier model, drop the temperature argument and get variance from
+    prompt-order randomization instead of resampling.
+    """
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "claude-haiku-4-5",
         n_samples: int = 3,
         temperature: float = 0.2,
         agreement_threshold: float = 0.85,
     ) -> None:
-        self.client = OpenAI()
+        self.client = Anthropic()
         self.model = model
         self.n_samples = n_samples
         self.temperature = temperature
@@ -270,13 +287,14 @@ class LLMJudge:
         )
         scores: list[int] = []
         for _ in range(self.n_samples):
-            resp = self.client.chat.completions.create(
+            resp = self.client.messages.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
                 max_tokens=100,
+                temperature=self.temperature,
+                messages=[{"role": "user", "content": prompt}],
             )
-            parsed = self._parse_score(resp.choices[0].message.content or "")
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            parsed = self._parse_score(text)
             if parsed is not None:
                 scores.append(parsed)
 
@@ -306,7 +324,7 @@ class EvalRunResult:
     run_id: str
     dataset_version: str
     dataset_hash: str
-    model_tag: str              # e.g. "gpt-4o-2024-08-06" or "prompt-v3"
+    model_tag: str              # e.g. "claude-sonnet-5" or "prompt-v3"
     scores: list[float]         # one score per example
     pass_count: int             # examples scoring >= min_acceptable_score
     total: int
@@ -397,7 +415,8 @@ ApplicationFn = Callable[[str, Optional[str]], str]  # (question, context) -> an
 class EvalPipeline:
     """
     Orchestrates: dataset load -> model invoke -> judge score -> regression check.
-    Minimum golden set: 200 examples for statistical validity.
+    Minimum golden set: 200 examples (detects d ~ 0.28 at 80% power, p=0.05);
+    400-700 if you need to detect a 0.15-0.20 effect.
     """
 
     def __init__(
@@ -501,7 +520,7 @@ jobs:
 
       - name: Run eval harness
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVAL_DATASET_VERSION: "v2.1.0"
           BASELINE_RUN_ID: ${{ vars.BASELINE_RUN_ID }}   # set after each promoted release
         run: |
@@ -532,17 +551,17 @@ jobs:
           path: eval_results.json
 ```
 
-**Key numbers**: golden set minimum 200 examples for 80% power at p=0.05; judge agreement threshold 0.85; pass rate CI gate at 85%; online sample rate 2–5%; judge runs at temperature 0.2 (not 0.0 — zero temperature makes all samples identical, defeating the agreement check); regression significance p < 0.05; minimum effect size 0.1 absolute score points to ignore noise.
+**Key numbers**: golden set minimum 200 examples — enough to detect a d ≈ 0.28 shift at 80% power and p=0.05 (n ≈ 16/d² per arm), so budget 400–700 if you need to catch a 0.15–0.20 effect; judge agreement threshold 0.85; pass rate CI gate at 85%; online sample rate 2–5%; judge runs at temperature 0.2 (not 0.0 — zero temperature makes all samples identical, defeating the agreement check); regression significance p < 0.05; minimum effect size 0.1 absolute score points to ignore noise.
 
 ---
 
 ## 7. Real-World Examples
 
-**Anthropic — Claude model releases**: Anthropic's eval suite is the primary release gate for every Claude model revision. The suite covers thousands of task categories using both automated metrics and human raters, with LLM-as-judge used for subjective quality dimensions (helpfulness, honesty, harmlessness). A candidate model must not regress on any category by more than 2 percentage points relative to the current production model. The eval results are reviewed by a release committee before deployment.
+**Frontier-lab release gating**: Every major lab gates model releases on a large internal eval suite spanning many task categories, combining automated metrics, LLM-as-judge for subjective dimensions (helpfulness, honesty, harmlessness), and human raters as the calibration source. The structural lesson that transfers is category-level gating rather than aggregate gating: a model that improves the mean while regressing one capability category is a regression, and only per-category thresholds catch it. The specific thresholds and review processes labs use internally are not published — do not quote a number you have not measured yourself.
 
-**OpenAI Evals framework**: OpenAI open-sourced its internal eval framework (github.com/openai/evals) in 2023. The framework encodes evals as YAML specifications (model, dataset, grading function) that run against any OpenAI model. Community-contributed evals cover medical, legal, coding, and reasoning tasks. The pairwise model comparison mode is the mechanism behind the OpenAI model leaderboard on the platform — the same model that beats the baseline on the Evals suite is promoted to production.
+**OpenAI Evals framework**: OpenAI open-sourced an eval framework at github.com/openai/evals in March 2023. It encodes evals as YAML specifications (model, dataset, grading function) and accepted community-contributed evals covering medical, legal, coding, and reasoning tasks. It is worth reading as the earliest widely-adopted statement of eval-as-code — versioned specs, declarative graders, reproducible runs — even though the tooling landscape has since moved to the platforms in Section 11. Its promotion role inside OpenAI is not publicly documented.
 
-**Braintrust**: Braintrust positions itself as the "CI/CD for LLMs." Teams define evals in code, run them against any LLM via the Braintrust SDK, and review results in a web dashboard that shows score trends over time, example-level diffs, and A/B comparisons. Braintrust stores eval runs immutably — you can compare a PR branch to any past run by ID. Companies using Braintrust (as of 2025) run 50–500 eval examples per PR merge on average.
+**Braintrust**: Braintrust positions itself as the "CI/CD for LLMs." Teams define evals in code, run them against any LLM via the Braintrust SDK, and review results in a web dashboard that shows score trends over time, example-level diffs, and A/B comparisons. Braintrust stores eval runs immutably — you can compare a PR branch to any past run by ID, which is the property that makes an eval gate trustworthy over months rather than days.
 
 **LangSmith**: Eval datasets in LangSmith are versioned collections. The `langsmith.evaluate()` function runs a chain against a dataset and scores with built-in evaluators (exact match, embedding distance, LLM-as-judge via the `criteria` evaluator). Results surface in the Experiments tab with per-run breakdowns and diff views. LangSmith's annotation queue routes low-scoring production traces to human reviewers, and their corrections are added to the dataset — closing the flywheel loop.
 
@@ -619,7 +638,7 @@ of them on every example — you cascade, resolving as many as possible at the c
 - Tracking quality KPIs on a per-feature or per-user-segment basis
 
 **Use human-in-the-loop eval when:**
-- Performing a major model version upgrade (GPT-4o → next generation)
+- Performing a major model version upgrade (any jump across model generations, not a point release)
 - Calibrating a new LLM judge (compare judge scores to human scores on 100 examples)
 - Investigating a safety incident where automated eval is insufficient
 - Building the adversarial examples for your golden set
@@ -636,13 +655,13 @@ of them on every example — you cascade, resolving as many as possible at the c
 
 **Pitfall 1: Self-serving bias — judge model evaluating itself**
 
-Teams use GPT-4o to judge GPT-4o outputs because it is the strongest available judge. The bias: GPT-4o rates its own outputs 12–15% higher than an independent judge (Claude-3.5-Sonnet) rates the same outputs when phrasing, ordering, and verbosity are matched. The effect is large enough to mask real regressions. In a 2024 analysis across 500 examples, GPT-4o self-judged pass rate was 91%; Claude-judged pass rate on the same examples was 78%. The 13-point gap represented actual failures hidden by self-serving bias.
+Teams reach for their application's own model as the judge because it is the strongest model they have access to. The bias is real and documented in the literature — self-preference bias, where a model scores its own generations higher than an independent judge scores the same text, has been measured repeatedly since 2024 (see Panickssery et al., "LLM Evaluators Recognize and Favor Their Own Generations", arXiv 2404.13076). The effect is large enough to mask real regressions: an application whose self-judged pass rate looks healthy in the low 90s can sit in the high 70s under an independent judge, and that gap is composed of actual failures. Treat any single published percentage for the size of the gap as model-pair-specific; measure it on your own data before trusting either number.
 
-Fix: always use a judge model from a different provider than the application model. If the application uses GPT-4o, judge with Claude-3.5-Sonnet or Gemini 1.5 Pro. If the application uses Claude, judge with GPT-4o. For the highest-stakes evals, use two independent judges and report disagreements.
+Fix: always use a judge model from a different provider — or at minimum a different model family — than the application model. If the application runs on Claude, judge with a non-Anthropic model, and vice versa. For the highest-stakes evals, use two independent judges and report their disagreements rather than averaging them away.
 
 **Pitfall 2: Golden-set contamination from training data leakage**
 
-A team built a 300-example golden set for their code generation application by sampling from public GitHub repositories. They later discovered that 47 examples were present in the fine-tuning dataset used by the model being evaluated. The model scored 94% on those 47 examples and 71% on the remaining 253 — but the contaminated aggregate of 83% looked healthy. The regression that would have been caught was invisible.
+A team built a 300-example golden set for their code generation application by sampling from public GitHub repositories. They later discovered that 47 examples were present in the fine-tuning dataset used by the model being evaluated. The model scored 94% on those 47 examples and 71% on the remaining 253 — an aggregate of (47 x 0.94 + 253 x 0.71) / 300 = 75%, which still cleared their 70% bar. The 71% true score on uncontaminated examples was the number that mattered, and it was never reported separately.
 
 Fix: For any golden set built from public data, run a deduplication check against the training data of every model you intend to evaluate. Use n-gram overlap (minimum 8-gram) and embedding similarity (threshold 0.92 cosine) to flag potential contamination. For internally generated golden sets, use data generated after the model's training cutoff date.
 
@@ -684,7 +703,7 @@ Fix: Pin the judge prompt with a version identifier the same way you pin the mod
 Unit tests check deterministic string equality — they pass or fail based on exact output matching, which breaks immediately with non-deterministic LLMs that produce valid paraphrases. A production eval harness layers lexical, semantic, and LLM-judge metrics to capture correctness at different abstraction levels, runs statistical regression detection to distinguish real quality drops from sampling noise, and operates continuously in CI and on live traffic rather than only at test time. The harness does not replace tests for deterministic behavior (structured output schema validation, tool call format checks) but adds the probabilistic quality measurement layer that unit tests cannot provide.
 
 **Q: What makes a good golden dataset for LLM eval?**
-A good golden dataset has four properties: diversity (covers all major query types including at least 20% adversarial or edge case examples), freshness (no examples predating the model training cutoff to prevent contamination), human-curated references (not model-generated, not scraped without curation), and sufficient size (minimum 200 examples for 80% statistical power at p=0.05 with typical effect sizes of 0.15–0.20). In practice, the hardest property to maintain is freshness — as the application evolves, examples that were edge cases in month 1 become routine in month 6, requiring periodic rebalancing.
+A good golden dataset is diverse, fresh, human-curated, and large enough for the effect you need to detect. Those four properties in detail: diversity (covers all major query types including at least 20% adversarial or edge case examples), freshness (no examples predating the model training cutoff to prevent contamination), human-curated references (not model-generated, not scraped without curation), and sufficient size. On size, use the standard two-sample approximation n ≈ 16/d² per arm for 80% power at p=0.05: 200 examples per arm detects only a fairly large shift of d ≈ 0.28 standard deviations, and detecting the 0.15–0.20 effects that matter in practice takes 400–700 per arm. Treat 200 as the floor below which the gate is decorative, not as the number that buys you power. In practice, the hardest property to maintain is freshness — as the application evolves, examples that were edge cases in month 1 become routine in month 6, requiring periodic rebalancing.
 
 **Q: How does LLM-as-judge work and what are its main failure modes?**
 LLM-as-judge presents the judge model with a question, reference answer, and model output, asking it to score on a rubric (typically 1–5) and provide a one-sentence rationale. The main failure modes are: self-serving bias (15% score inflation when judge and application share the same model family), verbosity bias (longer answers score higher independent of correctness — mitigated by rubric-grounded prompts that penalize unnecessary length), positional bias (in pairwise comparison, option A scores higher than option B when identical — mitigated by randomizing order and averaging both orderings), and prompt drift (changing the judge prompt changes scores without any application change — mitigated by pinning judge prompt version). Agreement across 3 samples at temperature 0.2 with threshold 0.85 is the standard calibration check.
@@ -705,13 +724,13 @@ The eval gate runs in CI on pull requests that modify prompts, RAG configuration
 Flakiness in LLM evals comes from judge non-determinism (temperature > 0), application non-determinism (sampling parameters), and small golden sets (high sampling variance). Mitigations: run the judge at temperature 0.2 and sample 3 responses, using the median score — this reduces judge score standard deviation from 0.6 to 0.2 on a 1–5 scale. Require that a regression be detected in 2 consecutive CI runs before blocking merge. Set a minimum effect size for regression detection (0.1 points) to ignore noise. Track the false-positive rate of the eval gate over 30 days — if it exceeds 5%, recalibrate the threshold. A flaky eval gate that developers learn to re-run until it passes is worse than no gate.
 
 **Q: How do LLM eval scores correlate with business KPIs?**
-The correlation is real but indirect and requires explicit measurement. A customer support application measured the relationship between eval judge score (1–5) and CSAT (1–5 customer satisfaction survey): Pearson r = 0.61 (moderate positive correlation). Concretely, examples scoring 4–5 in eval had mean CSAT of 4.2; examples scoring 1–2 in eval had mean CSAT of 2.8. However, 22% of high-scoring eval examples received low CSAT (model was correct but response was too long for the support context), and 14% of low-scoring eval examples received high CSAT (customer accepted an incorrect but confident answer). The implication: eval scores are a leading indicator of business KPIs, not a direct substitute. Calibrate the mapping quarterly using 200+ paired (eval score, KPI) observations.
+The correlation is real but indirect and requires explicit measurement. The worked example below is an illustrative composite, not a published result — the point is the shape of the relationship and the size of the off-diagonal, not the exact coefficient. A customer support application measured the relationship between eval judge score (1–5) and CSAT (1–5 customer satisfaction survey): Pearson r = 0.61 (moderate positive correlation). Concretely, examples scoring 4–5 in eval had mean CSAT of 4.2; examples scoring 1–2 in eval had mean CSAT of 2.8. However, 22% of high-scoring eval examples received low CSAT (model was correct but response was too long for the support context), and 14% of low-scoring eval examples received high CSAT (customer accepted an incorrect but confident answer). The implication: eval scores are a leading indicator of business KPIs, not a direct substitute. Calibrate the mapping quarterly using 200+ paired (eval score, KPI) observations.
 
 **Q: How do you calibrate an LLM judge to align with human raters?**
 Calibration is a three-step process run on a 100-example calibration set with human ratings. Step 1: collect 3 human ratings per example using a specific rubric and compute inter-rater agreement (target: Krippendorff's alpha > 0.70). Step 2: run the candidate judge prompt on the same 100 examples and compute agreement with the majority human rating. Step 3: if judge–human agreement is below 75%, modify the rubric (add examples, clarify scoring criteria) and repeat. After calibration, the judge is accepted if it achieves 80%+ agreement with human majority on the calibration set. Re-run calibration quarterly and after any judge model upgrade.
 
 **Q: What is the cost of running a production eval harness and how do you contain it?**
-For a 300-example golden set with GPT-4o as judge at 3 samples per example: 300 examples × 3 samples × 500 tokens per judge call = 450K tokens per eval run. At $5/1M input + $15/1M output (assume 400 input / 100 output split): cost per run ≈ $0.90. At 20 CI runs per day (active team) = $18/day. For online eval at 3% sample rate with 10K requests/day = 300 shadow evals/day = $0.90/day. Total: under $20/day for a mid-sized team. Cost reduction levers: use a smaller judge model (GPT-4o-mini at $0.15/1M input) for routine regression checks, reserving GPT-4o for edge cases; reduce judge samples from 3 to 1 for stable, well-calibrated runs; apply eval only to changed sections of the application.
+Work it from the token count. A 300-example golden set judged at 3 samples per example is 900 judge calls; at a 400-input / 100-output split that is 360K input and 90K output tokens per eval run. Judged by Claude Sonnet 5 at its July 2026 list price of $3/M input and $15/M output: 0.36 × $3 + 0.09 × $15 = **$2.43 per run**, so 20 CI runs/day for an active team is about $49/day. Swap the judge for Claude Haiku 4.5 at $1/M input and $5/M output and the same run costs 0.36 × $1 + 0.09 × $5 = **$0.81**, or about $16/day — a 3x saving from one config change. Online eval at a 3% sample rate on 10K requests/day adds 300 shadow evals, well under $1/day either way. Cost reduction levers, in order of leverage: use the cheap judge for routine regression checks and reserve the expensive one for edge cases and calibration; drop judge samples from 3 to 1 once the judge is well calibrated; and scope eval to the parts of the application a PR actually touches.
 
 **Q: How should you version and manage eval datasets over time?**
 Use semantic versioning: MAJOR.MINOR.PATCH. MAJOR: complete rebuild of the dataset (new composition policy, different task definition). MINOR: addition of 20+ new examples or removal of contaminated examples. PATCH: metadata fixes, tag corrections. Store each version as an immutable file in object storage (S3, GCS) with a content hash. Never modify a published version in place — create a new version. The regression detector requires the same dataset hash for baseline and candidate; comparing across dataset versions is a separate migration analysis. Quarterly, audit the dataset against the current production query distribution and bump MINOR if coverage has dropped below 80% of active query clusters.
@@ -720,10 +739,10 @@ Use semantic versioning: MAJOR.MINOR.PATCH. MAJOR: complete rebuild of the datas
 A RAG golden dataset must test both retrieval quality and generation quality independently. Each example needs: (1) a question, (2) the ground-truth document set that should be retrieved (to measure recall@k), (3) a reference answer grounded only in those documents (to measure faithfulness), and (4) a relevance label (is the question answerable from the corpus?). Include examples where the answer is not in the corpus — the correct model behavior is to acknowledge the gap, not hallucinate. Include examples that require synthesizing information from 3+ documents — this tests multi-hop reasoning, the hardest RAG failure mode. RAGAS provides built-in metrics for context recall (are the right documents retrieved?), faithfulness (does the answer stay in the retrieved context?), and answer relevance (does the answer address the question?).
 
 **Q: What happens when a model provider updates a model silently?**
-Model providers occasionally update models in-place (e.g., gpt-4o points to a new checkpoint). This produces apparent regressions or improvements that have nothing to do with your application changes. Defense: pin model versions explicitly (gpt-4o-2024-08-06, not gpt-4o). Monitor your eval dashboard for score changes on days when no application code changed — a score change without a code change is almost always a provider-side model update. When detected, update the baseline run ID to the post-update scores so future regressions are measured against the new model's baseline, not the old one.
+Model providers occasionally update models in-place, or an unversioned alias silently starts resolving to a new checkpoint. This produces apparent regressions or improvements that have nothing to do with your application changes. Defense: pin the most specific model identifier the provider exposes, and treat a provider-side model change as a deliberate baseline event rather than something to absorb silently. Monitor your eval dashboard for score changes on days when no application code changed — a score change without a code change is almost always a provider-side model update. When detected, update the baseline run ID to the post-update scores so future regressions are measured against the new model's baseline, not the old one.
 
 **Q: How do you evaluate an agentic application where outputs are not single text strings?**
-Agent outputs are multi-step — plan, tool calls, intermediate observations, final answer. Evaluate each layer: (1) tool selection accuracy (did the agent call the right tools in the right order?) using exact-match or set-overlap against a reference tool call sequence; (2) intermediate observation quality (did tool calls return useful information?) using the same RAG faithfulness metrics; (3) final answer quality using LLM judge on the (question, tool results, final answer) triple. The judge prompt for agents must include the full tool call trace so the judge can assess whether the reasoning chain supports the final answer. Trajectory-level evaluation — did the agent take the optimal path, or did it take a longer path that still reached the right answer? — is the hardest open problem in agent eval as of 2025.
+Agent outputs are multi-step — plan, tool calls, intermediate observations, final answer. Evaluate each layer: (1) tool selection accuracy (did the agent call the right tools in the right order?) using exact-match or set-overlap against a reference tool call sequence; (2) intermediate observation quality (did tool calls return useful information?) using the same RAG faithfulness metrics; (3) final answer quality using LLM judge on the (question, tool results, final answer) triple. The judge prompt for agents must include the full tool call trace so the judge can assess whether the reasoning chain supports the final answer. Trajectory-level evaluation — did the agent take the optimal path, or did it take a longer path that still reached the right answer? — remains the hardest open problem in agent eval.
 
 **Q: How do you reduce bias from verbosity in LLM-as-judge scoring?**
 Verbosity bias causes the judge to prefer longer, more detailed responses regardless of accuracy. Mitigations: (1) rubric-grounded scoring — specify "a score of 5 does not require exhaustive detail; concise and accurate is preferred over verbose and partially accurate"; (2) reference normalization — when computing similarity to a reference, normalize response length to the reference length and penalize >2x verbosity; (3) pairwise comparison with explicit instructions — "prefer the shorter response if both are equally accurate"; (4) length-controlled sampling — when building the golden set, sample model outputs at different temperature and max_token settings and label the shortest correct response as the reference. Studies show verbosity bias inflates scores by 0.2–0.4 absolute points on a 5-point scale, enough to mask real regressions.
@@ -734,9 +753,9 @@ Verbosity bias causes the judge to prefer longer, more detailed responses regard
 
 1. **Always include adversarial examples in the golden set** — at minimum 20% of examples should be edge cases or known failure modes. A golden set composed entirely of routine queries will miss the regressions that matter most.
 
-2. **Pin the judge model version explicitly** — use `gpt-4o-2024-08-06`, not `gpt-4o`. A judge model upgrade changes eval scores independent of any application change; unpinned judges make regression detection meaningless.
+2. **Pin the judge model to the most specific identifier the provider exposes, never a floating alias** — a judge model upgrade changes eval scores independent of any application change, so an unpinned judge makes regression detection meaningless. Record the pinned identifier in the run metadata alongside the dataset hash.
 
-3. **Never use the same model family as both the application model and the judge model** — self-serving bias inflates scores by 12–15%. If the application uses GPT-4o, judge with Claude-3.5-Sonnet or Gemini 1.5 Pro.
+3. **Never use the same model family as both the application model and the judge model** — self-preference bias is a documented effect (Panickssery et al., arXiv 2404.13076) and it inflates scores in the direction that hides regressions. Cross the provider boundary: judge a Claude-backed application with a non-Anthropic model, and vice versa.
 
 4. **Run eval as code in version control, not as a manual checklist** — the eval dataset version, judge prompt version, metric thresholds, and significance levels must all be checked into the same repository as the application code and reviewed in PRs.
 

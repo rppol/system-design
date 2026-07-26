@@ -6,7 +6,7 @@
 
 Software simulation agents model an entire software organization as a multi-agent system where each agent plays a named role — CEO, CTO, programmer, code reviewer, QA engineer, documentation writer — and the agents interact through structured conversation to produce working software artifacts.
 
-ChatDev (ICSE 2024, Qian et al.) pioneered this paradigm by simulating a "virtual software company." A single natural-language task description enters the system; a sequence of role-playing agents collaboratively produces source code files, dependency manifests, and documentation. The coordination mechanism is the "chat chain": each phase of software development is a turn in a structured multi-party conversation, and the output of one phase becomes the structured input of the next.
+ChatDev (ACL 2024, Qian et al., arXiv 2307.07924) pioneered this paradigm by simulating a "virtual software company." A single natural-language task description enters the system; a sequence of role-playing agents collaboratively produces source code files, dependency manifests, and documentation. The coordination mechanism is the "chat chain": each phase of software development is a turn in a structured multi-party conversation, and the output of one phase becomes the structured input of the next.
 
 MetaGPT (arXiv 2308.00352, Hong et al.) extended this by replacing free-form chat with Standard Operating Procedures (SOPs). Every agent is bound to produce a specific document type — a Product Requirements Document (PRD), a UML class diagram, an API specification, a test plan — before handing off to the next agent. This document-centric approach dramatically reduces hallucination drift that accumulates across long chat chains.
 
@@ -679,15 +679,15 @@ class BudgetExceededError(Exception):
 
 ## 7. Real-World Examples
 
-**ChatDev (original paper):** The ICSE 2024 paper evaluated ChatDev on 70 software tasks from platforms like Upwork and GitHub. Produced runnable Python applications in 7.21 minutes on average at a cost of roughly $0.20 per task using GPT-3.5-turbo. Code executability (fraction of generated apps that ran without crash) was 86.66%.
+**ChatDev (original paper, ACL 2024):** The paper evaluated ChatDev on 70 tasks selected from the Camel dataset (which spans 20 programming languages, 50 domains, 50 tasks per domain); the paper separately introduces a 1,200-prompt software-requirement dataset that was not used for this headline result. Average software production time was **409.84 seconds — under 7 minutes** — at an average development cost of **$0.2967 per software**, using the `ChatGPT-turbo-16k` model. Code executability (fraction of generated apps that ran flawlessly) was **86.66%**.
 
-**MetaGPT (original paper, arXiv 2308.00352):** Evaluated on HumanEval and MBPP code generation benchmarks and on end-to-end software project tasks. Achieved state-of-the-art on the SoftwareDev benchmark with 73.17% task completion. The SOP approach reduced "hallucinated" function calls (functions referenced but never defined) by 62% compared to a baseline multi-agent system without structured document output.
+**MetaGPT (original paper, arXiv 2308.00352):** Reports **85.9% Pass@1 on HumanEval and 87.7% on MBPP**, and on its own SoftwareDev benchmark an **executability score of 3.75 out of 4** with a **100% task completion rate**, 541 seconds of running time and 31,255 tokens per project (about 124.3 tokens per line of code, 5.1 files, 251.4 total lines). The paper argues qualitatively that SOPs and structured document handoffs reduce hallucination; it does not report a percentage reduction in undefined function calls, so treat any such figure you encounter as unsourced.
 
 **Devin (Cognition AI, 2024):** Though not published as a research paper, Devin's architecture follows a similar simulation pattern: a planner agent decomposes tasks, a coder agent implements files, a shell agent executes code and captures output, a reviewer agent inspects results. The shared workspace (a terminal + editor state) acts as external memory.
 
-**GitHub Copilot Workspace (2024):** Microsoft's extension of Copilot to full-workspace code editing uses a plan-then-implement-then-verify loop structurally similar to MetaGPT: the user describes a feature, the system generates a plan (structured), implements each change, and runs tests to verify. The structured plan prevents the model from jumping to code before requirements are clear.
+**GitHub Copilot Workspace (2024-2025):** GitHub's technical preview of full-workspace code editing used a plan-then-implement-then-verify loop structurally similar to MetaGPT: the user describes a feature, the system generates a structured plan, implements each change, and runs tests to verify. The structured plan prevents the model from jumping to code before requirements are clear. The preview was **sunset on 2025-05-30**; the architecture was folded into the GitHub Copilot coding agent, which went generally available to paid subscribers in September 2025. The lesson survived the product: the plan artifact, not the chat transcript, is what makes the run reviewable.
 
-**Enterprise Usage:** At a mid-size fintech company, an internal ChatDev-inspired system was used to generate boilerplate microservices (CRUD REST APIs with Spring Boot). A simple 5-endpoint service cost approximately 80,000 tokens (~$0.08 at GPT-4o mini pricing). Adding OAuth2 integration raised the cost to ~320,000 tokens due to multiple QA repair iterations.
+**Enterprise usage (illustrative, not a published deployment):** An internal ChatDev-inspired system generating boilerplate microservices (CRUD REST APIs with Spring Boot) shows the characteristic cost shape. A simple 5-endpoint service runs about 80,000 tokens (~$0.03 at gpt-4o-mini's $0.15/$0.60 per 1M input/output rates, assuming an even input/output split). Adding OAuth2 integration raises it to ~320,000 tokens (~$0.12) — driven by repair iterations, not by the size of the feature.
 
 **Stated plainly.** "Adding one feature did not add one feature's worth of tokens — it
 quadrupled the entire run, because the repair loop re-runs the expensive phases."
@@ -722,7 +722,7 @@ inside each band is almost entirely how many times QA sent work back.
 | Hallucination rate | Moderate (10–20% of files have bugs) | Lower (schema forces specificity) | High for complex tasks |
 | Token cost (simple app) | 50K–150K | 80K–200K | 5K–20K |
 | Token cost (complex app) | 200K–500K | 300K–700K | 20K–100K (incomplete) |
-| Executability (out of box) | ~87% (paper) | ~90%+ (paper) | ~60% for multi-file apps |
+| Executability (out of box) | 86.66% of runs executed flawlessly (paper) | 3.75 / 4 executability score on SoftwareDev (paper) — a graded score, not a percentage of runs | Lower for multi-file apps; no comparable published figure |
 | Debuggability | Moderate (chat logs) | High (structured docs at each phase) | Low |
 | Latency (wall clock) | 5–15 min per app | 10–25 min per app | 30s–2min |
 | Customizability | Easy (add/remove phases) | Moderate (change schemas, harder) | N/A |
@@ -908,21 +908,21 @@ next_agent.run(design)
 
 ## 11. Technologies & Tools
 
-**ChatDev (open source):** The original ChatDev implementation is available at `github.com/OpenBMB/ChatDev`. Built in Python, uses the OpenAI API, supports GPT-3.5-turbo and GPT-4. Includes a visualization UI (ChatChain Visualizer) for inspecting phase dialogues. Actively maintained as of 2025.
+**ChatDev (open source):** The original ChatDev implementation is available at `github.com/OpenBMB/ChatDev`. Built in Python, uses the OpenAI API. Includes a visualization UI (ChatChain Visualizer) for inspecting phase dialogues. Still actively maintained (commits through July 2026, ~34K stars).
 
-**MetaGPT (open source):** Available at `github.com/geekan/MetaGPT`. Python, supports OpenAI, Anthropic, and local models via litellm. Includes built-in roles, message bus, and schema definitions. Supports incremental mode where existing code files are reused rather than regenerated.
+**MetaGPT (open source):** Available at `github.com/FoundationAgents/MetaGPT` — the repository moved from `geekan/MetaGPT` to the FoundationAgents organization, and the old URL redirects. Python, with a provider layer covering OpenAI, Anthropic, and locally served models. Includes built-in roles, message bus, and schema definitions. Supports incremental mode where existing code files are reused rather than regenerated. ~70K stars.
 
 **GPT-Engineer:** A simpler single-loop variant. Prompts the model to clarify requirements then generate all code in one pass. Lower token cost, lower quality for multi-file projects. Available at `github.com/AntonOsika/gpt-engineer`.
 
 **Devin (Cognition AI):** Proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
 
-**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. Evaluated on SWE-bench (GitHub issue resolution). Achieves ~12–15% resolution rate on SWE-bench Verified. Available at `github.com/princeton-nlp/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/README.md).
+**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/README.md).
 
-**Model options:**
-- GPT-4o: best quality, ~$2.50/1M input tokens, ~$10/1M output tokens (as of mid-2025)
-- GPT-4o mini: 10x cheaper, suitable for QA and review phases where output is structured JSON
-- Claude Sonnet 4.6 (current): strong code generation, 200K context window (useful for large repo snapshots)
-- Local models (Llama 3.1 70B via Ollama): zero API cost but 3–5x slower, lower code quality
+**Model options** (rates verified July 2026; re-check before budgeting):
+- gpt-4o: $2.50/1M input, $10/1M output — still served by the API, but no longer OpenAI's flagship
+- gpt-4o-mini: $0.15/1M input, $0.60/1M output — roughly **16x cheaper on both sides**, suitable for QA and review phases where output is structured JSON
+- Claude Sonnet 5: current mid-tier Claude, $3/1M input and $15/1M output (introductory $2/$10 through 2026-08-31), 1M-token context — the context is what makes large repo snapshots viable
+- Local models (Llama-family 70B via Ollama): zero API cost but far slower and lower code quality
 
 **Orchestration frameworks:** [LangGraph](../agentic_frameworks/langgraph.md) (for stateful graph-based agent coordination), [CrewAI](../agentic_frameworks/crewai.md) (role-based multi-agent), [AutoGen](../agentic_frameworks/autogen.md) (Microsoft, dialogue-based multi-agent). All support ChatDev-like patterns with varying levels of built-in structure.
 
@@ -942,7 +942,7 @@ MetaGPT replaces free-form dialogue with document-centric SOPs: each agent publi
 A hallucinated file is one where the programmer agent produces syntactically valid code referencing functions, classes, or modules that were never defined anywhere in the codebase. Detection approaches: (1) parse all generated files with `ast.parse()` and resolve import references against the file list; (2) run the generated code in a sandboxed subprocess and capture `ModuleNotFoundError` / `NameError`; (3) have a static analysis agent (using pylint or pyflakes output) check for undefined names before writing to the repo.
 
 **Q: Why do software simulation agents use a shared code repository rather than passing full context between agents?**
-Context window limits and cost. Passing the full codebase to every agent becomes impossible once the codebase exceeds a few thousand lines (hitting 32K–128K token limits) and expensive even when feasible. The shared repository acts as external memory: agents read only the files relevant to their current task, reducing per-call token usage by 60–80% compared to full-snapshot injection. The repo also serves as the single source of truth, preventing agents from working on stale versions of a file.
+Context window limits and cost. Passing the full codebase to every agent is expensive at any size and eventually impossible: frontier context windows have grown from 32K-128K to 1M tokens, which moves the wall but does not remove it, and every token in that window is re-billed on every one of the pipeline's calls. The shared repository acts as external memory: agents read only the files relevant to their current task, reducing per-call token usage by 60–80% compared to full-snapshot injection. The repo also serves as the single source of truth, preventing agents from working on stale versions of a file.
 
 **Q: What are Standard Operating Procedures (SOPs) in MetaGPT and how do they reduce hallucination?**
 SOPs are structured role definitions that specify what document type each agent must produce, encoded as Pydantic schemas. When an agent must produce a `SystemDesign` JSON with specific required fields (language, framework, data_models, api_endpoints, file_structure), it cannot hide vague or hallucinated content in prose. The schema forces specificity: the agent must name concrete technologies, list specific endpoints with methods and paths, and enumerate actual data model fields. Downstream validation ensures schema compliance before the data flows further.
@@ -972,7 +972,7 @@ A Pydantic `ValidationError` is raised with field-level details (missing field, 
 The repository is the single source of truth. After each agent writes a file, subsequent agents that need that file read the current version from the repository rather than from their conversation history. In practice, agents receive a fresh repository snapshot at the start of each phase rather than relying on prior conversation turns. This guarantees that a QA agent reviewing `user_service.py` sees the version that the programmer agent most recently wrote, not a version from three phases ago that appeared in the conversation history.
 
 **Q: What is the executability rate reported in the ChatDev paper and what does it measure?**
-The ICSE 2024 paper reports 86.66% executability on 70 software tasks. Executability means the generated application can be launched without immediately crashing (i.e., `python main.py` runs without a top-level exception). It does not measure functional correctness (whether the app produces correct outputs for given inputs) or completeness (whether all specified features are implemented). Functional correctness rates are substantially lower — the paper estimates roughly 65–70% of generated apps implement the majority of requested features correctly.
+The ACL 2024 paper reports 86.66% executability across its 70 evaluation tasks. Executability means the generated application can be launched without immediately crashing (i.e., `python main.py` runs without a top-level exception). It does not measure functional correctness (whether the app produces correct outputs for given inputs) or completeness (whether all specified features are implemented), and the paper does not publish a functional-correctness rate — so an executability number is a floor on quality, not a claim about it. That gap is exactly why production pipelines add an execution-and-test verification step rather than stopping at "it launched."
 
 **Q: How would you adapt a ChatDev-style pipeline to operate on an existing codebase rather than generating from scratch?**
 Three changes are required: (1) the code repository is initialized with the existing codebase rather than empty; (2) the programmer agent's system prompt is changed from "implement from scratch" to "modify the existing file to add/change the specified feature, preserving all existing functionality"; (3) a diff-review phase is added where a reviewer agent compares the original file against the modified file and checks for unintended regressions. The QA phase remains unchanged. Token costs increase substantially because existing files must be injected into agent contexts even for small modifications.

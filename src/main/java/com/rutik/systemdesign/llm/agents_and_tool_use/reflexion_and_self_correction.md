@@ -16,30 +16,30 @@ The key tension: language models can reason about their errors, but they are als
 
 **Mental model**: A single LLM call is like a student answering an exam question without being allowed to check their work. Reflexion gives the student a red-pen grader: after each attempt, the grader writes a short critique ("you forgot to handle the empty list case"), the student reads the critique, adds it to their scratch pad, and tries again. The critique is stored in episodic memory — not just in context — so it persists across multiple retries and accumulates over many trials.
 
-**Why it matters**: Many tasks have verifiable correct answers (code passes tests, SQL returns expected rows, math result matches ground truth). In these domains, automatic grading enables autonomous improvement without human involvement. Reflexion improves HumanEval pass@1 from 65% to 91% on GPT-4 — a 40% relative improvement with zero additional training.
+**Why it matters**: Many tasks have verifiable correct answers (code passes tests, SQL returns expected rows, math result matches ground truth). In these domains, automatic grading enables autonomous improvement without human involvement. Reflexion improves HumanEval pass@1 from 80.1% to 91.0% on GPT-4 — a 55% cut in the residual error rate with zero additional training.
 
-**Stated plainly.** "Do not read that as '26 more points'. Read it as 'three-quarters of the problems it used to get wrong, it now gets right' — that is the number that actually predicts what happens to your bug queue."
+**Stated plainly.** "Do not read that as '11 more points'. Read it as 'over half of the problems it used to get wrong, it now gets right' — that is the number that actually predicts what happens to your bug queue."
 
 | Symbol | What it is |
 |--------|------------|
-| `pass@1` | Fraction correct on the first attempt, no retries. The baseline, 65.8% here |
-| `pass@k` | Fraction correct within `k` attempts. Reflexion@4 reaches 91.0% |
-| absolute gain | `after - before`, in percentage points. Flattering when the baseline is low |
-| relative gain | `(after - before) / before`. The "40% relative improvement" phrasing |
+| `pass@1` | Fraction correct on the first attempt, no retries. The GPT-4 baseline, 80.1% here |
+| `pass@k` | Fraction correct within `k` attempts. Reflexion reaches 91.0% |
+| absolute gain | `after - before`, in percentage points. Unflattering when the baseline is high |
+| relative gain | `(after - before) / before`. The weakest of the three framings here |
 | error reduction | `(err_before - err_after) / err_before`. What survives into production |
 
-**Walk one example.** The same 65.8 -> 91.0 move, read three ways:
+**Walk one example.** The same 80.1 -> 91.0 move, read three ways:
 
 ```
                         before    after    metric
-  pass rate              65.8%    91.0%
-  absolute gain                            +25.2 points
-  relative gain          25.2 / 65.8    =  +38.3%     <- the "40%" claim
-  residual error         34.2%     9.0%
-  error reduction        25.2 / 34.2    =  -73.7%     <- what ops actually feels
+  pass rate              80.1%    91.0%
+  absolute gain                            +10.9 points
+  relative gain          10.9 / 80.1    =  +13.6%
+  residual error         19.9%     9.0%
+  error reduction        10.9 / 19.9    =  -54.8%     <- what ops actually feels
 ```
 
-**Why error reduction is the honest framing.** Absolute points compress as you approach the ceiling: going 90% -> 95% is only 5 points but halves your failures, while 40% -> 45% is the same 5 points and barely dents them. Error reduction is scale-free, so it is the metric that stays comparable across tasks with different baselines — and the one to quote when arguing that a 2-4x cost increase is worth paying.
+**Why error reduction is the honest framing.** Absolute points compress as you approach the ceiling: going 90% -> 95% is only 5 points but halves your failures, while 40% -> 45% is the same 5 points and barely dents them. That compression is exactly what makes the +10.9 points here look unimpressive and the -54.8% error reduction look decisive — the same move, two framings. Error reduction is scale-free, so it is the metric that stays comparable across tasks with different baselines, and the one to quote when arguing that a 2-4x cost increase is worth paying.
 
 **Key insight**: The quality of self-correction is bounded by the quality of the evaluator. An LLM evaluating its own output using only the original prompt will regress to sycophancy. External ground truth (test execution, API calls, calculator) breaks this cycle.
 
@@ -89,7 +89,7 @@ CRITIC does not require a separate evaluator model — the external tool provide
 
 ### 4.4 Sycophancy and When Self-Correction Backfires
 
-A sycophantic failure mode: the model is told "your answer was wrong" without specifying why. It then produces a different answer, often less correct than the original, simply because it was pressured to change. Studies (Sharma et al. 2023) show GPT-4 changes a correct answer to an incorrect one ~20% of the time when the prompt implies disapproval. Mitigation: always provide specific, grounded feedback ("test case 3 failed with IndexError") not vague signals ("that was wrong").
+A sycophantic failure mode: the model is told "your answer was wrong" without specifying why. It then produces a different answer, often less correct than the original, simply because it was pressured to change. Sharma et al. (2023) measured this directly: challenged with "Are you sure?", GPT-4 changed its answer 32% of the time and admitted a mistake 42% of the time, while the most sycophantic model tested (Claude 1.3) admitted a mistake 98% of the time and changed its answer ~86% of the time — dropping average accuracy by up to 27 points. Crucially, switching from correct to incorrect was more likely than the reverse across every model tested. Mitigation: always provide specific, grounded feedback ("test case 3 failed with IndexError") not vague signals ("that was wrong").
 
 ---
 
@@ -322,10 +322,11 @@ if __name__ == "__main__":
 
 ### Concrete Numbers
 
-- Reflexion on HumanEval: GPT-4 pass@1 goes from 65.8% → 91.0% with 3 retry budget.
-- Self-Refine on code optimization: 13% average improvement in code efficiency vs no refinement.
-- CRITIC on TriviaQA: reduces hallucination rate from 38% to 22% by grounding critiques in web search.
-- Sycophancy rate: ~20% of correct GPT-4 answers flip to incorrect when prompted with "are you sure?"
+- Reflexion on HumanEval: GPT-4 pass@1 goes from 80.1% → 91.0%.
+- Reflexion on AlfWorld: 130 of 134 tasks solved across 12 trials, vs a ReAct-only baseline that plateaus around 96/134.
+- Self-Refine on code optimization: GPT-4 goes from 27.3% → 36.0% (+8.7 points); the paper's headline is ~20% absolute average improvement across all its tasks.
+- CRITIC: improves free-form QA, mathematical program synthesis and toxicity reduction by grounding critiques in external tools; the paper reports per-task tables rather than a single hallucination-rate figure.
+- Sycophancy: challenged with "Are you sure?", GPT-4 changes its answer 32% of the time; correct→incorrect flips outnumber incorrect→correct.
 
 ---
 
@@ -337,7 +338,7 @@ When a user runs "Fix this error" in the IDE, Copilot reads the error message (e
 
 ### Claude Code (Anthropic)
 
-After writing code, Claude Code runs `pytest` or `npm test`, reads the output, and iterates — a direct implementation of the CRITIC loop with code execution as the external evaluator. Anthropic reports week-long coding tasks using this pattern with subagents.
+After writing code, Claude Code runs `pytest` or `npm test`, reads the output, and iterates — a direct implementation of the CRITIC loop with code execution as the external evaluator. The same shape extends to subagent dispatch, where each subagent runs its own test-execute-fix loop and returns only the result.
 
 ### AlphaCode 2 (DeepMind)
 
@@ -395,7 +396,7 @@ Now the same arithmetic at the top of the "do NOT use" range, `p = 0.95`:
 
 **Why this bounds where self-correction pays.** Two failure modes bracket the useful band. Above ~95%, the residual error is so small that a second attempt exhausts nearly all of it and there is little left for reflection to earn — you pay 2-4x for fractions of a point. Below ~40%, `(1 - p)^k` stays large no matter what `k` you buy, because the model is missing capability rather than missing an edge case; more attempts sample from the same broken distribution.
 
-The independence assumption is also where this ceiling is optimistic rather than predictive. Real attempts from one model on one prompt are strongly correlated — the model tends to make the same mistake again — which is precisely the gap Reflexion's episodic memory targets. A reported Reflexion@4 of 91% against a `p = 0.68` baseline is *below* the 98.95% independent-sampling ideal, and that is expected: the true comparison is against measured pass@4 on your own task, where correlated retries fall well short of the formula.
+The independence assumption is also where this ceiling is optimistic rather than predictive. Real attempts from one model on one prompt are strongly correlated — the model tends to make the same mistake again — which is precisely the gap Reflexion's episodic memory targets. The Section 14 deployment's Reflexion@4 of 91% against its `p = 0.68` baseline sits far *below* the 98.95% independent-sampling ideal, and that is expected: the true comparison is against measured pass@4 on your own task, where correlated retries fall well short of the formula.
 
 ### Do NOT use self-correction when:
 - Task is subjective (creative writing, preference ranking) — no ground truth to evaluate against.
@@ -455,7 +456,7 @@ Appending all past reflections to each retry's prompt without a sliding window w
 | Reflexion (paper) | Algorithm | Shinn et al. 2023; no official library, implement from paper |
 | Self-Refine (paper) | Algorithm | Madaan et al. 2023; same |
 | CRITIC (paper) | Algorithm | Gou et al. 2023 |
-| E2B | Code execution sandbox | Python/JS/Bash; 500ms cold start; required for safe CRITIC-style eval |
+| E2B | Code execution sandbox | Firecracker microVM; sandbox start under 200ms; required for safe CRITIC-style eval |
 | LangGraph | Agent loop state management | Built-in checkpointing for resuming retries |
 | LangSmith | Tracing reflexion iterations | Visualize each attempt and reflection |
 | HumanEval | Code benchmark | 164 Python functions; standard for measuring self-correction gains |
@@ -468,7 +469,7 @@ Appending all past reflections to each retry's prompt without a sliding window w
 A: Reflexion is an algorithm in which a separate "reflector" LLM writes a verbal critique of each failed attempt, and that critique is stored in episodic memory and included in the next attempt's prompt. A simple retry sends the same prompt again with no additional information. Reflexion works because the verbal critique encodes specific information about what went wrong ("you forgot to handle the empty list case") that guides the actor toward a correct solution rather than randomly sampling a different one. The episodic memory also accumulates across attempts so the model knows which specific approaches failed.
 
 **Q: When does self-correction with a language model evaluator backfire?**
-A: It backfires when the evaluator produces sycophantic signal — agreeing that the actor made an error even when it did not, causing the actor to change a correct answer to an incorrect one. Studies show GPT-4 changes correct answers ~20% of the time when prompted with vague disapproval. Self-correction is unreliable whenever the evaluator cannot objectively verify correctness — subjective tasks (creative writing, tone), ambiguous tasks, or tasks where the model's own knowledge is the bottleneck.
+A: It backfires when the evaluator produces sycophantic signal — agreeing that the actor made an error even when it did not, causing the actor to change a correct answer to an incorrect one. Sharma et al. (2023) found GPT-4 changes its answer 32% of the time when simply asked "Are you sure?", and that correct→incorrect flips outnumber incorrect→correct ones. Self-correction is unreliable whenever the evaluator cannot objectively verify correctness — subjective tasks (creative writing, tone), ambiguous tasks, or tasks where the model's own knowledge is the bottleneck.
 
 **Q: What does CRITIC do differently from Reflexion?**
 A: CRITIC replaces the LLM evaluator with external tools — code execution, web search, calculator — to produce objective critique grounded in reality rather than model opinion. A CRITIC evaluating a code answer actually runs the code and reports test failures. A Reflexion evaluator is also an LLM that can be wrong. CRITIC eliminates the sycophancy risk for verifiable domains because the feedback comes from ground truth, not from another model's opinion.
@@ -480,7 +481,7 @@ A: Sycophancy is the tendency of RLHF-trained models to agree with human-express
 A: Each failed attempt produces a reflection that is appended to a list of past reflections. Before the next attempt, the actor reads all stored reflections. The reflections explicitly describe what failed and what to try instead ("on attempt 2, using a dict for lookup was too slow — next time use a set"). This is more reliable than relying on the model's implicit memory of the conversation history because the reflections are compressed, actionable summaries rather than raw conversation turns. A sliding window (typically last 3 reflections) prevents context overflow.
 
 **Q: How many retries does Reflexion use, and why not more?**
-A: Typically 3 retries (4 total attempts). Beyond 3 retries, empirical gains diminish rapidly — most problems solvable by Reflexion are solved within 3 attempts; problems that persist beyond that usually require capabilities the model does not have. Each retry approximately doubles the cost of the task. A 5-retry budget costs 6× the single-attempt baseline in LLM call cost. Reflexion's HumanEval results show most of the improvement happens on retry 1 and 2 (65% → 82% → 88%) with diminishing returns on retry 3 (88% → 91%).
+A: Typically 3 retries (4 total attempts). Beyond 3 retries, empirical gains diminish rapidly — most problems solvable by Reflexion are solved within 3 attempts; problems that persist beyond that usually require capabilities the model does not have. Each retry adds roughly one attempt's worth of cost plus a reflection call, so a 5-retry budget costs about 6× the single-attempt baseline. The published Reflexion curves show the same shape on every benchmark: the largest jump lands on the first one or two retries and the curve flattens after that, so measure your own per-retry deltas rather than assuming a fixed schedule.
 
 **Q: Describe how you would implement CRITIC for a SQL query generation task.**
 A: The actor generates a SQL query. The evaluator executes the query against the actual database and compares the output to the expected result set (or checks for syntax errors). If the query fails or returns wrong rows, the evaluator formats the database error message and a sample of expected vs actual rows as a critique string. The actor reads this critique and generates a corrected query. No additional evaluator model is needed — the database is the evaluator. This approach eliminates hallucinated column names and incorrect JOIN logic because the feedback is from the schema and data, not from a language model's opinion of the query.
@@ -492,10 +493,10 @@ A: Use a sliding window: retain only the last K reflections (typically K=3) in t
 A: Self-Refine uses the same model to generate, critique, and refine in a single conversation without an external evaluator or separate episodic memory. Prefer Self-Refine for tasks where the model has strong domain knowledge and the task is partially subjective: essay improvement, code style, translation quality, prompt optimization. Prefer Reflexion when the task has objective pass/fail criteria and the model can plausibly miss specific edge cases — the episodic memory prevents repeating specific identified mistakes, which Self-Refine's in-context critique does not guarantee.
 
 **Q: What concrete benchmark improvements does Reflexion achieve?**
-A: On HumanEval (code generation), GPT-4 pass@1 improves from 65.8% to 91.0% with a 3-retry Reflexion budget. On AlfWorld (interactive text games), Reflexion agents achieve 91% task success vs 53% for baseline ReAct. On HotpotQA (multi-hop reasoning), Reflexion improves exact-match accuracy by ~14 points over chain-of-thought baseline. These gains are domain-specific and depend on the evaluator quality.
+A: On HumanEval (code generation), GPT-4 pass@1 improves from 80.1% to 91.0%. On AlfWorld (interactive text games), Reflexion solves 130 of 134 tasks (97%) across 12 trials against a ReAct-only baseline that plateaus near 96/134 (72%). On HotpotQA (multi-hop reasoning), Reflexion adds roughly 14 points over the chain-of-thought baseline even when that baseline is given ground-truth context. Note the paper's one negative result: on MBPP, Reflexion scored 77.1% against the 80.1% baseline — worse than no reflection. These gains are domain-specific and depend on evaluator quality.
 
 **Q: What are the cost implications of adding Reflexion to a production agent?**
-A: Each Reflexion retry adds approximately 2 LLM calls (reflector + actor) plus the evaluation cost. With a 3-retry budget, worst-case cost is 4× the single-attempt baseline for LLM calls plus evaluation overhead (negligible for code execution, ~1 extra LLM call for LLM-based evaluation). At Claude Sonnet pricing ($3/M input, $15/M output), a task using 2K input tokens and 500 output tokens costs ~$0.014 per attempt, $0.056 worst-case with 4 attempts. For tasks where self-correction increases quality from 65% to 91% success rate, this cost is well justified; for tasks already at 95%+, it is not.
+A: Each Reflexion retry adds approximately 2 LLM calls (reflector + actor) plus the evaluation cost. With a 3-retry budget, worst-case cost is 4× the single-attempt baseline for LLM calls plus evaluation overhead (negligible for code execution, ~1 extra LLM call for LLM-based evaluation). At Claude Sonnet 5 list pricing ($3/M input, $15/M output), a task using 2K input tokens and 500 output tokens costs ~$0.014 per attempt, $0.056 worst-case with 4 attempts. For tasks where self-correction increases quality from 68% to 91% success rate, as in the Section 14 deployment, this cost is well justified; for tasks already at 95%+, it is not.
 
 **Q: How do you decide which tasks should have self-correction enabled?**
 A: Apply a two-factor test: (1) Is there an objective evaluator? If not, sycophancy risk makes self-correction unreliable. (2) Is the baseline pass rate in the range where improvement is possible? If baseline is already >95%, the cost of retries exceeds the quality benefit. If baseline is <40%, the model likely lacks the capability — retries will not fix a fundamental capability gap. The sweet spot is 50-85% baseline pass rate with an objective evaluator. Also consider latency tolerance: users waiting for a chat response cannot afford 3 retry cycles; batch jobs can.
@@ -504,7 +505,7 @@ A: Apply a two-factor test: (1) Is there an objective evaluator? If not, sycopha
 A: Chain-of-thought (CoT) improves the quality of a single attempt by prompting the model to reason step-by-step before answering. CoT does not involve multiple attempts or an external evaluator. Reflexion is a multi-attempt algorithm that uses CoT-style reasoning internally within each attempt but adds an outer retry loop driven by evaluator feedback. CoT reduces errors by improving reasoning quality per attempt; Reflexion further reduces errors by allowing the model to fix identified mistakes across attempts. They are complementary — using CoT within each Reflexion trial is the recommended approach (see [ReAct & Reasoning Patterns](react_and_reasoning_patterns.md)).
 
 **Q: Can self-correction improve a task the model fundamentally cannot do?**
-A: No. Self-correction is not capability injection — it can only help the model express capabilities it already has more reliably. If GPT-4 cannot solve a class of problem with probability zero (it has no training data for a specific obscure algorithm), retrying 10 times will still yield 0% success. Reflexion's documented improvements (65% → 91%) come from tasks where the model succeeds ~two-thirds of the time on the first try, meaning the knowledge is present but not always correctly expressed. Reflection helps with edge-case misses, not fundamental knowledge gaps.
+A: No. Self-correction is not capability injection — it can only help the model express capabilities it already has more reliably. If GPT-4 cannot solve a class of problem with probability zero (it has no training data for a specific obscure algorithm), retrying 10 times will still yield 0% success. Reflexion's documented improvement on HumanEval (80.1% → 91.0%) comes from a task the model already solves four times out of five on the first try, meaning the knowledge is present but not always correctly expressed. Reflection helps with edge-case misses, not fundamental knowledge gaps.
 
 **Q: What is a practical way to test whether self-correction is helping on your task?**
 A: Run an A/B evaluation: for 100 task samples, measure (1) pass@1 (first attempt only), (2) pass@4 (best of 4 independent samples), and (3) Reflexion@4 (4 attempts with episodic memory). If Reflexion@4 significantly exceeds both pass@1 and pass@4, self-correction is adding value beyond random sampling. If Reflexion@4 ≈ pass@4, you are not benefiting from the memory — just sampling more. This distinction is critical: Reflexion is justified only when guided retries outperform random retries.

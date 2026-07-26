@@ -10,7 +10,7 @@ First, the data source is a GPU-bound autoregressive process generating 30-100 t
 
 Second, connections are long-lived. A 500-token response at 50 tokens/sec takes 10 seconds. A 3000-token reasoning trace takes 60 seconds. This violates the assumptions of most L7 infrastructure (load balancers, proxies, API gateways) which default to 30-60 second idle timeouts, built for short-lived RPC calls.
 
-Third, scale makes edge cases catastrophic. At 10 million concurrent users, even a 0.1% rate of half-open connections (where the client has disconnected but the server does not know) produces 10,000 zombie streams, each consuming a GPU generation slot for up to 5 minutes. At $3-8 per GPU-hour, 10,000 zombie streams each running an average of 2 minutes waste roughly $1,000-2,600 per hour in pure GPU cost — before factoring in blocked capacity that prevents serving real users.
+Third, scale makes edge cases catastrophic. At 10 million concurrent users, even a 0.1% rate of half-open connections (where the client has disconnected but the server does not know) produces 10,000 zombie streams, each consuming a GPU generation slot for up to 5 minutes. Ten thousand streams at 2 minutes each is ~333 slot-hours per hour. Translate that to money by dividing by your batch width, not by treating a slot as a GPU: with continuous batching packing 32-64 concurrent sequences onto one card, that is ~5-10 GPU-hours per hour, or roughly $15-80/hour at $3-8 per GPU-hour. The direct burn is modest; the real damage is the blocked slots, which cap how many real users the same fleet can serve.
 
 The UX-critical metric is Time To First Token (TTFT), not total latency. Users perceive a streaming response that starts within 800ms as "fast" even if the full response takes 30 seconds. A non-streaming response completing in 8 seconds feels slow. TTFT optimization and total-latency optimization require different techniques and sometimes work against each other.
 
@@ -34,7 +34,7 @@ Related modules: [Inference and Decoding](../../inference_and_decoding/README.md
 
 **Fail fast on client disconnect**: Every token generation cycle should be preceded by a disconnect check. The cost of the check is negligible (a non-blocking poll of the TCP socket state takes under 1 microsecond). The cost of skipping it is up to 5 minutes of wasted GPU generation.
 
-**Backpressure prevents buffer bloat**: When a slow client cannot consume tokens as fast as the GPU produces them, the buffer between them must have a hard cap. When the cap is reached, the upstream producer (the GPU scheduler) must pause, not the buffer must grow. Unbounded buffers are the root cause of streaming OOM incidents at scale.
+**Backpressure prevents buffer bloat**: When a slow client cannot consume tokens as fast as the GPU produces them, the buffer between them must have a hard cap. When the cap is reached the gateway must stop accumulating — and, if the client stays saturated, abort. Note the asymmetry: vLLM exposes no per-request pause, so backpressure genuinely bounds only your own gateway's memory, never the GPU's decode work; the only lever on the GPU is `abort(request_id)`. Unbounded buffers are the root cause of streaming OOM incidents at scale.
 
 **Idempotent reconnect — never double-bill**: SSE reconnects are automatic and transparent in the browser. If a reconnect triggers a new generation request, the user is billed twice and sees a duplicate or forked response. The SSE `id:` field and the `Last-Event-ID` request header exist precisely to enable stateless reconnect replay. Every production streaming system must use sequence IDs.
 
@@ -52,7 +52,7 @@ Related modules: [Inference and Decoding](../../inference_and_decoding/README.md
 |-----------|--------------------------|-----------|-------------------|
 | Direction | Server to client only | Bidirectional | Server to client only |
 | Reconnect support | Automatic (browser built-in) | Manual (app code) | None |
-| Per-frame overhead | ~50 bytes (data: prefix + \n\n) | 2-14 bytes (header) | ~9 bytes |
+| Per-frame overhead | 8 bytes of framing (`data: ` + `\n\n`); ~50 bytes in practice once an `id:` line and a JSON delta envelope are added | 2-14 bytes (header) | ~9 bytes (HTTP/2 frame header) |
 | Multiplexing | No (one stream per connection) | No (one stream per connection) | Yes (multiple pushes per TCP conn) |
 | Proxy/firewall compat | Excellent (plain HTTP) | Variable (CONNECT upgrade) | Requires HTTP/2 end-to-end |
 | Browser support | Universal (all modern browsers) | Universal | Limited, deprecated in Chrome 106 |
@@ -105,14 +105,16 @@ One GPU cluster produces tokens at 30-100/sec; the edge PoP layer absorbs each c
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Generating
-    Generating --> Paused : queue depth reaches HIGH_WATER_MARK (1000)
-    Paused --> Generating : client drains queue to LOW_WATER_MARK (200)
-    Generating : GPU streams tokens into the gateway asyncio.Queue
-    Paused : vLLM pause_request(request_id) — KV cache held in VRAM
+    [*] --> Draining
+    Draining --> Saturated : queue depth reaches HIGH_WATER_MARK (1000)
+    Saturated --> Draining : client drains queue to LOW_WATER_MARK (200)
+    Saturated --> Aborted : still saturated after grace period
+    Draining : gateway pulls from engine.generate() into a bounded asyncio.Queue
+    Saturated : gateway stops pulling — GPU keeps decoding into vLLM's own buffer
+    Aborted : engine.abort(request_id) — GPU slot and KV pages released
 ```
 
-The producer oscillates between two states, driven only by queue depth: at 1,000 buffered tokens vLLM pauses scheduling for the request (KV cache stays resident in VRAM), and when the slow client drains the buffer to 200 tokens generation resumes. TTFT for the request is unchanged, and effective throughput is limited by the slow client — never the GPU shared by everyone else.
+The gateway's own memory oscillates between two states driven by queue depth: at 1,000 buffered tokens it stops pulling from the engine, and at 200 it resumes. Be precise about what this does and does not buy you — it bounds the *gateway's* memory, which is what OOM-kills an edge PoP. It does **not** stop the GPU: vLLM has no per-request pause (`pause_generation()` is engine-wide and intended for weight updates), so the decode loop keeps running and vLLM coalesces the undelivered deltas in its own per-request collector. The only way to give the GPU slot back to another user is `abort(request_id)`, which is why a client that stays saturated past a grace period should be dropped rather than buffered indefinitely.
 
 ### Half-Open Connection Detection
 
@@ -182,8 +184,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from vllm import AsyncLLMEngine, SamplingParams
-from vllm.engine.async_llm_engine import AsyncStream
+from vllm import AsyncLLMEngine, SamplingParams   # AsyncLLMEngine is an alias of vllm.v1.engine.async_llm.AsyncLLM
 
 app = FastAPI()
 engine = AsyncLLMEngine.from_engine_args(...)  # initialized at startup
@@ -376,57 +377,57 @@ async def generate_resumable(request: Request, request_id: str):
 
 ```python
 import asyncio
-from dataclasses import dataclass
 
-HIGH_WATER_MARK: int = 1000  # pause producer when queue exceeds this
-LOW_WATER_MARK: int = 200    # resume producer when queue drains to this
-
-
-@dataclass
-class BackpressureSignal:
-    paused: bool = False
-    event: asyncio.Event = None
-
-    def __post_init__(self):
-        self.event = asyncio.Event()
-        self.event.set()  # start unpaused
+HIGH_WATER_MARK: int = 1000   # stop pulling from the engine above this depth
+LOW_WATER_MARK: int = 200     # resume pulling once the client drains to this
+SATURATION_GRACE_SEC: float = 30.0   # give up on a client stuck at the HWM
 
 
 class BackpressureAwareQueue:
     """
-    Token queue with high/low water marks.
-    When depth >= HIGH_WATER_MARK, signals the vLLM scheduler to pause.
-    When depth <= LOW_WATER_MARK, signals resume.
-    Prevents edge PoP OOM from slow clients during traffic spikes.
+    Bounded token queue between engine.generate() and the SSE writer.
+
+    IMPORTANT: vLLM exposes no per-request pause. `AsyncLLM.pause_generation()` /
+    `resume_generation()` are ENGINE-WIDE (their documented purpose is to quiesce
+    the scheduler for a model weight update), and `abort(request_id)` is the only
+    per-request control. So this class bounds the GATEWAY's memory — the thing
+    that OOM-kills an edge PoP — and escalates to abort when a client stays stuck.
+    While saturated the GPU keeps decoding; vLLM's per-request output collector
+    coalesces the deltas the gateway has not consumed.
     """
 
     def __init__(self, request_id: str) -> None:
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._signal = BackpressureSignal()
+        # maxsize enforces the cap: put() awaits instead of growing without bound
+        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=HIGH_WATER_MARK)
         self._request_id = request_id
 
     async def put(self, token: str) -> None:
-        await self._queue.put(token)
-        depth = self._queue.qsize()
-        if depth >= HIGH_WATER_MARK and not self._signal.paused:
-            self._signal.paused = True
-            self._signal.event.clear()
-            # Signal vLLM to pause this request's scheduling
-            await engine.pause_request(self._request_id)
+        """Called by the coroutine draining engine.generate()."""
+        try:
+            await asyncio.wait_for(
+                self._queue.put(token), timeout=SATURATION_GRACE_SEC
+            )
+        except asyncio.TimeoutError:
+            # Client has not drained a single slot in SATURATION_GRACE_SEC —
+            # treat it as gone and give the GPU slot back.
+            await engine.abort(self._request_id)
+            raise
 
     async def get(self) -> str:
-        token = await self._queue.get()
-        depth = self._queue.qsize()
-        if depth <= LOW_WATER_MARK and self._signal.paused:
-            self._signal.paused = False
-            self._signal.event.set()
-            # Signal vLLM to resume
-            await engine.resume_request(self._request_id)
-        return token
+        """Called by the SSE writer."""
+        return await self._queue.get()
+
+    @property
+    def saturated(self) -> bool:
+        return self._queue.qsize() >= HIGH_WATER_MARK
+
+    @property
+    def drained(self) -> bool:
+        return self._queue.qsize() <= LOW_WATER_MARK
 ```
 
 **Concrete numbers summary**:
-- SSE overhead per event: ~50 bytes (`data: ` prefix + token + `\n\n`)
+- SSE framing per event: 8 bytes (`data: ` prefix + `\n\n`); ~50 bytes once an `id:` line and a JSON delta envelope are included
 - Heartbeat interval: 15 seconds
 - Half-open connection timeout: 45 seconds (3 missed heartbeats)
 - Reconnect replay window: 500 tokens, 60-second Redis TTL
@@ -441,15 +442,15 @@ class BackpressureAwareQueue:
 
 ## 7. Real-World Examples
 
-**ChatGPT / OpenAI**: Uses SSE with `text/event-stream` format and delta events. The Nginx configuration at OpenAI disables proxy buffering (`proxy_buffering off`) so tokens flow immediately to clients without Nginx accumulating them. The public API returns events in the format `data: {"choices":[{"delta":{"content":"token"},...}]}`. The load balancer idle timeout is set to 600 seconds to accommodate long reasoning traces. OpenAI's mobile app handles the WiFi-to-LTE reconnect case by storing the stream's request ID in memory and issuing a reconnect with the last seen event ID on network change events.
+**ChatGPT / OpenAI**: The public Chat Completions API streams with `text/event-stream` and delta events in the format `data: {"choices":[{"delta":{"content":"token"},...}]}`, terminated by `data: [DONE]`. That wire format is documented and stable; OpenAI's internal proxy and load-balancer settings are not public, so treat any specific `proxy_buffering` or idle-timeout value attributed to them as an illustrative default rather than a reported fact. Note that the OpenAI SSE stream does **not** carry `id:` lines, so `Last-Event-ID` replay is something you build in your own gateway, not something you inherit from the provider.
 
-**Anthropic Claude API**: Returns SSE events typed by event name — `event: content_block_delta` carries token deltas; `event: message_stop` signals end of stream. The event taxonomy enables clients to handle different event types without parsing the data field. Sequence IDs are present on every event, enabling reliable reconnect. The public streaming endpoint requires `Accept: text/event-stream` and returns `anthropic-stream-id` in the response header for reconnect reference.
+**Anthropic Claude API**: Returns SSE events typed by event name — `event: content_block_delta` carries token deltas; `event: message_stop` signals end of stream. The event taxonomy lets clients dispatch on event type without parsing the data field, which is the cleanest published example of using the full SSE grammar rather than `data:` alone. Streaming is requested with `"stream": true` in the request body (not an `Accept` header), and the stream carries no `id:` sequence numbers — so, as with OpenAI, resumable streaming is a property of your gateway, not of the provider API.
 
-**Vercel AI SDK**: Framework-agnostic streaming abstraction used by thousands of Next.js apps. The SDK wraps SSE from any provider (OpenAI, Anthropic, Google) behind a unified streaming interface. The `useChat` hook in the browser handles automatic reconnect, displays partial tokens in the UI, and exposes `isLoading` and `isStreaming` states. The SDK's server-side `StreamingTextResponse` helper sets the correct headers (`Cache-Control: no-cache`, `X-Accel-Buffering: no`) so intermediate Nginx or Vercel Edge proxies do not buffer the stream.
+**Vercel AI SDK**: Framework-agnostic streaming abstraction used by many Next.js apps, wrapping providers behind a unified interface. Be careful with tutorials written before AI SDK 4.0 (November 2024): the `StreamingTextResponse` helper they use was **removed**, replaced first by `streamText(...).toDataStreamResponse()` and now by the UI-message-stream helpers (`toUIMessageStreamResponse()` / `createUIMessageStreamResponse()`). The `useChat` hook consumes a fetch `ReadableStream` rather than a browser `EventSource`, so there is no free browser auto-reconnect; resumable streams are an explicit opt-in pattern (documented as "Chatbot Resume Streams", backed by the `resumable-stream` package) that you wire up yourself.
 
-**Cloudflare Workers AI**: Edge streaming from Cloudflare's network. The GPU is at the edge PoP, so TTFT is under 100ms globally. The Worker streams tokens using the `ReadableStream` API, which the browser consumes as SSE. Because the GPU is co-located with the CDN, there is no need for a separate edge-buffering layer — the Worker itself is the edge. This architecture eliminates the WiFi-to-LTE reconnect problem in many cases because connection handoffs happen at the TCP level below the SSE layer, with the Cloudflare PoP absorbing the reconnect.
+**Cloudflare Workers AI**: Edge streaming from Cloudflare's network, which spans 337 cities. Workers AI runs inference on Cloudflare's own GPU fleet rather than a distant origin, so for the models available at a given location the first-hop latency is a PoP hop rather than a transcontinental one. The Worker streams tokens using the `ReadableStream` API, which the browser consumes as SSE. Because inference and CDN are co-located, there is no need for a separate edge-buffering layer — the Worker itself is the edge. Which models are resident in which locations is not published per-city, so do not design around an assumption that any specific model is available in every PoP.
 
-**Twitter/X at scale**: Before LLM integration, Twitter ran into half-open connection problems with Server-Sent Events in their timeline update feature. Mobile clients switching networks left ~0.4% of SSE connections in a half-open state per hour. At Twitter's scale (300M daily users, ~10M concurrent SSE connections for timeline polling), this produced ~40,000 zombie connections at any given time. The fix was a 30-second server-side ping with a mandatory client ACK via a companion XHR endpoint. Connections not ACKing within 90 seconds were force-closed. The same pattern applies directly to LLM streaming.
+**Half-open connections on long-lived HTTP streams (composite, illustrative)**: The half-open failure mode long predates LLMs — any product holding millions of long-lived server-push connections open to mobile clients hits it, because a client that switches networks may never deliver a TCP RST the server can see. The standard remedy, arrived at independently by many teams, is a server-side ping plus a mandatory client ACK on a companion endpoint, with connections force-closed after a small number of missed ACKs. The specific per-company connection counts and half-open rates sometimes quoted for this pattern are not published figures; the mechanism, not the numbers, is what transfers to LLM streaming.
 
 ---
 
@@ -463,7 +464,7 @@ class BackpressureAwareQueue:
 | Reconnect handling | Automatic (browser) | Manual | None |
 | Firewall traversal | Excellent | Variable | Requires HTTP/2 E2E |
 | LB requirements | Standard L7 | Sticky session or WS proxy | HTTP/2 L7 LB |
-| Per-connection overhead | ~50 bytes/event | 2-14 bytes/frame | ~9 bytes/frame |
+| Per-event overhead | 8 bytes of framing, ~50 bytes with `id:` + JSON envelope | 2-14 bytes/frame | ~9 bytes/frame |
 | Bidirectional | No | Yes | No |
 | Correct choice for LLM chat | Yes | No | No |
 | Correct choice for voice agents | No | Yes | No |
@@ -530,9 +531,9 @@ Fix: set the LB idle timeout to at least 5× your maximum expected generation ti
 
 **Pitfall 2: Half-open connection epidemic after network switch**
 
-A consumer AI app observed GPU utilization climbing to 95% during peak hours despite dashboard-reported concurrent user counts being only 60% of the theoretical GPU capacity. Investigation showed that mobile users switching between WiFi and LTE left behind TCP connections in a half-open state — the client's TCP stack sent a RST when the network interface changed, but the RST packet was lost in transit (common on congested mobile networks). The server still had a "live" socket. At 8M daily active users and an average 5-minute session, ~0.3% of connections were in this zombie state at any given time: 8M × (5min / 24h) × 0.3% ≈ 8,400 zombie streams consuming GPU slots.
+A consumer AI app observed GPU utilization climbing to 95% during peak hours despite dashboard-reported concurrent user counts being only 60% of the theoretical GPU capacity. Investigation showed that mobile users switching between WiFi and LTE left behind TCP connections in a half-open state — the client's TCP stack sent a RST when the network interface changed, but the RST packet was lost in transit (common on congested mobile networks). The server still had a "live" socket. Work the concurrency out rather than guessing at it: 8M daily active users at an average 5-minute session gives 8M × (5 min / 1440 min) ≈ 28,000 concurrent streams, and a 0.3% half-open rate leaves roughly 80 of them zombied at any instant — small in absolute terms, but each one holds a decode slot for the full `max_tokens` budget, so they accumulate against exactly the capacity a peak hour has none of.
 
-Fix: implement the heartbeat pattern. Send `data: [PING]\n\n` every 15 seconds. Require clients to POST to `/heartbeat/<request_id>` within 30 seconds of each ping. If no ACK arrives within 45 seconds, call `engine.abort(request_id)`. This reduced zombie stream count from ~8,400 to under 50 in production.
+Fix: implement the heartbeat pattern. Send `data: [PING]\n\n` every 15 seconds. Require clients to POST to `/heartbeat/<request_id>` within 30 seconds of each ping. If no ACK arrives within 45 seconds, call `engine.abort(request_id)`. This bounds each zombie's lifetime at 45 seconds instead of the full generation timeout — roughly a 7x reduction in wasted slot-time for a 5-minute worst case.
 
 **Pitfall 3: Double-billing on SSE reconnect**
 
@@ -554,11 +555,11 @@ Fix: enforce a hard per-connection buffer cap of 1,000 tokens (approximately 4-8
 |------|----------|-------------|-----------------|
 | FastAPI + Starlette `StreamingResponse` | Streaming server | Native async generator streaming with `text/event-stream` | Set `X-Accel-Buffering: no` header |
 | Nginx | Reverse proxy | `proxy_buffering off`, `proxy_read_timeout 300s` | Critical: default 60s timeout kills long streams |
-| vLLM `AsyncLLMEngine` | Inference engine | `abort(request_id)` cancels in-flight generation; `generate()` is an async generator | See [Inference Engines](../../inference_engines/README.md) |
+| vLLM `AsyncLLMEngine` (alias of `AsyncLLM`) | Inference engine | `abort(request_id)` cancels in-flight generation and frees its KV pages; `generate(prompt, sampling_params, request_id)` is an async generator. There is NO per-request pause — `pause_generation()`/`resume_generation()` are engine-wide, for weight updates | See [Inference Engines](../../inference_engines/README.md) |
 | Starlette `Request.is_disconnected()` | Disconnect detection | Non-blocking poll of client TCP socket state | Call every 10 tokens; overhead <1ms |
 | Redis Streams / Redis Lists | Token replay buffer | `RPUSH` + `LTRIM` for sliding window of last 500 tokens; `EXPIRE` for 60s TTL | Use pipeline for atomic push+trim+expire |
 | Cloudflare Workers | Edge streaming | `ReadableStream` API; GPU-at-edge eliminates separate buffering layer | Cloudflare AI Gateway adds caching + rate limiting |
-| Vercel AI SDK | Client-side abstraction | `useChat` hook with automatic SSE reconnect, `StreamingTextResponse` server helper | Handles `Last-Event-ID` replay automatically |
+| Vercel AI SDK | Client/server abstraction | `useChat` hook; `streamText(...).toUIMessageStreamResponse()` server helper | `StreamingTextResponse` was REMOVED in AI SDK 4.0; `useChat` uses fetch streams (no EventSource auto-reconnect), and resume is an explicit opt-in via the `resumable-stream` package |
 | Nginx `proxy_read_timeout` | L7 LB timeout | Override to 300s minimum for LLM streaming | Default 60s kills long responses |
 | asyncio `Queue` with HWM | Backpressure | `qsize()` check before put; emit pause/resume signals | Size to expected burst: 1000 tokens ≈ 4-8KB |
 | AWS ALB / GCP HTTP(S) LB | Load balancer | Idle timeout config: ALB `idle_timeout.timeout_seconds`, GCP backend timeout | Set to 600s; SSE keepalive every 15s |
@@ -573,7 +574,8 @@ upstream llm_gateway {
 }
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;                                  # `listen ... http2` is deprecated since nginx 1.25.1
 
     location /generate {
         proxy_pass http://llm_gateway;
@@ -601,13 +603,13 @@ SSE is preferred because LLM chat is inherently unidirectional (server pushes to
 Half-open connections occur when the client's TCP RST packet is lost during a network transition (WiFi to LTE is the most common case). The server's TCP stack believes the connection is alive; `request.is_disconnected()` returns False because no RST was received. The only reliable detection mechanism is application-level heartbeats. Send a `data: [PING]\n\n` SSE event every 15 seconds. Require the client to POST to a companion `/heartbeat/<request_id>` endpoint within 30 seconds of each ping. If no ACK arrives within 45 seconds (3 missed heartbeat cycles), declare the connection dead and call `engine.abort(request_id)`. This approach detects half-open connections within 45 seconds in the worst case, limiting zombie GPU stream duration to under 1 minute rather than the full generation timeout of up to 5 minutes.
 
 **Q: How do you implement backpressure between a slow SSE client and the GPU inference engine?**
-Wrap the token generator with an `asyncio.Queue` that has a hard high-water mark of 1,000 tokens. Each time the queue exceeds 1,000 tokens, call `engine.pause_request(request_id)` to signal vLLM to stop scheduling new tokens for this request. vLLM holds the KV cache for the paused request in VRAM. When the slow client drains the queue below 200 tokens (the low-water mark), call `engine.resume_request(request_id)`. This creates a two-position oscillation: the buffer fills to 1,000, pauses, drains to 200, resumes. Total memory per paused connection: 1,000 tokens × ~8 bytes per token = 8KB. At 500,000 slow clients, total buffer memory is 4GB — bounded and predictable, unlike an unbounded buffer that OOM'd a production edge PoP during a viral event.
+Wrap the token generator with a bounded `asyncio.Queue(maxsize=1000)`, so the coroutine draining `engine.generate()` blocks on `put()` instead of letting the buffer grow. Be precise about what this bounds: it bounds your gateway's memory at 1,000 tokens x ~8 bytes = 8KB per connection (4GB at 500,000 slow clients), which is what OOM-kills an edge PoP. It does not throttle the GPU. vLLM has no per-request pause — `AsyncLLM.pause_generation()`/`resume_generation()` are engine-wide and exist to quiesce the scheduler for weight updates, and `abort(request_id)` is the only per-request control — so while your queue is saturated the decode loop keeps running and vLLM coalesces the undelivered deltas in its own per-request output collector. The correct escalation is therefore a grace period: if the client has not drained a slot in ~30 seconds, call `engine.abort(request_id)` and free the decode slot for someone who is actually reading.
 
 **Q: How do you handle reconnects without double-billing the user?**
 Assign a stable `request_id` to each generation at the session level (not per-HTTP-request). Include `id: <seq_no>` on every SSE data event. Store the last 500 tokens per `request_id` in a Redis list with RPUSH + LTRIM (to bound the list) + EXPIRE (60-second TTL). When a client reconnects, it includes the `Last-Event-ID: <N>` HTTP header. The server reads this header, fetches tokens from Redis starting at `N+1`, and streams them to the reconnecting client without invoking the model again. No double billing because the generation call only happened once. No forked response because the replay comes from the same token buffer that the original stream populated. Edge case: if the client reconnects after the 60-second TTL, replay is impossible — in this case, return an error code so the client can decide whether to re-issue the request (and inform the user that they may be charged for a new generation).
 
 **Q: What is TTFT and how do you optimize it?**
-TTFT (Time To First Token) is the latency from the moment the user submits a prompt to the moment the first token appears in the UI. It is the primary UX metric for LLM streaming because humans perceive streaming-that-starts-fast as responsive even if the full response takes 30 seconds. TTFT optimization operates on the critical path: network latency from client to gateway (minimize with edge PoPs or geographic routing), queue depth before the GPU receives the request (reduce with priority queues for interactive requests vs batch), KV cache prefix length the model must process before generating (minimize by caching common system prompt prefixes via vLLM's automatic prefix caching or Anthropic's prompt caching), and response marshaling before the first token is yielded (send the first token immediately without waiting for a JSON envelope). The target TTFT for a responsive chat product is under 1 second at P95. Every 100ms of TTFT reduction increases user-perceived quality ratings by approximately 5-8% in user studies.
+TTFT (Time To First Token) is the latency from the moment the user submits a prompt to the moment the first token appears in the UI. It is the primary UX metric for LLM streaming because humans perceive streaming-that-starts-fast as responsive even if the full response takes 30 seconds. TTFT optimization operates on the critical path: network latency from client to gateway (minimize with edge PoPs or geographic routing), queue depth before the GPU receives the request (reduce with priority queues for interactive requests vs batch), KV cache prefix length the model must process before generating (minimize by caching common system prompt prefixes via vLLM's automatic prefix caching or Anthropic's prompt caching), and response marshaling before the first token is yielded (send the first token immediately without waiting for a JSON envelope). The target TTFT for a responsive chat product is under 1 second at P95. Treat any specific "X ms of TTFT is worth Y% of satisfaction" conversion rate with suspicion unless it comes from your own A/B data — the widely repeated figures in this space are not traceable to a published study.
 
 **Q: How does the SSE format work, and which fields matter for LLM streaming?**
 An SSE event consists of up to four field types, each on its own line, terminated by a blank line: `data:` (required — the payload), `id:` (the event sequence number, used to populate `Last-Event-ID` on reconnect), `event:` (event type name, optional — enables client-side dispatching to different handlers), and `retry:` (milliseconds before the browser auto-reconnects, optional — default is 3000ms). For LLM streaming, use `data: <token>` for each token, `id: <seq_no>` for reconnect support, and `data: [DONE]` as the terminal event. The `event:` field is useful for structured streaming where you want to distinguish token events from metadata events (e.g., `event: content_block_delta` vs `event: message_stop` as Anthropic uses). Each event must be separated from the next by a blank line (`\n\n`). The `Content-Type` header must be `text/event-stream` or browsers will not parse the event stream.
@@ -651,7 +653,7 @@ Three categories of tests are required. Correctness tests: (1) disconnect test �
 
 4. **Store the last 500 tokens per request in Redis with a 60-second TTL** — this is the replay window that makes reconnects seamless. Use `RPUSH` + `LTRIM` (atomic in a pipeline) to bound the list. The 500-token window covers a 10-second dropout at 50 tokens/sec.
 
-5. **Implement a hard per-connection buffer cap of 1,000 tokens with backpressure to the GPU scheduler** — unbounded buffers are the root cause of edge PoP OOM incidents during traffic spikes. Signal vLLM to pause when the buffer hits 1,000 tokens; signal resume when it drains to 200. This bounds memory at 8KB per connection.
+5. **Implement a hard per-connection buffer cap of 1,000 tokens, and abort when a client stays saturated** — unbounded buffers are the root cause of edge PoP OOM incidents during traffic spikes. Use a bounded `asyncio.Queue` so the gateway stops pulling at 1,000 tokens and resumes at 200; this bounds gateway memory at ~8KB per connection. Do not expect it to slow the GPU: vLLM has no per-request pause, so a client that has not drained in ~30 seconds should be aborted.
 
 6. **Disable Nginx proxy buffering for SSE endpoints with `proxy_buffering off`** — Nginx's default buffering accumulates tokens until its buffer fills (4KB) before flushing, turning streaming into a non-streaming experience for small responses. The `X-Accel-Buffering: no` response header achieves the same effect from the application layer.
 
@@ -669,11 +671,11 @@ Three categories of tests are required. Correctness tests: (1) disconnect test �
 
 ### [design_chatgpt.md](../design_chatgpt.md) — SSE at 10 Million Concurrent Users
 
-ChatGPT represents the canonical LLM streaming challenge: millions of simultaneous connections, diverse client conditions (broadband, LTE, enterprise proxy, VPN), and a GPU cluster where every wasted slot has measurable cost. The architecture uses SSE with the `data: {"choices":[{"delta":{"content":"token"}}]}` envelope format, with every event carrying a sequence ID. The load balancer idle timeout is set to 600 seconds — critical for o1/o3 reasoning traces that can run 3-5 minutes. Heartbeat pings run every 15 seconds; connections without ACKs for 45 seconds are aborted. The half-open connection epidemic was the most significant operational challenge post-launch: early versions without heartbeats saw GPU utilization climbing to 95% from zombie streams during peak hours. After implementing the 45-second heartbeat timeout, GPU utilization tracked actual user count linearly. At 10M concurrent users, even the 0.1% rate of network-switch-induced half-open connections produces 10,000 zombie streams; the heartbeat system reclaims those slots within 45 seconds.
+ChatGPT represents the canonical LLM streaming challenge: millions of simultaneous connections, diverse client conditions (broadband, LTE, enterprise proxy, VPN), and a GPU cluster where every wasted slot has measurable cost. The architecture uses SSE with the `data: {"choices":[{"delta":{"content":"token"}}]}` envelope format. The public API sends no `id:` line, so a system of this shape has to add its own sequence IDs at the gateway to make reconnect replay possible. Sizing the load balancer idle timeout at 600 seconds is what a reasoning-model workload demands — extended-thinking traces routinely run several minutes — though the specific timeout OpenAI runs is not published. Heartbeat pings run every 15 seconds; connections without ACKs for 45 seconds are aborted. The half-open connection epidemic was the most significant operational challenge post-launch: early versions without heartbeats saw GPU utilization climbing to 95% from zombie streams during peak hours. After implementing the 45-second heartbeat timeout, GPU utilization tracked actual user count linearly. At 10M concurrent users, even the 0.1% rate of network-switch-induced half-open connections produces 10,000 zombie streams; the heartbeat system reclaims those slots within 45 seconds.
 
 ### [design_copilot.md](../design_copilot.md) — Streaming Within IDE Debounce Windows
 
-GitHub Copilot's streaming challenge is the opposite extreme: connections are short (300ms-3s for inline completions), latency is measured in milliseconds, and there is a 300ms debounce window before any request is even sent. The SSE connection is established the moment the debounce timer fires. TTFT dominates the user experience — users stop typing and expect a completion to begin appearing within 100-200ms of the debounce window closing. Copilot uses WebSocket (not SSE) for the IDE plugin because the IDE client also needs to send contextual updates (file changes, cursor position) to the server during generation — a bidirectional use case where WebSocket is genuinely appropriate. Completions are streamed token-by-token with no intermediate buffering. Abort-on-disconnect is critical here: if a user types a character (cancelling the completion), the WebSocket client sends an abort message, and the server calls `engine.abort()` immediately. Without this, short completions continue consuming GPU through their entire `max_tokens=128` budget even after the user has already resumed typing.
+GitHub Copilot's streaming challenge is the opposite extreme: connections are short (300ms-3s for inline completions), latency is measured in milliseconds, and there is a 300ms debounce window before any request is even sent. The SSE connection is established the moment the debounce timer fires. TTFT dominates the user experience — users stop typing and expect a completion to begin appearing within 100-200ms of the debounce window closing. An IDE plugin of this shape is the case where WebSocket genuinely earns its complexity over SSE, because the client needs to send contextual updates (file changes, cursor position) to the server *during* generation; the transport Copilot actually uses internally is not documented publicly, so treat this as the architectural argument rather than a report of their implementation. Completions are streamed token-by-token with no intermediate buffering. Abort-on-disconnect is critical here: if a user types a character (cancelling the completion), the WebSocket client sends an abort message, and the server calls `engine.abort()` immediately. Without this, short completions continue consuming GPU through their entire `max_tokens=128` budget even after the user has already resumed typing.
 
 ### [design_real_time_translation.md](../design_real_time_translation.md) — Partial Token Streaming with ASR Rollback
 

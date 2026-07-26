@@ -28,7 +28,7 @@ An LLM agent is a system where a language model acts as the reasoning engine tha
 
 The key insight: LLMs are exceptional reasoners but poor executors (they can't run code, access the internet, or call APIs). Tools bridge this gap. By giving an LLM access to tools and a loop to keep acting until a task is complete, we get a system that can accomplish tasks no single LLM call could handle.
 
-Agents represent the frontier of LLM application development in 2024-2025, powering systems like Claude Code, Devin, Cursor Composer, and countless enterprise automation workflows.
+Agents have been the frontier of LLM application development since 2024 and remain so, powering systems like Claude Code, Devin, Cursor Composer, OpenHands, and countless enterprise automation workflows.
 
 ---
 
@@ -80,7 +80,7 @@ tools = [{
 }]
 
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.4",
     messages=[{"role": "user", "content": "What's the weather in Paris?"}],
     tools=tools
 )
@@ -93,19 +93,22 @@ The model outputs a structured tool call; your code executes it; result injected
 
 Interleave thoughts and actions in a structured format:
 
+Illustrative trace — the Observation lines stand in for whatever the search tool
+returns at run time, and are not asserted as current facts:
+
 ```
 Task: Find the CEO of Apple and their net worth.
 
 Thought: I need to find the current CEO of Apple first.
-Action: search("Apple CEO 2024")
-Observation: Tim Cook is the CEO of Apple Inc.
+Action: search("Apple CEO")
+Observation: <search result naming the current CEO>
 
-Thought: Now I need to find Tim Cook's net worth.
-Action: search("Tim Cook net worth 2024")
-Observation: Tim Cook's net worth is approximately $1.5 billion.
+Thought: Now I need to find that person's net worth.
+Action: search("<CEO name> net worth")
+Observation: <search result giving a net-worth figure>
 
 Thought: I have all the information needed to answer.
-Final Answer: Tim Cook is the CEO of Apple. His net worth is approximately $1.5 billion.
+Final Answer: <CEO name> is the CEO of Apple, with a net worth of <figure>.
 ```
 
 ReAct was proposed as a prompting pattern (2022) and is now the default architecture for most agents.
@@ -174,7 +177,7 @@ Memory Types:
 
 In-context (working memory):
   The current conversation / context window
-  Limited: 8K-200K tokens depending on model
+  Limited: 200K-1M tokens on current frontier models
   Volatile: lost when context is cleared
 
 External (episodic memory):
@@ -562,23 +565,23 @@ System Prompt Structure for Agents:
 ### Claude Code (Anthropic)
 - Terminal-based agent that reads/writes files, executes commands
 - Tools: read_file, write_file, bash, list_directory
-- Context: up to 200K tokens; can hold entire codebases
+- Context: inherits the model's window — 1M tokens on current Claude models (200K on Haiku 4.5); can hold entire codebases
 - Can refactor multi-file projects, run tests, debug errors autonomously
 - Human-in-the-loop: asks permission for destructive operations
 
-### OpenAI Assistants API
+### OpenAI Assistants API (deprecated — superseded by the Responses API)
 - Managed agent infrastructure: threads, tools, file storage
 - Built-in tools: code_interpreter (Python sandbox), file_search (RAG)
 - Custom function calling
 - Persistent threads: conversation history managed server-side
-- Used by thousands of production applications
+- **Deprecated**: OpenAI reached feature parity in the Responses API and set the Assistants API shutdown for **26 August 2026**. Build new agents on the Responses API; migrate existing ones before that date.
 
 ### Devin (Cognition AI)
 - Full autonomous software engineering agent
 - Tools: terminal, browser, code editor, web search
 - Completes real GitHub issues end-to-end
 - Persistent workspace: remembers state across sessions
-- SWE-bench: 13.8% resolution rate (first highly publicized agent benchmark)
+- SWE-bench: 13.86% (79 of 570 issues) on a randomly chosen 25% subset of the SWE-bench test set — the first highly publicized agent benchmark result. Not comparable to later SWE-bench Verified numbers, which use a different, easier 500-issue subset.
 
 ---
 
@@ -625,8 +628,8 @@ System Prompt Structure for Agents:
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **OpenAI Assistants API** | Managed agent infra | Threads, built-in tools, file storage |
-| **Anthropic API** | Tool use + Claude | Best instruction following; claude-3.5 |
+| **OpenAI Responses API** | Managed agent infra | Successor to the Assistants API (which shuts down 2026-08-26); MCP, computer use, hosted tools |
+| **Anthropic API** | Tool use + Claude | Strong instruction following; current models are Opus 5 / Opus 4.7-4.8 / Sonnet 4.6 / Haiku 4.5 |
 | **LangGraph** | Stateful agent graphs | Complex multi-agent flows |
 | **LlamaIndex Agents** | RAG-focused agents | Data agents, query planning |
 | **Tavily Search** | Agent-optimized search | LLM-friendly search results |
@@ -635,9 +638,9 @@ System Prompt Structure for Agents:
 | **Tool-augmented LLM guide** | Best practices | Anthropic's tool use cookbook |
 | **Mem0** | Agent memory | Long-term memory for agents |
 | **browser-use** | Web agent library | Python; Playwright + LLM; accessibility tree |
-| **Anthropic Computer Use API** | Screen-based agent | Screenshot + action loop; claude-3-5-sonnet |
-| **GAIA benchmark** | Agent evaluation | 466 tasks; tool-use reasoning; 3 difficulty levels |
-| **SWE-bench** | Code agent evaluation | 2294 real GitHub issues; automated test scoring |
+| **Anthropic Computer Use** | Screen-based agent | Screenshot + action loop; client- or server-hosted; still a beta tool on current Claude models |
+| **GAIA benchmark** | Agent evaluation | 466 tasks (146 / 245 / 75 across 3 difficulty levels); tool-use reasoning |
+| **SWE-bench** | Code agent evaluation | 2,294 real GitHub issues from 12 Python repos; 500-issue Verified subset; automated test scoring |
 
 ---
 
@@ -653,7 +656,7 @@ A: ReAct (Reasoning + Acting) prompts the LLM to produce alternating Thought-Act
 A: (1) Hard iteration limit — stop after N steps (typically 10-20) and return a partial answer; (2) Timeout — kill the agent after T seconds total; (3) Repetition detection — if the same tool is called with the same arguments twice, exit the loop; (4) Cost tracking — stop if cumulative LLM cost exceeds a budget; (5) Human-in-the-loop — check in with a human when uncertain.
 
 **Q: What is the difference between working memory and long-term memory for agents?**
-A: Working memory is the agent's context window — everything in the current conversation. It's fast (no retrieval) but limited (typically 128K-200K tokens depending on model) and volatile (cleared between sessions). Long-term memory stores information in external databases (vector store, key-value store) and is retrieved as needed. It's persistent, unlimited, but requires retrieval latency. Agents need both: working memory for the current task, long-term memory for user preferences, past outcomes, and domain knowledge.
+A: Working memory is the agent's context window — everything in the current conversation. It's fast (no retrieval) but limited (200K-1M tokens on current frontier models) and volatile (cleared between sessions). Long-term memory stores information in external databases (vector store, key-value store) and is retrieved as needed. It's persistent, unlimited, but requires retrieval latency. Agents need both: working memory for the current task, long-term memory for user preferences, past outcomes, and domain knowledge.
 
 **Q: What are parallel tool calls and when should you use them?**
 A: Parallel tool calls allow the model to emit multiple tool call requests in a single response, which your application executes simultaneously. Use them when the calls are logically independent — their inputs don't depend on each other's outputs. Example: fetching weather for Paris and Tokyo in one round-trip instead of two sequential calls. Speedup: N× for N independent calls (latency = max(call_1, call_2, ...) rather than sum). Avoid parallel calls when one call's result determines the next call's arguments (sequential dependency).
@@ -662,7 +665,7 @@ A: Parallel tool calls allow the model to emit multiple tool call requests in a 
 A: Tool descriptions are a form of prompting that directly governs selection accuracy. Include four elements in every description: (1) what the tool does (mechanism); (2) trigger condition — "call this when the user asks about X"; (3) exclusion — "do NOT use for Y, use Z tool instead" to disambiguate similar tools; (4) a concrete example. Bad: "Gets data." Good: "Retrieves current stock prices for publicly traded companies. Call this when the user asks about current price or market cap. Do NOT use for historical prices — use get_historical_prices instead."
 
 **Q: What is the cost model for an agentic system — what drives token usage?**
-A: Token cost = sum over all LLM calls of (input_tokens × input_price + output_tokens × output_price). What drives input token growth: (1) accumulated conversation history and tool results — each step adds 500-2000 tokens; (2) large tool responses — a 5KB JSON API response can cost $0.025 in input tokens at GPT-4o pricing; (3) context repetition — the system prompt is re-sent on every call. Cost drivers by example: a 15-step agent at 3K tokens/step (input) × $5/1M = $0.225 total. Mitigations: truncate tool results to 500 words, compress old conversation history, route simple steps to cheaper models.
+A: Token cost = sum over all LLM calls of (input_tokens × input_price + output_tokens × output_price). What drives input token growth: (1) accumulated conversation history and tool results — each step adds 500-2000 tokens; (2) large tool responses — a 5KB JSON API response is roughly 1,300 tokens, and because it is re-sent on every later call it costs far more than its one-time price suggests; (3) context repetition — the system prompt is re-sent on every call. Cost drivers by example: a 15-step agent averaging 3K input tokens/step at Sonnet 4.6's $3/1M input costs $0.135 in input, and that is the *flat-context* floor — the real bill is higher because context grows (see the O(N²) section above). Mitigations: truncate tool results to 500 words, compress old conversation history, route simple steps to cheaper models.
 
 **Q: How do you implement human-in-the-loop in a production agent?**
 A: LangGraph provides `interrupt_before` and `interrupt_after` node hooks that pause graph execution and surface state to a human. The agent state is persisted via a checkpointer; the graph resumes when the human approves via `graph.update_state()`. Design: classify actions by risk (low/medium/high); only interrupt for high-risk actions (irreversible writes, external sends, large purchases). Surface the pending action with its reasoning context in a UI or Slack message; require explicit approval. Pattern: pause before any `send_email`, `delete_file`, `make_payment` node — never let these execute autonomously.
@@ -680,10 +683,10 @@ A: Three-layer strategy: (1) Input validation — validate tool result schema be
 A: Core: (1) task success rate — binary or LLM-scored; alert if drops >5% (rolling 7-day); (2) cost per task — $/task; alert if exceeds budget threshold; (3) P95 latency — wall time; alert on SLA breach; (4) step count per task — rising count indicates quality degradation or inefficiency; (5) tool error rate — fraction of tool calls returning errors. Supporting: human escalation rate (for HITL agents), token usage per step, retry rate. Set alert thresholds during a 2-week baseline period then alert on >2 standard deviation shifts. LLM judge on 5% of production traces gives qualitative quality signal without evaluating every call.
 
 **Q: When should you use LangChain LCEL for an agent versus LangGraph?**
-A: Use LCEL (`create_tool_calling_agent` + `AgentExecutor`) when the agent loop is simple: one LLM + a fixed set of tools + no persistent state across sessions. LCEL agents terminate after each invocation; state must be passed in fresh each time. Use LangGraph when: (1) the agent needs to persist state across multiple user turns (checkpointing); (2) the workflow has loops that depend on runtime conditions (tool retry, iterative refinement); (3) human-in-the-loop approval is required at specific steps; (4) multi-agent coordination with explicit routing between specialized agents; (5) you need to stream intermediate state transitions to a UI. Rule of thumb: if you can model the agent as `while True: call_llm(); if done: break`, use LCEL. If you need `if human_approved: continue`, persistent thread state, or parallel sub-agents, use LangGraph.
+A: Historically you used LCEL (`create_tool_calling_agent` + `AgentExecutor`) when the agent loop was simple: one LLM + a fixed set of tools + no persistent state across sessions. As of LangChain v1 that split no longer exists — `create_agent` is the standard agent constructor and is itself built on LangGraph, while the legacy chain/agent implementations moved to the `langchain-classic` package. LCEL agents terminate after each invocation; state must be passed in fresh each time. Reach past `create_agent` to raw LangGraph when: (1) the agent needs to persist state across multiple user turns (checkpointing); (2) the workflow has loops that depend on runtime conditions (tool retry, iterative refinement); (3) human-in-the-loop approval is required at specific steps; (4) multi-agent coordination with explicit routing between specialized agents; (5) you need to stream intermediate state transitions to a UI. Rule of thumb: if you can model the agent as `while True: call_llm(); if done: break`, use LCEL. If you need `if human_approved: continue`, persistent thread state, or parallel sub-agents, use LangGraph.
 
 **Q: How does LCEL's AgentExecutor compare to creating an agent loop in LangGraph?**
-A: `AgentExecutor` is LCEL's high-level agent runner that handles the Thought-Action-Observation loop for you: it automatically calls tools, injects results back into messages, and loops until the model produces a final answer or `max_iterations` is reached. LangGraph's equivalent is a `StateGraph` with an agent node and a tool node connected by a conditional edge. Key differences: AgentExecutor is simpler to set up (5 lines vs 30 lines for LangGraph) but has hard-to-customize loop logic; LangGraph exposes every step as a node you can modify, add logging, or interrupt. For production agents where you need visibility into each loop iteration, LangGraph's explicit graph is superior. AgentExecutor is deprecated in LangChain 0.3+ in favor of LangGraph's patterns.
+A: `AgentExecutor` is LCEL's high-level agent runner that handles the Thought-Action-Observation loop for you: it automatically calls tools, injects results back into messages, and loops until the model produces a final answer or `max_iterations` is reached. LangGraph's equivalent is a `StateGraph` with an agent node and a tool node connected by a conditional edge. Key differences: AgentExecutor is simpler to set up (5 lines vs 30 lines for LangGraph) but has hard-to-customize loop logic; LangGraph exposes every step as a node you can modify, add logging, or interrupt. For production agents where you need visibility into each loop iteration, LangGraph's explicit graph is superior. `AgentExecutor` is legacy: LangChain v1 removed it from the main `langchain` package into `langchain-classic` and made `create_agent` — a LangGraph-backed harness with middleware hooks — the standard way to build an agent.
 
 **Q: How do you make side-effectful tools safe when the agent retries or the loop replays a step?**
 A: Make every mutating tool idempotent from the agent's perspective, because retries are guaranteed: the LLM re-issues calls after timeouts, malformed observations, or loop restarts, and "send_email" executed twice is a real incident, not a hypothetical. The standard mechanics: require an idempotency key per logical action (derived from the step ID or a hash of the tool arguments) so the tool backend deduplicates repeat executions; separate read tools from write tools and let only reads auto-retry; and gate irreversible writes (payments, deletions, external messages) behind a confirm step — either human-in-the-loop or a two-phase propose-then-commit tool pair, so the model must first return a plan artifact and only a validated commit call executes it. Log every tool execution with its key so replays are detectable in traces. The interview trap is answering with "lower the temperature so it retries less" — retry safety is a systems property of the tool layer, never a sampling setting.
@@ -913,7 +916,8 @@ async def run_incident_agent(
             messages=messages,
         )
 
-        total_cost += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1e9
+        # Sonnet 4.6 list price: $3 / 1M input, $15 / 1M output -> divide by 1e6, not 1e9
+        total_cost += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1e6
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
@@ -1019,12 +1023,12 @@ class HumanApprovalGate:
         token = f"approval_{req.incident_id}_{int(req.requested_at)}"
 
         msg = (
-            f":robot_face: *Incident {req.incident_id} — Remediation Approval Needed*\n"
+            f"*Incident {req.incident_id} — Remediation Approval Needed*\n"
             f"*Action:* `{req.action}`\n"
             f"*Service:* `{req.action_params.get('service', '?')}`\n"
             f"*Justification:* {req.justification}\n"
             f"*Evidence:* {req.evidence[:400]}\n"
-            f"✅ `/approve {token}` | ❌ `/reject {token} [reason]`\n"
+            f"APPROVE: `/approve {token}`  |  REJECT: `/reject {token} [reason]`\n"
             f"_(Auto-reject in 5 min)_"
         )
         await self._slack.post_message(channel="#incidents-sre", text=msg)

@@ -91,7 +91,7 @@ LLM inference (text-to-code generation):
   Input tokens per query: 2,000 (schema + question + conversation context)
   Output tokens per query: 300 (generated code)
   Daily tokens: 3M x 2,300 = 6.9B tokens/day
-  Cost at $3/M input + $15/M output tokens (GPT-4o):
+  Cost at $3/M input + $15/M output tokens (Claude Sonnet 5 list price):
     Input: 6B x $3/M = $18,000/day
     Output: 0.9B x $15/M = $13,500/day
     Total LLM cost: ~$31,500/day = ~$11.5M/year
@@ -104,7 +104,8 @@ Sandbox compute:
 
 GPU for large dataset processing (optional):
   RAPIDS/cuDF for datasets > 100MB
-  4x A10G GPUs for peak: $4/hr x 4 x 24 = $384/day
+  4x A10G GPUs for peak (g5.12xlarge, $5.672/hr on-demand us-east-1
+  = $1.42/GPU-hour): $1.42/hr x 4 x 24 = $136/day
 ```
 
 ---
@@ -479,10 +480,10 @@ Sandbox architecture:
     ┌─────────────────────────────────────────────────┐
     │  Container (gVisor runtime)                      │
     │                                                  │
-    │  Python 3.11 + pre-installed libraries:          │
-    │    pandas 2.2, numpy 1.26, matplotlib 3.8,      │
-    │    plotly 5.18, scipy 1.12, scikit-learn 1.4,   │
-    │    polars 0.20, openpyxl 3.1                    │
+    │  Python 3.13 + pre-installed libraries:          │
+    │    pandas 3.0, numpy 2.5, matplotlib 3.11,      │
+    │    plotly 6.9, scipy 1.18, scikit-learn 1.9,    │
+    │    polars 1.43, openpyxl 3.1                    │
     │                                                  │
     │  Resources:                                      │
     │    CPU: 2 cores (burstable to 4)                │
@@ -763,7 +764,9 @@ Session state:
   }
 
 Context window management for multi-turn:
-  Total budget: 128K tokens (Claude 3.5 Sonnet / GPT-4o)
+  Total budget: cap the working context at 128K tokens by policy, even though
+  current frontier models expose far more (Claude Sonnet 5 / Claude Opus 5:
+  1M tokens). Attention dilution, not the window, is the binding constraint.
   Allocation:
     System prompt + instructions: 1,500 tokens (fixed)
     Schema + EDA summary: 2,000 tokens (fixed per dataset)
@@ -896,7 +899,7 @@ WebSocket /v1/ws/analysis
 | Decision | Chosen | Alternative | Reason |
 |----------|--------|-------------|--------|
 | Sandbox runtime | gVisor containers | Docker only | gVisor adds syscall-level isolation; Docker alone has known escape vectors |
-| Code generation model | GPT-4o / Claude 3.5 Sonnet | Code-specialized (CodeLlama) | General models handle NL ambiguity better; code-only models miss business context |
+| Code generation model | Frontier general model (Claude Sonnet 5 / GPT-5.4 class) | Code-specialized open-weight model (Qwen3-Coder class) | General models handle NL ambiguity better; code-only models miss business context |
 | Execution kernel | IPython (persistent) | Fresh process per query | Persistent kernel lets users reference prior DataFrames across turns; 10x faster for follow-ups |
 | DataFrame library | pandas (default) + polars (> 200MB) | pandas only | polars lazy evaluation handles 500MB files in 4GB RAM; pandas OOMs at ~300MB |
 | Chart library | plotly (interactive) | matplotlib (static) | Interactive charts let users hover, zoom, filter without re-querying; 3x higher user engagement |
@@ -919,7 +922,8 @@ LLM costs dominate ($11.5M/year at scale). Optimization levers:
             count=500000, missing=0, granularity=daily, ..."
      Compressed: "order_date: date [2020-2024, daily, 500K rows, no nulls]"
    Savings: 40% fewer input tokens on schema context
-   Impact: ~$4.5M/year saved
+   Impact: input spend is $18,000/day = $6.6M/year, so a 40% cut is
+   at most ~$2.6M/year
 
 2. Query template caching
    Common patterns: "show X by Y over time", "top N by metric",
@@ -927,27 +931,34 @@ LLM costs dominate ($11.5M/year at scale). Optimization levers:
    Cache: (query_pattern, schema_hash) → code template
    Fill in column names without LLM call
    Hit rate: 15-20% of queries match templates
-   Savings: $1.5-2M/year
+   Savings: 15-20% of the full $11.5M bill = $1.7-2.3M/year
 
 3. Tiered model routing
-   Simple queries (top N, basic aggregation): GPT-4o-mini ($0.15/$0.60 per M)
-   Complex queries (multi-table joins, statistical): GPT-4o ($3/$15 per M)
-   Report synthesis: Claude 3.5 Sonnet (strong at long narrative)
+   Simple queries (top N, basic aggregation): Claude Haiku 4.5 ($1/$5 per M)
+   Complex queries (multi-table joins, statistical): Claude Sonnet 5 ($3/$15 per M)
+   Report synthesis: Claude Opus 5 (strong at long narrative)
    Router: classify query complexity before LLM call (small classifier, < 5ms)
-   Savings: 60% of queries are simple → route to mini → $5M/year saved
+   Savings: 60% of queries are simple. Those queries cost
+     3.6B in x $3/M + 0.54B out x $15/M = $18,900/day on Sonnet 5, versus
+     3.6B x $1/M + 0.54B x $5/M = $6,300/day on Haiku 4.5
+     -> $12,600/day = ~$4.6M/year saved
 
-4. Prompt caching (Anthropic/OpenAI feature)
+4. Prompt caching (Anthropic cache-read pricing)
    Schema + system prompt is identical across queries in a session
-   Cache the 2,000-token prefix → pay 90% less for cached tokens
-   Savings: ~$3M/year on input token costs
+   Cache the 2,000-token prefix -> cache reads bill at 0.1x base input
+   (cache writes bill at 1.25x, so the break-even is two reads per entry)
+   Savings: ~$3M/year net of lever 1, which shrinks the same prefix
 
 5. Self-hosted models for simple queries
-   Llama 3.1 70B or Qwen2.5-Coder-32B on vLLM cluster
-   4x A100 GPUs: $50K/month = $600K/year
-   Handles 60% of simple queries (replacing $5M in API costs)
-   Net savings: $4.4M/year
+   Open-weight coder model (Qwen3-Coder-30B-A3B class) on a vLLM cluster
+   4x A100 80GB: a p4d.24xlarge (8x A100) is $21.96/hr on-demand in
+   us-east-1, so a half-node equivalent is ~$8K/month = ~$96K/year
+   Handles 60% of simple queries (replacing the $4.6M of API cost above)
+   Net savings: ~$4.5M/year
 
-Total optimized cost: ~$3-4M/year (vs $11.5M unoptimized)
+Total optimized cost: ~$3-4M/year (vs $11.5M unoptimized). The five levers
+overlap -- routing, caching and self-hosting all target the same queries --
+so they do not sum; $3-4M is the realistic floor, not $11.5M minus the list.
 ```
 
 ---
@@ -999,22 +1010,22 @@ Failure 6: SQL injection via natural language
 
 ## 9. Interview Discussion Points
 
-**Why not just give the LLM raw data and ask it to analyze directly?** LLMs cannot reliably perform arithmetic on large datasets. GPT-4o asked "what is the average of these 1000 numbers" will hallucinate or approximate. The correct architecture generates code that a deterministic runtime (pandas, SQL) executes. The LLM is the translator (NL to code), not the calculator. This separation ensures numerical accuracy regardless of dataset size.
+**Why not just give the LLM raw data and ask it to analyze directly?** LLMs cannot reliably perform arithmetic on large datasets. A frontier model asked "what is the average of these 1000 numbers" will approximate or hallucinate rather than compute exactly. The correct architecture generates code that a deterministic runtime (pandas, SQL) executes. The LLM is the translator (NL to code), not the calculator. This separation ensures numerical accuracy regardless of dataset size.
 
-**The schema inference quality determines everything downstream.** If the system infers a date column as a string, every time-series question fails. If it misses that "revenue" is monetary, currency formatting is wrong. The 5-10 seconds spent at upload time building a rich schema profile (types, distributions, semantics) is the highest-leverage investment. Production systems like Julius AI report that 40% of user complaints trace back to schema inference errors, not LLM quality.
+**The schema inference quality determines everything downstream.** If the system infers a date column as a string, every time-series question fails. If it misses that "revenue" is monetary, currency formatting is wrong. The 5-10 seconds spent at upload time building a rich schema profile (types, distributions, semantics) is the highest-leverage investment. In practice a large share of user complaints on products in this category trace back to schema inference errors rather than LLM quality -- worth instrumenting explicitly, since no vendor publishes the ratio.
 
-**Persistent kernel vs. stateless execution -- a critical architecture decision.** Stateless (fresh process per query) is simpler and more secure. But data analysis is inherently stateful: "now filter that to just Q4" references the DataFrame from the prior query. A persistent IPython kernel maintains variables across turns, enabling conversational analysis. The tradeoff: state management complexity (snapshot/restore, memory leaks from accumulating DataFrames) vs. user experience. Every production system (ChatGPT Code Interpreter, Julius, Noteable) chose persistent kernels because stateless analysis is unusable for real workflows.
+**Persistent kernel vs. stateless execution -- a critical architecture decision.** Stateless (fresh process per query) is simpler and more secure. But data analysis is inherently stateful: "now filter that to just Q4" references the DataFrame from the prior query. A persistent IPython kernel maintains variables across turns, enabling conversational analysis. The tradeoff: state management complexity (snapshot/restore, memory leaks from accumulating DataFrames) vs. user experience. Production systems in this category (ChatGPT's code interpreter, Julius) chose persistent kernels because stateless analysis is unusable for real workflows.
 
 **How do you handle a 500MB CSV in a 4GB sandbox?** Naive pandas read_csv on a 500MB file consumes 1.5-3GB of RAM (object overhead, string storage). Solutions, in order of preference: (1) dtype optimization at load time (downcast numerics, categorize strings) reduces memory 60%; (2) polars lazy evaluation processes data in streaming fashion without loading all rows; (3) chunked processing via dask for truly massive files; (4) pre-convert to Parquet at upload time (columnar format, 3-5x compression, memory-mapped reads). The upload service should convert CSV to Parquet on ingestion -- every downstream read is faster and cheaper.
 
 **Ambiguity resolution is a product decision, not just a technical one.** When the user says "show me trends," you can: (A) always ask for clarification (safe but annoying -- user leaves after 3 clarification rounds), (B) always guess (fast but sometimes wrong), or (C) guess with transparency (default to most likely interpretation, state the assumption, offer alternatives). Option C is what production systems converge on. The key metric is the "clarification abandonment rate" -- if > 20% of users drop off after a clarification question, you are asking too often.
 
-**Why auto-EDA matters for LLM code quality.** Without EDA context, the LLM generating code does not know that revenue is right-skewed (should it use mean or median?), that there is a data gap in March 2022 (time series will have a misleading dip), or that the "status" column has 47 unique values (a pie chart would be unreadable). Feeding EDA results into the code generation prompt improves first-attempt code correctness from 72% to 89% in production benchmarks.
+**Why auto-EDA matters for LLM code quality.** Without EDA context, the LLM generating code does not know that revenue is right-skewed (should it use mean or median?), that there is a data gap in March 2022 (time series will have a misleading dip), or that the "status" column has 47 unique values (a pie chart would be unreadable). Feeding EDA results into the code generation prompt is the single highest-yield change to first-attempt code correctness -- measure the lift on your own golden query set rather than trusting a published figure, since no vendor publishes one.
 
 **Security of the sandbox is not optional -- it is existential.** The system executes LLM-generated code. If the LLM is tricked (prompt injection) or hallucinates dangerous code (os.system('rm -rf /')), the sandbox must contain the blast radius. gVisor intercepts syscalls at the kernel level, not just at the container boundary. No network egress prevents data exfiltration. Read-only dataset mounts prevent data corruption. The 60-second execution limit prevents crypto-mining. Every layer matters because the attack surface is "arbitrary code execution triggered by natural language input" -- one of the highest-risk architectures in software.
 
 **Report synthesis requires hierarchical summarization for long sessions.** A power user might run 50 queries in a session. At 500 tokens per query-result pair, that is 25,000 tokens of findings -- too much to fit in a single LLM context window alongside instructions. The solution: summarize in batches of 10 findings, then synthesize the batch summaries into a final report. This hierarchical approach handles arbitrarily long sessions but introduces a risk of information loss at each summarization layer. Mitigation: always preserve exact numbers and chart references through the summarization chain; only compress narrative.
 
-**How do you stop LLM cost from scaling linearly with query volume?** Unoptimized, this system spends ~$11.5M/year on LLM inference (Section 7). Four levers compound: [tiered model routing](../llm_routing_and_model_selection/README.md) sends the ~60% of simple queries (top-N, basic aggregation) to a mini-tier model at roughly 1/20th the price; [prompt caching](../llm_caching/README.md) makes the identical ~2,000-token schema-plus-system prefix about 90% cheaper on every request after the first in a session; query template caching skips the LLM entirely for the 15-20% of queries matching known patterns; and schema compression cuts input tokens ~40%. Together these bring the bill to $3-4M/year -- the most interview-relevant arithmetic in the design, because it shows cost is an architecture property, not a vendor price.
+**How do you stop LLM cost from scaling linearly with query volume?** Unoptimized, this system spends ~$11.5M/year on LLM inference (Section 7). Four levers compound: [tiered model routing](../llm_routing_and_model_selection/README.md) sends the ~60% of simple queries (top-N, basic aggregation) to a small-tier model at roughly one-third the price (Claude Haiku 4.5 at $1/$5 per M versus Claude Sonnet 5 at $3/$15); [prompt caching](../llm_caching/README.md) bills the identical ~2,000-token schema-plus-system prefix at 0.1x base input on every cache read after the first in a session; query template caching skips the LLM entirely for the 15-20% of queries matching known patterns; and schema compression cuts input tokens ~40%. Together these bring the bill to $3-4M/year -- the most interview-relevant arithmetic in the design, because it shows cost is an architecture property, not a vendor price.
 
 **Session durability turns a demo into a product.** Analysis sessions span hours or days ("continue where I left off on Tuesday"), so session state -- the schema profile, pruned conversation summary, and derived DataFrames -- must survive process restarts and sandbox eviction. Storing Parquet file references on object storage instead of DataFrame contents keeps each checkpoint under 10KB regardless of data volume, and an idempotency key on `execute_sql` (hash of query + data snapshot id) prevents re-running a 45-second query when a resumed session replays recent context. The general checkpoint and idempotency-key pattern is developed in [Agent Durability Patterns](cross_cutting/agent_durability_patterns.md).

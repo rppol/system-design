@@ -27,7 +27,7 @@ RAG is now the dominant architecture for enterprise LLM applications: customer s
 - **Separation of concerns**: Retrieval handles access to current/private information; generation handles synthesis and reasoning.
 - **Context window as the interface**: Retrieved documents are injected into the LLM's context — the retrieval quality directly bounds RAG quality.
 - **Chunking strategy determines recall**: How you split documents determines what can be retrieved. Poor chunking = poor recall.
-- **Retrieval quality > Generation quality**: If the right context isn't retrieved, even GPT-4 can't produce a correct answer.
+- **Retrieval quality > Generation quality**: If the right context isn't retrieved, even a frontier model can't produce a correct answer.
 - **Grounding reduces hallucination**: LLMs anchored to retrieved documents hallucinate significantly less than relying on parametric memory alone.
 - **Evaluation is hard**: RAG evaluation requires measuring both retrieval quality (is the right doc found?) and generation quality (is the answer correct and grounded?).
 
@@ -330,7 +330,7 @@ That flatness is exactly the point. Compare two documents:
   Set alpha = 0.7 (semantic-leaning): C1 = 0.700, C2 = 0.300, C3 = 0.648.
 ```
 
-**Why normalization is non-optional here and absent from RRF.** Weighted combination consumes raw magnitudes, so any retriever whose scores happen to live on a bigger numeric range silently monopolizes the blend regardless of `α`. Min-max is also fragile: it is computed per query over the returned candidates, so one outlier BM25 score compresses everything else toward 0. RRF sidesteps the entire problem by never touching scores — ranks are always `1..N` on every system, which is why it needs no tuning and why the case study's measured gap between RRF and optimally-tuned linear interpolation is only 2–3%.
+**Why normalization is non-optional here and absent from RRF.** Weighted combination consumes raw magnitudes, so any retriever whose scores happen to live on a bigger numeric range silently monopolizes the blend regardless of `α`. Min-max is also fragile: it is computed per query over the returned candidates, so one outlier BM25 score compresses everything else toward 0. RRF sidesteps the entire problem by never touching scores — ranks are always `1..N` on every system, which is why it needs no tuning. RRF was introduced by Cormack, Clarke and Buettcher (SIGIR 2009), who showed it beating Condorcet Fuse, CombMNZ and every individual learning-to-rank method on LETOR 3; the practical reason to reach for it is that it has no weight to tune, not a guaranteed margin over a well-tuned linear blend.
 
 ### 4.4 Reranking
 
@@ -343,12 +343,17 @@ Cross-encoders read query and candidate together → much better relevance judgm
   than comparing separate embeddings
 
 Models:
-  - BGE-reranker-large (best open source)
-  - Cohere Rerank API (best managed)
+  - BGE-reranker-v2-m3 (0.6B, multilingual; current BAAI open-source default,
+    successor to bge-reranker-large / bge-reranker-base)
+  - Cohere Rerank API (managed; rerank-3.5 deprecated 2026-07-01, superseded
+    by cohere-rerank-4-fast)
   - ColBERT (token-level matching, faster than full cross-encoder)
 ```
 
-Cost: ~50ms for reranking top-100; worth it for precision-critical tasks.
+Cost: reranking latency scales with model size and candidate count, so measure it —
+a small cross-encoder (ms-marco-MiniLM-L-12-v2) scores ~30 pairs in roughly 10ms on GPU,
+while a 0.6B multilingual reranker over the same batch is an order of magnitude slower.
+Worth it for precision-critical tasks.
 
 ### 4.5 Context Injection
 
@@ -543,7 +548,8 @@ Strategy 3: Hierarchical (for hierarchical content)
   Retrieve summary first, drill down only if needed
 
 Strategy 4: Long context models
-  Use Gemini 1.5 Pro (1M tokens) or Claude 3.5 (200K)
+  Use a 1M-token model (Claude Opus 5 / Sonnet 5 both expose 1M;
+  Google's Gemini Pro tier is the other long-context option)
   Load entire document set into context (expensive but simple)
 ```
 
@@ -679,7 +685,7 @@ One query, three very different verdicts: recall says the retriever was perfect,
 
 1. **Poor chunking**: Splitting mid-sentence destroys meaning. Use sentence-boundary chunking at minimum.
 2. **Chunk too large**: Large chunks embed poorly (embedding averages away specifics). 500 tokens is often the max.
-3. **No reranking**: Initial retrieval has 70-80% precision; reranking gets to 90%+. Skipping costs significantly.
+3. **No reranking**: first-stage retrieval optimizes recall, not top-5 precision; a cross-encoder pass reliably reorders the candidate set for the better. In §14's case study the reranker moved NDCG@5 from 0.71 to 0.79 without enlarging the candidate set — measure the delta on your own corpus rather than assuming a fixed precision figure.
 4. **Ignoring metadata filtering**: Without filtering, a query about "Q4 2024 revenue" might return Q4 2021 documents.
 5. **Context stuffing**: More retrieved chunks isn't always better — model may hallucinate more with irrelevant context. Keep to 3-5 focused chunks.
 6. **Missing source attribution**: Users should be able to verify answers. Always return source metadata with responses.
@@ -723,28 +729,28 @@ A: Combine prompt-level and pipeline-level defenses. Prompt level: instruct the 
 A: Because long-context stuffing fails on cost, latency, and attention quality at corpus scale. Cost: re-sending 200K tokens on every query costs roughly $0.60 at $3/1M input pricing — per query — versus a few tens of milliseconds of vector search over a pre-built index, and a 10M-document corpus does not fit in any window regardless. Attention: "lost in the middle" degradation means relevance ordering still matters even when everything fits. Long context wins for single-document workflows ("analyze this contract") and small static corpora; RAG wins whenever the corpus is large, shared, or frequently updated — and in practice they combine: retrieval narrows millions of documents to the best 5 chunks, and the long window lets you include generous parent context around them.
 
 **Q: What is the minimal viable RAG stack for a production system?**
-A: Minimum viable production RAG: (1) Document parsing — Unstructured.io or PyMuPDF for PDFs; (2) Chunking — sentence-boundary, 300-500 tokens, 50-token overlap; (3) Embedding — BAAI/bge-base-en-v1.5 (self-hosted) or text-embedding-3-small (API); (4) Vector DB — Qdrant (self-hosted) or Pinecone (managed); (5) Retrieval — hybrid (dense + BM25) via Weaviate or Qdrant hybrid; (6) Reranker — BGE-reranker-base; (7) Generation — GPT-4o or Claude with system prompt requiring source attribution and "I don't know" fallback. This stack achieves 85%+ accuracy on well-scoped document corpora.
+A: Minimum viable production RAG: (1) Document parsing — Unstructured.io or PyMuPDF for PDFs; (2) Chunking — sentence-boundary, 300-500 tokens, 50-token overlap; (3) Embedding — BAAI/bge-base-en-v1.5 (self-hosted) or text-embedding-3-small (API); (4) Vector DB — Qdrant (self-hosted) or Pinecone (managed); (5) Retrieval — hybrid (dense + BM25) via Weaviate or Qdrant hybrid; (6) Reranker — BGE-reranker-base; (7) Generation — any current frontier model (Claude Sonnet 5, GPT-5.6) with a system prompt requiring source attribution and an "I don't know" fallback. Treat accuracy as something you measure on your own corpus; there is no stack-level accuracy figure that transfers between document sets.
 
 **Q: How does chunk size affect retrieval recall and generation quality in RAG?**
 Chunk size creates a fundamental tradeoff: smaller chunks (128-256 tokens) improve retrieval precision by isolating specific facts, while larger chunks (512-1024 tokens) provide more context but may dilute relevance. A chunk too small may miss surrounding context needed to answer the question; a chunk too large may contain irrelevant information that confuses the LLM. Empirically, 256-512 tokens is the sweet spot for most document types. For dense technical documents, smaller chunks (200-300 tokens) work better. For narrative documents (legal briefs, case studies), larger chunks (500-800 tokens) preserve important context. Always test on your actual queries — measure retrieval recall@5 and downstream answer quality (correctness, faithfulness) across chunk sizes. A common pattern: use small chunks for retrieval, then expand to the surrounding parent chunk for generation (parent-child chunking).
 
 **Q: How do you configure hybrid search weighting between dense and sparse retrieval?**
-Hybrid search combines dense (embedding) and sparse (BM25/keyword) retrieval using a weighting parameter alpha, where alpha=1.0 is pure dense and alpha=0.0 is pure sparse. The optimal alpha depends on your query types: keyword-heavy queries (product names, error codes, specific terms) favor lower alpha (0.3-0.5); semantic queries ("how to handle authentication") favor higher alpha (0.6-0.8). Start with alpha=0.5 (equal weight) and tune on your evaluation set. Reciprocal Rank Fusion (RRF) is an alternative that does not require tuning — it merges ranked lists by summing 1/(k + rank) for each document across retrievers, where k=60 is standard. RRF is more robust than linear interpolation because it is rank-based rather than score-based (different retrievers have incomparable score scales). In practice, RRF with k=60 performs within 2-3% of optimally-tuned linear interpolation.
+Hybrid search combines dense (embedding) and sparse (BM25/keyword) retrieval using a weighting parameter alpha, where alpha=1.0 is pure dense and alpha=0.0 is pure sparse. The optimal alpha depends on your query types: keyword-heavy queries (product names, error codes, specific terms) favor lower alpha (0.3-0.5); semantic queries ("how to handle authentication") favor higher alpha (0.6-0.8). Start with alpha=0.5 (equal weight) and tune on your evaluation set. Reciprocal Rank Fusion (RRF) is an alternative that does not require tuning — it merges ranked lists by summing 1/(k + rank) for each document across retrievers, where k=60 is standard (Cormack et al., SIGIR 2009). RRF is more robust than linear interpolation because it is rank-based rather than score-based (different retrievers have incomparable score scales). Its practical selling point is that it has no weight to tune at all, so it is the right default before you have an evaluation set to tune alpha against.
 
 **Q: What is query transformation and when does it improve retrieval?**
-Query transformation rewrites the user's query before retrieval so it better matches how answers are phrased in the corpus. The main techniques: query expansion (add synonyms and related terms), HyDE (generate a hypothetical answer with an LLM and embed that instead of the raw query — closing the question-vs-answer phrasing gap, typically worth 5-12% recall), and decomposition (split multi-part questions into sub-queries retrieved independently). Each adds an LLM call (~100ms or more), so apply selectively: transform when queries are short, vague, or stylistically distant from the documents ("what did we decide?"), and skip it when queries are already keyword-rich. See [query transformation](../advanced_rag/query_transformation.md) for the full technique catalog.
+Query transformation rewrites the user's query before retrieval so it better matches how answers are phrased in the corpus. The main techniques: query expansion (add synonyms and related terms), HyDE (generate a hypothetical answer with an LLM and embed that instead of the raw query — closing the question-vs-answer phrasing gap; Gao et al., 2022 measured +13.4 points Recall@1k on TREC DL19 over an unsupervised Contriever baseline, with much smaller gains over a well-tuned supervised retriever), and decomposition (split multi-part questions into sub-queries retrieved independently). Each adds an LLM call (~100ms or more), so apply selectively: transform when queries are short, vague, or stylistically distant from the documents ("what did we decide?"), and skip it when queries are already keyword-rich. See [query transformation](../advanced_rag/query_transformation.md) for the full technique catalog.
 
 **Q: What is the difference between a bi-encoder and a cross-encoder, and where does each belong in a RAG pipeline?**
 A bi-encoder embeds query and document independently into vectors compared via cosine similarity — document embeddings are precomputable, so it scales to millions of documents through ANN search, but it cannot model token-level interaction between query and document. A cross-encoder feeds the concatenated (query, document) pair through one transformer and outputs a relevance score — far more accurate, but it requires a full forward pass per pair and cannot be pre-indexed. The standard pipeline exploits both: bi-encoder retrieves top-50-100 candidates in tens of milliseconds, then a cross-encoder reranks them to the final top 5 (ColBERT's token-level late interaction sits between the two in both cost and quality). Never use a cross-encoder for first-stage retrieval over a large corpus, and never rely on bi-encoder scores alone for precision-critical top-5 selection.
 
 **Q: What is the latency budget for reranking in a production RAG pipeline?**
-Reranking adds 50-200ms to the pipeline depending on the model and number of candidates. A cross-encoder reranker (e.g., Cohere Rerank, bge-reranker-v2) processes each (query, document) pair independently through a transformer — scoring 20 documents with a 400M parameter reranker takes ~100-150ms on a T4 GPU. Budget allocation for a 2-second total pipeline SLO: embedding query (10ms) + vector search (20-50ms) + reranking (100-150ms) + LLM generation (1-1.5s) + overhead (100ms). To reduce reranking latency: (1) limit candidates to top-20 from initial retrieval (diminishing returns beyond 20); (2) use a smaller reranker model; (3) batch reranking calls; (4) use GPU acceleration. Skip reranking entirely for latency-critical applications (<500ms total) or when initial retrieval recall@5 already exceeds 90%.
+Reranking adds tens to hundreds of milliseconds depending on the model size, candidate count and hardware. A cross-encoder reranker processes each (query, document) pair independently through a transformer, so cost is linear in candidates: a small model (ms-marco-MiniLM-L-12-v2, ~33M params) scores 30 pairs in roughly 10ms on GPU, while a 0.6B multilingual model like bge-reranker-v2-m3 is an order of magnitude slower on the same batch, and the managed Cohere Rerank API adds a network round trip on top. Budget allocation for a 2-second total pipeline SLO: embedding query (~10ms) + vector search (20-50ms) + reranking (10-150ms depending on model) + LLM generation (1-1.5s) + overhead (100ms). To reduce reranking latency: (1) limit candidates to top-20 from initial retrieval (diminishing returns beyond 20); (2) use a smaller reranker model; (3) batch reranking calls; (4) use GPU acceleration. Skip reranking entirely for latency-critical applications (<500ms total) or when initial retrieval recall@5 already exceeds 90%.
 
 **Q: How do you choose between vector databases for a production RAG system?**
-Vector database selection depends on scale, infrastructure, and operational requirements. For fewer than 1M vectors: Chroma (embedded, Python-native, zero ops) or pgvector (if you already use PostgreSQL). For 1M-100M vectors: Qdrant (best query performance, Rust-based), Weaviate (good hybrid search, GraphQL API), or Pinecone (fully managed, zero ops). For more than 100M vectors: Milvus (distributed, battle-tested at Zillow/PayPal) or Pinecone (managed, scales automatically). Key decision factors: (1) managed vs self-hosted — Pinecone for zero-ops, Qdrant/Milvus for control; (2) hybrid search support — Weaviate and Qdrant have native BM25+dense; pgvector requires separate BM25 setup; (3) filtering — all support metadata filtering but performance varies (Qdrant and Milvus handle high-cardinality filters best); (4) cost — pgvector is free, Pinecone charges per vector per month, self-hosted cost = compute only.
+Vector database selection depends on scale, infrastructure, and operational requirements. For fewer than 1M vectors: Chroma (embedded, Python-native, zero ops) or pgvector (if you already use PostgreSQL). For 1M-100M vectors: Qdrant (best query performance, Rust-based), Weaviate (good hybrid search, GraphQL API), or Pinecone (fully managed, zero ops). For more than 100M vectors: Milvus (distributed; NVIDIA and Roblox are the adopters Milvus names on its own adopters page) or Pinecone (managed, scales automatically). Key decision factors: (1) managed vs self-hosted — Pinecone for zero-ops, Qdrant/Milvus for control; (2) hybrid search support — Weaviate and Qdrant have native BM25+dense; pgvector requires separate BM25 setup; (3) filtering — all support metadata filtering but performance varies (Qdrant and Milvus handle high-cardinality filters best); (4) cost — pgvector is free, Pinecone charges per vector per month, self-hosted cost = compute only.
 
 **Q: What is the "lost in the middle" problem and how do you mitigate it in RAG?**
-The "lost in the middle" phenomenon (Liu et al., 2023) shows that LLMs attend more to information at the beginning and end of the context, paying less attention to content in the middle. In RAG, if you retrieve 10 chunks and place them in the context, the LLM may ignore chunks 4-7 even if they contain the answer. Mitigations: (1) order chunks by relevance with the most relevant first and last (sandwich pattern); (2) reduce the number of chunks — 3-5 well-chosen chunks outperform 10+ mediocre ones; (3) use reranking to ensure only highly relevant chunks are included; (4) summarize or compress chunks before insertion; (5) use citation prompting — ask the model to cite which chunk it used, which forces attention to all chunks. Models with native long-context (Claude 200K, Gemini 1M) show reduced but not eliminated middle-loss effects.
+The "lost in the middle" phenomenon (Liu et al., 2023) shows that LLMs attend more to information at the beginning and end of the context, paying less attention to content in the middle. In RAG, if you retrieve 10 chunks and place them in the context, the LLM may ignore chunks 4-7 even if they contain the answer. Mitigations: (1) order chunks by relevance with the most relevant first and last (sandwich pattern); (2) reduce the number of chunks — 3-5 well-chosen chunks outperform 10+ mediocre ones; (3) use reranking to ensure only highly relevant chunks are included; (4) summarize or compress chunks before insertion; (5) use citation prompting — ask the model to cite which chunk it used, which forces attention to all chunks. Models with native long-context windows (Claude Opus 5 / Sonnet 5 at 1M tokens, Gemini's Pro tier) show reduced but not eliminated middle-loss effects.
 
 **Q: Why does metadata pre-filtering beat post-filtering in vector search?**
 Pre-filtering applies the metadata predicate inside the ANN search, so the index traverses only matching vectors and returns a full top-K of eligible chunks; post-filtering retrieves the global top-K and then discards non-matching results, which can leave far fewer than K survivors — retrieve 10, filter down to 1 — silently starving the LLM context. Post-filtering also breaks recall when the filter is selective: if only 0.1% of chunks match "source = Q4_2024_earnings.pdf", a global top-50 likely contains none of them. Modern vector DBs (Qdrant, Weaviate, Pinecone) implement filtered HNSW traversal; verify your DB actually pushes the filter down, and create payload indexes on high-cardinality filter fields so filtered search latency stays flat.
@@ -942,7 +948,7 @@ response = llm.complete(prompt)
 
 **Why does hybrid retrieval outperform either BM25 or dense retrieval alone?** BM25 excels at exact keyword matching — product codes, legal citations, rare technical terms. Dense retrieval excels at semantic matching — synonyms, paraphrases, concept-level queries. Their failures are complementary: a query for "myocardial infarction" finds dense results via semantic similarity to "heart attack" but BM25 misses; a query for "RFC-7807" finds BM25 results exactly but dense retrieval loses the rare token. RRF fusion captures wins from both without requiring tuned weighting between them.
 
-**What is HyDE (Hypothetical Document Embedding) and when does it help?** HyDE generates a hypothetical answer to the query using an LLM, then embeds that hypothetical answer for retrieval instead of the raw query. A query like "what is our policy on remote work?" gets a generated hypothetical policy paragraph that is semantically close to actual policy documents in the index. HyDE improves recall by 5-12% for knowledge base queries where the query and document style differ significantly. It adds one LLM call per query (~100ms latency) — only use it when retrieval recall is below target and latency budget allows.
+**What is HyDE (Hypothetical Document Embedding) and when does it help?** HyDE generates a hypothetical answer to the query using an LLM, then embeds that hypothetical answer for retrieval instead of the raw query. A query like "what is our policy on remote work?" gets a generated hypothetical policy paragraph that is semantically close to actual policy documents in the index. The original paper (Gao et al., 2022) reports large gains over an unsupervised Contriever baseline — nDCG@10 44.5 to 61.3 and Recall@1k 74.6 to 88.0 on TREC DL19 — but the headroom shrinks sharply once the dense retriever is already fine-tuned on in-domain data, so treat those numbers as an upper bound, not an expectation. It adds one LLM call per query (~100ms latency) — only use it when retrieval recall is below target and latency budget allows.
 
 **How do you evaluate retrieval quality separately from generation quality in a RAG pipeline?** Use a test set with labeled relevant document IDs per query. Measure retrieval metrics (Recall@K, MRR, NDCG@K) on the retriever alone, then measure end-to-end quality (faithfulness, answer accuracy) on the full RAG pipeline. This separation is critical for debugging: low answer accuracy from high retrieval recall → problem is in generation (hallucination, prompt); low retrieval recall → problem is in chunking or indexing. Tools: RAGAS (automated faithfulness + context recall), human evaluation for answer correctness.
 
@@ -969,8 +975,8 @@ response = llm.complete(prompt)
   │                                                              │
   │  Embedding: text-embedding-3-large (OpenAI)                  │
   │  3072-dim → PCA → 1536-dim (half storage cost, 97% quality) │
-  │  Batch API: $0.02/1M tokens → 10M docs × 500 avg tokens     │
-  │  = 5B tokens = $100 one-time embedding cost                  │
+  │  Batch API: $0.065/1M tok (50% of the $0.13 standard rate)  │
+  │  10M docs × 500 avg tokens = 5B tokens = $325 one-time cost  │
   │                                                              │
   │  Vector DB: Qdrant (self-hosted, 5 nodes)                   │
   │  HNSW index: M=32, ef_construction=200                       │
@@ -1013,8 +1019,8 @@ Hybrid Search RRF Fusion:
   BM25 top-3: ["Parental Leave Policy v2.3", "VP Benefits Summary", "Leave Types Overview"]
   Vector top-3: ["Parental Leave FAQ", "Benefits for Senior Employees", "Leave Policy"]
   RRF scores:
-    "Parental Leave Policy v2.3": 1/(1+60) + 1/(3+60) = 0.0164 + 0.0154 = 0.0318
-    "VP Benefits Summary":         1/(2+60) + 1/(5+60) = 0.0161 + 0.0154 = 0.0179
+    "Parental Leave Policy v2.3": 1/(1+60) + 1/(3+60) = 0.0164 + 0.0159 = 0.0323
+    "VP Benefits Summary":         1/(2+60) + 1/(5+60) = 0.0161 + 0.0154 = 0.0315
   Final order: "Parental Leave Policy v2.3" > "VP Benefits Summary" > ...
 ```
 
@@ -1242,9 +1248,11 @@ async def hybrid_search(
         )
 
     # Parallel: vector search + BM25 search
-    vector_task = qdrant.search(
+    # NOTE: `search()` was removed from qdrant-client; `query_points()` is the
+    # current API and returns a QueryResponse whose `.points` holds the hits.
+    vector_task = qdrant.query_points(
         collection_name=collection_name,
-        query_vector=query_embedding,
+        query=query_embedding,
         limit=top_k_each,
         query_filter=payload_filter,
         with_payload=True,
@@ -1264,7 +1272,8 @@ async def hybrid_search(
             "size": top_k_each,
         },
     )
-    vector_results, bm25_response = await asyncio.gather(vector_task, bm25_task)
+    vector_response, bm25_response = await asyncio.gather(vector_task, bm25_task)
+    vector_results = vector_response.points   # QueryResponse -> list[ScoredPoint]
 
     # Build rank maps
     vector_ranks: dict[str, int] = {
@@ -1317,8 +1326,8 @@ import anthropic
 
 # BROKEN: No system prompt grounding — LLM uses training knowledge to fill gaps.
 # Employee asks: "What is the maximum flex spending account contribution?"
-# Context: HR document says "$2,850 for 2023"
-# LLM (ungrounded): adds 2024 IRS limit from training data ($3,200) — hallucination.
+# Context: HR document says "$3,050 for 2023" (the IRS health FSA limit that year)
+# LLM (ungrounded): adds the 2024 IRS limit from training data ($3,200) — hallucination.
 # Correct answer: only what the document states.
 async def broken_generate_answer(query: str, context_chunks: list[str]) -> str:
     client = anthropic.AsyncAnthropic()
@@ -1486,7 +1495,7 @@ from qdrant_client import models as qmodels
 | Answer found rate | 33% | 61% | 74% | 81% |
 | Null result rate | 67% | 39% | 26% | 19% |
 | NDCG@5 | 0.31 | 0.58 | 0.71 | 0.79 |
-| Hallucination rate | 18% (GPT-4 ungrounded) | 9% | 6% | 2.1% |
+| Hallucination rate | 18% (ungrounded generation) | 9% | 6% | 2.1% |
 | p50 latency | 180ms | 380ms | 420ms | 435ms |
 | p99 latency | 820ms | 1,400ms | 1,600ms | 1,620ms |
 | LLM answer latency | — | — | — | 1,200ms |
@@ -1497,19 +1506,19 @@ from qdrant_client import models as qmodels
 **Interview Q&As:**
 
 **Q: Why use hybrid BM25 + vector search rather than vector search alone?**
-Vector search excels at semantic similarity but struggles with exact matches — product codes, policy numbers, employee IDs, proper nouns. BM25 excels at exact keyword matching and rare term retrieval but misses paraphrases and synonyms. Hybrid search with RRF fusion combines both strengths: a query for "FSA contribution limit 2024" benefits from BM25 finding documents containing "FSA" and "2024" exactly, while the vector component finds semantically related documents using synonyms like "flexible spending account" and "health benefit cap." In enterprise RAG benchmarks, hybrid search typically improves recall@10 by 10-20% over vector-only.
+Vector search excels at semantic similarity but struggles with exact matches — product codes, policy numbers, employee IDs, proper nouns. BM25 excels at exact keyword matching and rare term retrieval but misses paraphrases and synonyms. Hybrid search with RRF fusion combines both strengths: a query for "FSA contribution limit 2024" benefits from BM25 finding documents containing "FSA" and "2024" exactly, while the vector component finds semantically related documents using synonyms like "flexible spending account" and "health benefit cap." The size of the win is corpus-dependent — in this case study hybrid RRF lifted the answer-found rate from 61% (vector-only) to 74% — so measure it rather than quoting a generic benchmark figure.
 
 **Q: What is Reciprocal Rank Fusion (RRF) and why is it preferred over score normalization?**
-RRF combines ranked lists from multiple retrieval systems by assigning each document a score of 1/(rank + k) where k is a smoothing constant (typically 60) and summing scores across systems. Documents appearing near the top of multiple systems receive the highest combined scores. RRF is preferred over score normalization because BM25 and vector similarity scores are on incompatible scales — a BM25 score of 8.3 and a cosine similarity of 0.72 are not directly comparable. RRF avoids this by operating only on ranks, which are always in [1, N] regardless of the underlying scoring function. Empirically, RRF consistently outperforms simple score averaging on BEIR and MTEB benchmarks.
+RRF combines ranked lists from multiple retrieval systems by assigning each document a score of 1/(rank + k) where k is a smoothing constant (typically 60) and summing scores across systems. Documents appearing near the top of multiple systems receive the highest combined scores. RRF is preferred over score normalization because BM25 and vector similarity scores are on incompatible scales — a BM25 score of 8.3 and a cosine similarity of 0.72 are not directly comparable. RRF avoids this by operating only on ranks, which are always in [1, N] regardless of the underlying scoring function. The method comes from Cormack, Clarke and Buettcher (SIGIR 2009), who showed it beating Condorcet Fuse, CombMNZ and every individual learning-to-rank method on the LETOR 3 benchmark — note that is a classical IR evaluation, not BEIR or MTEB, neither of which evaluates fusion methods.
 
 **Q: How do you implement access control in a RAG system without leaking confidential documents?**
 Three layers: (1) Payload filtering at retrieval time — each chunk in the vector index carries a business_unit and document_classification field; the query filter restricts retrieval to chunks the requesting user is authorized to access. (2) Pre-indexing validation — require all indexed chunks to have a valid classification label; reject ingestion of any chunk missing access metadata. (3) Post-retrieval verification — before including a chunk in the LLM context, verify the user's identity and access level match the chunk's classification. Never rely solely on the LLM to redact confidential information from its response.
 
 **Q: Why does adaptive chunking by document type improve retrieval quality?**
-Different document types have different semantic unit boundaries: HR policies are organized by numbered sections; legal contracts by clauses; technical documentation by function/class definitions; financial reports by table structures. Fixed-size chunking ignores these boundaries — splitting a legal clause mid-sentence or separating a table header from its data rows destroys the semantic coherence the embedding model needs to produce a good representation. Adaptive chunking produces semantically coherent units that embed into more precise vectors, improving retrieval recall by 8-15% on domain-specific benchmarks.
+Different document types have different semantic unit boundaries: HR policies are organized by numbered sections; legal contracts by clauses; technical documentation by function/class definitions; financial reports by table structures. Fixed-size chunking ignores these boundaries — splitting a legal clause mid-sentence or separating a table header from its data rows destroys the semantic coherence the embedding model needs to produce a good representation. Adaptive chunking produces semantically coherent units that embed into more precise vectors. The gain is entirely a function of how structured your corpus is, so A/B it per document type against a fixed-size baseline rather than assuming a headline percentage.
 
 **Q: How do you handle document version control and stale embeddings in a large enterprise RAG system?**
 Three strategies: (1) Incremental updates — on document change events (webhooks from SharePoint/Confluence), re-chunk and re-embed only the changed document, then upsert to the vector index by doc_id. Completion within 60 seconds; no staleness window during batch re-indexing. (2) Version metadata — each chunk stores a last_updated timestamp; retrieval can filter to "updated within last 2 years" as a recency gate. (3) Deprecation markers — documents explicitly marked "deprecated" or "superseded" are moved to an archive collection; only retrieved when a user explicitly asks for historical information. Combine all three: always prefer the most recently updated chunk when duplicates exist.
 
 **Q: What is the role of the cross-encoder reranker and when should you use it?**
-The cross-encoder reranker takes (query, document) pairs and computes a joint relevance score — unlike bi-encoders which compute embeddings independently, the cross-encoder can model the interaction between query terms and document terms explicitly. It is significantly more accurate (NDCG improvement of 8-15%) but also slower — about 50ms for 30 pairs versus 8ms for HNSW. The standard practice is "retrieve many, rerank fewer": HNSW retrieves the top-30 candidates cheaply, the cross-encoder reranks them to the top-5 that are actually sent to the LLM. Use a cross-encoder when the quality of top-5 context matters more than throughput — almost always true for enterprise RAG where hallucinations from irrelevant context are costly.
+The cross-encoder reranker takes (query, document) pairs and computes a joint relevance score — unlike bi-encoders which compute embeddings independently, the cross-encoder can model the interaction between query terms and document terms explicitly. It is significantly more accurate — in this case study the reranker moved NDCG@5 from 0.71 to 0.79 — but also slower: the ms-marco-MiniLM-L-12-v2 reranker here costs 12ms for 30 pairs on top of a 24ms p99 HNSW search, and a larger 0.6B reranker would cost an order of magnitude more. The standard practice is "retrieve many, rerank fewer": HNSW retrieves the top-30 candidates cheaply, the cross-encoder reranks them to the top-5 that are actually sent to the LLM. Use a cross-encoder when the quality of top-5 context matters more than throughput — almost always true for enterprise RAG where hallucinations from irrelevant context are costly.
