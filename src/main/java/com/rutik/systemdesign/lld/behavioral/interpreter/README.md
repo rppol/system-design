@@ -326,29 +326,25 @@ public interface Expression {
     Object interpret(Context ctx);
 }
 
-public final class AndExpression implements Expression {
-    private final Expression left, right;
-    public AndExpression(Expression l, Expression r) { left = l; right = r; }
+// AST nodes are records: immutable, final, with equals/hashCode/toString for free —
+// which is exactly what an expression node needs (sharing sub-trees, caching, testing).
+public record AndExpression(Expression left, Expression right) implements Expression {
     @Override public Object interpret(Context ctx) {
-        Object lv = left.interpret(ctx);
-        if (!(lv instanceof Boolean) || !(Boolean) lv) return Boolean.FALSE;  // short-circuit
+        // short-circuit: pattern matching for instanceof binds the unboxed value
+        if (!(left.interpret(ctx) instanceof Boolean lv) || !lv) return Boolean.FALSE;
         return right.interpret(ctx);
     }
 }
 
-public final class VariableExpression implements Expression {
-    private final String name;
-    public VariableExpression(String n) { this.name = n; }
+public record VariableExpression(String name) implements Expression {
     @Override public Object interpret(Context ctx) { return ctx.lookup(name); }
 }
 
-public final class HasRoleExpression implements Expression {
-    private final String role;
-    public HasRoleExpression(String r) { this.role = r; }
+public record HasRoleExpression(String role) implements Expression {
     @Override public Object interpret(Context ctx) {
-        Authentication a = (Authentication) ctx.lookup("authentication");
-        return a != null && a.getAuthorities().stream()
-                .anyMatch(g -> g.getAuthority().equals("ROLE_" + role));
+        return ctx.lookup("authentication") instanceof Authentication a
+                && a.getAuthorities().stream()
+                    .anyMatch(g -> g.getAuthority().equals("ROLE_" + role));
     }
 }
 ```
@@ -356,17 +352,20 @@ public final class HasRoleExpression implements Expression {
 ```java
 public final class CachingExpressionEngine {
     // 200k req/sec * cold parse = catastrophic. Cache compiled ASTs.
+    private static final int MAX_ENTRIES = 10_000;
     private final Map<String, Expression> cache = new ConcurrentHashMap<>();
     private final ExpressionParser parser;
-    private final long maxEntries = 10_000;
 
     public boolean evaluate(String expr, Context ctx) {
-        Expression compiled = cache.computeIfAbsent(expr, this::parseChecked);
+        Expression compiled = cache.get(expr);
+        if (compiled == null) {
+            // Bound the cache OUTSIDE computeIfAbsent: ConcurrentHashMap forbids the
+            // mapping function from touching the map (it can deadlock or throw
+            // IllegalStateException on a recursive update).
+            if (cache.size() >= MAX_ENTRIES) cache.clear();
+            compiled = cache.computeIfAbsent(expr, parser::parse);
+        }
         return (Boolean) compiled.interpret(ctx);
-    }
-    private Expression parseChecked(String expr) {
-        if (cache.size() >= maxEntries) cache.clear();   // simple bounded cache
-        return parser.parse(expr);
     }
 }
 ```
@@ -375,7 +374,7 @@ public final class CachingExpressionEngine {
 - `org.springframework.expression.ExpressionParser` / `SpelExpressionParser` — SpEL, full Interpreter with operators, method invocation, projection, selection.
 - `org.springframework.expression.spel.support.SimpleEvaluationContext` — sandboxed SpEL context for untrusted expressions.
 - `java.util.regex.Pattern` — regex compiled to an internal Interpreter (NFA/DFA hybrid).
-- `javax.el.ExpressionFactory` — Jakarta EL for JSP/JSF (`${user.name}`).
+- `jakarta.el.ExpressionFactory` — Jakarta Expression Language for Jakarta Faces / JSP (`${user.name}`).
 - `java.sql.PreparedStatement` — SQL is parsed and interpreted by the DB engine.
 - `ognl.OgnlContext` — OGNL used by Struts/MyBatis for property navigation.
 - `org.apache.commons.jexl3.JexlEngine` — Apache Commons JEXL expression engine.
@@ -419,7 +418,7 @@ public boolean authorize(String exprStr, Context ctx) {
 
 ```java
 // FIX: cache compiled Expression objects keyed by the source string.
-// Spring's StandardEvaluationContext + SpelCompiler.MIXED takes this further
+// Spring's StandardEvaluationContext + SpelCompilerMode.MIXED takes this further
 // by JIT-compiling the AST to bytecode after a warm-up threshold.
 private final Map<String, Expression> compiled = new ConcurrentHashMap<>();
 public boolean authorize(String exprStr, Context ctx) {
@@ -460,7 +459,7 @@ Object result = parser.parseExpression(filter).getValue(sandbox, model);
 
 **Move TO Interpreter when**: you have a small, stable grammar (< 10 rules) used heavily inside the application (authorization rules, business filters, simple templating); you need expressions composable by non-developers; the AST will be evaluated many more times than parsed (so caching dominates). We added an Interpreter for tenant-customisable alerting rules ("severity > 7 AND tag contains 'prod'") — 6 grammar rules, 8 expression classes, 200 LOC.
 
-**Move AWAY FROM Interpreter when**: the grammar exceeds ~10 rules or develops left-recursion/operator-precedence demands (switch to ANTLR/JavaCC); evaluation hot-paths matter more than flexibility (compile the AST to bytecode, like SpEL's `SpelCompiler.MIXED` mode, or hand-translate to Java predicates); expressions come from untrusted users without a sandbox you can rely on (prefer a fixed DSL with a tiny allow-list, not a Turing-complete language).
+**Move AWAY FROM Interpreter when**: the grammar exceeds ~10 rules or develops left-recursion/operator-precedence demands (switch to ANTLR/JavaCC); evaluation hot-paths matter more than flexibility (compile the AST to bytecode, like SpEL's `SpelCompilerMode.MIXED` mode, or hand-translate to Java predicates); expressions come from untrusted users without a sandbox you can rely on (prefer a fixed DSL with a tiny allow-list, not a Turing-complete language).
 
 ---
 
@@ -531,7 +530,7 @@ A: Interpreter IS Composite applied to grammar. NonTerminalExpressions are compo
 A: Context stores the global state needed during evaluation — typically a map of variable names to values. When a VariableExpression evaluates itself, it looks up its name in the context to get the current value.
 
 **Q: Where is Interpreter used in real frameworks?**
-A: Spring Expression Language (SpEL), Java's regex engine (`java.util.regex`), Jakarta Expression Language (`javax.el`), OGNL in MyBatis/Struts, SQL query evaluation engines.
+A: Spring Expression Language (SpEL), Java's regex engine (`java.util.regex`), Jakarta Expression Language (`jakarta.el`), OGNL in MyBatis/Struts, SQL query evaluation engines.
 
 **Q: How does Interpreter relate to Visitor — are they the same thing?**
 A: No — they're complementary and frequently combined. Interpreter defines the AST node classes and one built-in operation, `interpret()`, baked directly into each node. Visitor instead keeps the AST node classes free of operation-specific code and lets you add new operations (pretty-print, type-check, optimize, evaluate) as separate `Visitor` implementations that each node's `accept(visitor)` dispatches to. A common production pattern is: build the AST once using Interpreter-style node classes, then implement `EvaluatingVisitor`, `PrettyPrintVisitor`, and `OptimizingVisitor` as separate classes over that same tree — this avoids cramming every new requirement into each node's `interpret()` method (which violates OCP once you need a third or fourth operation).
@@ -540,7 +539,7 @@ A: No — they're complementary and frequently combined. Interpreter defines the
 A: Once a grammar grows past roughly 10-15 rules, or needs correct operator precedence/associativity, left-recursion handling, or error recovery, hand-coding Interpreter classes becomes a maintenance trap — you end up debugging your own ad-hoc recursive-descent parser instead of the actual problem. At that point, use a parser generator like ANTLR or JavaCC: it generates the parser and a tree-walker/visitor scaffold for you, with proper precedence handling and much better error messages. The Interpreter pattern still describes the *evaluation* layer (what ANTLR's generated visitor does when it walks the tree) — the pattern doesn't disappear, but you stop hand-writing the parsing half of it.
 
 **Q: What's the performance difference between recursive tree-walking interpretation and compiling to bytecode?**
-A: A tree-walking interpreter re-traverses the AST on every evaluation, paying virtual-dispatch cost at every node each time — fine for infrequent evaluation but expensive at high call volumes (this is why Spring caches and then JIT-compiles SpEL expressions via `SpelCompiler.MIXED` after a warm-up threshold). Compiling to bytecode (or to a flat instruction array) does the tree traversal once, up front, producing a linear sequence of operations that a simple loop executes — eliminating repeated dispatch and enabling further optimizations like constant folding. The practical guidance: if the same expression is evaluated thousands of times (authorization checks, hot rule evaluation), invest in caching the parsed AST at minimum, and consider compiling to bytecode/lambdas if profiling shows interpretation overhead dominates; if expressions are evaluated rarely, the simplicity of tree-walking interpretation isn't worth optimizing away.
+A: A tree-walking interpreter re-traverses the AST on every evaluation, paying virtual-dispatch cost at every node each time — fine for infrequent evaluation but expensive at high call volumes (this is why Spring caches and then JIT-compiles SpEL expressions via `SpelCompilerMode.MIXED` after a warm-up threshold). Compiling to bytecode (or to a flat instruction array) does the tree traversal once, up front, producing a linear sequence of operations that a simple loop executes — eliminating repeated dispatch and enabling further optimizations like constant folding. The practical guidance: if the same expression is evaluated thousands of times (authorization checks, hot rule evaluation), invest in caching the parsed AST at minimum, and consider compiling to bytecode/lambdas if profiling shows interpretation overhead dominates; if expressions are evaluated rarely, the simplicity of tree-walking interpretation isn't worth optimizing away.
 
 **Q: Give concrete real-world examples beyond SpEL where Interpreter shows up.**
 A: A SQL `WHERE` clause evaluator is a textbook case — `age > 25 AND (status = 'ACTIVE' OR vip = true)` parses into a tree of `ComparisonExpression` and `AndExpression`/`OrExpression` nodes, each implementing `interpret(Row)` to return true/false for a given row. Regular expression engines (`java.util.regex.Pattern`) compile a regex string into an internal representation (an NFA) that is then "interpreted" against input characters — each regex construct (`*`, `|`, character classes) corresponds conceptually to a node type. Business rule engines like Drools represent rule conditions as Interpreter trees evaluated against working-memory facts; Elasticsearch's Query DSL and Lucene's query parser similarly parse JSON/string queries into expression trees evaluated against the inverted index.
@@ -560,7 +559,7 @@ A: A SQL `WHERE` clause evaluator is a textbook case — `age > 25 AND (status =
 
 ## 17. Best Practices
 
-1. **Keep the grammar simple:** Use Interpreter only for grammars with ~5-15 rules. If the grammar grows beyond that, invest in a proper parser generator (ANTLR, JavaCC, PEG.js).
+1. **Keep the grammar simple:** Use Interpreter only for grammars with ~5-15 rules. If the grammar grows beyond that, invest in a proper parser generator (ANTLR, JavaCC).
 
 2. **Separate the parser from the interpreter:** The parser (String → AST) and the interpreter (AST → result) are separate concerns. Keep them in separate classes. This enables you to swap parsers or add new interpreters over the same AST.
 

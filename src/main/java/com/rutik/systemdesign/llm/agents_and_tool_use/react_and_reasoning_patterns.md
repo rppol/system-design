@@ -297,10 +297,8 @@ Format:
 [then your tool call]
 """
 
-# For Anthropic's native thinking. On Claude 4.7 and later (Opus 5, Sonnet 5,
-# Fable 5) the old manual budget form -- thinking={"type": "enabled",
-# "budget_tokens": N} -- returns a 400 error; use adaptive thinking instead
-# and control depth with output_config.effort.
+# For Anthropic's native thinking: turn on adaptive thinking and control how
+# much the model thinks with output_config.effort.
 response = client.messages.create(
     model="claude-sonnet-5",
     max_tokens=16000,
@@ -500,8 +498,8 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **LangGraph** | ReAct agent loop | Built-in `create_react_agent` helper |
-| **LangChain agents** | ReAct + tool execution | Legacy `AgentExecutor`; prefer LangGraph |
+| **LangChain `create_agent`** | ReAct-style tool loop | `from langchain.agents import create_agent`; middleware hooks for guards and summarization |
+| **LangGraph** | Custom agent graphs | `StateGraph` when you need branching or loops `create_agent` cannot express |
 | **Reflexion (GitHub)** | Reflexion implementation | Shinn et al. (Northeastern/Princeton/MIT); reference code, not a packaged library |
 | **LangMem** | Long-term agent memory | Reflection storage + retrieval |
 | **Mem0** | Agent memory platform | Persistent memory across sessions |
@@ -538,7 +536,7 @@ A: ReAct: default choice for all agentic tool-use tasks; good balance of quality
 A: Chain-of-thought prompting adds reasoning steps to the LLM's output before the final answer — "Let me think step by step..." — without any tool calls. ReAct extends CoT by interleaving reasoning with actions (tool calls) and observations (results). CoT is a pure in-context reasoning enhancement; ReAct is CoT embedded in an agent loop with real-world grounding. CoT improves reasoning on self-contained tasks (math, logic); ReAct is CoT plus external verification (actual search results, code execution outputs). In practice, the "Thought" field in ReAct IS chain-of-thought applied per action step.
 
 **Q: How does Anthropic's native thinking feature relate to these patterns?**
-A: Anthropic's `thinking` parameter lets the model produce an extensive reasoning trace before the visible response. This is built-in CoT at the model level rather than prompted CoT — the model uses its native reasoning capacity in a separate scratch space, then produces a final answer. There are two modes: manual extended thinking (`{"type": "enabled", "budget_tokens": N}`), which is deprecated on the Claude 4.6 generation and returns a 400 error on Claude 4.7 and later; and adaptive thinking (`{"type": "adaptive"}` plus `output_config.effort`), where the model decides whether and how much to think per request. Unlike ReAct's Thought field (which is prompted and visible to the application), thinking blocks are summarized and encrypted and are not constrained to a human-readable format. Native thinking improves performance on hard math, coding, and multi-step reasoning tasks — adding ToT-like depth without the multiple-call overhead.
+A: Anthropic's `thinking` parameter lets the model produce an extensive reasoning trace before the visible response. This is built-in CoT at the model level rather than prompted CoT — the model uses its native reasoning capacity in a separate scratch space, then produces a final answer. On the current frontier models (Fable 5, Opus 5, Sonnet 5) the mode is adaptive thinking — `{"type": "adaptive"}` plus `output_config.effort` — where the model decides whether and how much to think per request; Haiku 4.5 uses extended thinking with an explicit `thinking.budget_tokens` ceiling. Unlike ReAct's Thought field (which is prompted and visible to the application), thinking blocks are summarized and encrypted and are not constrained to a human-readable format. Native thinking improves performance on hard math, coding, and multi-step reasoning tasks — adding ToT-like depth without the multiple-call overhead.
 
 **Q: Why does the order of reasoning matter — Thought before Action vs. Action before Thought?**
 A: Thought before Action (standard ReAct) forces the model to explicitly reason about what to do before committing to a tool call. This activates the model's planning capacity via chain-of-thought and reduces "reflex actions" — selecting the first plausible tool. Action before Thought would produce lower-quality decisions because the model generates the action token before articulating its reasoning, losing the benefit of explicit deliberation. Empirically, models that output a Thought field select the correct tool more often and use better search queries. The mechanism: each token the model generates attends to all previous tokens — writing a complete Thought first makes that reasoning available when generating the Action's arguments.

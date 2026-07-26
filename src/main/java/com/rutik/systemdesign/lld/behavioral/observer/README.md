@@ -694,7 +694,7 @@ public class AsyncConfig {
 ### Code 2: Guava `EventBus` with `@Subscribe` and Dead-Event Handling
 
 ```java
-// Guava EventBus (guava 32.x) — synchronous in-process event bus
+// Guava EventBus — synchronous in-process event bus
 // Use AsyncEventBus for async dispatch to an Executor
 @Configuration
 public class EventBusConfig {
@@ -702,7 +702,9 @@ public class EventBusConfig {
     @Bean
     public EventBus orderEventBus() {
         return new EventBus(
-            // Dead-event handler: fires when no subscriber handles an event type
+            // SubscriberExceptionHandler: catches anything a @Subscribe method throws,
+            // so one failing subscriber never aborts the dispatch loop.
+            // (Unhandled event TYPES are a different thing — see the DeadEvent subscriber below.)
             (exception, context) -> log.error(
                 "EventBus exception in subscriber={} on event={}",
                 context.getSubscriber(),
@@ -954,8 +956,8 @@ A: Synchronous notification is simple and gives the Subject a guarantee that all
 **Q: If one Observer throws an exception during notification, should it block the others?**
 A: No — by default, wrap each Observer's `update()` call in its own try/catch so one misbehaving Observer cannot prevent the rest from being notified. Log or collect the exception (e.g., into a list of `Throwable` to report after the loop) rather than letting it propagate from inside the iteration. This is exactly why frameworks like Spring's `ApplicationEventMulticaster` catch and log exceptions per-listener instead of failing the whole `publishEvent()` call.
 
-**Q: What's wrong with `java.util.Observable`, and what replaced it?**
-A: `java.util.Observable` is a concrete class (not an interface), so a Subject that already extends another class cannot use it — Java has no multiple inheritance. It was deprecated in Java 9. Modern replacements include `PropertyChangeSupport`/`PropertyChangeListener` for bean-style property notifications, `java.util.concurrent.Flow` (the `Flow.Publisher`/`Flow.Subscriber` reactive streams API) for backpressure-aware async streams, and Spring's `ApplicationEventPublisher` for application-level eventing.
+**Q: What does the JDK itself give you for Observer, and when do you use each?**
+A: Three options: your own listener interface, `java.beans.PropertyChangeSupport` for bean-style property notification, and `java.util.concurrent.Flow` for async streams. A hand-written interface (`interface PriceListener { void onPriceChanged(PriceChangedEvent e); }`) plus a `CopyOnWriteArrayList` is the default choice — it is typed, testable, and has no framework coupling. `PropertyChangeSupport` does the bookkeeping for you (`addPropertyChangeListener`, `removePropertyChangeListener`, and a `firePropertyChange(name, old, new)` that skips the notification when the value did not actually change), so a Subject just delegates to an instance of it. `java.util.concurrent.Flow` (JEP 266) is the Reactive Streams contract in the JDK — `Publisher`, `Subscriber`, `Subscription`, `Processor` with `request(n)` backpressure; use it when the producer can outrun the consumer, and reach for Reactor or RxJava rather than implementing `Flow` by hand. At application level, Spring's `ApplicationEventPublisher` plus `@TransactionalEventListener` covers most in-process fan-out.
 
 **Q: Does the order in which Observers are notified matter?**
 A: It can, and the GoF pattern makes no guarantee about ordering — it depends on the iteration order of the underlying collection (e.g., a `List` preserves insertion order, a `Set` may not). If ordering matters — for example, a logging Observer must run before a cache-invalidation Observer — either use an ordered collection and document the dependency, or assign explicit priorities (Spring's `@Order` / `Ordered` interface on `ApplicationListener`). Avoid designs where correctness silently depends on registration order; make ordering explicit if it's required.

@@ -38,7 +38,7 @@ flowchart TD
     PM --> WALW(WAL writer<br/>flush WAL buffers to disk)
     PM --> AVL(autovacuum launcher)
     AVL --> AVW(autovacuum workers<br/>up to 3 by default)
-    PM --> STATS(stats collector<br/>collects pg_stat views)
+    PM --> IOW(I/O workers<br/>async reads · io_method)
     PM --> LRL(logical replication<br/>launcher)
     LRL --> LRW(logical worker<br/>processes)
     PM --> BE([backend processes<br/>one per client connection])
@@ -49,7 +49,7 @@ flowchart TD
     class PM,SHM base
     class CKPT,BGW,WALW train
     class AVL,AVW mathOp
-    class STATS,BE,BE1,BE2,BEN req
+    class IOW,BE,BE1,BE2,BEN req
     class LRL,LRW frozen
 ```
 

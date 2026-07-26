@@ -329,7 +329,7 @@ stateDiagram-v2
     HALF_OPEN : send 10% to primary as probe
 ```
 
-The binary open/closed lifecycle above was later replaced by the proportional `AdaptiveCircuitBreaker` (see Incident 2), which reduces traffic in proportion to the error rate instead of all-or-nothing.
+The gateway runs the proportional `AdaptiveCircuitBreaker` (Section 10, Incident 2) rather than this binary lifecycle: it scales traffic down in proportion to the observed error rate, so the states above are the two endpoints of a continuous dial rather than the only two settings.
 
 ```
 Failover chain (configurable per tenant):

@@ -761,7 +761,7 @@ class SinkKVCache:
 
 ### Use Flash Attention when:
 
-- Always — there is no reason not to use it. `F.scaled_dot_product_attention(is_causal=True)` dispatches to a Flash Attention kernel automatically when CUDA is available; SDPA shipped in PyTorch 2.0 with the FA-1 kernel, and FlashAttention-2 was integrated in PyTorch 2.2.
+- Always — there is no reason not to use it. `F.scaled_dot_product_attention(is_causal=True)` dispatches to a Flash Attention kernel automatically when CUDA is available; the built-in kernel is FlashAttention-2, and a newer one is opted into with `activate_flash_attention_impl("FA3")`.
 
 ### Use sliding window attention when:
 
@@ -889,7 +889,7 @@ def kv_cache_gb(seq_len, num_layers, num_kv_heads, d_head, bytes=2):
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `torch.nn.functional.scaled_dot_product_attention` | FA-2 via PyTorch 2.2+ (SDPA itself landed in 2.0 with the FA-1 kernel) | Automatic FA-2 when CUDA available and d_head <= 256 |
+| `torch.nn.functional.scaled_dot_product_attention` | Built-in FA-2 kernel; FA-3/FA-4 pluggable | Automatic FA-2 when CUDA available and d_head <= 256 |
 | `flash_attn` (Tri Dao) | Flash Attention 1/2/3 CUDA kernels | `pip install flash-attn --no-build-isolation` |
 | `xformers` (Meta) | Memory-efficient attention ops | Flash attention + custom ops |
 | `vLLM` | KV cache management for serving | PagedAttention for dynamic KV cache allocation |

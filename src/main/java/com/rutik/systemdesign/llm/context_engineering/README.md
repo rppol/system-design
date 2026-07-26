@@ -478,13 +478,13 @@ from openai import OpenAI
 
 client = OpenAI()
 
-def compact_history(turns: list[dict], max_tokens: int = 500) -> str:
+def compact_history(turns: list[dict], max_summary_tokens: int = 500) -> str:
     """Summarize old turns into a structured entity/fact summary."""
     conversation_text = "\n".join(
         f"{t['role'].upper()}: {t['content']}" for t in turns
     )
     summary = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.4-nano",
         messages=[{
             "role": "user",
             "content": (
@@ -494,12 +494,12 @@ def compact_history(turns: list[dict], max_tokens: int = 500) -> str:
                 f"{conversation_text}"
             )
         }],
-        max_tokens=max_tokens,
+        max_completion_tokens=max_summary_tokens,
     ).choices[0].message.content
     return f"[Prior conversation summary]\n{summary}"
 ```
 
-**Decoding `max_tokens = 500` and the compression it implies.** Compaction is usually described
+**Decoding `max_summary_tokens = 500` and the compression it implies.** Compaction is usually described
 qualitatively ("summarize old turns"). The quantity that matters is the ratio, and whether the
 summarizer call pays for itself:
 
@@ -518,8 +518,8 @@ to be worth it."
 | Symbol | What it actually is |
 |--------|---------------------|
 | `R` | How many times smaller the history got. `5x` means 5,000 tokens became 1,000 |
-| `p_small` | Price of the summarizer. gpt-4o-mini at $0.15/1M — 17x cheaper than the main model |
-| `p_main` | Price of the model doing the real work. GPT-4o at $2.50/1M |
+| `p_small` | Price of the summarizer. gpt-5.4-nano at $0.20/1M — 12.5x cheaper than the main model |
+| `p_main` | Price of the model doing the real work. gpt-5.4 at $2.50/1M |
 | `N*` | Turns the compacted history must survive before the summarizer call is repaid |
 | one time | The summary is computed once and reused on every subsequent turn — that is the whole economics |
 
@@ -536,10 +536,10 @@ to be worth it."
 
   tokens saved per request   = 20,000 - 6,000  = 14,000
 
-  summarizer cost   = 17,000 x $0.15/1M   = $0.00255   (once)
+  summarizer cost   = 17,000 x $0.20/1M   = $0.00340   (once)
   saving/request    = 14,000 x $2.50/1M   = $0.03500   (every subsequent turn)
 
-  N* = 0.00255 / 0.03500 = 0.073  ->  ceil  ->  1 request
+  N* = 0.00340 / 0.03500 = 0.097  ->  ceil  ->  1 request
 
   The compaction pays for itself on the very next turn, then returns
   $0.035 per turn for the rest of the session.
@@ -572,11 +572,11 @@ and summary length are not published.
 
 **Anthropic thinking** places Claude's reasoning in thinking blocks that precede the final answer
 inside the same assistant turn — and that budget is NOT separate from the response budget. On
-models with manual extended thinking, `budget_tokens` must be less than `max_tokens` because
-thinking tokens count toward `max_tokens`, and `max_tokens` stays the hard ceiling on total output.
-Claude Opus 4.7 and later reject `thinking.type: "enabled"` outright and use adaptive thinking with
-an `effort` setting instead. Either way, budget reasoning tokens out of your output reserve, not on
-top of it.
+Opus 5, Sonnet 5 and Fable 5 you set `output_config.effort` (low / medium / high / xhigh / max) and
+the model decides how much to think; on models with manual extended thinking, such as Haiku 4.5,
+you set `thinking.budget_tokens`, which must be less than `max_tokens` because thinking tokens
+count toward it. Either way `max_tokens` stays the hard ceiling on total output, so budget
+reasoning tokens out of your output reserve, not on top of it.
 
 ---
 
@@ -646,8 +646,7 @@ for output, especially for tasks that generate long structured responses.
 | Tool | Purpose |
 |------|---------|
 | tiktoken / tokenizers | Token counting for budget enforcement |
-| LangGraph | Stateful context management for multi-turn agents |
-| LangChain ConversationSummaryMemory | Rolling conversation compaction |
+| LangGraph | Stateful context management for multi-turn agents; checkpointed thread state plus a summarization node for rolling conversation compaction |
 | LLMLingua / LLMLingua-2 | Neural prompt compression for long retrieved docs |
 | instructor / guidance | Structured output to reduce verbose output tokens |
 | vLLM / SGLang | KV-prefix caching for stable context prefixes |
@@ -720,7 +719,7 @@ automatic prefix caching both work on this principle.
 It makes the stable prefix literally cheaper, not just faster. Anthropic prompt caching charges
 1.25x base input to write a 5-minute cache segment (2.0x for the 1-hour TTL) and 0.1x to read it —
 a 90% discount — and OpenAI automatically caches prefixes of 1,024+ tokens, billing cached input at
-50% of the normal rate on GPT-4o and 10% of it on the current GPT-5 series — so a
+10% of the normal rate on the current GPT-5 series — so a
 5,000-token system-plus-tools prefix reused across requests costs a fraction of its nominal price.
 This flips the economics of few-shot examples: a large stable example block is nearly free after
 the first request, while the same tokens placed after dynamic content are billed in full every
@@ -824,7 +823,7 @@ result.*
 
 An enterprise legal research agent achieves 92% task completion on single-document questions but
 drops to 61% on multi-document questions requiring synthesis of information from 5+ retrieved
-documents. Context window is 128k tokens (GPT-4o); total context used is 90k tokens. Analysis
+documents. Context window is 128k tokens; total context used is 90k tokens. Analysis
 reveals all 5 documents are placed after 40k tokens of system prompt + conversation history.
 
 **Architecture Overview**

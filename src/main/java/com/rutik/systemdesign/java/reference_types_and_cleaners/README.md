@@ -359,7 +359,7 @@ an idle or low-variety thread supplies no load, so the stale values just sit the
 ## 7. Real-World Examples
 
 - **`ResourceBundle.BundleReference`**: `extends SoftReference<ResourceBundle>`, paired with a `ReferenceQueue<Object>` — the JDK's own locale-bundle cache evicts under memory pressure and lets its cache keys, which would otherwise pin the owning `ClassLoader`, go with it.
-- **`java.nio` direct buffer cleanup**: `DirectByteBuffer`'s native memory was historically freed by an internal `finalize()`-adjacent mechanism (`sun.misc.Cleaner`, itself a `PhantomReference` subclass that predates the public API); modern JDK-internal code runs this through `jdk.internal.ref.CleanerFactory`, backed by the same public `java.lang.ref.Cleaner`.
+- **`java.nio` direct buffer cleanup**: `DirectByteBuffer`'s off-heap memory is released by a cleanup action registered on the shared cleaner from `jdk.internal.ref.CleanerFactory`, itself an instance of the public `java.lang.ref.Cleaner` — which is why a direct buffer's native footprint comes back on the GC's schedule and not at any point application code controls.
 - **Guava `CacheBuilder.weakKeys()/weakValues()/softValues()`**: real, shipping API. Guava's own documentation warns that `weakKeys()`/`weakValues()` compare entries by identity (`==`), not `equals()`, because a cleared reference has nothing consistent left to call `equals()` against — a cache keyed by value-equal-but-not-identical objects silently stops matching.
 - **Spring `ConcurrentReferenceHashMap`**: a documented, shipping alternative to `Collections.synchronizedMap(new WeakHashMap<K, Reference<V>>())` — it defaults to soft references for both keys and values (configurable to weak) for concurrent, reference-based caching without a single global lock.
 - **This repo's own applied cases**: [`design_event_bus.md`](../case_studies/design_event_bus.md) wraps subscriber callbacks in `WeakReference` so a publisher can never outlive its listeners; [`design_lru_cache_java.md`](../case_studies/design_lru_cache_java.md)'s Level-3 cache wraps values in `SoftReference` to trade GC-driven eviction for OOM safety — both are applied instances of the strategies formalized in this module.
@@ -375,7 +375,7 @@ an idle or low-variety thread supplies no load, so the stale values just sit the
 | `WeakReference` | Medium — next GC cycle | Any GC, unconditionally | Canonicalizing maps, listener refs | Too aggressive for value caching |
 | Bounded cache (Caffeine/Guava) | Fully predictable | Explicit size/TTL policy | Production caches, by default | None inherent — needs correct sizing |
 | `PhantomReference`/`Cleaner` | Predictable *that* it fires, not *when* | Phantom reachability | Native/off-heap resource backstop | Never a substitute for explicit `close()` |
-| `finalize()` | Least predictable | GC + single Finalizer thread | Nothing — deprecated for removal | Resurrection, GC pauses, swallowed exceptions |
+| FFM `Arena` (confined/shared) | Fully predictable | Explicit `arena.close()` | Off-heap memory with a lexical scope | Use-after-close throws `IllegalStateException` |
 
 | Cache backing | Eviction trigger | Predictable footprint? | Verdict |
 |-----------------|--------------------|---------------------------|---------|
@@ -394,7 +394,7 @@ an idle or low-variety thread supplies no load, so the stale values just sit the
 
 **Use `PhantomReference` + `Cleaner`** when an object wraps a native or off-heap resource and the goal is a safety net for callers who forget to `close()` it — never as the primary release mechanism.
 
-**Do NOT use `finalize()`**: deprecated for removal since [JEP 421, JDK 18]; the `--finalization=disabled` launch flag already lets an entire JVM run with it turned off, and the migration pressure only increases from here.
+**Do NOT reach for `Cleaner` when the resource is off-heap memory with a clear scope**: an FFM `Arena.ofConfined()` inside a `try-with-resources` frees every segment it allocated at the closing brace, and turns use-after-free into an `IllegalStateException` rather than a native crash.
 
 **Do NOT use `WeakHashMap` as a general-purpose value cache**: no size bound, no TTL, and it only weakens the *key* — a value that strongly references its own key (a common accidental cycle) defeats it completely (§10).
 
@@ -448,9 +448,9 @@ the JDK protects the value.
 
 An application server redeployed the same WAR 41 times over three weeks without a JVM restart. Each deploy's driver called `Class.forName()`, self-registering with `java.sql.DriverManager` — a static registry loaded by the bootstrap classloader, a JVM-lifetime GC root — and the driver was never deregistered on undeploy. `DriverManager`'s static list ended up holding one `Driver` instance per deploy, each keeping its entire `WebAppClassLoader` (and every class it loaded) strongly reachable. `jmap -clstats` showed 41 live `WebAppClassLoader` instances where a healthy server has one; Metaspace, capped at 512MB, finally threw `OutOfMemoryError: Metaspace` on the 42nd deploy, having leaked roughly 11MB of class metadata per redeploy. **Fix**: deregister drivers in a `ServletContextListener.contextDestroyed()` (`DriverManager.deregisterDriver(driver)`), and confirm with `-Xlog:class+unload=info` that classes actually unload after undeploy.
 
-### War Story 3: A `Cleaner` Migration That Kept the Old Bug Shape
+### War Story 3: A `Cleaner` Registration That Could Never Fire
 
-A team migrated a native codec wrapper off `finalize()` onto `Cleaner`, expecting the leak to disappear — but wrote the cleanup action as a non-static inner class of the wrapper, which implicitly captured `NativeCodec.this`. Post-migration RSS still grew at the same ~40MB/hour rate it had before, because the registered `Runnable` was itself a strong path back to the object: it could never become phantom-reachable, so the `Cleaner` never fired, ever. The fix looked identical to the bug from the outside — same class name, same `Cleaner.create()` call — until the cleanup state was rewritten as a `static` nested class holding only the raw native handle. **Fix**: cleanup state must be a `static` nested class (or equivalent) referencing only the resource to free, never the enclosing object — the single most common mistake when adopting `Cleaner`.
+A team wrapped a native codec in a `Cleaner` registration, expecting the native buffers to be reclaimed automatically — but wrote the cleanup action as a non-static inner class of the wrapper, which implicitly captured `NativeCodec.this`. RSS still grew at ~40MB/hour with the `Cleaner` in place, because the registered `Runnable` was itself a strong path back to the object: it could never become phantom-reachable, so the `Cleaner` never fired, ever. The fix looked identical to the bug from the outside — same class name, same `Cleaner.create()` call — until the cleanup state was rewritten as a `static` nested class holding only the raw native handle. **Fix**: cleanup state must be a `static` nested class (or equivalent) referencing only the resource to free, never the enclosing object — the single most common mistake when adopting `Cleaner`.
 
 ### War Story 4: A `WeakHashMap` Value That Pins Its Own Key
 
@@ -474,7 +474,7 @@ A singleton `ConfigService` let short-lived, per-request objects register a `Con
 | `-Xlog:class+unload=info` | Confirms whether a suspected leaked classloader's classes ever actually unload |
 | `-XX:NativeMemoryTracking=summary` + `jcmd <pid> VM.native_memory summary.diff` | Tracks JVM-internal native memory; does NOT see raw JNI `malloc` |
 | `-XX:SoftRefLRUPolicyMSPerMB=<n>` | Tunes how aggressively `SoftReference`s are cleared (default 1000) |
-| `--finalization=disabled` [Java 18+] | Disables all finalization process-wide, including remaining JDK-internal uses |
+| `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=<dir>` | Captures a heap dump at the exact moment `OutOfMemoryError` is thrown |
 | Guava `CacheBuilder` / Caffeine | Bounded cache with `weakKeys`/`weakValues`/`softValues`, or size+TTL policies |
 
 ---
@@ -484,8 +484,8 @@ A singleton `ConfigService` let short-lived, per-request objects register a `Con
 **Why does `PhantomReference.get()` always return `null`, unlike `WeakReference.get()`?**
 It is hard-coded that way so a reclaimable object can never be resurrected through it. `Weak`/`SoftReference.get()` return the live referent right up until the GC clears it — fine for caching, but if cleanup code could still read the referent back, it could accidentally re-publish a strong reference and undo the very death the reference exists to observe. Phantom references trade away readability entirely: the only information available is that `queue.remove()` returned something, never the object itself.
 
-**What is the classic bug when migrating `finalize()` to `Cleaner`, and why does it silently defeat cleanup?**
-The cleanup `Runnable` accidentally captures a reference back to the object it should clean, usually via a non-static inner class or lambda that implicitly holds `this`. That reference is itself a strong path, so the registered object can never become phantom-reachable, the `Cleaner` never fires, and the resource leaks exactly as it would have under a broken `finalize()` — just with no exception and no log line to notice it by. The fix is mechanical: make the cleanup state a `static` nested class holding only the raw resource handle, never the enclosing object.
+**What is the classic bug that silently stops a `Cleaner` from ever running its action?**
+The cleanup `Runnable` captures a reference back to the object it should clean, usually via a non-static inner class or a lambda that reads an instance field. That reference is itself a strong path, so the registered object can never become phantom-reachable, the `Cleaner` never fires, and the resource leaks with no exception and no log line to notice it by. The fix is mechanical: make the cleanup state a `static` nested class holding only the raw resource handle, never the enclosing object.
 
 **Why can a `WeakHashMap` entry survive indefinitely even though its key has no external strong references?**
 Because the map's values are held by ordinary strong references, and a value that references its own key back defeats the weak wrapping entirely. `WeakHashMap` only weakens the key slot; if `value.owner == key` (a common accidental cycle), the map provides a strong path to the value, and the value provides a strong path back to the key, so neither can ever become just-weakly-reachable. This is the single most common `WeakHashMap` production bug — it looks like a self-cleaning cache but never actually cleans anything.
@@ -493,11 +493,11 @@ Because the map's values are held by ordinary strong references, and a value tha
 **Why doesn't calling `ThreadLocal.remove()` fully solve leaks if a fresh `ThreadLocal` instance is created on every request?**
 Because `remove()` only clears the slot for the specific `ThreadLocal` instance it is called on, and a per-request `ThreadLocal` is a different instance every time. Each pooled thread's `ThreadLocalMap` accumulates one `Entry` per distinct `ThreadLocal` object it has ever seen; the old instance's key does get weakly cleared by the GC on its own, but its value becomes a stale entry that survives until an unrelated future `set()`/`get()` on that same thread happens to probe that exact slot. The fix is always to hold `ThreadLocal` instances in `static final` fields, never construct them per call.
 
-**If `finalize()` resurrects `this` by stashing a reference in a live collection, does `finalize()` run again the next time the object becomes garbage?**
-No — the JVM tracks that an object's finalizer has already run and will not invoke it a second time. A resurrected object that later becomes unreachable again is collected silently, with no second chance to clean up, which is exactly the asymmetry that makes `finalize()`-based resurrection dangerous rather than merely wasteful. This is also the mechanism behind the classic "finalizer attack": a malicious subclass can resurrect a partially-constructed object whose constructor threw, escaping validation that assumed the object would never exist.
+**How many times does a registered `Cleaner` action run, and what triggers it?**
+At most once, whichever trigger comes first: an explicit `cleanable.clean()` call, or the object becoming phantom-reachable. That is what makes it safe to call `close()` on a `try-with-resources` path and still keep the registration as a backstop — the second trigger is a no-op, not a double free. It also means the action must be written to be correct on the `Cleaner`'s own daemon thread, since that is where the GC-driven path runs it.
 
-**Why are exceptions thrown inside `finalize()` dangerous beyond simply being uncaught?**
-An uncaught exception inside `finalize()` is silently swallowed by the JVM's Finalizer thread, and finalization of that object just stops, with no log, no stack trace, and no application-visible signal by default. This means a bug in cleanup code — the exact code responsible for releasing a file handle, socket, or lock — can fail completely invisibly in production for months. `Cleaner`-registered actions carry the same "don't crash the shared thread" concern, but at least isolate failures per registration rather than running on one single JVM-wide Finalizer thread.
+**What happens if a `Cleaner` action throws an exception?**
+The javadoc is explicit: all exceptions thrown by the cleaning action are ignored, and neither the cleaner nor any other registered action is affected. That isolation is useful, but it also means a bug in the code responsible for releasing a file handle, socket, or native buffer fails completely invisibly — no log, no stack trace, no application-visible signal. Any action worth registering should therefore catch and report its own failures rather than relying on the framework to surface them.
 
 **Why is `SoftReference` a poor substitute for a properly bounded cache like Caffeine?**
 Because its eviction timing depends on heap size and allocation pressure, not on any cache policy you control. Identical code behaves differently on a small heap versus a large one, which makes it nearly impossible to load-test deterministically — `SoftRefLRUPolicyMSPerMB` defaults to 1000ms of survival per free megabyte, so a comfortably-sized heap can hold "soft" entries far longer than intended, while a heap under pressure evicts them far more aggressively than any fixed-size or TTL policy would. A size- and time-bounded cache (Caffeine's `maximumSize`/`expireAfterWrite`) gives a predictable memory footprint and hit rate instead.

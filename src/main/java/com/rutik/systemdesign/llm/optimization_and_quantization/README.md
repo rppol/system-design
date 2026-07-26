@@ -1623,7 +1623,8 @@ Block 3 — BROKEN -> FIX: wrong calibration data and group size selection:
 ```python
 from __future__ import annotations
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme
+from llmcompressor.modifiers.quantization import QuantizationModifier
 
 
 # BROKEN: Calibrate AWQ on general text (C4 dataset) for a code LLM.
@@ -1651,48 +1652,49 @@ def fixed_calibration_data_code() -> list[str]:
 # Large groups mean many weights share a single scale — quantization error
 # for weights far from the group mean becomes large.
 # MBPP score drops an additional 2.1% vs group_size=128.
-def broken_quant_config_large_group() -> dict:
-    return {"q_group_size": 512, "w_bit": 4, "zero_point": True}
+def broken_scheme_large_group() -> QuantizationScheme:
+    return QuantizationScheme(
+        targets=["Linear"],
+        weights=QuantizationArgs(
+            num_bits=4, type="int", strategy="group", group_size=512, symmetric=False
+        ),
+    )
 
 
-# FIX: group_size=128 is the standard production setting.
+# FIX: group_size=128 is the standard production setting, and exactly what the
+# "W4A16_ASYM" preset gives you — spell the scheme out only to change something.
 # Quality vs size trade-off: 128 is Goldilocks — better quality than 256+,
 # minimal overhead vs 64.
 # For INT3 (not recommended): use group_size=64 to partially compensate for bit-loss.
-def fixed_quant_config() -> dict:
-    return {"q_group_size": 128, "w_bit": 4, "zero_point": True, "version": "GEMM"}
+def fixed_scheme() -> QuantizationScheme:
+    return QuantizationScheme(
+        targets=["Linear"],
+        weights=QuantizationArgs(
+            num_bits=4, type="int", strategy="group", group_size=128, symmetric=False
+        ),
+    )
 
 
-# BROKEN: Quantize embedding and LM head layers.
-# These layers are NOT compute-bottlenecks but DO have high sensitivity to quantization.
-# The embedding layer maps token IDs → vectors; INT4 embedding causes
-# vocabulary confusion for tokens with similar embeddings → 2-3% quality drop alone.
-def broken_quantize_all_layers(model: torch.nn.Module) -> torch.nn.Module:
-    # Quantize every Linear layer including embed_tokens and lm_head
-    return _apply_int4_to_all(model)
+# BROKEN: Quantize every Linear layer, lm_head included.
+# lm_head is NOT a compute bottleneck but IS highly sensitive to quantization:
+# it produces the vocabulary logits, and INT4 there spreads probability mass
+# incorrectly, hitting rare-token predictions hardest → 2-3% quality drop alone.
+def broken_modifier_quantizes_lm_head() -> QuantizationModifier:
+    return QuantizationModifier(targets=["Linear"], scheme="W4A16_ASYM", ignore=[])
 
 
-# FIX: Exclude embedding and lm_head layers from INT4 quantization.
-# Keep in FP16 (adds only ~0.5 GB to model size for 70B model).
-# AWQ's default behavior already excludes these — don't override it.
-def fixed_quantize_skip_embeddings(model: torch.nn.Module) -> torch.nn.Module:
-    # AWQ automatically skips: embed_tokens, lm_head, and the final layer norm
-    # Explicitly verify which layers were quantized:
-    quantized_layers = [
-        name for name, module in model.named_modules()
-        if hasattr(module, "scales") and hasattr(module, "zeros")
-    ]
-    print(f"Quantized {len(quantized_layers)} linear layers (embeddings excluded)")
-    return model
-
-
-def _apply_int4_to_all(model: torch.nn.Module) -> torch.nn.Module:
-    return model  # placeholder
+# FIX: Ignore lm_head. It stays in the checkpoint's original dtype, which costs
+# only ~0.5 GB on a 70B model. Embeddings and layer norms are not nn.Linear, so
+# targets=["Linear"] never reaches them in the first place.
+def fixed_modifier_ignores_lm_head() -> QuantizationModifier:
+    return QuantizationModifier(
+        targets=["Linear"], scheme="W4A16_ASYM", ignore=["lm_head"]
+    )
 
 
 # BROKEN: Deploy AWQ model on a GPU without checking its compute capability.
 # AWQ needs compute capability 7.5+ (Turing and later; vLLM's AWQ config returns
-# get_min_capability() == 75, and AutoAWQ documents "Compute Capability 7.5").
+# get_min_capability() == 75).
 # Deployed on V100 (7.0) → AWQ is simply unsupported; the load fails or falls back.
 def broken_deploy_awq_anywhere() -> None:
     # No capability check — deploys on any GPU

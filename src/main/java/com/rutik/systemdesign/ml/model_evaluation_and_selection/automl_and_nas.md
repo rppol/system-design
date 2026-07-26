@@ -6,7 +6,7 @@ AutoML automates the parts of the ML pipeline that a human normally hand-crafts:
 
 Neural Architecture Search (NAS) is the deep-learning-specific corner of AutoML: instead of tuning scalar hyperparameters of a fixed network, NAS *designs the network topology itself* — how many layers, which operations on each edge, how blocks connect. NAS is defined by three orthogonal axes: the **search space** (what architectures are reachable), the **search strategy** (how you explore it — RL, evolution, or gradient), and the **performance estimation strategy** (how you score a candidate cheaply — full training, weight-sharing supernet, or a proxy).
 
-The single fact that dominates NAS engineering is cost. The 2017 RL-based NASNet search consumed roughly **2000 GPU-days**; the 2018 differentiable method DARTS reproduced comparable ImageNet-transfer accuracy in about **1 GPU-day** — a ~1000x reduction — by replacing "train thousands of networks from scratch" with "train one shared supernet once." This module covers that landscape and the multi-fidelity HPO methods (Successive Halving → ASHA → Hyperband → BOHB) that make both AutoML and NAS affordable.
+The single fact that dominates NAS engineering is cost. The 2017 RL-based NASNet search ran on 500 GPUs for 4 days = **2000 GPU-days**; the differentiable method DARTS reports **1.5 GPU-days (first-order) and 4 GPU-days (second-order)** on CIFAR-10 in its own Table 1 — a **500x to 1300x** reduction — by replacing "train thousands of networks from scratch" with "train one shared supernet once." Transfer accuracy is close but not equal: in the ImageNet mobile setting DARTS reports 26.7% top-1 error against NASNet-A's 26.0%. This module covers that landscape and the multi-fidelity HPO methods (Successive Halving → ASHA → Hyperband → BOHB) that make both AutoML and NAS affordable.
 
 This sub-file **extends** the parent module ([../model_evaluation_and_selection/README.md](../model_evaluation_and_selection/README.md), which covers Optuna/TPE, GridSearchCV, RandomizedSearchCV) and the Hyperband/BOHB treatment in [../experiment_tracking_and_versioning/README.md](../experiment_tracking_and_versioning/README.md). It does not repeat them — it cross-links and adds ASHA and NAS, which neither covers.
 
@@ -19,9 +19,9 @@ One-line analogy: manual ML is a chef tasting and adjusting one dish; AutoML is 
 Mental model:
 - **Multi-fidelity HPO** = triage. Do not cook every dish to completion. Taste all of them after 1 minute, throw out the worst two-thirds, give the survivors 3 more minutes, repeat. Most bad configurations reveal themselves early.
 - **NAS search strategy** = how you propose the next architecture: an RL controller *learns* a policy that emits good architectures; evolution *mutates* a population of good ones; DARTS *differentiates* through the choice so gradient descent walks toward a good one.
-- **Performance estimation** = the cost-vs-fidelity dial. Full training is exact but ruinously expensive; a weight-sharing supernet is ~1000x cheaper but its rankings are noisy.
+- **Performance estimation** = the cost-vs-fidelity dial. Full training is exact but ruinously expensive; a weight-sharing supernet is two-to-three orders of magnitude cheaper but its rankings are noisy.
 
-Why it matters: the reason NAS papers went from 2000 GPU-days to 1 GPU-day is entirely a performance-estimation trick (weight sharing), not a smarter search. In practice, *where you spend fidelity* is the whole game.
+Why it matters: the reason NAS papers went from 2000 GPU-days to a few GPU-days is entirely a performance-estimation trick (weight sharing), not a smarter search. In practice, *where you spend fidelity* is the whole game.
 
 Key insight: **NAS meta-optimizes the validation set.** The search loop selects architectures by validation score across thousands of candidates, so the winning architecture is fit to the validation set exactly the way a single overfit model is fit to its training set. Without a truly held-out test set (or a separate search-validation split), the reported gain is largely search overfitting.
 

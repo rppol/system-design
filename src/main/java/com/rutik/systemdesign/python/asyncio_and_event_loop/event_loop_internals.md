@@ -654,9 +654,8 @@ Celery spawns 1,000 threads, each consuming ~1 MB stack = 1 GB RSS. An equivalen
 - **Access `loop._ready` or `loop._scheduled` directly** — these are CPython implementation
   details with no stability guarantee. Introspect via `loop.call_soon` wrappers or `asyncio.Task`
   APIs.
-- **Use `asyncio.get_event_loop()` without a running loop** (deprecated since 3.10, raises
-  `DeprecationWarning`; use `asyncio.get_running_loop()` inside coroutines, or `asyncio.run()`
-  at top level).
+- **Use `asyncio.get_event_loop()` without a running loop** — it raises `RuntimeError`. Use
+  `asyncio.get_running_loop()` inside coroutines, or `asyncio.run()` at top level.
 - **Mix asyncio and trio** without `anyio` — they have incompatible event loop models and cannot
   be composed directly.
 
@@ -783,13 +782,13 @@ async def fetch(url: str) -> str:
 
 async def main() -> None:
     asyncio.gather(fetch("a"), fetch("b"))  # BROKEN: not awaited — Tasks created but results lost
-    # No DeprecationWarning in 3.12; tasks run but exceptions silently swallowed
+    # No warning is emitted; the tasks run but results and exceptions are lost
 
 asyncio.run(main())
 ```
 
 ```python
-# FIX: always await gather; prefer TaskGroup for error propagation in 3.11+
+# FIX: always await gather; prefer TaskGroup for error propagation
 import asyncio
 
 async def main() -> None:
@@ -797,7 +796,7 @@ async def main() -> None:
     results = await asyncio.gather(fetch("a"), fetch("b"))
     print(results)  # ['data from a', 'data from b'] — order matches input order
 
-    # FIX option 2: TaskGroup (3.11+) — structured, exception-safe
+    # FIX option 2: TaskGroup — structured, exception-safe
     async with asyncio.TaskGroup() as tg:
         t1 = tg.create_task(fetch("a"))
         t2 = tg.create_task(fetch("b"))
@@ -806,10 +805,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-### Pitfall 4: `get_event_loop()` outside a running loop (3.10+ deprecation)
+### Pitfall 4: `get_event_loop()` outside a running loop
 
 ```python
-# BROKEN: deprecated since 3.10, raises DeprecationWarning; will error in future
+# BROKEN: raises RuntimeError when no event loop is current for this thread
 import asyncio
 
 loop = asyncio.get_event_loop()  # BROKEN: outside coroutine context
@@ -824,7 +823,7 @@ asyncio.run(some_coro())  # FIX: creates loop, runs, closes — all in one call
 
 # Inside a coroutine, use:
 async def inner() -> None:
-    loop = asyncio.get_running_loop()  # FIX: never raises DeprecationWarning
+    loop = asyncio.get_running_loop()  # FIX: unambiguous — returns the running loop
 ```
 
 ---
@@ -834,7 +833,7 @@ async def inner() -> None:
 | Tool | Role | Key feature |
 |---|---|---|
 | `asyncio` (stdlib) | Event loop, Tasks, Futures, transports | Zero deps; `asyncio.run()` entry point |
-| `uvloop` 0.19+ | Drop-in high-perf event loop | 2-4x faster via libuv; `asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())` |
+| `uvloop` | Drop-in high-perf event loop | 2-4x faster via libuv; enable with `uvloop.run(main())` |
 | `anyio` 4.x | Backend-agnostic async abstraction | Runs on asyncio or trio; `TaskGroup`, structured cancel scopes |
 | `trio` 0.25+ | Alternative event loop (structured concurrency) | Nurseries; strict cancel scope semantics; not compatible with raw asyncio code |
 | `aiofiles` | Async file I/O | Wraps `ThreadPoolExecutor`; `async with aiofiles.open()` |
@@ -875,7 +874,7 @@ Callbacks in `_ready` represent work that is already known to be runnable (eithe
 `Task.__step` is a bound method registered as a `Handle` in `_ready` (via `call_soon`). When the Handle fires, `__step` calls `coro.send(None)` to drive the coroutine one step. If the coroutine `yield`s a pending Future, `__step` registers itself as a done-callback on that Future. If the coroutine raises `StopIteration`, `__step` calls `Future.set_result`. If the coroutine raises any exception, `__step` calls `Future.set_exception`. The Task is never in `_ready` while it is waiting on a Future — it is "parked" on the Future's `_callbacks` list.
 
 **Q7: How does `asyncio.run()` differ from manually creating and running a loop?**
-`asyncio.run()` (3.7+) creates a *brand new* `SelectorEventLoop`, sets it as the current loop for the thread, wraps the coroutine in a Task, calls `run_forever()` (which exits when the Task completes), then calls `loop.run_until_complete(loop.shutdown_asyncgens())` to close any open async generators, then `loop.run_until_complete(loop.shutdown_default_executor())`, then `loop.close()`. It guarantees the loop is properly closed even on exceptions. Manual `get_event_loop().run_until_complete(coro)` skips the async-generator shutdown and is deprecated for creating new loops since 3.10.
+`asyncio.run()` creates a brand new event loop, runs the coroutine on it, and guarantees full shutdown even on exceptions. It sets the new loop as current for the thread, wraps the coroutine in a Task, calls `run_forever()` (which exits when the Task completes), then calls `loop.run_until_complete(loop.shutdown_asyncgens())` to close any open async generators, then `loop.run_until_complete(loop.shutdown_default_executor())`, then `loop.close()`. Driving a hand-made loop with `run_until_complete(coro)` skips the async-generator and executor shutdown, so async generators can be finalized after the loop is gone. Pass `loop_factory=` to `asyncio.run()` when you need a non-default loop implementation.
 
 **Q8: Why is uvloop 2-4x faster than `SelectorEventLoop`?**
 uvloop replaces the Python-level `_run_once` with a Cython extension calling libuv's `uv_run()`. All timer management, I/O polling, and callback dispatch happen in C with no Python frame overhead per callback. DNS resolution uses `uv_getaddrinfo` (truly async, non-blocking), while `SelectorEventLoop` calls `socket.getaddrinfo` via a thread-pool executor. The GIL is released for the entire libuv loop iteration, not just the `select()` syscall.
@@ -902,13 +901,13 @@ Enabled via `asyncio.run(main(), debug=True)` or `PYTHONASYNCIODEBUG=1`. It: (1)
 The GIL ensures only one Python thread runs bytecode at any instant. Two threads running pure Python are serialized — one waits while the other holds the GIL. `loop.run_in_executor(ThreadPoolExecutor)` is only effective for I/O-bound work that releases the GIL during the syscall (file read, network read). For CPU-bound work (NumPy with GIL held, regex, JSON parsing), the fix is `ProcessPoolExecutor` — separate processes have independent GILs. In CPython 3.13+ with `PYTHON_GIL=0` (PEP 703 free-threading), multiple threads can run Python bytecode concurrently, but asyncio itself is still single-threaded by design.
 
 **Q16: How does structured concurrency in `asyncio.TaskGroup` differ from `asyncio.gather`?**
-`TaskGroup` (3.11+) is a context manager that owns its child tasks. If any child raises an unhandled exception, `TaskGroup` cancels all remaining siblings and re-raises as an `ExceptionGroup`. The parent waits for all siblings to finish cancellation before propagating the exception. `asyncio.gather` by default swallows exceptions unless `return_exceptions=False`, and does not automatically cancel siblings on failure; you must inspect results manually. `TaskGroup` follows the structured concurrency principle: tasks cannot outlive the scope that created them.
+`TaskGroup` is a context manager that owns its child tasks. If any child raises an unhandled exception, `TaskGroup` cancels all remaining siblings and re-raises as an `ExceptionGroup`. The parent waits for all siblings to finish cancellation before propagating the exception. `asyncio.gather` re-raises only the first exception and leaves the other awaitables running; with `return_exceptions=True` it raises nothing at all and you must inspect the returned list yourself. `TaskGroup` follows the structured concurrency principle: tasks cannot outlive the scope that created them.
 
 ---
 
 ## 13. Best Practices
 
-**Always use `asyncio.run()` as the entry point.** Never call `get_event_loop().run_until_complete()` in new code. `asyncio.run()` ensures proper loop creation, async-generator cleanup, and executor shutdown.
+**Always use `asyncio.run()` as the entry point.** Never hand-roll loop creation plus `run_until_complete()`. `asyncio.run()` ensures proper loop creation, async-generator cleanup, and executor shutdown.
 
 **Use `asyncio.TaskGroup` over `gather` for error safety.** `TaskGroup` automatically cancels sibling tasks and collects all exceptions into `ExceptionGroup`, preventing silent failure.
 

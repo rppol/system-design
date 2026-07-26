@@ -21,7 +21,7 @@ This section covers:
 - Spring Cloud (config server, service discovery, circuit breakers, gateway)
 - Spring Messaging (Kafka/RabbitMQ integration, message converters)
 - Testing (MockMvc, WebTestClient, Testcontainers, slice tests)
-- Performance tuning (connection pool sizing, caching, virtual threads in Boot 3.2+)
+- Performance tuning (connection pool sizing, caching, virtual threads)
 
 ---
 
@@ -44,7 +44,7 @@ This section covers:
 | 13 | [filters_and_interceptors](filters_and_interceptors/) | 4 — Spring Web | Intermediate | Servlet Filter vs. HandlerInterceptor, Filter order, OncePerRequestFilter |
 | 14 | [spring_webflux](spring_webflux/) | 4 — Spring Web | Advanced | Reactor, Mono/Flux, Netty, RouterFunction, backpressure, WebClient |
 | 15 | [spring_graphql](spring_graphql/) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
-| 16 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Bean Validation (JSR-380), @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 7807) |
+| 16 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Jakarta Validation 3.1, @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 9457) |
 | 17 | [spring_data_jpa](spring_data_jpa/) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
 | 18 | [spring_transactions](spring_transactions/) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
 | 19 | [spring_caching](spring_caching/) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
@@ -58,7 +58,7 @@ This section covers:
 | 27 | [spring_ai](spring_ai/) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
 | 28 | [spring_integration](spring_integration/) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
 | 29 | [spring_testing](spring_testing/) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
-| 30 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads (Boot 3.2), GraalVM native, connection pools |
+| 30 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads, GraalVM native, connection pools |
 | 31 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
 | 32 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
 | 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
@@ -67,7 +67,7 @@ This section covers:
 | 36 | [spring_data_nosql](spring_data_nosql/) | 5 — Data & Transactions | Intermediate | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
 | 37 | [database_migrations](database_migrations/) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
 | 38 | [spring_websocket_stomp](spring_websocket_stomp/) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
-| 39 | [spring_http_clients](spring_http_clients/) | 4 — Spring Web | Intermediate | RestTemplate vs WebClient vs RestClient (6.1) vs @HttpExchange, connection pooling, timeouts, error handling, MockRestServiceServer |
+| 39 | [spring_http_clients](spring_http_clients/) | 4 — Spring Web | Intermediate | RestClient vs WebClient vs @HttpExchange, `@ImportHttpServices` groups, connection pooling, timeouts, error handling, MockRestServiceServer |
 
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
@@ -146,7 +146,7 @@ Phase 4 additions:
 | validation_and_error_handling    |  (extends request_handling)
 | spring_hateoas_rest_maturity     |  (REST maturity L0-L3, hypermedia)
 | spring_grpc                      |  (gRPC endpoints in Spring)
-| spring_http_clients              |  (RestTemplate/WebClient/RestClient/@HttpExchange)
+| spring_http_clients              |  (RestClient/WebClient/@HttpExchange)
 +----------------------------------+
 
 Phase 5 additions:

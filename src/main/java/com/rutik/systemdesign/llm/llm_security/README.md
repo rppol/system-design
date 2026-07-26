@@ -787,7 +787,7 @@ Latencies are order-of-magnitude for a typical deployment; the coverage column i
 
 **Apply core layers:**
 - Input sanitization (Unicode normalization, invisible character removal)
-- Pattern-based injection detection (Rebuff or similar)
+- Pattern-based injection detection (LLM Guard's prompt-injection scanner, Lakera Guard, or similar)
 - Output PII filtering
 - Rate limiting per user (50-100 requests/hour)
 - Scoped tool permissions (read-only by default)
@@ -910,7 +910,7 @@ AI-security tooling ships almost entirely as product lines inside the large secu
 |-------------|---------|-------|
 | **safetensors** | Safe model serialization | No code execution, zero-copy fast loading. No built-in cryptographic checksum — pair it with published hashes or Sigstore signatures |
 | **picklescan** | Pickle file malware scanner | Detects known malicious patterns in pickle files |
-| **ModelScan** | Model file scanner | Protect AI, scans for unsafe operations in model files |
+| **ModelScan** | Model file scanner | Open source under Palo Alto Networks; scans for unsafe operations in model files |
 | **Sigstore/cosign** | Model signing and verification | Cryptographic provenance for model artifacts |
 
 ---
@@ -1116,7 +1116,7 @@ Per-request prices below are **assumed unit costs for this worked example** — 
 | Layer | Per-Request Cost | Latency Added | Justification |
 |-------|-----------------|---------------|---------------|
 | Input sanitization | ~$0 | <5ms | Regex and Unicode ops, negligible |
-| ML injection classifier | $0.001 | 15-25ms | Commercial guard API (e.g. Lakera Guard, now part of Check Point) |
+| ML injection classifier | $0.001 | 15-25ms | Commercial guard API (e.g. Lakera Guard) |
 | PII masking/unmasking | ~$0 | 5-10ms | Local token mapping |
 | RAG content scanning | $0.002 | 20-30ms | Per retrieved chunk |
 | Output PII filter | $0.001 | 10-15ms | Regex + NER model |

@@ -267,15 +267,22 @@ async def test_driven_loop(task: str, max_iterations: int = 15) -> dict:
 
 ## 8. Tradeoffs
 
-| System | Autonomy Level | Best Use Case | Cost per Task | SWE-bench (approx) |
+| System | Autonomy Level | Best Use Case | Cost per Task | Model coupling |
 |---|---|---|---|---|
-| Cursor Composer | Medium (user approves diffs) | IDE-bound multi-file edits | $0.05-0.50 | N/A direct |
-| Claude Code | Medium-High (subagents) | CLI, large codebases, automation | $0.20-2.00 | ~49% (Claude 3.5 Sonnet) |
-| Devin | High (autonomous sessions) | Whole tickets, hours-long tasks | $1-20 | ~14% (early) - rising |
-| OpenHands | High (configurable) | Self-hosted, research | varies | ~32% (early) - rising |
-| Aider | Medium (interactive) | Terminal users, git-clean history | $0.10-1.00 | ~27% (Claude 3.5) |
-| SWE-agent | High (research) | Benchmarking, ACI study | varies | ~18% (GPT-4) |
-| Copilot (inline) | Low (per-completion) | Continuous coding assistance | per-token | N/A direct |
+| Cursor Composer | Medium (user approves diffs) | IDE-bound multi-file edits | $0.05-0.50 | Multi-provider; user-selectable |
+| Claude Code | Medium-High (subagents) | CLI, large codebases, automation | $0.20-2.00 | Claude models only |
+| Devin | High (autonomous sessions) | Whole tickets, hours-long tasks | $1-20 | Vendor-chosen; opaque |
+| OpenHands | High (configurable) | Self-hosted, research | varies | Any model via LiteLLM |
+| Aider | Medium (interactive) | Terminal users, git-clean history | $0.10-1.00 | Any model; per-model config |
+| SWE-agent | High (research) | Benchmarking, ACI study | varies | Any model; the ACI is the variable |
+| Copilot (inline + coding agent) | Low to Medium | Continuous assistance; issue-to-PR | per-token / per-seat | GitHub-selected models |
+
+**Do not memorize a per-scaffold SWE-bench number.** Scaffold scores now track the backing frontier
+model far more than the scaffold: swap the model under any of these and the score moves tens of
+points, which is why published per-agent figures go stale within a release cycle. Quote the model's
+score and the benchmark generation instead — 85-95% on SWE-bench Verified for current frontier
+models, versus roughly 60% at the top of SWE-bench Pro's public set — and treat the scaffold
+comparison as being about autonomy, ACI quality, and operational fit.
 
 ---
 
@@ -388,7 +395,7 @@ Whole-file reading bloats context (a 100KB file = ~25K tokens). With grep/symbol
 Parent CLI agent spawns subagents with focused tools and isolated context. Explore subagent does navigation (read-only); Implementation subagent does edits (write tools); Review subagent verifies. Each subagent's context stays lean (doesn't see other subagents' work); parent synthesizes results. Wall-clock 2-3× faster than monolithic agent on multi-file tasks.
 
 **Q: What is SWE-bench and why is it the standard benchmark?**
-SWE-bench (Princeton, 2024): 2294 real GitHub issues from 12 popular Python repos; agent must produce a patch that passes the issue's test cases. SWE-bench Verified: 500-issue human-validated subset. Standard because: real-world distribution (not synthetic), tests as ground truth (no LLM judges), spans multiple repos and patterns.
+SWE-bench (Princeton, 2024): 2294 real GitHub issues from 12 popular Python repos; agent must produce a patch that passes the issue's test cases. SWE-bench Verified: 500-issue human-validated subset. It became standard because of real-world distribution (not synthetic), tests as ground truth (no LLM judges), and coverage across repos and patterns. It is now near-saturated at the frontier, so pair it with SWE-bench Pro — 1,865 tasks across 41 repos in Python, Go, TypeScript and JavaScript, copyleft-licensed and partly private specifically to resist contamination.
 
 **Q: What's the difference between IDE-integrated agents (Cursor) and autonomous agents (Devin)?**
 IDE-integrated agents work within a developer's flow — engineer reviews and accepts each suggestion. Autonomous agents run end-to-end tasks (hours), then deliver a PR for review. IDE agents: faster iteration, easier course-correction. Autonomous: less developer time, harder to course-correct mid-task. Convergence: Cursor Background Agents add autonomy to IDE; Devin adds clarification dialog to autonomy.
@@ -454,7 +461,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
 - Backend: Claude Sonnet (and others) with custom system prompt + ACI tools (`read_file`, `edit_file`, `run_terminal`, `codebase_search`, `grep_search`)
 - Diff UI: inline preview with per-hunk accept/reject
 - Approval pattern: agent applies edits speculatively; user reviews diffs before commit
-- Background Agents (newer): autonomous longer-running tasks; agent runs in cloud VM, posts results
+- Background Agents: autonomous longer-running tasks; agent runs in cloud VM, posts results
 
 **Key design choices**:
 1. **Lightweight ACI**: ~10 well-designed tools — composability over expressiveness
@@ -463,7 +470,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
 4. **Token streaming with diff updates**: as model generates, IDE updates diff preview in real-time
 
 **Results**:
-- ~1M+ developers use Cursor (2024-2025)
+- Over a million developers on Cursor; one of the fastest-growing developer tools by revenue
 - Composer multi-file edits: 70%+ acceptance rate at the hunk level
 - Background Agents: hour-long tasks complete unattended for many users
 - Pricing: $20/month Pro tier; cost per Composer session typically $0.10-$2
@@ -503,7 +510,7 @@ Best-in-class agents ask clarifying questions before coding. Devin posts questio
                              │ structured issue context
                              v
   ┌─────────────────────────────────────────────────────────┐
-  │  SWE-agent (Claude claude-sonnet-4-6 backend)            │
+  │  SWE-agent (Claude claude-sonnet-5 backend)              │
   │  Sandbox: Docker container (exact CI environment)        │
   │  Tools: bash, find_file, goto, scroll, edit, run_tests   │
   │  Context: repo map (10k tokens) + issue context          │
@@ -633,7 +640,7 @@ class AgentResult:
 def run_swe_agent(
     issue: IssueContext,
     repo_path: Path,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-sonnet-5",
     max_iterations: int = 30,
     cost_limit_usd: float = 2.00,
 ) -> AgentResult:
@@ -926,7 +933,7 @@ def cost_aware_config() -> dict[str, object]:
 | Avg cost per issue (LLM) | — | $1.12 |
 | Avg iterations to solution | — | 18 |
 | Engineer time freed/week | — | ~28 person-hours |
-| SWE-bench Verified (claude-sonnet-4-6) | N/A | ~49% (public benchmark) |
+| SWE-bench Verified (claude-sonnet-5) | N/A | 85.2% (public benchmark) |
 
 **Put simply.** "The $1.12 is what an *attempt* costs, not what a *fix* costs — and since only about
 half of attempts succeed, the real price of a merged patch is roughly double the headline number."
@@ -985,7 +992,7 @@ plus 45 minutes of review is 59 minutes, against a 3.5-day (5,040-minute) manual
 **Interview Q&As:**
 
 **Q: What is SWE-bench and why is it the key benchmark for coding agents?**
-SWE-bench (Software Engineering Benchmark) tests coding agents on real GitHub issues from popular open-source Python repositories (Django, Scikit-learn, etc.). Each task gives the agent a repository and an issue description; the agent must produce a patch that makes the test suite pass. SWE-bench Verified is a curated subset of 500 tasks confirmed reproducible and correctly specified. It is the industry standard because the tasks are real-world (not toy problems) and the evaluation is objective (tests either pass or fail). Leading scores as of mid-2025: Claude claude-sonnet-4-6 ~49%, GPT-4o ~30%, o3 ~70%.
+SWE-bench (Software Engineering Benchmark) tests coding agents on real GitHub issues from popular open-source Python repositories (Django, Scikit-learn, etc.). Each task gives the agent a repository and an issue description; the agent must produce a patch that makes the test suite pass. SWE-bench Verified is a curated subset of 500 tasks confirmed reproducible and correctly specified. It became the industry standard because the tasks are real-world (not toy problems) and the evaluation is objective (tests either pass or fail). Frontier models now score 85-95% on it (Claude Fable 5 95.0%, Opus 4.8 88.6%, Sonnet 5 85.2%), which is close enough to saturation that the remaining spread is confounded by training-data contamination — the same models drop 30-40 points on SWE-bench Pro's harder, copyleft-licensed task set. The senior answer names both: cite Verified for historical comparability and Pro for a current capability signal.
 
 **Q: Why is the Agent-Computer Interface (ACI) design as important as model choice for coding agents?**
 The ACI defines how the LLM interacts with the codebase — what commands are available, how file content is presented, how errors are formatted. A poorly designed interface forces the agent to parse complex bash output, guess file locations, and hold large file contents in context. SWE-agent showed that domain-specific commands (`goto`, `scroll_down`, `edit start:end`) achieve 12% higher SWE-bench solve rates than raw bash with GPT-4 — the same model, different interface. Good ACI: small precise commands, windowed file views, structured error feedback.

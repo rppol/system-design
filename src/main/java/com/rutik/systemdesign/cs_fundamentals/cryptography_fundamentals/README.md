@@ -300,7 +300,7 @@ NIST published the first post-quantum standards in **August 2024**:
 | **FIPS 204** | ML-DSA (Dilithium) | Module lattices | RSA / ECDSA signatures |
 | **FIPS 205** | SLH-DSA (SPHINCS+) | Hash functions only | Signatures where lattice hardness is too new an assumption |
 
-The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. TLS 1.3 does this today with the `X25519MLKEM768` group, shipped by default in Chrome and Firefox — an X25519 ECDH combined with ML-KEM-768. Signatures are migrating more slowly because certificate chains carry every signature in the path and ML-DSA signatures are roughly 2.4 KB against Ed25519's 64 bytes.
+The deployed pattern is **hybrid**: run a classical and a post-quantum key exchange and concatenate both shared secrets into the KDF, so the session stays safe if either one holds. TLS 1.3 does this today with the `X25519MLKEM768` group, shipped by default in Chrome and Firefox — an X25519 ECDH combined with ML-KEM-768. Signatures are migrating more slowly because certificate chains carry every signature in the path and an ML-DSA-44 signature is 2,420 bytes against Ed25519's 64.
 
 Practical guidance: use AES-256 (not AES-128) and SHA-384 or better for anything with a long confidentiality horizon, prefer a hybrid TLS group where your stack offers one, and inventory where long-lived RSA/ECDSA keys are baked into firmware or root certificates — those are the migrations with multi-year lead times.
 
@@ -846,12 +846,12 @@ Linux package managers (apt, yum) verify GPG signatures on every package before 
 
 | Algorithm | Speed | Salt | Built-in | GPU Resistance | Recommendation |
 |-----------|-------|------|----------|---------------|---------------|
-| MD5 / SHA-1 | ~10 billion/sec (GPU) | No | No | None | Never use for passwords |
+| Argon2id | Configurable | Yes (embedded) | No (third-party) | Best (memory + CPU hard) | **Default choice** — m=19456, t=2, p=1 |
+| scrypt | Configurable | Yes (embedded) | No (third-party) | Good (memory-hard) | Use when Argon2id is unavailable — N=2^17, r=8, p=1 |
+| bcrypt (cost 12) | ~1,000/sec (GPU) | Yes (embedded) | No (third-party) | Good | Fine for existing estates; cost >= 10, 72-byte input limit |
+| PBKDF2-HMAC-SHA256 | Configurable | Yes (separate) | Python stdlib | Low–Medium | FIPS/stdlib-only fallback; 600,000 iterations |
 | SHA-256 | ~1 billion/sec (GPU) | No | No | None | Never use for passwords alone |
-| PBKDF2-HMAC-SHA256 | Configurable | Yes (separate) | Python stdlib | Low–Medium | Acceptable; use 600k+ iterations |
-| bcrypt (cost 12) | ~1,000/sec (GPU) | Yes (embedded) | No (third-party) | Good | Recommended; well-studied |
-| scrypt | Configurable | Yes | No (third-party) | Good (memory-hard) | Good for high security |
-| Argon2id | Configurable | Yes | No (third-party) | Best (memory + CPU) | Current best practice (OWASP 2024) |
+| MD5 / SHA-1 | ~10 billion/sec (GPU) | No | No | None | Never use for passwords |
 
 ```mermaid
 xychart-beta
@@ -867,8 +867,8 @@ The table above states the numbers; the chart is what makes the gap real: MD5/SH
 
 | Algorithm | Throughput | Security | Notes |
 |-----------|-----------|----------|-------|
-| MD5 | ~10 GB/s | BROKEN | Collisions demonstrated; do not use for security |
-| SHA-1 | ~5 GB/s | BROKEN | SHA-1 collision found (SHAttered, 2017) |
+| MD5 | ~10 GB/s | BROKEN | Chosen-prefix collisions in seconds; non-security checksums only |
+| SHA-1 | ~5 GB/s | BROKEN | SHAttered collision 2017; chosen-prefix collision 2019; NIST disallows after 2030 |
 | SHA-256 | ~1–3 GB/s (with SHA-NI) | Secure | Standard for integrity; 2^128 collision resistance |
 | SHA3-256 | ~0.5–1 GB/s | Secure | Different construction (Keccak sponge); immune to length extension |
 | BLAKE3 | ~5 GB/s | Secure | Very fast; parallel; good for checksums |
@@ -897,7 +897,7 @@ The table above states the numbers; the chart is what makes the gap real: MD5/SH
 - Within key derivation functions (PBKDF2, HKDF)
 
 **Do NOT use when:**
-- Storing passwords — use bcrypt, scrypt, or Argon2 instead; SHA-256 is too fast
+- Storing passwords — use Argon2id, scrypt, or bcrypt instead; SHA-256 is too fast
 - As a MAC — SHA-256(key || message) is vulnerable to length extension; use HMAC-SHA256
 - For randomness — a hash is deterministic, not a random number generator
 
@@ -935,10 +935,11 @@ The table above states the numbers; the chart is what makes the gap real: MD5/SH
 
 **Do NOT use when:**
 - Encrypting large amounts of data — use hybrid encryption (RSA to wrap an AES key)
-- RSA-1024 — it is broken; use RSA-2048 minimum, RSA-4096 for long-term
+- RSA-1024 — NIST disallowed it in 2014; RSA-2048 is the floor, RSA-3072 for a full 128-bit security level
 - Raw RSA without proper padding (OAEP for encryption, PSS for signing)
+- The confidentiality horizon runs past the 2030s — pair it with a hybrid post-quantum key exchange (§4.8)
 
-### PBKDF2 / bcrypt / Argon2
+### Argon2id / scrypt / bcrypt / PBKDF2
 
 **Always use one of these when:**
 - Storing user passwords
