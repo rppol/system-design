@@ -8,7 +8,7 @@
 
 **Why it matters**: Configuration stores, in-memory caches, and session registries are read constantly and updated rarely. Using an exclusive lock for everything serializes the system unnecessarily. RWL is the precision tool for this class of problem.
 
-**Key insight**: Watch out for writer starvation in highly read-heavy systems — if reads never stop, writers may wait indefinitely. Java's `ReentrantReadWriteLock` uses a fair mode flag (`true`) to give writers priority after they start waiting.
+**Key insight**: Watch out for writer starvation in highly read-heavy systems — the `ReentrantReadWriteLock` javadoc warns that the default non-fair mode "may indefinitely postpone one or more reader or writer threads." Constructing it with the fair flag (`new ReentrantReadWriteLock(true)`) switches to an approximately arrival-order policy, under which a new reader blocks if a writer is already queued — which is what rescues the writer.
 
 ---
 
@@ -67,7 +67,11 @@ while (writers > 0 || writeWaiters > 0) {
 }
 ```
 
-`ReentrantReadWriteLock(true)` — fair mode — uses FIFO queue to prevent starvation.
+`new ReentrantReadWriteLock(true)` — fair mode — is exactly this rule built in. Per the javadoc, fair
+mode grants entry using an "approximately arrival-order policy" (not a strict FIFO guarantee): a thread
+taking a fair read lock non-reentrantly blocks while a writer is waiting, and will not acquire it until
+the oldest waiting writer has acquired and released the write lock. Fair mode normally has lower
+throughput than the default non-fair mode — that is the price of the starvation guarantee.
 
 ---
 
@@ -81,7 +85,7 @@ while (writers > 0 || writeWaiters > 0) {
 | Condition variables | Yes | Yes | No |
 | Optimistic reads | No | No | Yes |
 | Lock downgrade (write→read) | No | Yes | Yes |
-| Lock upgrade (read→write) | No | No | Partial |
+| Lock upgrade (read→write) | No | No — javadoc: "not possible" | Partial — `tryConvertToWriteLock()`, best-effort |
 | Performance | Low | Medium | High |
 | Complexity | Low | Medium | High |
 
@@ -107,7 +111,12 @@ try {
 }
 ```
 
-**Lock upgrade (read → write) is NOT supported** — it would deadlock if two threads both try to upgrade simultaneously.
+**Lock upgrade (read → write) is NOT supported.** The javadoc is explicit: "upgrading from a read lock to
+the write lock is not possible" and "if a reader tries to acquire the write lock it will never succeed."
+A single thread attempting it therefore blocks forever on itself; with two threads both upgrading, it is a
+classic circular wait. Downgrade, by contrast, is explicitly sanctioned: "Reentrancy also allows
+downgrading from the write lock to a read lock, by acquiring the write lock, then the read lock and then
+releasing the write lock."
 
 ---
 
@@ -134,7 +143,7 @@ if (!lock.validate(stamp)) {
 // use x, y
 ```
 
-**When optimistic reads win**: High read:write ratio (99:1), reads are short, contention is low. Under these conditions, most optimistic reads succeed without lock acquisition — ~3x faster than `ReentrantReadWriteLock`.
+**When optimistic reads win**: High read:write ratio (99:1), reads are short, contention is low. Under these conditions most optimistic reads succeed without acquiring anything; published JMH-style comparisons at ~1% writes put `StampedLock` roughly 3x the throughput of `ReentrantReadWriteLock`. Treat that as an order of magnitude, not a guarantee — the ratio swings with thread count, write share, and critical-section length.
 
 ---
 
@@ -203,7 +212,7 @@ try {
 
 2. **Read lock with write assumption**: Modifying data while holding a read lock is a data race — other readers are also running!
 
-3. **Lock upgrade deadlock**: Thread A holds read lock, tries to upgrade to write lock. Thread B also holds read lock, also tries to upgrade. Neither can proceed — deadlock.
+3. **Lock upgrade deadlock**: Even a *single* thread deadlocks — holding the read lock and then calling `writeLock().lock()` blocks forever, because the write lock waits for all readers to drain, including the caller itself. With two threads it becomes a textbook circular wait: A and B each hold a read lock and each wait for the other to release it.
 
 4. **Holding locks across I/O**: Never hold a lock while doing I/O (database call, HTTP request) — too long, too much contention.
 
@@ -247,7 +256,7 @@ Each thread holds a read lock the other needs before it can upgrade — a circul
    `ReentrantLock` is exclusive — only one thread can hold it. `ReentrantReadWriteLock` allows multiple concurrent readers OR one writer. Use RWL when reads dominate.
 
 2. **Why can't you upgrade a read lock to a write lock in ReentrantReadWriteLock?**
-   Deadlock: if two threads both try to upgrade, each waits for the other to release their read lock — circular wait.
+   The javadoc states plainly that upgrading is not possible and that "if a reader tries to acquire the write lock it will never succeed" — the write lock waits for every reader to drain, including the thread doing the upgrade, so a lone thread blocks on itself. With two threads it is a circular wait: each waits for the other to release its read lock. The supported direction is downgrade: take the read lock while still holding the write lock, then release the write lock.
 
 3. **What is StampedLock and when would you use it?**
    A higher-performance lock (Java 8+) that supports optimistic reads — attempt to read without locking, then validate. Use for read-heavy, performance-critical code where writes are rare.
@@ -256,4 +265,4 @@ Each thread holds a read lock the other needs before it can upgrade — a circul
    Acquiring a read lock while holding a write lock, then releasing the write lock. Useful for writing a value and then immediately reading it, without releasing the lock entirely (which would allow another writer to change the value).
 
 5. **How do you prevent writer starvation?**
-   Use fair mode (`new ReentrantReadWriteLock(true)`) which uses a FIFO queue. Or manually prioritize writers by making new readers wait when a writer is queued.
+   Use fair mode (`new ReentrantReadWriteLock(true)`), which grants entry by an approximately arrival-order policy so a new reader blocks while a writer is already queued. Or manually prioritize writers by making new readers wait when a writer is queued. The default non-fair mode has higher throughput but the javadoc explicitly allows it to postpone a reader or writer indefinitely.

@@ -328,9 +328,11 @@ class Transaction {
 
 // ─────────────────────────────────────────────
 //  DEBT SIMPLIFIER — greedy min-cashflow algorithm
-//  Reduces a tangle of pairwise debts to the minimum number of
+//  Greedily reduces a tangle of pairwise debts to a small number of
 //  settling transactions using two max-heaps (creditors / debtors).
-//  Complexity: O(N log N) for N users.
+//  Complexity: O(N log N) for N users; bound is at most N-1 transactions.
+//  NOT guaranteed minimal: computing the true minimum (the debts-clearing
+//  problem) is NP-hard in the strong sense, by reduction from subset-sum.
 // ─────────────────────────────────────────────
 
 class DebtSimplifier {
@@ -341,7 +343,8 @@ class DebtSimplifier {
     /**
      * @param netBalances map of user -> net balance (positive = is owed money overall,
      *                     negative = owes money overall, zero = settled)
-     * @return minimal list of transactions that zero out all net balances
+     * @return greedily reduced list of transactions that zero out all net balances
+     *         (at most N-1; not guaranteed to be the minimum-cardinality list)
      */
     public static List<Transaction> simplify(Map<User, BigDecimal> netBalances) {
         PriorityQueue<Balance> creditors =
@@ -464,7 +467,7 @@ class ExpenseManager {
         return group.getLedger().getBalances(user.getId());
     }
 
-    /** Computes the minimal set of transactions to settle all debts within a group. */
+    /** Computes a greedily reduced set of transactions to settle all debts within a group. */
     public List<Transaction> simplifyGroupDebts(Group group) {
         Map<User, BigDecimal> netBalances = new HashMap<>();
         for (User member : group.getMembers()) {
@@ -549,7 +552,7 @@ public class Splitwise {
         }
 
         // 7. Simplify debts
-        System.out.println("\n--- Simplified debt summary (minimum transactions) ---");
+        System.out.println("\n--- Simplified debt summary (greedy; at most N-1 transactions) ---");
         List<Transaction> transactions = manager.simplifyGroupDebts(goaTrip);
         for (Transaction t : transactions) {
             System.out.println("  " + t);

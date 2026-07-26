@@ -160,7 +160,7 @@ Deep:       [ name="Enemy" | health=100 | config ──────────>
 - **Deep copy complexity**: Implementing a correct deep clone for a deeply nested, circular, or polymorphic object graph is non-trivial and error-prone.
 - **Cloning breaks encapsulation**: The `clone()` method must access all private fields of its own class (and nested classes). This couples the implementation to its own internals.
 - **Circular references require careful handling**: If object A references object B and B references A, a naive recursive deep clone loops infinitely. You need a visited-set to break cycles.
-- **`java.lang.Cloneable` is broken in Java**: `Cloneable` is a marker interface that doesn't declare `clone()`. `Object.clone()` does a shallow copy and throws `CloneNotSupportedException`. This is a notorious Java design mistake — prefer a custom `Prototype` interface with explicit copy constructors.
+- **`java.lang.Cloneable` is broken in Java**: `Cloneable` is a marker interface that doesn't declare `clone()`. The `protected Object.clone()` it enables does a field-by-field shallow copy, and throws the checked `CloneNotSupportedException` when the class does *not* implement `Cloneable`. This is a notorious Java design mistake — prefer a custom `Prototype` interface with explicit copy constructors.
 - **Hidden shared state**: A shallow clone looks independent but isn't. Bugs from accidentally shared nested objects can be subtle and hard to trace.
 
 ---
@@ -263,15 +263,16 @@ The 40 ms sprite/AI/DB cost is paid once per entity type at startup; every one o
 | `java.util.ArrayList` | `ArrayList.clone()` | Shallow — list structure copied, elements shared | Java 1.2+ |
 | `java.util.HashMap` | `HashMap.clone()` | Shallow — map structure copied, keys/values shared | Java 1.2+ |
 | `java.util.Properties` | `Properties.clone()` (inherits from Hashtable) | Shallow | Java 1.0+ |
-| Spring Framework 6 | `@Scope("prototype")` — `AbstractBeanFactory.doGetBean()` creates new instance per lookup | Not clone() — new construction per request | Spring 6.0+ |
-| Spring Framework 6 | `BeanDefinition.cloneBeanDefinition()` — container clones bean metadata during refresh | Deep copy of definition | Spring 6.0+ |
-| Jackson 2.x | `ObjectMapper.copy()` — returns a deep copy of the mapper with independent configuration | Custom deep copy | Jackson 2.9+ |
+| Spring Framework | `@Scope("prototype")` — `AbstractBeanFactory.doGetBean()` creates a new instance per lookup | Not clone() — new construction per request | Spring 6.x / 7.x |
+| Spring Framework | `AbstractBeanDefinition.cloneBeanDefinition()` (abstract; `RootBeanDefinition` returns `new RootBeanDefinition(this)`) — also what `AbstractBeanDefinition.clone()` delegates to | Copy constructor — new definition plus fresh `ConstructorArgumentValues`/`MutablePropertyValues` holders; the values inside are shared, so not a full deep copy | Spring 6.x / 7.x |
+| Jackson 2.x | `ObjectMapper.copy()` — new mapper with "same initial configuration"; caches of serializers/deserializers are NOT shared. (Removed in Jackson 3.x.) | Configuration copy, not an object deep-copy | Jackson 2.1+ |
 | Netty 4.x | `ByteBuf.copy()` — returns independent copy of buffer data | Deep copy | Netty 4.0+ |
 
-### Production-Grade Code: Game Entity Prototype Registry with Deep Clone (Java 17 LTS)
+### Production-Grade Code: Game Entity Prototype Registry with Deep Clone (Java 17+)
 
 ```java
-// Java 17 LTS — production-grade Prototype pattern for game entity prefab system.
+// Compiles unchanged on the Java 17, 21, and 25 LTS releases.
+// Production-grade Prototype pattern for a game entity prefab system.
 // Deep clone via copy constructor at every level — avoids java.lang.Cloneable pitfalls.
 
 // ── Mutable nested value objects (must be deep-copied) ──────────────────────────────────────
@@ -339,7 +340,8 @@ public class GameEntity implements EntityPrototype {
     public GameEntity(String entityType, byte[] spriteAtlas,
                       BehaviorTree behaviorTree, PhysicsBody physicsBody) {
         this.entityType   = entityType;
-        this.spriteAtlas  = spriteAtlas;      // shared: immutable byte array — safe
+        this.spriteAtlas  = spriteAtlas;      // shared by design: byte[] IS mutable, so this is
+                                              // safe only because nothing ever writes to it
         this.behaviorTree = behaviorTree;
         this.physicsBody  = physicsBody;
         this.instanceId   = "PROTOTYPE";      // prototype is never used as a live entity
@@ -349,7 +351,8 @@ public class GameEntity implements EntityPrototype {
     // Private copy constructor — used only by deepClone()
     private GameEntity(GameEntity other) {
         this.entityType   = other.entityType;       // String immutable — safe to share
-        this.spriteAtlas  = other.spriteAtlas;      // byte[] immutable after init — share ref
+        this.spriteAtlas  = other.spriteAtlas;      // byte[] is mutable; shared only under a
+                                                    // "never written after load" convention
         this.behaviorTree = new BehaviorTree(other.behaviorTree); // deep copy — mutable state
         this.physicsBody  = new PhysicsBody(other.physicsBody);   // deep copy — mutable velocity
         this.instanceId   = java.util.UUID.randomUUID().toString(); // new identity per clone
@@ -428,8 +431,8 @@ public class GameServerBootstrap {
 ```java
 // BROKEN: shallow clone causes all clones to share the same BehaviorTree instance.
 // When enemy A takes damage and updates its AI state, enemy B's AI state changes too.
-// This was a real bug in a Java game server codebase (2019): all archers
-// in a wave synchronized their attack targets because they shared one BehaviorTree.
+// Classic symptom of this bug shape: every archer in a spawned wave picks the same
+// attack target, because all of them share one BehaviorTree instance.
 
 public class BrokenGameEntity implements Cloneable {
     private final String       entityType;
@@ -812,7 +815,7 @@ The registry lookup at the top of every `deepClone()` call is what breaks the cy
 ### Spring Framework Prototype Scope: Framework-Level Prototype Pattern (Spring Boot 3.2+)
 
 ```java
-// Spring Boot 3.2+, Java 17 LTS
+// Spring Boot 3.2+ (and unchanged in Spring Boot 4.x / Spring Framework 7), Java 17+
 // @Scope("prototype") = prototype pattern managed by the Spring container.
 // Each ApplicationContext.getBean() call triggers new construction, not clone().
 // Use for stateful per-request processors that must not be shared across threads.
@@ -821,7 +824,7 @@ import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 
 @Component
-@Scope("prototype") // Spring Boot 3.0+: jakarta.inject.* namespace
+@Scope("prototype") // org.springframework.context.annotation.Scope — unchanged across Spring 5/6/7
 public class OrderEventProcessor {
     // Stateful: accumulates events for one request lifecycle — must not be shared
     private final List<String> processingLog = new ArrayList<>();
@@ -847,7 +850,7 @@ public class OrderEventProcessor {
 public class OrderService {
     private final ObjectProvider<OrderEventProcessor> processorProvider;
 
-    // Java 17 + Spring Boot 3.2+: constructor injection (preferred)
+    // Constructor injection (preferred)
     public OrderService(ObjectProvider<OrderEventProcessor> processorProvider) {
         this.processorProvider = processorProvider;
     }
@@ -863,25 +866,29 @@ public class OrderService {
 }
 ```
 
-### Performance Benchmark: Clone Mechanisms for Large Objects (Java 17 LTS)
+### Relative Cost of Clone Mechanisms for Large Objects
 
-Benchmark: 10,000 clones of a GameEntity with:
-- byte[] spriteAtlas: 2 MB (shared reference — not deep copied)
-- BehaviorTree with HashMap of 20 state entries
-- PhysicsBody with 6 float fields
+The durable, checkable fact is the *ordering*: a field-copying copy constructor is two to three
+orders of magnitude cheaper than any serialize/deserialize round trip, because the round trip
+allocates an intermediate byte or token stream and re-walks the whole object graph reflectively.
+The absolute microsecond figures below are **illustrative** for a `GameEntity` with a 2 MB shared
+`byte[]` atlas, a `BehaviorTree` holding a 20-entry `HashMap`, and a 6-float `PhysicsBody` — they
+are not measured JMH results and move with JVM, hardware, and payload.
 
-| Method | Time per clone | GC pressure | Correctness |
+| Method | Relative cost (illustrative) | GC pressure | Correctness |
 |--------|-----------------|-------------|-------------|
-| Object.clone() shallow | ~0.05 µs | very low | BROKEN (shared mutable state) |
-| Copy constructor (deep, custom) | ~0.8 µs | low | Correct |
-| Serialization (ObjectOutputStream) | ~250 µs | high | Correct (if all Serializable) |
-| Jackson ObjectMapper.copy() approach | ~180 µs | high | Correct |
+| `Object.clone()` shallow | cheapest (~0.05 µs) | very low | BROKEN (shared mutable state) |
+| Copy constructor (deep, custom) | ~10x the shallow copy (~1 µs) | low | Correct |
+| Java serialization round trip (`ObjectOutputStream` -> `ObjectInputStream`) | ~100-300x the copy constructor (hundreds of µs) | high | Correct if all `Serializable`; handles cycles via the stream's handle table |
+| JSON round trip via Jackson (`writeValueAsBytes` -> `readValue`) | same order as Java serialization | high | Correct only if the type round-trips losslessly; cycles need `@JsonIdentityInfo` |
 
-Key numbers:
-- Custom deep clone via copy constructor: 0.8 µs × 500 spawns/sec = 0.4ms CPU / sec — negligible
-- Serialization-based clone: 250 µs × 500 spawns/sec = 125ms CPU / sec — visible GC pressure
-- At 32 GB heap with G1GC: custom deep clone causes 0 additional GC cycles vs. baseline
-  Serialization-based: triggers 1-2 additional minor GCs per minute at 500 spawns/sec
+Note: `ObjectMapper.copy()` is **not** a deep-copy mechanism for your domain object — it copies the
+*mapper's configuration*. Deep-copying an object with Jackson means a serialize/deserialize round trip.
+
+Key numbers (using the illustrative figures above):
+- Custom deep clone via copy constructor: ~1 µs × 500 spawns/sec ≈ 0.5 ms CPU/sec — negligible
+- Serialization-based clone: ~250 µs × 500 spawns/sec ≈ 125 ms CPU/sec — roughly 12% of one core,
+  plus a steady stream of short-lived byte arrays feeding young-generation GC
 
 Recommendation: use copy constructors for production game entity cloning.
 Serialization is acceptable only for infrequent deep-copy of complex object graphs
@@ -892,10 +899,16 @@ Serialization is acceptable only for infrequent deep-copy of complex object grap
 **Use Prototype when:**
 - Object construction involves I/O (disk, network, DB) and the resulting object is
   used many times with only extrinsic state varying (position, health, ID).
-- Game engines, document template systems, connection pool pre-warming, config snapshot
-  distribution — all follow this pattern. Netflix connection pool pre-warming creates a
-  prototype connection (with TLS handshake complete) and clones it to fill the pool,
-  avoiding N serial handshakes on startup.
+- Game engines, document template systems, and config snapshot distribution all follow
+  this pattern. A verifiable library example is Jackson's `ObjectMapper.copy()` (`@since 2.1`):
+  building a mapper's configuration — modules, feature flags, custom (de)serializers — is
+  the expensive step, so the 2.x idiom is to configure one mapper and call `copy()` to obtain
+  a new mapper "that has same initial configuration as this instance," then tweak only what
+  differs. (Jackson 3 removed `copy()` and made `ObjectMapper` immutable; the replacement is
+  `mapper.rebuild().build()` — the same prototype-from-a-baseline idea expressed as a builder.)
+  Live network connections are the classic **non**-example: a connection pool pre-warms by
+  *opening* N connections eagerly, never by cloning one, because a TCP/TLS connection owns
+  kernel socket state and per-connection key material that cannot be copied in the Prototype sense.
 
 **Replace Prototype with object pooling when:**
 - Clones are short-lived and recycled frequently (bullets, particles). Object pools
@@ -1087,7 +1100,7 @@ A: Builder constructs each object from scratch via a fluent API, which is ideal 
 **HLD View — Where Prototype Appears in Distributed Systems**
 
 - **Distributed config snapshots** — When a config service pushes an update, each subscriber clones its current config snapshot, applies the delta, and atomically replaces the old reference. Cloning is faster and safer than reconstructing from scratch.
-- **Connection pool pre-warming** — Connection pools clone a prototype connection to pre-fill the pool on startup, avoiding the cold-start cost of establishing N connections sequentially.
+- **Pre-configured client objects** — HTTP/serialization clients (e.g. a Jackson `ObjectMapper`, an SDK client builder) are configured once and copied per call site, so each consumer gets independent configuration without repeating the expensive setup. Connection pools are *not* an instance of this: a pool pre-warms by opening N real connections eagerly, since a live TCP/TLS connection's socket and cryptographic state cannot be cloned.
 - **Deployment template cloning** — CI/CD systems clone a base environment configuration (prototype) when spinning up ephemeral preview or test environments, overriding only environment-specific values.
 - **Caching pre-populated objects** — Object caches store a prototypical response and clone it per-request, preventing shared mutable state bugs while avoiding the overhead of full reconstruction.
 

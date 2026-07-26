@@ -4,7 +4,7 @@
 
 > **Design intuition**: Splitwise tests modeling a group/expense/balance graph and pluggable split strategies (equal, exact amounts, percentage, shares). The entity model itself — User, Group, Expense, Split — is the "easy 60%" of the interview.
 
-**Key insight**: The hardest part isn't the data model — it's **debt simplification**, the greedy algorithm that reduces a tangle of pairwise debts (A owes B $10, B owes C $10, C owes A $5) into the minimum number of settling transactions (e.g., A pays C $5 directly). This is implemented with a max-heap of net creditors and a max-heap of net debtors, repeatedly matching the largest creditor against the largest debtor. Interviewers love this problem because it combines OOP modeling with a genuinely interesting greedy-algorithm component.
+**Key insight**: The hardest part isn't the data model — it's **debt simplification**, the greedy heuristic that collapses a tangle of pairwise debts (A owes B $10, B owes C $10, C owes A $5) into far fewer settling transactions (e.g., A pays C $5 directly). It is implemented with a max-heap of net creditors and a max-heap of net debtors, repeatedly matching the largest creditor against the largest debtor. **Say the word "heuristic", not "minimum"**: greedy matching guarantees only an upper bound of N-1 transactions for N users, not the true optimum. Computing the actual minimum — the debts-clearing / "optimal account balancing" problem (LeetCode 465) — is NP-hard in the strong sense, because deciding how to carve the balances into zero-sum subsets that can settle internally is a subset-sum problem. Interviewers love this problem because it combines OOP modeling with a greedy-algorithm component, and naming that greedy-vs-optimal gap is what separates a good answer from a great one.
 
 ---
 
@@ -15,7 +15,7 @@ Design a system where users can:
 - Add an expense to a group, paid by one user and split among participants using a configurable strategy: **equal**, **exact amounts**, or **percentage**
 - Track each user's net balance with every other user (who owes whom, and how much)
 - Settle up — record a payment between two users that reduces their mutual balance
-- View a **simplified debt summary** for a group — the minimum set of transactions needed to bring everyone's balance to zero
+- View a **simplified debt summary** for a group — a greedily reduced set of transactions (at most N-1 for N users) that brings everyone's balance to zero, not necessarily the provably minimum set
 
 ---
 
@@ -25,7 +25,7 @@ Design a system where users can:
 1. Create groups with a set of member users
 2. Add an expense: payer, total amount, list of participants, and a `SplitType` (EQUAL / EXACT / PERCENTAGE) plus any extra data the strategy needs (exact amounts, percentages)
 3. Compute and persist per-user-pair net balances after every expense
-4. Simplify a group's debts into the minimum number of settling transactions
+4. Simplify a group's debts into a reduced number of settling transactions (greedy; at most N-1 for N users, not guaranteed minimal)
 5. Record a settlement (payment) between two users and update balances accordingly
 6. Support multiple groups per user, each with an independent balance sheet
 
@@ -155,8 +155,8 @@ A natural extension would be a `BalanceChangeObserver` notified whenever an expe
 |----------|-------------|----------------|
 | Store pairwise net balances directly in `BalanceSheet` (`Map<String, Map<String, BigDecimal>>`), updated incrementally on each expense | Recompute every user's balance from the full expense history on each query | O(1) update per (payer, participant) pair and O(1) balance lookup vs. O(E) replay of every expense on every query. With thousands of expenses per group, incremental updates are essential |
 | `BigDecimal` for all money fields | `double` | `double` accumulates binary floating-point error — splitting $100.00 three ways as `33.333333...` repeatedly added/subtracted across hundreds of expenses drifts by cents. `BigDecimal` with `RoundingMode.HALF_UP` and a fixed scale (2) gives exact, auditable cent-level arithmetic — required for anything involving money |
-| Debt simplification via greedy max-heap matching (largest creditor vs. largest debtor) — **O(N log N)** | Exact minimum-transaction-count solution | Finding the *true* minimum number of transactions to zero out a set of balances is NP-hard in general (it reduces to a subset-sum / partition variant). The greedy heap approach produces at most N-1 transactions for N users and is the standard, practical interview answer — optimal in the common case and "good enough" otherwise |
-| Rounding remainder allocated to the **first N participants in iteration order** (one extra cent each until the remainder is exhausted) | Allocate all remainder to the payer, or randomly | Deterministic — same inputs always produce the same split, which matters for testing and for users comparing repeated runs of the same expense. "First N" is also how Splitwise's real UI behaves |
+| Debt simplification via greedy max-heap matching (largest creditor vs. largest debtor) — **O(N log N)** | Exact minimum-transaction-count solution | Finding the *true* minimum number of transactions to zero out a set of balances (the debts-clearing problem) is **NP-hard in the strong sense** — the hardness reduction goes *from* subset-sum, since each zero-sum subset of users you can find settles internally and saves a transaction ([arXiv:1402.6556](https://arxiv.org/abs/1402.6556)). The exact answer needs exponential subset enumeration (bitmask DP, O(2^N)); the greedy heap approach is a **heuristic** that produces at most N-1 transactions for N users in O(N log N). It frequently hits the optimum on small groups but is not guaranteed to, and it is the standard, practical interview answer |
+| Rounding remainder allocated to the **first N participants in iteration order** (one extra cent each until the remainder is exhausted) | Allocate all remainder to the payer, or randomly | Deterministic — same inputs always produce the same split, which matters for testing and for users comparing repeated runs of the same expense. Any fixed, documented tie-break rule works; what must not happen is a nondeterministic or drifting one |
 | `BalanceSheet` keyed by `String` user IDs rather than `User` object references | Use `User` objects as map keys directly | Avoids needing to implement `equals()`/`hashCode()` correctly on a mutable `User`; IDs are stable, comparable, and serialize cleanly if persisted |
 
 ---
@@ -273,6 +273,29 @@ debts — netting made B's $10 in and $10 out cancel before the greedy loop ever
 step 1 matters as much as the heap: the netting pass alone removes every user whose books already
 balance, and the `min(...)` rule then guarantees the remainder is cleared in at most `N-1` moves.
 
+**Where greedy is not optimal.** `N-1` is an *upper bound*, not the minimum. Take five users with
+nets `[+4, +3, +2, -4, -5]`:
+
+```
+greedy   +4 vs -5 -> settle 4, debtor -1 left        txn 1
+         +3 vs -4 -> settle 3, debtor -1 left        txn 2
+         +2 vs -1 -> settle 1, creditor +1 left      txn 3
+         +1 vs -1 -> settle 1, both cleared          txn 4      total: 4 transactions
+
+optimal  carve out the zero-sum subsets first:
+         {+4, -4}      -> 1 transaction
+         {+3, +2, -5}  -> 2 transactions                        total: 3 transactions
+```
+
+The lever greedy never pulls: **every disjoint zero-sum subset you can carve out settles internally
+and saves one transaction**, so the true optimum is `N - k`, where `N` counts users with a nonzero
+net and `k` is the maximum number of disjoint zero-sum subsets you can partition them into.
+Maximising `k` is exactly where the hardness enters — deciding whether a zero-sum subset exists is
+subset-sum — which is why the exact problem is NP-hard in the strong sense and is solved in practice
+by O(2^N) bitmask DP over the handful of users a friend group actually has. Greedy pairs by size,
+never by zero-sum structure, so it never goes looking for `{+4, -4}` at all. Say this out loud in an
+interview — claiming greedy returns "the minimum" is the single most common wrong answer here.
+
 ---
 
 ## Sample Output
@@ -315,7 +338,7 @@ Balance sheet:
   Carol : +$50.00
   Dave  : -$65.00
 
---- Simplified debt summary (minimum transactions) ---
+--- Simplified debt summary (greedy; at most N-1 transactions) ---
   Dave   pays Carol  $50.00
   Dave   pays Alice  $15.00
 
@@ -340,7 +363,7 @@ Updated net balances after settlement:
 - **Pairwise balance ledger -> double-entry ledger** — `BalanceSheet`'s `Map<userId, Map<otherId, BigDecimal>>` is a simplified double-entry ledger: every expense posts a credit to the payer and a matching debit to each participant. At production scale this becomes an append-only ledger table with optimistic-locking on balance updates — see `../../hld/case_studies/design_digital_wallet.md` for the full double-entry ledger and optimistic-concurrency pattern.
 - **Debt simplification as a batch job** — Running `simplifyDebts()` synchronously on every balance query is fine for a group of 10 friends, but at HLD scale (millions of groups) it becomes a periodic batch job — e.g., nightly, or triggered when a group's "settle up" screen is opened — that recomputes and caches the simplified transaction list rather than computing it inline on every request.
 - **Observer -> push notification fan-out** — The `BalanceChangeObserver` hook described in Patterns Used maps directly to a notification service: every balance-changing event (`updateBalance`) publishes to a message queue, fanned out to push-notification, email, and in-app feed consumers — see `../../hld/case_studies/design_notification_system.md`.
-- **BigDecimal precision -> minor-units convention** — The `BigDecimal`-with-scale-2 approach mirrors the real-world "store money as integer cents/minor units" convention used by payment processors (Stripe, PayPal APIs represent `$30.00` as the integer `3000`). Both approaches exist to eliminate floating-point drift; integer minor units are simply the wire-format equivalent of fixed-scale `BigDecimal`.
+- **BigDecimal precision -> minor-units convention** — The `BigDecimal`-with-scale-2 approach mirrors the real-world "never put money in a float" convention that every payment API enforces on the wire, in one of two shapes. Stripe uses **integer minor units**: its `amount` field is "a positive integer representing how much to charge in the smallest currency unit", so `$30.00` is the integer `3000`. PayPal's Orders v2 API instead uses a **decimal string** with explicit currency-driven precision (`"value": "30.00"`). Neither ever sends a binary float. Integer minor units are the wire-format equivalent of a fixed-scale `BigDecimal`; a decimal string is its literal serialization.
 
 ---
 

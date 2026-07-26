@@ -167,7 +167,7 @@ classDiagram
 
 1. **Not handling thread safety:** The simplest Singleton is not thread-safe. Two threads can simultaneously pass the `null` check and create two instances. Always use double-checked locking, static initialization, or an enum.
 
-2. **Double-checked locking without `volatile`:** Before Java 5, double-checked locking was broken. You must declare the `instance` field as `volatile` to prevent the JVM from reordering instructions.
+2. **Double-checked locking without `volatile`:** DCL is broken on *every* Java version if the field is not `volatile` — this is not a pre-Java-5-only problem. What Java 5 (JSR-133) changed is that a `volatile` field now establishes the happens-before edge that makes DCL correct; before that, even `volatile` did not fix it. You must declare the `instance` field as `volatile` to prevent the JVM or CPU from publishing the reference before the constructor finishes.
 
 3. **Serialization breaks Singleton:** If the Singleton implements `Serializable`, deserialization creates a new instance, defeating the pattern. You must implement `readResolve()` to return the existing instance.
 
@@ -183,19 +183,21 @@ classDiagram
 
 ## 14. Real-World Usage
 
-### Production Scenario: Netflix Archaius Config Registry at 500k Reads/sec
+### Production Scenario: Netflix Archaius Config Registry Under a Read-Heavy Load
 
-Netflix Archaius is a distributed configuration management library used across Netflix's microservice fleet.
-Every microservice — encoding workers, streaming edge nodes, recommendation engines — reads feature flags,
-timeouts, and A/B experiment assignments from a central config registry. At peak, the Archaius
-`ConfigurationManager` singleton serves over 500,000 property reads per second per JVM, with a p99 latency
-under 5 microseconds. Creating a new registry per caller would: (a) reload the full property graph from
-remote config sources (etcd/ZooKeeper) on every call — each taking 50–200ms, and (b) diverge in-flight
-reads if updates arrive between constructions.
+Netflix Archaius is an open-source configuration management library for dynamic, typed properties.
+Services read feature flags, timeouts, and experiment assignments from one process-wide config registry
+instead of constructing their own. In Archaius 1.x (`archaius-core`), that registry is reached through
+`com.netflix.config.ConfigurationManager.getConfigInstance()` — a textbook double-checked-locking
+singleton over a `static volatile AbstractConfiguration instance` field, returning a
+`ConcurrentCompositeConfiguration` (an Apache Commons Configuration `AbstractConfiguration`) by default.
+Constructing a new registry per caller would (a) re-run the bootstrap and re-poll every configuration
+source, and (b) diverge in-flight reads if an update landed between two constructions.
 
-The Archaius `ConfigurationManager` is one of the most referenced production Singleton implementations
-in the Java ecosystem. It uses the class-level static instance pattern, backed by `AbstractConfiguration`
-from Apache Commons Configuration.
+Archaius refreshes itself through a `PolledConfigurationSource` driven by `FixedDelayPollingScheduler`
+(defaults: 30 s initial delay, then every 60 s), with stock sources for URLs, JDBC, and DynamoDB.
+The throughput and latency figures used below — 500k reads/sec, p99 in the low microseconds — are an
+**illustrative** read-heavy workload chosen to size the argument; they are not published Netflix telemetry.
 
 ```mermaid
 flowchart LR
@@ -207,15 +209,15 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph JVM["Netflix Microservice JVM (32 GB heap, 200 request threads)"]
+    subgraph JVM["Service JVM (illustrative: 200 request threads)"]
         direction LR
         T1(["Thread-1"])
         T2(["Thread-2"])
         TN(["Thread-N"])
-        CM["ConfigurationManager (Singleton)<br/>static INSTANCE field<br/>ConcurrentCompositeConfiguration<br/>500k reads/sec, P99 under 5 microseconds"]
-        PS["PolledConfigSource<br/>(ZooKeeper / etcd)<br/>refresh every 30s"]
+        CM["ConfigurationManager<br/>static volatile instance (DCL)<br/>ConcurrentCompositeConfiguration<br/>illustrative: 500k reads/sec"]
+        PS["PolledConfigurationSource<br/>(URL / JDBC / DynamoDB)<br/>FixedDelayPollingScheduler, 60s"]
         DPF["DynamicPropertyFactory<br/>(watches + callbacks)"]
-        T1 -->|"getInstance().getProperty()"| CM
+        T1 -->|"getConfigInstance().getString()"| CM
         T2 --> CM
         TN --> CM
         CM --> PS
@@ -228,19 +230,19 @@ flowchart LR
     class DPF mathOp
 ```
 
-*Every HTTP-handling thread calls the same `ConfigurationManager` singleton instance (gold) rather than constructing its own — the shared object fans out to the remote poller (purple, external ZooKeeper/etcd) and the callback-driven property factory (orange), sustaining 500k reads/sec at p99 under 5 microseconds instead of N per-thread copies.*
+*Every HTTP-handling thread reaches the same `ConfigurationManager`-held configuration (gold) rather than constructing its own — the shared object fans out to the polled configuration source (purple, a URL/JDBC/DynamoDB source on a 60-second fixed-delay schedule) and the callback-driven `DynamicPropertyFactory` (orange), serving the illustrative 500k reads/sec from one in-memory map instead of N per-thread copies.*
 
 ### Famous Codebase Usages
 
 | Framework / Library | Class / Method | Version |
 |--------------------|---------------|---------|
-| `java.lang.Runtime` | `Runtime.getRuntime()` — static inner holder initializes once at class load | Java 1.0+ |
+| `java.lang.Runtime` | `Runtime.getRuntime()` — eager `private static final Runtime currentRuntime = new Runtime();`, initialized at class load (not a holder class) | Java 1.0+ |
 | `java.util.logging.LogManager` | `LogManager.getLogManager()` — singleton log manager, loggers cached by name | Java 1.4+ |
-| `java.awt.Desktop` | `Desktop.getDesktop()` — singleton desktop bridge, throws if no desktop | Java 6+ |
-| Hibernate 6.x | `SessionFactory` — one per persistence unit; `EntityManagerFactory` wraps it | Hibernate 6.0+ |
-| Spring Framework 6 | All `@Bean` methods with default scope are singleton-scoped — managed by `DefaultListableBeanFactory` | Spring 6.0+ (Spring Boot 3.0+) |
-| Netflix Archaius 2 | `ConfigurationManager.getInstance()` — static synchronized lazy init | Archaius 0.7+ |
-| HikariCP 5.x | `HikariDataSource` — intended as a singleton; pool of 10 connections by default, shared across all threads | HikariCP 5.0+ |
+| `java.awt.Desktop` | `Desktop.getDesktop()` — singleton desktop bridge, throws if headless/unsupported | Java 6+ |
+| Hibernate | `SessionFactory` — one per persistence unit; `EntityManagerFactory` wraps it | Hibernate 6.x / 7.x |
+| Spring Framework | All `@Bean` methods with default scope are singleton-scoped — managed by `DefaultListableBeanFactory` | Spring 6.x / 7.x (Spring Boot 3.x / 4.x) |
+| Netflix Archaius 1.x (`archaius-core`) | `ConfigurationManager.getConfigInstance()` — double-checked locking over a `static volatile AbstractConfiguration` field | archaius-core 0.x (the 2.x API is different: `com.netflix.archaius.api.Config`, DI-oriented, no static registry) |
+| HikariCP | `HikariDataSource` — intended as a singleton; `maximumPoolSize` defaults to 10 (`DEFAULT_POOL_SIZE`), shared across all threads | HikariCP 5.x–7.x |
 | SLF4J / Logback | `LoggerFactory.getLogger()` returns cached `Logger` singletons keyed by name — effectively per-name singletons | SLF4J 2.0+ |
 
 ### Anti-Pattern 1: DCL Without `volatile` — The Classic Production Bug
@@ -270,7 +272,8 @@ public class ConfigRegistry {
                 if (INSTANCE == null) {
                     INSTANCE = new ConfigRegistry(); // Thread A: partially constructed
                     // Thread B: passes first null check, sees non-null INSTANCE
-                    // Thread B: uses partially constructed object -> NullPointerException
+                    // Thread B: reads default/half-initialized fields (properties == null,
+                    //           numeric fields 0) -- which can surface as a NullPointerException
                 }
             }
         }
@@ -292,7 +295,7 @@ sequenceDiagram
     Note over F: missing volatile - JVM/CPU may reorder step 2 before step 3
     B->>F: read INSTANCE (non-null!)
     F-->>B: return partially-built object
-    Note over B: reads zeroed fields -> NullPointerException
+    Note over B: reads default/half-initialized state<br/>(can surface as a NullPointerException)
     A->>F: 3. run constructor body (too late)
 ```
 
@@ -374,14 +377,17 @@ c.setAccessible(true);
 ApiKeyStore second = c.newInstance(); // singleton violated
 ```
 
-### Production-Safe Alternative: Enum Singleton (Java 5+, Java 17 LTS recommended)
+### Production-Safe Alternative: Enum Singleton (Java 5+; unchanged on the Java 17 / 21 / 25 LTS releases)
 
-Effective Java Item 3: "Use enum to implement Singleton." The JVM guarantees enum values are
-instantiated exactly once per classloader, handles serialization natively (no `readResolve()`
-needed), and is immune to reflection attacks.
+Effective Java (3rd ed.) Item 3 is titled "Enforce the singleton property with a private constructor
+or an enum type," and concludes that "a single-element enum type is often the best way to implement a
+singleton." The JVM guarantees enum constants are instantiated exactly once per class initialization,
+serialization is handled natively (no `readResolve()` needed), and reflection is blocked:
+`Constructor.newInstance()` throws `IllegalArgumentException("Cannot reflectively create enum objects")`.
 
 ```java
-// Java 17 LTS — production-grade Singleton for shared config registry
+// Compiles and behaves identically on Java 17, 21, and 25 LTS
+// Production-grade Singleton for a shared config registry
 // Enum singleton: thread-safe, serialization-safe, reflection-safe, zero boilerplate.
 public enum ArchaiusConfigRegistry {
     INSTANCE;
@@ -396,7 +402,8 @@ public enum ArchaiusConfigRegistry {
     }
 
     private void loadFromRemoteSources() {
-        // Load from ZooKeeper/etcd — runs once, no locking needed
+        // Load from the configured polled sources (Archaius 1.x ships URL / JDBC / DynamoDB)
+        // — runs once during enum class initialization, no locking needed
         properties.put("streaming.maxBitrate", "8000");
         properties.put("ab.experiment.v2", "true");
         properties.put("timeout.upstream.ms", "200");
@@ -412,7 +419,7 @@ public enum ArchaiusConfigRegistry {
         return properties.getOrDefault(key, defaultValue);
     }
 
-    // Atomic update — called when ZooKeeper watcher fires
+    // Atomic update — called when the polling scheduler reports a changed property
     public void updateProperty(String key, String value) {
         properties.put(key, value);
     }
@@ -425,7 +432,7 @@ public enum ArchaiusConfigRegistry {
 // Usage — same instance returned on all 200 threads, zero locking on reads
 public class StreamingEdgeService {
     public int getMaxBitrate() {
-        // p99 < 5 microseconds: ConcurrentHashMap.get() with no lock contention
+        // Lock-free read path: a plain static field read plus ConcurrentHashMap.get()
         String val = ArchaiusConfigRegistry.INSTANCE.getProperty("streaming.maxBitrate", "4000");
         return Integer.parseInt(val);
     }
@@ -434,29 +441,36 @@ public class StreamingEdgeService {
 
 ### Performance and Correctness Numbers
 
-| Approach | Read latency (p99) | Thread safety | Serialization safe | Reflection safe |
-|---|---|---|---|---|
-| Eager static field | ~1 ns (field access) | Yes | No (needs readResolve) | No |
-| Bill Pugh holder idiom | ~2 ns (class load once) | Yes | No (needs readResolve) | No |
-| DCL + `volatile` | ~3–5 ns (volatile read) | Yes | No (needs readResolve) | No |
-| `synchronized getInstance()` | ~50–200 ns (lock on every call) | Yes | No | No |
-| Enum Singleton | ~1 ns (field access) | Yes | Yes (built-in) | Yes (JVM blocks) |
+The correctness columns are exact; the latency column is an **order-of-magnitude** guide only — actual
+figures depend on JVM, CPU architecture, and contention, and none of these are published benchmark results.
 
-ConcurrentHashMap reads at 500k/sec on a 32-core JVM: total CPU overhead under 0.5% per core.
-Lock contention with `synchronized getInstance()` at 500k/sec would saturate one core entirely.
+| Approach | Access cost (order of magnitude) | Thread safety | Serialization safe | Reflection safe |
+|---|---|---|---|---|
+| Eager static field | ~1 ns (plain field read) | Yes | No (needs readResolve) | No |
+| Bill Pugh holder idiom | ~1 ns after the one-time class init | Yes | No (needs readResolve) | No |
+| DCL + `volatile` | ~1–5 ns (volatile read; free on x86, a load-acquire on ARM) | Yes | No (needs readResolve) | No |
+| `synchronized getInstance()` | tens of ns uncontended, far worse once threads contend | Yes | No | No |
+| Enum Singleton | ~1 ns (plain field read) | Yes | Yes (built-in) | Yes (JVM blocks) |
+
+Working the arithmetic on the illustrative 500k reads/sec: at ~200 ns per call a `synchronized
+getInstance()` burns 500,000 x 200 ns = 0.1 s of CPU per second — roughly 10% of one core, and worse
+still once the monitor is actually contended and threads park. The lock-free forms (enum, holder idiom,
+or DCL with `volatile`) cost a plain field read, so at the same rate their overhead is negligible.
+Note that JSR-133's own FAQ recommends the holder idiom over DCL on readability grounds even though
+DCL-with-`volatile` is correct.
 
 ### Migration Story: When to Move TO Enum Singleton, and When to Move AWAY
 
 **Move TO Enum Singleton** when:
 - You have a static field Singleton that is also `Serializable` (distributed cache, session object).
 - The class is tested and reflection attacks are a security concern.
-- You are upgrading a legacy pre-Java 5 DCL-without-volatile to Java 17+ code.
+- You are upgrading legacy DCL-without-`volatile` code onto a current LTS (Java 17, 21, or 25).
 
 **Move AWAY from Singleton** (toward DI) when:
 - Unit tests need to swap the instance with a mock. A Singleton cannot be replaced by a test double
   without reflection hacks or test-specific static setters.
 - The application has multiple logical "tenants" (multi-tenant SaaS) that need independent instances.
-- The team migrates to Spring Boot 3.x where the container manages singleton scope via
+- The team migrates to Spring Boot 3.x/4.x where the container manages singleton scope via
   `@Bean` or `@Component`, making hand-rolled Singletons redundant and harder to manage.
 
 ```mermaid
@@ -575,7 +589,7 @@ flowchart TD
    public static Singleton getInstance() { return Holder.INSTANCE; }
    ```
 
-3. **Declare `instance` as `volatile`** if using double-checked locking — required since Java 5 for correct memory visibility.
+3. **Declare `instance` as `volatile`** if using double-checked locking — DCL is incorrect without it on any Java version, and it is Java 5's JSR-133 memory model that made `volatile` strong enough to fix it.
 
 4. **Implement `readResolve()`** if the Singleton is serializable — return the existing instance to prevent deserialization from creating a second object.
 

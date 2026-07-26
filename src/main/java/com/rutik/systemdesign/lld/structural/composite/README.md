@@ -243,6 +243,12 @@ sequenceDiagram
 
 ### Production Anchor: Gradle-Style Build Task Graph
 
+*Worked scenario, not a report on Gradle itself.* The system below is a representative
+monorepo build tool modelled on Gradle's task-graph design; every number in it (node
+counts, budgets, timings, hit rates) is an illustrative figure for this one hypothetical
+setup, chosen so the tradeoffs are concrete. Treat them as a worked example to reason
+against, not as published benchmarks for any real build tool.
+
 A monorepo build tool executes a task DAG of ~10,000 nodes (compile units, test groups, doc generation, packaging). `BuildTask` is the leaf (a single executable unit), `TaskGroup` is the composite (an aggregation that runs children in dependency order). `execute()` recurses the tree. Target: full graph traversal and scheduling decision in < 50ms; total build time bound by leaf execution, not by orchestration. Cache hit ratio of leaf outputs averages 92%, so most invocations skip work — but the composite must still walk every node to compute up-to-date status. Cycle detection is mandatory: a misconfigured `compileMain -> compileTest -> compileMain` cycle must be reported, not stack-overflow.
 
 ```
@@ -351,7 +357,7 @@ TaskResult result = root.execute(new BuildContext(cache, /*failFast*/ true));
 - **`java.io.File`** — `isDirectory()`/`listFiles()` form a Composite (File can be a leaf or a directory composite).
 - **`javax.swing.JComponent`** — `Container.add(Component)` defines the composite; every Swing widget participates. The component tree is walked for layout, painting, and event dispatch.
 - **`org.w3c.dom.Node`** — the XML/HTML DOM. `Node.getChildNodes()` returns children; `Element`, `Text`, `Attr` are nodes. Browser engines walk this tree for rendering and querySelector.
-- **`javax.faces.component.UIComponent`** — JSF component tree, walked during the JSF lifecycle phases.
+- **`jakarta.faces.component.UIComponent`** — Jakarta Faces (formerly JSF; the package moved from `javax.faces` to `jakarta.faces` in Jakarta EE 9) component tree, walked during the Faces lifecycle phases.
 - **Spring `org.springframework.core.env.CompositePropertySource`** — aggregates multiple `PropertySource`s; `getProperty(name)` walks children in order.
 - **Spring `org.springframework.web.filter.CompositeFilter`** — chains servlet filters; behaves as a single `Filter`.
 - **Spring `org.springframework.cache.support.CompositeCacheManager`** — delegates to multiple `CacheManager`s in order.
@@ -407,7 +413,7 @@ public TaskResult execute(BuildContext ctx) {
     for (BuildTask c : children) c.execute(ctx);    // stack overflow if cycle exists
     return TaskResult.aggregate(name, ...);
 }
-// Symptom: StackOverflowError 50 frames deep, no useful diagnostic.
+// Symptom: StackOverflowError thousands of frames deep, the trace a repeating cycle, no useful diagnostic.
 
 // FIX — track visited nodes; raise a clear error on cycle
 private TaskResult executeSafe(BuildContext ctx, Set<BuildTask> visiting) {
@@ -423,10 +429,17 @@ private TaskResult executeSafe(BuildContext ctx, Set<BuildTask> visiting) {
 
 ### Performance and Correctness Numbers
 
-- 10k-node graph traversal with cycle detection: 38ms p99 on a 2023 laptop — under the 50ms budget. `HashSet<BuildTask>` lookup is O(1); each node is hashed once.
-- Cache check per leaf: 4µs (mtime + content hash lookup in a memory-mapped index). 92% hit rate means 9,200 of 10,000 leaves return `cached` in microseconds.
-- Memory footprint of the graph: ~80 bytes per `LeafTask` + child list overhead in groups; 10k nodes ~ 1.5MB heap.
-- Cycle errors are reported with the full path (`build -> compile -> compile`) instead of a stack trace, cutting user debugging time from ~30 minutes to ~30 seconds.
+**Illustrative measurements, one stated setup.** The figures below are what this specific
+hypothetical build tool measured on one machine — a 2023 laptop (8-core x86-64, 32GB RAM,
+NVMe SSD), JDK 21, single JVM, warm page cache, 10,000-node graph. They are here to make
+the orders of magnitude concrete, not as universal constants: they are not published
+benchmarks, they are not vendor numbers, and they will not reproduce on your hardware,
+JDK, or graph shape. Measure your own tree before quoting any of them.
+
+- 10k-node graph traversal with cycle detection: 38ms p99 in that setup — under its 50ms budget. The algorithmic claim behind it is the durable part: `HashSet<BuildTask>` membership is **O(1) average** (O(n) worst case if hashes collide badly), so the visited-set check adds a constant factor rather than another traversal.
+- Cache check per leaf: ~4µs in that setup (mtime + content hash lookup in a memory-mapped index). The 92% hit rate is this scenario's observed ratio, so ~9,200 of 10,000 leaves returned `cached` — a healthy incremental build, not a figure any build tool guarantees.
+- Memory footprint of the graph in that setup: on the order of 80 bytes per `LeafTask` (object header + refs, 64-bit HotSpot with compressed oops) plus child-list overhead in groups; 10k nodes landed around 1.5MB heap. Exact per-object size is JVM- and layout-dependent — verify with JOL rather than assuming.
+- Cycle errors are reported with the full path (`build -> compile -> compile`) instead of a stack trace. The durable claim is qualitative: a named cycle path is diagnosable in seconds, a bare `StackOverflowError` is not.
 
 ### Migration Story
 
@@ -484,7 +497,7 @@ A: In the transparency design, `add/remove/getChild` are declared on the Compone
 A: Composite defines the tree structure. Visitor separates operations on that tree from the node classes. You add a new operation by writing a new Visitor rather than modifying every node class. The Composite tree calls `visitor.visit(this)` on each node; the Visitor implements different logic for each node type.
 
 **Q: Give a real-world example of the Composite pattern.**
-A: The Swing GUI framework. `java.awt.Component` is the Component interface. `java.awt.Container` is the Composite that holds child Components. `JButton`, `JLabel`, `JTextField` are Leaves. `JPanel`, `JFrame` are Containers. You can call `getPreferredSize()` on a `JPanel` and it recursively asks all children for their sizes — without knowing whether it's talking to a leaf or another container.
+A: The Swing GUI framework plays every Composite role: `java.awt.Component` is the Component role (an abstract class, not an interface), and `java.awt.Container` is the Composite that holds child Components. `JPanel` and `JFrame` are the composites you actually nest; `JButton`, `JLabel`, `JTextField` behave as leaves in practice. One caveat worth stating in an interview: because `javax.swing.JComponent` extends `Container`, every Swing widget is *technically* a container that could hold children — Swing chose full transparency, so "leaf" here is a usage convention, not a type distinction. You can call `getPreferredSize()` on a `JPanel` and its layout manager recursively asks all children for their sizes — without knowing whether it is talking to a leaf-style widget or another nested container.
 
 **Q: What are the risks of circular references in Composite?**
 A: If a composite is accidentally added as a child of itself (directly or indirectly), any traversal becomes infinite recursion. Prevention strategies include: maintaining parent references and checking for cycles on `add()`, or making composites immutable after construction.
@@ -493,7 +506,7 @@ A: If a composite is accidentally added as a child of itself (directly or indire
 A: Composite models a part-whole tree where a node can have zero, one, or many children of the same `Component` type, and operations are defined to aggregate results from those children — the focus is the tree structure. Decorator wraps exactly one component to layer additional behavior onto it, with no notion of "multiple children" or hierarchy — the focus is behavior augmentation. A practical tell: if removing a node should also remove everything beneath it in a meaningful tree (a folder and its files), that's Composite; if "removing" a wrapper should just unwrap to reveal the single object underneath (stripping a `BufferedInputStream` to get the raw `FileInputStream`), that's Decorator. The two are sometimes combined — e.g., a composite tree whose individual nodes are themselves decorated — but conflating them in an interview answer (calling Decorator "a composite with one child") is a common mistake to avoid.
 
 **Q: How do you avoid stack overflow when running recursive operations on very deep Composite trees?**
-A: The naive recursive implementation of `getSize()`, `render()`, or any tree-wide operation calls itself once per level of depth, so a tree thousands of levels deep can exhaust the JVM's default thread stack (~512KB-1MB) and throw `StackOverflowError`. The fix is to convert the recursion to an explicit iterative traversal using an auxiliary `Deque` as a stack (or `Queue` for BFS), pushing children onto it instead of making nested calls — this trades stack frames for heap-allocated collection entries, which scale far beyond the default stack size. Another option is increasing the thread's stack size via `-Xss` or the `Thread(ThreadGroup, Runnable, String, long stackSize)` constructor, but that is a band-aid that doesn't bound memory usage. In practice, most real-world composite trees (file systems, UI trees, org charts) are shallow enough (tens of levels) that recursion is fine — but flag the iterative alternative if the interviewer probes "what if the tree is 10,000 levels deep."
+A: The naive recursive implementation of `getSize()`, `render()`, or any tree-wide operation calls itself once per level of depth, so a tree thousands of levels deep can exhaust the JVM's default thread stack (platform-dependent; commonly around 512KB-1MB on 64-bit HotSpot, and settable with `-Xss`) and throw `StackOverflowError`. The fix is to convert the recursion to an explicit iterative traversal using an auxiliary `Deque` as a stack (or `Queue` for BFS), pushing children onto it instead of making nested calls — this trades stack frames for heap-allocated collection entries, which scale far beyond the default stack size. Another option is increasing the thread's stack size via `-Xss` or the `Thread(ThreadGroup, Runnable, String, long stackSize)` constructor, but that is a band-aid that doesn't bound memory usage. In practice, most real-world composite trees (file systems, UI trees, org charts) are shallow enough (tens of levels) that recursion is fine — but flag the iterative alternative if the interviewer probes "what if the tree is 10,000 levels deep."
 
 **Q: How would you implement and use Composite for a file system, concretely?**
 A: Define a `FileSystemNode` interface with methods like `getSize()` and `print(String indent)`. `File` (Leaf) implements `getSize()` by returning its own byte count and `print()` by printing its name. `Directory` (Composite) holds a `List<FileSystemNode>` of children; its `getSize()` sums `child.getSize()` over all children (recursively triggering the same logic on sub-directories), and its `print()` prints its own name then calls `print(indent + "  ")` on each child. The client computing total disk usage calls `root.getSize()` once and never needs to know whether `root` is a single file or a deeply nested directory tree — that uniform-interface property is the entire payoff. This is also the most commonly asked "implement Composite live" interview prompt, so being able to write this `File`/`Directory`/`FileSystemNode` trio from memory, including the constructor and `add()` method on `Directory`, is high-value preparation.

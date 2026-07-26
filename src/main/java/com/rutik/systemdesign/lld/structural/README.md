@@ -36,11 +36,11 @@ Key distinction: these patterns operate at the structural level — the relation
 |---------|------|--------|---------------------|-------------|
 | Adapter | [adapter/](adapter/) | Convert one interface to another | `InputStreamReader` wrapping `InputStream`; `Arrays.asList()` | Class adapter requires multiple inheritance (use object adapter in Java) |
 | Bridge | [bridge/](bridge/) | Separate abstraction from implementation so both can vary independently | JDBC: `java.sql.Driver` (abstraction) + vendor driver (implementation) | Often mistaken for Adapter — Bridge is designed upfront; Adapter retrofits |
-| Composite | [composite/](composite/) | Treat individual objects and compositions uniformly via a tree | `java.awt.Container` + `Component`; `javax.faces.component.UIComponent` | Leaf-specific operations (e.g., `add()`) don't make sense on leaves; breaks type safety |
+| Composite | [composite/](composite/) | Treat individual objects and compositions uniformly via a tree | `java.awt.Container` + `Component`; `jakarta.faces.component.UIComponent` (was `javax.faces.*` before Jakarta EE 9) | Leaf-specific operations (e.g., `add()`) don't make sense on leaves; breaks type safety |
 | Decorator | [decorator/](decorator/) | Attach additional responsibilities to an object dynamically | `BufferedReader(new InputStreamReader(socket.getInputStream()))` | Deep stacking makes debugging hard; ordering of decorators affects behavior |
-| Facade | [facade/](facade/) | Provide a simplified interface to a complex subsystem | `javax.faces.context.FacesContext`; Spring's `JdbcTemplate` | Facade can become a God Class if it exposes too much; doesn't prevent direct subsystem access |
+| Facade | [facade/](facade/) | Provide a simplified interface to a complex subsystem | `jakarta.faces.context.FacesContext`; Spring's `JdbcTemplate` | Facade can become a God Class if it exposes too much; doesn't prevent direct subsystem access |
 | Flyweight | [flyweight/](flyweight/) | Share common state across many fine-grained objects | `Integer.valueOf()` cache (-128 to 127); `String.intern()`; `Character` cache | Intrinsic/extrinsic state boundary must be clear; thread-safety of shared state required |
-| Proxy | [proxy/](proxy/) | Control access to an object — add lazy loading, logging, security, remote access | Spring AOP (JDK dynamic proxy / CGLIB); `java.lang.reflect.Proxy` | Proxy and subject must share the same interface; CGLIB breaks for final classes |
+| Proxy | [proxy/](proxy/) | Control access to an object — add lazy loading, logging, security, remote access | Spring AOP (JDK dynamic proxy / CGLIB); `java.lang.reflect.Proxy` | Proxy must be type-compatible with the subject (shared interface for JDK proxies, generated subclass for CGLIB); CGLIB cannot proxy `final` classes or advise `final` methods |
 
 ---
 
@@ -97,13 +97,13 @@ Each branch asks the deciding question for one of the seven patterns; the leaf i
 
 | Pattern | Spring / Java Library Usage |
 |---------|---------------------------|
-| Proxy | Spring AOP: JDK `java.lang.reflect.Proxy` (interface-based), CGLIB (class-based). Spring `@Transactional`, `@Async`, `@Cacheable` all work via proxy. |
+| Proxy | Spring AOP: JDK `java.lang.reflect.Proxy` (interface-based), CGLIB (class-based). Spring `@Transactional`, `@Async`, `@Cacheable` all work via proxy. Note: plain Spring Framework picks JDK when the target implements an interface, but Spring Boot has defaulted `spring.aop.proxy-target-class=true` since 2.0, so a Boot app gets CGLIB either way. |
 | Decorator | Java I/O: `InputStream` to `FilterInputStream` to `BufferedInputStream` to `GZIPInputStream` is a Decorator chain. |
 | Adapter | `HandlerAdapter` in Spring MVC adapts different handler types (Controller, HttpRequestHandler, Servlet) to a single interface. |
 | Facade | `JdbcTemplate` is a Facade over JDBC (handles connection, statement, exception translation). `SLF4J` is a Facade over logging implementations. |
 | Flyweight | `Integer.valueOf(n)` for -128 to 127 returns cached instances. `String.intern()` returns the pool instance. `Charset.forName()` caches Charset instances. |
-| Composite | Spring's `CompositePropertySource`, `CompositeCacheManager`, and `CompositeHealthIndicator` all use Composite to treat collections of components as a single component. |
-| Bridge | JDBC is the canonical Java Bridge: `DriverManager` is the abstraction; vendor-specific `Driver` implementations are the implementations. |
+| Composite | Spring's `CompositePropertySource`, `CompositeCacheManager`, and Actuator's `CompositeHealthContributor` all use Composite to treat collections of components as a single component. (`CompositeHealthIndicator` was the pre-2.2 name; deprecated in Boot 2.2 and removed in 2.4.) |
+| Bridge | JDBC is the canonical Java Bridge: the `java.sql` interfaces (`Driver`, `Connection`, `Statement`) are the abstraction; vendor-specific driver classes are the implementations. `DriverManager` is the registry/factory that binds the two, not the abstraction itself. |
 
 ---
 
@@ -201,8 +201,10 @@ Most structural patterns have negligible runtime overhead — the cost of one ex
 | Decorator | None | One delegation per layer | One wrapper object per decorator |
 | Facade | None | None (just delegation) | Negligible |
 | Flyweight | Cache population | Factory map lookup (O(1) typical) | Large saving (shared intrinsic state) |
-| Proxy (JDK) | Interface proxy generation | Reflection overhead (~5–10 ns) | One proxy object per bean |
-| Proxy (CGLIB) | Bytecode generation | Near-zero (direct dispatch) | One subclass per proxied type |
+| Proxy (JDK) | Interface proxy generation | One reflective `InvocationHandler` dispatch (single-digit to low-tens of nanoseconds once JIT-warm) | One proxy object per bean |
+| Proxy (CGLIB) | Bytecode generation | One generated-subclass dispatch via a `MethodInterceptor` | One subclass per proxied type |
+
+Per-call figures above are order-of-magnitude only. On modern JDKs the JDK-proxy vs CGLIB per-call gap is small enough to be swamped by whatever the advice itself does (a transaction begin/commit costs microseconds to milliseconds); benchmark your own workload before treating either as "the fast one."
 
 ---
 
@@ -212,9 +214,9 @@ Most structural patterns have negligible runtime overhead — the cost of one ex
 |---------|----------------------|-----------------|-------------|
 | Adapter | `java.io.InputStreamReader`, `Arrays.asList()`, `Collections.unmodifiableList()` | `HandlerAdapter`, `MessageConverter` | MapStruct (DTO adapters) |
 | Bridge | JDBC (`java.sql.Driver`), `java.util.logging.Handler` | N/A — architectural choice | N/A |
-| Composite | `java.awt.Container`, `javax.faces.component.UIComponent` | `CompositePropertySource`, `CompositeCacheManager` | Apache Commons Configuration |
+| Composite | `java.awt.Container`, `jakarta.faces.component.UIComponent` | `CompositePropertySource`, `CompositeCacheManager`, `CompositeHealthContributor` | Apache Commons Configuration |
 | Decorator | `java.io.*` streams, `java.util.Collections.synchronized*` | `BeanDefinitionDecorator` | Lombok `@Delegate` |
-| Facade | `javax.faces.context.FacesContext` | `JdbcTemplate`, `RestTemplate`, `RedisTemplate` | SLF4J |
+| Facade | `jakarta.faces.context.FacesContext` | `JdbcTemplate`, `RestClient`/`RestTemplate`, `RedisTemplate` | SLF4J |
 | Flyweight | `Integer.valueOf()`, `String.intern()`, `Boolean.valueOf()` | `SimpleTypeConverter` cache | Guava `Interners` |
 | Proxy | `java.lang.reflect.Proxy`, RMI stubs | Spring AOP, `@Transactional`, `@Cacheable` | ByteBuddy, Javassist, Mockito |
 
@@ -237,7 +239,7 @@ If you design an Adapter, it means you already have two incompatible things and 
 ---
 
 **Q: How does Spring AOP implement the Proxy pattern? What are the two mechanisms?**
-Spring creates a proxy around the target bean at startup. If the target implements an interface, Spring uses `java.lang.reflect.Proxy` (JDK dynamic proxy) — the proxy implements the same interface and delegates all calls. If the target does NOT implement an interface (or if `proxyTargetClass=true` is set), Spring uses CGLIB to subclass the target class and override methods. This is why `@Transactional` on a `final` method silently fails with CGLIB — final methods can't be overridden, so the proxy can't intercept them. Fix: declare all proxied methods on an interface, or remove `final`.
+Spring creates a proxy around the target bean at startup, using a JDK dynamic proxy when the target implements at least one interface and a CGLIB subclass proxy otherwise. With plain Spring Framework (7.0 docs still state this), a target implementing at least one interface gets `java.lang.reflect.Proxy` — the proxy implements all of the target's interfaces and delegates every call; a target with no interfaces gets a CGLIB runtime-generated subclass. The gotcha for 2026: Spring Boot has set `spring.aop.proxy-target-class=true` by default since Boot 2.0, so in a Boot application `@Transactional` is proxied by CGLIB regardless of whether the bean implements an interface (and that global default even overrides an explicit `@EnableTransactionManagement(proxyTargetClass = false)`). That matters because CGLIB cannot advise `final` methods or proxy `final` classes — they can't be overridden or extended, so `@Transactional` silently does nothing there. Also note the proxy only intercepts calls arriving from OUTSIDE the bean; `this.someMethod()` bypasses it entirely. Fix: drop `final`, or set `spring.aop.proxy-target-class=false` and proxy through an interface.
 
 ---
 
@@ -267,7 +269,7 @@ When a Spring bean calls one of its own `@Transactional` methods directly (`this
 ---
 
 **Q: How does Java's `Integer.valueOf()` implement the Flyweight pattern?**
-`Integer.valueOf(n)` caches `Integer` instances for values -128 to 127 (configurable up to a JVM flag maximum). Calls with values in this range return the same cached instance; calls outside the range create a new instance each time. This is the Flyweight: the `Integer` objects in the cache are the shared flyweights (intrinsic state = the integer value). The extrinsic state is the calling context — the same `Integer(42)` instance is returned to every caller who asks for 42. Pitfall: `Integer a = 200; Integer b = 200; a == b` is `false` (outside cache range); `Integer a = 100; Integer b = 100; a == b` is `true`. Always use `.equals()`, not `==`, for Integer comparison.
+`Integer.valueOf(n)` caches `Integer` instances for values -128 to 127, with the upper bound raisable via the `-XX:AutoBoxCacheMax=<size>` JVM flag. The -128 lower bound and the 127 minimum upper bound are mandated by the JLS autoboxing identity rules, so only the top of the range is tunable. Calls with values in this range return the same cached instance; calls outside the range create a new instance each time. This is the Flyweight: the `Integer` objects in the cache are the shared flyweights (intrinsic state = the integer value). The extrinsic state is the calling context — the same `Integer(42)` instance is returned to every caller who asks for 42. Pitfall (at default cache settings): `Integer a = 200; Integer b = 200; a == b` is `false` (outside cache range); `Integer a = 100; Integer b = 100; a == b` is `true`. Always use `.equals()`, not `==`, for Integer comparison.
 
 ---
 
@@ -277,7 +279,7 @@ Without Bridge: N abstractions x M implementations = N×M subclasses. Example: `
 ---
 
 **Q: What is a remote proxy, and how does it relate to Java RMI?**
-A remote proxy represents an object that lives in a different JVM or address space. The proxy exposes the same interface as the real object; method calls on the proxy are serialized, transmitted to the remote JVM, executed on the real object, and the result is serialized back. Java RMI (`java.rmi.Remote`) is the classic implementation: a stub (proxy) on the client side implements the remote interface; the skeleton on the server side unwraps calls. Modern equivalents: gRPC stubs, Feign clients, and Spring's `@FeignClient` are all remote proxies at the HTTP/protobuf level.
+A remote proxy represents an object that lives in a different JVM or address space. The proxy exposes the same interface as the real object; method calls on the proxy are serialized, transmitted to the remote JVM, executed on the real object, and the result is serialized back. Java RMI (`java.rmi.Remote`) is the classic implementation: a stub (proxy) on the client side implements the remote interface and marshals the call to the server. Server-side *skeletons* are a JDK 1.1 artifact — they have not been required since JDK 1.2, which dispatches reflectively instead, and the `rmic` static stub compiler that generated them was deprecated in JDK 13 and removed in JDK 17; modern RMI generates stubs dynamically. Modern equivalents: gRPC stubs and Spring Cloud OpenFeign's `@FeignClient` are remote proxies at the HTTP/protobuf level.
 
 ---
 
@@ -314,4 +316,4 @@ Proxy (Spring AOP mechanics and the self-invocation trap), Decorator vs Proxy (s
 - **Decorator**: define a canonical decorator order in a factory method. Never let callers construct arbitrary stacks — ordering bugs are silent and hard to reproduce.
 - **Facade**: keep the Facade thin. If it starts accumulating business logic, it has become a service layer, not a Facade. One Facade per client archetype, not one Facade for all.
 - **Flyweight**: make intrinsic state immutable (`final` fields). Use a `ConcurrentHashMap` as the factory cache for thread safety. Profile before applying — premature Flyweight adds complexity without measurable gain.
-- **Proxy**: always use an interface-based proxy where possible (JDK dynamic proxy). Reserve CGLIB for cases where the target has no interface. Document all proxied methods and test them through the Spring context, not via `new`, to catch self-invocation and final-method failures early.
+- **Proxy**: know which proxy you actually get — Spring Boot defaults `spring.aop.proxy-target-class=true`, so CGLIB is used even for beans that implement interfaces; set it to `false` only if you deliberately want JDK interface proxies everywhere. Either way, never mark a proxied method or class `final`. Document all proxied methods and test them through the Spring context, not via `new`, to catch self-invocation and final-method failures early.
