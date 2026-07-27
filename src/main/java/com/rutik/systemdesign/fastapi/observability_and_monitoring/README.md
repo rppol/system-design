@@ -22,7 +22,7 @@ to answer three questions in under two minutes: is there an error spike, which e
 is slow, and which specific request triggered the failure. Logs, metrics, and traces each carry one
 third of that answer.
 
-Python version scope: all examples target Python 3.11 / 3.12 and use `X | None` union syntax.
+Python version scope: all examples target Python 3.13 / 3.14 and use `X | None` union syntax.
 
 ---
 
@@ -37,9 +37,9 @@ scoreboard — total laps, average time, failure count. Logs are the per-runner 
 the baton at metre 42 because of a wet grip."
 
 **Why it matters.** Mean-time-to-resolution (MTTR) in production incidents is dominated by
-*diagnosis* time, not fix time. Teams with structured logs + metrics dashboards + distributed traces
-resolve incidents in under 15 minutes on average; teams relying on `print()` debugging measure MTTR
-in hours.
+*diagnosis* time, not fix time. Structured logs + metrics dashboards + distributed traces let you
+locate a failing component by querying; `print()` debugging leaves you re-deploying instrumentation
+mid-incident, which is what turns a minutes-long diagnosis into an hours-long one.
 
 **Key insight.** The three pillars are only valuable when they share a common identifier — the
 correlation / trace ID. Without it you have three isolated datasets. With it, a single string
@@ -69,9 +69,10 @@ metric labels.
 orchestrator (restart me? send traffic to me?). They must respond in under 50 ms and must not touch
 Prometheus counters or produce log lines — otherwise a K8s liveness loop creates unbounded log noise.
 
-**Sampling is necessary at scale.** At 10 000 req/s, storing 100% of traces costs ~$3 000/month on
-Jaeger-backed S3 at typical span sizes. Head-based sampling at 1–5% with tail-based sampling for
-errors and slow requests (p99 > 1 s) is the production-proven approach.
+**Sampling is necessary at scale.** At 10 000 req/s a service emits 864 million traces per day;
+retaining all of them is a storage and query-cost problem long before it is a usefulness problem.
+Head-based sampling at 1–5% with tail-based sampling for errors and slow requests (p99 > 1 s) is the
+production-proven approach.
 
 ---
 
@@ -88,9 +89,10 @@ errors and slow requests (p99 > 1 s) is the production-proven approach.
 
 ### 4.2 Metrics collection models
 
-**Pull model (Prometheus default).** Prometheus scrapes `/metrics` every 15 s. The app maintains
-in-memory counters; prometheus-fastapi-instrumentator registers the endpoint automatically. Zero
-external dependency at runtime.
+**Pull model (Prometheus default).** Prometheus scrapes `/metrics` on its configured
+`scrape_interval` — the shipped global default is `1m`, and 15 s is the value most production
+deployments set. The app maintains in-memory counters; prometheus-fastapi-instrumentator registers
+the endpoint automatically. Zero external dependency at runtime.
 
 **Push model (StatsD, InfluxDB line protocol).** The app sends UDP datagrams per event. Lower
 latency, no scrape endpoint needed. Harder to debug — if the UDP sink is down, data silently drops.
@@ -410,11 +412,11 @@ them." Every field you add for queryability is paid for on every line, forever.
 ```
 
 Note what moves the total: going from 3 lines to 5 costs 67% more, and going from 400 B to 600 B
-costs 50% more — the two together nearly triple it, from 8.6 to 21.6 GB/day, without a single extra
+costs 50% more — the two together multiply it by 2.5, from 8.6 to 21.6 GB/day, without a single extra
 request. That is the arithmetic behind Best Practice 2: a `log.info(...)` inside a 10,000-iteration
-loop does not add "some noise", it multiplies `lines/req` by 10,000 and turns an 8.6 GB/day service
-into a 28.8 TB/day one. Log at boundaries, aggregate inside loops, and treat field count as a per-line
-tax rather than a free improvement.
+loop does not add "some noise", it takes `lines/req` from 3 to 10,003 — a 3,334x multiplier — and
+turns an 8.6 GB/day service into a 28.8 TB/day one. Log at boundaries, aggregate inside loops, and
+treat field count as a per-line tax rather than a free improvement.
 
 ### 6.3 Correlation ID middleware
 
@@ -448,8 +450,8 @@ into request B on the same event-loop iteration — a subtle and hard-to-reprodu
 from prometheus_client import Counter, Histogram, Gauge
 from prometheus_fastapi_instrumentator import Instrumentator
 
-# Auto-instrumentation: registers starlette_requests_total and
-# starlette_request_duration_seconds with method/handler/status labels
+# Auto-instrumentation: registers http_requests_total and
+# http_request_duration_seconds with method/handler/status labels
 def setup_metrics(app: object) -> None:
     Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
@@ -553,10 +555,17 @@ async def charge_payment(order_id: int, amount: float) -> str:
 ### 6.6 Health and readiness probes
 
 ```python
-from fastapi import FastAPI, status
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 app = FastAPI()
+
+def get_engine() -> AsyncEngine:
+    # Returns the engine created in `lifespan`; see production_deployment_and_scaling.
+    return app.state.engine
 
 @app.get("/health", status_code=status.HTTP_200_OK, include_in_schema=False)
 async def liveness() -> dict[str, str]:
@@ -564,8 +573,13 @@ async def liveness() -> dict[str, str]:
     return {"status": "ok"}
 
 @app.get("/ready", status_code=status.HTTP_200_OK, include_in_schema=False)
-async def readiness(engine: AsyncEngine) -> dict[str, str]:
+async def readiness(
+    engine: Annotated[AsyncEngine, Depends(get_engine)],
+) -> dict[str, str]:
     # Verify dependencies are reachable before accepting traffic.
+    # AsyncEngine is not a Pydantic-representable type, so it MUST arrive via
+    # Depends — a bare `engine: AsyncEngine` parameter raises FastAPIError
+    # ("Invalid args for response field") at route-registration time.
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -601,27 +615,32 @@ readinessProbe:
 
 ## 7. Real-World Examples
 
-**Stripe.** Stripe runs structured JSON logs through a Kafka pipeline into Elasticsearch. Every log
-line carries a `request_id` that links to a trace in their internal tracing system. Engineers can
-pivot from a 5xx error in Kibana to the Jaeger trace in one click. Stripe publishes their structured
-logging conventions as part of the Sorbet/Stripe engineering blog.
+**Stripe.** Stripe's `Request-Id` header is part of the public API contract: every response carries
+one, and Stripe's own docs tell you to quote it when contacting support — the clearest public
+demonstration that a single correlation identifier is what joins a customer-visible failure to the
+provider-side logs and traces behind it.
 
-**Uber.** Uber's M3 system handles 100 million metric data points per second. They use Prometheus at
-the edge (per-service scrape) and aggregate into M3DB for long-term storage. Request-scoped context
-is propagated through their internal service mesh via the `x-uber-trace-id` header.
+**Uber.** Uber's M3 platform aggregates **500 million metrics per second** and persists **20 million
+metrics per second** to storage globally, across **more than 6.6 billion time series** (Uber
+Engineering, "M3: Uber's Open Source, Large-scale Metrics Platform for Prometheus"). They run
+Prometheus-compatible scraping at the edge and aggregate into M3DB for long-term storage. Jaeger,
+which Uber wrote and donated to the CNCF, propagates request context in the `uber-trace-id` header.
 
-**Cloudflare.** Cloudflare processes 55 million HTTP requests per second. They use tail-based
-sampling for distributed traces: only 0.1% of successful requests are stored in full; 100% of error
-requests and 5% of slow requests (p99 > 500 ms) are sampled. This reduces trace storage by ~95%
-while preserving all actionable signals.
+**Cloudflare.** Cloudflare's network handles **over 81 million HTTP requests per second on average**
+(peak over 129 million). At that volume full-fidelity tracing is not an option; tail-based sampling —
+keep every error, keep the slow tail, downsample the healthy-and-fast majority — is the standard
+shape of the answer, and it is the policy modelled in §5.4.
 
-**Netflix.** Netflix's Atlas metrics platform stores 1.2 billion time-series. They enforce that every
-metric label has at most 100 unique values — violating this causes the offending metric to be
-silently dropped. The rule is enforced at the SDK level.
+**Netflix.** Netflix's Atlas telemetry platform was reported sustaining **more than 1.2 billion time
+series** (Netflix Tech Blog, "Introducing Atlas: Netflix's Primary Telemetry Platform"). Atlas is a
+dimensional, in-memory time-series store, which is exactly why per-metric cardinality is governed
+centrally rather than left to each service — the memory cost of a runaway label lands on the shared
+platform, not on the team that added it.
 
-**Shopify.** Shopify uses OpenTelemetry with a custom sampling strategy that bumps trace sampling
-rate to 100% for any merchant in their top-100 by GMV. Business-critical paths always have complete
-traces regardless of overall sampling rate.
+**OpenTelemetry Collector.** The Collector's `tailsamplingprocessor` ships the policy types this
+module describes as first-class config: `status_code` (keep errors), `latency` (keep slow traces),
+`probabilistic` (downsample the rest), composable under `and`/`composite`. Reaching for tail-based
+sampling is a configuration decision in a supported component, not a bespoke build.
 
 ---
 
@@ -643,7 +662,7 @@ traces regardless of overall sampling rate.
 | Reliability | App survives collector outage | Data lost if collector down |
 | Cardinality enforcement | Yes — scrape fails before OOM | No — sink may accept then drop |
 | Setup complexity | Scrape config per service | Simpler per-service config |
-| Latency | Scrape interval (15 s default) | Near-real-time |
+| Latency | Scrape interval (1 m default, 15 s typical) | Near-real-time |
 | K8s fit | Native (ServiceMonitor CRD) | Requires DaemonSet agent |
 
 ### 8.3 Sampling strategies
@@ -677,7 +696,8 @@ traces regardless of overall sampling rate.
   specific to LLM calls.
 
 ### Do NOT add manual spans for:
-- In-process computation that takes under 1 ms — span overhead (~5–10 µs) is noise.
+- In-process computation that takes under 1 ms — a span costs a few microseconds to record, so the
+  measurement is mostly measuring itself.
 - Every function call — a trace with 10 000 spans is unreadable.
 
 ### Use Prometheus metrics when:
@@ -789,9 +809,10 @@ async def get_order(order_id: int, user_id: int):
 ```python
 # BROKEN: /health checks the database
 @app.get("/health")
-async def health(engine: AsyncEngine):
-    await engine.execute(text("SELECT 1"))   # If DB is down, pod restarts endlessly.
-    return {"status": "ok"}                  # This defeats pod restart as a recovery mechanism.
+async def health(engine: Annotated[AsyncEngine, Depends(get_engine)]):
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))  # If DB is down, pod restarts endlessly.
+    return {"status": "ok"}                   # This defeats pod restart as a recovery mechanism.
 
 # FIX: /health is process-only; /ready checks dependencies
 @app.get("/health")
@@ -799,7 +820,9 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}   # Always 200 if process is alive
 
 @app.get("/ready")
-async def readiness(engine: AsyncEngine) -> dict[str, str]:
+async def readiness(
+    engine: Annotated[AsyncEngine, Depends(get_engine)],
+) -> dict[str, str]:
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     return {"status": "ready"}   # 503 removes pod from LB; DB recovers, pod rejoins
@@ -860,11 +883,11 @@ async def send_confirmation_email(ctx: object) -> None:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between logs, metrics, and traces? When does each answer a different question?**
-Logs are discrete timestamped events ("payment failed for order 42"); they answer "what happened and
-why?" Metrics are aggregated numbers over time (request rate, p99 latency); they answer "how often
-and how fast?" Traces are causal chains across components; they answer "where did latency come from?"
-In practice: you alert on metrics, investigate with traces, and root-cause with logs — always linking
-all three via a shared correlation ID.
+Logs answer "what happened and why", metrics answer "how often and how fast", and traces answer
+"where did the latency come from". Logs are discrete timestamped events ("payment failed for order
+42"). Metrics are aggregated numbers over time (request rate, p99 latency). Traces are causal chains
+across components. In practice: you alert on metrics, investigate with traces, and root-cause with
+logs — always linking all three via a shared correlation ID.
 
 **Q2: Why is `print()` wrong in production and what should replace it?**
 `print()` bypasses the Python logging hierarchy, cannot be filtered by level, has no structured
@@ -916,9 +939,10 @@ in-flight spans in memory, requiring more collector resources.
 **Q8: How does `prometheus-fastapi-instrumentator` work and what does it instrument automatically?**
 It wraps the FastAPI/Starlette ASGI application as a middleware and hooks into the request/response
 lifecycle. On each request it records start time; on each response it computes duration and increments
-`starlette_requests_total` (labels: method, handler, status) and observes
-`starlette_request_duration_seconds` (histogram with default latency buckets). It also exposes a
-`/metrics` endpoint that Prometheus scrapes. It does not instrument background tasks, outbound HTTP
+`http_requests_total` (labels: method, handler, status) and observes `http_request_duration_seconds`
+(per-handler histogram) plus `http_request_duration_highr_seconds` (many buckets, no handler label,
+for accurate global percentiles), `http_request_size_bytes` and `http_response_size_bytes`. It also
+exposes a `/metrics` endpoint that Prometheus scrapes. It does not instrument background tasks, outbound HTTP
 calls, or database queries — those require OTel auto-instrumentation or manual instrumentation.
 
 **Q9: What is the `BatchSpanProcessor` and when would you use `SimpleSpanProcessor` instead?**
@@ -944,24 +968,25 @@ customer-facing paths. These are Prometheus recording rules evaluated by Alertma
 `for: 5m` clause to prevent noise from transient spikes.
 
 **Q12: How do you prevent the `/metrics` endpoint from being publicly accessible?**
-Three common approaches: (1) Serve `/metrics` on a separate port (e.g., 9090) that is not exposed
-via the public load-balancer ingress, only reachable from within the cluster; (2) Add an IP
-allowlist middleware that only permits requests from the Prometheus scraper IP range; (3) Use mutual
+Bind `/metrics` to a port the public ingress does not route to, so it is reachable only from inside
+the cluster. Three common approaches: (1) serve `/metrics` on a separate port (e.g., 9090) that is
+not exposed via the public load-balancer ingress; (2) add an IP allowlist middleware that only
+permits requests from the Prometheus scraper IP range; (3) use mutual
 TLS between Prometheus and the service. Option 1 is simplest in K8s — add a second `ContainerPort`
 and a separate `Service` of type `ClusterIP`. FastAPI supports multiple ASGI apps or a secondary
 `prometheus_client.start_http_server(port=9090)` call.
 
 **Q13: What does a `startupProbe` do that `livenessProbe` and `readinessProbe` do not, and when do you need one?**
-A `startupProbe` grants a slow-starting application an extended startup budget during which Kubernetes suspends `livenessProbe` checks entirely, preventing a pod that is still initializing — loading a large model, warming a cache, running migrations — from being killed and restarted before it ever finishes starting. Once the `startupProbe` succeeds a single time, Kubernetes stops running it and hands control over to the regular `livenessProbe` for the rest of the pod's life. Without a `startupProbe`, a tight `livenessProbe` timing tuned for steady-state operation would repeatedly kill a pod that legitimately needs 60+ seconds to boot, creating a crash-restart loop that never lets the app finish starting. Configure `failureThreshold × periodSeconds` on the `startupProbe` to comfortably exceed your worst observed cold-start time.
+A `startupProbe` gives a slow-starting app an extended boot budget during which Kubernetes suspends `livenessProbe` checks entirely. That protects a pod still loading a large model, warming a cache, or running migrations from being killed and restarted before it ever finishes starting. Once the `startupProbe` succeeds a single time, Kubernetes stops running it and hands control over to the regular `livenessProbe` for the rest of the pod's life. Without a `startupProbe`, a tight `livenessProbe` timing tuned for steady-state operation would repeatedly kill a pod that legitimately needs 60+ seconds to boot, creating a crash-restart loop that never lets the app finish starting. Configure `failureThreshold × periodSeconds` on the `startupProbe` to comfortably exceed your worst observed cold-start time.
 
 **Q14: The case study uses `tenant_id` (about 200 values) as a Prometheus label — why is this acceptable when `user_id` (millions of values) is forbidden?**
-Prometheus's cardinality problem scales with the number of *unique label value combinations*, not with whether a label represents an entity at all — 200 tenants means at most 200 additional time series per metric using that label, which is a bounded, small, and predictable memory cost, unlike `user_id` with potentially millions of distinct values growing unboundedly over time. The general rule from Q5 still applies: keep only low-cardinality dimensions as metric labels. The distinction is that "low cardinality" is a threshold, not a ban on all identifiers — a label with a few hundred realistic, roughly-fixed values (tenant, region, environment, payment method) is a normal and useful metric dimension, while one with millions of ever-growing values is not. When in doubt, estimate the maximum realistic cardinality before adding any identifier as a label, and put anything that could grow unbounded into logs or trace attributes instead.
+Because cardinality cost scales with the number of *unique label value combinations*, and 200 tenants multiply a metric by only 200. That is a bounded, small, and predictable memory cost, unlike `user_id` with potentially millions of distinct values growing unboundedly over time. The general rule from Q5 still applies: keep only low-cardinality dimensions as metric labels. The distinction is that "low cardinality" is a threshold, not a ban on all identifiers — a label with a few hundred realistic, roughly-fixed values (tenant, region, environment, payment method) is a normal and useful metric dimension, while one with millions of ever-growing values is not. When in doubt, estimate the maximum realistic cardinality before adding any identifier as a label, and put anything that could grow unbounded into logs or trace attributes instead.
 
 **Q15: Why should you add a Prometheus histogram bucket that matches your SLO exactly, rather than relying on the default buckets?**
-Prometheus's default histogram buckets (`0.005` through `10` seconds, roughly doubling) may not include a boundary at your specific SLO value, forcing any query that computes "fraction of requests meeting the SLO" to linearly interpolate between two buckets that straddle it, introducing approximation error into a number that should be exact. Adding an explicit bucket at, say, `0.2` for a 200ms SLO means `histogram_quantile` and simple bucket-ratio queries can report the SLO compliance percentage precisely, because a real bucket boundary exists exactly where the business requirement is defined. This costs a small amount of extra memory per histogram — one more bucket per label combination — but is worth it for any latency metric that feeds an SLO dashboard or alert. Define your histogram's `buckets=[...]` list explicitly rather than accepting the client library's default whenever the metric backs an SLO.
+Because the client library's default buckets almost certainly have no boundary at your SLO value. `prometheus_client`'s `DEFAULT_BUCKETS` run `0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, +Inf` — with no boundary at 200 ms, any query computing "fraction of requests meeting the SLO" must linearly interpolate between the two buckets that straddle it, introducing approximation error into a number that should be exact. Adding an explicit bucket at, say, `0.2` for a 200ms SLO means `histogram_quantile` and simple bucket-ratio queries can report the SLO compliance percentage precisely, because a real bucket boundary exists exactly where the business requirement is defined. This costs a small amount of extra memory per histogram — one more bucket per label combination — but is worth it for any latency metric that feeds an SLO dashboard or alert. Define your histogram's `buckets=[...]` list explicitly rather than accepting the client library's default whenever the metric backs an SLO.
 
 **Q16: What is a Prometheus recording rule, and why does the module recommend one for `rate(http_requests_total[5m])`?**
-A recording rule pre-computes an expensive or frequently-repeated PromQL expression on a schedule and stores the result as a new time series, so dashboards and alerts can query the cheap pre-computed series instead of re-running the original aggregation every time a panel refreshes. `rate(http_requests_total[5m])` computed across 50 label combinations on every 15-second dashboard refresh means Prometheus repeats that aggregation constantly across every viewer and every panel; a recording rule named `job:http_requests_total:rate5m` runs the computation once on Prometheus's own evaluation interval and everyone reads the cached result. This matters most for expressions used in multiple dashboards or in alerting rules, where redundant computation directly increases Prometheus server load. Reach for a recording rule once you notice the same non-trivial `rate()`/`histogram_quantile()` expression appearing in more than one place.
+A recording rule pre-computes a PromQL expression on a schedule and stores the result as a new time series. Dashboards and alerts then query the cheap pre-computed series instead of re-running the original aggregation every time a panel refreshes. `rate(http_requests_total[5m])` computed across 50 label combinations on every 15-second dashboard refresh means Prometheus repeats that aggregation constantly across every viewer and every panel; a recording rule named `job:http_requests_total:rate5m` runs the computation once on Prometheus's own evaluation interval and everyone reads the cached result. This matters most for expressions used in multiple dashboards or in alerting rules, where redundant computation directly increases Prometheus server load. Reach for a recording rule once you notice the same non-trivial `rate()`/`histogram_quantile()` expression appearing in more than one place.
 
 ---
 
@@ -983,10 +1008,10 @@ A recording rule pre-computes an expensive or frequently-repeated PromQL express
    `rate(http_requests_total[5m])` across 50 label combinations runs every 15 s per dashboard panel.
    Pre-compute it as a recording rule: `record: job:http_requests_total:rate5m`.
 
-5. **Set histogram buckets to your SLO.** Default Prometheus histogram buckets are
-   `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]` seconds. If your SLO is 200 ms,
-   add a bucket at `0.2` so you can compute the fraction of requests meeting the SLO exactly, without
-   linear interpolation error.
+5. **Set histogram buckets to your SLO.** `prometheus_client`'s `DEFAULT_BUCKETS` are
+   `[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, +Inf]` seconds.
+   If your SLO is 200 ms, add a bucket at `0.2` so you can compute the fraction of requests meeting
+   the SLO exactly, without linear interpolation error.
 
 6. **Add `service.name` and `service.version` as OTel resource attributes.** These appear in every
    span and log record, enabling instant service identification in multi-service Jaeger UIs.
@@ -1003,9 +1028,12 @@ A recording rule pre-computes an expensive or frequently-repeated PromQL express
 9. **Use `include_in_schema=False` on probe endpoints.** Prevents `/health` and `/ready` from
    cluttering the OpenAPI docs and being indexed by API discovery tools.
 
-10. **Instrument the OTel exporter's failure.** `BatchSpanProcessor` silently drops spans if the
-    OTLP endpoint is unreachable. Add a `SpanExporterMetrics` or monitor the processor's
-    `_dropped_spans` counter — exporter failures are invisible otherwise.
+10. **Instrument the OTel exporter's failure.** `BatchSpanProcessor` drops spans when its queue
+    fills or the OTLP endpoint is unreachable, and the request path never notices. Enable the SDK's
+    own self-observability metrics and alert on
+    `otel.sdk.processor.span.processed{error.type="queue_full"}` alongside
+    `otel.sdk.processor.span.queue.size` versus `...queue.capacity` — exporter failures are invisible
+    otherwise.
 
 ---
 

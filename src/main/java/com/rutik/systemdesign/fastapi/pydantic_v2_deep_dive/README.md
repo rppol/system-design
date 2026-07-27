@@ -7,7 +7,7 @@
 
 ## 1. Concept Overview
 
-Pydantic is a data validation and settings management library for Python that uses type annotations as the source of truth for runtime validation, coercion, and serialization. Version 2 (released June 2023) rewrote the validation engine in Rust via `pydantic-core`, achieving 5–50x faster throughput compared to v1 while introducing a cleaner, more explicit API.
+Pydantic is a data validation and settings management library for Python that uses type annotations as the source of truth for runtime validation, coercion, and serialization. Version 2 (released 30 June 2023) rewrote the validation engine in Rust via `pydantic-core`, materially raising throughput over v1 while introducing a cleaner, more explicit API. Measured on one machine (CPython 3.13, pydantic 1.10.26 vs 2.13.4) the gain runs from roughly **3x** on a small flat model to **>13x** on a collection-heavy one — see §6.9.
 
 Core capabilities:
 
@@ -17,7 +17,7 @@ Core capabilities:
 - **FastAPI integration**: FastAPI uses Pydantic models for request body parsing, response serialization, and automatic OpenAPI schema generation.
 - **Custom types**: define reusable validation logic as first-class types via `__get_pydantic_core_schema__`.
 
-Python version target: 3.11 / 3.12 with `from __future__ import annotations` as needed.
+Python version target: 3.13 / 3.14 with `from __future__ import annotations` as needed.
 
 ---
 
@@ -238,14 +238,14 @@ flowchart LR
 from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
+from datetime import UTC, datetime
 
 class Product(BaseModel):
     id: int
     name: str
     price: float = Field(ge=0.0, description="Price in USD, must be non-negative")
     stock: int = Field(default=0, ge=0, description="Units in stock")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     tags: list[str] = Field(default_factory=list)
     description: Optional[str] = None  # explicit None default
 
@@ -300,7 +300,6 @@ class UserV2(BaseModel):
 
 ```python
 from pydantic import field_validator
-from pydantic.functional_validators import FieldValidatorMode
 from typing import Any, Callable
 
 class StrictPositiveModel(BaseModel):
@@ -518,7 +517,9 @@ class AppSettings(BaseSettings):
     debug: bool = False
     secret_key: SecretStr = Field(..., description="JWT signing key")
     allowed_hosts: list[str] = ["localhost"]
-    db: DatabaseSettings = DatabaseSettings()
+    db: DatabaseSettings   # required, NOT `= DatabaseSettings()`: a default constructed
+                           # in the class body runs at import time, before DB__PASSWORD is
+                           # read, and raises ValidationError("password Field required")
 
 # Environment variables:
 # DB__HOST=prod-db.internal
@@ -529,87 +530,97 @@ class AppSettings(BaseSettings):
 settings = AppSettings()
 print(settings.debug)        # True
 print(settings.db.host)      # prod-db.internal
-print(settings.db.password)  # SecretStr('**********')
+print(settings.db.password)  # ********** (str(SecretStr) is masked; repr shows SecretStr('**********'))
 print(settings.db.password.get_secret_value())  # s3cret
 ```
 
 ### 6.9 Performance — pydantic-core Numbers
 
-Benchmark: 1 million `User(id=i, name="Alice", email="alice@example.com")` validations.
+Benchmark: 1 million `User(id=i, name="Alice", email="alice@example.com")` constructions, measured
+with `timeit` on one machine — CPython 3.13.11, pydantic **1.10.26** (Cython-compiled wheel) versus
+**2.13.4**. Absolute times are hardware-specific; the ratio is the transferable part.
 
 | Version | Time | Throughput |
 |---------|------|------------|
-| Pydantic v1.10 | 3.2 s | ~312 k/s |
-| Pydantic v2.0 | 0.18 s | ~5.6 M/s |
-| Speedup | ~17.8x | — |
+| Pydantic v1.10 | 1.42 s | ~704 k/s |
+| Pydantic v2.13 | 0.52 s | ~1.93 M/s |
+| Speedup | ~2.7x | — |
 
 ```mermaid
 xychart-beta
     title "1M User Validations: Throughput by Pydantic Version"
-    x-axis ["Pydantic v1.10", "Pydantic v2.0"]
-    y-axis "Throughput (k validations / sec)" 0 --> 6000
-    bar [312, 5600]
+    x-axis ["Pydantic v1.10", "Pydantic v2.13"]
+    y-axis "Throughput (k validations / sec)" 0 --> 2000
+    bar [704, 1933]
 ```
 
-*Same benchmark as the table above, expressed on one axis — the bar length gap is the ~17.8x jump the Rust `pydantic-core` engine buys over pure-Python field-by-field validation.*
+*Same benchmark as the table above, expressed on one axis — the bar length gap is the ~2.7x jump the Rust `pydantic-core` engine buys over v1's Cython-compiled field-by-field validation on a three-primitive-field model.*
 
-For deeply nested models with complex validators the speedup narrows to ~5x; for flat models with only primitive types it reaches ~50x. The Rust core (`SchemaValidator`) handles coercion and constraint checks; Python callbacks are invoked only when `@field_validator` or `@model_validator` decorators are present.
+**The gap widens with the amount of work per call, not with model simplicity.** On the same machine, a flat 3-field model gains ~2.9x, a flat 30-field model ~5.4x, and an `Event` model carrying a 20-key `dict[str, str]` plus a 20-element `list[str]` gains ~13x (19.5 µs in v1 versus 1.5 µs in v2). The reason is fixed cost: every validation pays one Python call plus one FFI crossing regardless of engine, so the smaller the model the more that constant dominates and the less the Rust core can show. Do not expect a 3-field DTO to demonstrate the headline numbers.
+
+The Rust core (`SchemaValidator`) handles coercion and constraint checks; Python callbacks are invoked only when `@field_validator` or `@model_validator` decorators are present, and each such callback claws back part of the gain.
 
 Model construction cost is paid once at class definition, not per validation call.
 
 #### Decoding the benchmark table
 
-**What this actually says.** "Divide one second by the throughput and you get the price of a single validation — v1 charged 3.2 microseconds per model, v2 charges 0.18."
+**What this actually says.** "Divide one second by the throughput and you get the price of a single validation — v1 charged 1.42 microseconds per model, v2 charges 0.52."
 
 Throughput and per-call latency are the same number read from opposite ends. The table hands you one; the reciprocal hands you the other, and the reciprocal is the form you actually budget a request with.
 
 | Symbol | What it is |
 |--------|------------|
 | `N` | Validations in the benchmark run — `1 000 000` here |
-| `T` | Wall-clock seconds the whole run took: `3.2` s for v1, `0.18` s for v2 |
+| `T` | Wall-clock seconds the whole run took: `1.42` s for v1, `0.52` s for v2 |
 | `N / T` | Throughput — validations per second, the table's right-hand column |
 | `T / N` | Per-validation cost — what one `model_validate` call charges you |
-| `T_v1 / T_v2` | The speedup, `17.8x` — how many v1 validations fit in one v2 validation's time |
+| `T_v1 / T_v2` | The speedup, `2.7x` — how many v1 validations fit in one v2 validation's time |
 
 **Walk one example.** The same benchmark read both directions:
 
 ```
-  v1:  T/N = 3.2 s  / 1 000 000 = 3.2  us per validation
-       N/T = 1 000 000 / 3.2    =   312 500 /s   -> the table's "~312 k/s"
+  v1:  T/N = 1.42 s / 1 000 000 = 1.42 us per validation
+       N/T = 1 000 000 / 1.42   =   704 225 /s   -> the table's "~704 k/s"
 
-  v2:  T/N = 0.18 s / 1 000 000 = 0.18 us per validation
-       N/T = 1 000 000 / 0.18   = 5 555 556 /s   -> the table's "~5.6 M/s"
+  v2:  T/N = 0.52 s / 1 000 000 = 0.52 us per validation
+       N/T = 1 000 000 / 0.52   = 1 923 077 /s   -> the table's "~1.93 M/s"
 
-  speedup = 3.2 / 0.18 = 17.78x   (identical to 5 555 556 / 312 500)
+  speedup = 1.42 / 0.52 = 2.73x   (identical to 1 923 077 / 704 225)
 ```
 
-Now spend that against a real request budget. The `User` model benchmarked above
-carries 3 fields, so the per-field price is `0.18 / 3 = 0.06 us` in v2 and
-`3.2 / 3 = 1.07 us` in v1. A batch endpoint validating a list of items with 10
-fields each scales linearly in total field count:
+Now spend that against a real request budget. Do NOT get there by dividing the
+3-field figure by 3 — most of it is per-call fixed cost, not per-field. Measure
+the model you actually ship. A 10-field flat model on the same machine costs
+`0.93 us` in v2 and `3.77 us` in v1, and a batch endpoint validating a list of
+them scales with the item count:
 
 ```
                                                        share of a 20 ms
-   items   fields    v2 = 0.06us x f   v1 = 1.07us x f   request budget
+   items   fields    v2 = 0.93us/item   v1 = 3.77us/item  request budget
                                                           v2        v1
-       1       10         0.6 us            10.7 us      0.003%     0.05%
-      50      500        30.0 us           533.3 us      0.15 %     2.67%
-     200    2 000       120.0 us         2 133.3 us      0.60 %    10.67%
-   1 000   10 000       600.0 us        10 666.7 us      3.00 %    53.33%
+       1       10         0.93 us            3.77 us      0.005%     0.02%
+      50      500        46.5  us          188.5  us      0.23 %     0.94%
+     200    2 000       186.0  us          754.0  us      0.93 %     3.77%
+   1 000   10 000       930.0  us        3 770.0  us      4.65 %    18.85%
 ```
 
-Read the bottom row: on a 1 000-item bulk import, v1 burned over half the entire
-20 ms budget inside the validator, which is why v1 services felt "slow for no
-reason" on batch endpoints. In v2 the same work is 3% — annoying but no longer
-the bottleneck. Read the top row instead and the opposite lesson lands: for a
-single small model, validation is 0.003% of the budget in v2 and was still only
-0.05% in v1. Optimizing Pydantic on a single-object endpoint is optimizing a
-component that cannot pay you back; the win only exists where field count is
+Read the bottom row: on a 1 000-item bulk import, v1 burned nearly a fifth of the
+entire 20 ms budget inside the validator, which is why v1 services felt "slow for
+no reason" on batch endpoints. In v2 the same work is under 5% — noticeable but
+no longer the bottleneck. Read the top row instead and the opposite lesson lands:
+for a single small model, validation is 0.005% of the budget in v2 and was still
+only 0.02% in v1. Optimizing Pydantic on a single-object endpoint is optimizing a
+component that cannot pay you back; the win only exists where item count is
 large.
+
+The marginal cost is the number to carry away: going from 10 to 30 fields adds
+`0.06 us` per extra field in v2 and `0.38 us` in v1. Per *field*, the Rust core
+is about 6x cheaper — it is the constant per-call overhead, not the field work,
+that keeps the headline ratio near 3x on small models.
 
 ### 6.10 Discriminated Unions
 
-Without a discriminator, Pydantic tries every branch in order (O(n) worst case). With a discriminator on a `Literal` field, it does a single O(1) dict lookup:
+Without a discriminator, Pydantic evaluates every branch (O(n) *always*, not just in the worst case — the default **smart** union mode picks the best match rather than stopping at the first one that parses). With a discriminator on a `Literal` field, it does a single O(1) dict lookup:
 
 ```mermaid
 flowchart LR
@@ -623,9 +634,9 @@ flowchart LR
 
     subgraph PU["Plain Union — O(n) worst case"]
         direction LR
-        P1(["Input dict"]) --> P2{"Try Cat schema"}
-        P2 -.->|fails| P3{"Try Dog schema"}
-        P3 -->|matches| P4(["Dog instance"])
+        P1(["Input dict"]) --> P2{"Evaluate Cat<br/>schema"}
+        P2 --> P3{"Evaluate Dog<br/>schema"}
+        P3 -->|"best match"| P4(["Dog instance"])
     end
 
     subgraph DU["Discriminated Union — O(1)"]
@@ -641,35 +652,39 @@ flowchart LR
     class Q2,Q3 mathOp
 ```
 
-*Plain `Union` validation retries each branch in sequence until one matches (Cat fails, Dog succeeds) — O(n) attempts. A discriminated union reads the `type` field once and jumps straight to the matching model — O(1), with a clearer error when nothing matches.*
+*Plain `Union` validation evaluates every branch and then selects the best match — O(n) attempts whatever the payload is. A discriminated union reads the `type` field once and jumps straight to the matching model — O(1), with a clearer error when nothing matches.*
 
-**Read it like this.** "A plain union is a linear search through your model list; on average you pay for half of it, and in the worst case you pay for all of it. A discriminator turns that search into a dictionary lookup."
+**Read it like this.** "A plain union prices in every model you listed, on every single validation. A discriminator turns that scan into a dictionary lookup."
 
-The "O(n)" label hides the constant that actually matters in production: the *expected* number of branches attempted, which is `(n + 1) / 2` when the correct type is uniformly distributed across the union.
+The trap is assuming you pay for *half* the union on average — that would be true of a first-match linear search, and Pydantic's default smart mode is not one. Position in the union does not change the cost.
 
 | Symbol | What it is |
 |--------|------------|
 | `n` | Number of branches in the `Union` |
-| `k` | Position (1-based) of the branch that finally matches |
-| `(n + 1) / 2` | Expected attempts when every branch is equally likely to be the right one |
-| `n` | Worst case — the matching branch sits last |
-| `1` | Attempts under a discriminator, regardless of `n` |
+| `n` | Branches evaluated per validation, regardless of which one matches |
+| `1` | Branches evaluated under a discriminator, regardless of `n` |
+| ratio | Measured untagged/tagged cost, branches of 10 fields each |
 
-**Walk one example.** How the cost grows as you add event types:
+**Walk one example.** Measured on CPython 3.13.11 / pydantic 2.13.4, branches of
+ten fields each, timing both a first-branch and a last-branch payload:
 
 ```
-   union size n     avg attempts (n+1)/2     worst case n     discriminated
-        2                  1.5                    2                1
-        3                  2.0                    3                1
-        5                  3.0                    5                1
-       20                 10.5                   20                1
+   union size n     untagged (us)     tagged (us)     ratio
+        2               1.7               1.36        1.2x
+        3               2.2               1.35        1.6x
+        5               3.1               1.24        2.5x
+       10               5.6               1.19        4.7x
+       20               9.8-10.3          1.13        9.2x
+
+   first-branch and last-branch payloads timed within noise of each other
+   at every n -- there is no early exit to benefit from.
 ```
 
-The 3-branch `MessageContent` union below is cheap either way — 2 attempts on
-average. The reason to reach for `Field(discriminator="type")` anyway is that
-the cost is not just attempts: each failed branch builds and discards a partial
-validator state, and the failure error you get back is "none of the union
-variants matched" rather than a pointer at the one field that was wrong.
+The 3-branch `MessageContent` union below is cheap either way — a 1.6x ratio on a
+microsecond. The reason to reach for `Field(discriminator="type")` anyway is that
+the ratio grows linearly with the number of event types you will inevitably add,
+and that the failure error you get back is "none of the union variants matched"
+rather than a pointer at the one field that was wrong.
 
 
 
@@ -801,7 +816,7 @@ print(update.model_dump(exclude_unset=True))
 
 | Dimension | Pydantic v2 | Pydantic v1 | attrs + cattrs | dataclasses (stdlib) |
 |-----------|-------------|-------------|----------------|----------------------|
-| Validation speed | 5.6 M/s (Rust core) | 312 k/s | ~1–2 M/s | No validation |
+| Validation speed (3-field model, one machine) | ~1.9 M/s (Rust core) | ~0.7 M/s | Comparable to v2 | No validation |
 | Schema overhead | Paid at class def | Paid at class def | Paid at class def | None |
 | JSON Schema | Built-in | Built-in | Via cattrs converters | None |
 | ORM integration | `from_attributes=True` | `orm_mode=True` | Manual | Manual |
@@ -929,7 +944,7 @@ for name, field in MyModel.__fields__.items():
     print(name, field.type_)  # v1 ModelField API
 ```
 
-In v2 `__fields__` still exists for compatibility but returns a compatibility shim, not the real metadata.
+In v2 `__fields__` is deprecated (`PydanticDeprecatedSince20`, removal in V3) and simply forwards to `model_fields`, so the entries are `FieldInfo` objects — `field.type_` no longer exists.
 
 **FIX:**
 
@@ -975,7 +990,11 @@ def check_dates(self):
     # forgot to return self
 ```
 
-The validator must return `self` (or a modified instance). Returning `None` sets the model to `None`.
+The validator must return `self` (or a modified instance). Returning `None` does not silently
+corrupt the instance — Pydantic emits `UserWarning: A custom validator is returning a value other
+than 'self'` and keeps the correctly-built model — but the warning is easy to miss in a test log,
+and returning anything other than `self` from a top-level model validator is unsupported when
+validating via `__init__`, so the behaviour is not something to rely on.
 
 **FIX:**
 
@@ -1001,7 +1020,7 @@ def check_dates(self) -> Self:
 | `mypy` + `pydantic mypy plugin` | Static type checking | Plugin in `mypy.ini`: `[mypy] plugins = pydantic.mypy` |
 | `pyright` | Static type checking | Works out of the box; no plugin needed |
 | `pytest` + `pydantic` | Testing validation logic | Test `ValidationError.errors()` structure |
-| `hypothesis` + `hypothesis-pydantic` | Property-based testing | Auto-generate valid/invalid inputs from schema |
+| `hypothesis` + `hypothesis-jsonschema` | Property-based testing | Generate inputs from `Model.model_json_schema()`; Pydantic v1's built-in Hypothesis plugin does not exist in v2 |
 
 ### mypy configuration
 
@@ -1021,7 +1040,7 @@ warn_required_dynamic_aliases = True
 ## 12. Interview Questions with Answers
 
 **Q1: What is pydantic-core and why is Pydantic v2 significantly faster than v1?**
-Pydantic-core is a compiled extension module written in Rust (via PyO3) that implements the entire validation and serialization pipeline. In v1, validation was pure Python: every field check was a Python function call with associated bytecode overhead, attribute lookups, and GC pressure. In v2, the schema is compiled to a `SchemaValidator` Rust struct at class-definition time, and validation calls drop into native code. The result is 5–50x faster throughput (e.g., ~312 k/s in v1 vs ~5.6 M/s in v2 for simple flat models). Speedup is smaller (~5x) for models with many Python `@field_validator` callbacks because each callback crosses the Python/Rust boundary.
+Pydantic-core is a compiled extension module written in Rust (via PyO3) that implements the entire validation and serialization pipeline. In v1, the validation loop was Python (Cython-compiled at best): every field check was a function call with bytecode overhead, attribute lookups, and GC pressure. In v2, the schema is compiled to a `SchemaValidator` Rust struct at class-definition time, and validation calls drop into native code. Measured on one machine (CPython 3.13, v1.10.26 vs v2.13.4) the gain runs from ~2.7x on a flat 3-field model to ~13x on a model carrying a 20-key dict and a 20-element list. It is smallest on tiny models, where the fixed per-call and FFI cost dominates, and it shrinks again for models with many Python `@field_validator` callbacks because each callback crosses the Python/Rust boundary.
 
 **Q2: What is the difference between `@field_validator` modes `"before"`, `"after"`, and `"wrap"`?**
 `mode="before"` runs before type coercion and receives the raw input; use it for normalization (strip, lowercase). `mode="after"` runs after coercion and receives the typed Python value; use it for business logic (age >= 18). `mode="wrap"` receives the raw input plus a `handler` callable that invokes the rest of the pipeline; use it when you need to decide whether to call the default pipeline, replace it, or post-process its result. `"wrap"` is the most powerful but also the most complex to reason about.
@@ -1039,13 +1058,13 @@ Nested models are declared as field types directly: `address: Address`. During v
 Use `Annotated[T, Field(...)]` to define a named type alias: `PositiveInt = Annotated[int, Field(gt=0)]`. This type can be used as a field annotation in any model without subclassing. Multiple constraints can be stacked: `Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[a-z]+$")]`. This is the idiomatic v2 approach; do not subclass `int` or `str` just to add constraints.
 
 **Q7: How does Pydantic v2 integrate with FastAPI, and what does FastAPI do with Pydantic models?**
-FastAPI uses Pydantic v2 for three things: (1) request body parsing — a `BaseModel` parameter in a route function causes FastAPI to parse the JSON body and validate it via `model_validate`; (2) response serialization — a `response_model=SomeModel` annotation causes FastAPI to call `model_dump()` on the return value and filter/coerce fields; (3) OpenAPI schema generation — FastAPI calls `SomeModel.model_json_schema()` to generate the JSON Schema for the Swagger UI. FastAPI 0.100+ requires Pydantic v2; older versions used v1.
+FastAPI uses Pydantic v2 for request body parsing, response serialization, and OpenAPI schema generation. Concretely: (1) request body parsing — a `BaseModel` parameter in a route function causes FastAPI to parse the JSON body and validate it; (2) response serialization — a `response_model=SomeModel` annotation causes FastAPI to call `model_dump()` on the return value and filter/coerce fields; (3) OpenAPI schema generation — FastAPI calls `SomeModel.model_json_schema()` to generate the JSON Schema for the Swagger UI. FastAPI 0.100+ requires Pydantic v2; older versions used v1.
 
 **Q8: What is a discriminated union and why is it more efficient than a plain Union?**
-A discriminated union uses a `Literal` field (the discriminator) as a fast lookup key to select the correct union branch before attempting full validation. With a plain `Union[A, B, C]`, Pydantic tries each branch in order until one succeeds — O(n) attempts. With `Annotated[Union[A, B, C], Field(discriminator="type")]`, Pydantic reads the discriminator value and maps it directly to the correct model in O(1). This also produces clearer validation errors: instead of "none of the union variants matched", you get "type='unknown_value' is not valid".
+A discriminated union uses a `Literal` field (the discriminator) as a fast lookup key to select the correct union branch before attempting full validation. With a plain `Union[A, B, C]`, Pydantic's default smart mode evaluates every branch and selects the best match — O(n) attempts, and the cost is the same wherever the matching branch sits. With `Annotated[Union[A, B, C], Field(discriminator="type")]`, Pydantic reads the discriminator value and maps it directly to the correct model in O(1); measured, that is ~1.6x at three branches and ~9.2x at twenty. This also produces clearer validation errors: instead of "none of the union variants matched", you get "type='unknown_value' is not valid".
 
 **Q9: How do you exclude fields from serialization output?**
-Three approaches: (1) `model_dump(exclude={"field_name"})` — runtime exclusion per call; (2) `model_dump(exclude_none=True)` — omit all `None` fields; (3) `model_dump(exclude_unset=True)` — omit fields not explicitly set (useful for PATCH endpoints); (4) annotate the field with `Field(exclude=True)` — permanently excluded from all `model_dump` calls; (5) use `@field_serializer` to return `None` and combine with `exclude_none=True` for conditional exclusion.
+Either per call via `model_dump`'s `exclude` / `exclude_none` / `exclude_unset` arguments, or permanently via `Field(exclude=True)` on the field itself. In full, five options: (1) `model_dump(exclude={"field_name"})` — runtime exclusion per call; (2) `model_dump(exclude_none=True)` — omit all `None` fields; (3) `model_dump(exclude_unset=True)` — omit fields not explicitly set (useful for PATCH endpoints); (4) annotate the field with `Field(exclude=True)` — permanently excluded from all `model_dump` calls; (5) use `@field_serializer` to return `None` and combine with `exclude_none=True` for conditional exclusion.
 
 **Q10: How do you validate environment variables with BaseSettings?**
 Inherit from `pydantic_settings.BaseSettings` instead of `BaseModel`. Declare fields with their expected types and defaults. Pydantic reads matching environment variable names (case-insensitive by default). Set `model_config = SettingsConfigDict(env_file=".env")` to also read from a `.env` file. Use `env_nested_delimiter="__"` to populate nested models from env vars like `DB__HOST`. Use `SecretStr` for sensitive values — the secret is never exposed in `__repr__` or `model_dump()` unless `.get_secret_value()` is called explicitly.
@@ -1063,13 +1082,13 @@ By default, Pydantic v2 does NOT run validators on fields that use their default
 `TypeAdapter` validates arbitrary types without defining a model class: `TypeAdapter(list[int]).validate_python(["1","2"])` returns `[1, 2]`. Use it when you need to validate a single value, a generic container (`list[MyModel]`), or a union type without the overhead of a full model class definition. It also exposes `validate_json`, `dump_python`, and `json_schema` methods matching the `BaseModel` API.
 
 **Q15: What is `model_dump(mode="json")` vs `model_dump_json()`?**
-`model_dump(mode="json")` returns a Python `dict` where all values have been converted to JSON-compatible types (e.g., `datetime` → ISO string, `UUID` → string). `model_dump_json()` returns a `bytes`/`str` JSON string directly using the Rust serializer, which is faster. Use `model_dump(mode="json")` when you need a dict for further manipulation before serializing; use `model_dump_json()` for the fastest direct JSON output.
+`model_dump(mode="json")` returns a Python `dict` where all values have been converted to JSON-compatible types (e.g., `datetime` → ISO string, `UUID` → string). `model_dump_json()` returns a `str` containing the JSON document, produced directly by the Rust serializer, which is faster. Use `model_dump(mode="json")` when you need a dict for further manipulation before serializing; use `model_dump_json()` for the fastest direct JSON output.
 
 **Q16: How does `ConfigDict(frozen=True)` affect a model?**
 Setting `frozen=True` makes the model immutable after creation: any attempt to set an attribute raises a `ValidationError`. It also makes the model hashable (implements `__hash__`), so instances can be used as dict keys or set members. Internally, Pydantic sets `__setattr__` and `__delattr__` to raise exceptions. Use `frozen=True` for value objects — DTOs that are passed around but never modified.
 
 **Q17: How do you handle v1 → v2 migration for a large codebase?**
-Pydantic provides a `PYDANTIC_V1_COMPAT` compatibility layer in v2 — many v1 patterns still work but emit deprecation warnings. A safe migration path: (1) install Pydantic v2, (2) run your test suite and collect all `PydanticDeprecatedSince20` warnings, (3) replace `@validator` with `@field_validator`, `class Config` with `ConfigDict`, `.dict()` with `.model_dump()`, `.json()` with `.model_dump_json()`, `parse_obj` with `model_validate`, (4) replace `__fields__` accesses with `model_fields`. The `bump-pydantic` CLI tool automates most of these rewrites.
+Lean on the deprecation warnings: v2 keeps many v1 spellings working but raises `PydanticDeprecatedSince20` for each, so the warning log is your worklist. (If a module genuinely cannot be ported yet, `import pydantic.v1` gives you the vendored v1 API side by side with v2 in the same process.) A safe migration path: (1) install Pydantic v2, (2) run your test suite and collect all `PydanticDeprecatedSince20` warnings, (3) replace `@validator` with `@field_validator`, `class Config` with `ConfigDict`, `.dict()` with `.model_dump()`, `.json()` with `.model_dump_json()`, `parse_obj` with `model_validate`, (4) replace `__fields__` accesses with `model_fields`. The `bump-pydantic` CLI tool automates most of these rewrites.
 
 **Q18: What is the purpose of `model_rebuild()` and when is it needed?**
 `model_rebuild()` re-compiles the Pydantic core schema for a model. It is needed when a model has forward references (`from __future__ import annotations` or string annotations) that were not resolved at class definition time, or when you add fields dynamically after class creation. In practice, you call `MyModel.model_rebuild()` at the end of a module after all referenced types are defined. FastAPI calls it automatically during app startup for models registered as request/response bodies.
@@ -1274,8 +1293,8 @@ print(patch_fields)   # {'status': 'confirmed'}  — discount_code and notes NOT
 for name, field_info in OrderCreate.model_fields.items():
     print(f"{name}: annotation={field_info.annotation}, default={field_info.default}")
 
-# JSON output (Rust serializer, fastest path)
-json_bytes = order.model_dump_json(exclude_none=True)
+# JSON output (Rust serializer, fastest path). model_dump_json returns a `str`.
+json_str = order.model_dump_json(exclude_none=True)
 ```
 
 **Key design decisions in the fix:**
