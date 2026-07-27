@@ -1,6 +1,6 @@
 # Python + FastAPI — Case Studies Learning Path
 
-End-to-end system design case studies demonstrating production Python and FastAPI architecture. Each case study follows the 7-section legacy template: Problem Statement, Architecture Overview (ASCII diagram), Key Design Decisions, Implementation (Python code), Python/FastAPI Components Used, Tradeoffs and Alternatives, Interview Discussion Points.
+End-to-end system design case studies demonstrating production Python and FastAPI architecture. Each case study follows the 7-section legacy template: Problem Statement, Architecture Overview (Mermaid diagram), Key Design Decisions, Implementation (Python code), Python/FastAPI Components Used, Tradeoffs and Alternatives, Interview Discussion Points.
 
 ---
 

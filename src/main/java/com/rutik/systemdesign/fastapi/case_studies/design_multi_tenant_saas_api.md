@@ -147,9 +147,11 @@ CREATE TABLE tenants (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- Every tenant_id FK cascades. Without ON DELETE CASCADE the GDPR erasure
+-- path below is not a DELETE, it is a foreign-key violation.
 CREATE TABLE users (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id),
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email       TEXT NOT NULL,
     hashed_pw   TEXT NOT NULL,
     UNIQUE (tenant_id, email)
@@ -157,15 +159,15 @@ CREATE TABLE users (
 
 CREATE TABLE roles (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id),
-    user_id     UUID NOT NULL REFERENCES users(id),
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role        TEXT NOT NULL CHECK (role IN ('owner','admin','member','viewer')),
     UNIQUE (tenant_id, user_id)
 );
 
 CREATE TABLE projects (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id),
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     created_by  UUID NOT NULL REFERENCES users(id),
     created_at  TIMESTAMPTZ DEFAULT now()
@@ -173,10 +175,10 @@ CREATE TABLE projects (
 
 CREATE TABLE tasks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID NOT NULL REFERENCES tenants(id),
-    project_id  UUID NOT NULL REFERENCES projects(id),
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title       TEXT NOT NULL,
-    assignee_id UUID REFERENCES users(id),
+    assignee_id UUID REFERENCES users(id) ON DELETE SET NULL,
     status      TEXT NOT NULL DEFAULT 'todo'
 );
 
@@ -407,13 +409,20 @@ async def get_tenant(
     return decode_jwt(credentials.credentials)
 
 
-# BROKEN: opens a session but NEVER sets app.current_tenant_id
-# PostgreSQL's RLS policy reads current_setting('app.current_tenant_id').
-# One-arg form  -> ERROR: unrecognized configuration parameter, so every
-#                  request 500s. Loud, but at least not a leak.
-# missing_ok=true -> returns NULL (not ""), so `tenant_id = NULL::uuid`
-#                  evaluates to NULL, no row passes, and the endpoint
-#                  returns an empty list. Silently wrong, never a leak.
+# BROKEN: opens a session but NEVER sets app.current_tenant_id.
+# PostgreSQL's RLS policy reads current_setting('app.current_tenant_id'),
+# and what that returns depends on whether this CONNECTION ever saw the
+# variable -- which, in a pool, is not the same as whether this REQUEST set
+# it. Both outcomes are loud; neither leaks:
+#   - Fresh connection, one-arg form -> ERROR: unrecognized configuration
+#     parameter "app.current_tenant_id". The request 500s.
+#   - Fresh connection, missing_ok=true -> NULL, so tenant_id = NULL::uuid
+#     is NULL, no row passes, endpoint returns an empty list.
+#   - Recycled connection (a previous request set it transaction-locally
+#     and committed) -> the runtime-created GUC resets to the EMPTY STRING,
+#     not to undefined. The one-arg form now returns '' instead of raising,
+#     and ''::uuid fails with: invalid input syntax for type uuid: "".
+#     missing_ok=true returns '' here too, NOT NULL.
 # The real leak in this file is not here -- it is forgetting
 # FORCE ROW LEVEL SECURITY, which disables the policy entirely for the
 # table owner and returns every tenant's rows.
@@ -760,4 +769,4 @@ Insert a row into `tenants`, create the first user row, assign the `owner` role,
 Add a PostgreSQL trigger on `projects` and `tasks` that inserts into an `audit_log` table with `(tenant_id, user_id, action, table_name, row_id, changed_at)`. The trigger fires inside the same transaction as the DML, so the audit record is atomically consistent with the data change. For high-volume tenants, partition the `audit_log` table by `tenant_id` hash.
 
 **Q: How do you handle GDPR right-to-erasure for a tenant?**
-Issue a `DELETE FROM users WHERE tenant_id = :tid` cascade (foreign key `ON DELETE CASCADE` on all tenant-owned tables), then delete the `tenants` row. Because all data is in a single schema, a single transaction covers the full deletion. Schema-per-tenant would require `DROP SCHEMA` which is irreversible without a backup; database-per-tenant requires decommissioning an entire instance. RLS + single schema makes GDPR erasure a standard parameterized `DELETE`.
+Issue a single `DELETE FROM tenants WHERE id = :tid` and let the cascade do the work. That only works because every `tenant_id` foreign key in the schema is declared `ON DELETE CASCADE` — the common bug is to write the erasure runbook against a schema whose FKs default to `NO ACTION`, where the same statement is a foreign-key violation rather than a deletion. Deleting the child rows first (`DELETE FROM users WHERE tenant_id = :tid`) is the wrong shape too: `projects` and `tasks` hang off `tenants`, not off `users`, so they would survive. Because all data is in a single schema, one transaction covers the full deletion. Schema-per-tenant would require `DROP SCHEMA` which is irreversible without a backup; database-per-tenant requires decommissioning an entire instance. RLS + single schema makes GDPR erasure a standard parameterized `DELETE`.

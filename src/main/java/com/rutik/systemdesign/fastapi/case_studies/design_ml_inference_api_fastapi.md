@@ -168,10 +168,11 @@ flowchart LR
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -223,7 +224,7 @@ class BertClassifier:
 
 
 async def load_model(path: str) -> BertClassifier:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, BertClassifier, path)
 
 
@@ -263,19 +264,20 @@ class MicroBatcher:
                 pass
 
     async def infer(self, text: str) -> tuple[str, float]:
-        future: asyncio.Future[tuple[str, float]] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[tuple[str, float]] = asyncio.get_running_loop().create_future()
         await self._queue.put(_BatchItem(text=text, future=future))
         return await future
 
     async def _drain_loop(self) -> None:
+        loop = asyncio.get_running_loop()
         while True:
             # Wait for the first item
             first = await self._queue.get()
             batch: list[_BatchItem] = [first]
 
-            deadline = asyncio.get_event_loop().time() + self._flush_interval
+            deadline = loop.time() + self._flush_interval
             while len(batch) < self._max_batch:
-                remaining = deadline - asyncio.get_event_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
                     break
                 try:
@@ -287,7 +289,7 @@ class MicroBatcher:
             texts = [item.text for item in batch]
             model: BertClassifier = self._model_getter()
             try:
-                results = await asyncio.get_event_loop().run_in_executor(
+                results = await loop.run_in_executor(
                     None, model.predict_batch, texts
                 )
                 for item, result in zip(batch, results):
@@ -314,37 +316,64 @@ class SemanticCache:
         embedder: SentenceTransformer,
         threshold: float = 0.95,
         ttl_seconds: int = 3600,
+        max_scan: int = 500,
     ) -> None:
         self._redis = redis
         self._embedder = embedder
         self._threshold = threshold
         self._ttl = ttl_seconds
+        self._max_scan = max_scan
 
-    async def get(self, text: str) -> tuple[str, float] | None:
-        query_emb = await asyncio.get_event_loop().run_in_executor(
+    async def embed(self, text: str) -> np.ndarray:
+        """Encode once per request; both get() and set() take the result."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
             None, lambda: self._embedder.encode(text, normalize_embeddings=True)
         )
-        # Scan stored embeddings (production: use Redis Vector Search / HNSW)
-        keys = await self._redis.keys(f"{self.EMBED_KEY_PREFIX}*")
-        for key in keys:
-            raw = await self._redis.get(key)
-            if raw is None:
-                continue
-            stored_emb = np.frombuffer(raw, dtype=np.float32)
-            sim = float(np.dot(query_emb, stored_emb))
-            if sim >= self._threshold:
-                cache_key = key.decode().replace(self.EMBED_KEY_PREFIX, self.CACHE_KEY_PREFIX)
-                cached = await self._redis.get(cache_key)
-                if cached:
-                    label, confidence = cached.decode().split("|")
-                    return label, float(confidence)
-        return None
 
-    async def set(self, text: str, label: str, confidence: float) -> None:
-        emb = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: self._embedder.encode(text, normalize_embeddings=True)
+    async def get(self, query_emb: np.ndarray) -> tuple[str, float] | None:
+        # SCAN, not KEYS: KEYS walks the entire keyspace inside one blocking
+        # call on a single-threaded server. And ONE MGET, not one GET per key:
+        # N sequential round-trips is N x RTT of pure latency on the hot path.
+        # This brute-force scan is a bounded stand-in; see the tradeoffs
+        # section for the entry count at which Redis Vector Search is required.
+        keys: list[bytes] = []
+        cursor = 0
+        while True:
+            cursor, batch = await self._redis.scan(
+                cursor, match=f"{self.EMBED_KEY_PREFIX}*", count=500
+            )
+            keys.extend(batch)
+            if cursor == 0 or len(keys) >= self._max_scan:
+                break
+        keys = keys[: self._max_scan]
+        if not keys:
+            return None
+
+        raws = await self._redis.mget(keys)
+        pairs = [(k, r) for k, r in zip(keys, raws) if r is not None]
+        if not pairs:
+            return None
+
+        # Both sides are L2-normalised, so a matrix product IS cosine similarity.
+        matrix = np.stack([np.frombuffer(r, dtype=np.float32) for _, r in pairs])
+        sims = matrix @ query_emb
+        best = int(sims.argmax())
+        if float(sims[best]) < self._threshold:
+            return None
+
+        cache_key = pairs[best][0].decode().replace(
+            self.EMBED_KEY_PREFIX, self.CACHE_KEY_PREFIX
         )
-        import hashlib
+        cached = await self._redis.get(cache_key)
+        if cached is None:
+            return None
+        label, confidence = cached.decode().split("|")
+        return label, float(confidence)
+
+    async def set(
+        self, text: str, emb: np.ndarray, label: str, confidence: float
+    ) -> None:
         key_id = hashlib.sha256(text.encode()).hexdigest()[:16]
         await self._redis.set(
             f"{self.EMBED_KEY_PREFIX}{key_id}",
@@ -356,6 +385,20 @@ class SemanticCache:
             f"{label}|{confidence}",
             ex=self._ttl,
         )
+
+    async def invalidate_all(self) -> None:
+        """Drop every entry — called on model swap, since the cached labels
+        were produced by the model that is being replaced."""
+        for prefix in (self.EMBED_KEY_PREFIX, self.CACHE_KEY_PREFIX):
+            cursor = 0
+            while True:
+                cursor, batch = await self._redis.scan(
+                    cursor, match=f"{prefix}*", count=500
+                )
+                if batch:
+                    await self._redis.delete(*batch)
+                if cursor == 0:
+                    break
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +428,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # --- shutdown ---
     await batcher.stop()
     await redis.aclose()
-    for slot_model in app.state.slots.values():
-        del slot_model
+    # `del slot_model` inside a loop would only unbind the loop variable and
+    # free nothing. Drop the container's references, then hand the freed
+    # blocks back to the driver so a restarting process finds a clean device.
+    app.state.slots.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 app = FastAPI(title="ML Inference API", lifespan=lifespan)
@@ -416,14 +463,18 @@ async def predict(
 ) -> PredictResponse:
     t0 = time.perf_counter()
 
-    cached_result = await cache.get(payload.text)
+    # Encode once. A miss must not pay for a second forward pass of the
+    # embedder just to write the entry it already has the vector for.
+    query_emb = await cache.embed(payload.text)
+
+    cached_result = await cache.get(query_emb)
     if cached_result:
         label, confidence = cached_result
         latency_ms = (time.perf_counter() - t0) * 1000
         return PredictResponse(label=label, confidence=confidence, cached=True, latency_ms=round(latency_ms, 2))
 
     label, confidence = await batcher.infer(payload.text)
-    await cache.set(payload.text, label, confidence)
+    await cache.set(payload.text, query_emb, label, confidence)
 
     latency_ms = (time.perf_counter() - t0) * 1000
     return PredictResponse(label=label, confidence=confidence, cached=False, latency_ms=round(latency_ms, 2))
@@ -471,6 +522,12 @@ class ModelUpdateRequest(BaseModel):
     drain_seconds: float = 30.0
 
 
+# asyncio keeps only a weak reference to a running Task. Without a strong
+# reference the drain task can be collected before its sleep elapses, and the
+# old model is never released.
+_drain_tasks: set[asyncio.Task[None]] = set()
+
+
 @app.post("/admin/update-model", status_code=202)
 async def update_model(
     body: ModelUpdateRequest,
@@ -486,14 +543,21 @@ async def update_model(
     # Atomic swap
     request.app.state.active_slot = new_slot
 
+    # Every cached entry was produced by the OLD model. Leaving them in place
+    # would serve the previous model's predictions for a full TTL after the
+    # swap, so the cache is dropped as part of the swap, not left to expire.
+    await request.app.state.cache.invalidate_all()
+
     # Drain old slot after grace period
     async def _drain_old(old_slot: int, delay: float) -> None:
         await asyncio.sleep(delay)
-        old_model = request.app.state.slots.get(old_slot)
-        del old_model
-        request.app.state.slots[old_slot] = None
+        request.app.state.slots[old_slot] = None   # drops the last reference
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    asyncio.create_task(_drain_old(current_slot, body.drain_seconds))
+    task = asyncio.create_task(_drain_old(current_slot, body.drain_seconds))
+    _drain_tasks.add(task)
+    task.add_done_callback(_drain_tasks.discard)
 
     return {"status": "swapped", "active_slot": str(new_slot)}
 
@@ -568,7 +632,9 @@ SSE is the right choice for token streaming because the client only needs to rec
 
 ### Semantic cache tradeoffs
 
-A threshold of 0.95 cosine similarity is conservative and minimises false-positive cache hits (returning a cached answer for a genuinely different query). Lowering to 0.90 increases hit rate but raises the risk of incorrect results. The current scan-all-keys implementation is acceptable at < 10,000 cached entries; at larger scale, replace with Redis Vector Search (HNSW index) for O(log n) retrieval.
+A threshold of 0.95 cosine similarity is conservative and minimises false-positive cache hits (returning a cached answer for a genuinely different query). Lowering to 0.90 increases hit rate but raises the risk of incorrect results.
+
+The brute-force scan is the part that does not scale, and the ceiling is far lower than it looks. Every lookup pulls N stored embeddings across the wire: at 384 dims in float32 that is 1,536 bytes each, so N = 10,000 is **15 MB fetched per request** — at the 100 req/s target, 1.5 GB/s of Redis egress, which no single node serves. The similarity maths is not the problem (a 10,000 x 384 matrix product against the query takes well under 1 ms in NumPy); the transfer is. That is why `max_scan` defaults to 500: 768 KB per request, ~77 MB/s at peak, and still inside the 200 ms p99 budget. Treat 500-1,000 entries as the honest ceiling for scan-all and move to Redis Vector Search (HNSW) — which returns only the top-k rather than the whole set — before the cache grows past it. The original `KEYS` + per-key `GET` shape was worse again: `KEYS` blocks the single-threaded server for the full keyspace walk, and N sequential `GET`s add N x RTT, roughly 1 s of pure latency at N = 10,000.
 
 ### TorchServe vs FastAPI for model serving
 
@@ -590,7 +656,7 @@ TorchServe is appropriate for pure model-serving infrastructure. FastAPI is bett
 Module-level loading executes during `import`, which runs in all worker processes simultaneously at startup and also during test imports. `lifespan` runs exactly once per process after the event loop is ready, giving access to async APIs (e.g., loading from S3 with `aioboto3`) and allowing clean teardown on SIGTERM.
 
 **Q: How does the micro-batcher guarantee the 200 ms p99 SLA?**
-Worst-case queue time is the flush interval (10 ms). GPU inference on a batch of 8 BERT-base inputs takes approximately 20 ms on a T4. Total worst-case is 10 + 20 + network = ~50 ms, well under 200 ms. The batcher uses `asyncio.wait_for` with a hard timeout so no request waits longer than one flush interval regardless of queue depth.
+It does not guarantee it — it budgets for it, and the budget only holds while arrival rate stays under the drain loop's service rate. Queue time is the flush interval (10 ms) plus however many batches are already ahead of you. GPU inference on a batch of 8 BERT-base inputs takes approximately 20 ms on a T4, so one serial drain loop retires 8 requests per ~30 ms — about 265 req/s. Under the 100 req/s target the queue stays near-empty and the arithmetic is 10 + 20 + network = ~50 ms, well under 200 ms. Push past ~265 req/s and the queue grows without bound and latency goes with it: `asyncio.wait_for` bounds how long the batcher waits to *fill* a batch, not how long a request waits for its turn. The queue-depth gauge is therefore the SLA's real leading indicator, and the fix beyond that point is more drain loops or more replicas, not a longer timeout.
 
 **Q: What happens if the GPU runs out of memory during a batch inference call?**
 `run_in_executor` propagates the `torch.cuda.OutOfMemoryError` back to the event loop. The drain loop catches it, marks all in-flight futures as failed with the exception, and the request handlers return HTTP 500. The batcher continues processing the next batch. A production system should add a circuit breaker that reduces batch size or falls back to CPU inference after repeated OOM events.
@@ -599,13 +665,13 @@ Worst-case queue time is the flush interval (10 ms). GPU inference on a batch of
 Only the model's own output is stored — user input is never stored as the value, only as the lookup key. Embeddings are deterministic and produced server-side. A user cannot inject an arbitrary cached answer because `set` is called only after a successful inference result. Input length is bounded by the Pydantic validator (`max_length=2048`).
 
 **Q: Why use cosine similarity at 0.95 rather than exact-match hashing?**
-Exact-match hashing misses "What is the sentiment of this review?" and "What's the sentiment for this review?" — semantically identical prompts that hash differently. At 0.95 cosine similarity with MiniLM-L6 embeddings, false positive rate is under 1% on standard NLP benchmarks. Exact-match is still valuable as a first-pass check (O(1)) before the embedding scan.
+Exact-match hashing misses "What is the sentiment of this review?" and "What's the sentiment for this review?" — semantically identical prompts that hash differently. 0.95 is a deliberately conservative operating point, not a published constant: the false-positive rate at any threshold depends entirely on your own prompt distribution, so measure it by replaying production traffic through the cache and auditing the hits, and re-measure whenever the embedder changes. Exact-match is still valuable as a first-pass check (O(1)) before the embedding scan.
 
 **Q: How does zero-downtime model update avoid serving inconsistent results mid-swap?**
-`app.state.active_slot` is a plain Python integer. Python's GIL guarantees that the integer assignment `active_slot = new_slot` is atomic at the bytecode level. Requests that have already read the old slot ID and are mid-inference continue to use the old model object (which is kept alive in `slots[old_slot]` until the drain window expires). No request sees a partially-loaded model.
+Because the swap is a single attribute assignment on a single-threaded event loop, and there is no `await` between reading `active_slot` and using the model it names. That, not the GIL, is the argument that holds: a free-threaded (no-GIL) CPython build would invalidate a GIL-based claim, whereas the event-loop argument survives it. A coroutine that has already resolved the slot continues against the old model object, which stays alive in `slots[old_slot]` until the drain window expires. The load into the inactive slot completes before the flip, so no request ever sees a partially-loaded model.
 
 **Q: How would you scale this beyond a single process?**
-Run multiple Uvicorn workers behind Gunicorn (`-w 4 --worker-class uvicorn.workers.UvicornWorker`). Each worker has its own copy of the model in GPU memory, so memory scales linearly with worker count. The semantic cache lives in Redis, which is shared across all workers, so cache hits are process-agnostic. The micro-batcher is per-process; cross-process batching requires an external queue (Redis Streams or Kafka) feeding a dedicated inference worker, which is the TorchServe or Triton Inference Server architecture.
+Run multiple Uvicorn workers behind Gunicorn (`pip install uvicorn-worker`, then `-w 4 --worker-class uvicorn_worker.UvicornWorker`). Each worker has its own copy of the model in GPU memory, so memory scales linearly with worker count. The semantic cache lives in Redis, which is shared across all workers, so cache hits are process-agnostic. The micro-batcher is per-process; cross-process batching requires an external queue (Redis Streams or Kafka) feeding a dedicated inference worker, which is the TorchServe or Triton Inference Server architecture.
 
 ```mermaid
 flowchart LR

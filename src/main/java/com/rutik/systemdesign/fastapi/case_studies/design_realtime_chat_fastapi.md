@@ -142,6 +142,8 @@ Passing a JWT as a query parameter (`/ws/room?token=xxx`) is a common shortcut b
 
 Authentication is not authorization: a valid JWT proves *who* the caller is, not that they belong to the room in the URL path. Without a membership check any authenticated user can open `/ws/{room_id}` for any room and receive its entire live feed. The auth phase therefore does both — verify the token, then verify `(user_id, room_id)` against the membership table — before the connection is registered for fan-out.
 
+The ordering is load-bearing and easy to get wrong, because the natural shape of a `ConnectionManager` is a single `connect()` that accepts the handshake *and* inserts into the registry. That shape puts an unauthenticated socket into the room's broadcast set for the full length of the auth window. Split it: the endpoint calls `websocket.accept()` itself (the client cannot send the auth frame before the handshake completes), and only calls `manager.register()` once membership has been proven.
+
 ### 5. Backpressure and Stale Connection Detection
 
 **Choice: Per-connection `asyncio.Queue` with bounded capacity and periodic ping.**
@@ -257,9 +259,17 @@ class ConnectionManager:
     # Public API
     # ------------------------------------------------------------------
 
-    async def connect(self, room_id: str, ws: WebSocket) -> asyncio.Queue[str]:
-        """Accept WS and register it. Returns the per-connection send queue."""
-        await ws.accept()
+    def register(self, room_id: str, ws: WebSocket) -> asyncio.Queue[str]:
+        """
+        Register an ALREADY-accepted, ALREADY-authorised socket for fan-out.
+        Returns the per-connection send queue.
+
+        Deliberately does not call ws.accept(): the handshake must complete
+        before the client can send its auth frame, but the socket must not
+        appear in the fan-out registry until membership is proven. Fusing
+        accept and register into one connect() call puts an unauthenticated
+        socket into the room's broadcast set for the whole auth window.
+        """
         q: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_MAX)
         ws_id = id(ws)
         self._rooms.setdefault(room_id, {})[ws_id] = (ws, q)
@@ -371,16 +381,15 @@ async def websocket_endpoint(
 ) -> None:
     # NOTE: no BackgroundTasks parameter. FastAPI only drains background tasks
     # after an HTTP response; on a WebSocket route they are never executed.
-    send_queue = await manager.connect(room_id, websocket)
+    await websocket.accept()
     user_id: str | None = None
     pong_event = asyncio.Event()
 
-    # --- Phase 1: authenticate AND authorize ---
+    # --- Phase 1: authenticate AND authorize, BEFORE registering for fan-out ---
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT)
     except asyncio.TimeoutError:
         await websocket.close(code=4001, reason="auth timeout")
-        manager.disconnect(room_id, websocket)
         return
 
     try:
@@ -398,9 +407,10 @@ async def websocket_endpoint(
         # reason text, and echoing the exception leaks internals to the client.
         logger.info("Auth rejected for room %s", room_id, exc_info=True)
         await websocket.close(code=4003, reason="auth failed")
-        manager.disconnect(room_id, websocket)
         return
 
+    # Only now does the socket enter the room's broadcast set.
+    send_queue = manager.register(room_id, websocket)
     await websocket.send_text(json.dumps({"type": "auth_ok", "user_id": user_id}))
     logger.info("User %s joined room %s", user_id, room_id)
 

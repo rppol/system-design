@@ -164,12 +164,12 @@ dequeue independently.
 | Dimension            | BackgroundTasks      | Celery               | ARQ                  | Dramatiq             |
 |----------------------|----------------------|----------------------|----------------------|----------------------|
 | Durability           | None (in-process)    | Yes (broker)         | Yes (Redis)          | Yes (broker)         |
-| Async-native         | Yes                  | No (threads/greenlets)| Yes (asyncio)       | Partial              |
+| Async-native         | Yes                  | No (threads/greenlets)| Yes (asyncio)       | Async actors (1.15+) |
 | Broker options       | —                    | Redis, RabbitMQ, SQS | Redis only           | Redis, RabbitMQ      |
 | Setup complexity     | Zero                 | High (beat, flower)  | Low                  | Medium               |
 | Result backend       | None                 | Redis / DB           | Redis                | Redis / DB           |
 | FastAPI fit          | Simple non-durable   | Moderate             | Excellent            | Good                 |
-| Monitoring UI        | None                 | Flower               | None (DIY)           | None (DIY)           |
+| Monitoring UI        | None                 | Flower               | None (DIY)           | dramatiq-dashboard   |
 
 **Decision:** ARQ. It is asyncio-native, has minimal boilerplate, integrates cleanly with FastAPI's
 lifespan, and Redis is already in the stack for caching. Celery is production-proven but brings
@@ -261,8 +261,10 @@ are also appended to a `task_audit` PostgreSQL table for compliance queries.
 
 All three task types (HTTP calls, file I/O, email API) are network-bound. An async ARQ worker runs
 a single-threaded event loop and multiplexes dozens of in-flight tasks without thread overhead.
-Thread-pool workers would context-switch unnecessarily. The recommended concurrency setting for
-ARQ is `max_jobs=50` per worker process; scale horizontally by adding worker replicas.
+Thread-pool workers would context-switch unnecessarily. This design sets `max_jobs=50` per worker
+process — ARQ's own default is 10, so that is a deliberate raise, not a published recommendation.
+Size it against the slowest downstream, not against the queue: 50 concurrent ERP calls at 8-second
+timeouts is 50 sockets that SAP has to survive. Scale horizontally by adding worker replicas.
 
 ---
 
@@ -270,14 +272,19 @@ ARQ is `max_jobs=50` per worker process; scale horizontally by adding worker rep
 
 ```python
 # ── requirements ──────────────────────────────────────────────────────────────
-# arq==0.26.*  redis==5.*  fastapi==0.111.*  uvicorn  pydantic-settings
+# arq==0.28.*  fastapi==0.140.*  uvicorn  pydantic-settings
+# redis>=4.2,<6   <- do NOT pin redis 8 here: arq itself requires
+#                    redis[hiredis]>=4.2.0,<6, so a redis==8 pin is
+#                    unresolvable alongside arq
 # aiohttp  weasyprint  sqlalchemy[asyncio]  asyncpg
 
 # ── src/config.py ─────────────────────────────────────────────────────────────
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     redis_dsn: str = "redis://localhost:6379/0"
     postgres_dsn: str = "postgresql+asyncpg://user:pass@localhost/orders"
     arq_max_jobs: int = 50
@@ -287,9 +294,6 @@ class Settings(BaseSettings):
     task_jitter: float = 10.0
     result_ttl_seconds: int = 86_400  # 24 h
     idempotency_ttl_seconds: int = 172_800  # 48 h
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
@@ -328,12 +332,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # ── src/tasks/helpers.py ──────────────────────────────────────────────────────
 import json
-import math
 import random
 import time
 from typing import Any
 
 import redis.asyncio as aioredis
+
+from ..config import settings
 
 
 async def claim(redis: aioredis.Redis, order_id: str, task_name: str) -> bool:
@@ -396,6 +401,7 @@ import aiohttp
 import redis.asyncio as aioredis
 from arq import Retry
 
+from ..config import settings
 from .helpers import (
     backoff_delay,
     claim,
@@ -679,11 +685,11 @@ app.include_router(admin_router)
 | Dimension              | ARQ                         | Celery                         | Dramatiq                      | FastAPI BackgroundTasks      |
 |------------------------|-----------------------------|--------------------------------|-------------------------------|------------------------------|
 | Durability             | Redis-backed                | Redis / RabbitMQ / SQS         | Redis / RabbitMQ              | None (in-process)            |
-| Async support          | Native asyncio              | Threads (greenlets with gevent)| Threads only                  | Native asyncio               |
+| Async support          | Native asyncio              | Threads (greenlets with gevent)| Async actors since 1.15, run on a dedicated loop thread | Native asyncio |
 | Retry built-in         | `Retry` exception + `defer` | `autoretry_for`, `countdown`   | `@actor(max_retries=N)`       | None                         |
-| DLQ support            | DIY (push to list)          | Built-in (dead_letter_routing) | Built-in                      | None                         |
-| Monitoring UI          | None (DIY dashboards)       | Flower (mature)                | Periodiq (limited)            | None                         |
-| Scheduled tasks        | `cron` in WorkerSettings    | Celery Beat                    | `apscheduler` integration     | None                         |
+| DLQ support            | DIY (push to list)          | Not built in — configure the broker's own DLX (`queue_arguments` with `x-dead-letter-exchange`) | Built in — 7-day dead-letter retention | None |
+| Monitoring UI          | None (DIY dashboards)       | Flower (mature)                | dramatiq-dashboard (third-party) | None                      |
+| Scheduled tasks        | `cron` in WorkerSettings    | Celery Beat                    | periodiq or APScheduler       | None                         |
 | Broker flexibility     | Redis only                  | Redis, RabbitMQ, SQS, etc.     | Redis, RabbitMQ               | —                            |
 | Operational complexity | Low                         | High                           | Medium                        | Zero                         |
 | Best fit               | Async FastAPI, I/O-bound    | Large Django/Flask shops       | CPU-bound + threads           | Ephemeral, non-critical      |
@@ -709,7 +715,8 @@ Exactly-once delivery requires:
 - Kafka with `enable.idempotence=true` and a consumer that checkpoints offsets only after DB commit.
 
 For this system (Redis broker, external HTTP calls), exactly-once is impractical. At-least-once with
-idempotency keys is the standard production pattern and costs only one Redis GET per task invocation.
+idempotency keys is the standard production pattern and costs one `SET NX EX` per task invocation —
+not a `GET`, because a read followed by a write is the very race the key exists to close.
 
 ---
 

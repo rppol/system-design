@@ -103,7 +103,7 @@ Web scraping is I/O-bound: most time is spent waiting for network responses. Thr
 | threading | Legacy code, blocking libraries | GIL limits true parallelism; 100s of threads = high memory |
 | multiprocessing | CPU-bound (image processing) | Process startup overhead; IPC complexity |
 
-asyncio runs all 50 workers on a single thread. The event loop yields during `await session.get(url)`, allowing other workers to proceed. Memory footprint is ~1 MB per process vs ~8 MB per thread for 50 threads. For CPU-heavy parsing, `asyncio.get_event_loop().run_in_executor(None, parse_html, raw_html)` offloads to a thread pool without blocking the loop.
+asyncio runs all 50 workers on a single thread. The event loop yields during `await session.get(url)`, allowing other workers to proceed. A coroutine costs a few KB of heap; an OS thread reserves the platform default stack — 8 MB of *virtual address space* on Linux, of which only the touched pages are ever resident, so quote it as address-space reservation and scheduler pressure rather than 8 MB of RAM apiece. For CPU-heavy parsing, `asyncio.get_running_loop().run_in_executor(None, parse_html, raw_html)` offloads to a thread pool without blocking the loop.
 
 ### 2. Rate Limiting Per Domain
 
@@ -125,33 +125,43 @@ This violates per-domain rate contracts and can starve fast-responding domains w
 
 ```python
 # GOOD: per-domain control
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 import asyncio, time
 
 class DomainRateLimiter:
     def __init__(self, max_rps: int = 5) -> None:
         self._sems: dict[str, asyncio.Semaphore] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._last_request: dict[str, float] = {}
+        self._max_rps = max_rps
         self._min_interval = 1.0 / max_rps  # 0.2 s between requests
 
     def _domain(self, url: str) -> str:
         return urlparse(url).netloc
 
-    async def acquire(self, url: str) -> None:
+    @asynccontextmanager
+    async def slot(self, url: str):
+        """Hold a domain slot for the WHOLE fetch, not just the pacing sleep."""
         domain = self._domain(url)
         if domain not in self._sems:
-            self._sems[domain] = asyncio.Semaphore(max_rps)  # concurrency cap
-        sem = self._sems[domain]
-        async with sem:
-            now = time.monotonic()
-            last = self._last_request.get(domain, 0.0)
-            wait = self._min_interval - (now - last)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last_request[domain] = time.monotonic()
+            self._sems[domain] = asyncio.Semaphore(self._max_rps)
+            self._locks[domain] = asyncio.Lock()
+        async with self._sems[domain]:            # concurrency cap
+            # The pacing decision must be serialised. Without the lock, every
+            # coroutine inside the semaphore reads the same _last_request,
+            # computes the same wait, and they all fire in the same instant.
+            async with self._locks[domain]:
+                wait = self._min_interval - (time.monotonic() - self._last_request.get(domain, 0.0))
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._last_request[domain] = time.monotonic()
+            yield                                  # semaphore still held here
 ```
 
-Each domain gets its own `asyncio.Semaphore(5)` limiting to 5 concurrent requests. The `_min_interval` sleep ensures at least 200 ms between requests to the same domain even if all 5 semaphore slots are available simultaneously.
+Two separate controls, and they are separate on purpose. The `asyncio.Semaphore(5)` caps how many requests are *open at once* against one host; the `_min_interval` sleep caps how *often* a new one starts, at one per 200 ms.
+
+The reason `slot()` is a context manager rather than an `acquire()` call is the whole point. If the semaphore is released as soon as the pacing sleep finishes — which is what an `async with sem:` block that returns before the fetch does — it caps nothing at all, because the fetch it is supposed to be limiting has not started yet. Concurrency then settles at `fetch_latency / _min_interval`: at this system's own upper-bound fetch latency of 2 s and 200 ms pacing, that is **10** simultaneous connections to a host advertised as capped at 5. Hold the slot across the fetch and the cap is real.
 
 ### 3. URL Deduplication: Redis vs In-Memory Set
 
@@ -276,25 +286,26 @@ class RobotsCache:
 
     async def is_allowed(self, url: str, user_agent: str = "*") -> bool:
         domain = urlparse(url).netloc
-        now = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        now = loop.time()
         cached = self._cache.get(domain)
         if cached is None or (now - cached[1]) > self._ttl:
-            parser = await self._fetch_robots(domain)
+            parser = await self._fetch_robots(domain, loop)
             self._cache[domain] = (parser, now)
         else:
             parser = cached[0]
-        loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, parser.can_fetch, user_agent, url)
 
-    async def _fetch_robots(self, domain: str) -> RobotFileParser:
+    async def _fetch_robots(
+        self, domain: str, loop: asyncio.AbstractEventLoop
+    ) -> RobotFileParser:
         robots_url = f"https://{domain}/robots.txt"
         parser = RobotFileParser(robots_url)
-        loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, parser.read)
         return parser
 ```
 
-The cache serves a hot path when an entry is under 1 hour old, and only falls to the blocking `run_in_executor` fetch on a cold or stale domain — a failed fetch degrades safely to `allow_all` rather than blocking the crawl:
+The cache serves a hot path when an entry is under 1 hour old, and only falls to the blocking `run_in_executor` fetch on a cold or stale domain — an unreachable host degrades to `disallow_all`, the conservative side, rather than crawling on regardless:
 
 ```mermaid
 flowchart LR
@@ -312,7 +323,7 @@ flowchart LR
     fetchNew(Fetch robots.txt<br/>via executor)
     fetchOk{"Fetch<br/>succeeded?"}
     cacheParser(Cache parser<br/>+ timestamp)
-    fallbackAllow(Fallback:<br/>allow_all = true)
+    fallbackAllow(Unreachable:<br/>disallow_all = true)
     permCheck{"parser.can_fetch<br/>user_agent, url"}
     allowed(["Allowed<br/>fetch proceeds"])
     disallowed(["Disallowed<br/>skip URL"])
@@ -353,8 +364,9 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -405,7 +417,9 @@ class DomainRateLimiter:
     def _domain(self, url: str) -> str:
         return urlparse(url).netloc
 
-    async def acquire(self, url: str) -> None:
+    @asynccontextmanager
+    async def slot(self, url: str) -> AsyncIterator[None]:
+        """Hold the domain's concurrency slot for the duration of the fetch."""
         domain = self._domain(url)
         if domain not in self._sems:
             self._sems[domain] = asyncio.Semaphore(self._max_rps)
@@ -417,6 +431,7 @@ class DomainRateLimiter:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 self._last_request[domain] = time.monotonic()
+            yield
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +445,7 @@ class RobotsCache:
 
     async def is_allowed(self, url: str, user_agent: str = "AsyncScraper/1.0") -> bool:
         domain = urlparse(url).netloc
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         now = loop.time()
         cached = self._cache.get(domain)
         if cached is None or (now - cached[1]) > self._ttl:
@@ -446,7 +461,17 @@ class RobotsCache:
         try:
             await loop.run_in_executor(None, parser.read)
         except Exception:
-            parser.allow_all = True  # if robots.txt unreachable, allow all
+            # RFC 9309 splits the failure classes, and so must we.
+            # read() swallows every HTTPError itself: 4xx "unavailable" sets
+            # allow_all, 401/403 sets disallow_all, and 5xx sets neither and
+            # never parses -- which leaves last_checked at 0, so can_fetch
+            # returns False. All three already match the RFC.
+            # Reaching HERE therefore means a network-level URLError (DNS,
+            # refused connection, TLS), i.e. RFC 9309 s2.3.1.4 "unreachable",
+            # for which a crawler MUST assume complete disallow. Defaulting
+            # to allow_all is the exact opposite of the spec and hammers a
+            # host that is already failing.
+            parser.disallow_all = True
         return parser
 
 
@@ -558,15 +583,16 @@ async def worker(
             if not await robots.is_allowed(url):
                 continue
 
-            # Rate-limited fetch
-            await rate_limiter.acquire(url)
-            html = await fetch_page(session, url)
+            # Rate-limited fetch — the slot is held for the whole request, so
+            # the per-domain concurrency cap actually caps something.
+            async with rate_limiter.slot(url):
+                html = await fetch_page(session, url)
             if html is None:
                 job_state.errors += 1
                 continue
 
             # Parse in executor to avoid blocking event loop on large pages
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             product = await loop.run_in_executor(None, parse_product, html, url)
             new_links = await loop.run_in_executor(None, extract_product_links, html, url)
 
@@ -610,10 +636,17 @@ async def run_job(
         for i in range(num_workers)
     ]
 
-    await queue.join()
-    for t in tasks:
-        t.cancel()
-    job_state.status = "done"
+    # try/finally, not a bare cancel after join(). DELETE /jobs/{id} cancels
+    # THIS coroutine, which interrupts `await queue.join()` -- and without the
+    # finally the 50 worker tasks are never cancelled and keep crawling
+    # forever, ignoring the stop request. Cancellation must propagate.
+    try:
+        await queue.join()
+        job_state.status = "done"
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +755,7 @@ CREATE INDEX idx_products_scraped_at ON products (scraped_at);
 | `asyncio.Queue` | Bounded URL frontier; `maxsize=200_000` prevents unbounded memory growth; `queue.join()` blocks until all URLs processed |
 | `asyncio.Semaphore` | Per-domain concurrency cap (max 5 simultaneous connections to one host) |
 | `asyncio.create_task` | Spawns 50 worker coroutines concurrently; each task runs the full fetch-parse-store pipeline |
-| `asyncio.get_event_loop().run_in_executor` | Offloads CPU-bound HTML parsing (BeautifulSoup) and blocking `robotparser.read()` to thread pool |
+| `asyncio.get_running_loop().run_in_executor` | Offloads CPU-bound HTML parsing (BeautifulSoup) and blocking `robotparser.read()` to thread pool |
 | `aiohttp.ClientSession` | Shared async HTTP client with connection pooling (`TCPConnector(limit=100)`); reused across all workers |
 | `aiohttp.ClientTimeout` | 15-second total timeout per request; prevents workers hanging on slow servers |
 | `asyncpg` | Async PostgreSQL driver; connection pool (`min_size=5, max_size=20`); `UPSERT` with `ON CONFLICT` |
@@ -754,7 +787,7 @@ CREATE INDEX idx_products_scraped_at ON products (scraped_at);
 |---|---|---|
 | Multi-process safe | Yes | No — each process has its own set |
 | Survives restart | Yes (with persistence) | No |
-| Memory (10M URLs) | ~1 GB | ~800 MB (Python set overhead higher) |
+| Memory (10M URLs) | ~1 GB | ~1.4 GB (measured; per-object `str` header + set table beat Redis's per-entry cost) |
 | Latency per check | ~0.1 ms (local Redis) | ~50 ns |
 | Operational cost | Requires Redis infra | None |
 
@@ -775,10 +808,10 @@ For 10,000 pages/hour = 2.8 pages/second, a single machine with 50 async workers
 ## Interview Discussion Points
 
 **Q: What makes asyncio more efficient than threading for this use case?**
-asyncio uses a single thread and cooperative multitasking: when a coroutine awaits a network response, the event loop runs another coroutine. This avoids thread context-switch overhead (~1-5 µs) and the GIL contention that limits Python threads. 50 async workers consume ~10 MB total vs ~400 MB for 50 OS threads. The tradeoff: one blocking call anywhere stalls all workers, so CPU-bound operations must go through `run_in_executor`.
+asyncio uses a single thread and cooperative multitasking: when a coroutine awaits a network response, the event loop runs another coroutine. This avoids thread context-switch overhead (~1-5 µs) and the GIL contention that limits Python threads. Be precise about the memory claim, because it is routinely overstated: 50 coroutines cost single-digit MB of heap, while 50 OS threads reserve ~400 MB of *virtual address space* (8 MB default stack each on Linux) but touch only a few KB of it, so resident usage is far smaller than the reservation. The honest advantage is scheduler and context-switch cost, not a 40x RSS saving. The tradeoff: one blocking call anywhere stalls all workers, so CPU-bound operations must go through `run_in_executor`.
 
 **Q: How do you prevent overwhelming a single domain with concurrent requests?**
-Two mechanisms in combination: a per-domain `asyncio.Semaphore(5)` caps concurrent open connections to that domain to 5, and a politeness delay of `sleep(1/rate)` ensures at least 200 ms between consecutive requests even when 5 connections are available simultaneously. The semaphore prevents connection storms; the sleep provides steady cadence.
+Two mechanisms in combination: a per-domain `asyncio.Semaphore(5)` caps concurrent open connections to that domain to 5, and a politeness delay of `sleep(1/rate)` ensures at least 200 ms between consecutive requests even when 5 connections are available simultaneously. The semaphore prevents connection storms; the sleep provides steady cadence. The detail interviewers probe is the *scope* of the semaphore: it has to be held for the whole fetch, which is why the limiter is an `async with rate_limiter.slot(url)` context manager rather than an `acquire()` that returns before the request goes out. Release it early and it caps nothing — concurrency settles at `fetch_latency / interval` instead, which at a 2 s fetch and 200 ms pacing is 10 open connections against a host you advertised as capped at 5. The pacing update also needs its own `asyncio.Lock`, or every coroutine inside the semaphore reads the same `_last_request`, computes the same wait, and they all fire together.
 
 **Q: How does the URL frontier handle backpressure when pages are discovered faster than they are processed?**
 The `asyncio.Queue(maxsize=200_000)` provides bounded capacity. When the queue is full, `queue.put()` blocks the producer coroutine, creating natural backpressure. Workers calling `queue.task_done()` signal completion, allowing blocked puts to resume. If 200,000 URLs is insufficient for a deep crawl, the frontier can be backed by Redis lists (`LPUSH`/`BRPOP`) which provide persistent, unbounded storage at the cost of Redis round-trips per URL.
@@ -787,19 +820,19 @@ The `asyncio.Queue(maxsize=200_000)` provides bounded capacity. When the queue i
 The current implementation catches all exceptions in the worker loop, increments the error counter, and continues. A more robust approach wraps the `write_product` call in a retry with exponential backoff for `asyncpg.TooManyConnectionsError` or transient network errors. For idempotency, the schema uses `ON CONFLICT (url) DO UPDATE`, so replaying a URL after a partial write is safe.
 
 **Q: How would you scale this system to 10x throughput (100,000 pages/hour)?**
-100,000 pages/hour = 28 pages/second. Options: (1) increase `num_workers` from 50 to 200 — asyncio handles this with minimal overhead; (2) shard by domain across multiple scraper processes using Kafka topic partitioning; (3) add a second Redis for dedup to reduce round-trip latency. The PostgreSQL write path becomes the bottleneck at ~28 inserts/second — use `asyncpg` batch inserts or a write buffer that flushes every 100 records or 1 second.
+100,000 pages/hour = 28 pages/second, and the first move is to work out what actually binds — which is *not* the worker count. Politeness caps each domain at 5 req/s, so 5-10 domains give a hard ceiling of 25-50 pages/second no matter how many workers you add. At 5 domains, 28 pages/s is simply unreachable; raising `num_workers` from 50 to 200 buys nothing but idle coroutines parked on the same semaphores. So: (1) widen the domain set, or negotiate a higher rate with the sites you have — this is the only lever that raises the ceiling; (2) once past ~10 domains, shard by domain across multiple scraper processes with Kafka topic partitioning, because the per-domain limiter is per-process state and two processes crawling one domain each enforce 5 req/s independently, giving 10; (3) add a second Redis for dedup to cut round-trip latency. PostgreSQL is not the constraint at this scale — 28 single-row inserts/second is trivial for it — but batching with `asyncpg`'s `executemany` or a buffer that flushes every 100 records or 1 second still cuts connection churn and is worth doing before it matters.
 
 **Q: How do you handle sites that require JavaScript rendering?**
 aiohttp fetches raw HTML and cannot execute JavaScript. For JS-heavy sites, use Playwright's async API (`playwright.async_api`) with a pool of browser contexts. Each browser context costs ~50 MB RAM vs ~1 MB for an HTTP connection, so limit JS-rendered workers to a smaller pool (5-10) and route by domain. Alternatively, look for the site's internal API that the JavaScript calls and scrape that directly.
 
 **Q: How does the robots.txt cache avoid stale data?**
-The `RobotsCache` stores a `(parser, timestamp)` tuple per domain and re-fetches when the cached entry is older than 1 hour (`_ttl = 3600`). If the `robots.txt` fetch fails (site unreachable), the parser is set to `allow_all = True` as a safe fallback, matching the robots.txt spec's guidance that crawlers should not retry indefinitely on failure. A 1-hour TTL balances freshness against the overhead of fetching robots.txt on every page request.
+The `RobotsCache` stores a `(parser, timestamp)` tuple per domain and re-fetches when the cached entry is older than 1 hour (`_ttl = 3600`). The failure fallback is not a single rule, because RFC 9309 §2.3.1 splits the cases: a 4xx is "unavailable" and the crawler MAY access anything (`allow_all`), while an unreachable host — network error or 5xx — leaves robots.txt undefined and the crawler MUST assume complete disallow (`disallow_all`). `RobotFileParser.read()` already implements the HTTP half; the code only has to handle the network error, and it must fail closed there, not open. A 1-hour TTL balances freshness against the overhead of fetching robots.txt on every page request.
 
 **Q: Why use `ON CONFLICT DO UPDATE` instead of checking existence before insert?**
 A check-then-insert sequence has a TOCTOU race: two workers could both check, both find the URL absent, and both attempt to insert, causing a constraint violation. `ON CONFLICT DO UPDATE` (an UPSERT) is atomic at the database level — the second writer's insert becomes an update. It also handles the case where a re-crawl run wants to refresh prices without needing explicit logic to distinguish new vs existing rows.
 
 **Q: How would you add politeness delays that respect the `Crawl-Delay` directive in robots.txt?**
-`RobotFileParser` exposes `crawler_delay(user_agent)` which returns the `Crawl-Delay` value in seconds if set. The `DomainRateLimiter` can be extended to read this value when initialising a domain's semaphore: if `robots.crawler_delay("AsyncScraper/1.0")` returns 2, set `_min_interval = 2.0` for that domain rather than the default `1/max_rps`. This integrates robots.txt compliance directly into the rate-limiting layer.
+`RobotFileParser` exposes `crawl_delay(useragent)`, which returns the `Crawl-Delay` value in seconds if the site set one and `None` otherwise. The `DomainRateLimiter` can be extended to read it when initialising a domain's slot: if `robots.crawl_delay("AsyncScraper/1.0")` returns 2, set `_min_interval = 2.0` for that domain rather than the default `1/max_rps`, and take `max()` of the two so a site's stated delay can only ever slow you down. `request_rate(useragent)` is the related accessor for the `Request-Rate` directive. This integrates robots.txt compliance directly into the rate-limiting layer.
 
 **Q: How do you monitor crawl health in production?**
 The `JobState` dataclass tracks `fetched` and `errors` counts exposed via `GET /jobs/{job_id}`. For production monitoring: (1) expose a Prometheus `/metrics` endpoint with `scraped_total`, `errors_total`, `queue_depth`, and `active_workers` gauges using `prometheus-fastapi-instrumentator`; (2) set an alert if `errors/fetched > 0.1` (10% error rate) over a 5-minute window; (3) track p95 fetch latency with a histogram to detect slow domains early.

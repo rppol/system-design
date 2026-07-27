@@ -126,6 +126,8 @@ This is a classic TOCTOU race: two concurrent requests both read `count = 99`, b
 
 If Redis is down, the alternative is to fail-closed (return 503 to all traffic). For most public APIs, blocking all traffic because the rate limiter is unavailable is worse than temporarily allowing excess traffic. The implementation catches `redis.exceptions.RedisError` and logs a `WARNING` metric (so an alert fires), then continues to the route handler. Operators can decide to fail-closed by re-raising the exception.
 
+Fail-open is only fail-open if everything downstream survives the missing counters. Swallowing the exception is the easy half; the trap is that the limiter normally publishes `request.state.rate_limit_*`, and the outage path skips those assignments. A route or middleware that reads `request.state.rate_limit_minute` then raises `AttributeError` and the request 500s — a "fail-open" limiter that fails harder than the closed one. The limiter therefore seeds those attributes before its first Redis call, so the outage path leaves a defined, if uninformative, value behind.
+
 **5. Two independent time windows**
 
 The minute window (100 req/min) prevents burst abuse. The day window (1000 req/day) caps sustained usage. Each is a separate Redis key with its own TTL. Both checks run inside the same `__call__` coroutine. If either limit is exceeded, the 429 response body identifies which window was hit.
@@ -320,6 +322,15 @@ class RateLimiter:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="X-Api-Key header is required.",
             )
+
+        # Seed the counters BEFORE touching Redis. The fail-open branch at the
+        # bottom returns without setting them, and any route that reads
+        # request.state.rate_limit_* would then raise AttributeError -> 500 —
+        # turning "fail open" into "fail with a 500", the worst of both worlds.
+        request.state.rate_limit_minute = 0
+        request.state.rate_limit_minute_limit = self.minute_limit
+        request.state.rate_limit_day = 0
+        request.state.rate_limit_day_limit = self.day_limit
 
         redis_client: aioredis.Redis = app_state.redis
 
@@ -530,7 +541,7 @@ The fixed window counter buckets time into discrete windows (e.g., each 60-secon
 Add a second `RateLimiter` variant that keys on `request.client.host` instead of the `X-Api-Key` header. Apply it as an additional dependency or stack both: `dependencies=[Depends(ip_limiter), Depends(key_limiter)]`. The two limiters are independent; either one can trigger a 429. Use separate key namespaces — `rate::ip::{ip}::minute::...` — to avoid collisions. Behind a proxy, `request.client.host` is the proxy's address, so you must run Uvicorn with `--proxy-headers --forwarded-allow-ips=<lb-cidr>` and let it rewrite `client.host` from `X-Forwarded-For`. Never read `X-Forwarded-For` yourself and never trust the leftmost entry: a client can send any header it likes, so an attacker rotates a fake value per request and the IP limit becomes a no-op. Take the rightmost hop your own infrastructure appended, and pin `forwarded-allow-ips` to the load balancer's addresses so unproxied traffic cannot spoof it at all.
 
 **Q: What happens if Redis goes down mid-deployment?**
-The `except aioredis.RedisError` block in `__call__` catches all connection errors, timeouts, and cluster failures. It logs a warning (which should trigger a PagerDuty alert via your log aggregator) and returns without raising, allowing the request to proceed to the route handler. This means the API stays up but rate limiting is suspended. If you prefer fail-closed, replace the `logger.warning` with `raise HTTPException(status_code=503)`.
+The `except aioredis.RedisError` block in `__call__` catches all connection errors, timeouts, and cluster failures. It logs a warning (which should trigger a PagerDuty alert via your log aggregator) and returns without raising, allowing the request to proceed to the route handler. This means the API stays up but rate limiting is suspended. The subtlety worth stating in an interview: swallowing the exception is not sufficient on its own. The limiter also publishes `request.state.rate_limit_*` for downstream headers, and the outage path never reaches those assignments — so a route that reads them raises `AttributeError` and returns 500, defeating the whole point. Seed the state attributes before the first Redis call. If you prefer fail-closed, replace the `logger.warning` with `raise HTTPException(status_code=503)`.
 
 **Q: How would you implement burst capacity (token bucket) on top of this?**
 Store two values per key: `tokens_remaining` and `last_refill_timestamp`. In the Lua script: compute `elapsed = now - last_refill`; compute `refill = elapsed * refill_rate`; set `tokens = min(bucket_capacity, tokens_remaining + refill)`; if `tokens >= 1`, decrement and allow; otherwise deny. The Lua script must be updated to accept `bucket_capacity` and `refill_rate` as arguments. Token bucket allows short bursts up to `bucket_capacity` while still enforcing a long-run average rate.
