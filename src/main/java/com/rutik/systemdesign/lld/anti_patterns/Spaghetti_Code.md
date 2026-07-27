@@ -44,7 +44,8 @@ Spaghetti Code is one of the oldest and most widely recognized anti-patterns in 
 /**
  * WARNING: This method was "temporarily" written to ship the MVP.
  * That was 3 years ago. It now handles all order processing.
- * Cyclomatic complexity: 34. Test coverage: 0%.
+ * Cyclomatic complexity: 32 by Checkstyle's counting rules (one for the method,
+ * plus one each for if, for, ?:, catch, and every && or ||). Test coverage: 0%.
  */
 public class OrderService {
 
@@ -68,7 +69,7 @@ public class OrderService {
     // This single method does: validation, inventory check, pricing,
     // payment charging, order persistence, email notification, SMS notification,
     // audit logging, and loyalty point calculation.
-    // It is 200+ lines and cannot be unit tested in isolation.
+    // It is ~175 lines and cannot be unit tested in isolation.
     public String processOrder(Map<String, Object> requestData) {
 
         boolean isValid = false;
@@ -297,7 +298,7 @@ flowchart LR
 To test "what happens when inventory is insufficient", you must provide a valid payment token, a real database connection, and a working mail client. There is no seam where a single concern can be tested without the others.
 
 **Change Amplification**
-A requirement to change how loyalty points are calculated requires reading and understanding the entire 200-line method before safely modifying 5 lines at the bottom. Any change risks breaking any of the other 6 concerns.
+A requirement to change how loyalty points are calculated requires reading and understanding the whole method before safely modifying 5 lines at the bottom. Any change risks breaking any of the other 6 concerns.
 
 **Debugging Nightmare**
 When a production incident occurs, engineers must trace the control flow through deeply nested conditionals with boolean flags to determine which code path was taken. Log messages are scattered and inconsistent.
@@ -482,6 +483,8 @@ If you write tests first, untestable spaghetti code cannot be written — the te
 ---
 
 ## Real-World Consequences
+
+*The four scenarios below are illustrative composites of common incident patterns, not reports of specific named public incidents. The numbers show the shape of the failure; treat them as worked examples rather than as citable industry statistics.*
 
 **Scenario 1: The Three-Day Bug Hunt**
 A payments team spent three days debugging a production issue where some orders were being double-charged. The root cause was a single boolean flag (`paymentSucceeded`) that was set to `true` in two separate branches of a 300-line method. Finding the second assignment required reading the entire method in sequence. A clean extracted `chargePayment()` method would have isolated the bug in minutes.

@@ -137,7 +137,7 @@ public class UserManager {
 }
 ```
 
-This single class is responsible for authentication, session management, registration, profile management, password management, payments, notifications, and admin operations. It has 8 dependencies injected directly.
+This single class is responsible for authentication, session management, registration, profile management, password management, payments, notifications, and admin operations. It holds 7 collaborators as fields — `Database`, `EmailService`, `AuditLogger`, `PasswordEncoder`, `SessionStore`, `PaymentGateway`, `NotificationService` — and every one of them has to be stood up before any single method can be exercised.
 
 The class diagram below makes the hub-and-spoke shape concrete: one `UserManager` wired directly to every collaborator it needs, carrying auth, registration, profile, password, payment, and admin logic as its own methods.
 
@@ -188,7 +188,7 @@ classDiagram
 
 1. **Violates SRP**: The class has many reasons to change. A payment bug forces changes in the same file as authentication logic.
 2. **Tight coupling**: All callers depend on a single type, making substitution or mocking in tests very hard.
-3. **Testing nightmare**: Setting up a unit test for `login()` requires mocking 7+ dependencies.
+3. **Testing nightmare**: Setting up a unit test for `login()` requires standing up all 7 collaborators, even though `login()` itself touches only 4 of them.
 4. **Merge conflicts**: Multiple developers editing the same large file creates constant conflicts.
 5. **Cognitive overload**: Nobody can hold the entire class in their head at once.
 6. **Impossible to reuse**: The class is too intertwined to extract a subset of its logic.
@@ -247,6 +247,16 @@ public class UserRegistrationService {
     private final EmailService emailService;
     private final AuditLogger auditLogger;
 
+    public UserRegistrationService(UserRepository userRepository,
+                                   PasswordEncoder passwordEncoder,
+                                   EmailService emailService,
+                                   AuditLogger auditLogger) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.emailService = emailService;
+        this.auditLogger = auditLogger;
+    }
+
     public User register(String email, String password, String name) {
         if (userRepository.existsByEmail(email)) {
             throw new ValidationException("Email already in use");
@@ -265,6 +275,14 @@ public class SubscriptionService {
     private final UserRepository userRepository;
     private final PaymentGateway paymentGateway;
     private final NotificationService notificationService;
+
+    public SubscriptionService(UserRepository userRepository,
+                               PaymentGateway paymentGateway,
+                               NotificationService notificationService) {
+        this.userRepository = userRepository;
+        this.paymentGateway = paymentGateway;
+        this.notificationService = notificationService;
+    }
 
     public void subscribe(Long userId, String planId) {
         User user = userRepository.findById(userId)
@@ -361,5 +379,5 @@ Each service now:
 **Key talking points:**
 - Name the principle violated: SRP
 - Describe the decomposition strategy: identify cohesive groups of methods and fields, extract into dedicated classes
-- Mention testability as a concrete consequence — hard to mock 8 dependencies
+- Mention testability as a concrete consequence — every test has to mock all 7 collaborators, even the ones the method under test never calls
 - Mention merge conflict overhead as a practical team problem

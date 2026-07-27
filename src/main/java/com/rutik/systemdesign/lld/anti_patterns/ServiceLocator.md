@@ -4,7 +4,9 @@
 
 The Service Locator pattern provides a centralized registry where services (dependencies) can be looked up by name or type at runtime. Any class can call the locator to obtain a dependency instead of receiving it through a constructor or setter.
 
-While it was once considered a solution to dependency management, Service Locator is now widely considered an anti-pattern — most notably by Martin Fowler and Mark Seemann — because it hides dependencies, making code harder to understand, test, and maintain.
+Get the attribution right, because it is commonly mangled. The "Service Locator is an anti-pattern" position is **Mark Seemann's** (2010), and it rests on the hidden-dependency argument: the class compiles and constructs fine while its real requirements stay invisible, so the failure shows up at runtime. Martin Fowler's 2004 article "Inversion of Control Containers and the Dependency Injection pattern" — the piece everyone cites here — does **not** condemn Service Locator. Fowler presents the two as alternatives that "provide the fundamental decoupling that's missing in the naive example", says his preference is "to start with constructor injection", and concludes that "the choice between Service Locator and Dependency Injection is less important than the principle of separating service configuration from the use of services." Citing Fowler as calling it an anti-pattern is a misattribution.
+
+The rest of this file argues the Seemann position, which is the mainstream one for application business logic; the "When Service Locator Is Acceptable" section below is where Fowler's nuance lands.
 
 The contrast:
 - **Service Locator**: Dependencies are pulled from a global registry inside the class.
@@ -363,4 +365,4 @@ Even in these cases, the Service Locator should be used at the **boundary** of t
 - The core problem is hidden dependencies — the class's needs are not visible from outside
 - DI makes dependencies explicit, enabling compile-time checking and easy mocking
 - Service Locator couples every class to the locator — DI decouples classes from each other
-- Mention Martin Fowler's article "Inversion of Control Containers and the Dependency Injection pattern" as the authoritative source
+- Cite Fowler's 2004 "Inversion of Control Containers and the Dependency Injection pattern" for the comparison, and Mark Seemann (2010) for the anti-pattern verdict — getting that split right is a credibility signal, because Fowler treats the two as alternatives rather than condemning Service Locator

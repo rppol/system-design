@@ -16,7 +16,7 @@ The key distinction from other anti-patterns: this is not about bad code — the
 
 **Mental model**: A team expert in SQL Server uses it for everything — time series data (wrong tool), full-text search (wrong tool), graph queries (wrong tool). A developer who knows Regex writes a regex for everything, even when simple string operations suffice. The familiarity bias overrides objective fit assessment. The tool may be excellent — the problem is applying it indiscriminately.
 
-**Why it matters**: Every wrong-tool application makes the codebase harder — SQL for time series is 10× slower than InfluxDB; Regex for a simple prefix check is unreadable. Over time, golden hammer applications accumulate into a system that's poorly suited to each of its own use cases.
+**Why it matters**: Every wrong-tool application makes the codebase harder — a general-purpose relational table with a timestamp column carries index and storage overhead that a purpose-built time-series engine avoids; a regex for a simple prefix check is unreadable. Over time, golden hammer applications accumulate into a system that's poorly suited to each of its own use cases.
 
 **Key insight**: The antidote is tool-agnostic problem definition — state the requirement clearly ("store and query 10M sensor readings per second with point-in-time lookups") before choosing a tool. Choose based on fit, not familiarity.
 
@@ -67,8 +67,10 @@ public class SocialNetworkServiceViolation {
             ") " +
             "SELECT path FROM path WHERE user_id = ? ORDER BY depth LIMIT 1";
 
-        // Performs full recursive table scan — catastrophic at 10M+ rows
-        // Cycles and fan-out make this O(n^k) where k is max depth
+        // Performs full recursive table scan — catastrophic at 10M+ rows.
+        // The recursive term expands every row into up to b children per level, so
+        // the CTE materializes up to b^d rows for average friend count b and the
+        // depth cap d = 6 above: at b = 100 that is 100^6 = 10^12 candidate paths.
         String pathStr = jdbc.queryForObject(sql, String.class, fromUserId, fromUserId, toUserId);
         return parsePathString(pathStr);
     }
@@ -111,11 +113,15 @@ class PointFactoryProvider {
     public static void setFactory(PointFactory f) { instance = f; }
 }
 
-// Usage — massively over-engineered
-Point p = PointFactoryProvider.getInstance().createPoint(3.0, 4.0);
+class PointUsage {
+    void demo() {
+        // Usage — massively over-engineered
+        Point p = PointFactoryProvider.getInstance().createPoint(3.0, 4.0);
 
-// What it should be:
-Point p2 = new Point(3.0, 4.0); // or a static factory method if that is genuinely useful
+        // What it should be:
+        Point p2 = new Point(3.0, 4.0); // or a static factory method if that is genuinely useful
+    }
+}
 ```
 
 ---
@@ -300,9 +306,9 @@ flowchart LR
 **HLD View — Where Golden Hammer Appears in Distributed Systems**
 
 - **Kafka for everything** — A team that knows Kafka deeply uses it for a background job that runs once per hour. A cron job with a simple database flag would be simpler, faster to build, and easier to operate. The hammer: Kafka. The screw: scheduled batch processing.
-- **Microservices for all team sizes** — A two-person team building an internal tool adopts microservices because "that's how it's done." They spend 60% of their time on service discovery, inter-service auth, and distributed tracing instead of building features. The right tool: a well-structured monolith.
+- **Microservices for all team sizes** — A two-person team building an internal tool adopts microservices because "that's how it's done." Most of their effort goes into service discovery, inter-service auth, and distributed tracing instead of building features. The right tool: a well-structured monolith.
 - **Redis as primary database** — A team comfortable with Redis uses it as the source of truth for financial transactions that require ACID guarantees. Redis is an excellent cache and message broker, but its persistence and consistency model is wrong for this use case.
-- **NoSQL for relational data** — Using MongoDB or DynamoDB for data with complex relationships and ad-hoc query requirements because "NoSQL scales better." The result: application-level joins, consistency headaches, and 10× the query complexity of a well-indexed relational database.
+- **NoSQL for relational data** — Using MongoDB or DynamoDB for data with complex relationships and ad-hoc query requirements because "NoSQL scales better." The result: joins reimplemented in application code, consistency headaches, and access patterns that a well-indexed relational database would have answered with one query.
 
 ---
 

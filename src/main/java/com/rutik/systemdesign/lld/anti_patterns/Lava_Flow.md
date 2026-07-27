@@ -191,7 +191,7 @@ public class OrderProcessor {
 ## Why It's Harmful
 
 **Maintenance Burden**
-Every new engineer must read and reason about dead code before they can confidently modify the class. A 500-line class where 300 lines are inert is still a 500-line cognitive burden.
+Every new engineer must read and reason about dead code before they can confidently modify the class. A 500-line class where 300 lines are inert is still a 500-line cognitive burden — the reader has to prove each line is dead before ignoring it, which costs as much as reading live code.
 
 **Security Risk**
 Unreviewed code paths can harbor vulnerabilities. A deprecated method that "nobody calls" might still be invokable via reflection, serialization, or a forgotten cron job. Security audits must cover all code, dead or alive.
@@ -264,14 +264,14 @@ public class OrderValidator {
 - All deprecated methods and their dead private helpers were deleted after a confirmed-safe audit
 - The mysterious static initializer was investigated, found unnecessary, and removed
 - `OrderValidator` was extracted for testability and single responsibility
-- Class is now 30 lines instead of 150+; every line has a known purpose
+- Class is now about 20 lines instead of roughly 125; every line has a known purpose
 
 **Visualized — the class shape before and after:**
 
 ```mermaid
 classDiagram
     direction LR
-    class OrderProcessorBefore["OrderProcessor (before, 150+ lines)"]
+    class OrderProcessorBefore["OrderProcessor (before, ~125 lines)"]
     OrderProcessorBefore : -LEGACY_REGISTRY Map~String, Object~$
     OrderProcessorBefore : -OLD_PAYMENT_ENDPOINT String$
     OrderProcessorBefore : -orderRepository OrderRepository
@@ -286,7 +286,7 @@ classDiagram
     OrderProcessorBefore : -buildOrderHash(order) String
     OrderProcessorBefore : -retryOnFailure(action, maxRetries) void
 
-    class OrderProcessorAfter["OrderProcessor (after, 30 lines)"]
+    class OrderProcessorAfter["OrderProcessor (after, ~20 lines)"]
     OrderProcessorAfter : -orderRepository OrderRepository
     OrderProcessorAfter : -paymentService PaymentService
     OrderProcessorAfter : -orderValidator OrderValidator
@@ -400,6 +400,8 @@ When code must remain for non-obvious reasons, document *why* with a ticket refe
 ---
 
 ## Real-World Consequences
+
+*The four scenarios below are illustrative composites of common incident patterns, not reports of specific named public incidents. The numbers show the shape of the failure; treat them as worked examples rather than as citable industry statistics.*
 
 **Scenario 1: The Resurrected Vulnerability**
 A fintech company had a commented-out authentication bypass added during a testing sprint. A developer debugging an unrelated issue noticed the commented block, assumed it was a useful shortcut for local development, and uncommented it. The code was reviewed quickly and merged. It reached production. A security researcher found it three weeks later.

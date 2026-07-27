@@ -190,18 +190,32 @@ public class OrderService {
 // This causes a harder-to-diagnose problem at class loading time.
 // =========================================================================
 
+// NOTE the initializers below are deliberately NOT constant expressions.
+// If they were (e.g. `static final int BASE_TIMEOUT = 100;`), javac would inline
+// both values at every use site under JLS 13.1 and NO class initialization would
+// ever run — the cycle would be invisible and the values always correct. The bug
+// only appears once an initializer needs to execute at class-init time.
+
 public class ConfigA {
-    // When ConfigA is loaded, it accesses ConfigB.VALUE.
-    // If ConfigB hasn't finished loading yet, this reads the default (0), not the intended value.
-    public static final int TIMEOUT = ConfigB.BASE_TIMEOUT * 2;
+    // Initializing ConfigA triggers ConfigB's initialization.
+    public static final int TIMEOUT = ConfigB.baseTimeout() * 2;   // intended: 200
 }
 
 public class ConfigB {
-    // When ConfigB is loaded, it accesses ConfigA.TIMEOUT.
-    // ClassLoader deadlock or incorrect value (0) depending on load order.
-    public static final int BASE_TIMEOUT = 100;
-    public static final int EXTENDED = ConfigA.TIMEOUT + 500;  // reads 0 if ConfigA not loaded
+    public static final int BASE_TIMEOUT = Integer.parseInt("100");
+
+    // Initializing ConfigB reads back into ConfigA. If ConfigA is already
+    // in progress ON THIS THREAD, the JVM does not re-enter it (JLS 12.4.2) and
+    // simply reads TIMEOUT's default value 0 — silently, with no error.
+    public static final int EXTENDED = ConfigA.TIMEOUT + 500;      // intended: 700
+
+    public static int baseTimeout() { return BASE_TIMEOUT; }
 }
+
+// Touch ConfigB first -> EXTENDED = 700, TIMEOUT = 200   (both correct)
+// Touch ConfigA first -> EXTENDED = 500, TIMEOUT = 200   (EXTENDED silently wrong)
+// Two threads entering from opposite ends can instead deadlock on the two
+// initialization locks, because neither release happens until the other completes.
 
 // =========================================================================
 // PACKAGE-LEVEL CYCLE (Architecture violation)
@@ -225,7 +239,7 @@ public class Order {
 - No unit test can instantiate `UserService` without a real or mock `OrderService`, and vice versa — mocking both creates a circular mock setup
 - `getUserTier()` lives in `UserService` but is really a derived fact computed from `OrderService` data — the responsibility is misplaced
 - `notifyUserOfOrderConfirmation()` in `UserService` is an event handler that was placed in the wrong class
-- Static initialization cycle in `ConfigA`/`ConfigB` causes incorrect constant values depending on class load order — a class of bug that is nearly impossible to reproduce in tests
+- Static initialization cycle in `ConfigA`/`ConfigB` silently yields `ConfigB.EXTENDED == 500` instead of `700` when `ConfigA` is touched first, because the re-entrant read of `ConfigA.TIMEOUT` sees the field's default `0` — a class of bug that is nearly impossible to reproduce in tests, since it depends on which class the process happens to touch first
 
 **The Runtime Call Graph (Why It's a Loop, Not Just a Cycle)**
 
@@ -487,7 +501,7 @@ public void noCyclicPackageDependenciesShouldExist() throws IOException {
     JDepend jdepend = new JDepend();
     jdepend.addDirectory("target/classes");
     jdepend.analyze();
-    assertFalse("Cyclic dependencies found!", jdepend.containsCycles());
+    assertFalse(jdepend.containsCycles(), "Cyclic dependencies found!");
 }
 ```
 
@@ -537,8 +551,10 @@ Vertical slicing (package by feature: `com.example.order`, `com.example.user`) m
 
 ## Real-World Consequences
 
+*The four scenarios below are illustrative composites of common incident patterns, not reports of specific named public incidents. The numbers show the shape of the failure; treat them as worked examples rather than as citable industry statistics.*
+
 **Scenario 1: The Spring Boot Startup Failure**
-A fintech startup added a new feature that required `PaymentService` to look up account details via `AccountService`, and `AccountService` to validate payment status via `PaymentService`. The application context failed to start in the next CI run with `BeanCurrentlyInCreationException`. The team "fixed" it by adding `@Lazy` to the `AccountService` injection in `PaymentService`. This deferred the creation of `AccountService` to first use — which happened during application warm-up — resulting in intermittent `NullPointerExceptions` in production under high load conditions, where beans were being accessed before lazy initialization completed.
+A fintech startup added a new feature that required `PaymentService` to look up account details via `AccountService`, and `AccountService` to validate payment status via `PaymentService`. The application context failed to start in the next CI run with `BeanCurrentlyInCreationException`. The team "fixed" it by adding `@Lazy` to the `AccountService` injection in `PaymentService`. Spring then injected a lazy-resolution proxy instead of the real bean, so the context started clean and the cycle looked resolved. It was not: the bean graph was still cyclic, `@Lazy` had only moved bean creation off the startup path and onto the first request that dereferenced the proxy. The loud, deterministic, CI-visible failure was traded for a quiet one whose timing depends on traffic, and the underlying design defect — the bidirectional call loop and the untestability that comes with it — was untouched.
 
 **Scenario 2: The Microservices Deployment Deadlock**
 A company decomposed their monolith into microservices but preserved the circular dependencies between the `User Service` and `Order Service`. Both services called each other's REST APIs on startup for health checks and configuration. In production, restarting both services simultaneously caused both to fail their health checks (because each was trying to call the other, which was also restarting) and both entered a crash loop. The deployment window stretched from 30 minutes to 4 hours while the team manually sequenced restarts.

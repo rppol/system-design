@@ -4,7 +4,7 @@
 
 The Anemic Domain Model (ADM) anti-pattern describes a domain model where the domain objects (entities) contain only data — fields and getters/setters — with no business logic. All business logic is pushed into a separate layer of service classes that operate on these data containers.
 
-The term was coined by Martin Fowler, who described it as "the anti-pattern of creating a domain model with no behavior" and noted it directly contradicts the fundamental principles of object-oriented design.
+Martin Fowler's bliki entry (25 November 2003) is the canonical write-up. His stated symptom is that the objects look right but have "hardly any behavior on these objects, making them little more than bags of getters and setters", and that the design is "really just a procedural style design". His stated cost is sharper than "no behaviour": an anemic model "incur[s] all of the costs of a domain model, without yielding any of the benefits" — the primary cost being the awkwardness of mapping to a database, which buys you a whole O/R mapping layer you then get nothing back from. Fowler does not claim to have coined the term; he names Eric Evans as a co-observer of the pattern and quotes *Domain-Driven Design* in support.
 
 The contrast:
 - **Anemic Domain Model**: `Order` has fields. `OrderService` has all the business logic that operates on `Order`.
@@ -245,6 +245,15 @@ public class Order {
         items.add(item);
     }
 
+    // Business operation — the PENDING -> CONFIRMED transition markShipped() requires
+    public void confirm() {
+        if (status != OrderStatus.PENDING) {
+            throw new IllegalStateException(
+                "Only pending orders can be confirmed; order " + id + " is " + status);
+        }
+        this.status = OrderStatus.CONFIRMED;
+    }
+
     // Behavior lives here — calculation is encapsulated and never duplicated
     public BigDecimal calculateTotal() {
         return items.stream()
@@ -315,7 +324,9 @@ class OrderTest {
             new OrderItem("Gadget", BigDecimal.valueOf(25.00), 1)
         );
         Order order = Order.place(1L, items, "123 Main St");
-        assertEquals(new BigDecimal("45.00"), order.calculateTotal());
+        // compareTo, not equals: BigDecimal.equals() also compares scale, and
+        // 10.0*2 + 25.0*1 sums to 45.0 (scale 1), which is not equal to 45.00 (scale 2)
+        assertEquals(0, order.calculateTotal().compareTo(new BigDecimal("45.00")));
     }
 }
 ```
@@ -391,7 +402,7 @@ sequenceDiagram
 - "What is the difference between a domain object and a DTO?" — Tests understanding of where behavior belongs.
 
 **Key talking points:**
-- Cite Martin Fowler — this is his term, and name-dropping the source shows depth
+- Cite Fowler's 2003 bliki entry as the canonical write-up, and state his actual argument: you pay the full cost of a domain model (chiefly the O/R mapping layer) and collect none of the benefits
 - Contrast with rich domain model — the fix is not a new class, it is moving logic into the existing entity
 - Explain encapsulation: the entity should protect its own invariants
 - Mention testability: domain logic in the entity is testable without infrastructure

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Premature Optimization is the practice of investing engineering effort in performance improvements before identifying, measuring, or confirming that a performance problem actually exists. It is one of the most costly anti-patterns because it trades two valuable assets — code readability and development velocity — for a performance gain that may be immeasurable, irrelevant, or in the wrong place entirely. The anti-pattern was most famously characterized by Donald Knuth: *"Premature optimization is the root of all evil (or at least most of it) in programming."* Engineers who fall into this trap often do so with good intentions — they want the system to be fast — but they optimize based on intuition rather than evidence, wasting time on micro-optimizations while true bottlenecks go unaddressed. The result is code that is harder to read, harder to maintain, and often no faster than the naive solution.
+Premature Optimization is the practice of investing engineering effort in performance improvements before identifying, measuring, or confirming that a performance problem actually exists. It is one of the most costly anti-patterns because it trades two valuable assets — code readability and development velocity — for a performance gain that may be immeasurable, irrelevant, or in the wrong place entirely. The anti-pattern was most famously characterized by Donald Knuth in "Structured Programming with go to Statements" (ACM Computing Surveys 6:4, December 1974, p.268). The sentence is almost always quoted with its two halves cut off, which reverses the advice; in full it reads: *"We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%."* Knuth is not saying never optimize — he is saying find the 3% first, and he says so in the same breath. Engineers who fall into this trap often do so with good intentions — they want the system to be fast — but they optimize based on intuition rather than evidence, wasting time on micro-optimizations while true bottlenecks go unaddressed. The result is code that is harder to read, harder to maintain, and often no faster than the naive solution.
 
 ---
 
@@ -10,7 +10,7 @@ Premature Optimization is the practice of investing engineering effort in perfor
 
 > **One-line analogy**: Premature optimization is like remodeling a house before you know if you're going to live in it — you spend huge effort improving something that may not need improving, while the real problems go unaddressed.
 
-**Mental model**: Without measurement, intuition about performance bottlenecks is wrong ~80% of the time. You hand-optimize a function that runs 10 times per day while the database query that runs 10 million times per day is unindexed. The optimization cost: complex, unmaintainable code where 20 lines became 200. The performance gain: zero improvement to user experience. Knuth's rule: measure first, then optimize only the measured bottleneck.
+**Mental model**: Without measurement, intuition about where the time goes is unreliable — Knuth's own summary in the same paragraph is that "the universal experience of programmers who have been using measurement tools has been that their intuitive guesses fail." You hand-optimize a function that runs 10 times per day while the database query that runs 10 million times per day is unindexed. The optimization cost: complex, unmaintainable code where 20 lines became 200. The performance gain: zero improvement to user experience. Knuth's rule: measure first, then optimize only the measured bottleneck — but do optimize it.
 
 **Why it matters**: Premature optimization trades code clarity for speculative performance gains. Complex optimized code has more bugs, is harder to understand, and costs more to maintain. The opportunity cost is also high — time spent on speculation isn't spent on actual user value.
 
@@ -216,7 +216,7 @@ Once bit manipulation or clever tricks are merged, they rarely get cleaned up. F
 When a system appears to have been "heavily optimized," performance investigations are deprioritized. The real bottlenecks — missing indexes, N+1 queries, synchronous I/O on the main thread — go unaddressed because the team believes the code has already been optimized.
 
 **Increased Maintenance Cost**
-Every hand-rolled data structure is a custom artifact that must be maintained, documented, and debugged. Guava's `Cache` has 10 years of battle-testing, documentation, and community knowledge. A custom `LinkedHashMap` subclass has none of that.
+Every hand-rolled data structure is a custom artifact that must be maintained, documented, and debugged. Guava's `Cache` and Caffeine have well over a decade of battle-testing, documentation, and community knowledge behind them. A custom `LinkedHashMap` subclass has none of that.
 
 ---
 
@@ -296,7 +296,7 @@ public class ProductSearchService {
 ## Prevention Strategies
 
 **1. Follow the Three-Phase Mantra**
-Knuth's wisdom operationalized:
+Knuth's wisdom operationalized — note that phase 3 is not optional, it is merely last:
 - **Make it work**: correct, readable, simple
 - **Make it right**: well-tested, well-structured
 - **Make it fast**: only after profiling proves it is too slow
@@ -375,6 +375,8 @@ Reviewers should challenge:
 
 ## Real-World Consequences
 
+*The four scenarios below are illustrative composites of common incident patterns, not reports of specific named public incidents. The numbers show the shape of the failure; treat them as worked examples rather than as citable industry statistics.*
+
 **Scenario 1: The Billion-Dollar Micro-Optimization**
 A trading firm's engineering team spent three weeks micro-optimizing their order matching engine in Java, replacing `HashMap` with a hand-rolled open-addressing hash table and eliminating all object allocations in the hot path. The latency improvement was 0.3 microseconds per operation. Meanwhile, their network configuration had a suboptimal MTU setting that added 40 microseconds of latency per message. The network issue took one hour to fix. The three-week optimization project delivered 0.75% of the benefit that a one-hour configuration change produced.
 
@@ -394,7 +396,7 @@ A high-frequency data ingestion service had its inner loop "optimized" over four
 | Dimension | Details |
 |---|---|
 | **Anti-Pattern Name** | Premature Optimization |
-| **Canonical Quote** | "Premature optimization is the root of all evil." — Donald Knuth, 1974 |
+| **Canonical Quote** | "We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%." — Donald Knuth, ACM Computing Surveys 6:4 (Dec 1974), p.268 |
 | **Root Cause** | Optimizing based on intuition rather than measurement; fear of future performance problems |
 | **Primary Symptom** | Complex, unreadable code in non-bottleneck paths; hand-rolled replacements for standard library components |
 | **Key Code Smells** | Unexplained bit manipulation, custom caches without benchmarks, "faster" claims without profiling data |

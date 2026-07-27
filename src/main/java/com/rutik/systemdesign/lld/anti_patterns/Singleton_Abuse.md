@@ -42,9 +42,13 @@ public class DatabaseConnection {
 
     private DatabaseConnection() {
         // hardcoded config — can't be overridden in tests
-        this.connection = DriverManager.getConnection(
-            "jdbc:mysql://localhost:3306/prod_db", "root", "password"
-        );
+        try {
+            this.connection = DriverManager.getConnection(
+                "jdbc:mysql://localhost:3306/prod_db", "root", "password"
+            );
+        } catch (SQLException e) {
+            throw new RuntimeException("Cannot connect to database", e);
+        }
     }
 
     public static DatabaseConnection getInstance() {
@@ -101,6 +105,10 @@ public class UserRepository {
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private User mapToUser(ResultSet rs) throws SQLException {
+        return rs.next() ? new User(rs.getLong("id"), rs.getString("email")) : null;
     }
 }
 ```
@@ -163,7 +171,7 @@ class UserRepositoryTest {
 2. **Global mutable state**: Singletons are effectively global variables. Any code anywhere can mutate them, making reasoning about state extremely difficult.
 3. **Untestable code**: You cannot substitute a test double (mock) for a Singleton dependency because the dependency is not injected — it is looked up internally.
 4. **Initialization order problems**: Singleton A may depend on Singleton B which may not yet be initialized. This creates fragile, order-dependent startup sequences.
-5. **Thread safety issues**: The basic `if (instance == null)` check is not thread-safe. Double-checked locking is error-prone.
+5. **Thread safety issues**: The basic `if (instance == null)` check is not thread-safe — two threads can both see `null` and both construct. Double-checked locking is the usual patch, and it is correct **only if the instance field is `volatile`**: without `volatile` the publishing write can be reordered relative to the constructor's writes, so a second thread can observe a non-null reference to a partially initialized object and read default or half-written field values. JSR-133 (Java 5) strengthened `volatile` enough to make the volatile form correct, and it has been broken on every Java version without it. An `enum` singleton or a static holder class sidesteps the problem entirely and is the better default when a singleton is genuinely warranted.
 6. **Tight coupling**: Every consumer is coupled directly to the concrete Singleton class.
 7. **Testing interference**: Tests can corrupt shared state, causing order-dependent test failures.
 
@@ -219,11 +227,21 @@ public class UserRepository {
     public User findById(Long id) {
         Connection conn = dbConnection.getConnection();
         String table = config.get("users.table");
-        // ... query logic
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "SELECT * FROM " + table + " WHERE id = ?")) {
+            stmt.setLong(1, id);
+            ResultSet rs = stmt.executeQuery();
+            return rs.next() ? new User(rs.getLong("id"), rs.getString("email")) : null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
     }
 }
 
 // Step 3: Wire everything in one place (composition root)
+// AppConfig gets the same treatment as DatabaseConnection above: the private
+// no-arg constructor and getInstance() are gone, replaced by a public constructor
+// that takes the config file path, so tests can point it at a fixture.
 public class Application {
 
     public static void main(String[] args) {

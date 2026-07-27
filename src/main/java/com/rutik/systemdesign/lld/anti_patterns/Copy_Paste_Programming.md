@@ -12,9 +12,9 @@ Copy-Paste Programming, also called Code Cloning, is the practice of duplicating
 
 **Mental model**: You copy a validation function and make slight modifications for a second use case. Later: a bug in the validation logic must be found and fixed in both places. A requirement change needs to be applied to all copies. Over years, dozens of copies exist across the codebase; some have drifted; finding them all is archaeology. This is DRY violation in its most literal form.
 
-**Why it matters**: Duplicated code means duplicated bugs and duplicated maintenance cost. Every bug found in one copy might exist in ten others. Every feature change needs to be applied ten times — and missing one is a bug. The exponential maintenance cost makes systems increasingly expensive to change.
+**Why it matters**: Duplicated code means duplicated bugs and duplicated maintenance cost. Every bug found in one copy might exist in ten others. Every feature change needs to be applied ten times — and missing one is a bug. The multiplied maintenance cost makes systems increasingly expensive to change.
 
-**Key insight**: The pattern is seductive because the first copy is quick and safe. The damage is cumulative — each additional copy seems harmless, but the aggregate maintenance burden grows quadratically. Resist the first copy by extracting a shared function immediately.
+**Key insight**: The pattern is seductive because the first copy is quick and safe. The damage is cumulative — each additional copy seems harmless, but the effort per change scales with the number of copies while the odds of applying every change to every copy fall with each one added. Resist the first copy by extracting a shared function immediately.
 
 ---
 
@@ -207,8 +207,8 @@ classDiagram
 **Inconsistent Bug Fixes**
 When a bug is discovered in duplicated code, it is typically fixed in the file that was reported. The developer may not know (or may forget) that the same logic exists in 2 other places. The bug "disappears" from one module and silently persists in others.
 
-**Exponential Maintenance Cost**
-With N copies of logic, every change costs N times the effort. With 3 copies, that's manageable. With 30 copies scattered across a large codebase, it becomes prohibitive. Teams often give up and leave duplicates inconsistent.
+**Multiplied Maintenance Cost**
+With N copies of logic, every change costs N times the effort — the cost is linear in the number of copies, and that alone is bad enough. What is worse than linear is the *reliability* of the change: each copy is an independent chance to be missed, so with 3 copies the change is usually applied everywhere, and with 30 copies scattered across a large codebase it almost never is. Teams often give up and leave duplicates inconsistent.
 
 **Silent Divergence**
 Copies evolve independently over time. Well-intentioned modifications in one copy introduce behavioral differences that are never explicitly decided — they simply drift. The system now has multiple conflicting definitions of the same concept.
@@ -388,6 +388,12 @@ public abstract class ContactFormProcessor<T extends ContactRequest, R> {
 public class UserRegistrationProcessor
         extends ContactFormProcessor<UserRegistrationRequest, User> {
 
+    private final UserRepository userRepository;
+
+    public UserRegistrationProcessor(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
     @Override
     protected void validateBusinessRules(UserRegistrationRequest request) {
         if (request.getPassword().length() < 8) {
@@ -452,6 +458,8 @@ pmd cpd --minimum-tokens 50 --files src/main/java --language java
 
 ## Real-World Consequences
 
+*The four scenarios below are illustrative composites of common incident patterns, not reports of specific named public incidents. The numbers show the shape of the failure; treat them as worked examples rather than as citable industry statistics.*
+
 **Scenario 1: The Recurring Security Vulnerability**
 A security team discovered that input sanitization logic had been copy-pasted across 14 REST controllers in a web application. A SQL injection vulnerability was found and patched in the user login controller. The patch was applied to 3 of the 14 controllers. The remaining 11 stayed vulnerable for 8 months until the next security audit, despite the team believing the issue had been fixed.
 
@@ -475,7 +483,7 @@ A team decided to consolidate duplicated business logic across 8 services into a
 | **Root Cause** | Convenience, lack of shared abstractions, time pressure, insufficient design thinking |
 | **Primary Symptom** | Identical or near-identical logic blocks in multiple locations with no shared abstraction |
 | **Key Code Smells** | Same validation/formatting logic in multiple classes, "fixed in one place not others" bug pattern, diverged regex definitions |
-| **Main Harm** | Inconsistent bug fixes, diverging behavior, exponential maintenance cost, security gaps |
+| **Main Harm** | Inconsistent bug fixes, diverging behavior, maintenance cost multiplied by copy count, security gaps |
 | **Detection Tools** | IntelliJ Duplicate Code detector, SonarQube CPD, PMD CPD |
 | **Fix Strategy** | Extract to shared utility class, apply Template Method or Strategy pattern, create common base class |
 | **Prevention** | DRY principle, Rule of Three, shared utility modules, clone detection in CI |
