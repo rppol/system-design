@@ -602,7 +602,7 @@ PostgreSQL (metadata):
 
 Embedding model:
   Shared across all workspaces (stateless, no tenant data in model)
-  text-embedding-3-small hosted on shared GPU cluster
+  text-embedding-3-small via the managed OpenAI API (no per-tenant model state)
   Input: chunk text only (no workspace-identifying information in embedding input)
 
 Cross-workspace isolation guarantees:
