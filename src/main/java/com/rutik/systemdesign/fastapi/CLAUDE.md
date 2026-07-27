@@ -26,7 +26,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 | `configuration_and_settings_management/` | 1 | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings |
 | `async_database_sqlalchemy/` | 2 | SQLAlchemy 2.0 async, `AsyncSession`, async engine, Alembic, SQLModel, N+1 |
 | `authentication_and_security/` | 2 | OAuth2 password flow, JWT, scopes, passlib/bcrypt/argon2, OIDC, CSRF/CORS |
-| `error_handling_and_validation/` | 2 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 7807 Problem Details |
+| `error_handling_and_validation/` | 2 | `HTTPException`, custom handlers, `RequestValidationError`, RFC 9457 Problem Details |
 | `testing_fastapi/` | 2 | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, rollback |
 | `websockets_sse_and_streaming/` | 2 | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, backpressure |
 | `background_jobs_and_task_queues/` | 2 | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, idempotency, retries, DLQ |
@@ -120,7 +120,7 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 ## Adding a New FastAPI Module
 
 1. Create `<module_name>/README.md` — 14-section clean template
-2. All code in Python 3.11/3.12 + FastAPI with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
+2. All code in Python 3.13/3.14 + FastAPI with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific FastAPI/Pydantic/SQLAlchemy versions
 4. Meet the Q&A minimum for the module's depth level (15-Q&A floor; 15-18 for the four deep modules above)
 5. Update this file's Module List table

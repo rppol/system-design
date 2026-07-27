@@ -73,7 +73,8 @@ When covering a feature, include the version it was introduced:
 - Python 3.10: `match`/`case`, `X | Y` union type syntax, `ParamSpec`
 - Python 3.11: `TaskGroup`, `ExceptionGroup`/`except*`, 10–60% performance gains, `tomllib`
 - Python 3.12: `type` statement (PEP 695), `@override`, `f-string` improvements
-- Python 3.13: free-threading (PEP 703, experimental), JIT compilation (experimental)
+- Python 3.13: free-threading build introduced (PEP 703), experimental JIT
+- Python 3.14: free-threading **officially supported** (PEP 779, single-thread penalty down to 5–10%), deferred annotation evaluation (PEP 649/749) + `annotationlib`, t-strings (PEP 750), `concurrent.interpreters` (PEP 734) + `InterpreterPoolExecutor`, `compression.zstd` (PEP 784), `sys.remote_exec` debugger attach (PEP 768)
 
 Format: `[3.11]` inline or `Added in Python 3.11`.
 
@@ -85,7 +86,7 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 ## Adding a New Python Module
 
 1. Create `<module_name>/README.md` — 14-section clean template
-2. All code in Python 3.11/3.12 with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
+2. All code in Python 3.13/3.14 with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific Python versions
 4. Meet the Q&A minimum for the module's depth level
 5. Flip the module's Status from `pending` → `done` in `README.md` §7 tracker
