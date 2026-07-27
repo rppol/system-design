@@ -8,8 +8,8 @@ Structured outputs refers to the pattern of forcing LLM responses to conform to 
 
 Two mechanisms exist for structured outputs: (1) native structured output APIs (OpenAI `response_format={"type": "json_schema", ...}`, Anthropic [tool use](../agents_and_tool_use/README.md)), which constrain the model at the token sampling level; and (2) prompt-based parsing (ask the model to output JSON, parse the response), which is less reliable.
 
-**Current versions**: instructor 1.x (2024), openai 1.x JSON mode / structured outputs
-**Production adoption signal**: Instructor has 8K+ GitHub stars as of 2024. The pattern is used in virtually every production LLM application that extracts structured information.
+**Current versions**: instructor 1.15.x, openai 1.x with GA structured outputs (`chat.completions.parse` / `responses.parse`)
+**Production adoption signal**: Instructor reports 3M+ monthly downloads and 10K+ GitHub stars. The pattern is used in virtually every production LLM application that extracts structured information.
 
 ---
 
@@ -45,11 +45,11 @@ Two mechanisms exist for structured outputs: (1) native structured output APIs (
 
 | Mode | Mechanism | Reliability | Model Support |
 |------|-----------|------------|---------------|
-| `TOOLS` | OpenAI function calling | High | GPT-4, GPT-3.5, GPT-4o |
-| `JSON_SCHEMA` | OpenAI structured outputs (strict) | Highest | GPT-4o, GPT-4o-mini |
-| `JSON` | OpenAI JSON mode (prompt + parse) | Medium | GPT-4, GPT-3.5-turbo |
-| `ANTHROPIC_TOOLS` | Anthropic tool use | High | Claude 3+ |
-| `GEMINI_JSON` | Gemini response_mime_type | High | Gemini 1.5+ |
+| `TOOLS` | OpenAI function calling | High | Any OpenAI model with tool calling |
+| `JSON_SCHEMA` | OpenAI structured outputs (strict) | Highest | Current GPT-5.x line |
+| `JSON` | OpenAI JSON mode (prompt + parse) | Medium | Any OpenAI chat model |
+| `ANTHROPIC_TOOLS` | Anthropic tool use | High | Claude Sonnet 5 / Opus 5 / Haiku 4.5 |
+| `GEMINI_JSON` | Gemini response_mime_type | High | Current Gemini line |
 | `MD_JSON` | Markdown code block extraction | Low | Any model |
 
 ### Schema Patterns
@@ -92,8 +92,8 @@ Instructor internal flow:
 
 ```
 Client code:
-  completion = openai.beta.chat.completions.parse(
-      model="gpt-4o",
+  completion = openai.chat.completions.parse(
+      model="gpt-5.6-terra",
       response_format=Resume,  # Pydantic class directly
       messages=[...]
   )
@@ -129,20 +129,18 @@ Attempt 2 (retry):
 
 ```python
 import instructor
-from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import List
 
-client = instructor.from_openai(OpenAI())
+client = instructor.from_provider("openai/gpt-5.6-terra")
 
 class Person(BaseModel):
     name: str = Field(description="Full name of the person")
     age: int = Field(description="Age in years", gt=0, lt=150)
     email: str = Field(description="Email address")
 
-# Instructor patches the OpenAI client; response_model replaces response_format
+# Instructor wraps the provider client; response_model replaces response_format
 person = client.chat.completions.create(
-    model="gpt-4o",
     response_model=Person,
     messages=[
         {"role": "user", "content": "Extract info: John Doe, 32 years old, john@example.com"}
@@ -190,7 +188,6 @@ class Invoice(BaseModel):
         return v
 
 invoice = client.chat.completions.create(
-    model="gpt-4o",
     response_model=Invoice,
     messages=[{
         "role": "user",
@@ -220,7 +217,7 @@ class CustomerIntent(BaseModel):
         use_enum_values = True
 
 intent = client.chat.completions.create(
-    model="gpt-4o-mini",   # cheaper model fine for classification
+    model="gpt-5.4-nano",   # cheaper model fine for classification; overrides the bound model
     response_model=CustomerIntent,
     messages=[{"role": "user", "content": f"Classify: {customer_message}"}]
 )
@@ -243,7 +240,6 @@ class AnalysisReport(BaseModel):
 
 # Stream partial model as tokens arrive
 for partial_report in client.chat.completions.create_partial(
-    model="gpt-4o",
     response_model=AnalysisReport,
     messages=[{"role": "user", "content": f"Analyze: {document}"}],
     stream=True
@@ -259,9 +255,8 @@ for partial_report in client.chat.completions.create_partial(
 
 ```python
 import instructor
-from anthropic import Anthropic
 
-client = instructor.from_anthropic(Anthropic())
+client = instructor.from_provider("anthropic/claude-sonnet-5")
 
 class Summary(BaseModel):
     title: str
@@ -269,7 +264,6 @@ class Summary(BaseModel):
     sentiment: Literal["positive", "negative", "neutral"]
 
 summary = client.messages.create(
-    model="claude-3-5-sonnet-20241022",
     response_model=Summary,
     max_tokens=1024,
     messages=[{"role": "user", "content": f"Summarize: {article}"}]
@@ -289,9 +283,9 @@ class CalendarEvent(BaseModel):
     date: str  # YYYY-MM-DD
     participants: List[str]
 
-# beta.chat.completions.parse handles Pydantic models natively
-completion = client.beta.chat.completions.parse(
-    model="gpt-4o-2024-08-06",  # structured outputs requires this version+
+# chat.completions.parse handles Pydantic models natively
+completion = client.chat.completions.parse(
+    model="gpt-5.6-terra",
     messages=[{"role": "user", "content": "Alice and Bob have a meeting tomorrow at 9am"}],
     response_format=CalendarEvent,
 )
@@ -300,6 +294,14 @@ event = completion.choices[0].message.parsed
 # Guaranteed to be a valid CalendarEvent — no retries needed
 print(event.name)  # "Meeting"
 print(event.participants)  # ["Alice", "Bob"]
+
+# Responses API equivalent: same schema, different parameter names
+response = client.responses.parse(
+    model="gpt-5.6-terra",
+    input=[{"role": "user", "content": "Alice and Bob have a meeting tomorrow at 9am"}],
+    text_format=CalendarEvent,      # not response_format
+)
+event = response.output_parsed      # not .choices[0].message.parsed
 ```
 
 ### Multi-Extract (List of Objects)
@@ -317,7 +319,6 @@ class EntityExtraction(BaseModel):
     source_language: str = Field(description="Detected language of the source text")
 
 extraction = client.chat.completions.create(
-    model="gpt-4o",
     response_model=EntityExtraction,
     messages=[{"role": "user", "content": f"Extract all named entities from:\n{text}"}]
 )
@@ -330,15 +331,13 @@ for entity in extraction.entities:
 
 ```python
 import instructor
-from openai import AsyncOpenAI
 import asyncio
 
-async_client = instructor.from_openai(AsyncOpenAI())
+async_client = instructor.from_provider("openai/gpt-5.6-terra", async_client=True)
 
 async def extract_concurrently(texts: list[str]) -> list[Person]:
     tasks = [
         async_client.chat.completions.create(
-            model="gpt-4o",
             response_model=Person,
             messages=[{"role": "user", "content": f"Extract: {text}"}]
         )
@@ -475,7 +474,6 @@ from instructor.exceptions import InstructorRetryException
 
 try:
     result = client.chat.completions.create(
-        model="gpt-4o",
         response_model=MyModel,
         messages=[...],
         max_retries=3
@@ -521,19 +519,18 @@ Changing a Pydantic model field name or type is a breaking change for any persis
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `instructor` | Pydantic + LLM extraction | Supports OpenAI, Anthropic, Gemini, Ollama |
+| `instructor` | Pydantic + LLM extraction | 1.15.x; one syntax across OpenAI, Anthropic, Gemini, Ollama |
 | `pydantic` v2 | Schema definition + validation | Required for instructor; v2 for performance |
-| `openai` SDK | Native structured outputs | `beta.chat.completions.parse` for GPT-4o+ |
-| `anthropic` SDK | Anthropic tool use | `instructor.from_anthropic()` |
+| `openai` SDK | Native structured outputs | `chat.completions.parse`, or `responses.parse` on the Responses API |
+| `anthropic` SDK | Anthropic tool use | `instructor.from_provider("anthropic/claude-sonnet-5")` |
 | `marvin` | Alternative to instructor | Higher-level abstraction |
 | `outlines` | Constrained generation | Model-side constraint (for local models) |
 | `lm-format-enforcer` | Grammar-constrained generation | For vLLM / Hugging Face |
 | `jsonschema` | Schema validation without Pydantic | Lightweight alternative |
 
 **Version notes:**
-- Instructor 0.x: legacy API (`instructor.patch()`)
-- Instructor 1.x (2024): `instructor.from_openai()`, multi-provider support, streaming Partial
-- OpenAI structured outputs: requires `gpt-4o-2024-08-06` or newer; `openai>=1.40.0`
+- Instructor 1.15.x is the current line. `instructor.from_provider("openai/gpt-5.6-terra")` is the unified constructor — one call for every provider, and `async_client=True` returns the async variant. The per-provider constructors (`from_openai(OpenAI())`, `from_anthropic(Anthropic())`) still work and are what you will see in most existing code.
+- OpenAI native structured outputs are available on the current GPT-5.x models; use `client.chat.completions.parse` (Chat Completions) or `client.responses.parse` (Responses API). Both are GA — no `beta.` namespace.
 
 ---
 
@@ -546,7 +543,7 @@ Structured outputs means constraining LLM responses to conform to a defined sche
 Instructor is a Python library that wraps LLM clients (OpenAI, Anthropic, Gemini) to enforce structured Pydantic outputs. It works by: (1) generating a function/tool definition from the Pydantic model, (2) passing it to the LLM API alongside the user's messages, (3) asking the model to call the function with the extracted data, (4) validating the model's JSON output against the Pydantic model, (5) if validation fails, appending the error message to the conversation and retrying (up to `max_retries`). The caller receives a fully-validated Pydantic object or an exception after max retries.
 
 **Q: What is the difference between Instructor's TOOLS mode and OpenAI's native structured outputs?**
-`TOOLS` mode uses OpenAI function calling: the model generates a function call JSON which Instructor validates. If invalid, Instructor retries with the error. Native structured outputs (`response_format={"type": "json_schema", ...}` or `openai.beta.chat.completions.parse`) constrain the token sampling process server-side — the model physically cannot produce tokens that violate the JSON schema. Native structured outputs are more reliable (no validation failures possible for structural issues) and faster (no retries). Trade-off: native structured outputs have JSON Schema limitations (no `oneOf` with discriminators, limited validators); Instructor supports arbitrary Pydantic validators.
+`TOOLS` mode uses OpenAI function calling: the model generates a function call JSON which Instructor validates. If invalid, Instructor retries with the error. Native structured outputs (`response_format={"type": "json_schema", ...}` or `client.chat.completions.parse`) constrain the token sampling process server-side — the model physically cannot produce tokens that violate the JSON schema. Native structured outputs are more reliable (no validation failures possible for structural issues) and faster (no retries). Trade-off: native structured outputs have JSON Schema limitations (no `oneOf` with discriminators, limited validators); Instructor supports arbitrary Pydantic validators.
 
 **Q: How do you handle optional fields in extraction schemas?**
 Use `Optional[type] = None` for fields that may not be present in the source document. Example: `due_date: Optional[str] = Field(None, description="Due date if mentioned, else null")`. Without `Optional`, the model is forced to produce a value even if not present, leading to hallucination. Include `"else null"` in the field description to explicitly tell the model to output null when the field is absent. For lists: `items: List[Item] = Field(default_factory=list)` for potentially empty lists.
@@ -653,11 +650,10 @@ class Invoice(BaseModel):
 
 ```python
 import instructor
-from openai import AsyncOpenAI
 from pathlib import Path
 import asyncio
 
-async_client = instructor.from_openai(AsyncOpenAI())
+async_client = instructor.from_provider("openai/gpt-5.6-terra", async_client=True)
 
 async def extract_invoice(pdf_path: Path) -> Invoice | None:
     # Convert PDF to image (first page)
@@ -665,7 +661,6 @@ async def extract_invoice(pdf_path: Path) -> Invoice | None:
 
     try:
         invoice = await async_client.chat.completions.create(
-            model="gpt-4o",
             response_model=Invoice,
             max_retries=3,
             messages=[{

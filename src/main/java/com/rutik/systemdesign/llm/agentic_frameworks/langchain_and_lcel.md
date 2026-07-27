@@ -6,9 +6,9 @@
 
 LangChain is the most widely adopted orchestration framework for LLM applications, providing composable building blocks: prompt templates, output parsers, chains, agents, memory, and 300+ tool/data-source integrations. Released in October 2022, it became the default choice for LLM developers within six months due to its breadth of integrations and active community.
 
-LangChain Expression Language (LCEL), introduced in 2023 and made the canonical API in the 0.1.0 release, replaced the legacy chain classes (LLMChain, ConversationalRetrievalChain) with a composable pipe-based API. LCEL is now the canonical way to build with LangChain.
+LangChain Expression Language (LCEL) is the canonical API: a composable pipe-based interface where every component is a Runnable and `|` wires them together. Agents are built on top of it with `create_agent`, a configurable harness that runs on the LangGraph runtime.
 
-**Current version**: langchain / langchain-core / langchain-community 1.x (1.2.x is the current stable line; Python 3.10+). The 1.0 release moved the legacy chain classes out of `langchain` into a separate `langchain-classic` package.
+**Current version**: langchain / langchain-core / langchain-community 1.x (1.3.x is the current stable line; Python 3.10+). Pre-1.0 chain classes such as `LLMChain` live in a separate `langchain-classic` package, which is where you will meet them in an inherited codebase.
 **Production adoption signal**: Used by Notion AI, Elastic, Replit (initially), numerous enterprise deployments. The most-starred LLM framework on GitHub as of 2024.
 
 ---
@@ -29,11 +29,11 @@ LangChain Expression Language (LCEL), introduced in 2023 and made the canonical 
 
 **Runnable Protocol**: Every component implements `invoke(input) -> output`, `stream(input) -> Iterator`, `batch(inputs) -> List[output]`, and their async equivalents. This uniformity means a chain of 10 components behaves identically to a single component from the caller's perspective.
 
-**Composability over inheritance**: Old LangChain (pre-LCEL) used class inheritance to extend chains. LCEL uses composition — wrap any function with `RunnableLambda`, combine with `|`. No subclassing required.
+**Composability over inheritance**: LCEL extends chains by composition, not subclassing — wrap any function with `RunnableLambda`, combine with `|`. A custom step is a function, not a class hierarchy.
 
 **Lazy evaluation**: Composing `a | b | c` does not execute — it builds a computation graph. Execution happens only when `.invoke()` or `.stream()` is called. This allows inspection (`chain.get_graph()`), serialization (`chain.to_json()`), and parallel batching.
 
-**Immutability**: LCEL chains are stateless by default. Memory and state are explicit (not hidden in the chain object). This prevents the "mysterious side effects" of legacy ConversationalBufferMemory.
+**Immutability**: LCEL chains are stateless by default. Memory and state are explicit — held in a history store or a LangGraph checkpointer, never hidden inside the chain object — so two concurrent requests through the same chain cannot contaminate each other.
 
 **Separation of concerns**: `langchain-core` (Runnable abstractions, base classes) vs `langchain-community` (third-party integrations) vs `langchain` (pre-built chains, agents). Pin versions per package.
 
@@ -65,9 +65,8 @@ LangChain Expression Language (LCEL), introduced in 2023 and made the canonical 
 
 ### Agent Strategies
 
-- **Tool calling agent** (recommended): Uses native function calling (OpenAI, Anthropic, Gemini). Most reliable.
+- **`create_agent`** (recommended): The 1.x agent harness. Uses native tool calling (OpenAI, Anthropic, Gemini), runs on the LangGraph runtime, and takes `middleware` for retries, summarization, and human-in-the-loop.
 - **ReAct agent**: Model reasons and acts in natural language (see [ReAct and Reasoning Patterns](../agents_and_tool_use/react_and_reasoning_patterns.md)). Works with any model but less reliable.
-- **Structured chat agent**: Older pattern; deprecated in favor of tool calling.
 
 ---
 
@@ -265,8 +264,9 @@ print(result.name)  # "Jane Doe"
 ### Tool Calling Agent
 
 ```python
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain.agents import create_agent
 from langchain.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 @tool
 def search_web(query: str) -> str:
@@ -278,15 +278,22 @@ def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return weather_api(city)
 
-agent = create_tool_calling_agent(
-    llm=ChatOpenAI(model="gpt-5.5"),
+agent = create_agent(
+    model="openai:gpt-5.5",                 # "provider:model" string, or a chat model object
     tools=[search_web, get_weather],
-    prompt=prompt
+    system_prompt="You are a helpful assistant. Be concise.",
+    checkpointer=InMemorySaver(),           # swap for PostgresSaver in production
 )
 
-executor = AgentExecutor(agent=agent, tools=[search_web, get_weather], verbose=True)
-result = executor.invoke({"input": "What is the weather in San Francisco?"})
+# The agent is a graph, not an AgentExecutor: state in, state out.
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "What is the weather in San Francisco?"}]},
+    config={"configurable": {"thread_id": "user-123"}},
+)
+print(result["messages"][-1].content)
 ```
+
+`create_agent` runs the tool loop for you and returns the accumulated message list. Because the `thread_id` keys a checkpointer, the next call on the same thread resumes the conversation without you re-sending history.
 
 ### Error Handling and Fallbacks
 
@@ -504,7 +511,7 @@ than compose it from per-step percentiles.
 | Async | Consistent `.ainvoke()` | Inconsistent support |
 | Batching | `.batch()` with concurrency | Not built-in |
 | Debugging | `chain.get_graph()`, LangSmith | Stack-trace hunting |
-| Status | Current, maintained | Moved out of `langchain` into `langchain-classic` at 1.0; slated for removal in 2.0 |
+| Status | Current, maintained | Ships only in `langchain-classic` |
 
 ---
 
@@ -528,8 +535,8 @@ than compose it from per-step percentiles.
 
 ## 10. Common Pitfalls
 
-**Pitfall 1: Using legacy chains instead of LCEL**
-Production issue: `ConversationalRetrievalChain` silently dropped context windows when conversation grew. The class had no streaming support. Teams discovered this in production when customers reported laggy chat. Fix: migrate to LCEL `RunnableWithMessageHistory` — explicit, streaming-native, debuggable.
+**Pitfall 1: Carrying `langchain-classic` chains into new code**
+The classic chain classes still install, so a snippet copied off a 2023 blog post runs — badly. `ConversationalRetrievalChain` silently drops context once the conversation outgrows the window and has no streaming path, which teams discover when customers report laggy chat. Build new work with LCEL plus `RunnableWithMessageHistory` (or `create_agent` with a checkpointer): explicit state, streaming-native, traceable step by step.
 
 **Pitfall 2: Not pinning package versions**
 LangChain releases broke production deployments multiple times in 2023-2024. Breaking changes in callbacks, prompt template formats, agent output parsing. The split into `langchain`, `langchain-core`, `langchain-community` happened mid-2023 with a namespace migration that broke all imports. Pin exact versions in `requirements.txt`; use `pip-tools` or Poetry lockfiles.
@@ -617,22 +624,19 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 | Tool | Category | Version Notes |
 |------|----------|---------------|
 | `langchain-core` | Core Runnable abstractions | 1.x — stable interface |
-| `langchain` | High-level agents + LCEL primitives | 1.x — pin strictly |
-| `langchain-classic` | Legacy pre-1.0 chains (LLMChain, RetrievalQA) | Compatibility shim split out at 1.0; migrate off it |
+| `langchain` | `create_agent` + LCEL primitives | 1.3.x — pin strictly |
+| `langchain-classic` | Pre-1.0 chains (LLMChain, RetrievalQA) | Compatibility shim; only for inherited code |
 | `langchain-community` | 300+ third-party integrations | Moves fast, pin strictly |
 | `langchain-openai` | OpenAI-specific integration | Separate package since 0.1 |
 | `langchain-anthropic` | Anthropic-specific integration | Separate package since 0.1 |
 | `langsmith` | Tracing, evaluation, dataset management | Set `LANGSMITH_TRACING=true`; dataset versioning, A/B testing for chains |
 | [`langgraph`](langgraph.md) | Stateful agent graphs | Companion to LangChain |
-| `pydantic` v2 | Output validation | Required since LangChain 0.2 |
+| `pydantic` v2 | Output validation | Required end-to-end in 1.x |
 
-**Version matrix:**
-- LangChain 0.0.x (2022-2023): legacy chains, not LCEL
-- LangChain 0.1.x (early 2024): LCEL introduced, legacy deprecation announced
-- LangChain 0.2.x (mid-2024): pydantic v2, package split
-- LangChain 0.3.x: pydantic v2 required end-to-end
-- LangChain 1.x (current, 1.2.x stable): legacy chains moved out to `langchain-classic`, `create_agent` becomes the recommended agent API, Python 3.10+ required. Breaking changes are reserved for 2.0 per the published release policy.
-- `langchain-core`: the stable foundation; updates are backward-compatible
+**Version matrix (target the 1.x line):**
+- `langchain` 1.x — 1.3.x is the current stable release. Requires Python 3.10+ and pydantic v2 end-to-end. `create_agent` is the agent API; the classic chain classes ship separately in `langchain-classic`. Breaking changes are reserved for 2.0 per the published release policy.
+- `langchain-core` 1.x — the stable foundation (Runnable, base classes); updates are backward-compatible, so pin it loosely and pin everything else tightly.
+- A pin below `langchain==1.0` predates the LangGraph-backed agent runtime and the `langchain-classic` split; treat upgrading off it as a migration, not a version bump.
 
 **LangSmith features:**
 - **Dataset versioning**: tag datasets (`v1`, `v2`, `baseline`) and compare chain performance across versions.
@@ -645,7 +649,7 @@ traffic didn't" incidents: usage per session got longer, not more frequent.
 ## 12. Interview Questions with Answers
 
 **Q: What is LCEL and how does it differ from legacy LangChain chains?**
-LCEL (LangChain Expression Language) is a composable Runnable API using Python's pipe operator (`|`) to chain components. Legacy chains (`LLMChain`, `ConversationalRetrievalChain`) were class-based, required subclassing to customize, had inconsistent streaming support, and buried state in the chain object. LCEL is stateless by default, streaming-native, async-native, and supports `.batch()` with configurable concurrency. Legacy chains were deprecated during 0.1/0.2 and moved out of the main `langchain` package into `langchain-classic` at 1.0.
+LCEL (LangChain Expression Language) is a composable Runnable API using Python's pipe operator (`|`) to chain components. Legacy chains (`LLMChain`, `ConversationalRetrievalChain`) were class-based, required subclassing to customize, had inconsistent streaming support, and buried state in the chain object. LCEL is stateless by default, streaming-native, async-native, and supports `.batch()` with configurable concurrency. The classic chain classes now ship only in `langchain-classic`, so a 1.x install gives you the Runnable API and `create_agent` and nothing else.
 
 **Q: What is a Runnable in LangChain?**
 A Runnable is any object implementing the protocol: `invoke(input) -> output`, `stream(input) -> Iterator`, `batch(inputs) -> List`, and async variants `ainvoke`, `astream`, `abatch`. Built-in Runnables include `ChatPromptTemplate`, `ChatOpenAI`, `StrOutputParser`, `RunnableLambda`, `RunnableParallel`. Composing Runnables with `|` produces a `RunnableSequence`, which is itself a Runnable. This uniformity means you can swap any component without changing callers.
@@ -675,7 +679,7 @@ Three approaches: (1) LangSmith: set `LANGSMITH_TRACING=true` — every invocati
 Use a custom callback handler that tracks tokens: subclass `BaseCallbackHandler`, implement `on_llm_end(response)`, extract `response.llm_output["token_usage"]`, accumulate per session ID. Inject the callback at invocation time: `chain.invoke(input, config={"callbacks": [budget_tracker]})`. Check budget before each invocation: `if budget_tracker.total_cost(session_id) >= BUDGET_LIMIT: raise BudgetExceededException`. Concrete numbers: `gpt-5.5` costs $5/1M input tokens + $30/1M output tokens; a 10K token/day user budget works out to roughly $0.10/day at typical input/output ratios.
 
 **Q: What are the package boundaries in LangChain 1.x?**
-`langchain-core`: Runnable protocol, base classes (BaseLanguageModel, BaseRetriever, etc.), no third-party dependencies. `langchain`: High-level agents, LCEL primitives, and prompt templates built on core; `langchain-classic` holds the pre-1.0 chain classes that were split out at 1.0. `langchain-community`: Third-party integrations (vector stores, LLMs, tools, document loaders) — these have external dependencies. `langchain-openai`, `langchain-anthropic`, `langchain-google-genai`: Provider-specific implementations, maintained by providers. This split means you can use `langchain-core` + `langchain-openai` without installing the 300+ community dependencies. In production, only install what you need.
+`langchain-core`: Runnable protocol, base classes (BaseLanguageModel, BaseRetriever, etc.), no third-party dependencies. `langchain`: `create_agent`, LCEL primitives, and prompt templates built on core; `langchain-classic` holds the pre-1.0 chain classes. `langchain-community`: Third-party integrations (vector stores, LLMs, tools, document loaders) — these have external dependencies. `langchain-openai`, `langchain-anthropic`, `langchain-google-genai`: Provider-specific implementations, maintained by providers. This split means you can use `langchain-core` + `langchain-openai` without installing the 300+ community dependencies. In production, only install what you need.
 
 **Q: How do you test a LangChain chain?**
 Unit test components independently: test prompt templates with `prompt.format_messages(question="test")`, test output parsers with expected model outputs, test RunnableLambda functions as plain Python. For integration tests, use `pytest` with `@pytest.mark.vcr` to record and replay actual API responses (using `vcrpy`). For evaluation, use LangSmith's dataset + evaluator pattern: upload test cases to a dataset, run the chain against each, apply an LLM-as-judge evaluator for correctness. Concrete: a RAG chain evaluation should test retrieval recall (are relevant docs retrieved?), answer faithfulness (does the answer stay in context?), and answer relevance (does it address the question?).
@@ -705,7 +709,7 @@ Create a LangSmith dataset with representative input examples. Run both chain va
 
 ## 13. Best Practices
 
-1. **Always use LCEL** — never use legacy chains. They are deprecated and will be removed.
+1. **Build with LCEL and `create_agent`** — the Runnable protocol is the only surface that streams, batches, and traces uniformly.
 2. **Pin all LangChain packages** — `langchain`, `langchain-core`, `langchain-community` (currently the 1.x line) — independently, not just `langchain`.
 3. **Connect LangSmith before writing any chain logic** — retroactive debugging is much harder.
 4. **Keep RunnableLambda functions stateless** — no mutable closures; all state in the input dict.

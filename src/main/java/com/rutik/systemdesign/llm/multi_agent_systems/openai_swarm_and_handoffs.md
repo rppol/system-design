@@ -4,9 +4,9 @@
 
 ## 1. Concept Overview
 
-OpenAI Swarm (October 2024) and the OpenAI Agents SDK (announced 11 March 2025) are frameworks for building multi-agent systems where multiple LLM-powered agents collaborate by handing off control to one another. The central primitive in both is the **Agent**: a named entity with a system prompt (instructions), a list of callable tools, and a way to transfer control to another agent.
+The **OpenAI Agents SDK** (`pip install openai-agents`) is the framework for building multi-agent systems on OpenAI models, where several LLM-powered agents collaborate by handing off control to one another. Its central primitive is the **Agent**: a named entity with a system prompt (instructions), a list of callable tools, and a declared set of peers it may transfer control to. Around that it adds async execution, streaming, typed context, guardrails, retries, and tracing that is on by default.
 
-**Read this before using Swarm for anything.** Swarm labels itself "Swarm (experimental, educational)" and was never published to PyPI. Its own README now opens with: "Swarm is now replaced by the OpenAI Agents SDK, which is a production-ready evolution of Swarm... We recommend migrating to the Agents SDK for all production use cases." Swarm exists in this file to explain the handoff *idea* in ~100 lines of readable source; **it is not a production choice, and its API is not the Agents SDK's API** — the two differ in the fields you pass, the return types, and where handoffs are declared (see §4.1 vs §4.2). The Agents SDK is the successor: async, streaming, traced, typed context, guardrails.
+This file also uses **Swarm** (October 2024) as a teaching foil. Swarm is a ~100-line experimental repo, never published to PyPI, that OpenAI now points at the Agents SDK for anything real — but its source is short enough to read end to end, which makes it the clearest way to see that *a handoff is just a tool call whose return value happens to be an agent*. Read §4.1 and §6.1 for the mechanism, then build on the SDK. The two APIs are not interchangeable: they differ in the fields you pass, the return types, and where handoffs are declared (§4.1 vs §4.2).
 
 **Version this file targets (checked July 2026).** Agents SDK code below targets the `openai-agents` PyPI package (current release line 0.18.x) and was checked signature-by-signature against `openai/openai-agents-python` on `main`. Swarm code targets `openai/swarm` on `main`.
 
@@ -80,7 +80,7 @@ agent = Agent(
     handoffs=[billing_agent, technical_agent],
     input_guardrails=[pii_guardrail],
     output_guardrails=[toxicity_guardrail],     # PLURAL, and a list
-    model="gpt-4o",
+    model="gpt-5.6-terra",
 )
 
 result: RunResult = await Runner.run(agent, input="My bill is wrong")
@@ -376,7 +376,7 @@ async def reset_password(ctx: RunContextWrapper[SupportContext]) -> str:
 
 billing_agent = Agent[SupportContext](
     name="Billing Agent",
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     instructions=(
         "You are a billing specialist. "
         "Use get_billing_history() to review charges. "
@@ -389,7 +389,7 @@ billing_agent = Agent[SupportContext](
 
 technical_agent = Agent[SupportContext](
     name="Technical Agent",
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     instructions=(
         "You are a technical support specialist. "
         "Use reset_password() for access issues. "
@@ -401,7 +401,7 @@ technical_agent = Agent[SupportContext](
 
 triage_agent = Agent[SupportContext](
     name="Triage Agent",
-    model="gpt-4o",
+    model="gpt-5.6-terra",
     instructions=(
         "You are the first point of contact for customer support. "
         "Step 1: Call lookup_account() to load the customer record. "
@@ -513,7 +513,7 @@ PR arrives. Triage Agent determines language and scope. Style Agent checks forma
 
 | Dimension | Swarm (2024) | Agents SDK (2025) |
 |-----------|--------------|-------------------|
-| Status | Experimental / educational; README says "replaced by the OpenAI Agents SDK" | Production, actively maintained (0.18.x as of July 2026) |
+| Status | Experimental / educational reference source | Production, actively maintained (0.18.x as of July 2026) |
 | Async | No (synchronous) | Yes (asyncio native) |
 | Streaming | No | Yes (run_streamed) |
 | Persistence | Caller manages messages | RunResult manages internally |
@@ -550,11 +550,11 @@ PR arrives. Triage Agent determines language and scope. Style Agent checks forma
 
 ## 9. When to Use / When NOT to Use
 
-### Use Swarm when:
-- Learning or prototyping the handoff pattern in under 100 lines
-- Teaching multi-agent concepts to a team
-- No async requirements
-- Throw-away script that will not go to production
+### Read Swarm's source when:
+- You want to see the handoff mechanism with nothing between you and it — the whole runner is under 100 lines
+- You are teaching multi-agent concepts and need a diagram that fits on one screen
+
+Build on the Agents SDK regardless of which of those applies; Swarm is a reading exercise, not a dependency.
 
 ### Use Agents SDK when:
 - Building a production customer-facing system
@@ -703,8 +703,8 @@ async def lookup_account(ctx: RunContextWrapper[SupportContext]) -> str:
 | Tool / Library | Role | Notes |
 |----------------|------|-------|
 | openai-agents | Agents SDK core | `pip install openai-agents`; MIT license; 0.18.x as of July 2026 |
-| swarm | Experimental/educational handoff library | `pip install git+https://github.com/openai/swarm.git` (never on PyPI — the PyPI `swarm` package is unrelated); superseded by the Agents SDK |
-| openai Python SDK | Underlying LLM calls | Swarm wraps `openai.OpenAI` (sync); the Agents SDK uses the async client |
+| swarm | Reading-only reference implementation of handoffs | `git clone https://github.com/openai/swarm` — never on PyPI (the PyPI `swarm` package is unrelated), so it cannot enter a lockfile by accident |
+| openai Python SDK | Underlying LLM calls | The Agents SDK uses the async client; Swarm wraps the sync `openai.OpenAI` |
 | asyncio | Async runtime | Required by Agents SDK |
 | httpx | Async HTTP in tools | Preferred over requests in async context |
 | pydantic | Structured tool outputs | Agents SDK supports pydantic model as output_type |
@@ -739,7 +739,7 @@ max_turns is a parameter to Runner.run (default 10) that limits the total number
 Input guardrails run before the LLM receives the user message; they can inspect and block PII, prompt injection, or policy violations. Output guardrails run after the LLM produces its response; they can block toxic, off-topic, or malformed outputs. Both return GuardrailFunctionOutput; setting tripwire_triggered=True aborts the run by raising InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered — two distinct exception classes, so catch both.
 
 **Q: Can a guardrail call another LLM?**
-You should avoid calling Runner.run inside a guardrail because it causes nested runs and can trigger guardrails recursively. Instead, use a direct openai.chat.completions.create call with a fast, cheap model (e.g., gpt-4o-mini), a regex heuristic, or a local classifier. The latency budget for a guardrail is typically under 200ms.
+You should avoid calling Runner.run inside a guardrail because it causes nested runs and can trigger guardrails recursively. Instead, use a direct openai.chat.completions.create call with a fast, cheap model (e.g., gpt-5.4-nano), a regex heuristic, or a local classifier. The latency budget for a guardrail is typically under 200ms.
 
 **Q: How does streaming work in the Agents SDK?**
 Runner.run_streamed is a synchronous call that immediately returns a RunResultStreaming object, which you then iterate with `async for event in result.stream_events()`. It is neither awaited nor used as an async context manager. There are three event types: raw_response_event (raw Responses API deltas, for token-level output), agent_updated_stream_event (the active agent changed, i.e. a handoff), and run_item_stream_event (a higher-level item finished — message_output_item, tool_call_item, tool_call_output_item, handoff_output_item). The caller can display tokens in real time while the runner continues processing.
@@ -751,7 +751,7 @@ The full message history is preserved and passed to the new agent. The new agent
 Use Runner.run in a pytest-asyncio test with a FakeModel or by patching openai.AsyncOpenAI to return canned responses. Assert on result.last_agent.name to confirm the correct handoff occurred, and on context attributes to confirm tools mutated context correctly. Test the guardrail separately by calling it directly with a RunContextWrapper mock.
 
 **Q: What is the token cost implication of multi-agent handoffs?**
-Each handoff triggers a new LLM call. The new call includes the full conversation history, so token cost grows linearly with conversation length. A 3-agent chain on a 10-turn conversation may pay 3x the token cost of a single-agent approach. Mitigation: summarise earlier turns before handoff, or use a cheaper model (gpt-4o-mini at $0.15/1M input tokens) for triage and reserve gpt-4o ($2.50/1M) for specialists.
+Each handoff triggers a new LLM call. The new call includes the full conversation history, so token cost grows linearly with conversation length. A 3-agent chain on a 10-turn conversation may pay 3x the token cost of a single-agent approach. Mitigation: summarise earlier turns before handoff, or use a cheaper model (gpt-5.4-nano at $0.20/1M input tokens) for triage and reserve gpt-5.6-terra ($2.50/1M) for specialists.
 
 **Q: How would you prevent a triage agent from looping back to itself?**
 Remove the transfer_to_triage tool from specialist agents entirely. Specialists should have an escape hatch that says "tell the user you cannot help and they should contact human support" — not a transfer back to triage. Set max_turns=8 as a circuit breaker. Log a warning if last_agent == starting_agent after more than 3 turns.
@@ -763,7 +763,7 @@ output_type is a pydantic model that forces the LLM's final response to conform 
 Every Runner.run call automatically creates a trace on the OpenAI platform, viewable in the Traces dashboard. There is no trace_url attribute on RunResult — to correlate a run with its trace, wrap the call in `with trace("workflow-name", group_id=...)` and look it up by that name or group ID. The trace shows each LLM call, tool call, handoff, and guardrail evaluation with latency, token counts, and inputs/outputs. No additional instrumentation code is required; it is on by default with a valid API key.
 
 **Q: What is the recommended model size split for triage vs specialist agents in production?**
-Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-4o-mini at $0.15/1M input is a common choice; reserve a stronger model for specialists that need reasoning, tool use, or domain knowledge. Do not reach for o1-mini here — it was deprecated in April 2025 and removed from the API on 27 October 2025. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
+Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-5.4-nano at $0.20/1M input is a common choice; reserve a stronger model such as gpt-5.6-terra ($2.50/1M) for specialists that need reasoning, tool use, or domain knowledge. Never put a reasoning model on triage: hidden thinking tokens are billed as output and add seconds of latency to a call whose entire job is picking one of four labels. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
 
 ---
 
@@ -856,9 +856,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    User(["User"]) --> Triage["Triage Agent<br/>gpt-4o-mini, ~180-word instructions<br/>tools: lookup_account, classify_intent<br/>input_guardrail: pii, injection"]
-    Triage -- "billing issue?" --> Billing["Billing Agent<br/>gpt-4o, ~220-word instructions<br/>tools: get_invoices, issue_refund,<br/>get_payment_methods<br/>output_guardrail: amount_sanity<br/>(blocks refunds &gt; $10,000)"]
-    Triage -- "technical issue?" --> Technical["Technical Agent<br/>gpt-4o, ~200-word instructions<br/>tools: reset_password, check_service_status,<br/>create_ticket<br/>output_guardrail: length_guardrail"]
+    User(["User"]) --> Triage["Triage Agent<br/>gpt-5.4-nano, ~180-word instructions<br/>tools: lookup_account, classify_intent<br/>input_guardrail: pii, injection"]
+    Triage -- "billing issue?" --> Billing["Billing Agent<br/>gpt-5.6-terra, ~220-word instructions<br/>tools: get_invoices, issue_refund,<br/>get_payment_methods<br/>output_guardrail: amount_sanity<br/>(blocks refunds &gt; $10,000)"]
+    Triage -- "technical issue?" --> Technical["Technical Agent<br/>gpt-5.6-terra, ~200-word instructions<br/>tools: reset_password, check_service_status,<br/>create_ticket<br/>output_guardrail: length_guardrail"]
 
     class User io
     class Triage,Billing,Technical base
@@ -874,9 +874,9 @@ All runs used Runner.run with max_turns=12. Trace URLs were stored in the CRM al
 
 **Results after 30 days:**
 - Hallucination rate on billing: 14% → 1.8% (billing agent has focused 220-word prompt + real invoice data from tool)
-- Average first-response latency: 8s → 3.2s (gpt-4o-mini for triage, smaller prompt for specialists)
+- Average first-response latency: 8s → 3.2s (gpt-5.4-nano for triage, smaller prompt for specialists)
 - Human escalation rate: 22% → 9%
-- Average cost per conversation: $0.021 → $0.009 (mix of mini for triage, gpt-4o only for specialists)
+- Average cost per conversation: $0.021 → $0.009 (nano for triage, gpt-5.6-terra only for specialists)
 - GDPR audit requests satisfied in < 2 minutes (trace URL lookup in CRM)
 
 **In plain terms.** "Every one of these percentages is a rate, and a rate only becomes a
@@ -926,6 +926,6 @@ beside it.
 
 **Lessons learned:**
 1. The amount_sanity_guardrail caught 3 production incidents in the first week where the LLM hallucinated a refund amount 10x larger than the actual charge.
-2. The biggest latency win came from switching triage to gpt-4o-mini, not from architectural changes.
+2. The biggest latency win came from switching triage to gpt-5.4-nano, not from architectural changes.
 3. Routine-style instructions (numbered steps) in the triage agent reduced off-topic transfers by 40% versus free-form instructions.
 4. max_turns=12 was triggered 0.3% of the time; all cases were users re-asking the same question repeatedly. Adding a "repeated question" detector in the triage agent's instructions reduced this to 0.05%.
