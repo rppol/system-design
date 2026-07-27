@@ -455,7 +455,7 @@ class Button {
 
 | System | Pattern | Why |
 |--------|---------|-----|
-| Event bus (Guava, Spring) | Mediator-like | Fully decouples publishers and subscribers |
+| Event bus (Spring `ApplicationEventPublisher`) | Mediator-like | Fully decouples publishers and subscribers |
 | UI data binding | Observer | View observes ViewModel state |
 | React useState + useEffect | Observer | Component re-renders when state changes |
 | Air traffic control | Mediator | Planes don't communicate directly |

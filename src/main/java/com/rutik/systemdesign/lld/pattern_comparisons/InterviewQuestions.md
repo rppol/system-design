@@ -43,7 +43,7 @@ Follow-up: What are the downsides of Singleton? How do you test code that uses a
 
 **Q: What is the Factory Method pattern? When would you use it?**
 
-Factory Method defines an interface for creating an object but lets subclasses decide which class to instantiate. Defers instantiation to subclasses; the creator does not need to know the concrete class. Use it when: the exact type of object to create is not known until runtime, or when subclasses should control which objects are created. Real-world example: `LoggerFactory.getLogger()` in SLF4J, JDBC's `DriverManager.getConnection()`. Compared to `new`: Factory Method decouples the client from the concrete product class.
+Factory Method defines an interface for creating an object but lets subclasses decide which class to instantiate. Defers instantiation to subclasses; the creator does not need to know the concrete class. Use it when: the exact type of object to create is not known until runtime, or when subclasses should control which objects are created. Real-world example: `LoggerFactory.getLogger()` in SLF4J, and JDBC's `Driver.connect()` — the method each driver overrides to produce its own `Connection` (`DriverManager.getConnection()` is the registry that dispatches to it, not the factory method itself). Compared to `new`: Factory Method decouples the client from the concrete product class.
 
 Follow-up: What is the difference between Factory Method and Abstract Factory?
 
@@ -83,7 +83,7 @@ Follow-up: What is the difference between Builder and Abstract Factory?
 
 **Q: What is the Adapter pattern? When would you use it?**
 
-Converts the interface of a class into another interface that clients expect. Lets incompatible classes work together. Two forms: Class Adapter (uses multiple inheritance, available in C++) and Object Adapter (wraps an instance, preferred in Java). Use when: integrating a third-party library, working with legacy code, or when two independently developed classes need to cooperate. Real-world examples: power plug adapters, Java's `Arrays.asList()` (adapts array to List), `InputStreamReader` (adapts byte stream to character stream).
+Converts the interface of a class into another interface that clients expect. Lets incompatible classes work together. Two forms: Class Adapter (`class Adapter extends Adaptee implements Target` — legal in Java whenever Target is an interface; GoF call it multiple inheritance because in C++ Target is a class too) and Object Adapter (wraps an instance, preferred in Java because one adapter works for every adaptee subclass). Use when: integrating a third-party library, working with legacy code, or when two independently developed classes need to cooperate. Real-world examples: power plug adapters, Java's `Arrays.asList()` (adapts array to List), `InputStreamReader` (adapts byte stream to character stream).
 
 Follow-up: What is the difference between Adapter and Facade?
 

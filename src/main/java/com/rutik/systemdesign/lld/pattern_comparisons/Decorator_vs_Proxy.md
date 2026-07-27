@@ -197,12 +197,12 @@ order = new MilkDecorator(order);
 order = new WhipDecorator(order);
 order = new CaramelDecorator(order);
 System.out.println(order.getDescription() + " $" + order.getCost());
-// "Simple coffee, milk, whip, caramel $2.50"
+// "Simple coffee, milk, whip, caramel $2.5"  (1.00 + 0.25 + 0.50 + 0.75)
 
 // Different combination — mix and match freely
 Coffee latte = new MilkDecorator(new MilkDecorator(new SimpleCoffee()));
 System.out.println(latte.getDescription() + " $" + latte.getCost());
-// "Simple coffee, milk, milk $1.50"
+// "Simple coffee, milk, milk $1.5"  (1.00 + 0.25 + 0.25)
 ```
 
 ```mermaid

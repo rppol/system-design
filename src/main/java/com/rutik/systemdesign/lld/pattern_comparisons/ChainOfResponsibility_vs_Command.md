@@ -400,7 +400,7 @@ Use **Command** when:
 
 | Chain of Responsibility | Command |
 |-------------------------|---------|
-| HTTP middleware / filter chains (`javax.servlet.Filter`) | Menu items and toolbar buttons in GUIs |
+| HTTP middleware / filter chains (`jakarta.servlet.Filter`) | Menu items and toolbar buttons in GUIs |
 | Spring Security filter chain | Database transaction log (replay / rollback) |
 | Exception handling chains (try-catch nesting) | Job queues (Celery, Sidekiq, RabbitMQ tasks) |
 | Logging level hierarchy (DEBUG → INFO → WARN → ERROR) | Git commits (reversible history) |

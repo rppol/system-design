@@ -285,8 +285,8 @@ class Rectangle extends Shape {
     public void resize(double factor) { width *= factor; height *= factor; }
 }
 
-// Without Bridge: 2 shapes * 2 renderers = 4 subclasses
-// With Bridge: 2 + 2 = 4 classes (grows linearly not exponentially)
+// Without Bridge: m shapes * n renderers subclasses (2 * 2 = 4 here)
+// With Bridge: m + n classes (2 + 2 = 4 here) — grows additively, not multiplicatively
 Shape c1 = new Circle(new VectorRenderer(), 5.0);
 Shape c2 = new Circle(new RasterRenderer(), 5.0);
 Shape r1 = new Rectangle(new VectorRenderer(), 4.0, 3.0);

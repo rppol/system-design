@@ -56,7 +56,7 @@ flowchart LR
 
     subgraph CR["CREATIONAL"]
         direction TB
-        FM["Factory Method"] -->|extends| AF["Abstract Factory<br/>(factory of factories)"]
+        FM["Factory Method"] -->|often used inside| AF["Abstract Factory<br/>(one factory per product family)"]
         BLD["Builder<br/>complex object construction"]
         PRO["Prototype<br/>clone-based creation"]
         SIN["Singleton<br/>single instance"]
@@ -216,4 +216,5 @@ flowchart LR
 - [Composite_vs_Decorator.md](Composite_vs_Decorator.md)
 - [ChainOfResponsibility_vs_Command.md](ChainOfResponsibility_vs_Command.md)
 - [DecisionFlowchart.md](DecisionFlowchart.md)
+- [PatternCombinations.md](PatternCombinations.md)
 - [InterviewQuestions.md](InterviewQuestions.md)

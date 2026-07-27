@@ -373,7 +373,7 @@ flowchart LR
 
 3. **Decorator chain order matters** — Wrapping `Encrypted(Buffered(File))` is different from `Buffered(Encrypted(File))`. The innermost decorator executes first during delegation.
 
-4. **Composite is structural, Decorator is behavioral** — Gang of Four classification makes this explicit. Composite answers "what is the shape of the object graph?" Decorator answers "what can this object do?"
+4. **Both are Structural in the Gang of Four classification** — the split is not category but question: Composite answers "what is the shape of the object graph?" Decorator answers "what can this object do?"
 
 5. **Decorator is not subclassing** — Even though it implements the same interface as the component, it does so by delegation, not by inheritance of behavior.
 
@@ -385,7 +385,7 @@ flowchart LR
 |-----------|-----------|
 | `java.awt.Container` (contains `Component` children) | `java.io.BufferedInputStream` wrapping `FileInputStream` |
 | HTML/XML DOM tree (element contains child elements) | `java.io.GZIPOutputStream` wrapping `FileOutputStream` |
-| GUI widget trees (panel contains buttons, labels) | Spring `HttpServletRequestWrapper` |
+| GUI widget trees (panel contains buttons, labels) | `jakarta.servlet.http.HttpServletRequestWrapper` |
 | Organization charts (department contains employees or sub-departments) | Java logging handlers with formatters |
 | Menu systems (menu contains menu items or sub-menus) | HTTP middleware chains (authentication → rate-limiting → logging) |
 
@@ -420,4 +420,4 @@ FileSystemComponent sensitiveDir = new Directory("confidential");
 // (shown conceptually — adapt interfaces as needed)
 ```
 
-A concrete real-world example: `java.io` uses Composite-style recursive reading and Decorator-style wrapping (`BufferedReader` → `InputStreamReader` → `FileInputStream`) in the same pipeline.
+A concrete real-world example is the GoF's own document editor: a page is a Composite of glyphs (rows containing columns containing characters), and any node in that tree — leaf or container — can be wrapped in a `BorderDecorator` or `ScrollDecorator` because both realize the same `Glyph` interface. `java.io` is Decorator only (`BufferedReader` wrapping `InputStreamReader` wrapping `FileInputStream`); its stream classes form no part-whole tree, so it is not an example of the combination.

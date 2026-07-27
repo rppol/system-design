@@ -307,7 +307,7 @@ Use **Strategy** when:
 
 | Template Method | Strategy |
 |-----------------|----------|
-| `javax.servlet.HttpServlet` (`doGet`, `doPost` override) | `java.util.Comparator` |
+| `jakarta.servlet.http.HttpServlet` (`doGet`, `doPost` override) | `java.util.Comparator` |
 | `Spring JdbcTemplate` (callback hooks) | `java.util.Collections.sort()` accepting a `Comparator` |
 | `AbstractList` in Java Collections Framework | `LayoutManager` in Java AWT/Swing |
 | JUnit `setUp` / `tearDown` test lifecycle | Payment gateway selection (Stripe, PayPal, Braintree) |

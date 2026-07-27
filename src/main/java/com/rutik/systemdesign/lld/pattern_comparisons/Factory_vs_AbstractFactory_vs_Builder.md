@@ -241,7 +241,7 @@ class Application {
 }
 
 // Swap entire family by changing one line
-GUIFactory factory = System.getProperty("os").equals("Windows")
+GUIFactory factory = System.getProperty("os.name").startsWith("Windows")
     ? new WindowsFactory()
     : new MacFactory();
 Application app = new Application(factory);

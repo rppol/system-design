@@ -220,6 +220,8 @@ class TextEditor {
             text = new StringBuilder(prev.getState()); // restore
         }
     }
+
+    public StringBuilder getText() { return text; }
 }
 
 class TypeCommand implements Command {
@@ -367,6 +369,11 @@ class AuditingProxy<T> implements InvocationHandler {
     private final T target;
     private final List<AuditObserver> observers;
 
+    AuditingProxy(T target, List<AuditObserver> observers) {
+        this.target    = target;
+        this.observers = observers;
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         long start = System.currentTimeMillis();
@@ -406,8 +413,8 @@ class EnemyFactory {
 }
 
 // Register once:
-factory.registerPrototype("GOBLIN", new Goblin(health=50, damage=10, speed=FAST));
-factory.registerPrototype("TROLL",  new Troll(health=200, damage=40, speed=SLOW));
+factory.registerPrototype("GOBLIN", new Goblin(50, 10, Speed.FAST));   // health, damage, speed
+factory.registerPrototype("TROLL",  new Troll(200, 40, Speed.SLOW));
 
 // Create many — no expensive re-initialization:
 for (int i = 0; i < 100; i++) {

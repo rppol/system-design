@@ -326,12 +326,12 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Start(["Need to encapsulate<br/>a request or an algorithm?"]) --> Q1{"Need undo, a job<br/>queue, or audit log?"}
-    Q1 -- yes --> Cmd(["Use Command<br/>Invoker to Receiver"])
+    Q1 -- yes --> Q3{"Also need a swappable<br/>algorithm inside it?"}
+    Q3 -- no --> Cmd(["Use Command<br/>Invoker to Receiver"])
+    Q3 -- yes --> Combo(["Combine: SortCommand<br/>wraps a SortStrategy"])
     Q1 -- no --> Q2{"Just swapping the<br/>algorithm at runtime?"}
     Q2 -- yes --> Strat(["Use Strategy<br/>Context plus interface"])
-    Q2 -- no --> Q3{"Need reversibility AND<br/>a swappable algorithm?"}
-    Q3 -- yes --> Combo(["Combine: SortCommand<br/>wraps a SortStrategy"])
-    Q3 -- no --> Other(["Neither fits —<br/>reconsider the design"])
+    Q2 -- no --> Other(["Neither fits —<br/>reconsider the design"])
 
     class Start io
     class Q1,Q2,Q3 mathOp
