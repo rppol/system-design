@@ -14,7 +14,7 @@ One-line analogy: the training loop is a hiker descending a foggy mountain — t
 
 Mental model: the optimizer is not a magic box. Every hyperparameter choice — learning rate, weight decay, batch size, warmup steps — directly affects the trajectory through the loss landscape. Understanding each component lets you diagnose training failures systematically rather than by trial and error.
 
-Why it matters: a good architecture trained poorly will lose to a mediocre architecture trained well. Google Brain's research shows that training recipe (optimizer, LR schedule, augmentation) often contributes more to final accuracy than architectural choices alone.
+Why it matters: a good architecture trained poorly will lose to a mediocre architecture trained well. Bello et al., "Revisiting ResNets" (Google Brain, NeurIPS 2021), took a canonical ResNet-200 from 79.0% to 82.2% top-1 on ImageNet using improved training methods alone, and concluded that training and scaling strategies "may matter more than architectural changes."
 
 Key insight: learning rate is the single most important hyperparameter. A correctly scheduled LR with warmup and cosine decay can recover from many poor choices elsewhere. No amount of architectural sophistication compensates for a wildly misset learning rate.
 
@@ -239,8 +239,10 @@ xychart-beta
 
 The LR ramps linearly from 0 to peak over the first 5% of steps (warmup protects
 cold, poorly-initialized parameters), then follows `0.5·(1 + cos(π·progress))` down
-to 0 across the remaining 95%. This is the GPT-3 and BERT fine-tuning recipe: warmup
-over roughly 5% of steps, cosine decay to a small final LR.
+to 0 across the remaining 95%. Warmup over 5-10% of steps followed by cosine decay is
+the standard fine-tuning recipe; large pretraining runs use the same shape with a much
+shorter warmup (GPT-3 warmed up over 375M of 300B tokens, about 0.125%) and decay to a
+floor rather than to 0.
 
 ### Mixed Precision Training — FP16 Compute, FP32 Master Weights
 
@@ -342,7 +344,7 @@ Note that clipping happens *after* `loss.backward()` and *before* `optimizer.ste
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from typing import Optional
 import math
@@ -645,13 +647,13 @@ class EarlyStopping:
 
 ## 7. Real-World Examples
 
-**GPT-3 training recipe**: AdamW with lr=6e-4, beta1=0.9, beta2=0.95, weight_decay=0.1. Linear warmup over 375M tokens (0.003% of 300B total), cosine decay to 10% of peak LR. Gradient clipping max_norm=1.0. Batch size 3.2M tokens (achieved via gradient accumulation across 256 A100 GPUs). Mixed precision (bfloat16 for stability over float16).
+**GPT-3 training recipe**: Adam with lr=6e-4 (175B model), beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.1. Linear warmup over the first 375M tokens (0.125% of the 300B-token budget), then cosine decay to 10% of peak LR over 260B tokens, held flat at 10% thereafter. Gradient clipping max_norm=1.0. Batch size ramped linearly from 32k tokens up to 3.2M tokens over the first 4-12B tokens. Trained on V100 GPUs on a Microsoft-provided high-bandwidth cluster.
 
 **ImageNet training (ResNet-50)**: SGD with momentum=0.9, lr=0.1, weight_decay=1e-4. LR decays by 10x at epochs 30, 60, 90. Batch size 256. Training time: ~90 epochs, ~24 hours on 4 V100s. Mixed precision cuts this to ~14 hours.
 
-**BERT fine-tuning**: AdamW, lr=2e-5, warmup over 6% of steps, linear decay. Batch size 32. Weight decay 0.01. 3-5 epochs on downstream tasks. Label smoothing not used (BERT uses cross-entropy directly).
+**BERT fine-tuning**: AdamW, lr=2e-5, warmup over 6% of steps, linear decay. Batch size 32. Weight decay 0.01. The BERT paper's recommended fine-tuning grid is batch size {16, 32}, lr {5e-5, 3e-5, 2e-5}, and 2-4 epochs on downstream tasks. Label smoothing not used (BERT uses cross-entropy directly).
 
-**Production training at Stability AI (Stable Diffusion)**: gradient accumulation across 32 A100s to simulate batch size 2048. GradScaler with initial scale 65536 (2^16). Checkpoint saving every 5000 steps (training crashed ~3 times, requiring restarts from checkpoints).
+**Stable Diffusion v1 (CompVis / Stability AI)**: trained on 32 nodes x 8 A100 GPUs = 256 A100s, AdamW, effective batch size 2048 (`32 x 8 x 2 per-device x 4 accumulation steps`), LR warmed up to 1e-4 over 10,000 steps and then held constant. Long multi-week runs like this make frequent checkpointing non-optional — a node failure or a NaN mid-run costs whatever was not written to disk.
 
 ---
 
@@ -769,7 +771,7 @@ optimizer = optim.AdamW(get_optimizer_groups(model, weight_decay=1e-4), lr=1e-3)
 | Tool | Purpose |
 |------|---------|
 | `torch.amp.autocast` | Automatic mixed precision context manager |
-| `torch.cuda.amp.GradScaler` | Gradient scaling for fp16 stability |
+| `torch.amp.GradScaler("cuda")` | Gradient scaling for fp16 stability |
 | `torch.optim.AdamW` | Decoupled weight decay optimizer (standard for Transformers) |
 | `torch.optim.lr_scheduler` | Built-in LR schedulers (OneCycleLR, CosineAnnealingLR, etc.) |
 | `torch.nn.utils.clip_grad_norm_` | Gradient norm clipping |
@@ -798,16 +800,16 @@ loader = DataLoader(
 ## 12. Interview Questions with Answers
 
 **Q: What is the correct order of operations in a training iteration?**
-The correct order is: (1) `optimizer.zero_grad()` — clear accumulated gradients from the previous step; (2) `model(x)` — forward pass to compute predictions; (3) `criterion(output, y)` — compute scalar loss; (4) `loss.backward()` — compute gradients via backpropagation; (5) `clip_grad_norm_` (optional but recommended) — clip gradient norm; (6) `optimizer.step()` — update parameters using gradients; (7) `scheduler.step()` — advance LR schedule. Calling `zero_grad` after `backward` but before `step` discards computed gradients. Calling `step` before `backward` uses stale gradients from the previous iteration.
+Zero the gradients, forward, compute loss, backward, clip, step the optimizer, then step the scheduler. In code that is: (1) `optimizer.zero_grad()` — clear accumulated gradients from the previous step; (2) `model(x)` — forward pass to compute predictions; (3) `criterion(output, y)` — compute scalar loss; (4) `loss.backward()` — compute gradients via backpropagation; (5) `clip_grad_norm_` (optional but recommended) — clip gradient norm; (6) `optimizer.step()` — update parameters using gradients; (7) `scheduler.step()` — advance LR schedule. Calling `zero_grad` after `backward` but before `step` discards computed gradients. Calling `step` before `backward` uses stale gradients from the previous iteration.
 
 **Q: What is Adam and how does it differ from SGD?**
-Adam (Adaptive Moment Estimation) maintains per-parameter adaptive learning rates by tracking the first moment (exponential moving average of gradients, beta1=0.9) and second moment (exponential moving average of squared gradients, beta2=0.999). The update divides the gradient by the square root of the second moment plus epsilon (eps=1e-8), effectively normalizing each parameter's update by its historical gradient magnitude. Parameters with consistent large gradients get smaller effective LRs; rare-but-important parameters get larger effective updates. SGD uses the same LR for all parameters. Adam converges faster and requires less LR tuning, but SGD + momentum often achieves slightly better final accuracy on computer vision tasks with careful tuning.
+Adam gives every parameter its own adaptive learning rate, while SGD applies one global rate to all of them. It does this by tracking the first moment (exponential moving average of gradients, beta1=0.9) and the second moment (exponential moving average of squared gradients, beta2=0.999). The update divides the gradient by the square root of the second moment plus epsilon (eps=1e-8), effectively normalizing each parameter's update by its historical gradient magnitude. Parameters with consistent large gradients get smaller effective LRs; rare-but-important parameters get larger effective updates. SGD uses the same LR for all parameters. Adam converges faster and requires less LR tuning, but SGD + momentum often achieves slightly better final accuracy on computer vision tasks with careful tuning.
 
 **Q: What is learning rate warmup and why is it important?**
 Warmup linearly increases the LR from near-zero to the target LR over the first 5-10% of training steps. At initialization, parameters are random and the loss landscape is steep and unstable. A large LR at this stage causes large, noisy gradient steps that can push parameters into poor regions of the loss landscape from which recovery is slow. Warmup gives the optimizer a chance to orient itself with small, conservative steps before taking larger ones. It is especially critical for Transformers: without warmup, Adam's adaptive learning rates are poorly calibrated (the second moment estimate is initialized to zero and converges over many steps), causing the effective LR to be much larger than intended in early iterations.
 
 **Q: How does mixed precision training work and what are its benefits?**
-Mixed precision uses 16-bit floats (float16 or bfloat16) for the forward and backward passes (matrix multiplications, activations, gradients), while maintaining a float32 master copy of parameters for the optimizer update. Benefits: ~50% memory reduction (fp16 tensors are half the size of fp32), 1.5-2x throughput speedup on Tensor Core GPUs (which have 2-8x higher throughput for fp16 matmul vs fp32), and larger effective batch sizes. Risk: fp16 has a smaller dynamic range (max ~65504) than fp32, so gradients can overflow to inf or underflow to 0. GradScaler addresses this by multiplying the loss by a large scale factor (typically 2^16 = 65536) before backward, then unscaling gradients before the optimizer step. bfloat16 (Ampere+ GPUs) has the same range as fp32 with lower precision, avoiding overflow entirely.
+Mixed precision runs the forward and backward passes in 16-bit floats while keeping a float32 master copy of the parameters for the optimizer update. The 16-bit half covers matrix multiplications, activations and gradients, in either float16 or bfloat16. Benefits: ~50% memory reduction (fp16 tensors are half the size of fp32), 1.5-2x throughput speedup on Tensor Core GPUs (which have 2-8x higher throughput for fp16 matmul vs fp32), and larger effective batch sizes. Risk: fp16 has a smaller dynamic range (max ~65504) than fp32, so gradients can overflow to inf or underflow to 0. GradScaler addresses this by multiplying the loss by a large scale factor (typically 2^16 = 65536) before backward, then unscaling gradients before the optimizer step. bfloat16 (Ampere+ GPUs) has the same range as fp32 with lower precision, avoiding overflow entirely.
 
 **Q: What is gradient accumulation and when would you use it?**
 Gradient accumulation simulates a larger effective batch size by accumulating gradients over multiple forward/backward passes before calling `optimizer.step()`. If GPU memory fits only 32 samples but you want an effective batch size of 256, set accumulation_steps=8 and divide the loss by 8 at each micro-step. After 8 micro-steps, call step() and zero_grad(). The parameter update is mathematically identical to a single 256-sample batch. Use it when training large models (LLMs, diffusion models) where even a single example barely fits in GPU memory, or when theory indicates larger batches improve convergence (as in distributed training parity).
@@ -876,7 +878,7 @@ Seed all RNGs (Python, NumPy, torch, CUDA), set deterministic algorithms, and sa
 
 ## 14. Case Study
 
-**Scenario:** A research lab fine-tunes a 7B-parameter LLaMA-3 on 40B tokens of domain-specific instruction data using 8 A100-80GB GPUs. The first training attempt with fp16 and standard Adam fails at step 1,800 with NaN loss; the second attempt with fp32 takes 9 days and $28,000 in compute. The goal: use bf16 mixed precision, gradient checkpointing, gradient accumulation, and proper normalisation to achieve convergence in under 48 hours ($7,200 compute cost) with perplexity <= 2.95 on a held-out validation set.
+**Scenario:** A research lab fine-tunes a 7B-parameter Llama-style decoder-only LLM on 3B tokens of domain-specific instruction data using 8 A100-80GB GPUs. The first training attempt with fp16 and standard Adam fails at step 1,800 with NaN loss; the second attempt with fp32 takes 9 days and about $6,900 in compute. The goal: use bf16 mixed precision, gradient checkpointing, gradient accumulation, and proper normalisation to achieve convergence in under 48 hours (about $1,400 compute cost) with perplexity <= 2.95 on a held-out validation set.
 
 **Architecture:**
 ```
@@ -893,8 +895,8 @@ Seed all RNGs (Python, NumPy, torch, CUDA), set deterministic algorithms, and sa
 Training Configuration
   Global batch: 4 seq/GPU * 8 GPU * 8 accum = 256 seq = 1.05M tokens/step
   Sequence length: 4096 tokens
-  Steps: ~38,000 for 40B tokens at 1.05M tokens/step
-  Warmup: 2,000 steps (5.3%), cosine decay to 10% of peak LR
+  Steps: ~2,900 for 3B tokens at 1.05M tokens/step
+  Warmup: 150 steps (5.2%), cosine decay to 10% of peak LR
   Peak LR: 3e-4, weight decay: 0.1, gradient clip: 1.0
 ```
 
@@ -938,18 +940,15 @@ class GradientCheckpointedTransformerBlock(nn.Module):
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         # During forward pass: discard activations, recompute during backward
-        # Trades ~40% compute for 10x memory reduction in activations
+        # Trades ~33% extra compute for a ~10x reduction in activation memory
         return checkpoint(self.block, *args, use_reentrant=False, **kwargs)
 
 def enable_gradient_checkpointing(model: nn.Module) -> None:
     """Apply gradient checkpointing to all transformer decoder layers."""
-    for layer in model.model.layers:   # LLaMA-style architecture
-        layer.__class__ = type(
-            "CheckpointedLayer",
-            (GradientCheckpointedTransformerBlock,),
-            {},
-        )
-    print(f"Gradient checkpointing enabled for {len(model.model.layers)} layers")
+    layers = model.model.layers        # Llama-style architecture: an nn.ModuleList
+    for i, layer in enumerate(layers):
+        layers[i] = GradientCheckpointedTransformerBlock(layer)   # wrap, do not rebind __class__
+    print(f"Gradient checkpointing enabled for {len(layers)} layers")
 ```
 
 ```python
@@ -985,7 +984,7 @@ class TrainingEngine:
         labels = labels.to(self.device)
 
         # Use autocast for bf16 mixed precision
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             outputs = self.model(input_ids=input_ids, labels=labels)
             loss = outputs.loss / self.gradient_accumulation_steps
 
@@ -1021,7 +1020,7 @@ class TrainingEngine:
         n_batches = 0
         with torch.no_grad():
             for input_ids, labels in val_loader:
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                     outputs = self.model(input_ids=input_ids.to(self.device),
                                         labels=labels.to(self.device))
                 total_loss += float(outputs.loss)
@@ -1038,7 +1037,7 @@ from collections import deque
 class TrainingDiagnostics:
     """Monitor training health: loss, gradient norm, learning rate, NaN detection."""
 
-    def __init__(self, window_size: int = 100) -> None:
+    def __init__(self, window_size: int = 400) -> None:
         self.loss_history: deque[float] = deque(maxlen=window_size)
         self.grad_norm_history: deque[float] = deque(maxlen=window_size)
         self.nan_steps: list[int] = []
@@ -1063,8 +1062,9 @@ class TrainingDiagnostics:
         return metrics
 
     def should_restart_from_checkpoint(self) -> bool:
-        """Detect divergence: if rolling loss increases for 500 consecutive steps."""
-        if len(self.loss_history) < 200:
+        """Detect divergence: mean loss over the last 200 steps is >15% worse than
+        over the 200 before that. Needs a 400-step window, hence window_size=400."""
+        if len(self.loss_history) < 400:
             return False
         recent = list(self.loss_history)[-200:]
         older = list(self.loss_history)[-400:-200]
@@ -1076,19 +1076,19 @@ class TrainingDiagnostics:
 **Pitfall 1 - fp16 training without GradScaler causes NaN loss from gradient underflow:**
 ```python
 # BROKEN: bf16/fp16 without loss scaling; gradients for small learning signal underflow to 0
-with torch.cuda.amp.autocast(dtype=torch.float16):
+with torch.amp.autocast("cuda", dtype=torch.float16):
     loss = model(input_ids, labels).loss
 loss.backward()   # gradients for embeddings are O(1e-7), below fp16 min_normal 6e-5 -> zero
 optimizer.step()  # parameters don't update; model stagnates, then diverges at step 1800
 
 # FIX option A: use bfloat16 (same exponent range as fp32; no underflow at same magnitude)
-with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+with torch.amp.autocast("cuda", dtype=torch.bfloat16):
     loss = model(input_ids, labels).loss
 loss.backward()   # bf16 min_normal = 1.175e-38; gradients never underflow
 
 # FIX option B: if fp16 required (e.g., older hardware), use GradScaler
-scaler = torch.cuda.amp.GradScaler()
-with torch.cuda.amp.autocast(dtype=torch.float16):
+scaler = torch.amp.GradScaler("cuda")
+with torch.amp.autocast("cuda", dtype=torch.float16):
     loss = model(input_ids, labels).loss
 scaler.scale(loss).backward()
 scaler.unscale_(optimizer)
@@ -1099,11 +1099,12 @@ scaler.update()
 
 **Pitfall 2 - Gradient checkpointing with use_reentrant=True causes silent autograd graph corruption in FSDP:**
 ```python
-# BROKEN: use_reentrant=True (PyTorch default before 2.0) is incompatible with
-# FSDP and custom autograd functions; causes hooks to fire twice, doubling gradients
-output = checkpoint(layer, x, use_reentrant=True)   # default
+# BROKEN: use_reentrant=True is incompatible with FSDP and custom autograd
+# functions; it causes hooks to fire twice, doubling gradients. PyTorch now
+# requires the flag to be passed explicitly and recommends False.
+output = checkpoint(layer, x, use_reentrant=True)
 # In FSDP with gradient hooks, some gradients are applied twice -> 2x learning rate effectively
-# Gradients for Q/K/V projections in attention diverge at step ~3000
+# Gradients for Q/K/V projections in attention diverge at step ~2000
 
 # FIX: use_reentrant=False (required with FSDP, torch.compile, and custom autograd)
 output = checkpoint(layer, x, use_reentrant=False)   # explicit, FSDP-safe
@@ -1117,7 +1118,7 @@ output = checkpoint(layer, x, use_reentrant=False)   # explicit, FSDP-safe
 for module in model.modules():
     if hasattr(module, "weight"):
         nn.init.zeros_(module.weight)   # catastrophic: all attention heads identical
-# Loss stagnates at log(vocab_size)=10.8 nats for 500 steps, then fails to improve
+# Loss stagnates at ln(vocab_size) nats — the uniform-prediction floor — and never improves
 
 # FIX: use model-appropriate initialisation (Kaiming for ReLU, Xavier for sigmoid/tanh)
 for name, module in model.named_modules():
@@ -1135,26 +1136,28 @@ for name, module in model.named_modules():
 
 | Metric | fp32 Adam | fp16 + Adam (failed) | bf16 + AdamW + checkpointing |
 |---|---|---|---|
-| Training time (40B tokens) | 9 days | Failed at step 1800 | 44 hr |
-| Compute cost (8xA100 @ $4/hr) | $28,800 | $1,440 (wasted) | $7,040 |
+| Training time (3B tokens) | 9 days (216 hr) | Failed at step 1800 (21.8 hr in) | 44 hr |
+| Compute cost (8xA100 @ $4/GPU-hr = $32/hr) | $6,900 | $700 (wasted) | $1,400 |
 | Peak GPU memory per device | 78 GB | 41 GB | 34 GB |
 | Validation perplexity | 2.91 | N/A (NaN) | 2.88 |
 | Gradient norm (stable range) | 0.6-1.0 | Exploded 142 | 0.7-0.95 |
 | NaN loss incidents | 0 | 1 (fatal) | 0 |
-| Tokens/second throughput | 180K | 310K | 820K |
+| Tokens/second throughput | 3.9K | 24K (no checkpointing) | 19K |
 | FSDP communication overhead | N/A | N/A | 12% |
 | Checkpoint size | 56 GB | N/A | 14 GB (bf16) |
+
+Cross-check the throughput row against the times: `3e9 / 19,000 tok/s = 157,900 s = 43.9 hr`, and `3e9 / 3,900 = 8.9 days`. At 19K tok/s the bf16 run sustains about 133 TFLOPS per A100 with activation recompute (8 FLOPs per parameter per token), roughly 43% MFU — the top of the realistic band for a 7B model on this hardware. Any case-study number claiming multiples of that is arithmetically impossible, not merely optimistic.
 
 **Interview discussion points:**
 
 **Why is bfloat16 preferred over float16 for LLM training despite having lower precision?** Float16 has 5 exponent bits (range 6e-5 to 65,504) and 10 mantissa bits (relative precision ~0.1%). Bfloat16 has 8 exponent bits (range 1.2e-38 to 3.4e38, same as fp32) and 7 mantissa bits (~0.8% precision). The critical failure mode for LLM training is gradient underflow: embedding gradients can be O(1e-6) to O(1e-8), which rounds to zero in fp16 (minimum normal = 6e-5) but is representable in bf16 (minimum normal = 1.2e-38). The lower mantissa precision of bf16 versus fp16 has negligible impact because SGD-based training is robust to gradient noise at this level.
 
-**What is gradient checkpointing and what is its exact memory-time tradeoff?** Gradient checkpointing (activation checkpointing) discards intermediate activations during the forward pass and recomputes them during the backward pass by running the forward pass again for each checkpointed segment. For a transformer with L layers, standard training stores O(L * seq_len * hidden_dim) activations; gradient checkpointing stores O(sqrt(L) * seq_len * hidden_dim) by checkpointing at every sqrt(L) layers. This reduces activation memory from 21 GB to 2.1 GB for 7B LLaMA-3 at seq_len=4096, at the cost of ~33% more compute (one extra forward pass worth of computation per backward pass).
+**What is gradient checkpointing and what is its exact memory-time tradeoff?** Gradient checkpointing (activation checkpointing) discards intermediate activations during the forward pass and recomputes them during the backward pass by running the forward pass again for each checkpointed segment. For a transformer with L layers, standard training stores O(L * seq_len * hidden_dim) activations; gradient checkpointing stores O(sqrt(L) * seq_len * hidden_dim) by checkpointing at every sqrt(L) layers. This reduces activation memory from 21 GB to 2.1 GB for the 7B Llama-style model at seq_len=4096, at the cost of ~33% more compute (one extra forward pass worth of computation per backward pass).
 
-**How does FSDP ZeRO Stage 2 reduce memory and what is the communication cost?** ZeRO Stage 2 shards gradient tensors and optimizer states across all 8 GPUs, while keeping parameters replicated. For 7B parameters: fp32 optimizer state (Adam first and second moment) = 56 GB total, sharded to 7 GB per GPU. Gradient sharding reduces peak gradient memory from 14 GB to 1.75 GB per GPU. The communication cost is two all-reduce operations per step (one forward parameter broadcast, one backward gradient all-reduce), adding approximately 12% wall-clock overhead at 8xA100 interconnected via NVLink (600 GB/s). ZeRO Stage 3 also shards parameters, further reducing memory but doubling communication overhead to ~24%.
+**How does FSDP ZeRO Stage 2 reduce memory and what is the communication cost?** ZeRO Stage 2 shards gradient tensors and optimizer states across all 8 GPUs, while keeping parameters replicated. For 7B parameters: fp32 optimizer state (Adam first and second moment) = 56 GB total, sharded to 7 GB per GPU. Gradient sharding reduces peak gradient memory from 14 GB to 1.75 GB per GPU. The communication per step is a reduce-scatter of gradients during the backward pass plus an all-gather of the updated parameters after the optimizer step — the same total volume as the single all-reduce plain data parallelism performs, which is why the ZeRO paper reports Stage 1 and Stage 2 as having "same communication volume as DP". At 8xA100 on NVLink (600 GB/s) that costs roughly 12% wall-clock overhead here. ZeRO Stage 3 also shards parameters, further reducing memory at a 1.5x communication volume (the paper's "modest 50% increase"), so the overhead here would rise to roughly 18%.
 
 **What is the residual stream initialisation scaling (1/sqrt(2L)) and why is it necessary for deep transformers?** In a transformer with L residual blocks, each block adds its output to the residual stream: x_{l+1} = x_l + f_l(x_l). If each f_l has weight variance sigma^2, the variance of the residual stream after L layers is approximately L * sigma^2 (assuming independence). For L=32 layers, variance explodes by 32x, causing the softmax attention and LayerNorm to receive inputs with variance far outside the trained range. Scaling each residual block's output projection by 1/sqrt(2L) ensures the residual stream variance stays O(1) at initialisation regardless of depth, stabilising training for the first 500 steps when gradients are largest.
 
-**How would you debug a training run that shows increasing loss after 15,000 steps?** Follow a systematic diagnosis: (1) check if the LR schedule is decaying correctly - a bug where cosine decay overshoots to negative LR would cause increasing loss; (2) plot gradient norm over time - if norm suddenly increases, the model has entered a loss landscape region with large gradients suggesting a data quality issue (corrupted batch); (3) examine validation loss separately from training loss - if training loss increases but validation is stable, a data pipeline issue is introducing bad training batches; (4) compare checkpoint at step 14,000 versus 16,000 parameter norms per layer - if specific layers' norms explode while others are stable, the issue is layer-specific (often the output projection or embedding layers); (5) rerun with loss logging per sample to identify specific training examples causing loss spikes.
+**How would you debug a training run that shows increasing loss after 1,500 steps?** Follow a systematic diagnosis: (1) check if the LR schedule is decaying correctly - a bug where cosine decay overshoots to negative LR would cause increasing loss; (2) plot gradient norm over time - if norm suddenly increases, the model has entered a loss landscape region with large gradients suggesting a data quality issue (corrupted batch); (3) examine validation loss separately from training loss - if training loss increases but validation is stable, a data pipeline issue is introducing bad training batches; (4) compare checkpoint at step 1,400 versus 1,600 parameter norms per layer - if specific layers' norms explode while others are stable, the issue is layer-specific (often the output projection or embedding layers); (5) rerun with loss logging per sample to identify specific training examples causing loss spikes.
 
 **What is the correct way to save and resume FSDP training without state dict inconsistencies?** FSDP's default local_state_dict stores each GPU's shard separately, requiring the same number of GPUs to resume. The correct approach is to use FSDP's full_state_dict context manager to consolidate all shards to rank-0 before saving: with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT). This saves a single checkpoint loadable on any number of GPUs. For 7B bf16 parameters, the consolidated checkpoint is 14 GB. When resuming, load the full state dict to rank-0 and use FSDP's scatter mechanism to distribute shards. Always save optimizer state alongside model state - resuming without optimizer state (Adam moments) extends warmup by ~500 steps as moments rebuild from scratch.

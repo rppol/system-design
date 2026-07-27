@@ -40,15 +40,17 @@ Key insight: gating is the critical innovation. By multiplying information by va
 
 ## 4. Types / Architectures / Strategies
 
-| Architecture | Gates | Params (hidden=256) | Long-range | Streaming | Use Case |
+| Architecture | Gates | Params (input=256, hidden=256) | Long-range | Streaming | Use Case |
 |-------------|-------|---------------------|-----------|-----------|---------|
-| Vanilla RNN | 0 | ~65K | Poor | Yes | Toy tasks only |
-| LSTM | 4 | ~263K | Good | Yes | NLP, time series |
-| GRU | 2 | ~198K | Good | Yes | Faster LSTM alternative |
-| Bidirectional LSTM | 4x2 | ~526K | Excellent | No | Encoding (BERT-like) |
-| Stacked LSTM | 4 per layer | ~1M (3-layer) | Best | Yes | Deep sequence models |
+| Vanilla RNN | 0 | ~131K | Poor | Yes | Toy tasks only |
+| LSTM | 4 | ~525K | Good | Yes | NLP, time series |
+| GRU | 2 | ~394K | Good | Yes | Faster LSTM alternative |
+| Bidirectional LSTM | 4x2 | ~1.05M | Excellent | No | Encoding (BERT-like) |
+| Stacked LSTM | 4 per layer | ~1.58M (3-layer) | Best | Yes | Deep sequence models |
 
-**GRU vs LSTM tradeoff**: GRU has 2/3 the parameters of LSTM (fewer gate computations) and often matches LSTM performance on tasks with sequences < 200 steps. LSTM consistently outperforms GRU on very long sequences (>500 steps) where the separate cell state matters. In practice, GRU is preferred when training speed matters; LSTM when maximum sequence modeling quality is needed.
+Each row is `G * (input + hidden + 1) * hidden` with G gate matrices — G=1 for the vanilla RNN, G=3 for GRU, G=4 for LSTM — so the counts are exactly in the ratio 1 : 3 : 4.
+
+**GRU vs LSTM tradeoff**: GRU has 3/4 the parameters of LSTM (3 gate matrices instead of 4) and often matches LSTM performance on tasks with sequences < 200 steps. Head-to-head studies (Chung et al. 2014; Greff et al. 2017) find no consistent winner — the gap is task-dependent, with LSTM more often ahead on very long sequences where the separate cell state matters. In practice, GRU is preferred when training speed matters; LSTM when maximum sequence modeling quality is needed. Benchmark both.
 
 **Seq2seq architecture**: encoder RNN processes the input sequence into a context vector (final hidden state); decoder RNN generates the output sequence conditioned on that context. Without attention, long input sequences compress into a fixed-size context vector, losing information. Adding cross-attention (Bahdanau/Luong) allows the decoder to dynamically attend to different encoder steps.
 
@@ -202,8 +204,8 @@ flowchart LR
 ```
 
 GRU merges forget and input into a single update gate z and drops the separate cell
-state; h_t simply interpolates the old state and the new candidate, giving roughly
-2/3 the parameters of an LSTM.
+state; h_t simply interpolates the old state and the new candidate, giving
+3/4 the parameters of an LSTM (3 gate matrices instead of 4).
 
 Written out, the three lines in that diagram are:
 
@@ -416,8 +418,9 @@ class LSTMCellManual(nn.Module):
         # Orthogonal init for recurrent weights (preserves gradient norms better than random)
         nn.init.orthogonal_(self.W.weight)
         nn.init.zeros_(self.W.bias)
-        # Initialize forget gate bias to 1 (common trick: helps remember by default)
-        self.W.bias.data[self.hidden_size:2 * self.hidden_size].fill_(1.0)
+        # Initialize forget gate bias to 1 (common trick: helps remember by default).
+        # The forget gate is chunk 0 below, so its bias occupies rows [0:hidden_size).
+        self.W.bias.data[:self.hidden_size].fill_(1.0)
 
     def forward(
         self,
@@ -608,13 +611,13 @@ def decode_with_teacher_forcing(
 
 ## 7. Real-World Examples
 
-**Machine translation (Google Translate, 2016)**: the first production neural MT system used a 8-layer stacked LSTM with attention. Before attention, LSTM was limited to ~30-word sentences. Attention enabled accurate translation of 100+ word sentences by letting the decoder look at any encoder position.
+**Machine translation (Google Translate, GNMT 2016)**: Google's production NMT system used an 8-layer LSTM encoder (1 bidirectional + 7 unidirectional) and an 8-layer LSTM decoder with attention. Before attention, encoder-decoder quality degraded sharply beyond ~30-word sentences. Attention enabled accurate translation of much longer sentences by letting the decoder look at any encoder position.
 
-**Speech recognition (DeepSpeech)**: Baidu's DeepSpeech used a 5-layer bidirectional LSTM with CTC loss to directly transcribe audio to text without phoneme alignment. Training used gradient clipping with max_norm=400 (speech has much longer sequences than text — up to 2000 frames).
+**Speech recognition (Baidu Deep Speech)**: Deep Speech used 5 hidden layers — three feed-forward clipped-ReLU layers, one bidirectional *recurrent* layer, and one more feed-forward layer — trained with CTC loss to transcribe audio directly without phoneme alignment. The paper deliberately avoided LSTM cells in favour of plain rectified-linear recurrence for GPU efficiency. Its successor Deep Speech 2 rescaled the gradient to norm 400 whenever it exceeded that threshold (speech has much longer sequences than text — thousands of frames).
 
-**Time series forecasting (LSTM at Uber)**: Uber's demand forecasting pipeline used stacked LSTMs with external covariates (hour of day, weather, events). They found vanilla LSTM with hidden_size=128-256 outperformed GRU for 7-day forecasts but GRU trained 30% faster. For 1-day forecasts, GRU matched LSTM at lower compute.
+**Time series forecasting (LSTM demand models)**: ride-hailing and delivery demand-forecasting pipelines commonly stack LSTMs over external covariates (hour of day, weather, events). The usual reported pattern is that LSTM edges out GRU on longer multi-day horizons while GRU trains meaningfully faster and matches it on short horizons — treat the exact margins as workload-specific, not as published constants.
 
-**Streaming inference (on-device)**: RNNs/LSTMs are preferred over Transformers for streaming audio processing on embedded hardware because they process one time step at a time with constant O(hidden_size^2) memory per step. Transformers need to cache all previous keys/values, which is infeasible for long streams on low-memory devices.
+**Streaming inference (on-device)**: RNNs/LSTMs are preferred over Transformers for streaming audio processing on embedded hardware because they process one time step at a time with O(hidden_size) state memory and O(hidden_size^2) compute per step, independent of how long the stream is. Transformers need to cache all previous keys/values, which is infeasible for long streams on low-memory devices.
 
 ---
 
@@ -664,7 +667,7 @@ def decode_with_teacher_forcing(
 ## 10. Common Pitfalls
 
 **War story 1 — Exploding gradients causing NaN loss:**
-A team trained a 3-layer stacked LSTM on financial time series (sequence length 500). Training loss was NaN by step 50. Root cause: no gradient clipping. With 3 LSTM layers and 500 time steps, gradients could amplify 1500-fold through recurrent connections. Fix: add `clip_grad_norm_(params, max_norm=1.0)` after `loss.backward()`. Gradient norms stabilized at 0.5-2.0, loss converged normally.
+A team trained a 3-layer stacked LSTM on financial time series (sequence length 500). Training loss was NaN by step 50. Root cause: no gradient clipping. With 3 LSTM layers and 500 time steps, the per-step amplification compounds over the whole backprop chain, so logged gradient norms spiked three orders of magnitude above the healthy band. Fix: add `clip_grad_norm_(params, max_norm=1.0)` after `loss.backward()`. Gradient norms stabilized at 0.5-2.0, loss converged normally.
 
 ```python
 # BROKEN: no gradient clipping for RNNs
@@ -730,13 +733,13 @@ In vanilla RNNs, gradients flow backward through T time steps by repeated multip
 Forget gate (f_t = sigmoid(W_f * [h_{t-1}, x_t])): controls how much of the previous cell state to retain. Value near 0 erases, near 1 preserves. Input gate (i_t = sigmoid(...)): controls how much new information to write to the cell state. Candidate gate (g_t = tanh(...)): the actual candidate values to potentially write. Output gate (o_t = sigmoid(...)): controls what portion of the cell state to expose as the hidden state h_t. The cell update is: c_t = f_t * c_{t-1} + i_t * g_t. A common initialization trick is setting the forget gate bias to 1.0 so the LSTM starts by remembering everything, giving it a chance to learn what to forget.
 
 **Q: How does GRU differ from LSTM and when would you prefer each?**
-GRU has 2 gates (reset and update) versus LSTM's 4, and no separate cell state. The update gate z_t simultaneously controls how much old hidden state to keep and how much new candidate to adopt: h_t = (1-z_t)*h_{t-1} + z_t*n_t. The reset gate r_t controls how much of h_{t-1} to use when computing the candidate. GRU has roughly 2/3 the parameters of LSTM and trains ~25% faster. Prefer GRU for sequences < 200 steps, speed-constrained training, or when GRU reaches the same validation metric with fewer resources. Prefer LSTM for very long sequences (>500 steps) or when accuracy on benchmarks is the primary concern.
+GRU has 2 gates (reset and update) versus LSTM's 4, and no separate cell state. The update gate z_t simultaneously controls how much old hidden state to keep and how much new candidate to adopt: h_t = (1-z_t)*h_{t-1} + z_t*n_t. The reset gate r_t controls how much of h_{t-1} to use when computing the candidate. GRU has 3/4 the parameters of LSTM (three gate matrices instead of four) and trains correspondingly faster per step. Prefer GRU for sequences < 200 steps, speed-constrained training, or when GRU reaches the same validation metric with fewer resources. Prefer LSTM for very long sequences (>500 steps) or when accuracy on benchmarks is the primary concern.
 
 **Q: What is teacher forcing and what is exposure bias?**
 Teacher forcing is a training technique for autoregressive decoders where the ground truth token is fed as the next-step input rather than the model's previous prediction. This makes training stable and fast because errors do not accumulate. Exposure bias is the mismatch: at inference, the model receives its own (possibly incorrect) previous prediction, not the ground truth. A small early error can cascade — the model has never been trained to handle its own mistakes. Fix: scheduled sampling (gradually decay teacher forcing ratio during training from 100% to 50%), or beam search (explore multiple hypothesis sequences at inference).
 
 **Q: What is gradient clipping and what value should you use?**
-Gradient clipping limits the global L2 norm of all parameter gradients to a maximum value. If the norm exceeds max_norm, all gradients are scaled down proportionally (direction preserved). This prevents the optimizer step from moving parameters catastrophically far when gradients explode. Typical max_norm=1.0 for LSTM on NLP tasks; 0.5 for very deep stacked RNNs; 400 was used by DeepSpeech for speech (longer sequences, larger natural gradient norms). You should monitor the pre-clipping gradient norm — if it consistently exceeds max_norm by large factors, investigate the learning rate or architecture, not just clip harder.
+Gradient clipping limits the global L2 norm of all parameter gradients to a maximum value. If the norm exceeds max_norm, all gradients are scaled down proportionally (direction preserved). This prevents the optimizer step from moving parameters catastrophically far when gradients explode. Typical max_norm=1.0 for LSTM on NLP tasks; 0.5 for very deep stacked RNNs; Deep Speech 2 rescaled to norm 400 for speech (longer sequences, larger natural gradient norms). You should monitor the pre-clipping gradient norm — if it consistently exceeds max_norm by large factors, investigate the learning rate or architecture, not just clip harder.
 
 **Q: Why can't bidirectional RNNs be used for streaming inference?**
 Bidirectional RNNs run a forward LSTM (left to right) and a backward LSTM (right to left). The backward LSTM requires knowing the entire input sequence to begin processing (it starts at the last token). This means for a 10-second audio clip, you must wait for all 10 seconds before generating any output — incompatible with real-time streaming requirements. Bidirectional models are excellent for encoding tasks (classification, named entity recognition, embeddings) where the full input is available. For streaming generation, use unidirectional models or causal Transformers.
@@ -745,13 +748,13 @@ Bidirectional RNNs run a forward LSTM (left to right) and a backward LSTM (right
 CTC (Connectionist Temporal Classification) is a loss function for sequence-to-sequence tasks where the alignment between input and output is unknown. In speech recognition, a 1-second audio clip at 100 frames/second produces 100 output frames, but the transcript may have only 20 characters. CTC introduces a blank token and marginalizes over all valid alignments (using dynamic programming) that map the output sequence to the target label sequence by collapsing repeated non-blank characters. It enables end-to-end training without explicit frame-level alignment labels. Used in DeepSpeech, wav2vec, and OCR systems.
 
 **Q: How do you handle variable-length sequences in LSTM efficiently?**
-Use `torch.nn.utils.rnn.pack_padded_sequence` before the LSTM and `pad_packed_sequence` after. Packing removes padding tokens from computation — the LSTM only processes real tokens at each step, skipping padding. This is faster than processing padded sequences (especially when length variance is high) and ensures BatchNorm/statistics are not contaminated by padding. Input lengths must be sorted descending (enforce_sorted=True, the default, or set enforce_sorted=False in newer PyTorch).
+Use `torch.nn.utils.rnn.pack_padded_sequence` before the LSTM and `pad_packed_sequence` after. Packing removes padding tokens from computation — the LSTM only processes real tokens at each step, skipping padding. This is faster than processing padded sequences (especially when length variance is high) and ensures BatchNorm/statistics are not contaminated by padding. Input lengths must be sorted descending unless you pass `enforce_sorted=False`, which lets PyTorch sort and restore the order for you (`enforce_sorted=True` is the default and is only needed for ONNX export).
 
 **Q: Why did Transformers replace RNNs for NLP tasks?**
-Three core reasons: (1) Parallelization — RNNs are inherently sequential (step t depends on step t-1), so training a sequence of length T on a GPU takes T sequential matrix multiplications. Transformers apply attention over all pairs simultaneously, utilizing GPU parallelism fully. Training is 10-100x faster in practice. (2) Long-range dependencies — attention connects any two tokens in O(1) operations regardless of distance. RNNs must carry information through all intermediate hidden states. (3) Scalability — Transformers scale more favorably with data and compute (GPT, BERT, T5 are all Transformer-based). RNNs struggle to train on datasets > 1 billion tokens.
+Three core reasons: (1) Parallelization — RNNs are inherently sequential (step t depends on step t-1), so training a sequence of length T on a GPU takes T sequential matrix multiplications. Transformers apply attention over all pairs simultaneously, utilizing GPU parallelism fully. Training is 10-100x faster in practice. (2) Long-range dependencies — attention connects any two tokens in O(1) operations regardless of distance. RNNs must carry information through all intermediate hidden states. (3) Scalability — Transformers scale more favorably with data and compute (GPT, BERT, T5 are all Transformer-based). Large LSTM language models were trained on billion-token corpora, but doing so cost weeks on large GPU fleets precisely because the recurrence serializes the sequence dimension.
 
 **Q: What is the forget gate bias initialization trick and why does it help?**
-Initializing the forget gate bias to 1.0 (instead of 0.0) makes the LSTM start training in a "remember by default" state: f_t ≈ sigmoid(1.0) ≈ 0.73. This means the cell state retains ~73% of its previous value by default at the start of training. Without this, f_t ≈ 0.5 and the LSTM aggressively forgets early in training before it has learned what to preserve. The biased initialization gives the LSTM a head start on modeling long-range dependencies, often leading to faster convergence and better performance on long sequences. Proposed by Jozefowicz et al. (2015) and Greff et al. (2017).
+Initializing the forget gate bias to 1.0 (instead of 0.0) makes the LSTM start training in a "remember by default" state: f_t ≈ sigmoid(1.0) ≈ 0.73. This means the cell state retains ~73% of its previous value by default at the start of training. Without this, f_t ≈ 0.5 and the LSTM aggressively forgets early in training before it has learned what to preserve. The biased initialization gives the LSTM a head start on modeling long-range dependencies, often leading to faster convergence and better performance on long sequences. It was proposed by Gers, Schmidhuber and Cummins (2000) — the paper that introduced the forget gate — and re-popularized by Jozefowicz et al. (2015), who showed a forget-gate bias of 1 makes the LSTM competitive with the best architecture variants they searched; Greff et al. (2017) studied it again in their LSTM ablation.
 
 **Q: How do you prevent the hidden state from leaking between independent sequences in a batch?**
 Pass `None` as the initial hidden state (h_0, c_0) to `nn.LSTM` or explicitly create zero tensors. In PyTorch, passing None initializes to zeros automatically. For stateful streaming (one long continuous sequence), carry the hidden state across batches but call `.detach()` to prevent gradients from flowing into previous batches (avoids memory explosion): `h = h.detach()`. For independent sequences (document classification), always reset to None between sequences.
@@ -760,7 +763,7 @@ Pass `None` as the initial hidden state (h_0, c_0) to `nn.LSTM` or explicitly cr
 A stacked LSTM (multiple layers) learns hierarchical representations: lower layers capture local patterns, higher layers capture abstract semantics — analogous to deep CNNs. A single wide LSTM has all representational capacity at one level. Empirically, 2-4 LSTM layers outperform 1 very wide layer for complex tasks. Beyond 4 layers, training becomes unstable without careful initialization and learning rate tuning. Dropout between layers (not on the last layer) is essential for regularization in stacked LSTMs. Typical hidden_size=256-512 per layer; dropout_between_layers=0.2-0.5.
 
 **Q: Why do exploding gradients, not vanishing gradients, cause NaN loss in RNN training?**
-When the recurrent weight's spectral norm exceeds 1, gradients grow exponentially through timesteps and overflow to NaN, whereas vanishing gradients merely stall learning without crashing. A 3-layer LSTM over 500 steps can amplify gradients 1500-fold, so a single large update sends weights to inf and the next forward pass returns NaN. The fix is gradient clipping (`clip_grad_norm_`, max_norm=1.0), which caps the global gradient norm while preserving its direction; vanishing is instead addressed architecturally by gating.
+When the recurrent weight's spectral norm exceeds 1, gradients grow exponentially through timesteps and overflow to NaN, whereas vanishing gradients merely stall learning without crashing. Because the amplification is exponential in sequence length, a deep LSTM over hundreds of steps can produce a gradient norm orders of magnitude above the healthy band, so a single large update sends weights to inf and the next forward pass returns NaN. The fix is gradient clipping (`clip_grad_norm_`, max_norm=1.0), which caps the global gradient norm while preserving its direction; vanishing is instead addressed architecturally by gating.
 
 **Q: Why does BatchNorm not work well in RNNs, and what normalization is used instead?**
 BatchNorm computes statistics over the batch at each timestep, but sequence lengths vary and per-timestep batch statistics are noisy and undefined for late timesteps that few sequences reach. LayerNorm is used instead: it normalizes across the feature dimension within a single example, so it is independent of batch size and sequence position and behaves identically at train and inference. This is why LayerNorm became the default in recurrent and transformer sequence models.
@@ -785,7 +788,7 @@ A plain seq2seq compresses the entire input into one fixed-size context vector (
 - Detach hidden states between independent sequences (`.detach()` for stateful streaming) or reset to None for independent-sequence batches.
 - Monitor pre-clipping gradient norm every N steps — if it is consistently 100x above max_norm, investigate architecture or learning rate rather than just clipping harder.
 - Prefer bidirectional LSTM for classification and encoding tasks; prefer unidirectional for generation and streaming.
-- For seq2seq, implement scheduled sampling (decay teacher forcing ratio) rather than pure teacher forcing — this improves inference robustness by ~5-10% BLEU on machine translation.
+- For seq2seq, implement scheduled sampling (decay teacher forcing ratio) rather than pure teacher forcing — this improves inference robustness on long outputs by training the decoder to recover from its own errors. Measure the BLEU delta on your own data; the published gains vary widely by task and decay schedule.
 - Typical hyperparameters: hidden_size=256-512, num_layers=2-4, dropout_between_layers=0.3, lr=0.001 with Adam, gradient clipping max_norm=1.0.
 
 ---
@@ -912,7 +915,7 @@ normal_windows = [w for w in load_all_logs(...)
 # Label anomalies only during threshold calibration on a held-out validation set
 ```
 
-**Pitfall 2 — Vanishing gradients with long sequences and no gradient clipping.**
+**Pitfall 2 — Exploding gradients with long sequences and no gradient clipping.**
 
 ```python
 # BROKEN: no gradient clipping — LSTM over 200-step sequences diverges in 3 epochs
@@ -924,7 +927,8 @@ optimizer.step()   # gradients explode on long sequences → NaN weights
 loss.backward()
 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 optimizer.step()
-# Monitor: log grad_norm = sum(p.grad.norm() for p in model.parameters()) / n_params
+# Monitor: clip_grad_norm_ RETURNS the global L2 norm measured before clipping —
+# log that value; do not average per-parameter norms, which is a different quantity.
 ```
 
 **Pitfall 3 — Tokenizer mismatch between training and inference causes silent degradation.**
@@ -950,11 +954,11 @@ def save_checkpoint(model, tokenizer, path: str) -> None:
 |---|---|
 | Training data | 90 days, 78B log tokens |
 | Vocab size | 12,847 unique tokens |
-| Model parameters | 4.2M |
-| Training time | 6h on 1×A100 |
+| Model parameters | 5.0M (0.82M embedding + 0.86M LSTM + 3.30M output head) |
+| Training time | 18h on 1×A100 |
 | Inference latency p99 | 4ms per 50-event window |
 | False positive rate | 0.7% (threshold at 99th percentile) |
-| Recall on known incidents | 91% (14/15 incidents caught within 30s) |
+| Recall on known incidents | 93% (14/15 incidents caught within 30s) |
 | Throughput | 2,500 windows/sec per GPU replica |
 
 **Interview discussion points:**
@@ -965,8 +969,8 @@ def save_checkpoint(model, tokenizer, path: str) -> None:
 
 **What is the risk of using a fixed sliding window size?** A window of 50 events may capture a complete burst (e.g., a restart sequence) or split it across two windows. A split anomaly may score below threshold in both halves. Mitigate by using overlapping windows (stride = 25 instead of 50) so an anomalous burst is fully contained in at least one window. The cost is 2× inference volume, worth it for detection recall.
 
-**How do you handle log schema changes when a new microservice is deployed?** With a frozen vocab, new service names become `<unk>` tokens, and the model cannot distinguish between different new services. Two mitigations: (1) use subword tokenization (BPE) so "payment-service-v2" shares tokens with "payment-service"; (2) periodically fine-tune the model on recent normal data with the new vocab (warm-start from existing checkpoint — fast, 1-2h vs 6h from scratch).
+**How do you handle log schema changes when a new microservice is deployed?** With a frozen vocab, new service names become `<unk>` tokens, and the model cannot distinguish between different new services. Two mitigations: (1) use subword tokenization (BPE) so "payment-service-v2" shares tokens with "payment-service"; (2) periodically fine-tune the model on recent normal data with the new vocab (warm-start from existing checkpoint — fast, 1-2h vs 18h from scratch).
 
-**What are the latency trade-offs between CPU and GPU inference for this use case?** At 10k events/sec with 50-event windows → 200 window evaluations/sec per service replica. A single LSTM forward pass on CPU takes ~15ms for a 4M-param model (batch size 1), GPU ~4ms. CPU is viable for < 70 windows/sec (suitable for smaller clusters); GPU is required for 200+. Use ONNX export + ONNX Runtime for CPU serving — typically 3-5× faster than plain PyTorch CPU inference.
+**What are the latency trade-offs between CPU and GPU inference for this use case?** At 10k events/sec with 50-event windows → 200 window evaluations/sec per service replica. A single LSTM forward pass on CPU takes ~15ms for a 5M-param model (batch size 1), GPU ~4ms. CPU is viable for < 70 windows/sec (suitable for smaller clusters); GPU is required for 200+. Use ONNX export + ONNX Runtime for CPU serving — typically 3-5× faster than plain PyTorch CPU inference.
 
-**Why is pack_padded_sequence important for production training?** Log sequences have variable lengths. Without packing, padding tokens consume GPU compute and LSTM states are updated on padding — introducing spurious gradient signal. `pack_padded_sequence` tells LSTM to skip padding, reducing compute by up to 40% on highly variable-length datasets. At 78B training tokens, this 40% reduction saves ~2.4h of A100 time per training run.
+**Why is pack_padded_sequence important for production training?** Log sequences have variable lengths. Without packing, padding tokens consume GPU compute and LSTM states are updated on padding — introducing spurious gradient signal. `pack_padded_sequence` tells LSTM to skip padding, reducing compute by up to 40% on highly variable-length datasets. At 78B training tokens and an 18h baseline, this 40% reduction saves ~7h of A100 time per training run.

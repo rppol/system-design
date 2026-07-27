@@ -251,11 +251,11 @@ The single biggest modeling knob in a GMM is the covariance structure. More flex
 | Type | `Sigma_k` structure | Cov params (K comps, D dims) | Shapes it fits | Risk |
 |------|---------------------|------------------------------|----------------|------|
 | `spherical` | `sigma_k^2 * I` | `K` | Round balls, per-component radius | Underfits elongated clusters |
-| `diagonal` | `diag(sigma_k1^2, ..., sigma_kD^2)` | `K*D` | Axis-aligned ellipses | Cannot model correlated features |
+| `diag` | `diag(sigma_k1^2, ..., sigma_kD^2)` | `K*D` | Axis-aligned ellipses | Cannot model correlated features |
 | `tied` | one shared full `Sigma` | `D(D+1)/2` | Same-shaped rotated ellipses | All clusters forced identical shape |
 | `full` | per-component full `Sigma_k` | `K * D(D+1)/2` | Arbitrary rotated ellipses | Most singular-collapse prone; needs most data |
 
-Rule of thumb: start with `full` for low dimensions (D < 10) and abundant data; drop to `diagonal` or `tied` when D is large or data is scarce — a `full` covariance in D=50 needs `50*51/2 = 1275` parameters *per component*.
+Rule of thumb: start with `full` for low dimensions (D < 10) and abundant data; drop to `diag` or `tied` when D is large or data is scarce — a `full` covariance in D=50 needs `50*51/2 = 1275` parameters *per component*.
 
 ### 4.2 Soft vs hard assignment
 
@@ -303,7 +303,7 @@ The framing matters because likelihood alone cannot choose K: adding a component
 | Lower is better | Both are bills to minimize, not scores to maximize |
 | Which to use | BIC when you believe a true finite K exists; AIC when you only want predictive accuracy |
 
-**Walk one example.** The BIC curve in §5.3 with `N = 1500`, `D = 2`, full covariance. Parameter count per component is `(K-1) + 2K + 3K = 6K - 1`, since a full `2x2` covariance has `D(D+1)/2 = 3` free entries:
+**Walk one example.** The BIC curve in §5.3 with `N = 1500`, `D = 2`, full covariance. Total free-parameter count is `(K-1) + 2K + 3K = 6K - 1`, since a full `2x2` covariance has `D(D+1)/2 = 3` free entries:
 
 ```
   ln N = ln 1500 = 7.3132
@@ -322,7 +322,7 @@ The framing matters because likelihood alone cannot choose K: adding a component
     AIC charges     :  6 extra params * 2       =  12.0   ->  12.0 >  3.9, REJECT
 
   both pick K=4, but look at the margins
-    BIC:  8340.0 - 8300.0 = 40.1 worse   -> rejects K=5 emphatically
+    BIC:  8340.0 - 8300.0 = 40.0 worse   -> rejects K=5 emphatically
     AIC:  8185.9 - 8177.8 =  8.1 worse   -> rejects K=5 barely
 
   price per parameter:  BIC 7.3132  vs  AIC 2.0000   ->  BIC is 3.66x stricter here
@@ -617,7 +617,7 @@ Splitting it that way is the useful mental model: one factor decides *shape* (ho
                  N = 0.039789 * exp(-0.5) = 0.039789 * 0.606531 = 0.024133
 ```
 
-**Why the log form is not just tidiness.** At `D = 50` a typical density is around `1e-40`; multiply a few of those inside the E-step's ratio and float64 flushes to exactly `0.0`, turning every responsibility into `0/0 = NaN`. Working in logs and normalizing with `logsumexp` (as §6.2 does) keeps every intermediate in a representable range — this is the same trick as a numerically stable softmax, and it is why the code never calls `np.exp` until *after* subtracting `log_norm`.
+**Why the log form is not just tidiness.** The normalizing constant alone is `(2*pi)^(-D/2)`, so it shrinks exponentially in `D`: about `1e-20` at `D = 50` and `1e-200` at `D = 500`. Add the `exp(-0.5 * maha)` factor — `maha` is roughly `D` for a typical point — and a single component density at `D = 50` is already around `1e-31`. Past a few hundred dimensions it underflows float64 to exactly `0.0` for *every* component, and the E-step's ratio becomes `0/0 = NaN`. Working in logs and normalizing with `logsumexp` (as §6.2 does) keeps every intermediate in a representable range — this is the same trick as a numerically stable softmax, and it is why the code never calls `np.exp` until *after* subtracting `log_norm`.
 
 ### 6.3 Broken -> fix: singular covariance collapse
 
@@ -642,7 +642,7 @@ Sigma[k] = (gamma[:, k, None] * diff).T @ diff / Nk[k]
 Sigma[k] += reg_covar * np.eye(D)                              # floor eigenvalues >= reg_covar
 ```
 
-sklearn exposes this as the `reg_covar` constructor argument (default `1e-6`). If you still see collapse, the additional fixes are: use `init_params="k-means"` (better starts avoid empty/degenerate components), reduce K, switch to `covariance_type="diagonal"` or `"tied"` (fewer parameters to collapse), and increase `n_init` so a bad run is discarded.
+sklearn exposes this as the `reg_covar` constructor argument (default `1e-6`). If you still see collapse, the additional fixes are: use `init_params="k-means"` (better starts avoid empty/degenerate components), reduce K, switch to `covariance_type="diag"` or `"tied"` (fewer parameters to collapse), and increase `n_init` so a bad run is discarded.
 
 ### 6.4 sklearn GaussianMixture — covariance types, BIC selection, anomaly scoring
 
@@ -682,7 +682,7 @@ def select_k_by_bic(
 
 def compare_covariance_types(X: NDArray[np.float64], k: int = 4) -> None:
     """Show the params/flexibility tradeoff across covariance structures."""
-    for cov in ("spherical", "diagonal", "tied", "full"):
+    for cov in ("spherical", "diag", "tied", "full"):
         gmm = GaussianMixture(n_components=k, covariance_type=cov,
                               n_init=5, random_state=0).fit(X)
         print(f"{cov:10s}  BIC={gmm.bic(X):9.1f}  free_params={gmm._n_parameters():4d}")
@@ -761,7 +761,7 @@ def kmeans_is_hard_em(X: NDArray[np.float64], k: int = 3) -> None:
 | Handles overlap | Yes (splits responsibility) | Poorly | Merges dense regions |
 | Outlier handling | Low-density scoring | None (all points assigned) | Explicit `-1` noise |
 | Cost / iteration | `O(N K D^2)` full cov | `O(N K D)` | `O(N log N)` with index |
-| Failure mode | Singular covariance collapse | Bad init -> poor local opt[imum] | eps sensitivity |
+| Failure mode | Singular covariance collapse | Bad init -> poor local optimum | eps sensitivity |
 
 ### 8.2 GMM vs single Gaussian vs KDE for density estimation
 
@@ -778,7 +778,7 @@ GMM is the parametric middle ground: far more expressive than one Gaussian, far 
 | Type | Underfit risk | Overfit / singular risk | Data efficiency |
 |------|---------------|-------------------------|-----------------|
 | spherical | High | Lowest | Best (fewest params) |
-| diagonal | Medium | Low | Good |
+| diag | Medium | Low | Good |
 | tied | Medium | Low-medium | Good |
 | full | Lowest | Highest | Worst (needs most data) |
 
@@ -800,7 +800,7 @@ GMM is the parametric middle ground: far more expressive than one Gaussian, far 
 
 **Do NOT use a GMM when:**
 - Clusters are strongly non-convex (rings, spirals, crescents) — the Gaussian assumption breaks; use DBSCAN/HDBSCAN or spectral clustering.
-- D is very high relative to N (full covariance needs `~D^2/2` params per component; you will hit singular collapse) — reduce with PCA first, or use `diagonal`/`tied`.
+- D is very high relative to N (full covariance needs `~D^2/2` params per component; you will hit singular collapse) — reduce with PCA first, or use `diag`/`tied`.
 - Components are not remotely Gaussian and cannot be transformed to be so.
 - You need robustness to heavy outliers — a few extreme points distort covariances; consider a Student-t mixture or robust covariance.
 
@@ -816,7 +816,7 @@ GMM is the parametric middle ground: far more expressive than one Gaussian, far 
 
 **Pitfall 4 — Choosing K by likelihood alone.** The training log-likelihood always increases with more components (K=N gives a spike on every point), so "pick K that maximizes likelihood" over-splits catastrophically. Fix: use BIC (or AIC), which penalize parameter count, and look for the elbow/minimum — not the raw likelihood.
 
-**Pitfall 5 — Full covariance in high dimensions.** A `full` covariance needs `D(D+1)/2` parameters per component — 1275 at D=50. With limited data this is unidentifiable and collapses. Fix: PCA down to ~10-20 dims first, or use `covariance_type="diagonal"`/`"tied"`.
+**Pitfall 5 — Full covariance in high dimensions.** A `full` covariance needs `D(D+1)/2` parameters per component — 1275 at D=50. With limited data this is unidentifiable and collapses. Fix: PCA down to ~10-20 dims first, or use `covariance_type="diag"`/`"tied"`.
 
 **Pitfall 6 — Label switching between runs.** Component indices are arbitrary: "component 2" in one fit is not "component 2" in the next (EM has no canonical ordering). Teams that store the raw component id as a downstream feature see it silently change across retrains. Fix: match components across runs by mean/weight (Hungarian assignment), or reuse a single persisted fitted model rather than refitting.
 
@@ -865,7 +865,7 @@ It happens when a component collapses onto a single point: its covariance shrink
 Fit GMMs across a range of K and pick the K minimizing BIC (or AIC): `BIC = -2 ln L + p ln N`, where p is the free-parameter count. BIC's `ln N` penalty grows with data and produces a clear elbow/minimum, favoring parsimony; AIC (`2p` penalty) is lighter and tends to select larger K. Never pick K by training likelihood alone, because it always increases with more components.
 
 **Q: What are the covariance types and their tradeoff?**
-Spherical (`sigma^2 I`, 1 param per comp), diagonal (`D` params, axis-aligned ellipses), tied (one shared full covariance), and full (`D(D+1)/2` params per comp, arbitrary rotated ellipses). More flexible types fit richer shapes but need more data and are more prone to singular collapse — a full covariance at D=50 is 1275 parameters per component. Start full for low-D with ample data; drop to diagonal or tied when D is large or data is scarce.
+The four sklearn values are `spherical` (`sigma^2 I`, 1 param per comp), `diag` (`D` params, axis-aligned ellipses), `tied` (one shared full covariance), and `full` (`D(D+1)/2` params per comp, arbitrary rotated ellipses). More flexible types fit richer shapes but need more data and are more prone to singular collapse — a full covariance at D=50 is 1275 parameters per component. Start with `full` for low-D with ample data; drop to `diag` or `tied` when D is large or data is scarce.
 
 **Q: What is the ELBO and how does EM relate to it?**
 The ELBO (evidence lower bound) is `L(q, theta) = E_q[ln p(x,z|theta)] - E_q[ln q(z)]`, a lower bound on `ln p(x|theta)` whose gap is exactly `KL(q || p(z|x,theta))`. EM is coordinate ascent on this bound: the E-step maximizes it over `q` (setting `q` to the posterior, closing the KL gap), and the M-step maximizes it over `theta`. This is the same ELBO that variational inference and VAEs optimize — EM is the special case where the E-step posterior is available in closed form.
@@ -880,7 +880,7 @@ Because multiplying many small Gaussian densities underflows to zero in floating
 Both optimize the same ELBO, but a GMM's E-step posterior is a closed-form categorical over K components while a VAE's latent posterior is intractable. Because the VAE posterior cannot be computed exactly, it is approximated by an encoder network `q_phi(z|x)`, and the "E-step" becomes a gradient update on `phi`. A GMM is exact EM; a VAE is amortized variational EM with continuous latents and a neural decoder in place of the Gaussian components. Understanding GMM/EM is the standard on-ramp to VAEs.
 
 **Q: Can a GMM overfit, and how do you control it?**
-Yes — adding components always raises training likelihood, so an unconstrained GMM can place a near-degenerate component on nearly every point. Control it with BIC/AIC for K selection, `reg_covar` to bound covariances, lower-parameter covariance types (diagonal/tied), and a held-out log-likelihood check. A Bayesian (Dirichlet-process) GMM can also prune unused components automatically.
+Yes — adding components always raises training likelihood, so an unconstrained GMM can place a near-degenerate component on nearly every point. Control it with BIC/AIC for K selection, `reg_covar` to bound covariances, lower-parameter covariance types (`diag`/`tied`), and a held-out log-likelihood check. A Bayesian (Dirichlet-process) GMM can also prune unused components automatically.
 
 **Q: What is the computational complexity of EM per iteration?**
 It is `O(N K D^2)` for full covariance (the `D^2` comes from evaluating and inverting each `D x D` covariance and the Mahalanobis distances), versus `O(N K D)` for k-means. Diagonal or spherical covariances drop the per-component cost toward `O(N K D)`. Memory is `O(N K)` for the responsibility matrix plus `O(K D^2)` for the covariances.
@@ -899,7 +899,7 @@ k-means minimizes squared distance with an implicit assumption of equal-radius s
 2. **Always keep `reg_covar > 0`.** Default `1e-6` prevents singular collapse; raise to `1e-4`/`1e-3` in high dimensions. Assert the log-likelihood is finite and monotone non-decreasing during development.
 3. **Use `n_init >= 10` with `init_params="k-means++"`.** EM is init-sensitive and only finds local optima; multiple restarts keep the best run.
 4. **Choose K with BIC/AIC, not training likelihood.** Sweep K, plot BIC, pick the elbow/minimum. Prefer BIC for parsimony; AIC if you optimize predictive risk.
-5. **Match covariance type to data budget.** Full covariance for low-D with ample data; diagonal or tied when D is large or samples are few. PCA-reduce before a full-covariance GMM in high D.
+5. **Match covariance type to data budget.** Full covariance for low-D with ample data; `diag` or `tied` when D is large or samples are few. PCA-reduce before a full-covariance GMM in high D.
 6. **Reuse the fitted model; never re-fit for stability.** Component indices are arbitrary and switch between runs — persist one fitted model rather than refitting, or align components via the Hungarian algorithm.
 7. **For anomaly detection, threshold `score_samples`.** Use `-ln p(x)` at a chosen percentile (e.g. 99th) and validate the threshold on a labeled holdout.
 8. **Let a Bayesian GMM pick K when unsure.** `BayesianGaussianMixture` with a large upper-bound K and a Dirichlet-process prior prunes unneeded components automatically.

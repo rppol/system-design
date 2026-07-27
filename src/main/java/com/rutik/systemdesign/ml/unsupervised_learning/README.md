@@ -59,7 +59,7 @@ Key insight: the definition of "similar" is baked into the distance metric and a
 | Method  | Linear | Preserves       | New data | Speed   | Typical use |
 |---------|--------|-----------------|----------|---------|-------------|
 | PCA     | Yes    | Global variance  | Yes      | Fast    | Pre-processing, noise removal |
-| t-SNE   | No     | Local structure  | No       | O(n^2)  | 2-D visualization only |
+| t-SNE   | No     | Local structure  | No       | O(n log n) Barnes-Hut (sklearn default); O(n^2) exact | 2-D visualization only |
 | UMAP    | No     | Local + global   | Yes      | ~10x faster than t-SNE | Visualization + feature extraction |
 | Autoencoder | No | Learned         | Yes      | GPU-dependent | Compression, anomaly detection |
 
@@ -386,8 +386,8 @@ The normalization by `max(a, b)` is what makes silhouette usable where inertia i
       x =  2   a = 1.500   b = 7.333   s = 0.7955
       x =  4   a = 2.500   b = 5.333   s = 0.5312   <- weakest, it sits nearest C2
       x =  8   a = 2.000   b = 5.667   s = 0.6471
-      x =  9   a = 2.000   b = 8.889   s = 0.7750
-      x = 11   a = 3.000   b = 10.400  s = 0.7115
+      x =  9   a = 1.500   b = 6.667   s = 0.7750
+      x = 11   a = 2.500   b = 8.667   s = 0.7115
 
   overall silhouette = mean of the six = 0.7034     -> "strong structure" band
 ```
@@ -461,7 +461,8 @@ def fit_kmeans_elbow(
     # Simple elbow detection: largest second derivative of inertia curve
     diffs = np.diff(inertias)
     second_diffs = np.diff(diffs)
-    elbow_k = int(k_range[np.argmax(second_diffs) + 2])  # +2 accounts for double-diff offset
+    # second_diffs[i] is the curvature at inertias[i+1], i.e. at k_range[i+1]
+    elbow_k = int(k_range[np.argmax(second_diffs) + 1])
     print(f"\nElbow at k={elbow_k}")
 
     best_km = KMeans(n_clusters=elbow_k, init="k-means++", n_init=10, random_state=random_state)
@@ -501,13 +502,16 @@ def kdistance_plot_eps(X: np.ndarray, k: int = 5) -> float:
     Heuristic for eps selection: compute distance to kth nearest neighbor for
     every point, sort, find the 'knee' in the curve.
     Returns suggested eps (95th percentile of k-distances — practical heuristic).
+    The knee sits near the TOP of the k-distance distribution: points beyond it
+    are the sparse tail that should become noise. A low percentile (e.g. 5th)
+    yields a tiny eps that labels nearly every point noise.
     """
     from sklearn.neighbors import NearestNeighbors
     nbrs = NearestNeighbors(n_neighbors=k).fit(X)
     distances, _ = nbrs.kneighbors(X)
     k_distances = np.sort(distances[:, k - 1])[::-1]
-    suggested_eps = float(np.percentile(k_distances, 5))  # knee approximation
-    print(f"Suggested eps (5th percentile of {k}-distances): {suggested_eps:.4f}")
+    suggested_eps = float(np.percentile(k_distances, 95))  # knee approximation
+    print(f"Suggested eps (95th percentile of {k}-distances): {suggested_eps:.4f}")
     return suggested_eps
 
 
@@ -553,7 +557,9 @@ def reduce_for_visualization(
 ) -> np.ndarray:
     """
     t-SNE: perplexity 5-50 (balance local vs global); typical 30.
-           O(n^2) — do NOT use on n > 10_000 without PCA pre-reduction.
+           Barnes-Hut is sklearn's default (O(n log n)); the exact method is
+           O(n^2). Still pre-reduce with PCA above ~10_000 points — the
+           high-dimensional neighbor search, not the gradient step, dominates.
            Cannot transform new data points.
     UMAP:  n_neighbors=15, min_dist=0.1 defaults work well.
            ~5-10x faster than t-SNE for same n.
@@ -714,9 +720,9 @@ The same four points, the same metric, two completely different 2-cluster answer
 
 **Fraud ring detection (DBSCAN):** Credit card transactions form dense clusters around merchant terminals. DBSCAN with eps=0.3, min_samples=10 identifies tight groups of transactions sharing device fingerprints — noise points (-1) flagged for manual review. k-means would have missed irregular-shaped rings.
 
-**Image compression (PCA):** MNIST 784-pixel images compressed to 154 components retaining 95% explained variance. Reconstruction quality acceptable for classification pre-processing; 5x storage reduction. Feature matrix shrinks from 784 to 154, cutting downstream model training time by ~60%.
+**Image compression (PCA):** MNIST 784-pixel images compressed to 154 components retaining 95% explained variance. Reconstruction quality acceptable for classification pre-processing; 5x storage reduction (784 / 154 = 5.1). The feature matrix shrinks from 784 to 154 columns, so any downstream model whose cost is linear in the feature count gets a proportional speedup — measure it, since the actual saving depends on the algorithm.
 
-**Drug discovery visualization (UMAP):** 200,000 molecular fingerprints (2048-dim) projected to 2-D in 4 minutes with UMAP vs 3+ hours with t-SNE. Chemical clusters visually separate by scaffold family. New query molecules can be projected without refit (unlike t-SNE).
+**Drug discovery visualization (UMAP):** 200,000 molecular fingerprints (2048-dim) projected to 2-D. UMAP finishes such a run in minutes where Barnes-Hut t-SNE takes hours (timings are illustrative — they depend heavily on hardware, `n_neighbors`, and perplexity). Chemical clusters visually separate by scaffold family. New query molecules can be projected without refit (unlike t-SNE).
 
 **Anomaly detection (autoencoder):** Network intrusion detection system trains autoencoder on normal traffic (95% of data). At inference, reconstruction error threshold at 99th percentile of training error. Attack traffic reconstructs poorly (error > threshold), triggering alert. Achieves 94% recall on known attack types without any labeled attack data.
 
@@ -812,7 +818,7 @@ A researcher used 2-D t-SNE coordinates as input features for a downstream class
 Setting eps=0.5 on un-scaled data with mixed feature ranges caused DBSCAN to produce a single massive cluster (everything was "nearby" in relative terms). Fix: always scale; use k-distance plot to select eps empirically.
 
 **Pitfall 5: Ignoring noise points in evaluation.**
-Team computed silhouette score on DBSCAN output including noise label -1. sklearn raised a warning and produced NaN. Fix: mask out noise points (`labels != -1`) before calling `silhouette_score`.
+Team computed silhouette score on DBSCAN output including noise label -1. sklearn does not warn — it silently treats -1 as one more cluster, and because noise points are scattered all over the space that pseudo-cluster is maximally incohesive, dragging the reported score down (often to a negative number) and making a good clustering look broken. Fix: mask out noise points (`labels != -1`) before calling `silhouette_score`, and report the noise fraction separately.
 
 **Pitfall 6: PCA on categorical features.**
 PCA requires numeric, preferably continuous features. Applying PCA to one-hot encoded binary columns produces valid math but misleading principal components (variance in binary indicators is not the same as variance in continuous measurements). Fix: use MCA (multiple correspondence analysis) for categorical data, or encode then standardize carefully.
@@ -837,10 +843,10 @@ PCA requires numeric, preferably continuous features. Applying PCA to one-hot en
 ## 12. Interview Questions with Answers
 
 **Q: What is k-means++ initialization and why does it matter?**
-k-means++ selects the first centroid randomly, then chooses each subsequent centroid with probability proportional to its squared distance from the nearest already-selected centroid. This spreads initial centroids apart, reducing the chance of poor local minima. In practice it reduces the number of required restarts from 10–20 (random init) to 3–5, cutting wall time while improving final inertia by 10–30%.
+k-means++ selects the first centroid randomly, then chooses each subsequent centroid with probability proportional to its squared distance from the nearest already-selected centroid. This spreads initial centroids apart, reducing the chance of poor local minima. Arthur and Vassilvitskii (2007) prove it gives an O(log k)-competitive expected inertia versus no guarantee at all for random init, and report both faster convergence and lower final inertia in practice — which is why fewer restarts are needed to reach a good solution. Measure the inertia gain on your own data rather than quoting a fixed percentage.
 
 **Q: What is the silhouette score and how do you interpret it?**
-The silhouette score measures how similar each point is to its own cluster versus the nearest other cluster: `(b - a) / max(a, b)` where `a` = mean intra-cluster distance and `b` = mean nearest-cluster distance. Range is -1 to +1; > 0.7 indicates strong structure, 0.25–0.5 is weak, negative values mean the point likely belongs to a different cluster. Use the mean silhouette score across all k values to pick the best k (complement elbow method with this).
+The silhouette score measures how similar each point is to its own cluster versus the nearest other cluster: `(b - a) / max(a, b)` where `a` = mean intra-cluster distance and `b` = mean nearest-cluster distance. Range is -1 to +1; > 0.7 indicates strong structure, 0.25–0.5 is weak, negative values mean the point likely belongs to a different cluster. To pick k, compute the mean silhouette for each candidate k and take the k that maximizes it, using the elbow plot as a cross-check.
 
 **Q: How does DBSCAN define a cluster, and what are core, border, and noise points?**
 DBSCAN classifies points as: core (has at least `min_samples` neighbors within radius `eps`), border (within eps of a core point but not itself a core point), or noise (neither). A cluster is the set of all density-connected core points and their border points. Noise points receive label -1. This allows DBSCAN to find arbitrarily shaped clusters and explicitly identify outliers.
@@ -858,13 +864,13 @@ PCA finds directions of maximum variance. If feature scales differ (e.g., one fe
 In high dimensions (d > ~50), Euclidean distances between all pairs of points converge to the same value — there is no meaningful notion of "near" versus "far". This makes distance-based clustering (k-means, DBSCAN) unreliable. Mitigation: reduce dimensionality with PCA or UMAP before clustering, use cosine similarity (better for text), or switch to algorithms designed for high-dimensional data.
 
 **Q: Can you use t-SNE embeddings as input features for a classifier? Why or why not?**
-No. t-SNE is not suitable for feature extraction because: (1) it cannot transform new/unseen data points — it requires rerunning the optimization on the full dataset, (2) distances in t-SNE space are not meaningful for global structure — only local neighborhoods are preserved, and (3) results change with different random seeds. Use UMAP or PCA for feature extraction; reserve t-SNE for visualization only.
+No — t-SNE embeddings are for looking at, not for feeding a model. It is unsuitable for feature extraction because: (1) it cannot transform new/unseen data points — it requires rerunning the optimization on the full dataset, (2) distances in t-SNE space are not meaningful for global structure — only local neighborhoods are preserved, and (3) results change with different random seeds. Use UMAP or PCA for feature extraction; reserve t-SNE for visualization only.
 
 **Q: How do you evaluate clustering when you have no ground truth labels?**
 Use intrinsic metrics: silhouette score (higher is better, -1 to +1), Davies-Bouldin index (lower is better), and Calinski-Harabasz index (higher is better). None of these tell you if the clusters are meaningful — validate by having domain experts inspect cluster contents, or use extrinsic evaluation if a small labeled subset is available (adjusted Rand index, normalized mutual information).
 
 **Q: Explain the difference between t-SNE and UMAP. When would you choose each?**
-Both are non-linear dimensionality reduction methods for visualization, but they differ in: (1) speed — UMAP is ~5-10x faster than t-SNE for equivalent n; (2) global structure — UMAP better preserves inter-cluster distances, t-SNE distorts them; (3) new data — UMAP supports `transform()` on new points, t-SNE does not; (4) reproducibility — UMAP with fixed seed is deterministic, t-SNE can vary. Choose UMAP in almost all new projects; t-SNE is useful when you need maximum local neighborhood fidelity for small n.
+Both are non-linear dimensionality reduction methods for visualization, but UMAP is faster, preserves more global structure, and can project new points, while t-SNE does none of those. They differ in four ways: (1) speed — UMAP is ~5-10x faster than t-SNE for equivalent n; (2) global structure — UMAP better preserves inter-cluster distances, t-SNE distorts them; (3) new data — UMAP supports `transform()` on new points, t-SNE does not; (4) reproducibility — UMAP with fixed seed is deterministic, t-SNE can vary. Choose UMAP in almost all new projects; t-SNE is useful when you need maximum local neighborhood fidelity for small n.
 
 **Q: What is the Davies-Bouldin index?**
 The Davies-Bouldin index measures the average similarity between each cluster and its most similar other cluster. Similarity is defined as the ratio of within-cluster scatter to between-cluster distance. Lower values indicate better clustering (0 is perfect). It is easier to compute than silhouette score for large n because it only requires cluster centroids, not all pairwise distances.
@@ -895,8 +901,8 @@ PCA is a linear projection onto the top-variance orthogonal directions, while an
 ## 13. Best Practices
 
 1. Always `StandardScaler` (or `RobustScaler` for outlier-heavy data) before any distance-based algorithm — k-means, DBSCAN, PCA, t-SNE, UMAP.
-2. Use `k-means++` initialization (`init="k-means++"`, default in sklearn >= 1.0) — never rely on random init for production.
-3. Run k-means with `n_init=10` (10 random restarts); higher for noisy data. Mini-batch k-means for n > 100,000.
+2. Use `k-means++` initialization — it is `KMeans`'s default (`init="k-means++"`), so never override it with random init in production.
+3. Set `n_init` explicitly (e.g. `n_init=10`); sklearn's default is `"auto"`, which resolves to a single run for `k-means++`. Higher for noisy data. Mini-batch k-means for n > 100,000.
 4. For DBSCAN, use the k-distance plot to select eps; k = `min_samples`; `min_samples` default rule of thumb = `2 * n_features`.
 5. For high-dimensional data (d > 50), always reduce with PCA to ~50 components before running t-SNE or DBSCAN.
 6. Plot silhouette scores for all candidate k values, not just the elbow point — silhouette peak and elbow may differ.
@@ -1053,7 +1059,7 @@ labels = kmeans.fit_predict(embeddings)
 
 **When does DBSCAN outperform k-means for production clustering?** DBSCAN excels when: (1) the number of clusters is unknown and varies over time (it determines it automatically); (2) clusters are non-spherical (elongated, irregular shapes); (3) there are outliers to exclude (DBSCAN marks them as noise, k-means assigns every point). Use case: anomaly detection — DBSCAN marks low-density regions as noise, naturally isolating anomalies. Limitation: DBSCAN is O(n log n) with a k-d tree (good to ~1M points) but scales poorly to 10M+; use HDBSCAN or MiniBatchKMeans for larger datasets.
 
-**How do you validate unsupervised cluster quality without ground truth labels?** Use internal metrics on the embedding space: (1) Silhouette score (−1 to +1): measures cohesion within clusters vs. separation between clusters; target > 0.5 for production use; (2) Davies-Bouldin index: lower is better; (3) Calinski-Harabasz index: higher is better. For business validation, sample 20-30 points per cluster and manually review with a domain expert — check if cluster members share meaningful business properties. Automated metrics can be gamed by trivial solutions (one cluster = score 0 Silhouette); always combine with business review.
+**How do you validate unsupervised cluster quality without ground truth labels?** Use internal metrics on the embedding space: (1) Silhouette score (−1 to +1): measures cohesion within clusters vs. separation between clusters; target > 0.5 for production use; (2) Davies-Bouldin index: lower is better; (3) Calinski-Harabasz index: higher is better. For business validation, sample 20-30 points per cluster and manually review with a domain expert — check if cluster members share meaningful business properties. Automated metrics can be gamed by trivial solutions (silhouette is not even defined for a single cluster, and splitting one true cluster in two can raise it); always combine with business review.
 
 **When does dimensionality reduction with PCA before clustering hurt rather than help?** PCA maximizes variance explained — it preserves the directions of maximum global spread. If the cluster structure lives in low-variance directions (e.g., rare but coherent clusters), PCA discards those directions. UMAP preserves local neighborhood structure and finds cluster separation in low-dimensional space more reliably than PCA for complex, non-linear cluster geometries. Safe heuristic: use PCA for noise reduction (keep 95% variance) before k-means on high-dimensional numerical data; use UMAP for visualization and clustering of text/image embeddings where cluster structure is non-linear.
 
