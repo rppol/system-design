@@ -649,7 +649,7 @@ public void publishOutboxEvents() {
 | Ordering guarantee | Within partition | Within single-consumer queue |
 | Message size | Best for small (<1MB) | Small to medium messages |
 | Consumer scaling | Up to partition count | Many consumers on one queue |
-| Operational complexity | Higher (ZooKeeper or KRaft) | Lower |
+| Operational complexity | Higher (KRaft quorum, partition rebalancing) | Lower |
 | Latency | ~1-5ms end-to-end | Sub-millisecond possible |
 
 ### At-Least-Once vs Exactly-Once
@@ -983,7 +983,7 @@ You expose standard Java functional beans and the binder wires them to destinati
 SockJS is a JavaScript library and protocol that provides a WebSocket-like API with automatic fallback to HTTP long-polling or HTTP streaming when WebSocket is unavailable. This is needed in corporate environments with proxies or firewalls that block WebSocket upgrades. When SockJS is configured via registry.addEndpoint("/ws").withSockJS(), the Spring backend supports multiple transports on the same endpoint: native WebSocket, XHR-streaming, and XHR-polling. The client SockJS library negotiates the best available transport. In production, prefer an external STOMP broker relay (RabbitMQ with STOMP plugin) over the in-memory SimpleBroker for persistence and horizontal scalability.
 
 **Q: What is the risk of prefetchCount in RabbitMQ being too high?**
-A high prefetchCount (e.g., 250, the old default) causes the broker to send up to 250 unacknowledged messages to each consumer before waiting for acks. If the consumer is slow or crashes, all 250 messages are held in memory unprocessed, and other consumers cannot receive them. This reduces throughput by concentrating load on slow consumers. In Spring AMQP, the default prefetchCount was changed from 250 to 1 (fair dispatch) in older versions, but Spring Boot auto-configuration sets it to 250 unless overridden. For fair dispatch, set prefetchCount=1. For higher throughput with fast consumers, increase it — but monitor unacked message counts to find the optimal value.
+A high prefetchCount causes the broker to send that many unacknowledged messages to each consumer before waiting for acks. If the consumer is slow or crashes, all of them are held in memory unprocessed, and other consumers cannot receive them. This reduces throughput by concentrating load on slow consumers. Spring AMQP's listener containers default to `DEFAULT_PREFETCH_COUNT = 250`, overridable with `spring.rabbitmq.listener.simple.prefetch`. For fair dispatch, set prefetch=1. For higher throughput with fast consumers, increase it — but monitor unacked message counts to find the optimal value.
 
 **Q: How do you test a Kafka consumer in a Spring Boot integration test?**
 Use Testcontainers with KafkaContainer to start a real Kafka broker in Docker. Annotate the test class with @Testcontainers and @SpringBootTest. Use @DynamicPropertySource to set spring.kafka.bootstrap-servers to the container's mapped port. Publish messages using KafkaTemplate in the test and verify consumer behavior via assertions on the database or a CountDownLatch that the listener decrements. For unit tests of listener logic, test the handler method directly without Spring context overhead. The EmbeddedKafkaBroker (@EmbeddedKafka) is an alternative that avoids Docker but is less production-representative.

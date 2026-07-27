@@ -242,9 +242,9 @@ class LLMJudge:
 
     Model choice is load-bearing twice over. First, pin it (Best Practice 2) —
     a floating alias silently re-baselines every score. Second, the agreement
-    check below needs a non-zero sampling temperature, and the newest frontier
-    models no longer expose one: Claude Opus 5 and Opus 4.7/4.8 reject
-    `temperature` outright, and Claude Sonnet 5 rejects any non-default value.
+    check below needs a non-zero sampling temperature, which the frontier models
+    do not expose: Claude Opus 5 rejects `temperature` outright, and Claude
+    Sonnet 5 rejects any non-default value.
     A cheap, sampling-capable model such as Claude Haiku 4.5 is both the right
     judge for routine regression checks on cost grounds and one that still
     supports the temperature knob this design depends on. If you must judge

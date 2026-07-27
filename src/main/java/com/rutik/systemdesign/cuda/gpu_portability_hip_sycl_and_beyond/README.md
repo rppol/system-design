@@ -195,7 +195,7 @@ lane index: 0..63, all 64 lanes active for one instruction
 Reduction loop hardcoded for warp=32, run unmodified on a 64-wide wavefront:
 
   for (int off = 16; off > 0; off >>= 1)
-      sum += __shfl_down(sum, off);
+      sum += __shfl_down_sync(mask, sum, off);
 
   On a CUDA warp (32 lanes):        covers all 32 lanes -- correct.
   On an AMD wavefront (64 lanes):   covers only lanes 0-31 -- lanes 32-63
@@ -203,7 +203,7 @@ Reduction loop hardcoded for warp=32, run unmodified on a 64-wide wavefront:
                                      partial reduction, not a crash.
 ```
 
-Caption: a `hipify`-translated reduction that hardcodes `32` (or a loop bound derived from `warpSize` read at CUDA-compile time rather than the target's actual wavefront width) is the single most common "it compiles and looks right" bug in a naive AMD port — see the BROKEN→FIX in §10, and [Warps & SIMT Execution](../warps_and_simt_execution/) for why the warp/wavefront width is a hardware scheduling constant, not a portable one.
+Caption: a `hipify`-translated reduction that hardcodes `32` (in the loop bound, or in a 32-bit `0xFFFFFFFF` participation mask, rather than deriving both from the target's actual wavefront width) is the single most common "it compiles and looks right" bug in a naive AMD port — see the BROKEN→FIX in §10, and [Warps & SIMT Execution](../warps_and_simt_execution/) for why the warp/wavefront width is a hardware scheduling constant, not a portable one.
 
 **In plain terms.** A halving shuffle reduction folds `2^steps` lanes, so the loop's starting offset *is* the width assumption: "each iteration halves the number of live lanes, so `k` iterations can only ever combine `2^k` of them — and starting at 16 hard-codes `k = 5`, which hard-codes width 32."
 
@@ -215,7 +215,7 @@ The bug is invisible in the source because the number `32` never appears. It is 
 | `steps` | Iterations the loop runs — `log2(width)` for a correct reduction |
 | `2^steps` | Lanes actually folded into lane 0. The loop's real, implicit width assumption |
 | `width` | The hardware scheduling unit: **32** on a CUDA warp, **64** on a CDNA wavefront |
-| `__shfl_down(val, offset)` | Reads `val` from the lane `offset` positions higher. Translated correctly by `hipify`; its *argument* is not |
+| `__shfl_down_sync(mask, val, offset)` | Reads `val` from the lane `offset` positions higher. The name carries over to HIP unchanged; its *arguments* do not — HIP's `mask` is 64-bit |
 
 **Walk one example.** Trace the loop's offsets on both hardware widths:
 

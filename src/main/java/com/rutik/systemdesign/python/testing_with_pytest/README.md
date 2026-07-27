@@ -456,9 +456,9 @@ async def test_fetch_user_async() -> None:
 ### 6.5 pytest-asyncio
 
 ```python
-# pytest.ini or pyproject.toml
-# [pytest]
-# asyncio_mode = auto      ← auto-detects async test functions; no @mark needed
+# pyproject.toml
+# [tool.pytest.ini_options]
+# asyncio_mode = "auto"    ← auto-detects async test functions; no @mark needed
 
 import pytest
 import httpx
@@ -776,7 +776,7 @@ def test_send(mock_send): ...
 | `factory_boy` | Test object factories (replaces hand-rolled fixtures) | `pip install factory-boy` |
 | `pytest-mock` | Thin wrapper around `unittest.mock` — adds `mocker` fixture | `pip install pytest-mock` |
 
-### pytest.ini / pyproject.toml Configuration
+### pyproject.toml Configuration
 
 ```toml
 # pyproject.toml

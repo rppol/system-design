@@ -752,9 +752,8 @@ comparison per thread.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| `compute-sanitizer` | Memory/race/sync/init instrumentation (replaces the deprecated `cuda-memcheck`) | Four sub-tools via `--tool {memcheck,racecheck,synccheck,initcheck}`; ships with the CUDA Toolkit |
+| `compute-sanitizer` | Memory/race/sync/init instrumentation | Four sub-tools via `--tool {memcheck,racecheck,synccheck,initcheck}`; ships with the CUDA Toolkit |
 | `cuda-gdb` | Interactive source-level device debugger | Requires `-G` debug build; extends `gdb` with `info cuda threads`, `cuda thread`, `cuda block` |
-| `cuda-memcheck` (legacy) | Predecessor to `compute-sanitizer` | Deprecated since CUDA 11.6 — use `compute-sanitizer` in any current toolchain |
 | `CUDA_LAUNCH_BLOCKING=1` | Environment variable forcing synchronous kernel launches | Debugging-only; destroys stream/host overlap |
 | `cudaGetLastError()` / `cudaPeekAtLastError()` | Query and (for `Get`) clear the last non-sticky error | `Peek` does not clear the flag; `Get` does |
 | In-kernel `printf` | Device-side formatted output | Default 1 MB grid-wide FIFO buffer (`cudaLimitPrintfFifoSize`), no cross-thread ordering guarantee |

@@ -44,7 +44,7 @@ This module is the pure-Java view of native-image: the closed-world model, the r
 |--------|-----------|--------|-----------|
 | **Tracing agent** (`native-image-agent`) | Reflection/resource/proxy/JNI/serialization access during a real JVM run | Run your app/tests with `-agentlib:...` | Only as good as your test coverage |
 | **GraalVM Reachability Metadata Repository** | Pre-written hints for hundreds of popular third-party libraries | Automatic once enabled in the build plugin | High (community/vendor maintained) |
-| **Hand-authored JSON** (`reflect-config.json` etc., or unified `reachability-metadata.json`) | Whatever you already know your code needs | Manual | Exact, but easy to let drift from the code |
+| **Hand-authored JSON** (`reachability-metadata.json`) | Whatever you already know your code needs | Manual | Exact, but easy to let drift from the code |
 | **`Feature` API** (`org.graalvm.nativeimage.hosted.Feature`) | Anything you can express in build-time Java code | Manual, code-level | Exact, versioned with the code it registers |
 
 ### 4.2 Garbage collector choices (`--gc=`)
@@ -59,7 +59,7 @@ This module is the pure-Java view of native-image: the closed-world model, the r
 
 | Distribution | Based on | License | PGO | G1 GC | Typical user |
 |--------------|----------|---------|-----|-------|--------------|
-| **Oracle GraalVM** | Oracle JDK | Free for production under the GraalVM Free Terms and Conditions (GFTC, since the 2023 licensing change) | Yes (`--pgo`) | Yes (Linux only) | Teams that want every optimization lever |
+| **Oracle GraalVM** | Oracle JDK | Free for production under the GraalVM Free Terms and Conditions (GFTC) | Yes (`--pgo`) | Yes (Linux only) | Teams that want every optimization lever |
 | **GraalVM Community Edition** | OpenJDK | GPL (open source) | No | No | Default open-source choice; most tutorials |
 | **Mandrel** | Downstream of Community Edition | GPL | No | No | Quarkus's native builds specifically |
 
@@ -148,7 +148,7 @@ dynamic access pattern               metadata kind    what the hint declares
 ------------------------------------ ---------------- ----------------------------
 Class.forName(name)                  reflection       the type + which members
 obj.getClass().getDeclaredMethod()   reflection        are reflectively usable
-new java.lang.reflect.Proxy(...)     dynamic proxy    the interface set to proxy
+new java.lang.reflect.Proxy(...)     reflection       the interface set to proxy
 getResourceAsStream("x.regex")       resource         a literal name or a pattern
 ObjectOutputStream.writeObject()     serialization    the serializable type
 JNI FindClass / GetMethodID          JNI              same shape as reflection
@@ -187,7 +187,7 @@ sequenceDiagram
     Dev->>JVM: run full test suite with -agentlib:native-image-agent=config-output-dir=...
     JVM->>App: execute every test path
     App-->>JVM: reflective / resource / proxy / JNI access observed
-    JVM->>Cfg: write reflect-config.json, resource-config.json, ...
+    JVM->>Cfg: write reachability-metadata.json
     Note over Cfg: only paths the tests actually executed are recorded
     Dev->>Build: native-image reads Cfg from META-INF/native-image/...
     Build-->>Dev: executable
@@ -207,8 +207,8 @@ No framework required — `native-image` compiles from plain `.class` files or a
 ```bash
 javac -d out $(find src -name '*.java')
 
-# From a classes directory, naming the entry point:
-native-image -cp out -H:Class=com.example.logredact.Main -o logredact
+# From a classes directory, naming the entry point positionally:
+native-image -cp out com.example.logredact.Main -o logredact
 
 # From an executable jar (Main-Class in the manifest):
 native-image -jar logredact.jar -o logredact

@@ -453,11 +453,12 @@ oversubscribed and no per-preemption tuning will save you. Lower `max_num_seqs` 
 
 ### BlockPool
 
-V1 keeps a single **GPU** block pool (`vllm/v1/core/block_pool.py`): a free list of physical
-blocks in GPU HBM plus a hash table of cached blocks. The separate **CPU allocator** that V0 used
-to hold swapped-out sequences no longer exists — see the preemption note in §4. Offloading KV to
-host memory is back as an **opt-in cache extension**, not as the scheduler's preemption path:
-`--kv-offloading-size <GiB>` plus `--kv-offloading-backend native|lmcache`, off by default.
+vLLM keeps a single **GPU** block pool (`vllm/v1/core/block_pool.py`): a free list of physical
+blocks in GPU HBM plus a hash table of cached blocks. Nothing spills to host memory on the
+scheduler's own path — preemption recomputes (§4). Offloading KV to host memory exists as an
+**opt-in cache extension**: `--kv-offloading-size <GiB>` plus
+`--kv-offloading-backend native|lmcache`, off by default. It buys prefix-cache capacity beyond
+HBM; it is not a preemption mechanism.
 
 Block states:
 ```
@@ -890,9 +891,8 @@ vLLM supports multiple quantization formats, affecting memory, throughput, and q
 (`vllm/model_executor/layers/quantization/__init__.py`). In v0.26.0 that list includes `awq`,
 `gptq`, `gptq_marlin`, `awq_marlin`, `fp8`, `modelopt`, `modelopt_fp4`, `mxfp4`,
 `compressed-tensors`, `bitsandbytes`, `quark`, `torchao` and several online-quantization
-shorthands. **`squeezellm`, `aqlm` and QuIP# are gone** — they were removed from vLLM, so any
-tutorial passing them will fail argument validation. GGUF is no longer in-tree either; it is
-served through an out-of-tree plugin.
+shorthands. That enum is the whole contract: a value outside it fails argument validation at
+startup. GGUF is served through an out-of-tree plugin rather than a `--quantization` value.
 
 | Format | Bits | `--quantization` value | Method | Quality loss |
 |---|---|---|---|---|
@@ -1129,8 +1129,7 @@ response = client.chat.completions.create(
 
 vLLM can constrain generation to follow a JSON schema, regex, grammar, or choice list.
 
-**The API changed.** The old `guided_json` / `guided_regex` / `guided_choice` / `guided_grammar`
-top-level fields were replaced by a single `structured_outputs` object
+All of it goes through a single `structured_outputs` object
 (`StructuredOutputsParams` in `vllm/sampling_params.py`) whose fields are `json`, `regex`,
 `choice`, `grammar`, `json_object` and `structural_tag`. The backend is chosen by
 `StructuredOutputsConfig.backend`, which defaults to **`"auto"`** — vLLM picks per request among

@@ -445,11 +445,11 @@ A reliability diagram is nothing more than that check drawn as a plot — bucket
         = 0.1826
 
   Murphy decomposition:  Brier = reliability - resolution + uncertainty
-    reliability  = sum n_b*(p_b - o_b)^2 / N                      = 0.0083
-    base rate    = sum n_b*o_b / N = 2849 / 10000                 = 0.2849
-    uncertainty  = base*(1 - base) = 0.2849 * 0.7151              = 0.2038
-    resolution   = sum n_b*(o_b - base)^2 / N                     = 0.0295
-    check: 0.0083 - 0.0295 + 0.2038 = 0.1826                      <- matches
+    reliability  = sum n_b*(p_b - o_b)^2 / N                      = 0.00835
+    base rate    = sum n_b*o_b / N = 2849 / 10000                 = 0.28490
+    uncertainty  = base*(1 - base) = 0.2849 * 0.7151              = 0.20373
+    resolution   = sum n_b*(o_b - base)^2 / N                     = 0.02948
+    check: 0.00835 - 0.02948 + 0.20373 = 0.18260                  <- matches
 
   Brier of the SAME model after perfect recalibration (predict o_b in bin b)
     = sum n_b * o_b*(1 - o_b) / N = 0.1743   <- Brier minus the reliability term

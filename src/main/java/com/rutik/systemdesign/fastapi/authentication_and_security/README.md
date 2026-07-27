@@ -280,29 +280,32 @@ Decoding raises `jwt.ExpiredSignatureError` on an expired token and `jwt.Invalid
 
 ### 6.4 Password Hashing
 
-`bcrypt` is the baseline. Cost factor 12 produces ~250 ms hash time on a modern server CPU — slow enough to defeat brute force, fast enough for user login. Do not lower cost factor below 12 for public-facing auth.
+`argon2id` is the default choice. It is memory-hard as well as CPU-bound, so a GPU or ASIC cannot amortise an attack across thousands of parallel guesses the way it can against a purely CPU-bound hash. OWASP's Password Storage Cheat Sheet gives a floor of 19 MiB of memory, 2 iterations and 1 degree of parallelism; `argon2-cffi`'s own defaults are RFC 9106's second recommended profile, `m=65536` (64 MiB), `t=3`, `p=4`, comfortably above that floor.
 
-`argon2` (winner of the Password Hashing Competition) is memory-hard in addition to being CPU-bound. Use `argon2-cffi` via `passlib`. Harder to parallelize on GPU rigs. Preferred for new systems.
+`bcrypt` remains acceptable, particularly for an existing store you are migrating. OWASP's floor is a work factor of 10, tuned upward to whatever verification latency the server can absorb. Its one sharp edge is a **72-byte input limit** in most implementations — bytes beyond that are silently ignored, so cap the accepted password length at 72 bytes rather than letting a long passphrase quietly truncate.
 
-`scrypt` is built into Python's stdlib (`hashlib.scrypt`). Similar memory-hardness to argon2. Less commonly used.
+`scrypt` is built into Python's stdlib (`hashlib.scrypt`) and is the accepted substitute where argon2id is unavailable; OWASP's minimum is `N=2^17` (128 MiB), `r=8`, `p=1`.
+
+`pwdlib` is the maintained hashing front end FastAPI's own security tutorial uses. `PasswordHash.recommended()` returns an argon2id hasher with `argon2-cffi`'s defaults.
 
 ```python
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
 
-# Create context once at module level
-pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
-# "deprecated=auto" transparently re-hashes bcrypt passwords to argon2 on next login
+# Create once at module level — construction is not free
+password_hash = PasswordHash.recommended()      # argon2id
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return password_hash.hash(plain)
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-    # Constant-time comparison is built into passlib — no timing oracle
+    return password_hash.verify(plain, hashed)
+    # Digest comparison is constant-time inside argon2-cffi — no timing oracle
 ```
 
-**In plain terms.** "The cost factor is an exponent, not a dial — each `+1` doubles the work for
-everyone, the attacker and your own login endpoint alike." That symmetry is the whole design: you
+Tune the parameters so one verification costs roughly 200–300 ms of CPU on your production hardware, then hold that budget as the machine gets faster. Argon2's knobs are linear — doubling `m` or `t` roughly doubles the work — which makes them easy to dial to a latency target. bcrypt's knob is not:
+
+**In plain terms.** "The bcrypt cost factor is an exponent, not a dial — each `+1` doubles the work
+for everyone, the attacker and your own login endpoint alike." That symmetry is the whole design: you
 cannot slow an attacker down without paying the identical tax on every legitimate login.
 
 | Symbol | What it is |
