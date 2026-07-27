@@ -652,7 +652,7 @@ Two properties worth committing to memory. First, in single-label multiclass, mi
 
 ## 7. Real-World Examples
 
-**Gmail spam filtering.** Google's spam classifier began life as a Naive Bayes model over word and header features and still uses linear models in its ensemble for their speed and interpretability; the per-word weights make it auditable ("why was this flagged?"). Modern Gmail layers deep models on top, but the fast linear layer scores the overwhelming majority of clearly-ham mail cheaply.
+**Email spam filtering.** Bayesian spam filtering over word and header features is the canonical deployment of this file's linear baseline — Sahami et al. (1998) published the first Naive Bayes spam filter and Paul Graham's "A Plan for Spam" (2002) made it the industry default, precisely because per-word weights are fast to score and auditable ("why was this flagged?"). Modern providers layer deep models on top: Google has publicly reported Gmail's spam-filter accuracy moving from 99.5% to 99.9% after adding neural networks, while cheap linear scoring still disposes of the overwhelming majority of clearly-ham mail.
 
 **fastText at Meta.** fastText was built to classify billions of posts and tags at Facebook scale where training a deep model per label was infeasible. On the DBpedia and Yelp benchmarks it matches character-CNNs while training in seconds on CPU instead of hours on GPU — the canonical example of a shallow model winning on the throughput axis.
 
@@ -794,7 +794,7 @@ Training a K-class softmax when documents can carry several labels forces the la
 
 ### Pitfall 4: no smoothing in Naive Bayes
 
-A single unseen (word, class) pair drives `P(w | c) = 0`, which zeroes the whole product and makes the class impossible regardless of other evidence. Always keep `alpha >= ` a small positive value (`MultinomialNB(alpha=1.0)` by default); never set `alpha=0`.
+A single unseen (word, class) pair drives `P(w | c) = 0`, which zeroes the whole product and makes the class impossible regardless of other evidence. Always keep `alpha` at a small positive value (`MultinomialNB(alpha=1.0)` by default); never set `alpha=0`.
 
 ### Pitfall 5: over-aggressive preprocessing
 
@@ -887,7 +887,7 @@ SMOTE synthesizes minority points by interpolating between sparse neighbor vecto
 4. Under imbalance, report macro-F1 and minority-class recall, never accuracy; pull class weights, then threshold moving, before resampling.
 5. Tune the decision threshold on a validation set to the product's precision/recall operating point instead of defaulting to 0.5.
 6. For multi-label, use independent sigmoids + BCE and per-label thresholds; never a K-way softmax.
-7. Keep `alpha >= ` a small positive value in Naive Bayes; default `alpha=1.0`, drop toward 0.1 on large vocabularies.
+7. Keep `alpha` at a small positive value in Naive Bayes; default `alpha=1.0`, drop toward 0.1 on large vocabularies.
 8. For neural text models, initialize embeddings from pretrained Word2Vec/GloVe and fine-tune them (CNN-non-static) for a 1–2 point gain.
 9. A/B every preprocessing decision (stopwords, casing, punctuation) against the baseline; do not assume normalization helps.
 10. Save the fitted vectorizer and classifier together (joblib) so training and serving share identical vocabulary and IDF — a mismatch silently corrupts predictions.

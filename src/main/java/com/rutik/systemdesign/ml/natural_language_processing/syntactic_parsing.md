@@ -416,9 +416,9 @@ Exactly one rule in the derivation is below `1.0`, so the tree probability colla
   doubling 20 -> 40 tokens multiplies the work by 8.0x  (10,660 / 1,330)
 ```
 
-Grammar size is the term people forget. Going from a 1,500-rule toy grammar to a 15,000-rule treebank grammar costs the same 10x as quadrupling the sentence length — which is why practical parsers prune the rule set per cell (coarse-to-fine filtering) rather than looping over all of `|G|`.
+Grammar size is the term people forget. Going from a 1,500-rule toy grammar to a 15,000-rule treebank grammar costs the same 10x as growing the sentence from 20 to 44 tokens — which is why practical parsers prune the rule set per cell (coarse-to-fine filtering) rather than looping over all of `|G|`.
 
-**Why the chart is worth building at all.** The number of distinct binary trees over `n` words is the Catalan number: `14` for n=4, `16,796` for n=10, and `6,564,120,420` for n=20. Enumerating parses for a 20-token sentence means scoring 6.56 billion trees; CKY answers the identical question in 1,330 cell-visits times the grammar, because every shared sub-span is scored once and reused by every tree that contains it.
+**Why the chart is worth building at all.** The number of distinct binary trees over `n` words is the Catalan number `C(n-1)`: `5` for n=4, `4,862` for n=10, and `1,767,263,190` for n=20. Enumerating parses for a 20-token sentence means scoring 1.77 billion trees; CKY answers the identical question in 1,330 cell-visits times the grammar, because every shared sub-span is scored once and reused by every tree that contains it.
 
 ### Arc-standard transition system with a static oracle (pure Python)
 
@@ -550,7 +550,7 @@ The `dep_`, `head`, and `children` attributes expose the full tree; `doc.noun_ch
 
 **Google's SyntaxNet / Parsey McParseface (May 2016).** A globally normalized transition-based parser with beam search, released open-source and announced as "the world's most accurate parser." Google reported over 94% accuracy on individual dependencies for English newswire (Penn Treebank), against 96–97% agreement between trained human linguists; the underlying paper (Andor et al. 2016) reports 94.61% UAS / 92.79% LAS on the WSJ test set with a beam of 32, and the shipped Parsey McParseface model used a beam of 8. Accuracy fell to just over 90% on the Google Web Treebank — the out-of-domain drop of Pitfall 5. It demonstrated that beam search plus global normalization closes most of the gap between transition and graph-based parsers.
 
-**Stanford CoreNLP and the Universal Dependencies project.** The UD treebanks (200+ treebanks, 100+ languages) standardized dependency annotation so one parser architecture and one relation inventory transfer across languages. Cross-lingual parsers trained on UD power multilingual grammar tools and low-resource-language NLP where no LLM has enough pretraining data.
+**Stanford CoreNLP and the Universal Dependencies project.** The UD treebanks (200+ treebanks, 150+ languages as of release 2.18, May 2026) standardized dependency annotation so one parser architecture and one relation inventory transfer across languages. Cross-lingual parsers trained on UD power multilingual grammar tools and low-resource-language NLP where no LLM has enough pretraining data.
 
 **Grammar and writing assistants.** Grammarly-style tools use dependency structure to catch subject-verb agreement errors ("the list of items *are*"), dangling modifiers, and misplaced clauses — errors defined structurally, not lexically. A parser flags that the verb's `nsubj` is singular even though a nearer noun is plural.
 
@@ -634,7 +634,7 @@ The Eisner/CLE ratio is exactly `n` — it grows with the sentence, so the gap i
 ### Use dependency parsing when:
 
 - You need explicit subject-verb-object or modifier relations for rule-based extraction.
-- You are building a multilingual pipeline (Universal Dependencies gives one schema across 100+ languages).
+- You are building a multilingual pipeline (Universal Dependencies gives one schema across 150+ languages).
 - Latency matters — a transition parser adds ~1–5 ms/sentence on CPU.
 - You want an inspectable, debuggable structure rather than an opaque embedding.
 
@@ -776,7 +776,7 @@ The 2.1-point gap is 1,008 concrete tokens whose attachment is correct and whose
   F1        = 2 * 0.9522 * 0.9476 / (0.9522 + 0.9476) = 0.9499 = 94.99%
 ```
 
-Here precision and recall are within half a point of each other, so F1 lands between them and the harmonic mean barely differs from a plain average. The two separate the moment the parser is lopsided: a bracket-happy parser scoring precision `0.99` and recall `0.60` averages to `0.795` but has F1 `0.7472` — over four points lower. That penalty for imbalance is exactly why PARSEVAL reports F1 rather than a mean, and why over-producing brackets to chase recall does not pay.
+Here precision and recall are within half a point of each other, so F1 lands between them and the harmonic mean barely differs from a plain average. The two separate the moment the parser is lopsided: a bracket-happy parser that over-produces spans scores recall `0.99` at precision `0.60`, which averages to `0.795` but has F1 `0.7472` — over four points lower. That penalty for imbalance is exactly why PARSEVAL reports F1 rather than a mean, and why over-producing brackets to chase recall does not pay.
 
 ### Pitfall 5: Out-of-domain collapse
 
@@ -846,7 +846,7 @@ A static oracle maps each configuration to the single gold transition assuming t
 Use one of three approaches: a SWAP transition, a pseudo-projective transform, or a graph-based Chu-Liu/Edmonds decoder that has no projectivity restriction. In detail: (1) a SWAP transition reorders the top of the stack, letting the parser reach configurations that license crossing arcs (Nivre 2009), at the cost of longer derivations; (2) pseudo-projective parsing (Nivre & Nilsson) transforms non-projective training trees into projective ones with augmented labels, parses projectively, then inverts the transformation to restore crossings; (3) a graph-based Chu-Liu/Edmonds decoder produces non-projective trees directly. The choice depends on how non-projective the language is and whether you can afford the graph-based decoder's cost.
 
 **Q: What is Universal Dependencies and why does standardization matter?**
-Universal Dependencies (UD) is a cross-linguistically consistent annotation scheme: one fixed inventory of ~37 relation labels and universal POS tags shared across 200+ treebanks in 100+ languages. The labels (nsubj, obj, obl, nmod, amod, ...) and files (CoNLL-U format) are identical across languages, so one parser architecture and one relation set transfer across languages, enabling multilingual and cross-lingual parsers, transfer learning from high- to low-resource languages, and directly comparable evaluation. Before UD, every treebank had its own labels, so a "subject" in one corpus was not comparable to another; UD made dependency parsing a genuinely multilingual field.
+Universal Dependencies (UD) is a cross-linguistically consistent annotation scheme: one fixed inventory of ~37 relation labels and universal POS tags shared across 200+ treebanks in 150+ languages. The labels (nsubj, obj, obl, nmod, amod, ...) and files (CoNLL-U format) are identical across languages, so one parser architecture and one relation set transfer across languages, enabling multilingual and cross-lingual parsers, transfer learning from high- to low-resource languages, and directly comparable evaluation. Before UD, every treebank had its own labels, so a "subject" in one corpus was not comparable to another; UD made dependency parsing a genuinely multilingual field.
 
 **Q: How is constituency parsing evaluated with labeled bracketing F1 (PARSEVAL)?**
 PARSEVAL treats each labeled constituent (a phrase span plus its category, e.g. "NP over words 2–4") as an item; precision is the fraction of predicted brackets that match a gold bracket, recall is the fraction of gold brackets recovered, and F1 is their harmonic mean. It also reports crossing brackets (predicted spans that overlap a gold span without nesting) and complete-match rate. Weaknesses: it over-credits parsers on easy short spans, is sensitive to annotation conventions (unary chains, punctuation attachment), and a single high attachment error can shift many brackets. Modern neural constituency parsers reach ~95 F1 on the Penn Treebank; use the official `evalb` script rather than a homemade scorer.
@@ -874,7 +874,7 @@ Enforce it with a spanning-tree decoder rather than independent per-token head s
 5. Match the algorithm to the language: projective (English) → arc-standard/eager or Eisner; non-projective (Czech, German) → SWAP transition or CLE.
 6. Binarize to Chomsky Normal Form and handle unary chains before running CKY, or the parser silently ignores multi-child and unary rules.
 7. Fine-tune on in-domain treebank data before deploying on out-of-domain text; expect a 10–20 UAS drop on tweets/ASR/biomedical text with a newswire-trained parser.
-8. Start from Universal Dependencies for any multilingual work — one schema, one relation set, comparable evaluation across 100+ languages.
+8. Start from Universal Dependencies for any multilingual work — one schema, one relation set, comparable evaluation across 150+ languages.
 9. Swap the encoder to a pretrained contextual model (BERT) before hand-tuning the parser head; contextual embeddings alone add ~1–1.5 UAS over a BiLSTM.
 10. Use the official scorers (`evalb` for constituency, the CoNLL-18 scorer for UD) — homemade metrics almost always mishandle punctuation, multiword tokens, or label matching.
 

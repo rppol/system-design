@@ -21,7 +21,8 @@ Three canonical tasks:
 - **POS tagging** — assign a part-of-speech (NOUN, VERB, DET, ...) to each word. Penn Treebank
   uses 45 tags; a good tagger hits ~97% per-token accuracy.
 - **Named Entity Recognition (NER)** — label spans of tokens as PER/ORG/LOC/MISC etc. CoNLL-2003
-  has 4 entity types encoded as 9 BIO tags; state-of-the-art F1 is ~93.
+  has 4 entity types encoded as 9 BIO tags; state-of-the-art F1 is ~94.6 (ACE with
+  document context, Wang et al. 2021), with LUKE at 94.3 just behind it.
 - **Chunking (shallow parsing)** — group words into non-overlapping phrases (NP, VP, PP).
 
 The historical arc removes independence assumptions step by step: **HMM** (generative) → **MEMM**
@@ -153,7 +154,7 @@ is `K x K` — so the scheme you pick quadratically drives the parameter count a
 
 BIOES buys sharper boundaries — a one-token entity gets its own `S-` tag instead of a lone `B-` that
 looks like the start of something longer — at 3.6x the transition parameters and Viterbi work. On
-CoNLL the gain is usually under half an F1 point, which is why BIO stays the default.
+CoNLL the gain is usually under one F1 point (§12 quotes ~0.5-1), which is why BIO stays the default.
 
 ### 4.2 Hidden Markov Model (HMM) — generative
 
@@ -840,13 +841,15 @@ shape, prefix/suffix, and window features; ships 3-class (PER/ORG/LOC) and 7-cla
 widely deployed where GPUs are unavailable — it runs at thousands of tokens/sec on CPU.
 
 **spaCy:** `en_core_web_sm/md/lg` use a CNN + transition-based parser for NER (not a CRF), while
-`en_core_web_trf` uses a BERT backbone. spaCy deliberately dropped the CRF layer because its beam
-+ transition system already enforces valid spans — a reminder that a CRF is one way, not the only
-way, to get global consistency.
+`en_core_web_trf` uses a transformer backbone. spaCy never shipped a CRF layer: its BILUO transition
+system already makes malformed spans unreachable by construction — a reminder that a CRF is one way,
+not the only way, to get global consistency.
 
-**Flair:** `flair/ner-english-large` stacks contextual string embeddings + a BiLSTM-CRF and hit
-~94 F1 on CoNLL-2003, among the best non-transformer results. It demonstrates that BiLSTM-CRF
-remains competitive when fed strong contextual embeddings.
+**Flair:** the framework's original contextual string embeddings (Akbik et al., 2018) feed a
+BiLSTM-CRF and reach 93.09 F1 on CoNLL-2003 — still the strongest non-transformer result, and a
+demonstration that BiLSTM-CRF remains competitive when fed strong character-level embeddings. The
+current `flair/ner-english-large` checkpoint reports 94.36 F1 but is a different animal: FLERT-style
+document-level XLM-R fine-tuning with **no** RNN and **no** CRF layer at all.
 
 **POS tagging in NLTK / TnT:** classic averaged-perceptron and HMM taggers (TnT is a trigram HMM)
 reach ~96–97% token accuracy on Penn Treebank — the workhorses before neural taggers.

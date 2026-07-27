@@ -306,7 +306,7 @@ xychart-beta
     bar [962, 170, 109, 105, 102]
 ```
 
-*The jump from unigram to trigram is enormous; past trigram, added context helps little because higher-order contexts are almost all unseen — classic sparsity.*
+*Illustrative magnitudes, not a published benchmark: the shape is what matters. The jump from unigram to trigram is enormous; past trigram, added context helps little because higher-order contexts are almost all unseen — classic sparsity.*
 
 ### Perplexity vs training size
 
@@ -318,7 +318,7 @@ xychart-beta
     line [250, 178, 131, 104, 88]
 ```
 
-*More data monotonically lowers perplexity by filling in previously-unseen n-grams; this is why web-scale corpora (Google's 1T-token n-grams) beat clever smoothing on small data.*
+*Illustrative magnitudes. More data monotonically lowers perplexity by filling in previously-unseen n-grams; this is why web-scale corpora (Google's 1T-token n-grams) beat clever smoothing on small data.*
 
 ### Perplexity by smoothing method
 
@@ -330,7 +330,7 @@ xychart-beta
     bar [220, 154, 121, 114, 109]
 ```
 
-*Add-1 is catastrophic because it steals too much mass for a 50k vocabulary; Kneser-Ney's continuation probability makes it the best classical method. (An unsmoothed model is not shown — its perplexity is infinite; see §10.)*
+*Illustrative magnitudes; the ordering is the robust published finding (Chen & Goodman, 1998), not these exact values. Add-1 is catastrophic because it steals too much mass for a 50k vocabulary; Kneser-Ney's continuation probability makes it the best classical method. (An unsmoothed model is not shown — its perplexity is infinite; see §10.)*
 
 ---
 
@@ -663,7 +663,7 @@ Each dropped order costs a flat factor of `0.4`, so two drops cost `0.16` and th
 
 **Bengio et al., "A Neural Probabilistic Language Model" (2003):** The feedforward NLM that introduced learned word embeddings. It concatenated the embeddings of the previous `n-1` words and beat smoothed trigrams on Brown and AP News corpora, establishing that distributed representations cure sparsity. Its ideas flow directly into word2vec and every modern LM.
 
-**Mikolov RNNLM (2010):** Recurrent NN language model that cut perplexity ~20% over the best 5-gram Kneser-Ney on the Penn Treebank and WSJ, and shipped in speech-recognition rescoring. It demonstrated that an unbounded recurrent context beats a fixed n-gram window — the argument that motivated the entire neural-LM era.
+**Mikolov RNNLM (2010):** Recurrent NN language model whose abstract reports roughly 50% perplexity reduction from a mixture of several RNN LMs against a state-of-the-art backoff model, about 18% word-error-rate reduction on Wall Street Journal at equal training data, and ~5% on NIST RT05 even against a backoff model trained on far more data. It demonstrated that an unbounded recurrent context beats a fixed n-gram window — the argument that motivated the entire neural-LM era — at the cost of much higher training complexity.
 
 ---
 
@@ -935,21 +935,24 @@ flowchart LR
 **Component decisions:**
 
 - **Pruned 4-gram trie.** Trained with modified Kneser-Ney over a multi-billion-token corpus, then pruned to drop n-grams below a count threshold and quantized to store each probability in ~8 bits. This handles the head of the distribution ("I'll be" then "there", "New" then "York") with nanosecond lookups.
-- **Compact LSTM LM.** Two-layer LSTM, `embed_dim = hidden_dim = 256`, weight-tied (halving the parameter count), quantized to int8 for a ~8 MB footprint and ~5 ms inference. It generalizes to phrasings the n-gram never saw and captures longer context than four tokens.
+- **Compact LSTM LM.** Two-layer LSTM over a 30k-word shortlist, `embed_dim = hidden_dim = 256`, weight-tied (halving the parameter count, since the embedding table dominates), quantized to int8 for a ~8 MB footprint and ~5 ms inference. It generalizes to phrasings the n-gram never saw and captures longer context than four tokens.
 - **Personal cache.** An on-device count table of the user's own recent n-grams, updated online, so the keyboard learns names, slang, and app-specific jargon within a session. This is where most perceived "smartness" comes from.
 - **Federated learning.** The shared neural LM is improved by federated averaging: each phone computes gradients on local text, only the *gradients* (clipped and noised for differential privacy) are aggregated centrally, and raw keystrokes never leave the device.
 
 **Training and serving configuration:**
 
 ```python
-# Compact on-device LSTM LM
+# Compact on-device LSTM LM.
+# The neural LM runs on a 30k-word SHORTLIST, not the full 170k vocabulary:
+# 170_000 x 256 x 1 byte would be 43.5 MB of int8 embedding table on its own,
+# five times the entire model budget. The pruned n-gram trie carries the tail.
 model = RNNLanguageModel(
-    vocab_size=170_000,
+    vocab_size=30_000,
     embed_dim=256,
     hidden_dim=256,     # equal so weights can be tied
     num_layers=2,
     dropout=0.3,
-    tie_weights=True,   # ~44M -> ~22M params before quantization
+    tie_weights=True,   # ~17M -> ~8.8M params before quantization
 )
 # Post-training int8 quantization -> ~8 MB on disk, ~5 ms/step on a mid-range phone.
 

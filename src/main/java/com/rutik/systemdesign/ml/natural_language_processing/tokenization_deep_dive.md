@@ -66,7 +66,7 @@ This is why `"hello"` and `" hello"` can tokenize differently — a frequent sou
 ### 4.3 Byte-level vs character-level fallback
 
 - **Character BPE**: unknown characters (rare CJK, emoji) can still hit `<UNK>` if not in the base alphabet.
-- **Byte-level BPE** (GPT-2 onward): the base alphabet is the 256 possible bytes, so *every* UTF-8 string is encodable with zero OOV. The cost is that non-ASCII characters consume 2-4 tokens each.
+- **Byte-level BPE** (GPT-2 onward): the base alphabet is the 256 possible bytes, so *every* UTF-8 string is encodable with zero OOV. The cost is that non-ASCII characters span 2-4 UTF-8 bytes and therefore cost more tokens: measured on GPT-2, `é`, `ü` and `的` are 1 token each, Devanagari `अ` and Thai `ก` are 2, and Burmese `မ` is 3.
 
 ### 4.4 SentencePiece: language-agnostic, raw-stream
 
@@ -362,7 +362,8 @@ if __name__ == "__main__":
     corpus = {"low": 5, "lower": 2, "newest": 6, "widest": 3}
     merges = train_bpe(corpus, num_merges=10)
     print(merges)
-    # [('e', 's'), ('es', 't'), ('l', 'o'), ('lo', 'w'), ('n', 'e'), ...]
+    # [('e', 's'), ('es', 't'), ('est', '</w>'), ('l', 'o'), ('lo', 'w'),
+    #  ('n', 'e'), ('ne', 'w'), ('new', 'est</w>'), ('low', '</w>'), ('w', 'i')]
 ```
 
 ### Applying learned BPE merges (encoding)
@@ -440,7 +441,7 @@ This prefers merging pieces that occur together more often than chance would pre
   behaviour is fully predictable.
 
   ("w","e") is the instructive loser: count 8, nearly the most frequent, but it
-  scores WORST (0.0294) because w and e are both everywhere. Seeing them adjacent
+  scores lowest of these five (0.0294) because w and e are both everywhere. Adjacency
   is what you would expect by chance, so merging them teaches the model nothing.
 ```
 
@@ -460,7 +461,8 @@ This prefers merging pieces that occur together more often than chance would pre
 #   probabilities -> the single most likely split.
 #
 # Unigram supports "subword regularization": sample alternative segmentations
-# during training as data augmentation (improves robustness ~0.5-1 BLEU on MT).
+# during training as data augmentation (Kudo 2018 reports +1-2 BLEU on most MT
+# pairs, and +2 to +4.6 BLEU on low-resource pairs such as IWSLT en-zh/vi-en).
 ```
 
 **What it means.** "Give every candidate piece a probability, score a whole split by multiplying its pieces' probabilities, keep the best split — then delete whichever pieces the best splits never actually needed."
@@ -516,7 +518,8 @@ print(gpt2.tokenize(text))
 # ['Token', 'ization', 'Ġisn', "'t", 'Ġtrivial', '.']   (Ġ marks a leading space)
 
 print(len(gpt2.encode("café")), "tokens for 'café'")
-# 'é' is 2 UTF-8 bytes -> byte-level BPE may use 2-3 tokens for one accented char
+# 3 tokens: ['c', 'af', 'Ã©'] — the two UTF-8 bytes of 'é' merged into one token,
+# but the byte-level view also split the ASCII prefix differently than "cafe" would
 ```
 
 ### Training a custom tokenizer
@@ -540,9 +543,9 @@ def train_custom_bpe(files: list[str], vocab_size: int = 32_000) -> Tokenizer:
 
 ## 7. Real-World Examples
 
-**GPT-2/3/4 (byte-level BPE, `tiktoken`):** ~50k vocabulary over raw bytes, so any string is encodable with no `<UNK>`. The trade-off is visible in pricing: non-English text and code use more tokens per character, so the same content costs more in languages like Thai or Telugu than in English.
+**GPT-2/3/4 (byte-level BPE, `tiktoken`):** the vocabulary grew with each generation — GPT-2 and GPT-3 use `r50k_base` at 50,257 tokens, GPT-4 uses `cl100k_base` at 100,277, and GPT-4o/o200k models use `o200k_base` at 200,019 — all over raw bytes, so any string is encodable with no `<UNK>`. The trade-off is visible in pricing: non-English text and code use more tokens per character, so the same content costs more in languages like Thai or Telugu than in English.
 
-**BERT (WordPiece, 30k vocab):** lowercased `bert-base-uncased` splits `"unaffordable"` -> `["una", "##fford", "##able"]`. The `##` continuation markers let the model reconstruct word boundaries.
+**BERT (WordPiece, 30,522 vocab):** lowercased `bert-base-uncased` splits `"unaffordable"` -> `["una", "##ff", "##ord", "##able"]`. The `##` continuation markers let the model reconstruct word boundaries.
 
 **LLaMA / T5 (SentencePiece):** treat text as a raw stream with `▁` for spaces, enabling clean multilingual handling and lossless detokenization (no Python-side join heuristics).
 
@@ -725,7 +728,7 @@ Both are bottom-up merge algorithms, but they choose merges differently. BPE mer
 Unigram is top-down. It seeds a large candidate vocabulary, assigns each piece a probability via EM to maximize corpus likelihood, then iteratively prunes the pieces whose removal least hurts likelihood until it reaches the target size. At inference it uses Viterbi to pick the single most probable segmentation. Unlike BPE/WordPiece it can also *sample* alternative segmentations (subword regularization), which acts as data augmentation and improves robustness.
 
 **Q: What is byte-level BPE and why is it useful?**
-Byte-level BPE (introduced with GPT-2) uses the 256 possible bytes as the base alphabet instead of Unicode characters. Because every UTF-8 string decomposes into bytes, there is no possible OOV — any text, emoji, or even binary is encodable. The cost is that non-ASCII characters span multiple bytes and therefore consume 2-4 tokens each, inflating sequence length for non-English text.
+Byte-level BPE (introduced with GPT-2) uses the 256 possible bytes as the base alphabet instead of Unicode characters. Because every UTF-8 string decomposes into bytes, there is no possible OOV — any text, emoji, or even binary is encodable. The cost is that non-ASCII characters span 2-4 UTF-8 bytes, so scripts the merges never saw cost 2-3 tokens per character (Devanagari and Thai 2, Burmese 3 on GPT-2), inflating sequence length for non-English text.
 
 **Q: What is the `##` prefix in BERT's tokens and the `Ġ`/`▁` marker in GPT/SentencePiece?**
 They encode word-boundary/whitespace information. WordPiece uses `##` to mark a *continuation* piece (`play`, `##ing` reconstructs "playing"). Byte-level BPE uses `Ġ` to mark a piece that was preceded by a space, and SentencePiece uses `▁` (U+2581) for the same purpose. Without these markers, detokenization could not tell "newyork" from "new york."
@@ -734,7 +737,7 @@ They encode word-boundary/whitespace information. WordPiece uses `##` to mark a 
 In byte-level BPE and SentencePiece, the leading space is part of the token. " hello" becomes a single `Ġhello`/`▁hello` token, while "hello" at the start of a string has no leading space and tokenizes as `hello`. This matters when you splice pre-tokenized fragments together: dropping or adding spaces shifts the IDs and can degrade model output.
 
 **Q: How does vocabulary size trade off against sequence length and model size?**
-A larger vocabulary means more text fits in each token, so sequences are shorter (less attention compute, which is quadratic in length) — but the embedding and output-softmax tables grow linearly with vocab size, adding parameters and memory. A smaller vocabulary shrinks those tables but fragments text into more tokens, lengthening sequences. Common practice lands at 32k-50k for monolingual and 100k-250k for heavily multilingual models.
+A larger vocabulary shortens sequences but enlarges the embedding and output-softmax tables, so you trade a one-time parameter cost for a per-request compute saving. Fewer, longer tokens mean less attention compute (which is quadratic in length), while the two tables grow linearly with vocab size. A smaller vocabulary shrinks those tables but fragments text into more tokens, lengthening sequences. Common practice lands at 32k-50k for monolingual and 100k-250k for heavily multilingual models.
 
 **Q: What is tokenizer "fertility" and why does it matter?**
 Fertility is the average number of tokens per word (or per character) the tokenizer produces on a given text. High fertility means longer sequences, which increase latency, memory, and API cost while reducing how much real content fits in a fixed context window. A tokenizer trained mostly on English has low fertility on English (~1.1) but high fertility (2-4) on under-represented languages — both a cost and a fairness issue.
@@ -752,7 +755,7 @@ Use `add_tokens` / `add_special_tokens`, then immediately call `model.resize_tok
 The tokenizer's merges were learned mostly from English-heavy data, so it has few multi-character tokens for other scripts and falls back to byte- or character-level pieces. A Hindi or Thai sentence therefore fragments into many more tokens than its English translation. Multilingual models mitigate this by training the tokenizer on balanced multilingual corpora so common pieces exist for many scripts.
 
 **Q: What is subword regularization and which algorithm supports it?**
-Subword regularization samples among multiple valid segmentations of the same text during training instead of always using the single best one, acting as data augmentation that makes the model robust to tokenization ambiguity. The Unigram LM (via SentencePiece) supports it natively because it has a probability distribution over segmentations; BPE has a dropout variant (BPE-dropout) that randomly skips merges to achieve a similar effect. Gains are typically ~0.5-1 BLEU on low-resource translation.
+Subword regularization samples among multiple valid segmentations of the same text during training instead of always using the best one. That acts as data augmentation and makes the model robust to tokenization ambiguity. The Unigram LM (via SentencePiece) supports it natively because it has a probability distribution over segmentations; BPE has a dropout variant (BPE-dropout) that randomly skips merges to achieve a similar effect. Kudo (2018) reports +1-2 BLEU on most pairs and up to +4.6 BLEU on low-resource translation.
 
 **Q: How should you count tokens for a context-window or cost budget?**
 Always run the actual model tokenizer: `len(tokenizer.encode(text))`. Character- or word-based estimates ("4 chars per token") are English averages that break badly on code, JSON, math, or non-Latin scripts where the ratio can be 1-2 chars/token. For OpenAI models use `tiktoken` with the model-specific encoding; for HF models use the model's own tokenizer.

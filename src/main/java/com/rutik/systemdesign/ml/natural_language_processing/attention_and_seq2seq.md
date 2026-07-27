@@ -187,7 +187,7 @@ That last pair is the punchline. The dot product is **unbounded** — it scales 
 
 **Global attention:** At each decoder step, attend to all encoder positions (default). O(src_len) alignment per decoder step.
 
-**Local attention:** At each decoder step, predict an alignment position p_t (using a small MLP), then attend only to a window [p_t - D, p_t + D]. O(D) alignment computation. Useful for very long source sequences where global attention is expensive and monotonic alignment holds (e.g., speech recognition).
+**Local attention:** At each decoder step, predict an alignment position p_t (using a small MLP), then attend only to a window [p_t - D, p_t + D]; Luong et al. set D=10. O(D) alignment computation. Useful for very long source sequences where global attention is expensive and monotonic alignment holds (e.g., speech recognition).
 
 ---
 
@@ -516,7 +516,8 @@ def length_penalized_score(
 ) -> float:
     """
     Wu et al. (2016) length penalty: lp = ((5 + len) / 6)^alpha
-    alpha=0.6 is the Google NMT default.
+    Wu et al. used alpha=0.2; alpha=0.6 with this same formula is the value
+    "Attention Is All You Need" (Vaswani et al. 2017) used for WMT.
     alpha=0: no penalty (favors short sequences)
     alpha=1: strong penalty (strongly favors longer sequences)
     """
@@ -591,7 +592,9 @@ def nucleus_sampling(
     Nucleus (top-p) sampling (Holtzman et al., 2020).
     Sample from the smallest set of tokens whose cumulative probability >= p.
     """
-    probs = torch.exp(log_probs / temperature)
+    # re-normalize after temperature scaling, or the cumulative sum below is
+    # compared against p on an unnormalized scale and the nucleus is wrong
+    probs = F.softmax(log_probs / temperature, dim=-1)
     sorted_probs, sorted_indices = probs.sort(descending=True)
     cumulative_probs = sorted_probs.cumsum(dim=-1)
 
@@ -619,7 +622,7 @@ Raw beam scores are a *sum* of negative numbers, so every extra token makes the 
 | `log_prob` | The hypothesis's raw cumulative `Σ log P(token)`. Negative |
 | `len` | Token count of the hypothesis |
 | `5` and `6` | Wu et al.'s constants. They make `lp = 1.0` at `len = 1`, so short sequences get no free boost |
-| `alpha` | Penalty strength. `0` = off, `0.6` = Google NMT default, larger = more tolerant of length |
+| `alpha` | Penalty strength. `0` = off, `0.6` = the Transformer paper's WMT setting, larger = more tolerant of length |
 | `lp` | The divisor itself. Always `>= 1` for `len >= 1` |
 | `log_prob / lp` | Final ranking score. Dividing a negative number by something `> 1` moves it *toward* zero |
 
@@ -822,13 +825,13 @@ Two things fall out of that table. First, the fast pair has already wrapped arou
 
 ## 7. Real-World Examples
 
-**Google Neural Machine Translation (GNMT, 2016):** Eight-layer encoder-decoder LSTM with attention. Bahdanau attention with a projection W_a. Beam width 8, length penalty alpha=0.6. This system reduced translation errors by 60% compared to phrase-based MT. The coverage mechanism (penalizing attention distributions that focus repeatedly on the same source tokens) prevented repetition.
+**Google Neural Machine Translation (GNMT, 2016):** Eight encoder LSTM layers (1 bidirectional + 7 unidirectional) and 8 decoder layers with attention. Beam width 8-12, length penalty `lp(Y) = (5+|Y|)^alpha / 6^alpha` with alpha=0.2 and coverage penalty beta=0.2. On a human side-by-side evaluation of isolated simple sentences, the system reduced translation errors by an average of 60% versus Google's phrase-based production system. The coverage penalty (penalizing attention distributions that focus repeatedly on the same source tokens) prevented repetition.
 
-**Facebook FAIR WMT competition:** The original "Attention Is All You Need" transformer (6 layers, 8 heads, d_model=512) set the WMT14 En-De BLEU record at 28.4 in 2017. The same architecture with beam width 4 and alpha=0.6 achieved results that previously required ensembles of 8 LSTM models.
+**WMT14 with the original Transformer (Vaswani et al., 2017):** The *big* model (6 layers, 16 heads, d_model=1024) set the WMT14 En-De record at 28.4 BLEU; the *base* model (6 layers, 8 heads, d_model=512) scored 27.3. Both decoded with beam width 4 and length penalty alpha=0.6 under the Wu et al. formula, and the big model beat every previously published single model and ensemble.
 
-**Speech recognition (Listen, Attend and Spell, 2015):** First application of attention to speech. Pyramidal BiLSTM encoder (reduces sequence length by 4x at each layer) + attention decoder. Beam search width 32 was needed because the output space is phoneme sequences, sparser than word translation. Local attention (window ±10 frames) outperformed global attention for alignment with the monotonic left-to-right nature of speech.
+**Speech recognition (Listen, Attend and Spell, 2015):** First application of attention to large-vocabulary speech, emitting **characters** directly with no pronunciation lexicon. A pyramidal BiLSTM encoder halves the time resolution at each of its 3 pyramid layers (8x total), which is what makes attention over an acoustic frame sequence tractable. Decoding used a beam of 32 with optional LM rescoring.
 
-**Document summarization (BART, 2019):** Encoder-decoder transformer fine-tuned for summarization. Beam width 4, length penalty 2.0 (stronger than translation to prevent copying), no-repeat-ngram-size=3 (prevents repeating any 3-gram). The strong length penalty forces generating concise summaries rather than extracting long verbatim spans.
+**Document summarization (BART, 2019):** Encoder-decoder transformer fine-tuned for summarization. The `facebook/bart-large-cnn` generation config is beam width 4, `length_penalty=2.0`, `no_repeat_ngram_size=3`, `min_length=56`, `max_length=142`. Because the penalty divides a negative log-probability, `2.0` pushes the decoder toward *longer* summaries — CNN/DailyMail references run about three sentences, and without it beam search terminates far too early.
 
 ---
 
@@ -838,7 +841,7 @@ Two things fall out of that table. First, the fast pair has already wrapped arou
 |------------------|---------|-----------|-------|---------|
 | Greedy | Low | None | Fast (1x) | Latency-critical, acceptable quality |
 | Beam search (k=4) | Good | Low | 4x slower | Translation, summarization |
-| Beam search (k=20) | Marginal gain | Very low | 20x slower | Research, reranking candidates |
+| Beam search (k=20) | No gain; often regresses | Very low | 20x slower | Research, reranking candidates |
 | Top-k (k=50) | Good | Medium | 1x | Story generation, code |
 | Nucleus (p=0.9) | Good | High | 1x | Creative tasks, diverse outputs |
 | Temperature (T=0.7) | Good | Medium | 1x | General purpose generation |
@@ -976,17 +979,19 @@ model.forward(src, tgt, src_key_padding_mask=src_key_padding_mask)
 ### Pitfall 4: Length penalty misconfiguration for tasks
 
 ```python
+# Direction reminder: the score is a NEGATIVE log-prob divided by lp, so a
+# LARGER alpha yields a less-negative score for long hypotheses -> longer output.
 # alpha=0.6 works for translation but is wrong for:
-# - Summarization: needs strong penalty (alpha=2.0) to avoid verbatim copying
+# - Summarization: needs a larger alpha (1.5-2.0) so summaries reach gold length
 # - QA answer extraction: needs no penalty (alpha=0.0) since answers are short
-# - Creative writing: needs negative penalty to reward longer outputs
+# - Terse structured output: a negative alpha actively rewards brevity
 
 # Tuning guidance:
 ALPHA_MAP = {
-    "translation": 0.6,       # Wu et al. 2016 default
-    "summarization": 1.5,     # Force concise summaries
+    "translation": 0.6,       # Vaswani et al. 2017, WMT14
+    "summarization": 1.5,     # Push summaries out to gold length
     "qa_extraction": 0.0,     # Short answers preferred
-    "story_generation": -0.2, # Reward longer outputs
+    "terse_structured": -0.2, # Actively reward shorter outputs
 }
 ```
 
@@ -1068,7 +1073,7 @@ Both failure modes named in the pitfall comment above are the same phenomenon se
 | `sacrebleu` | BLEU score computation | Standard benchmark evaluation; use `corpus_bleu` not `sentence_bleu` |
 | `fairseq` (Meta) | Efficient seq2seq training | Used for WMT competition models, fast beam search |
 | `OpenNMT-py` | Reference NMT implementation | Academic research, reproducible NMT baselines |
-| `BerViz` | Attention visualization | Visualize encoder-decoder cross-attention patterns |
+| `BertViz` | Attention visualization | Visualize encoder-decoder cross-attention patterns |
 | `ctranslate2` | Fast inference for seq2seq | 2-4x speedup over HuggingFace inference |
 
 ---
@@ -1082,25 +1087,25 @@ Without attention, an encoder-decoder RNN compresses the entire source sequence 
 Bahdanau uses an additive energy function: `e_{ti} = v^T tanh(W_1 h_i + W_2 s_t)`, where `W_1`, `W_2`, and `v` are learned parameters. The tanh introduces nonlinearity, allowing the model to capture complex interactions between encoder states and decoder states. It can handle different encoder and decoder dimensions via the projection matrices. Luong computes the energy after the decoder step (versus before in Bahdanau) and offers three variants. The dot product variant: `e_{ti} = s_t^T h_i` has no learned parameters and requires encoder and decoder to have the same dimension. The general variant: `e_{ti} = s_t^T W h_i` adds a learnable matrix. Practically, Luong general is slightly faster (fewer parameters, no tanh) while Bahdanau is more expressive and works well when encoder/decoder dimensions differ.
 
 **Q: Why do we divide by sqrt(d_k) in transformer attention?**
-The dot product `Q · K^T` between two vectors of dimension d_k has variance approximately equal to d_k when the vectors have unit variance. For d_k=512, the dot products have standard deviation ~22 — large enough that the softmax becomes nearly one-hot (all weight on the maximum element), causing vanishing gradients for non-maximum keys. Dividing by sqrt(d_k) rescales the variance to 1 regardless of dimension, keeping softmax in a regime with meaningful gradients. At d_k=64 (standard for multi-head with d_model=512, 8 heads), unscaled variance would be 8, which already causes significant gradient issues during training.
+The dot product `Q · K^T` between two vectors of dimension d_k has variance approximately equal to d_k when the vectors have unit variance. For d_k=512, the dot products have standard deviation ~22 — large enough that the softmax becomes nearly one-hot (all weight on the maximum element), causing vanishing gradients for non-maximum keys. Dividing by sqrt(d_k) rescales the variance to 1 regardless of dimension, keeping softmax in a regime with meaningful gradients. At d_k=64 (standard for multi-head with d_model=512, 8 heads), the unscaled variance is 64 and the standard deviation is 8, which already causes significant gradient issues during training.
 
 **Q: What is beam search and when does it fail?**
 Beam search maintains K candidate sequences (beams) at each decoding step, expanding each by one token and keeping the top K by cumulative log-probability. Unlike greedy decoding (K=1), it finds better global sequences by not committing prematurely to locally highest-probability choices. Beam search fails in three scenarios: (1) repetition — beam search tends to produce generic, repetitive output because common n-grams have high probability and are reinforced across beams; (2) length bias — beams are scored by log-probability which decreases with length, so short sequences are unfairly favored without length penalty; (3) diversity collapse — all beams converge to similar sequences since they share the same scoring objective. For creative text generation, nucleus sampling outperforms beam search because diversity is desired. For structured outputs (translation, code), beam search with n-gram blocking is typically preferred.
 
 **Q: What is the coverage mechanism in neural machine translation and why was it needed?**
-In early attention-based NMT, the attention mechanism could repeatedly focus on the same source tokens (over-translation, e.g., "cat" translated three times) or skip source tokens entirely (under-translation, e.g., a word is never translated). The coverage mechanism adds a coverage vector `C_t = Σ_{t'<t} α_{t'}` tracking cumulative attention over source positions. A penalty term `Σ_i min(α_{t,i}, C_{t,i})` in the training objective penalizes attending to positions that have already received significant attention. This forces the model to "cover" all source positions and not revisit already-translated tokens. Coverage reduced Google NMT translation errors by ~20% specifically on long sentences.
+Coverage tracks how much attention each source position has already received, then penalizes the decoder for revisiting positions it has already translated. It exists because early attention-based NMT could focus repeatedly on the same source tokens (over-translation, e.g., "cat" translated three times) or skip source tokens entirely (under-translation, e.g., a word is never translated). The mechanism adds a coverage vector `C_t = Σ_{t'<t} α_{t'}` over source positions; Tu et al. (2016) feed it back into the attention model, while GNMT adds a decode-time coverage penalty `cp(X;Y) = beta * Σ_i log(min(Σ_t α_{t,i}, 1.0))` to the beam score with beta=0.2. Both push the model to "cover" all source positions exactly once, and GNMT reports the coverage penalty helping most on long sentences.
 
 **Q: How does teacher forcing cause exposure bias and what strategies mitigate it?**
 Teacher forcing provides the ground-truth previous token as decoder input at each training step: `P(y_t | y_1^*, ..., y_{t-1}^*, x)`. At inference, the model instead conditions on its own previously generated tokens: `P(y_t | y_1, ..., y_{t-1}, x)`. If the model generates an incorrect token at step t-1, subsequent predictions are conditioned on an input the model has never seen during training, causing compounding errors. Three mitigation strategies: (1) scheduled sampling — with increasing probability during training, use the model's own prediction instead of ground truth; (2) minimum risk training — optimize for expected BLEU directly using Monte Carlo sampling, training on the actual inference distribution; (3) contrastive decoding — train a small negative model and use log(P_pos) - log(P_neg) as the generation objective, naturally penalizing the common errors of the base model.
 
 **Q: Compare nucleus sampling vs beam search for code generation.**
-Beam search favors high-probability sequences — for code, this often means generating boilerplate that is syntactically correct but functionally wrong (the model is confident about common patterns). Nucleus sampling introduces stochasticity, which can generate novel code structures but also syntactic errors. In practice for code generation: beam search with a small width (4-8) produces more consistent, idiomatic code; nucleus sampling with p=0.95 is useful when generating multiple diverse candidates for a pass@k evaluation. GitHub Copilot uses temperature sampling (T≈0.8) rather than beam search because latency is critical (beam width 5 is 5x slower) and they evaluate a sample of outputs rather than a single best.
+Beam search favors high-probability sequences — for code, this often means generating boilerplate that is syntactically correct but functionally wrong (the model is confident about common patterns). Nucleus sampling introduces stochasticity, which can generate novel code structures but also syntactic errors. In practice for code generation: beam search with a small width (4-8) produces more consistent, idiomatic code; nucleus sampling with p=0.95 is useful when generating multiple diverse candidates for a pass@k evaluation. Production code assistants generally use temperature sampling rather than beam search because latency is critical (beam width 5 is roughly 5x slower) and pass@k evaluation wants a *sample* of outputs, not a single best; the Codex paper tunes temperature per k, with higher temperature paying off as k grows.
 
 **Q: What is label smoothing in sequence generation and why does it help?**
 Label smoothing replaces the one-hot target distribution (1 for correct token, 0 for others) with a soft distribution: ε/(V-1) for all wrong tokens, 1-ε for the correct token. ε=0.1 is standard. This prevents the model from becoming overconfident on training data — an overconfident model produces poorly calibrated probabilities and overfits to noise in the training labels. For sequence generation, label smoothing reduces cross-entropy loss by ~0.1 and improves BLEU by 1-2 points on WMT translation benchmarks. The downside: perplexity (evaluated against one-hot targets) appears higher even when actual generation quality improves — so always evaluate BLEU rather than perplexity when label smoothing is used.
 
 **Q: Why does beam search width have diminishing returns past k=4-8?**
-The theoretical bound on beam search is exponential improvement with width — but in practice, quality plateaus quickly. Studies on WMT translation show: k=1 (greedy) BLEU ~26; k=4 BLEU ~28; k=8 BLEU ~28.2; k=64 BLEU ~28.3. Beyond k=4-8, the additional hypotheses explored are near-duplicates of already-covered paths (they differ in low-probability branches that the model correctly avoided). The marginal gain of increasing k from 4 to 64 is 0.3 BLEU at 16x the inference cost. For production: k=4 or k=5 is the standard practical choice, balancing quality and latency.
+Quality plateaus quickly because the extra hypotheses past k=4-8 are near-duplicates of paths already covered, differing only in low-probability branches the model correctly avoided. The published NMT result is stronger than "diminishing returns": BLEU peaks around small beams and then *declines* as the beam grows — the "beam search curse" (Koehn & Knowles 2017; Yang, Huang & Ma 2018) — because larger beams surface short, high-probability hypotheses that a length penalty only partly corrects. Wu et al. (2016) likewise report that dropping from 8-12 beams to 4 or 2 has only a slight negative effect on BLEU. For production: k=4 or k=5 is the standard practical choice, balancing quality and latency.
 
 **Q: Explain the difference between self-attention and cross-attention in an encoder-decoder transformer.**
 In self-attention (both in the encoder and in the decoder's first sublayer), queries, keys, and values all come from the same sequence: `Q = K = V = X · W_{Q/K/V}`. Each token attends to all other tokens in the same sequence to build contextual representations. In cross-attention (the decoder's second sublayer), queries come from the decoder's current representations and keys/values come from the encoder's output: `Q = decoder_state · W_Q`, `K = encoder_output · W_K`, `V = encoder_output · W_V`. This is the attention mechanism that performs alignment — each decoder position queries the encoder memory to extract relevant source information. The causal mask in the decoder's self-attention prevents positions from attending to future positions; the cross-attention has no causal constraint because the full encoder output is always available.
@@ -1124,7 +1129,7 @@ Additive attention passes the summed projections through a tanh, which bounds th
 The encoder output (the memory) depends only on the fixed source sequence, so it is computed once and cached, while the decoder must run step by step because each token conditions on the previously generated one. During inference you encode the source a single time, then loop the decoder: at step t it attends over the cached encoder memory (unchanged) plus its own tokens 1..t-1. This asymmetry drives two production optimizations — pre-compute and cache the encoder memory per input, and use a KV cache for the decoder's self-attention so each step is O(1) in past length rather than O(t). Recomputing the encoder every decode step is a common and costly beginner mistake.
 
 **Q: What is local attention in the Luong formulation and when is it preferable to global attention?**
-Local attention predicts an alignment center p_t and attends only to a window [p_t - D, p_t + D] around it, cutting cost from O(source length) to O(window) per decoder step. Global attention re-scores every source position at every decoder step, which is wasteful when the alignment is roughly monotonic and the relevant source region is narrow. Local attention shines in speech recognition and character-level translation, where the output tracks the input left-to-right and the useful context is a small neighborhood — Listen-Attend-Spell used a ±10-frame window and outperformed global attention. The tradeoff: if p_t is mispredicted, the true aligned position can fall outside the window and be lost, so local attention is risky for tasks with long-range reordering (e.g., English↔Japanese).
+Local attention predicts an alignment center p_t and attends only to a window [p_t - D, p_t + D] around it, cutting cost from O(source length) to O(window) per decoder step. Global attention re-scores every source position at every decoder step, which is wasteful when the alignment is roughly monotonic and the relevant source region is narrow. Local attention shines in speech recognition and character-level translation, where the output tracks the input left-to-right and the useful context is a small neighborhood; Luong et al. (2015) set D=10 and report local-p attention beating global attention by +0.9 BLEU on WMT English-German. The tradeoff: if p_t is mispredicted, the true aligned position can fall outside the window and be lost, so local attention is risky for tasks with long-range reordering (e.g., English↔Japanese).
 
 ---
 
@@ -1149,7 +1154,7 @@ Local attention predicts an alignment center p_t and attends only to a window [p
 
 **Context:** A news agency summarizes articles in 12 languages into English for global editorial distribution. Articles average 800 tokens; target summaries average 80 tokens (10:1 compression ratio). 2M parallel article-summary pairs in English; 50K-200K pairs per language.
 
-**Architecture:** mBART-large (12-layer encoder-decoder transformer, 680M params, pretrained on 25 languages). Cross-attention (6 decoder layers each attending to 800 encoder positions) is the memory bottleneck.
+**Architecture:** mBART-large (12 encoder + 12 decoder layers, d_model=1024, 16 heads, ~680M params, pretrained on 25 languages). Cross-attention (12 decoder layers each attending to 800 encoder positions) is the memory bottleneck.
 
 **Training configuration:**
 
@@ -1184,5 +1189,5 @@ gen_config = {
 - Beam width 4 vs 8: +0.3 ROUGE-L at 2x latency cost. Deployed with k=4.
 - Length penalty 1.5 vs 0.6: summaries at lp=0.6 were 40% shorter than gold; lp=1.5 matched gold length distribution.
 - Coverage attention monitoring: 3% of Arabic articles produced near-uniform attention (entropy >6.0) indicating alignment failure. Root cause: Arabic RTL encoding required explicit language token. Fixed by prepending `<ar_AR>` to source.
-- Cross-attention memory: 800 (source) × 128 (max target) × 6 layers × 16 heads × 4 bytes = 39.3MB per sequence in FP32. Using FP16 reduced to 19.7MB, so even large batches fit comfortably on a 40GB A100.
+- Cross-attention memory: 800 (source) × 128 (max target) × 12 layers × 16 heads × 4 bytes = 78.6MB per sequence in FP32. Using FP16 reduced to 39.3MB, so even large batches fit comfortably on a 40GB A100.
 - Production throughput: 45 articles/second (800-token source, 80-token target) on 4x A100 GPUs. Target: 50/second. Optimization: ctranslate2 FP16 inference achieved 67 articles/second.

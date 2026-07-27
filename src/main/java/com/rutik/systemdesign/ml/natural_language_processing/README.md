@@ -30,9 +30,9 @@ One-line analogy: NLP teaches a machine to read — first by memorizing a dictio
 
 Mental model: Language is sequence + context + structure. Classical methods capture frequency statistics. Word embeddings capture semantic similarity. Sequence models capture order dependencies. Each layer adds a richer view of the same text.
 
-Why it matters: 80% of enterprise data is unstructured text. Search engines, spam filters, customer-support bots, and autocomplete all began with pre-transformer NLP techniques — many of which still run in production because they are fast, interpretable, and require no GPU.
+Why it matters: the large majority of enterprise data is unstructured, and most of that is text. Search engines, spam filters, customer-support bots, and autocomplete all began with pre-transformer NLP techniques — many of which still run in production because they are fast, interpretable, and require no GPU.
 
-Key insight: TF-IDF and logistic regression still outperform fine-tuned BERT on short-text classification with fewer than 10K training samples due to overfitting risk.
+Key insight: TF-IDF and logistic regression stay competitive with fine-tuned BERT on short-text classification below roughly 5K labeled samples, where BERT's extra capacity mostly buys overfitting.
 
 ---
 
@@ -412,9 +412,7 @@ def build_tfidf_classifier(
         ("clf", LogisticRegression(
             C=1.0,                   # inverse regularization strength
             max_iter=1000,
-            solver="lbfgs",
-            multi_class="auto",
-            n_jobs=-1,
+            solver="lbfgs",          # multinomial loss for n_classes >= 3
         )),
     ])
 
@@ -583,8 +581,8 @@ import spacy
 from spacy.tokens import Doc
 from typing import List, Tuple
 
-# Load pre-trained model (en_core_web_lg: 685MB, GloVe vectors + NER)
-# en_core_web_sm: 12MB, no vectors, faster
+# Load pre-trained model (en_core_web_lg 3.8: ~382MB, 514K 300d word vectors + NER)
+# en_core_web_sm: ~13MB, no vectors, faster
 nlp = spacy.load("en_core_web_lg")
 
 def extract_entities(text: str) -> List[Tuple[str, str, int, int]]:
@@ -602,9 +600,9 @@ def demo_ner() -> None:
         print(f"  [{label}] '{ent_text}' at chars {start}-{end}")
     # Output:
     # [ORG] 'Apple Inc.' at chars 0-10
-    # [PERSON] 'Steve Jobs' at chars 25-35
-    # [GPE] 'Cupertino' at chars 39-48
-    # [DATE] '1976' at chars 52-56
+    # [PERSON] 'Steve Jobs' at chars 26-36
+    # [GPE] 'Cupertino' at chars 40-49
+    # [DATE] '1976' at chars 53-57
 ```
 
 ### TextCNN in PyTorch
@@ -746,17 +744,17 @@ def train_lda(
 
 ## 7. Real-World Examples
 
-**Gmail spam filter (pre-2015):** TF-IDF features + Naive Bayes + logistic regression ensemble. Still processes billions of emails per day. Rule-based preprocessing handles Unicode abuse (e.g., "V1agra" variants).
+**Large-scale email spam filtering (pre-deep-learning era):** TF-IDF features + Naive Bayes + logistic regression ensembles were the workhorse at web-mail scale for a decade before neural rewrites. Rule-based preprocessing handles Unicode abuse (e.g., "V1agra" variants).
 
 **LinkedIn job title normalization:** FastText subword embeddings map "Sr. SWE" and "Senior Software Engineer" to nearby vectors. OOV handling via subword n-grams is critical because job titles contain abbreviations not in any pre-trained vocabulary.
 
-**Bloomberg News NER:** BiLSTM + CRF trained on financial text. Identifies TICKER symbols, executive names, and organization names where general-purpose spaCy models underperform. Domain-specific training data yields 10-15 F1-point improvement over off-the-shelf models.
+**Financial-newswire NER:** BiLSTM + CRF trained on financial text. Identifies TICKER symbols, executive names, and organization names where general-purpose spaCy models underperform. Domain-specific training data reliably beats off-the-shelf models on in-domain entity types; the exact gap is corpus-specific, so measure it rather than assume a number.
 
-**NY Times topic discovery:** LDA with 150 topics over 20 years of articles. Topics drift over time (e.g., "internet" topic words shift from "modem/dial-up" to "broadband/streaming"). Requires periodic retraining or dynamic topic models.
+**News-archive topic discovery:** LDA with 150 topics over 20 years of articles. Topics drift over time (e.g., an "internet" topic's words shift from "modem/dial-up" to "broadband/streaming"). Requires periodic retraining or dynamic topic models.
 
-**Stack Overflow search (hybrid retrieval):** BM25 over title+body indexes for exact keyword matching, combined with Sentence-BERT bi-encoder for semantic similarity via FAISS. BM25 alone achieves NDCG@10 of 0.45 on technical queries; adding dense retrieval and RRF fusion (k=60) pushes NDCG@10 to 0.58. Cross-encoder reranking of top-20 results raises MRR@10 by a further 12%. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for implementation.
+**Developer-Q&A search (hybrid retrieval), illustrative:** BM25 over title+body indexes for exact keyword matching, combined with a Sentence-BERT bi-encoder for semantic similarity via FAISS, fused with RRF (k=60), then cross-encoder reranking of the top 20. The published finding this pattern rests on is qualitative and robust: BM25 and dense retrieval fail on different queries, so fusing them beats either alone, and reranking adds a further lift. Measure NDCG@10 and MRR@10 on your own corpus — the numbers do not transfer. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for implementation.
 
-**Salesforce customer intent classification with DeBERTa-v3-base:** A support ticket router with 47 intent classes (billing, outage, feature request, etc.) replaced a LogisticRegression+TF-IDF baseline. DeBERTa-v3-base fine-tuned for 5 epochs (LR 2e-5, batch 32) on 80K labeled tickets achieved 94.1% accuracy vs 87.4% for the baseline. Inference served via TorchServe with dynamic batching (max_batch_delay=50ms) sustains 2,000 RPS on two A10G GPUs. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for fine-tuning details.
+**Support-ticket intent classification with DeBERTa-v3-base, illustrative:** A ticket router with 47 intent classes (billing, outage, feature request, etc.) replaces a LogisticRegression+TF-IDF baseline. DeBERTa-v3-base fine-tuned for 5 epochs (LR 2e-5, batch 32) on 80K labeled tickets, served via TorchServe with dynamic batching (max_batch_delay=50ms) on two A10G GPUs. The scenario metrics below are illustrative, not a published benchmark. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for fine-tuning details.
 
 ---
 
@@ -782,7 +780,7 @@ def train_lda(
 
 ### When to Use Classical NLP
 
-- Fewer than 50K labeled training examples (BERT overfits; LR + TF-IDF generalizes better)
+- Fewer than 5K labeled training examples (BERT overfits; LR + TF-IDF generalizes better)
 - Latency under 1ms required (embeddings and LSTMs are too slow without batching)
 - CPU-only deployment with no GPU budget
 - Interpretability required (regulators need feature importance)
@@ -873,13 +871,13 @@ Dropping 300d to 100d is a straight 3x memory cut because the relationship is li
 
 | Tool | Use Case | Notes |
 |------|---------|-------|
-| spaCy | Tokenization, NER, POS tagging | Industrial-strength; en_core_web_lg has GloVe vectors |
+| spaCy | Tokenization, NER, POS tagging | Industrial-strength; en_core_web_lg ships 514K 300d static vectors |
 | NLTK | Preprocessing, WordNet lemmatization, corpora | Research-oriented; slower than spaCy |
 | Gensim | Word2Vec, FastText, LDA, Doc2Vec | Best-in-class for word embeddings and topic models |
 | scikit-learn | TF-IDF, Naive Bayes, LogisticRegression, pipelines | Production ML pipelines |
 | PyTorch | TextCNN, BiLSTM, custom models | Research and custom architectures |
-| HuggingFace Tokenizers | Fast BPE/WordPiece tokenization | 100x faster than pure Python |
-| fastText (Meta CLI) | Sub-word embeddings, fast text classification | Ships as a single binary; 1M sentences/second |
+| HuggingFace Tokenizers | Fast BPE/WordPiece tokenization | Rust core; under 20 seconds to tokenize 1 GB of text on a server CPU |
+| fastText (Meta CLI) | Sub-word embeddings, fast text classification | Ships as a single binary; trains and classifies on CPU only |
 | Vowpal Wabbit | Online learning for text classification | Handles datasets that don't fit in RAM |
 
 ---
@@ -920,7 +918,7 @@ Naive Bayes trains in O(n*d) with a single pass over data, making it ideal when 
 Stemming applies rule-based suffix stripping to produce a root form ("studies" -> "studi", "running" -> "run"). It is fast (O(1) per word) but produces non-words. Lemmatization uses a morphological dictionary to produce the canonical base form ("studies" -> "study", "running" -> "run"). Lemmatization is ~10x slower than stemming but produces valid words with correct part-of-speech awareness. Use stemming for information retrieval (search engines) where recall matters and the query also gets stemmed. Use lemmatization for tasks where word validity matters (text generation seeds, vocabulary-limited models).
 
 **Q: How do you handle class imbalance in text classification?**
-Three main approaches: (1) class_weight="balanced" in scikit-learn LogisticRegression, which weights each sample inversely proportional to class frequency; (2) oversampling the minority class using SMOTE in the embedding space (not on raw text); (3) adjusting the decision threshold post-training based on precision-recall curve analysis. For extreme imbalance (1:100+), reframe as anomaly detection using one-class classifiers. Always evaluate with F1 or AUPR, never accuracy, which is misleading on imbalanced datasets.
+Reweight the loss, resample the minority class, or move the decision threshold — in that order of preference. Concretely: (1) `class_weight="balanced"` in scikit-learn LogisticRegression, which weights each sample inversely proportional to class frequency; (2) oversampling the minority class using SMOTE in the embedding space (not on raw text); (3) adjusting the decision threshold post-training based on precision-recall curve analysis. For extreme imbalance (1:100+), reframe as anomaly detection using one-class classifiers. Always evaluate with F1 or AUPR, never accuracy, which is misleading on imbalanced datasets.
 
 **Q: What is the distributional hypothesis and why does it underpin word embeddings?**
 The distributional hypothesis states that words appearing in similar contexts have similar meanings (Firth, 1957: "You shall know a word by the company it keeps"). Word2Vec exploits this by training a neural network to predict context words from a center word (or vice versa). The intermediate weight matrix becomes the word embedding — words with similar context distributions (e.g., "cat" and "dog" both appear near "pet", "food", "vet") end up geometrically close in the embedding space, enabling semantic arithmetic like king - man + woman = queen.
@@ -929,16 +927,16 @@ The distributional hypothesis states that words appearing in similar contexts ha
 Pre-trained embeddings (Word2Vec on Google News, GloVe on Common Crawl) embed words according to general English usage. In a biomedical context, "cold" primarily means a respiratory infection, but in general English it means low temperature. Fine-tuning only the output layer on top of frozen general embeddings will not correct this semantic mismatch. Solutions: (1) train domain-specific embeddings from scratch on domain corpus; (2) continue training (fine-tune) pre-trained embeddings on domain data; (3) use subword models like FastText which are more robust to domain terminology.
 
 **Q: When would you use BERT fine-tuning over TF-IDF + Logistic Regression for text classification?**
-Use BERT fine-tuning when you have more than 10K labeled examples, a GPU is available, and accuracy is more important than latency. BERT's bidirectional context captures meaning that TF-IDF cannot — "bank" near "river" vs "bank" near "loan" get different representations. For fewer than 5K examples, TF-IDF + LR usually generalizes better because BERT overfits without sufficient data. For latency under 5ms or CPU-only environments, TF-IDF + LR is the only practical choice. DistilBERT is a middle ground: 60% of BERT's parameter count, 40% faster inference, and within 3% of BERT accuracy on most GLUE tasks. See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for detailed guidance.
+Use BERT fine-tuning when you have more than 10K labeled examples, a GPU is available, and accuracy is more important than latency. BERT's bidirectional context captures meaning that TF-IDF cannot — "bank" near "river" vs "bank" near "loan" get different representations. For fewer than 5K examples, TF-IDF + LR usually generalizes better because BERT overfits without sufficient data. For latency under 5ms or CPU-only environments, TF-IDF + LR is the only practical choice. DistilBERT is a middle ground: 40% smaller than BERT-base, 60% faster, and retaining 97% of its language understanding (Sanh et al., 2019). See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for detailed guidance.
 
 **Q: What is BM25 and when does it outperform dense embedding retrieval?**
-BM25 (Best Match 25) is a probabilistic term-frequency ranking function that scores documents by TF saturation (k1=1.2, so additional occurrences of a term yield diminishing returns), length normalization (b=0.75, penalizing verbose documents), and IDF (inverse document frequency, downweighting common terms). BM25 outperforms dense retrieval when queries contain rare terms, product codes, or proper nouns not seen in the embedding model's training data; when queries are exact keyword lookups ("error code 0x80070057"); and when the document collection is very large and un-indexed (FAISS requires memory proportional to corpus size). Dense retrieval wins on paraphrase and semantic matching tasks. Hybrid (BM25 + dense, fused with RRF) is the production standard for general search. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for full derivation.
+BM25 (Best Match 25) is a probabilistic lexical ranking function that scores documents by saturating term frequency, normalizing for document length, and weighting by IDF. Its three ingredients are TF saturation (k1=1.2, so additional occurrences of a term yield diminishing returns), length normalization (b=0.75, penalizing verbose documents), and IDF (downweighting common terms). BM25 outperforms dense retrieval when queries contain rare terms, product codes, or proper nouns not seen in the embedding model's training data; when queries are exact keyword lookups ("error code 0x80070057"); and when the document collection is very large and un-indexed (FAISS requires memory proportional to corpus size). Dense retrieval wins on paraphrase and semantic matching tasks. Hybrid (BM25 + dense, fused with RRF) is the production standard for general search. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for full derivation.
 
 **Q: How do sentence embeddings differ from word embeddings, and why can't you just average word2vec vectors?**
-Sentence embeddings represent an entire sentence as a single fixed-length vector capturing sentence-level semantics, not individual word semantics. Averaging word2vec vectors loses word order and composition — "dog bites man" and "man bites dog" have the same average embedding. Additionally, word2vec embeddings are context-independent, so "bank" always has one vector regardless of whether it means river bank or financial institution. Sentence-BERT (SBERT) uses a siamese BERT network trained on NLI (natural language inference) triplets with contrastive loss, producing embeddings where cosine similarity directly measures semantic similarity. SBERT cosine similarity achieves Spearman r=0.86 on STS-B vs 0.20 for averaged GloVe. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for training details.
+Sentence embeddings represent an entire sentence as a single fixed-length vector capturing sentence-level semantics, not individual word semantics. Averaging word2vec vectors loses word order and composition — "dog bites man" and "man bites dog" have the same average embedding. Additionally, word2vec embeddings are context-independent, so "bank" always has one vector regardless of whether it means river bank or financial institution. Sentence-BERT (SBERT) uses a siamese BERT network trained on NLI (natural language inference) triplets with contrastive loss, producing embeddings where cosine similarity directly measures semantic similarity. SBERT cosine similarity reaches Spearman 86.1 on STS-B, versus 58.0 for averaged GloVe and 16.5 for raw BERT `[CLS]` (Reimers & Gurevych, 2019). See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for training details.
 
 **Q: What is BLEU and what are its most significant weaknesses?**
-BLEU (Bilingual Evaluation Understudy) measures the geometric mean of modified n-gram precision (n=1 to 4) between a hypothesis and one or more reference translations, multiplied by a brevity penalty to penalize short outputs. Modified precision clips each n-gram count by its maximum occurrence in any reference, preventing trivial repetition. Weaknesses: BLEU is a corpus-level metric that correlates poorly with human judgment at the sentence level; it penalizes valid paraphrases not matching any reference (a correct translation using "automobile" when the reference says "car" scores zero for that bigram); it rewards n-gram overlap regardless of grammatical coherence; and it is computed differently across implementations (smoothing methods vary). ROUGE-L is preferred for summarization (recall-oriented, based on longest common subsequence). BERTScore is preferred when semantic equivalence matters over lexical matching. See [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) for full derivations.
+BLEU is a precision metric: the geometric mean of clipped n-gram precisions for n=1 to 4, multiplied by a brevity penalty that punishes short output. Modified precision clips each n-gram count by its maximum occurrence in any reference, preventing trivial repetition. Weaknesses: BLEU is a corpus-level metric that correlates poorly with human judgment at the sentence level; it penalizes valid paraphrases not matching any reference (a correct translation using "automobile" when the reference says "car" scores zero for that bigram); it rewards n-gram overlap regardless of grammatical coherence; and it is computed differently across implementations (smoothing methods vary). ROUGE-L is preferred for summarization (recall-oriented, based on longest common subsequence). BERTScore is preferred when semantic equivalence matters over lexical matching. See [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) for full derivations.
 
 **Q: What is the vanishing gradient problem in RNNs and how do LSTMs address it?**
 Gradients shrink multiplicatively through many time steps, so tokens far back in the sequence receive almost no learning signal and long-range dependencies never get learned. A plain RNN multiplies the same weight matrix at every step, so errors decay (or explode) exponentially with sequence length. LSTMs add a gated cell state with an additive update path — the cell carries information forward with minimal attenuation, and input/forget/output gates learn what to keep or discard. This is why LSTMs and GRUs handle sequences of 100+ tokens where vanilla RNNs fail past ~10.
