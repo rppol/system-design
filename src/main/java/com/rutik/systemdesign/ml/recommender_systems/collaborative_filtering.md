@@ -24,7 +24,7 @@ Key insight: ALS (Alternating Least Squares) for implicit feedback solves the pr
 
 **User-User CF**: Identify the K most similar users to the target user (cosine similarity or Pearson correlation on interaction vectors). Aggregate their ratings for candidate items, weighted by similarity.
 
-**Item-Item CF**: Identify the K most similar items to each item the target user has liked. Aggregate similarity-weighted scores for candidates. More stable than user-user CF because item similarities change slowly; Amazon patented and deployed this at scale in 2003.
+**Item-Item CF**: Identify the K most similar items to each item the target user has liked. Aggregate similarity-weighted scores for candidates. More stable than user-user CF because item similarities change slowly; Amazon patented it in 2001 (US 6,266,649, filed 1998) and described the deployed system in 2003.
 
 **Matrix Factorization**: Factorize R (n_users x n_items) into U (n_users x k) and V (n_items x k). Prediction: R_hat[u, i] = U[u] · V[i]. Latent dimension k = 50–200 typical. Regularization prevents overfitting on sparse data.
 
@@ -674,11 +674,11 @@ def popularity_fallback(
 
 ## 7. Real-World Examples
 
-**Netflix Prize**: The 2009 winning solution combined over 100 models, but pure matrix factorization (SVD++) achieved ~8.5% RMSE improvement by itself. SVD++ extended standard MF by incorporating implicit feedback signals (which movies a user rated, regardless of the rating value) into the user vector. This was a key insight: the act of rating something tells you something about the user even if the rating is negative.
+**Netflix Prize**: The 2009 winning solution blended 107 individual predictors, but pure matrix factorization got most of the way alone — Netflix measured plain SVD at 0.8914 RMSE against Cinematch's 0.9514, about 6% of the 10% target. SVD++ extended standard MF by incorporating implicit feedback signals (which movies a user rated, regardless of the rating value) into the user vector. This was a key insight: the act of rating something tells you something about the user even if the rating is negative.
 
 **Amazon Item-Item CF**: Amazon's 2003 paper "Amazon.com Recommendations: Item-to-Item Collaborative Filtering" described computing item-item similarities from the co-purchase graph. The key insight was that item-item similarities are more stable over time than user-user similarities (new users arrive constantly; item relationships change slowly). This allows pre-computing the full similarity table offline, making real-time recommendations O(1) lookups.
 
-**Spotify "implicit" ALS**: Spotify used ALS on implicit play-count data to power Discover Weekly's initial artist-level recommendations. The confidence parameter alpha=40 was found empirically — too low and the model treats all items equally, too high and popular items dominate at the expense of long-tail discovery.
+**Spotify implicit-feedback ALS**: Spotify built its early music recommendations on implicit matrix factorization over play counts, loading the resulting item vectors into its own ANN library (Annoy) for similar-item and personalized lookups. The alpha = 40 default comes from Hu, Koren & Volinsky's original implicit-ALS paper, not from Spotify — too low and the model treats all items equally, too high and popular items dominate at the expense of long-tail discovery.
 
 **Last.fm scrobble data**: One of the classic implicit CF benchmarks. Users' listening histories (scrobble counts) fed into ALS produce latent factor spaces where distance correlates strongly with musical genre and style — emergent behavior not provided as input features.
 
@@ -753,10 +753,10 @@ def popularity_fallback(
 
 | Tool | Type | Notes |
 |------|------|-------|
-| `implicit` (Python) | ALS + BPR | Fast Cython/GPU ALS, production-grade, used by Spotify |
+| `implicit` (Python) | ALS + BPR | Fast Cython/GPU ALS, production-grade; maintained by Ben Frederickson |
 | `LightFM` | Hybrid CF+CB | Supports user/item features alongside CF; useful for cold start |
 | `Surprise` | SVD, KNN | Research/prototyping, not production scale |
-| `RecBole` | Research framework | 70+ models, unified interface for benchmarking |
+| `RecBole` | Research framework | 100+ models, unified interface for benchmarking |
 | `PyTorch` | Custom MF/BPR | Full control for non-standard loss functions |
 | `Apache Spark MLlib` | Distributed ALS | Production-scale; handles 100M+ users via Spark workers |
 | `FAISS` | ANN for item retrieval | After ALS, store item vectors in FAISS for fast nearest neighbor |
@@ -787,7 +787,7 @@ Use a temporal train/test split: train on interactions before date T, test on in
 With regularization lambda close to 0, user and item latent vectors can grow arbitrarily large to minimize training loss on observed cells. This causes severe overfitting: the model perfectly predicts observed interactions but fails on unobserved ones. In practice, you see training loss near zero but poor Recall@K on the test set. The fix: set lambda in the range 0.001–0.1 (empirically tuned), or use cross-validation on a held-out validation split to select lambda.
 
 **Q: How does SVD++ extend standard matrix factorization?**
-SVD++ augments the user latent vector with an implicit feedback component: user_vector_u = user_factor_u + (1/sqrt(|N(u)|)) * sum over j in N(u) of implicit_factor_j, where N(u) is the set of items user u has interacted with (regardless of rating value) and implicit_factor_j is a learned vector for each item. This captures the notion that which items a user chose to interact with (not just how they rated them) is informative. SVD++ won the Netflix Prize and typically outperforms standard MF by 2–5% RMSE.
+SVD++ adds an implicit-feedback term to the user vector, so which items a user chose to rate shapes their taste alongside how they rated them. Concretely: user_vector_u = user_factor_u + (1/sqrt(|N(u)|)) * sum over j in N(u) of implicit_factor_j, where N(u) is the set of items user u has interacted with (regardless of rating value) and implicit_factor_j is a learned vector for each item. This captures the notion that which items a user chose to interact with (not just how they rated them) is informative. SVD++ was one of the strongest single models inside the Netflix Prize-winning blend and consistently beat plain SVD on the same data — by a margin that looks small in absolute RMSE but was decisive in a contest whose entire target was 10%.
 
 **Q: What is the complexity of item-item CF pre-computation and how would you scale it?**
 Naive item-item similarity computation requires O(I^2 * U) time (for all item pairs, compute cosine similarity on user interaction vectors of length U). For 1M items, this is 10^12 operations — infeasible. Scalable approaches: (1) use MinHash/LSH to approximate nearest items in O(I * U) with a false-negative tradeoff; (2) compute similarities only for item pairs that share at least one user (co-occurrence filtering, sparse matrix multiply); (3) use approximate nearest neighbor on item embeddings from a trained ALS model (FAISS). The `implicit` library computes item similarities via the ALS item factor dot products, which is O(I^2 * k) but k is small (128) vs. U (millions).
@@ -799,7 +799,7 @@ The user-item interaction matrix for a large platform (200M users, 10M items) co
 ALS alternates between closed-form updates for user factors (holding item factors fixed) and item factors (holding user factors fixed). Each update is an exact solution to a linear system, so convergence per iteration is reliable. Parallelizes perfectly — each user/item update is independent. Best for implicit feedback with the confidence weighting structure. SGD (stochastic gradient descent) processes one (user, item) pair at a time, updating both factors by gradient step. More flexible (any loss function), lower memory, but requires careful learning rate scheduling. ALS converges in 10–20 iterations and is preferred for large-scale implicit CF; SGD is used for explicit feedback and custom losses like BPR.
 
 **Q: How would you handle new users arriving between ALS training runs?**
-Strategy 1: folding in. Given a new user's interaction vector r_new (length n_items), compute their user factor analytically using the fixed item factor matrix V: u_new = solve((V.T @ diag(c_new) @ V + lambda*I), V.T @ (c_new * p_new)). This is a single linear solve with pre-computed V.T @ V. No retraining required. Limitation: the new user's interactions do not influence item factors until the next training run. Strategy 2: real-time online updates via SGD — process the new user's interactions as they arrive. Strategy 3: content-based cold start — use available features (age group, country, onboarding preferences) to select an initial user factor from the learned factor space (nearest centroid assignment).
+Fold them in: one small ridge solve against the frozen item factors gives a usable user vector without retraining. Strategy 1, folding in. Given a new user's interaction vector r_new (length n_items), compute their user factor analytically using the fixed item factor matrix V: u_new = solve((V.T @ diag(c_new) @ V + lambda*I), V.T @ (c_new * p_new)). This is a single linear solve with pre-computed V.T @ V. No retraining required. Limitation: the new user's interactions do not influence item factors until the next training run. Strategy 2: real-time online updates via SGD — process the new user's interactions as they arrive. Strategy 3: content-based cold start — use available features (age group, country, onboarding preferences) to select an initial user factor from the learned factor space (nearest centroid assignment).
 
 **Q: What is item frequency bias in ALS and how do you correct it?**
 Frequently interacted items accumulate high confidence weights across many users. Their item factors are trained on far more data and become large-magnitude vectors. When computing dot products for ranking, high-magnitude item factors dominate even for users who have never interacted with those items. Correction: L2-normalize item factors before computing recommendation scores; or apply popularity-based score discounting: score(u,i) = U[u] · V[i] / log(1 + popularity(i)). The `implicit` library includes a popularity-based filter option for this reason.

@@ -45,7 +45,7 @@ One-line analogy: A recommender is a librarian who has watched every patron's re
 
 Mental model: The system solves two sub-problems simultaneously. First, it must find the needle (relevant items) in a haystack of 10 million possibilities quickly — this is retrieval, optimized for recall. Second, it must rank the 500 needles it found by how much you personally will enjoy each one — this is ranking, optimized for precision.
 
-Why it matters: Netflix attributes more than 80% of watched content to recommendations. Amazon reports 35% of revenue driven by its recommendation engine. Spotify's Discover Weekly generates ~3 billion streams per month.
+Why it matters: Netflix reported that about 80% of hours streamed came from its recommender rather than search, and valued personalization at roughly $1B/year (Gomez-Uribe & Hunt, 2015). McKinsey estimated in 2013 that recommendations drive about 35% of purchases at Amazon. Spotify's Discover Weekly passed 100 billion tracks streamed in its first decade.
 
 Key insight: Collaborative filtering exploits the wisdom of crowds — users who agreed in the past will agree in the future — without needing to understand item content at all. The surprising implication: a recommender can surface a documentary you will love even though you have never expressed interest in documentaries, because 50 users with identical viewing history loved it.
 
@@ -142,7 +142,7 @@ TF-IDF or sentence embeddings for text features. Cosine similarity between user 
 
 **Two-tower**: Separate neural networks for user and item; dot product at retrieval time. Serves as the modern backbone of YouTube, Pinterest, Twitter.
 
-**Wide & Deep**: Wide linear model (memorization of rare feature combinations) + Deep MLP (generalization). Google Play serves 10B+ recommendations/day.
+**Wide & Deep**: Wide linear model (memorization of rare feature combinations) + Deep MLP (generalization). Deployed on Google Play (>1B active users), where the ranker scores over 10M apps per second at peak.
 
 **DeepFM**: Factorization Machines + deep MLP, automatically models pairwise feature interactions without manual feature engineering.
 
@@ -456,13 +456,13 @@ Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% an
 
 ## 7. Real-World Examples
 
-**Netflix Prize (2009)**: A $1M competition to improve Netflix's Cinematch algorithm by 10% RMSE. The winning solution (BellKor's Pragmatic Chaos) combined 107 models including matrix factorization, RBMs, and neighborhood methods. Matrix factorization alone achieved ~8.5% improvement. Key insight: SVD++ (incorporating implicit feedback) outperformed plain SVD. Netflix never deployed the winning ensemble — latency was impractical.
+**Netflix Prize (2009)**: A $1M competition to improve Netflix's Cinematch algorithm by 10% RMSE. The winning solution (BellKor's Pragmatic Chaos) blended 107 individual predictors including matrix factorization, RBMs, and neighborhood methods, reaching test RMSE 0.8567 against Cinematch's 0.9514 (10.06%). Matrix factorization alone got most of the way there: Netflix measured plain SVD at 0.8914 RMSE, about 6% better than Cinematch. Key insight: SVD++ (incorporating implicit feedback) outperformed plain SVD. Netflix put SVD and RBM into production but never shipped the grand-prize ensemble — the extra accuracy "did not seem to justify the engineering effort needed to bring [it] into a production environment."
 
-**YouTube Two-Tower (2016)**: Google published the landmark paper on using deep neural networks for YouTube recommendation. Candidate generation network: user watch history embedded via average pooling of video embeddings, then a DNN producing a user vector. Retrieval via nearest neighbor search over all video vectors. Ranking network: a separate deeper DNN with hundreds of features. This architecture became the blueprint for modern RecSys.
+**YouTube Deep Candidate Generation (2016)**: Google published the landmark paper on using deep neural networks for YouTube recommendation. Candidate generation network: user watch history embedded via average pooling of video embeddings, then a DNN producing a user vector, trained as an extreme multiclass softmax over ~1M video classes with several thousand sampled negatives per example. Retrieval via nearest neighbor search over the learned video vectors. Ranking network: a separate deeper DNN with hundreds of features, predicting expected watch time rather than click. This architecture became the blueprint for modern RecSys.
 
-**TikTok For You Page**: A reinforcement learning system that treats each user session as an episodic interaction. The model updates continuously from watch-time signals (not just binary clicks). Short videos allow extremely high-frequency feedback loops. Cold start handled by showing viral/trending content to new users.
+**TikTok For You Page**: Optimizes for watch-time and completion signals rather than binary clicks; very short videos give an extremely high-frequency feedback loop, and cold start is handled by showing viral/trending content to new users. ByteDance has not published the ranking architecture, so treat the mechanism as reported rather than documented.
 
-**Spotify Discover Weekly**: Combines collaborative filtering (users with similar listening history) with NLP on playlist titles and track metadata. 30-song playlist generated every Monday. Launched 2015, within weeks generated 1.7 billion streams. The key innovation: treating playlists as "documents" and songs as "words" — word2vec on playlists gives song embeddings that capture musical relationships.
+**Spotify Discover Weekly**: Combines collaborative filtering (users with similar listening history) with NLP on playlist titles and track metadata. 30-song playlist generated every Monday. Launched July 2015; press coverage reported 1.7 billion tracks streamed in its first five months. The key innovation: treating playlists as "documents" and songs as "words" — word2vec on playlists gives song embeddings that capture musical relationships.
 
 **Amazon "Customers Also Bought"**: Item-item CF computed offline. Stable and fast because item similarities change slowly compared to user preferences. Scales to Amazon's full catalog because each item only needs its K most similar neighbors stored.
 
@@ -559,7 +559,7 @@ Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% an
 Retrieval (candidate generation) selects ~100-1000 items from a corpus of millions, optimizing for recall (recall@100 > 95% is the target). Ranking then scores those candidates with a heavier model, optimizing for precision (NDCG@10). The two-stage design exists because scoring all 10M items with a deep model per request would take seconds; a simple dot product ANN search takes milliseconds. Retrieval sacrifices a little recall to enable feasible ranking.
 
 **Q: How does matrix factorization work for collaborative filtering?**
-Matrix factorization decomposes the sparse user-item interaction matrix R (n_users x n_items) into two low-rank matrices: U (n_users x k) and V (n_items x k), such that R ≈ U @ V.T. Each user and item gets a k-dimensional latent vector (k = 50–200 typically). For explicit feedback, the loss is MSE on observed ratings; for implicit feedback, ALS with confidence weighting is preferred. The Netflix Prize showed SVD-based MF achieving ~8.5% RMSE improvement over the baseline.
+Matrix factorization decomposes the sparse user-item interaction matrix R (n_users x n_items) into two low-rank matrices: U (n_users x k) and V (n_items x k), such that R ≈ U @ V.T. Each user and item gets a k-dimensional latent vector (k = 50–200 typically). For explicit feedback, the loss is MSE on observed ratings; for implicit feedback, ALS with confidence weighting is preferred. In the Netflix Prize, plain SVD reached 0.8914 RMSE against Cinematch's 0.9514 — about 6% of the 10% needed to win, from one model.
 
 **Q: What is implicit feedback and how does it differ from explicit feedback?**
 Explicit feedback is a direct user rating (1–5 stars). Implicit feedback is inferred from behavior: clicks, purchases, dwell time, skips. Implicit is far more abundant but carries no true negatives — if a user did not click an item, they may not have seen it, or it may not have been shown. Algorithms like ALS (with confidence weighting) and BPR (pairwise ranking) are specifically designed for implicit feedback, treating unobserved interactions as weakly negative rather than missing.
@@ -571,7 +571,7 @@ Cold start occurs when a new user has no interaction history (user cold start) o
 Position bias is the tendency for users to click items shown at higher positions regardless of intrinsic quality. Items at position 1 can receive 10x the CTR of items at position 10 with identical quality. If you train on raw clicks, the model learns position as a proxy for quality. Correction methods: inverse propensity weighting (IPW) — upweight clicks at lower positions by 1/P(position), where P is estimated from randomization experiments; or use a separate position bias model trained on randomized traffic to debias labels.
 
 **Q: How does the Wide & Deep model work?**
-Wide & Deep (Google, 2016) combines a wide linear model with a deep neural network, trained jointly. The wide part memorizes specific feature combinations (e.g., "user installed app X and searched for Y" → install Z) using manually crafted cross features. The deep part generalizes to unseen feature combinations via dense embeddings through multiple MLP layers. The intuition: memorization handles rare but reliable patterns; generalization handles novel combinations. Google Play uses this to serve over 10 billion recommendations per day.
+Wide & Deep (Google, 2016) combines a wide linear model with a deep neural network, trained jointly. The wide part memorizes specific feature combinations (e.g., "user installed app X and searched for Y" → install Z) using manually crafted cross features. The deep part generalizes to unseen feature combinations via dense embeddings through multiple MLP layers. The intuition: memorization handles rare but reliable patterns; generalization handles novel combinations. Google published it on Google Play (over 1 billion active users, over 1 million apps), trained on 500 billion examples, with the ranking layer scoring over 10 million apps per second at peak.
 
 **Q: What metrics would you use to evaluate a recommender system offline?**
 NDCG@K (Normalized Discounted Cumulative Gain) — measures ranking quality, giving higher weight to relevant items at top positions. Recall@K — fraction of relevant items captured in top-K, important for the retrieval stage. MRR (Mean Reciprocal Rank) — 1/rank of first relevant item, important when finding any relevant item quickly matters. For diversity: ILD (Intra-List Diversity) — average pairwise distance among recommended items. For novelty: mean inverse log popularity of recommended items. Critical caveat: always use temporal train/test split, never random split.
@@ -592,7 +592,7 @@ Offline metrics reward predicting logged historical clicks, but those logs were 
 A random split leaks future interactions into training, letting the model see a user's later clicks while predicting their earlier ones, which inflates offline metrics that then collapse online. Real serving only ever has past data to predict the future, so evaluation must mirror that by training on interactions before a cutoff time T and testing on interactions after T. Random splits routinely show large NDCG gains that translate to zero online CTR lift.
 
 **Q: How do you stop a two-tower retrieval model from only recommending popular items?**
-Apply a logQ correction: subtract the log of each item's sampling probability from the in-batch softmax logits so frequently sampled head items are penalized in the denominator. In-batch negative sampling draws negatives in proportion to popularity, which biases the model toward blockbusters; the correction restores an approximately unbiased softmax. Complement it with popularity discounting at scoring time (divide the score by log(1 + interaction_count)) and a small exploration budget to keep the long tail visible.
+Discount by popularity at scoring time — divide the score by log(1 + interaction_count) — and reserve a small exploration budget for the long tail. Head domination comes from the training positives: blockbusters are most of the logged interactions, so the towers learn they are a safe bet for everyone. Diversity and category caps in re-ranking are the third lever. The logQ correction fixes a different, opposite bias: in-batch negatives are drawn in proportion to popularity, so uncorrected training over-penalizes popular items as negatives, and subtracting log Q(i) from the logits restores an approximately unbiased softmax (Yi et al., 2019).
 
 **Q: What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
 Pointwise predicts an absolute relevance score per item, pairwise learns which of two items should rank higher, and listwise optimizes a metric defined over the whole ranked list. Pointwise (logistic regression on click) is simplest and fully parallel but ignores relative order; pairwise (RankNet, LambdaRank, BPR) directly targets ordering; listwise (ListNet, LambdaMART) aligns best with NDCG but costs more to train. Most production rankers use pairwise or LambdaMART because ordering, not absolute score, drives the ranking metric.
@@ -721,14 +721,15 @@ class RecommenderService:
         return out
 ```
 
-**Pitfall 1 — Popularity bias.** The retrieval tower learns to recommend only blockbusters because they dominate the training log; the long tail never surfaces.
+**Pitfall 1 — Sampling bias in the in-batch softmax.** Negatives arrive in proportion to popularity, so the raw batch softmax is a biased estimator of the full softmax and head items are over-penalized as negatives.
 
 ```python
-# BROKEN: sampled softmax treats all items equally -> head items always win
+# BROKEN: batch softmax ignores that item j appeared as a negative with
+# probability Q(j) -> frequent items absorb far more push-away gradient
 loss = in_batch_loss(logits)
 
-# FIX: logQ correction (subtract log of item sampling probability) so frequent
-# items are penalized in the softmax denominator (exposure penalty).
+# FIX: logQ correction (subtract log of item sampling probability) so each
+# sampled negative is reweighted back to its full-softmax contribution.
 log_q = tf.math.log(item_freq_prob)            # P(item) estimated from log
 corrected_logits = logits - log_q[tf.newaxis, :]
 loss = in_batch_loss(corrected_logits)

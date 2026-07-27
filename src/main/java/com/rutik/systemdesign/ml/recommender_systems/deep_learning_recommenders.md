@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Deep learning recommenders replace hand-crafted similarity functions and shallow matrix factorization with learned neural representations that can capture complex, non-linear interactions between users, items, and context. They are the foundation of modern large-scale recommendation systems at Google (Wide & Deep, YouTube two-tower), Meta (DLRM), and Pinterest (PinSage).
+Deep learning recommenders replace hand-crafted similarity functions and shallow matrix factorization with learned neural representations that can capture complex, non-linear interactions between users, items, and context. They are the foundation of modern large-scale recommendation systems at Google (Wide & Deep, YouTube deep candidate generation and its two-tower successors), Meta (DLRM), and Pinterest (PinSage).
 
 The key advancement over collaborative filtering is the ability to incorporate heterogeneous features: sparse ID features (user_id, item_id, category), dense numerical features (price, age, click rate), and sequential features (last 50 items viewed) — all jointly learned in a single model. Deep models also learn cross-feature interactions automatically, eliminating manual feature engineering.
 
@@ -57,7 +57,7 @@ Directly predicts click probability (binary classification)
 Wide part: linear model on raw + crossed features (e.g., user_country × item_category)
 Deep part: MLP on dense embeddings of all features
 Training: jointly optimized end-to-end
-Serving: Google Play, 10B+ recommendations/day
+Serving: Google Play, over 10M apps scored per second at peak (14 ms multithreaded)
 
 ### 4.4 DeepFM
 
@@ -628,9 +628,10 @@ explains."
 ```
 
 The blockbuster gets back `3.91` and the niche item gets back `9.21`. Read the direction carefully,
-because it is the part interviewers probe: raising the popular item's logit means it already
-accounts for more of the softmax denominator, so the gradient stops shoving it away from every
-user. Uncorrected, the blockbuster appears as a negative in nearly every batch and accumulates
+because it is the part interviewers probe: the *rare* item is lifted more, because the one time it
+was sampled it stands in for all the times it was not — so its share of the softmax denominator
+grows and the blockbuster's share shrinks, which is exactly the push-away gradient the blockbuster
+was over-paying. Uncorrected, the blockbuster appears as a negative in nearly every batch and accumulates
 thousands of small "push away" gradients per epoch while the niche item accumulates a handful —
 so the model learns to systematically underrank exactly the items most users would enjoy. That is
 the Pitfall 1 failure, and the correction is cheap: one precomputed frequency table, one
@@ -710,7 +711,7 @@ one exactly once, and feed that list of numbers to the top MLP."
 
 The `n(n-1)/2` growth is the handshake count again — quadratic in the number of feature tables,
 which is why DLRM's interaction layer is the part that stops scaling first. At 26 tables you emit
-`351` scalars into the top MLP; at 60 tables it would be `1,770`. This is the concrete difference
+`351` scalars into the top MLP; at 60 tables (61 vectors) it would be `1,830`. This is the concrete difference
 from DeepFM: FM also models all pairwise crosses, but folds them into a single sum via an algebraic
 shortcut, whereas DLRM keeps all `351` numbers separate and lets the top MLP decide what each one
 is worth. Keeping them separate is more expressive and far more hardware-friendly — it is one
@@ -721,13 +722,13 @@ MLP's first layer, grows quadratically with the feature count.
 
 ## 7. Real-World Examples
 
-**YouTube Two-Tower (2016)**: Google's "Deep Neural Networks for YouTube Recommendations" paper described a candidate generation network that replaced the previous CF system. User tower inputs: watch history (average of video embeddings), search history, demographic features, geographic features, device, time. Item tower: video ID, topic, description embeddings. Trained with sampled softmax on 1M+ candidate videos. The key challenge was training scale: hundreds of millions of users, millions of videos, billions of training examples. Solution: use in-batch negatives for efficiency.
+**YouTube Deep Candidate Generation (2016)**: Google's "Deep Neural Networks for YouTube Recommendations" paper described a candidate generation network that replaced the previous CF system. Inputs: watch history (average of video embeddings), search history, demographic features, geographic features, device, time. It is a single network, not a dual encoder: the video vectors used for serving are the output-layer embeddings of an extreme multiclass softmax over ~1M video classes, retrieved by ANN at request time. The key challenge was training scale: models with roughly a billion parameters trained on hundreds of billions of examples. Solution: candidate sampling — several thousand sampled negatives per example with importance weighting, over 100x faster than a full softmax.
 
-**Google Play Wide & Deep (2016)**: Deployed for Google Play app recommendations. Wide component: feature crosses between app and user features (e.g., "user_installed_app=X AND query=Y"). Deep component: 1B+ parameters with embedding tables for categorical features. Served to over 1 billion Android users. Key insight: the wide component was essential for memorizing specific user-app combinations that the deep component could not generalize from (too rare in training data).
+**Google Play Wide & Deep (2016)**: Deployed for Google Play app recommendations. Wide component: feature crosses between app and user features (e.g., "user_installed_app=X AND query=Y"). Deep component: 32-dimensional embeddings for every categorical feature, concatenated into a ~1200-dimensional dense input, trained on over 500 billion examples. Served to over 1 billion active users, with the ranker scoring over 10 million apps per second at peak (14 ms serving latency after multithreading, versus 31 ms single-threaded). Key insight: the wide component was essential for memorizing specific user-app combinations that the deep component could not generalize from (too rare in training data); Wide & Deep gained +3.9% app acquisitions over wide-only in an online A/B test.
 
-**Pinterest PinSage (2018)**: Graph convolutional network for pin recommendation. Treats the user-item interaction graph as a graph; pin embeddings are computed by aggregating neighborhood pin features via GCN. Scales to 3 billion pins. Key innovation: importance-based neighborhood sampling (not all neighbors equally — sample proportional to random walk visit count) makes GCN tractable at Pinterest's scale.
+**Pinterest PinSage (2018)**: Graph convolutional network for pin recommendation. Treats the pin-board bipartite structure as a graph; pin embeddings are computed by aggregating neighborhood pin features via GCN. Scales to 3 billion nodes and 18 billion edges. Key innovation: importance-based neighborhood sampling (not all neighbors equally — sample proportional to random walk visit count) makes GCN tractable at Pinterest's scale.
 
-**Netflix SASRec-style Sequential Modeling**: Netflix uses sequential models to capture "session context" — the series you are currently watching matters more than your 5-year watch history. A self-attention model over the last 20 watched items significantly improves same-session next-episode recommendations compared to static user embeddings.
+**Sequential Modeling for Session Context**: Streaming services use sequential models to capture "session context" — the series you are currently watching matters more than your 5-year watch history. A self-attention model over the last N watched items improves same-session next-episode recommendations compared to static user embeddings; the specific window and gain are internal numbers that platforms rarely publish, so tune N on your own data.
 
 ---
 
@@ -781,7 +782,7 @@ Bidirectional attention is O(N^2) in sequence length. For sequences longer than 
 
 ## 10. Common Pitfalls
 
-**Pitfall 1 — Popularity bias in in-batch negatives**: A two-tower model trained with in-batch negatives consistently recommended only the top 500 most popular items. Root cause: popular items appear as negatives in many batches; the model learns to push their embeddings far from most users' vectors, which paradoxically makes them stand out from true negatives. Fix: apply importance sampling correction — divide the loss contribution of each negative by its sampling probability (proportional to item popularity).
+**Pitfall 1 — Sampling bias in in-batch negatives**: A two-tower model trained with in-batch negatives systematically underranked the head of the catalog — blockbusters that most users enjoy stopped appearing in retrieval. Root cause: negatives arrive in proportion to popularity, so a popular item shows up as a negative in nearly every batch and absorbs thousands of small push-away gradients per epoch while a tail item absorbs a handful. The raw batch softmax is therefore a biased estimator of the full softmax. Fix: apply the logQ correction — subtract log Q(i), the item's batch-sampling probability, from each logit so every sampled negative is reweighted back to its full-softmax contribution.
 
 **Pitfall 2 — Embedding table size explosion**: A Wide & Deep model was built with embedding_dim=128 for 50M user IDs and 10M item IDs. Embedding tables alone: (50M + 10M) * 128 * 4 bytes = 30GB. Exceeded GPU memory. Fix: use feature hashing (hash user_id to a bucket of size 5M), reduce embedding dim for high-cardinality features, or use embedding pruning for rare IDs.
 
@@ -799,7 +800,7 @@ Bidirectional attention is O(N^2) in sequence length. For sequences longer than 
 |------|----------|
 | PyTorch | Two-tower, SASRec, NCF — custom deep models |
 | TensorFlow Recommenders (TFRS) | Two-tower with built-in retrieval tasks, Google's framework |
-| RecBole | Benchmark 70+ models including NCF, BERT4Rec, SASRec |
+| RecBole | Benchmark 100+ models including NCF, BERT4Rec, SASRec |
 | FAISS | ANN index for two-tower retrieval |
 | PyTorch Geometric | Graph-based models (PinSage) |
 | Merlin (NVIDIA) | GPU-accelerated recommendation training (DLRM at scale) |
@@ -833,7 +834,7 @@ Strategy 1: Feature hashing — hash user IDs into a smaller bucket space (e.g.,
 Hard negatives are items that are similar to the user's preferred items but are not actually positive (the user did not interact with them). Training with only random negatives means the model easily distinguishes the positive from completely irrelevant items. Hard negatives force the model to learn fine-grained distinctions. Mining: after a training epoch, compute user-item similarities; for each user, the top-K most similar non-positive items are hard negatives for the next epoch. Benefit: improves recall@K for similar items (the "hard" region of the embedding space). Risk: false hard negatives — items the user would actually like but has not yet seen — can harm training. Mitigation: mix 50% hard and 50% random negatives.
 
 **Q: How does Wide & Deep handle the memorization-generalization tradeoff?**
-The wide (linear) part memorizes specific feature combinations by directly modeling raw and crossed features — e.g., "if user installed Word AND searched for Excel, show Excel App." These combinations are rare but highly predictive. A deep neural network would rarely see this exact combination in training and cannot generalize to it reliably. The deep part generalizes across features it has not seen together by learning dense representations — e.g., "productivity apps" cluster together in embedding space. Joint training ensures both components complement each other rather than one dominating.
+The wide linear part memorizes rare but reliable feature crosses while the deep part generalizes across them, and joint training keeps both contributing. The wide part memorizes specific feature combinations by directly modeling raw and crossed features — e.g., "if user installed Word AND searched for Excel, show Excel App." These combinations are rare but highly predictive. A deep neural network would rarely see this exact combination in training and cannot generalize to it reliably. The deep part generalizes across features it has not seen together by learning dense representations — e.g., "productivity apps" cluster together in embedding space. Joint training ensures both components complement each other rather than one dominating.
 
 **Q: How do you evaluate a two-tower retrieval model?**
 Primary metric: Recall@K — what fraction of the true positive items appear in the top-K retrieved candidates. Target: Recall@100 > 95% (so the ranking stage has enough good candidates). Also measure: Hit@1 (fraction of users for whom the true positive item is ranked #1, useful for next-item prediction tasks), and catalog coverage. Use temporal evaluation: train on interactions before date T, evaluate on interactions at T+1 to T+7. Compare against an ALS baseline — two-tower with features should outperform ALS significantly when item content features are informative.
@@ -899,9 +900,9 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    uf(["User tower inputs<br/>user_id (64), age group (16)<br/>country (16), device (8)<br/>recent_10_videos avg pool (64)<br/>dense: watch_rate, days_since_signup, n_watches_log"]) --> umlp["User MLP<br/>400 -> 256 -> 256"]
+    uf(["User tower inputs<br/>user_id (64), age group (16)<br/>country (16), device (8)<br/>recent_10_videos avg pool (64)<br/>dense: watch_rate, days_since_signup, n_watches_log"]) --> umlp["User MLP<br/>171 -> 256 -> 256"]
     umlp --> un["L2-normalize"]
-    itf(["Item tower inputs<br/>video_id (64), genre (32)<br/>director (16), BERT text embed (128, frozen)<br/>release_year (1, normalized)<br/>dense: avg_rating, n_views_log"]) --> imlp["Item MLP<br/>341 -> 256 -> 256"]
+    itf(["Item tower inputs<br/>video_id (64), genre (32)<br/>director (16), BERT text embed (128, frozen)<br/>release_year (1, normalized)<br/>dense: avg_rating, n_views_log"]) --> imlp["Item MLP<br/>243 -> 256 -> 256"]
     imlp --> inz["L2-normalize"]
     un --> dot(("dot product"))
     inz --> dot
