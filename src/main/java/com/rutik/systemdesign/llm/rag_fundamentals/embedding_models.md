@@ -140,14 +140,38 @@ Model                          Dim    Context  MTEB Avg  Use Case
 ---------------------------------------------------------
 text-embedding-3-small         1536   8192     62.3      OpenAI managed; good default
 text-embedding-3-large         3072   8192     64.6      Best OpenAI quality; high cost
-text-embedding-ada-002         1536   8192     61.0      Legacy; superseded by v3
-BAAI/bge-base-en-v1.5          768    512      63.6      Best open source (compact)
-BAAI/bge-large-en-v1.5         1024   512      64.2      Best open source (quality)
+BAAI/bge-base-en-v1.5          768    512      63.6      Open source (compact)
+BAAI/bge-large-en-v1.5         1024   512      64.2      Open source (quality)
 BAAI/bge-m3                    1024   8192     -         Multilingual; long context
 nomic-embed-text-v1.5          768    8192     62.3      Open source; long context
 E5-large-v2                    1024   512      62.3      Good general purpose
-Cohere embed-english-v3.0      1024   512      64.5      Managed; strong multilingual
+Cohere embed-english-v3.0      1024   512      64.5      Managed; English
 ```
+
+The MTEB Avg column above is the original MTEB (English) average. MTEB has since been
+restructured, and the models now at the top of the board report **MTEB v2 English mean**,
+which is a different scale — do not compare the two columns:
+
+```
+Model                       Dim (MRL)          Context  MTEB v2 En  Use Case
+-------------------------------------------------------------------------------------------------
+Qwen3-Embedding-8B          32-4096              32768  75.22       Open weights; board leader
+Qwen3-Embedding-4B          32-2560              32768  74.60       Open weights; mid-size
+Qwen3-Embedding-0.6B        32-1024              32768  70.70       Open weights; cheap to serve
+gemini-embedding-2          128-3072              8192  -           Managed; text/image/audio/PDF
+Cohere embed-v4.0           256/512/1024/1536   128000  -           Managed; multimodal, 128k ctx
+voyage-4-large              256/512/1024/2048    32000  -           Managed; retrieval-tuned
+google/embeddinggemma-300m  128-768               2048  -           On-device / edge, 300M params
+nomic-embed-text-v2-moe     256-768                512  -           Open weights MoE; multilingual
+```
+
+Every model in the second block is MRL-trained, so dimension is now a deployment knob
+rather than a fixed model property — see the Matryoshka section below. Note also that the
+newer open-weights models are instruction-conditioned: Qwen3-Embedding wants
+`"Instruct: {task}\nQuery:{query}"` on queries and nothing on documents, EmbeddingGemma
+wants `"task: search result | query: {q}"` / `"title: none | text: {doc}"`, and
+nomic-embed-text-v2-moe wants `search_query:` / `search_document:`. Getting the prefix
+wrong costs measurable recall, exactly as it does with BGE.
 
 Dimension considerations:
 ```
@@ -164,7 +188,7 @@ Dimension considerations:
 Cost at 10M chunks:
   text-embedding-3-small: 10M × 1536 × 4B = 60GB storage
   BAAI/bge-base-en-v1.5:  10M × 768 × 4B = 30GB storage
-  text-embedding-ada-002: 10M × 1536 × 4B = 60GB storage
+  Qwen3-Embedding-0.6B:   10M × 1024 × 4B = 40GB storage (truncatable to 10GB at 256d)
 ```
 
 **Stated plainly.** `bytes = N x d x 4` says: "your embedding bill is one multiplication — number of chunks, times dimensions, times four bytes per float32." Dimension is a *linear* storage multiplier, so doubling `d` doubles the index, every time, with no discount.
@@ -290,12 +314,15 @@ embeddings = model.encode(
     convert_to_numpy=True
 )  # shape: [N, 768]
 
-# BGE models require a query prefix for optimal retrieval performance:
-query = "Represent this sentence for searching relevant passages: " + user_query
-query_embedding = model.encode(query, normalize_embeddings=True)
+# Retrieval models are asymmetric: queries need the model's query prompt,
+# documents do not. encode_query() / encode_document() pull the right prompt
+# out of the model's own config, so the prefix cannot drift between the two
+# call sites (BGE: "Represent this sentence for searching relevant passages: ").
+query_embedding = model.encode_query(user_query, normalize_embeddings=True)
+doc_embedding = model.encode_document(chunk_text, normalize_embeddings=True)
 
-# Document chunks: no prefix needed
-doc_embedding = model.encode(chunk_text, normalize_embeddings=True)
+# Same two calls work unchanged for Qwen3-Embedding, EmbeddingGemma and
+# nomic-embed-text-v2-moe, each of which wants a different prefix string.
 ```
 
 ### 3.5 MTEB Benchmark
@@ -328,9 +355,12 @@ Key retrieval datasets in MTEB:
 ### 3.6 Domain-Specific Fine-Tuning of Embedding Models
 
 ```python
-from sentence_transformers import SentenceTransformer, losses
-from sentence_transformers.training_args import SentenceTransformerTrainingArguments
-from sentence_transformers.trainer import SentenceTransformerTrainer
+from sentence_transformers import (
+    SentenceTransformer,
+    SentenceTransformerTrainer,
+    SentenceTransformerTrainingArguments,
+    losses,
+)
 from datasets import Dataset
 
 # Training data format for domain fine-tuning:
@@ -422,7 +452,8 @@ Truncated to 512d:   [d1, d2, d3, ..., d512]   → works well (MRL training)
 Truncated to 256d:   [d1, d2, d3, ..., d256]   → still reasonable
 Truncated to 64d:    [d1, d2, d3, ..., d64]    → lower quality but fast
 
-MRL models (text-embedding-3-small/large, nomic-embed-text-v1.5):
+MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-2,
+            Cohere embed-v4.0, voyage-4-large, EmbeddingGemma, nomic-embed-text):
   Trained so first N dimensions are meaningful at any N
   Enables adaptive dimensionality: use 512d for fast retrieval,
   3072d for final reranking
@@ -464,8 +495,8 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 ## 5. Real-World Examples
 
 ### OpenAI Embeddings API (the managed option, as used for file-retrieval features)
-- text-embedding-3-small superseded text-embedding-ada-002 as the default managed model
-  (OpenAI does not publish which model backs ChatGPT's own file retrieval)
+- text-embedding-3-small is the default managed model; text-embedding-3-large is the
+  quality tier (OpenAI does not publish which model backs ChatGPT's own file retrieval)
 - 1536-dim embeddings, 8192-token max input
 - Managed endpoint: no infrastructure; pay-per-use
 
@@ -495,8 +526,9 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 
 Note the ordering: on MTEB Retrieval nDCG@10, `text-embedding-3-small` (51.08) sits *below*
 both self-hosted BGE models — its appeal is the managed endpoint and 8k context, not raw
-retrieval quality. Cohere also ships `embed-v4.0` (1536-dim, multimodal, $0.12/M text tokens)
-alongside the v3 line. Two caveats on this table: the bge-m3 figure is not confirmed against a
+retrieval quality. Cohere's current flagship is `embed-v4.0` — multimodal, 128k context, and
+MRL-truncatable to 256/512/1024/1536 dimensions — with the v3 line kept for compatibility.
+Two caveats on this table: the bge-m3 figure is not confirmed against a
 primary source, and Cohere's own materials have quoted both 55.0 and 55.9 for
 `embed-english-v3.0` on BEIR — treat both rows as indicative. The BGE and OpenAI rows come
 from the model cards and the original MTEB (English) leaderboard; MTEB has since been
@@ -528,7 +560,7 @@ restructured, so re-check the live leaderboard before quoting a ranking.
 ## 8. Common Pitfalls
 
 **1. Using different models for indexing and querying**
-If documents are indexed with text-embedding-ada-002 but queries are embedded with text-embedding-3-small, the vectors are in different semantic spaces and cosine similarity is meaningless.
+If documents are indexed with text-embedding-3-large truncated to 1536 dimensions but queries are embedded with text-embedding-3-small, the vectors have identical shape and are still in different semantic spaces — cosine similarity is meaningless and nothing errors.
 Fix: Store the model name with the index metadata. Enforce using the same model at query time. When upgrading embedding models, re-embed the entire corpus.
 
 **2. Exceeding the model's token limit**
@@ -559,7 +591,10 @@ Fix: Batch up to 2048 inputs per OpenAI API call (or 256 per sentence-transforme
 |------|---------|-------|
 | **sentence-transformers** | Self-hosted embedding | Standard library; supports all major models |
 | **OpenAI Embeddings API** | Managed embedding | text-embedding-3-small/large; best managed option |
-| **Cohere Embed API** | Managed embedding | Best multilingual managed option |
+| **Cohere Embed API** | Managed embedding | `embed-v4.0`; multimodal, 128k context, MRL dims |
+| **Gemini Embedding API** | Managed embedding | `gemini-embedding-2`; text, image, audio and PDF in one space |
+| **Voyage AI** | Managed embedding | `voyage-4-large` plus code/finance/law domain models |
+| **Qwen3-Embedding** | Open source models | 0.6B/4B/8B, 32k context, MRL; current MTEB leader |
 | **HuggingFace Inference API** | Managed + open source | Host any HuggingFace model via API |
 | **MTEB Leaderboard** | Model comparison | huggingface.co/spaces/mteb/leaderboard; filter by Retrieval |
 | **BAAI/bge** | Open source models | Best open-source English embedding family |
@@ -587,7 +622,7 @@ A: Matryoshka Representation Learning (MRL) trains embeddings so that the first 
 A: Domain fine-tuning continues training a pre-trained embedding model on domain-specific (query, positive_passage, negative_passage) triples. The model learns domain vocabulary alignment and domain-specific similarity patterns. Training: MultipleNegativesRankingLoss on 5K-50K domain triples, 2-5 epochs, learning rate 2e-5. Worth the effort when: (1) MTEB retrieval recall@10 on your domain is under 70% with general models; (2) Domain has specialized vocabulary that general models handle poorly (medical ICD codes, legal citations, financial terminology); (3) You have or can generate sufficient training triples (minimum ~5000 high-quality pairs). For most RAG deployments, a well-configured general model (BGE-large, text-embedding-3) is sufficient; fine-tuning is reserved for specialized domains where the baseline is genuinely poor.
 
 **Q: What causes embedding dimension mismatch bugs and how do you prevent them?**
-A: Dimension mismatch occurs when the embedding model changes during the system's lifecycle. Common scenarios: (1) upgrading from text-embedding-ada-002 (1536d) to text-embedding-3-small (1536d — same dimension, but different semantic space, still incompatible); (2) switching from BGE-base (768d) to BGE-large (1024d) — different dimension, immediate error; (3) deploying a different model at query time than was used at index time. Prevention: (1) store model_name and model_version as vector index metadata; (2) assert model_name matches at query time; (3) version the vector index — when changing models, create a new index version and migrate atomically. Never assume same-dimension means same semantic space.
+A: Dimension mismatch occurs when the embedding model changes during the system's lifecycle. Common scenarios: (1) swapping text-embedding-3-large truncated to 1536d for text-embedding-3-small (1536d — same dimension, different semantic space, so it fails silently rather than erroring); (2) switching from BGE-base (768d) to BGE-large (1024d) — different dimension, immediate error; (3) deploying a different model at query time than was used at index time. Prevention: (1) store model_name and model_version as vector index metadata; (2) assert model_name matches at query time; (3) version the vector index — when changing models, create a new index version and migrate atomically. Never assume same-dimension means same semantic space.
 
 **Q: How do you handle long documents that exceed an embedding model's context window?**
 A: Four strategies. First, chunking: split the document into chunks that fit within the model's context window (most common approach; see [chunking_strategies.md](chunking_strategies.md)). Second, use a long-context embedding model: bge-m3 (8192 tokens), nomic-embed-text-v1.5 (8192 tokens), text-embedding-3-large (8192 tokens). Third, hierarchical summarization: embed a summary of each long document as a coarse-grained index; use the summary embedding for first-stage retrieval, then retrieve sub-sections from matched documents. Fourth, sliding window: embed overlapping windows of the document independently; at query time, retrieve the window with highest similarity. For most production systems: chunking + overlap is the right default; switch to long-context models when chunk boundary information loss is a significant problem.
@@ -596,7 +631,7 @@ A: Four strategies. First, chunking: split the document into chunks that fit wit
 A: Measure recall@10 on a labeled retrieval test set: 100-200 (query, expected_document_ids) pairs created by domain experts. Run both the base model and fine-tuned model on this test set. Record recall@10: fraction of queries where the expected document appears in top-10 retrieved results. Also measure: (1) MRR@10 (Mean Reciprocal Rank) — measures average rank of the first relevant document; (2) NDCG@10 — weighted rank measure. A fine-tuned model should show >5% recall@10 improvement to justify the fine-tuning effort and maintenance overhead. If improvement is less, the base model is already well-calibrated for the domain, or the training data isn't high quality.
 
 **Q: What are the cost implications of embedding model choice at scale?**
-A: Cost comparison for 10M documents × 400 tokens average = 4B tokens indexing: OpenAI text-embedding-3-small: $0.02/1M tokens × 4B = $80 one-time indexing cost. OpenAI text-embedding-3-large: $0.13/1M tokens × 4B = $520 one-time indexing. BAAI/bge-base self-hosted: GPU cost only — on an A10G GPU at $1/hr, embedding 4B tokens takes ~8 hours = $8. Re-embedding for model updates is a major cost: switching from ada-002 to text-embedding-3 requires re-embedding the entire corpus. At 10M documents with monthly refresh rate: bge self-hosted cost approaches 0; API cost can be $80-520/month. Note the marginal cost already favours self-hosting at this 10M-document scale ($8 of GPU time versus $80 of API spend); the real break-even is not a document count but whether you already operate GPUs — if the fixed cost of running and maintaining inference hardware has to be created from scratch, the API stays cheaper for far longer.
+A: Cost comparison for 10M documents × 400 tokens average = 4B tokens indexing: OpenAI text-embedding-3-small: $0.02/1M tokens × 4B = $80 one-time indexing cost. OpenAI text-embedding-3-large: $0.13/1M tokens × 4B = $520 one-time indexing. BAAI/bge-base self-hosted: GPU cost only — on an A10G GPU at $1/hr, embedding 4B tokens takes ~8 hours = $8. Re-embedding for model updates is a major cost: any model change — even between two sizes of the same family — requires re-embedding the entire corpus. At 10M documents with monthly refresh rate: bge self-hosted cost approaches 0; API cost can be $80-520/month. Note the marginal cost already favours self-hosting at this 10M-document scale ($8 of GPU time versus $80 of API spend); the real break-even is not a document count but whether you already operate GPUs — if the fixed cost of running and maintaining inference hardware has to be created from scratch, the API stays cheaper for far longer.
 
 **Q: What is the asymmetric nature of query-document embedding and how does BGE handle it?**
 A: In retrieval, queries are short (5-20 words) and documents are longer (100-500 tokens). Bi-encoders trained symmetrically (where query and document encoders are identical) underperform on this asymmetry because the model wasn't explicitly trained to bridge the length gap. BGE addresses this by requiring a query-specific prefix: "Represent this sentence for searching relevant passages: [query]" for queries, and no prefix for documents. The prefix trains the model to encode queries in "retrieval mode" — producing vectors aligned with document vectors rather than symmetric sentence vectors. Critically: you must use this prefix consistently at query time — BAAI's own model card instructs adding it for short query-to-passage retrieval, and omitting it measurably degrades retrieval on those models.
@@ -611,7 +646,7 @@ A: Hard negatives are passages that are superficially similar to the query but d
 A: Quality degrades gracefully rather than falling off a cliff, because MRL training front-loads information into the leading dimensions. OpenAI's published anchor point: `text-embedding-3-large` truncated to 256 dimensions still scores higher on MTEB than the full 1536-dimension `text-embedding-ada-002`. Push the prefix far enough down and quality does collapse — the model can no longer represent the full range of semantic distinctions needed for retrieval — but where that happens is corpus-specific, so find your own knee rather than trusting a published cutoff. The exact breakpoint depends on domain: tasks with high lexical similarity between relevant and irrelevant documents (legal, medical) need more dimensions to capture fine-grained distinctions; simpler semantic tasks tolerate more aggressive truncation. Practical approach: test recall@10 at 64, 128, 256, 512 dimensions on your labeled eval set and pick the smallest dimension that stays within 3% of the full-dimension baseline — this minimizes storage and ANN search cost.
 
 **Q: What are the challenges of multilingual embedding models?**
-A: Multilingual models must align representations across languages so that "machine learning" (English) and its translations in French, German, and Japanese cluster together in embedding space — a much harder training objective than monolingual alignment. Challenges: (1) lower-resource languages receive weaker embeddings because training data is sparse; cross-lingual retrieval accuracy for low-resource language queries drops 10-20% vs. high-resource languages; (2) cross-lingual retrieval (query in English, documents in French) accuracy drops 10-20% vs. monolingual retrieval even for well-resourced language pairs; (3) vocabulary coverage varies — the tokenizer may break low-resource language words into many sub-word tokens, reducing effective context window. Models like multilingual-e5-large and Cohere embed-multilingual-v3.0 handle 100+ languages and are the correct defaults for multilingual RAG.
+A: Multilingual models must align meaning across languages, so a phrase and its translations land in the same region of embedding space. "Machine learning" in English and its French, German and Japanese renderings have to cluster together — a much harder training objective than monolingual alignment. Challenges: (1) lower-resource languages receive weaker embeddings because training data is sparse; cross-lingual retrieval accuracy for low-resource language queries drops 10-20% vs. high-resource languages; (2) cross-lingual retrieval (query in English, documents in French) accuracy drops 10-20% vs. monolingual retrieval even for well-resourced language pairs; (3) vocabulary coverage varies — the tokenizer may break low-resource language words into many sub-word tokens, reducing effective context window. Models like multilingual-e5-large and Cohere embed-multilingual-v3.0 handle 100+ languages and are the correct defaults for multilingual RAG.
 
 **Q: How do you estimate the right embedding dimensionality for your use case?**
 A: Higher dimensions capture more semantic nuance but increase storage and ANN search cost non-linearly (HNSW memory usage scales linearly with dimension; search time scales sub-linearly but still increases). Rule of thumb: 384 dimensions for simple semantic search on small corpora (under 1M documents), 768 dimensions for standard production RAG, 1024+ dimensions only when fine-tuned for domain-specific nuance where the additional dimensions encode domain-relevant distinctions. Empirical approach: measure recall@10 at 256, 384, 512, 768 dimensions using MRL-truncated embeddings on your domain eval set. Stop increasing dimensionality when recall plateaus (less than 1% gain per doubling of dimensions). For most RAG deployments, the recall plateau is reached at 512-768 dimensions — deploying at 1024+ is rarely justified by the storage and latency cost.
@@ -686,10 +721,9 @@ User Query (any language)
     |   country_availability includes user.country
     |   product_status = "active"
     |
-    +-- Reranker (Cohere managed rerank; current IDs are rerank-v4.0-fast /
-    |   rerank-v4.0-pro. On Pinecone's hosted catalog, cohere-rerank-3.5 was
-    |   deprecated 2026-07-01 and is auto-served by cohere-rerank-4-fast from
-    |   2026-08-01, which returns a different score scale — re-tune thresholds)
+    +-- Reranker (Cohere managed rerank: rerank-v4.0-fast for latency,
+    |   rerank-v4.0-pro for quality. Rerank score scales are not stable
+    |   across model generations — re-tune cutoff thresholds on any swap)
     |   Top-200 → Top-20 for display
     |
     +-- Results Ranked by (rerank_score × 0.7 + popularity_score × 0.3)
@@ -708,9 +742,12 @@ User Query (any language)
 **Implementation — Fine-Tuning**
 
 ```python
-from sentence_transformers import SentenceTransformer, losses
-from sentence_transformers.trainer import SentenceTransformerTrainer
-from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+from sentence_transformers import (
+    SentenceTransformer,
+    SentenceTransformerTrainer,
+    SentenceTransformerTrainingArguments,
+    losses,
+)
 from datasets import Dataset
 
 # Training data: cross-lingual query-product pairs
@@ -734,9 +771,7 @@ args = SentenceTransformerTrainingArguments(
     learning_rate=1e-5,               # low LR to preserve multilingual alignment
     warmup_ratio=0.1,
     fp16=True,
-    # `evaluation_strategy` was removed in transformers 4.46 — the arg is now
-    # `eval_strategy`, and it requires an eval_dataset= on the trainer.
-    eval_strategy="epoch",
+    eval_strategy="epoch",   # requires an eval_dataset= on the trainer
 )
 
 trainer = SentenceTransformerTrainer(

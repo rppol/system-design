@@ -197,7 +197,7 @@ npx -y @smithery/cli uninstall @modelcontextprotocol/server-filesystem --client 
 
 Path: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
 
-Every package above is one of the seven maintained reference servers. For GitHub, Postgres, Slack, search or browser automation, configure the vendor's own server (`github/github-mcp-server`, `@playwright/mcp`, and so on) rather than the `@modelcontextprotocol/server-*` names that older tutorials still show — those npm entries are archived and carry a deprecation notice.
+Every package above is one of the seven maintained reference servers (`everything`, `fetch`, `filesystem`, `git`, `memory`, `sequentialthinking`, `time`). For GitHub, Postgres, Slack, search or browser automation, configure the vendor's own server — `github/github-mcp-server`, `@playwright/mcp`, and so on. Copied-in configs that still name `@modelcontextprotocol/server-github` and friends are pointing at `modelcontextprotocol/servers-archived`; repoint them at the vendor package.
 
 ### Publishing Your Own Server to Smithery
 
