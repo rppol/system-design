@@ -8,9 +8,9 @@ Apache Kafka is a distributed, durable, high-throughput event streaming platform
 
 Kafka's fundamental design choices differ radically from traditional message brokers: the broker is "dumb" (it does not route or transform messages), the consumer is "smart" (it tracks its own position in the log), messages are immutable and retained on disk for configurable periods, and consumers can replay the stream from any point. These choices make Kafka ideal for event streaming, event sourcing, CQRS projections, audit logs, and stream processing.
 
-ZooKeeper has been replaced by KRaft (Kafka Raft Metadata) mode, eliminating the external dependency and simplifying operations. KRaft was marked production-ready in Kafka 3.3 (KIP-833), ZooKeeper mode was deprecated in Kafka 3.5, and ZooKeeper support was **removed entirely in Kafka 4.0** (released 2025-03-18). Kafka 4.x runs KRaft-only; there is no ZooKeeper option.
+Cluster metadata lives inside Kafka itself, in KRaft (Kafka Raft Metadata) mode. A quorum of controller nodes replicates every piece of cluster state — topics, partitions, configs, broker registrations, ACLs — through an internal Raft log, so a Kafka cluster has no external coordination service to run, secure, patch, or size. Each node declares its role with `process.roles` and finds the quorum through `controller.quorum.bootstrap.servers`.
 
-**This module targets Kafka 4.x** (latest release at time of writing: 4.3.1, June 2026). Every default quoted below is the Kafka 4.x default — several changed in 3.0 and 4.0 and are commonly misremembered (`acks` is now `all`, `enable.idempotence` is now `true`, `linger.ms` is now `5`).
+**This module targets Kafka 4.x** (latest release at time of writing: 4.3.1, June 2026). Every default quoted below is the Kafka 4.x default — several are commonly misremembered (`acks` is `all`, `enable.idempotence` is `true`, `linger.ms` is `5`).
 
 ---
 
@@ -44,18 +44,25 @@ Key insight: Kafka's durability and replay capability transform it from a messag
 
 ## 4. Types / Architectures / Strategies
 
-### Deployment Modes
+### Node Roles (KRaft)
 
-**KRaft Mode (production-ready since 3.3; the ONLY mode from 4.0 onward)**
-- Internal Raft consensus replaces ZooKeeper.
-- Controller nodes (dedicated or combined with brokers) manage cluster metadata via a `__cluster_metadata` topic.
-- Eliminates ZooKeeper as an external dependency.
-- Much faster controller failover — Confluent reports the metadata-reload phase dropping from seconds/minutes to near-constant time.
-- Scales to millions of partitions; Confluent's guidance for ZooKeeper-backed clusters was to stay under ~200k partitions per cluster, and their KRaft lab test ran 2 million.
+Every node sets `process.roles` to one of three values, and the choice is the main cluster-topology decision you make at install time.
 
-**Classic Mode (ZooKeeper-based) — REMOVED in Kafka 4.0**
-- ZooKeeper managed cluster metadata, controller election, and topic configs.
-- Kafka 4.0 deleted it. You cannot upgrade a ZooKeeper cluster straight to 4.x, and 4.x contains no ZK-to-KRaft migration path: migrate to KRaft on a 3.x bridge release (3.5+) first, then upgrade to 4.x.
+**`process.roles=controller` — dedicated controller**
+- Joins the Raft quorum that owns all cluster metadata, stored in the internal `__cluster_metadata` topic.
+- One controller is the Raft leader (the active controller); the rest replicate its log and stand by.
+- Quorum size is odd — 3 controllers tolerate 1 failure, 5 tolerate 2.
+- Metadata is a replicated log every broker already caches, so controller failover is near-constant time rather than a full metadata reload that grows with cluster size.
+
+**`process.roles=broker` — dedicated broker**
+- Serves produce and fetch traffic, hosts partition replicas, and follows the metadata log to learn assignments.
+- Discovers the quorum via `controller.quorum.bootstrap.servers` and talks to it over the listener named in `controller.listener.names`.
+
+**`process.roles=broker,controller` — combined**
+- One JVM does both jobs. Convenient for local development, test clusters, and small footprints.
+- **Not supported for production workloads** — a broker under GC pressure or heavy fetch load is also the node holding metadata consensus. Give controllers their own JVMs in any critical deployment.
+
+Because metadata is a Raft log rather than an external store, partition counts scale far past what an external coordinator allowed: Confluent's lab test ran 2 million partitions on a single KRaft cluster.
 
 ### Topic Retention Strategies
 
@@ -591,10 +598,10 @@ Compression ratios below are directional only; the achieved ratio depends entire
 | gzip | High | Highest | Higher | Storage-constrained, cold data |
 | zstd | Medium | High | Low | Best balance: use in production |
 
-| Mode | ZooKeeper | Partitions per cluster | Failover Speed | Status |
-|------|-----------|------------------------|----------------|--------|
-| Classic (ZK) | Required | ~200k guideline | Slow — grows with metadata size | Deprecated in 3.5, **removed in 4.0** |
-| KRaft | None | Millions (2M in Confluent's lab test) | Near-constant time | The only mode from 4.0 |
+| `process.roles` | Nodes needed | Blast radius of one node | Production? |
+|-----------------|--------------|--------------------------|-------------|
+| `controller` + `broker` (dedicated) | 3 controllers + N brokers | A broker GC pause cannot stall metadata consensus | Yes — the recommended layout |
+| `broker,controller` (combined) | N nodes total | Fetch load and metadata consensus share one JVM and one heap | No — dev and test only |
 
 ---
 
@@ -722,7 +729,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 ## 11. Technologies and Tools
 
 **Kafka Ecosystem**
-- Apache Kafka — core broker. 4.x is KRaft-only (no ZooKeeper); brokers/Connect/tools require Java 17+, clients and Streams require Java 11+.
+- Apache Kafka — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Brokers, Connect and the CLI tools require Java 17+; clients and Streams require Java 11+.
 - Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
 - ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
 - Kafka Connect — scalable framework for source and sink connectors. 200+ connectors available (JDBC, Elasticsearch, S3, Debezium CDC).
@@ -738,7 +745,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 - Aiven for Kafka — managed Kafka across AWS, GCP, Azure.
 
 **Monitoring**
-- Confluent Control Center — commercial UI for consumer lag, broker health, Schema Registry. Note the split: the original ("Legacy") Control Center was discontinued with Confluent Platform 8.0; the replacement ships separately as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and upgrading is a migration that discards historical metrics.
+- Confluent Control Center — commercial UI for consumer lag, broker health, Schema Registry. Ships separately from Confluent Platform as `confluent-control-center-next-gen` (2.0+) on its own release cadence, and stores its metrics in Prometheus rather than an internal Kafka Streams pipeline.
 - Kafdrop — open-source web UI for topic/message inspection.
 - Burrow (LinkedIn) — consumer lag monitoring with rule-based alerting.
 - KEDA (Kubernetes) — event-driven autoscaling based on Kafka consumer group lag.
@@ -746,7 +753,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 
 **Spring Integration**
 - Spring Kafka (`spring-kafka`) — `@KafkaListener`, `KafkaTemplate`, `KafkaTransactionManager`.
-- Spring Cloud Stream — binder abstraction for Kafka and RabbitMQ. The annotation model (`@EnableBinding`, `@StreamListener`, `@Input`, `@Output`) was deprecated in 3.1 and **removed in 4.0** — use the functional model (`Supplier<T>` / `Function<T,R>` / `Consumer<T>` beans).
+- Spring Cloud Stream — binder abstraction for Kafka and RabbitMQ. Handlers are plain `Supplier<T>` / `Function<T,R>` / `Consumer<T>` beans, bound to destinations by `spring.cloud.stream.function.definition`.
 
 ---
 
@@ -797,8 +804,8 @@ Producer metrics: `record-error-rate` (should be 0), `record-send-rate`, `reques
 **Q: What is the difference between consumer group rebalancing and partition reassignment?**
 Consumer group rebalancing is a runtime event triggered when a consumer joins or leaves a group, or when partition count changes. It redistributes partition assignments among the live consumers in the group without moving data. Partition reassignment (via `kafka-reassign-partitions.sh` or Admin API) is an administrative operation that moves partition replicas between brokers — it physically copies partition data to new brokers. Partition reassignment is used for broker decommissioning, rack-aware rebalancing, or restoring replication factor after broker failure.
 
-**Q: How does KRaft mode change Kafka's architecture compared to ZooKeeper-based Kafka?**
-KRaft replaces the external ZooKeeper ensemble with an internal Raft quorum of controller nodes that own all cluster metadata. The active controller is elected via Raft consensus, and metadata lives in an internal `__cluster_metadata` topic replicated by the Raft log. In the old ZooKeeper architecture, ZooKeeper managed controller election and stored topic metadata and broker registrations, and the active controller was a single broker elected via ZooKeeper. Eliminating ZooKeeper removes an external operational dependency, reduces the number of processes to manage, makes controller failover near-constant time instead of scaling with metadata size, and lifts the ~200k-partitions-per-cluster guideline ZooKeeper imposed (Confluent has lab-tested 2 million partitions on KRaft). Timeline for interviews: production-ready in 3.3 (KIP-833), ZooKeeper deprecated in 3.5 (also the bridge release for migration), ZooKeeper **removed in 4.0** — so there is no "ZooKeeper vs KRaft" choice on any current version, and a ZK cluster must be migrated on 3.5+ before it can upgrade to 4.x.
+**Q: How does KRaft manage cluster metadata, and what does each node role do?**
+KRaft keeps all cluster metadata inside Kafka itself, in an internal Raft log replicated by a quorum of controller nodes. The quorum elects one active controller as its Raft leader; metadata — topics, partitions, configs, broker registrations, ACLs — lives in the internal `__cluster_metadata` topic, and every broker tails that log and caches it locally. Each node sets `process.roles` to `controller`, `broker`, or `broker,controller`, and brokers reach the quorum via `controller.quorum.bootstrap.servers` on the listener named by `controller.listener.names`. Failover is near-constant time rather than a metadata reload that grows with cluster size, because a new active controller only has to replay a log every node already holds, and partition counts scale into the millions (Confluent lab-tested 2 million on one cluster). The production rule interviewers look for: run dedicated controllers, since a combined `broker,controller` node puts fetch load and metadata consensus in the same JVM and heap.
 
 **Q: What is the significance of the linger.ms and batch.size settings together?**
 These two settings jointly control when the producer sends a batch. `batch.size` sets the maximum size of a batch in bytes — the batch is sent immediately when full. `linger.ms` sets the maximum time the producer waits for the batch to fill before sending regardless of size. They work together: with `batch.size=64KB` and `linger.ms=5`, the producer sends when either 64KB is accumulated OR 5ms elapses, whichever comes first. At high throughput, batches fill quickly (batch.size dominates — near-zero extra latency). At low throughput, linger.ms governs (adds up to 5ms latency but groups more records together for compression efficiency). Setting both `linger.ms=0` and a large `batch.size` is counterproductive — batches will rarely fill.

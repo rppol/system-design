@@ -196,18 +196,21 @@ flowchart LR
 
 ### Resilience4j Circuit Breaker Configuration
 
-Note on `Try` below: Resilience4j 2.0.0 **removed** its Vavr dependency to slim the library
-down, so `io.vavr.control.Try` no longer arrives transitively. On 2.x you must add either Vavr
-itself or the optional `io.github.resilience4j:resilience4j-vavr` module; otherwise use plain
-`Supplier`/`try-catch` or `CircuitBreaker.decorateSupplier(...)` with a manual fallback.
+Composition below uses the `Decorators` builder from `io.github.resilience4j:resilience4j-all`,
+which is the library's own fluent API for stacking patterns and attaching fallbacks — no
+third-party functional library is involved.
 
 ```java
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.decorators.Decorators;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 
 CircuitBreakerConfig config = CircuitBreakerConfig.custom()
@@ -230,15 +233,14 @@ CircuitBreakerConfig config = CircuitBreakerConfig.custom()
 CircuitBreakerRegistry registry = CircuitBreakerRegistry.of(config);
 CircuitBreaker circuitBreaker = registry.circuitBreaker("payment-service");
 
-// Decorate a supplier
-Supplier<PaymentResponse> decoratedSupplier = CircuitBreaker
-    .decorateSupplier(circuitBreaker, () -> paymentClient.charge(request));
+// Decorate the call and attach a fallback per failure kind
+Callable<PaymentResponse> call = () -> paymentClient.charge(request);
 
-// Execute with fallback
-Try.ofSupplier(decoratedSupplier)
-    .recover(CallNotPermittedException.class, ex -> getCachedResponse(request))
-    .recover(IOException.class, ex -> getDefaultResponse(request))
-    .get();
+PaymentResponse response = Decorators.ofCallable(call)
+    .withCircuitBreaker(circuitBreaker)
+    .withFallback(List.of(CallNotPermittedException.class), ex -> getCachedResponse(request))
+    .withFallback(List.of(IOException.class), ex -> getDefaultResponse(request))
+    .call();
 ```
 
 **In plain terms.** "Over the last 100 calls, once at least 20 have happened, if half of them
@@ -535,20 +537,18 @@ public class ResilientPaymentService {
         Callable<PaymentResponse> timeLimited =
             TimeLimiter.decorateFutureSupplier(timeLimiter, futureSupplier);
 
-        // The remaining decorators are Callable-based, so the breaker records the
-        // real outcome of the call rather than the mere creation of a future.
-        Callable<PaymentResponse> cbProtected =
-            CircuitBreaker.decorateCallable(circuitBreaker, timeLimited);
-
-        Callable<PaymentResponse> retried =
-            Retry.decorateCallable(retry, cbProtected);
-
-        Callable<PaymentResponse> bulkheaded =
-            Bulkhead.decorateCallable(bulkhead, retried);
-
-        return Try.ofCallable(bulkheaded)
-            .recover(ex -> cacheService.getLastSuccessful(request.getUserId()))
-            .getOrElseThrow(ex -> new ServiceUnavailableException("Payment service unavailable", ex));
+        // Each with* wraps the previous one, so the nesting reads inside-out:
+        // circuit breaker closest to the call, then retry, then bulkhead.
+        try {
+            return Decorators.ofCallable(timeLimited)
+                .withCircuitBreaker(circuitBreaker)
+                .withRetry(retry)
+                .withBulkhead(bulkhead)
+                .withFallback(ex -> cacheService.getLastSuccessful(request.getUserId()))
+                .call();
+        } catch (Exception ex) {
+            throw new ServiceUnavailableException("Payment service unavailable", ex);
+        }
     }
 }
 ```
@@ -616,11 +616,11 @@ to get its chance.
 
 ## 7. Real-World Examples
 
-### Netflix and the Origin of Hystrix
+### Netflix and the Origin of JVM Circuit Breaking
 
-Netflix built Hystrix in 2011 after discovering that a single failing downstream service could bring down their entire API server: a slow dependency with no effective timeout consumed every thread in the shared pool, so the API server kept accepting connections while processing nothing. Hystrix introduced circuit breaking and thread pool bulkheads to the JVM ecosystem, and its wiki's latency-and-fault-tolerance framing shaped the whole generation of libraries that followed.
+Netflix built Hystrix in 2011 after discovering that a single failing downstream service could bring down their entire API server: a slow dependency with no effective timeout consumed every thread in the shared pool, so the API server kept accepting connections while processing nothing. That failure mode — thread pool exhaustion by one slow dependency — is why circuit breaking and thread pool bulkheads exist on the JVM at all, and it is still the diagnosis behind most "the whole service went down but only one dependency was broken" incidents.
 
-Status as of 2026: Hystrix is **in maintenance mode, not deleted and not formally deprecated**. Netflix stopped active development in November 2018; the last release is 1.5.18, and the GitHub README states Hystrix "is no longer in active development, and is currently in maintenance mode", recommends the community consider **Resilience4j**, and notes Netflix moved internally toward adaptive concurrency limits that react to real-time performance rather than pre-configured thresholds. Treat it as unmaintained for new work; existing deployments still run.
+New JVM work uses **Resilience4j**, which is what the rest of this module configures; you will still meet Hystrix in older Spring Cloud Netflix codebases, where the migration is a straight swap onto the Spring Cloud CircuitBreaker SPI. Netflix itself moved on to **adaptive concurrency limits** that infer the safe in-flight limit from measured latency rather than from a pre-configured threshold — the same idea as the client-side adaptive throttling described below.
 
 ### Amazon's Retry Storms During EC2 Recovery
 
@@ -669,17 +669,16 @@ Google's SRE book treats retry amplification as a first-class cascading-failure 
 | Hung call impact    | Ties up a caller thread      | Ties up only pool thread         |
 | Latency overhead    | Negligible                   | ~1-5 microseconds context switch, plus cache-locality loss |
 
-### Hystrix vs. Resilience4j
+### In-Process (Resilience4j) vs. Mesh-Level (Envoy / Istio)
 
-| Dimension              | Hystrix (maintenance mode)      | Resilience4j                        |
-|------------------------|---------------------------------|-------------------------------------|
-| Threading model        | Thread-per-command (heavy)      | Lightweight, decorator-based        |
-| Reactive support       | RxJava only                     | Project Reactor, RxJava, plain Java |
-| Maintenance            | In maintenance mode since 2018  | Actively maintained                 |
-| Modularity             | Monolithic jar                  | Individual modules (pick what you need) |
-| Metrics integration    | Archaius + Servo                | Micrometer (Prometheus, Datadog, etc.) |
-| Spring Boot support    | Spring Cloud Netflix (legacy)   | Spring Cloud CircuitBreaker SPI     |
-| Configuration          | Code + properties files         | Code, YAML, or @Bean config         |
+| Dimension              | Resilience4j — in the JVM        | Envoy / Istio — in the mesh          |
+|------------------------|----------------------------------|--------------------------------------|
+| What "circuit breaker" means | Failure-rate and slow-call state machine: CLOSED / OPEN / HALF_OPEN | Per-cluster concurrency ceilings (`max_connections`, `max_pending_requests`, `max_requests`, `max_retries`); host ejection is the separate `outlierDetection` feature |
+| Trip signal            | Percentage of failed or slow calls in a sliding window | In-flight connection or request count crossing a fixed limit |
+| Fallback               | Arbitrary Java — cached response, default value, degraded mode | None; the proxy returns 503 and the caller must cope |
+| Reach                  | One JVM, one dependency, per-instance state | Every workload in the mesh, any language, no code |
+| To change it           | Code or YAML change plus a redeploy | Config push, effective in seconds |
+| Blast radius of a mistake | Confined to the service that owns it | Mesh-wide — shared limits shed traffic for unrelated services (DoorDash, §7) |
 
 ---
 
@@ -785,12 +784,11 @@ Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident
 | Technology            | Role                                                          | Notes                                       |
 |-----------------------|---------------------------------------------------------------|---------------------------------------------|
 | Resilience4j          | Circuit breaker, retry, bulkhead, time limiter, rate limiter  | Lightweight, modular, Micrometer integration |
-| Spring Cloud CircuitBreaker | Abstraction layer over a pluggable implementation        | Current supported implementations are Resilience4J, Spring Retry and Framework Retry (Spring Framework 7 native retry). The Hystrix and Sentinel implementations were dropped |
-| Hystrix               | Circuit breaker (Netflix OSS)                                 | Maintenance mode since Nov 2018, last release 1.5.18; do not use for new projects |
+| Spring Cloud CircuitBreaker | Abstraction layer over a pluggable implementation        | Three implementations: Resilience4J, Spring Retry, and Framework Retry (Spring Framework 7's native retry; no reactive support) |
 | Sentinel (Alibaba)    | Circuit breaking + flow control + hotspot detection           | Popular in Chinese tech stack                |
 | Failsafe              | Retry, circuit breaker, timeout, hedge                        | Lightweight alternative to Resilience4j     |
 | Polly (.NET)          | .NET equivalent of Resilience4j                               | Reference architecture for .NET services    |
-| AWS SDK               | Built-in retry with jittered backoff on all AWS API calls     | Java v2: `ClientOverrideConfiguration.retryStrategy`. `ClientConfiguration` is the **v1** API — v1 reached end-of-support 31 Dec 2025 |
+| AWS SDK for Java 2.x  | Built-in retry with jittered backoff on all AWS API calls     | Configure via `ClientOverrideConfiguration.retryStrategy` — `RetryMode.ADAPTIVE` adds client-side rate limiting on top of the backoff |
 | Istio / Envoy         | Circuit breaking and retry at the service mesh layer          | No code changes required; config-driven     |
 | Chaos Monkey          | Injects faults to test resilience (Netflix)                   | Use to validate circuit breaker behavior    |
 | Chaos Toolkit         | Open-source chaos engineering                                 | Run fault injection in CI/CD pipelines      |
@@ -878,8 +876,8 @@ Amdahl's Law states that parallelism is limited by the sequential portion of a p
 **Q: What is the difference between a fallback and a compensating transaction?**
 A fallback is an immediate alternative response that is returned when the primary call fails — it does not undo anything, it just provides a substitute result. A compensating transaction is a business-level mechanism that undoes a previously committed operation when a subsequent operation in the same saga fails (e.g., if payment succeeded but inventory reservation failed, the compensating transaction refunds the payment). Fallbacks are a resilience pattern; compensating transactions are a data consistency pattern in distributed transactions and sagas.
 
-**Q: How does Resilience4j differ from Hystrix architecturally?**
-Hystrix uses a thread-per-command model while Resilience4j uses a lightweight functional decorator model. In Hystrix each command type runs in its own dedicated thread pool, which provides isolation but adds significant thread overhead (thousands of threads for services with many integration points). Resilience4j instead uses a decorator model with no threads of its own — it wraps your existing callables with metrics and state management using Java 8 functional interfaces. Resilience4j is modular (you can include only circuit breaker, or only retry, without pulling in the rest), integrates natively with Micrometer, and supports reactive types (Mono, Flux) natively. Hystrix's reactive support was limited to RxJava 1.x.
+**Q: When should circuit breaking live in the application (Resilience4j) rather than in the service mesh (Envoy/Istio)?**
+Keep it in the application when you need a real failure-rate state machine and a language-level fallback; push it to the mesh when you need uniform, language-agnostic policy you can change without a redeploy. The distinction interviewers probe is that Envoy's "circuit breakers" are not failure-rate state machines at all — they are per-cluster concurrency ceilings (`max_connections`, `max_pending_requests`, `max_requests`, `max_retries`), and host ejection is a separate `outlierDetection` feature. So the mesh can shed load and eject a bad instance, but it cannot say "half of the last hundred calls failed, stop calling for sixty seconds", and it cannot return a stale cache entry — it returns 503 and the caller still needs a fallback. Most production systems run both: mesh-level ceilings and outlier ejection as an infrastructure-wide floor, plus Resilience4j on the specific calls that have a meaningful degraded response. The failure mode to avoid is shared mesh limits, where one heavy service exhausts a cluster-wide ceiling and sheds traffic for unrelated services (DoorDash, §7).
 
 **Q: How do you test circuit breaker behavior in integration tests?**
 Drive the state machine directly using the transition methods on the `CircuitBreaker` instance rather than manufacturing a real failure rate. Resolve the instance from the `CircuitBreakerRegistry`, then call `transitionToOpenState()`, `transitionToHalfOpenState()` or `transitionToClosedState()` to assert each fallback path. Use WireMock or MockServer to simulate downstream failures (502, 503, connection refused, slow responses via response delays). Test all three states explicitly: CLOSED with success, CLOSED with failures accumulating, OPEN with fallback, HALF_OPEN with probe failures (stays OPEN), and HALF_OPEN with probe successes (transitions to CLOSED). Use Testcontainers with Toxiproxy to simulate network failures in realistic container-to-container calls.

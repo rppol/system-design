@@ -546,14 +546,14 @@ A bug is reported: "the payment page is slow sometimes." You have 15 services. W
 | Service framework | Spring Boot, Quarkus, Micronaut, Dropwizard |
 | Sync communication | REST (HTTP/1.1, HTTP/2), gRPC (Protocol Buffers, HTTP/2 streaming) |
 | Async messaging | Apache Kafka, RabbitMQ, AWS SQS/SNS, Google Pub/Sub |
-| Service discovery | Kubernetes Services (kube-dns), Consul, Eureka (Netflix OSS) |
+| Service discovery | Kubernetes Services (CoreDNS), Consul, Eureka (Spring Cloud Netflix) |
 | API gateway | Spring Cloud Gateway, Kong, AWS API Gateway, Nginx, Envoy |
 | Distributed tracing | Jaeger, Zipkin, AWS X-Ray, Micrometer Tracing + OpenTelemetry |
 | Log aggregation | ELK stack (Elasticsearch, Logstash, Kibana), Grafana Loki, Splunk |
-| Circuit breaker | Resilience4j, Hystrix (maintenance mode — "no longer in active development", final release 1.5.18; Netflix points new projects at Resilience4j), Istio (service mesh level) |
+| Circuit breaker | Resilience4j (via the Spring Cloud CircuitBreaker SPI), Envoy/Istio outlier detection (service mesh level) |
 | Saga orchestration | Temporal, Apache Camel, custom Kafka-based state machine |
 | Container orchestration | Kubernetes, AWS ECS, Nomad |
-| Service mesh | Istio, Linkerd, Consul Connect |
+| Service mesh | Istio (sidecar or ambient), Linkerd, Consul service mesh |
 
 ---
 

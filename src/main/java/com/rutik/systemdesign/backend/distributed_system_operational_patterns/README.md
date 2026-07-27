@@ -582,7 +582,7 @@ stateDiagram-v2
 
 ## 7. Real-World Examples
 
-- **Netflix**: bulkhead pattern is foundational to their Hystrix library (now deprecated in favor of Resilience4j); separate thread pools for each downstream service dependency
+- **Netflix**: pioneered per-dependency thread pool isolation in their API tier — a separate bounded pool for each downstream service dependency, so one slow dependency can only exhaust its own pool; Resilience4j's `ThreadPoolBulkhead` is the pattern's current JVM implementation
 - **Amazon**: strangler fig pattern used for every major service extraction from their monolith over 10 years; each service extracted independently with traffic gradually shifted
 - **Spotify**: feature flags used for every new feature; deploy to 100% of users with flag off, gradually enable; emergency kill switch for any feature
 - **LinkedIn**: anti-corruption layer between their internal domain models and external data feeds (member data from multiple acquisition systems); prevents legacy schemas from polluting core domain

@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-A service mesh is a dedicated infrastructure layer for handling service-to-service communication in a microservices architecture. It handles traffic management, security (mTLS), and observability without requiring changes to application code. A sidecar proxy (Envoy) is injected alongside each service instance and intercepts all inbound and outbound traffic. The control plane (Istio) configures and manages the sidecar proxies. Service discovery is the mechanism by which services locate each other's network addresses, which can be client-side (service queries a registry directly), server-side (a load balancer queries the registry), or DNS-based (Kubernetes Services).
+A service mesh is a dedicated infrastructure layer for handling service-to-service communication in a microservices architecture. It handles traffic management, security (mTLS), and observability without requiring changes to application code. In Istio's sidecar mode an Envoy proxy is injected alongside each service instance and intercepts all inbound and outbound traffic; in ambient mode a per-node `ztunnel` handles L4 and mTLS with optional per-service `waypoint` proxies for L7, so pods carry no sidecar at all. Either way a single control-plane binary, `istiod`, computes and pushes the proxy configuration. Service discovery is the mechanism by which services locate each other's network addresses, which can be client-side (service queries a registry directly), server-side (a load balancer queries the registry), or DNS-based (Kubernetes Services).
 
 ---
 
@@ -25,10 +25,10 @@ Without a service mesh, every service must implement its own retry logic, circui
 ## 4. Types / Architectures / Strategies
 
 **Service mesh implementations**:
-- Istio + Envoy: most feature-complete; control plane (Istiod), data plane (Envoy sidecar); complex to operate
+- Istio + Envoy: most feature-complete; one control-plane binary (`istiod`), two data-plane modes — Envoy sidecars, or ambient (`ztunnel` per node for L4/mTLS plus optional `waypoint` proxies for L7); complex to operate
 - Linkerd: lightweight, Rust-based sidecar; simpler than Istio; less feature-complete
-- Consul Connect: HashiCorp Consul with built-in mTLS and intentions
-- AWS App Mesh: Envoy-based managed service mesh for AWS
+- Consul service mesh: HashiCorp Consul with built-in mTLS and intentions
+- Amazon ECS Service Connect: AWS's managed service-to-service connectivity for ECS, and the migration target AWS names for App Mesh (App Mesh loses support on 30 September 2026)
 
 **Service discovery mechanisms**:
 - Client-side: service registers with registry (Eureka, Consul), client queries registry, client load-balances
@@ -57,10 +57,10 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph CP["Control Plane (Istiod)"]
-        Pilot("Pilot<br/>routing rules")
-        Citadel("Citadel<br/>mTLS cert authority")
-        Galley("Galley<br/>config validation")
+    subgraph CP["Control Plane - istiod, one binary"]
+        Cfg("Config + discovery<br/>CRDs to Envoy config")
+        CA("Mesh CA<br/>issues workload certs")
+        Inj("Injection webhook<br/>+ config validation")
     end
 
     xDS{"xDS API<br/>LDS · RDS · CDS · EDS"}
@@ -77,18 +77,18 @@ flowchart TD
         AppB --> EnvoyB
     end
 
-    Pilot --> xDS
-    Citadel --> xDS
-    Galley --> xDS
+    Cfg --> xDS
+    CA --> xDS
+    Inj --> xDS
     xDS -.->|"push config"| EnvoyA
     xDS -.->|"push config"| EnvoyB
     EnvoyA -->|"mTLS"| EnvoyB
 
-    class Pilot,Citadel,Galley base
+    class Cfg,CA,Inj base
     class xDS mathOp
     class AppA,AppB io
 ```
-*Istiod's three components compute the mesh configuration and push it to every Envoy sidecar over the xDS API (LDS, RDS, CDS, EDS); iptables then transparently redirects each pod's traffic into its local sidecar, and sidecars encrypt pod-to-pod traffic with mTLS.*
+*istiod is a single process wearing three hats — config/service discovery, mesh certificate authority, and the injection/validation admission webhook — and pushes the derived configuration to every Envoy sidecar over the xDS API (LDS, RDS, CDS, EDS); iptables then transparently redirects each pod's traffic into its local sidecar, and sidecars encrypt pod-to-pod traffic with mTLS.*
 
 **Service Discovery Mechanisms**
 
@@ -102,7 +102,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    subgraph CS["Client-Side (Eureka / Ribbon)"]
+    subgraph CS["Client-Side (Eureka / Spring Cloud LoadBalancer)"]
         direction LR
         csA(["Service A"]) -->|"query"| csReg["Eureka Registry"]
         csReg -->|"instance list"| csPick{"pick instance<br/>round robin / random"}
@@ -120,7 +120,7 @@ flowchart TD
 
     subgraph DNSSD["DNS-Based (Kubernetes)"]
         direction LR
-        dnsA(["Service A"]) -->|"DNS lookup"| dnsKube["kube-dns"]
+        dnsA(["Service A"]) -->|"DNS lookup"| dnsKube["CoreDNS"]
         dnsKube -->|"ClusterIP"| dnsIptables{"iptables / IPVS"}
         dnsIptables --> dnsB(["healthy pod"])
     end
@@ -130,7 +130,7 @@ flowchart TD
     class csReg,dnsKube base
     class csPick,dnsIptables mathOp
 ```
-*Client-side discovery puts the registry query and load-balancing choice inside the caller; server-side and DNS-based discovery move that decision into shared infrastructure (the ALB or kube-dns) at the cost of one extra hop — see the tradeoffs in §8.*
+*Client-side discovery puts the registry query and load-balancing choice inside the caller; server-side and DNS-based discovery move that decision into shared infrastructure (the ALB or CoreDNS) at the cost of one extra hop — see the tradeoffs in §8.*
 
 ---
 
@@ -140,7 +140,7 @@ flowchart TD
 
 ```yaml
 # VirtualService: routing rules for traffic entering a service
-apiVersion: networking.istio.io/v1alpha3
+apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
   name: order-service-vs
@@ -178,7 +178,7 @@ spec:
 
 ```yaml
 # DestinationRule: traffic policy for a service
-apiVersion: networking.istio.io/v1alpha3
+apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
   name: order-service-dr
@@ -262,7 +262,7 @@ stateDiagram-v2
 
 ```yaml
 # Enforce mTLS for all services in the namespace
-apiVersion: security.istio.io/v1beta1
+apiVersion: security.istio.io/v1
 kind: PeerAuthentication
 metadata:
   name: default
@@ -273,7 +273,7 @@ spec:
 
 ---
 # AuthorizationPolicy: who can call whom
-apiVersion: security.istio.io/v1beta1
+apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
   name: allow-order-to-inventory
@@ -435,8 +435,8 @@ spring:
     name: order-service
   cloud:
     loadbalancer:
-      ribbon:
-        enabled: false  # use Spring Cloud LoadBalancer (Ribbon deprecated)
+      cache:
+        ttl: 35s        # instance-list cache in front of the registry (this IS the default)
 
 eureka:
   client:
@@ -452,7 +452,7 @@ eureka:
     prefer-ip-address: true
 ```
 
-**What the formula is telling you.** "These three intervals are not independent settings — they stack, and their sum is how long a client can keep sending traffic to an instance that is already dead."
+**What the formula is telling you.** "These intervals are not independent settings — they stack, and their sum is how long a client can keep sending traffic to an instance that is already dead."
 
 Discovery staleness is almost always debugged one knob at a time, which is why it stays mysterious. The number that governs the incident is the total: expiry on the server plus cache lifetime on the client.
 
@@ -462,26 +462,28 @@ Discovery staleness is almost always debugged one knob at a time, which is why i
 | `lease-expiration-duration-in-seconds: 90` | How long the server waits without a heartbeat before evicting the instance |
 | `90 / 30` | Missed heartbeats tolerated = 3. The margin that stops a GC pause from deregistering a healthy pod |
 | `registry-fetch-interval-seconds: 30` | How often each client refreshes its local copy of the registry |
-| Total staleness | `expiration + fetch interval` — server-side eviction lag plus client-side cache lag |
-| `ServerListRefreshInterval` | The client-side cache refresh the pitfall below tightens to 5 s |
+| Total staleness | `expiration + fetch interval + loadbalancer cache ttl` — server-side eviction lag plus both client-side cache lags |
+| `spring.cloud.loadbalancer.cache.ttl` | Spring Cloud LoadBalancer's own instance-list cache, default 35 s. The pitfall below tightens this and the fetch interval to 5 s |
 
 **Walk one example.** An instance is killed at t=0 and never sends another heartbeat:
 
 ```
   Server still lists it for up to            90 s   (lease expiration)
-  Client cache still holds it for up to      30 s   (registry fetch interval)
+  Registry fetch cache holds it for up to    30 s   (registry-fetch-interval-seconds)
+  LoadBalancer cache holds it for up to      35 s   (spring.cloud.loadbalancer.cache.ttl)
   ---------------------------------------------
-  Worst-case routing to a dead instance     120 s  =  2 minutes
+  Worst-case routing to a dead instance     155 s  =  2.6 minutes
 
   Tolerated missed heartbeats:  90 / 30  =  3
 
-  After ServerListRefreshInterval = 5 s:
-    90 + 5  =  95 s        still dominated by the 90 s server-side lease
+  After cutting BOTH client-side caches to 5 s
+  (registry-fetch-interval-seconds: 5, spring.cloud.loadbalancer.cache.ttl: 5s):
+    90 + 5 + 5  =  100 s   still dominated by the 90 s server-side lease
 ```
 
-Note what the second calculation shows: dropping the client cache from 30 s to 5 s removes only
-25 of the 120 seconds, because the 90-second lease expiration is the dominant term and no
-client-side setting touches it. This is why the fix in Common Pitfalls pairs the cache change
+Note what the second calculation shows: cutting both client caches from 30 s and 35 s to 5 s
+removes only 55 of the 155 seconds, because the 90-second lease expiration is the dominant term
+and no client-side setting touches it. This is why the fix in Common Pitfalls pairs the cache change
 with connect timeouts and retry-on-first-failure — you cannot tune your way to zero staleness in
 a heartbeat-based registry, so the client must be built to survive a dead endpoint rather than
 to never receive one.
@@ -490,7 +492,7 @@ The `90 / 30 = 3` ratio is the part not to "optimize" casually. It exists so tha
 missed heartbeat — a stop-the-world GC pause, a momentary network blip, a slow health endpoint —
 cannot evict a perfectly healthy instance. Set expiration to 30 s to cut staleness and you get a
 registry that deregisters healthy pods during every major GC, which fails far more disruptively
-than the two-minute staleness you were trying to fix.
+than the two-and-a-half-minute staleness you were trying to fix.
 
 ---
 
@@ -528,7 +530,7 @@ For liveness probes: NEVER check external dependencies (database, cache, downstr
 
 **Liveness probe checking database connectivity**: A team configured liveness to call `SELECT 1` on the database. During a brief database maintenance window (2 minutes), all 10 pods failed their liveness probe. Kubernetes restarted all 10 pods simultaneously. Each pod tried to reconnect to the DB during startup, creating a connection storm that overwhelmed the DB, extending the outage from 2 minutes to 15 minutes. Fix: liveness = only check JVM health (trivial HTTP endpoint returning 200); readiness = check DB connectivity.
 
-**Eureka registry cache causing stale instances**: A service instance was terminated but Eureka clients cached the old registry for `registry-fetch-interval-seconds=30`. For 30 seconds after instance termination, some requests were routed to the dead instance, causing connection refused errors. Fix: set `ribbon.ServerListRefreshInterval=5000` (5s cache refresh) and ensure HTTP clients have appropriate connect timeout and retry on first failure.
+**Eureka registry cache causing stale instances**: A service instance was terminated but Eureka clients cached the old registry for `registry-fetch-interval-seconds=30`, and Spring Cloud LoadBalancer held its own instance list for another `spring.cloud.loadbalancer.cache.ttl=35s`. For up to a minute after instance termination, some requests were routed to the dead instance, causing connection refused errors. Fix: cut both client-side caches (`eureka.client.registry-fetch-interval-seconds: 5` and `spring.cloud.loadbalancer.cache.ttl: 5s`) and ensure HTTP clients have appropriate connect timeout and retry on first failure.
 
 **Istio breaking existing HTTP health checks during mTLS migration**: A team enabled `STRICT` mTLS across the namespace before updating health check endpoints to use HTTPS. Kubernetes HTTP health checks (non-mTLS) started failing because Istio rejected non-mTLS connections. All pods entered a crash loop. Fix: set mTLS to `PERMISSIVE` first (accepts both mTLS and plaintext), migrate health checks to use Istio's built-in bypass (port 15021 for health checks bypasses mTLS), then switch to `STRICT`.
 
@@ -544,7 +546,7 @@ For liveness probes: NEVER check external dependencies (database, cache, downstr
 | Linkerd | Lightweight service mesh (Rust-based sidecar) |
 | Consul | Service discovery + KV + health checking + service mesh |
 | Spring Cloud Eureka | Client-side service registry for Spring apps |
-| Spring Cloud LoadBalancer | Client-side load balancing (replacement for Ribbon) |
+| Spring Cloud LoadBalancer | Client-side load balancing and instance-list caching for Spring apps |
 | Kubernetes Services | Built-in DNS-based service discovery |
 
 ---
@@ -564,7 +566,7 @@ In client-side discovery, the service queries a registry (Eureka, Consul) for av
 Istio's `DestinationRule` `outlierDetection` configuration implements circuit breaking at the Envoy sidecar level. You configure: `consecutiveGatewayErrors` (how many 5xx responses before ejecting an instance), `interval` (how often to evaluate), `baseEjectionTime` (how long to eject for), and `maxEjectionPercent` (max percentage of instances to eject simultaneously). When Envoy detects that a specific upstream instance is returning errors, it stops routing traffic to that instance for the ejection period, then gradually re-admits it. This works for any service regardless of language or framework.
 
 **Q: What is mTLS in a service mesh and why is it important?**
-Mutual TLS (mTLS) means both the client and server authenticate each other using TLS certificates, unlike regular HTTPS where only the server is authenticated. In a service mesh, Istio's Citadel issues certificates to each service (based on its Kubernetes ServiceAccount). When service A calls service B, both sides present and validate certificates. This provides: authentication (only services with valid certificates can communicate), encryption (traffic is encrypted in transit — protects against eavesdropping within the cluster), and authorization (Istio's AuthorizationPolicy can restrict which service identities can call which endpoints). This implements zero-trust networking inside the cluster.
+Mutual TLS (mTLS) means both the client and server authenticate each other using TLS certificates, unlike regular HTTPS where only the server is authenticated. In a service mesh, istiod acts as the mesh certificate authority and issues a short-lived certificate to each workload, keyed to its Kubernetes ServiceAccount. When service A calls service B, both sides present and validate certificates. This provides: authentication (only services with valid certificates can communicate), encryption (traffic is encrypted in transit — protects against eavesdropping within the cluster), and authorization (Istio's AuthorizationPolicy can restrict which service identities can call which endpoints). This implements zero-trust networking inside the cluster.
 
 **Q: How does xDS protocol work in Istio?**
 xDS (x Discovery Service) is the API between Istio's control plane (Istiod) and Envoy sidecar proxies. It consists of several sub-APIs: LDS (Listener Discovery Service) configures what ports Envoy listens on; RDS (Route Discovery Service) configures routing rules (VirtualService); CDS (Cluster Discovery Service) defines upstream service clusters (DestinationRule); EDS (Endpoint Discovery Service) provides healthy endpoint lists for each cluster. Istiod watches Kubernetes Service and Pod resources, merges Istio CRD configurations (VirtualService, DestinationRule), and pushes the derived xDS configuration to all relevant Envoy proxies. This is how a change to a VirtualService takes effect across all pods within seconds without restart.
@@ -591,7 +593,7 @@ An init container installs iptables rules that transparently redirect all inboun
 Self-preservation mode stops Eureka from expiring instance registrations when too many clients suddenly stop renewing their leases at once. Eureka expects roughly 85% of registered instances to renew their 30-second lease on schedule; if the renewal rate drops below that, commonly from a network partition or a mass simultaneous restart, Eureka assumes the network is unhealthy rather than the instances, and stops evicting anyone to avoid a false-positive mass deregistration. The tradeoff: during a real outage, self-preservation keeps serving stale addresses for longer than the normal 90-second `lease-expiration-duration-in-seconds`, so some requests keep hitting dead instances until the renewal rate recovers above 85%. This is a deliberate tradeoff toward registry availability over correctness — a single team's rolling restart of 20 instances at once can accidentally trip it, which is why Eureka dashboards show a visible banner when it activates.
 
 **Q: What DNS caching pitfall can break client-side load balancing after a backend IP changes?**
-The JVM caches successful DNS lookups by default, so a client can keep sending traffic to an old IP long after the hostname behind it has moved. The `networkaddress.cache.ttl` security property defaults to caching forever on many JVM distributions when no SecurityManager is installed, meaning a resolved hostname-to-IP mapping never expires for the life of the process, not even after the DNS record's own TTL elapses. This bites hardest with a database endpoint or internal load balancer that fails over to a new IP — client-side connection pools keep reconnecting to the dead IP and every new attempt times out until the JVM process restarts. Fix: explicitly set `networkaddress.cache.ttl=30` seconds, and prefer Kubernetes Service ClusterIPs, a stable virtual IP backed by iptables rather than a DNS-cached hostname, for in-cluster discovery specifically to sidestep this bug.
+The JVM caches successful DNS lookups for a fixed 30 seconds by default and ignores the DNS record's own TTL entirely, so a client keeps sending traffic to an old IP after the hostname behind it has moved. The knob is the `networkaddress.cache.ttl` **security** property (set in `java.security` or via `java.security.Security.setProperty`) — it is not a `-D` system property, which is why the usual `-Dnetworkaddress.cache.ttl=5` on the command line silently does nothing. Negative lookups are cached separately for 10 seconds by `networkaddress.cache.negative.ttl`, which is the one that bites during a failover: the client resolves while the new endpoint is still unpublished, caches the failure, and keeps failing after DNS is already correct. This hurts most with a database endpoint or internal load balancer that fails over to a new IP — connection pools keep reconnecting to the dead address until the cache entry expires. Fix: set `networkaddress.cache.ttl` explicitly to a few seconds for endpoints that fail over, and prefer Kubernetes Service ClusterIPs, a stable virtual IP backed by iptables rather than a DNS-cached hostname, for in-cluster discovery.
 
 **Q: What goes wrong when a startup probe's failureThreshold is too tight for a service running database migrations at boot?**
 A startup probe sized for a normal cold start restarts the container mid-migration, because Flyway or Liquibase can hold the process in a not-yet-ready state far longer than a typical boot. The startup probe in §6 allows `failureThreshold: 30` at `periodSeconds: 10`, a 5-minute budget sized for ordinary Spring Boot cold start; a schema migration touching a multi-million-row table can easily run 6-8 minutes, well past that budget. When the probe finally fails, Kubernetes kills and restarts the container without rolling back the partially applied migration, so the new container boots into a half-migrated schema, and Flyway's checksum validation can then refuse to proceed at all. Fix: size `failureThreshold * periodSeconds` to comfortably exceed the worst observed migration time, or run migrations in an init container or a one-shot Job that completes before the main container's startup probe begins evaluating.
