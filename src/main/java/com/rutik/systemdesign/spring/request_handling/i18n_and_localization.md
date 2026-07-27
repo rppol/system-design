@@ -304,7 +304,7 @@ public class ApiExceptionHandler {
         ProblemDetail pd = ProblemDetail.forStatus(HttpStatus.NOT_FOUND);
         pd.setTitle(messages.getMessage("error.notfound.title", null,
                                         LocaleContextHolder.getLocale()));
-        pd.setDetail(detail);                       // localized RFC 7807 body
+        pd.setDetail(detail);                       // localized RFC 9457 body
         return pd;
     }
 }
@@ -413,7 +413,7 @@ a language switcher hits `?lang=fr` backed by a `CookieLocaleResolver`.
 cookie; a German user in Europe/Berlin sees `3.7.2026, 14:30` while a US user sees
 `7/3/2026, 8:30 AM` for the same UTC instant.
 
-**Partner-facing REST API** returns RFC 7807 `ProblemDetail` bodies whose `title`
+**Partner-facing REST API** returns RFC 9457 `ProblemDetail` bodies whose `title`
 and `detail` are localized from the `Accept-Language` header via
 `AcceptHeaderLocaleResolver`, so integrators get errors in their language without a
 UI.

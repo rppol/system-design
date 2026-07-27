@@ -59,7 +59,7 @@ Think of a controller method as a contract: it declares exactly what it needs fr
 | `@ExceptionHandler` in controller | Controller-local | Specific exceptions for one controller |
 | `@ControllerAdvice` + `@ExceptionHandler` | Global | Centralized error handling for all controllers |
 | `ResponseStatusException` | Inline throw | Quick status code + message |
-| `ProblemDetail` (Spring 6+) | RFC 7807 response | Structured error format for REST APIs |
+| `ProblemDetail` (Spring 6+) | RFC 9457 response | Structured error format for REST APIs |
 
 ---
 
@@ -489,7 +489,7 @@ server.tomcat.max-http-form-post-size=10MB
 | `HttpMessageConverter` | Serializes/deserializes request/response bodies |
 | `@ControllerAdvice` / `@RestControllerAdvice` | Global exception handling and response advice |
 | `ResponseBodyAdvice` | Intercepts response body before writing |
-| `ProblemDetail` | RFC 7807 structured error response (Spring 6+) |
+| `ProblemDetail` | RFC 9457 structured error response (Spring 6+) |
 | `@Validated` | Spring's group-aware validation annotation |
 | `ContentCachingRequestWrapper` | Cache request body for multiple reads |
 | `WebDataBinder` | Binds request parameters to Java objects |
@@ -517,7 +517,7 @@ Spring throws `MethodArgumentNotValidException` before the controller method exe
 Multiple ways: (1) Throw `ResponseStatusException(HttpStatus.NOT_FOUND, "message")` from anywhere; (2) throw a custom exception annotated with `@ResponseStatus(HttpStatus.NOT_FOUND)`; (3) return `ResponseEntity.notFound().build()`; (4) throw `UserNotFoundException` and handle it in `@ControllerAdvice` with `@ExceptionHandler(UserNotFoundException.class)` returning `@ResponseStatus(HttpStatus.NOT_FOUND)`. Prefer option 4 for clean controller code and centralized error handling. Option 1 is a quick throwaway in simple cases.
 
 **Q: What is ProblemDetail and why was it introduced?**
-`ProblemDetail` (Spring 6 / Spring Boot 3) implements RFC 7807 "Problem Details for HTTP APIs" — a standardized JSON format for error responses: `type` (URI identifying the error type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description), `instance` (URI of the specific occurrence). Before this, every team invented their own error response format, making API clients harder to write. Use `ProblemDetail.forStatus(HttpStatus.NOT_FOUND)` in `@ExceptionHandler` methods. Spring MVC 6 also auto-returns `ProblemDetail` for many built-in exceptions (404, 400, 405) when `spring.mvc.problemdetails.enabled=true`.
+`ProblemDetail` (Spring 6 / Spring Boot 3) implements RFC 9457 "Problem Details for HTTP APIs" — a standardized JSON format for error responses: `type` (URI identifying the error type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description), `instance` (URI of the specific occurrence). Before this, every team invented their own error response format, making API clients harder to write. Use `ProblemDetail.forStatus(HttpStatus.NOT_FOUND)` in `@ExceptionHandler` methods. Spring MVC 6 also auto-returns `ProblemDetail` for many built-in exceptions (404, 400, 405) when `spring.mvc.problemdetails.enabled=true`.
 
 **Q: How does HandlerMethodArgumentResolver allow extending Spring MVC?**
 `HandlerMethodArgumentResolver` with `supportsParameter()` returning true for a custom annotation/type and `resolveArgument()` extracting the value from the `NativeWebRequest`. Register via `WebMvcConfigurer.addArgumentResolvers()`. Spring MVC calls `supportsParameter()` for each registered resolver in order; the first match wins. Built-in resolvers handle `@RequestBody`, `@PathVariable`, `Principal`, `HttpSession`, `Pageable` (Spring Data). Custom resolvers cover authenticated user injection, tenant context, or any cross-cutting parameter pattern.
@@ -531,8 +531,8 @@ Annotate the method with `@PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_
 **Q: What is the difference between @RequestMapping(method=GET) and @GetMapping?**
 `@GetMapping` is a composed annotation: `@RequestMapping(method = RequestMethod.GET)`. It is shorter, more readable, and statically typed (IDE warns if you use `@GetMapping` with `method = RequestMethod.POST`). All `@GetMapping`, `@PostMapping`, `@PutMapping`, `@PatchMapping`, `@DeleteMapping` are composed annotations added in Spring 4.3. Use them instead of `@RequestMapping` with `method=` for all new code. Reserve `@RequestMapping` for class-level base path declarations where the method is not yet known.
 
-**Q: What is `ProblemDetail` (RFC 7807) and how do you return it from a Spring MVC controller in Boot 3.x?**
-`ProblemDetail` (Spring 6.0 / Boot 3.0) is a standardised error response body conforming to RFC 7807 Problem Details for HTTP APIs. It includes: `type` (URI identifier of the problem type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description for this occurrence), `instance` (URI of the specific request). Enable it with `spring.mvc.problemdetails.enabled=true`. All built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) are automatically mapped to `ProblemDetail` responses. Throw `ResponseStatusException` with a problem detail or implement `ErrorResponseException` for custom problems:
+**Q: What is `ProblemDetail` (RFC 9457) and how do you return it from a Spring MVC controller in Boot 3.x?**
+`ProblemDetail` (Spring 6.0 / Boot 3.0) is a standardised error response body conforming to RFC 9457 Problem Details for HTTP APIs. It includes: `type` (URI identifier of the problem type), `title` (human-readable summary), `status` (HTTP status code), `detail` (specific problem description for this occurrence), `instance` (URI of the specific request). Enable it with `spring.mvc.problemdetails.enabled=true`. All built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) are automatically mapped to `ProblemDetail` responses. Throw `ResponseStatusException` with a problem detail or implement `ErrorResponseException` for custom problems:
 
 ```java
 // Boot 3.x: throw a structured problem detail
@@ -559,7 +559,7 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 2. **Return DTOs, not entities** — never expose JPA entities directly in REST responses.
 3. **Use `ResponseEntity<T>` when you need to control status codes or headers**.
 4. **Centralize exception handling in `@RestControllerAdvice`** with structured error responses.
-5. **Use `ProblemDetail` (Spring 6+)** for RFC 7807-compliant error responses.
+5. **Use `ProblemDetail` (Spring 6+)** for RFC 9457-compliant error responses.
 6. **Declare `produces` and `consumes`** on all mappings for explicit content-type contracts.
 7. **Handle `MethodArgumentNotValidException` globally** — don't let Spring return its default ugly 400.
 8. **Use `ContentCachingRequestWrapper` in filters** if you need to log request bodies.
@@ -572,7 +572,7 @@ throw new ResponseStatusException(HttpStatus.NOT_FOUND,
 
 ### Scenario: B2B Platform REST API with Validation, Multipart Upload, and Global Error Mapping
 
-**Context.** A B2B integration platform exposes a REST API consumed by ~600 partner systems, handling **6,000 req/sec**. Endpoints use `@RestController` with `@PathVariable`, `@RequestParam`, and `@RequestBody`. Bean validation (`@Valid`) on request bodies produces structured RFC 7807 `ProblemDetail` responses (Spring 6 / Boot 3). Partners also upload bulk CSV files (bounded to 25 MB) and submit CSV bodies parsed by a custom `HttpMessageConverter`. A single `@ControllerAdvice` maps every exception type to a consistent error contract.
+**Context.** A B2B integration platform exposes a REST API consumed by ~600 partner systems, handling **6,000 req/sec**. Endpoints use `@RestController` with `@PathVariable`, `@RequestParam`, and `@RequestBody`. Bean validation (`@Valid`) on request bodies produces structured RFC 9457 `ProblemDetail` responses (Spring 6 / Boot 3). Partners also upload bulk CSV files (bounded to 25 MB) and submit CSV bodies parsed by a custom `HttpMessageConverter`. A single `@ControllerAdvice` maps every exception type to a consistent error contract.
 
 ### Request and Error Flow
 
@@ -757,9 +757,9 @@ spring:
 
 **How does Spring bound multipart memory usage?** With `file-size-threshold`, small files stay in memory and larger ones are streamed to a temp directory; `max-file-size`/`max-request-size` reject oversized uploads before fully buffering them, preventing heap exhaustion from hostile or accidental large files.
 
-**Why centralize error handling in `@ControllerAdvice` rather than per controller?** A single advice class maps every exception type to one RFC 7807 contract, so all 600 partners get a consistent error shape and new exception types are handled in one place. A per-controller `@ExceptionHandler` only covers that controller, leading to inconsistent formats.
+**Why centralize error handling in `@ControllerAdvice` rather than per controller?** A single advice class maps every exception type to one RFC 9457 contract, so all 600 partners get a consistent error shape and new exception types are handled in one place. A per-controller `@ExceptionHandler` only covers that controller, leading to inconsistent formats.
 
-**What is the advantage of `ProblemDetail` for a partner-facing API?** It is a standardized (RFC 7807) media type `application/problem+json` with predictable fields plus typed extensions like `fieldErrors`. Partners can write one parser for all error responses instead of branching on ad hoc shapes per endpoint.
+**What is the advantage of `ProblemDetail` for a partner-facing API?** It is a standardized (RFC 9457) media type `application/problem+json` with predictable fields plus typed extensions like `fieldErrors`. Partners can write one parser for all error responses instead of branching on ad hoc shapes per endpoint.
 
 ---
 

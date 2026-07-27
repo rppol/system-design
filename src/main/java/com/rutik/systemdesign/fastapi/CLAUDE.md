@@ -107,7 +107,9 @@ When covering a feature, include the version it was introduced:
 - FastAPI 0.93+: first `lifespan` context manager support
 - FastAPI 0.100+: official Pydantic v2 support
 - FastAPI 0.110+: `lifespan` replaces `on_startup`/`on_shutdown` as the recommended pattern
-- Pydantic 2.0+ (2023): `@field_validator`, `.model_dump()`, `pydantic-core` Rust — 5–50x faster than v1
+- Pydantic 2.0+ (2023): `@field_validator`, `.model_dump()`, `pydantic-core` Rust. Faster than v1, but quote a
+  multiplier only with a measurement beside it — the speedup is model-shaped (measured ~2.7x on a mixed model,
+  ~2.9x on a 3-field flat model, ~13x on one with a dict and a list), so a blanket "5-50x" is not a fact
 - SQLAlchemy 2.0 (2023): unified 2.0-style only; `AsyncSession`/`async_engine` stable
 
 Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.

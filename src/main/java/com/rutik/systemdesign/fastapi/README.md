@@ -30,7 +30,7 @@ This section covers:
 | 6 | [configuration_and_settings_management](configuration_and_settings_management/) | 1 — FastAPI Core & ASGI | Intermediate | `pydantic-settings`, 12-factor config, env vars/secrets, layered settings, per-env overrides |
 | 7 | [async_database_sqlalchemy](async_database_sqlalchemy/) | 2 — Production Concerns | Advanced | SQLAlchemy 2.0 async, `AsyncSession`, async engine, pool sizing, Alembic, SQLModel, N+1 avoidance |
 | 8 | [authentication_and_security](authentication_and_security/) | 2 — Production Concerns | Advanced | OAuth2 password flow, JWT (PyJWT), scopes, passlib/bcrypt/argon2, OIDC, CSRF/CORS |
-| 9 | [error_handling_and_validation](error_handling_and_validation/) | 2 — Production Concerns | Intermediate | `HTTPException`, custom exception handlers, `RequestValidationError`, RFC 7807 Problem Details |
+| 9 | [error_handling_and_validation](error_handling_and_validation/) | 2 — Production Concerns | Intermediate | `HTTPException`, custom exception handlers, `RequestValidationError`, RFC 9457 Problem Details |
 | 10 | [testing_fastapi](testing_fastapi/) | 2 — Production Concerns | Intermediate | `TestClient`, `httpx.AsyncClient`, `pytest-asyncio`, `dependency_overrides`, transactional rollback |
 | 11 | [websockets_sse_and_streaming](websockets_sse_and_streaming/) | 2 — Production Concerns | Advanced | WebSockets, SSE, `StreamingResponse`, Redis pub/sub fan-out, connection registry, backpressure |
 | 12 | [background_jobs_and_task_queues](background_jobs_and_task_queues/) | 2 — Production Concerns | Advanced | `BackgroundTasks` vs Celery vs ARQ vs Dramatiq, scheduling, idempotency, retries, DLQ |
@@ -109,7 +109,7 @@ A ruthless cut to what a **senior FastAPI / backend interview** actually probes,
 | Group | Modules | Why it's tested |
 |-------|---------|-----------------|
 | FastAPI Core & ASGI | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/), [pydantic_v2_deep_dive](pydantic_v2_deep_dive/), [dependency_injection_in_fastapi](dependency_injection_in_fastapi/) | ASGI scope/receive/send, Pydantic v2's Rust core and the v1->v2 migration, and the `Depends` dependency graph — the framework internals every FastAPI-focused interview opens with |
-| Production Concerns | [async_database_sqlalchemy](async_database_sqlalchemy/), [authentication_and_security](authentication_and_security/), [error_handling_and_validation](error_handling_and_validation/) | Async SQLAlchemy session-per-request and N+1 avoidance, OAuth2/JWT flows, and RFC 7807 error contracts — what shows up the moment a toy API becomes a real service |
+| Production Concerns | [async_database_sqlalchemy](async_database_sqlalchemy/), [authentication_and_security](authentication_and_security/), [error_handling_and_validation](error_handling_and_validation/) | Async SQLAlchemy session-per-request and N+1 avoidance, OAuth2/JWT flows, and RFC 9457 error contracts — what shows up the moment a toy API becomes a real service |
 | Deployment, Observability & Scale | [production_deployment_and_scaling](production_deployment_and_scaling/), [observability_and_monitoring](observability_and_monitoring/), [caching_and_performance](caching_and_performance/) | Uvicorn/Gunicorn worker sizing, graceful shutdown and K8s probes, OpenTelemetry/Prometheus, and Redis caching — the "how does this run at 100k RPS" half of a senior loop |
 
 **Deliberately deferred to the Full Path** (valuable, lower interview yield): routing & request handling, middleware & lifecycle, configuration & settings management, WebSockets/SSE, background job queues, FastAPI-specific testing, HTTP clients for external APIs, message-queue-driven consumers, API design & versioning, and OWASP security hardening. A niche flagged in an interview (e.g. "have you used Celery?" or "how do you version a REST API?") is a bonus, not a gate — reach for these once the 9 above are solid.
@@ -166,7 +166,7 @@ The highest-frequency FastAPI *knowledge* questions mapped to the file that answ
 | How does FastAPI resolve the `Depends` graph, and how do `yield` dependencies clean up after the response is sent? | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/) |
 | How do you avoid N+1 queries in async SQLAlchemy 2.0? | [async_database_sqlalchemy](async_database_sqlalchemy/) |
 | Walk through the OAuth2 password flow and JWT validation in FastAPI. | [authentication_and_security](authentication_and_security/) |
-| How do you turn a `RequestValidationError` into an RFC 7807 Problem Details response? | [error_handling_and_validation](error_handling_and_validation/) |
+| How do you turn a `RequestValidationError` into an RFC 9457 Problem Details response? | [error_handling_and_validation](error_handling_and_validation/) |
 | How do readiness probes, graceful shutdown, and OpenTelemetry tracing work together during a zero-downtime rolling update? | [production_deployment_and_scaling](production_deployment_and_scaling/), [observability_and_monitoring](observability_and_monitoring/) |
 | How do you cache a FastAPI response in Redis without serving stale data? | [caching_and_performance](caching_and_performance/) |
 

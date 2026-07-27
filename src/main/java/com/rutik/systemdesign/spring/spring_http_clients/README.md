@@ -693,7 +693,7 @@ try {
     throw new OrderCreationException(problem != null ? problem.getDetail() : ex.getMessage());
 }
 ```
-See [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/README.md) for the full `ProblemDetail` (RFC 7807) contract this pattern assumes on the server side.
+See [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/README.md) for the full `ProblemDetail` (RFC 9457) contract this pattern assumes on the server side.
 
 ---
 
@@ -921,6 +921,6 @@ public class CheckoutService {
 ## Related / See Also
 
 - [Spring WebFlux and Project Reactor](../spring_webflux/README.md) — `WebClient`'s reactive engine, `.block()` deadlock mechanics, Reactor Netty internals in depth
-- [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/README.md) — `ProblemDetail` (RFC 7807) error contracts and the hypermedia-consuming angle of `RestClient`/`@HttpExchange`
+- [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/README.md) — `ProblemDetail` (RFC 9457) error contracts and the hypermedia-consuming angle of `RestClient`/`@HttpExchange`
 - [Spring Cloud Patterns](../spring_cloud_patterns/README.md) — Resilience4j retry/circuit-breaker/bulkhead, OpenFeign, and idempotency-key patterns layered on top of these clients
 - [Networking & HTTP Client (Java)](../../java/networking_and_http_client/README.md) — the plain JDK `HttpClient`/NIO/connection-pooling fundamentals underneath every Spring HTTP client

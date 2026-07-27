@@ -277,7 +277,7 @@ async def validation_error_handler(
 
 ### 4.4 RFC 9457 Problem Details
 
-RFC 9457 (which obsoletes RFC 7807) defines a standard JSON body for HTTP error responses with
+RFC 9457 defines a standard JSON body for HTTP error responses with
 Content-Type `application/problem+json`. All five standard members are optional:
 
 | Field | Type | Required | Description |
@@ -988,7 +988,7 @@ know which field failed.
 
 **Q4: What is RFC 9457 and when should you use it?**
 RFC 9457, Problem Details for HTTP APIs, is the current standard JSON shape for HTTP error
-bodies; it obsoletes RFC 7807. It defines five members, all optional: `type` (URI reference
+bodies. It defines five members, all optional: `type` (URI reference
 identifying the problem type, defaulting to `about:blank`), `title` (short summary), `status`
 (an advisory copy of the HTTP status that must match the response), `detail` (occurrence-specific
 explanation), and `instance` (URI reference for this specific error, which may be relative). Use

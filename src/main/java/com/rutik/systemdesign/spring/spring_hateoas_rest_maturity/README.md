@@ -6,7 +6,7 @@ REST maturity is measured by the **Richardson Maturity Model (RMM)** — a four-
 
 **Spring HATEOAS** (the `spring-boot-starter-hateoas` module) is the toolkit for building Level 3 APIs on Spring MVC. It supplies `RepresentationModel`, `EntityModel<T>`, `CollectionModel<T>`, and `PagedModel<T>` wrappers that carry `Link` objects; a `WebMvcLinkBuilder` that generates URLs by pointing at controller methods (`linkTo(methodOn(...))`) instead of concatenating strings; and `RepresentationModelAssembler` to keep link-building out of the controller. It serializes to the **HAL** media type (`application/hal+json`) and, when you add affordances, to **HAL-FORMS** (`application/prs.hal-forms+json`), which also describes the *inputs* each action needs.
 
-Around this sit the pieces that make an evolvable REST API: a standardized error model with **`ProblemDetail`** (RFC 7807, `application/problem+json`), a versioning strategy (URI vs header vs media type), and declarative HTTP clients — `@HttpExchange` interfaces backed by `RestClient` (both GA in Spring Boot 3.2) — that let a *consumer* follow those hypermedia links cleanly.
+Around this sit the pieces that make an evolvable REST API: a standardized error model with **`ProblemDetail`** (RFC 9457, `application/problem+json`), a versioning strategy (URI vs header vs media type), and declarative HTTP clients — `@HttpExchange` interfaces backed by `RestClient` (both GA in Spring Boot 3.2) — that let a *consumer* follow those hypermedia links cleanly.
 
 ---
 
@@ -26,7 +26,7 @@ Think of a hypermedia API as **a website built for machines**. When you browse a
 2. **Server owns application state transitions:** The presence or absence of a link (`pay`, `cancel`, `ship`) encodes what the resource *allows right now*. The client reads the state machine off the response.
 3. **Hypermedia as the engine:** The client stores one bookmark (the API root) and navigates by relation names (`rel`), decoupling it from the URI layout.
 4. **Self-describing media types:** `application/hal+json` standardizes where links live (`_links`) and where nested resources live (`_embedded`); HAL-FORMS adds `_templates` describing method, target, and expected fields.
-5. **Standardized errors:** Every failure is a `ProblemDetail` (RFC 7807), so a client writes one error parser instead of one per endpoint.
+5. **Standardized errors:** Every failure is a `ProblemDetail` (RFC 9457), so a client writes one error parser instead of one per endpoint.
 6. **Evolve without breaking:** Additive change (new links, new optional fields, new media-type version) over breaking change; version explicitly when you must.
 
 ---
@@ -58,7 +58,7 @@ Think of a hypermedia API as **a website built for machines**. When you browse a
 |------------|---------|
 | `application/hal+json` | HAL: `_links` + `_embedded`; the Spring HATEOAS default |
 | `application/prs.hal-forms+json` | HAL-FORMS: HAL plus `_templates` describing method/target/fields of each action |
-| `application/problem+json` | RFC 7807 error bodies (`ProblemDetail`) |
+| `application/problem+json` | RFC 9457 error bodies (`ProblemDetail`) |
 | `application/vnd.company.v2+json` | Media-type (vendor) versioning |
 | Collection+JSON / Siren / Uber | Alternative hypermedia formats Spring HATEOAS can emit |
 
@@ -334,7 +334,7 @@ pay.ifPresent(link -> rc.put().uri(link.getHref()).retrieve().toBodilessEntity()
 
 `RestClient` is the synchronous fluent client that replaces `RestTemplate`; `WebClient` remains the choice when you need reactive/non-blocking streams. Prefer `RestClient` for ordinary blocking calls in a servlet stack.
 
-### Errors — `ProblemDetail` (RFC 7807)
+### Errors — `ProblemDetail` (RFC 9457)
 
 ```java
 @RestControllerAdvice
@@ -360,7 +360,7 @@ class OrderExceptionHandler {
 
 **Spring Data REST** auto-exposes JPA repositories as a HAL API: it generates `_links` and `_embedded` for every entity and association out of the box, and serves an ALPS/HAL-FORMS profile describing each resource — the most common way teams ship a Level 3 API without hand-writing assemblers.
 
-**Amazon API Gateway + AWS services** commonly return `application/problem+json`-style structured errors, and internal service meshes increasingly standardize on RFC 7807 so that one client error handler works across dozens of services.
+**Amazon API Gateway + AWS services** commonly return `application/problem+json`-style structured errors, and internal service meshes increasingly standardize on RFC 9457 so that one client error handler works across dozens of services.
 
 ---
 
@@ -458,7 +458,7 @@ Once clients navigate by `rel`, a `rel` name is part of your contract. Renaming 
 | `RepresentationModelAssembler` | Convert domain objects to linked models |
 | `PagedResourcesAssembler` | Build `PagedModel` with navigation links |
 | `Affordances` / HAL-FORMS | Describe action inputs (`_templates`) |
-| `ProblemDetail` (Spring 6 / Boot 3) | RFC 7807 error bodies |
+| `ProblemDetail` (Spring 6 / Boot 3) | RFC 9457 error bodies |
 | `RestClient` (Boot 3.2) | Synchronous fluent HTTP client |
 | `@HttpExchange` + `HttpServiceProxyFactory` + `RestClientAdapter` | Declarative HTTP client interfaces |
 | Spring Data REST | Auto-generated HAL API over repositories |
@@ -491,7 +491,7 @@ HAL (`application/hal+json`) describes *where* you can go via `_links` and embed
 It is an interface with a `toModel(entity)` method that centralizes conversion of a domain object into a linked `EntityModel`, keeping link logic out of controllers. This avoids duplicating link-building across every endpoint that returns the same resource and gives you one place to encode state-dependent links (show `pay`/`cancel` only when NEW). Controllers then just call `assembler.toModel(order)` and stay thin.
 
 **Q: What is `ProblemDetail` and what problem does it solve?**
-`ProblemDetail` (Spring 6 / Boot 3) is Spring's implementation of RFC 7807, a standardized JSON error body with `type`, `title`, `status`, `detail`, and `instance`, served as `application/problem+json`. It replaces every team inventing its own error shape, so a client writes one error parser for all endpoints. You create one with `ProblemDetail.forStatus(...)` in an `@ExceptionHandler` and can add custom properties like a `fieldErrors` map.
+`ProblemDetail` (Spring 6 / Boot 3) is Spring's implementation of RFC 9457, a standardized JSON error body with `type`, `title`, `status`, `detail`, and `instance`, served as `application/problem+json`. It replaces every team inventing its own error shape, so a client writes one error parser for all endpoints. You create one with `ProblemDetail.forStatus(...)` in an `@ExceptionHandler` and can add custom properties like a `fieldErrors` map.
 
 **Q: When would you choose `RestClient` over `RestTemplate` or `WebClient`?**
 Use `RestClient` (GA in Boot 3.2) for synchronous, blocking HTTP in a servlet application — it is the modern fluent replacement for `RestTemplate`, which is now in maintenance mode. Use `WebClient` when you need reactive, non-blocking calls or very high concurrency fan-out. `RestTemplate` is only for legacy code you are not modernizing; it is supported but receives no new features.
@@ -528,7 +528,7 @@ No — HATEOAS sits on top of Level 2, so you still return 201 on create, 200 on
 2. **Wrap DTOs, never entities**, inside `EntityModel` — avoid exposing the DB schema and lazy-loading serialization errors.
 3. **Put link logic in a `RepresentationModelAssembler`**, not controllers — one place per resource, easy to encode state-dependent links.
 4. **Let link presence encode the state machine** — add `pay`/`cancel`/`ship` only for the states that allow them.
-5. **Standardize every error as `ProblemDetail`** (RFC 7807) so clients write one error parser.
+5. **Standardize every error as `ProblemDetail`** (RFC 9457) so clients write one error parser.
 6. **Target solid Level 2 first**; add HATEOAS only where a real state machine or evolvability need justifies the cost.
 7. **Version deliberately** (prefer URI versioning for pragmatism) and treat `rel` names as part of the contract.
 8. **Use `RestClient` (Boot 3.2)** for synchronous clients and `@HttpExchange` interfaces for typed, testable client contracts; reserve `WebClient` for reactive needs.
@@ -632,7 +632,7 @@ class OrderController {
 }
 ```
 
-### Error contract (RFC 7807)
+### Error contract (RFC 9457)
 
 ```java
 @RestControllerAdvice
@@ -732,7 +732,7 @@ FIXED:  treated rel names as contract; kept cancel, added cancelOrder as an alia
 
 **What did the v2 route move demonstrate about HATEOAS?** Partners whose clients followed `_links` needed zero changes when `/api/orders/{id}/pay` became `/api/v2/...`, because the new `href` flowed through the response automatically. The one partner who hardcoded the URL got a 404 — proving the benefit only materializes for link-following clients.
 
-**Why is `ProblemDetail` valuable for a 120-partner API?** It gives every partner one RFC 7807 error shape (`application/problem+json`) with predictable fields plus typed extensions like `currentState`, so they write a single error handler instead of branching per endpoint. This drastically cuts integration-support load compared to ad hoc error bodies.
+**Why is `ProblemDetail` valuable for a 120-partner API?** It gives every partner one RFC 9457 error shape (`application/problem+json`) with predictable fields plus typed extensions like `currentState`, so they write a single error handler instead of branching per endpoint. This drastically cuts integration-support load compared to ad hoc error bodies.
 
 **What is the cost side of this design?** HAL adds ~180 bytes per response and clients must parse and follow links rather than fetch by URL, so the team accepted larger payloads and a more complex client contract in exchange for evolvability. They kept the flow at Level 2 semantics (correct verbs/status) and layered hypermedia only where the state machine justified it.
 

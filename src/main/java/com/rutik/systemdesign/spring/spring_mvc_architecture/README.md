@@ -489,7 +489,7 @@ Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 2
 Content negotiation is the process by which Spring MVC selects the response media type (e.g., `application/json`, `application/xml`) based on the client's `Accept` header and the handler's declared capabilities. `produces = "application/json"` on `@GetMapping` narrows the handler to only handle requests that accept JSON — if the client sends `Accept: application/xml`, this mapping is skipped and Spring looks for another handler. If no handler matches, Spring returns `406 Not Acceptable`. Content negotiation order: `Accept` header → path extension (deprecated) → query parameter (`?format=json`, disabled by default). In REST APIs, always declare `produces = MediaType.APPLICATION_JSON_VALUE` on all handlers for clear documentation and to prevent accidental content type negotiation fall-through.
 
 **Q: How does Spring MVC's `HandlerExceptionResolver` hierarchy work, and in what order are resolvers consulted?**
-`DispatcherServlet` catches handler exceptions and passes them through a chain of `HandlerExceptionResolver` beans in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@Controller` and `@ControllerAdvice` (highest priority, handles most cases). (2) `ResponseStatusExceptionResolver` — handles `@ResponseStatus` on exception classes and `ResponseStatusException` thrown programmatically. (3) `DefaultHandlerExceptionResolver` — handles standard Spring MVC exceptions (e.g., `MethodArgumentNotValidException` → 400, `HttpRequestMethodNotSupportedException` → 405, `HttpMediaTypeNotSupportedException` → 415). (4) Fallback: unhandled exceptions propagate to the Servlet container, which renders a generic 500 error page. Boot 3.x adds `ResponseEntityExceptionHandler` as a convenient base class for `@ControllerAdvice` that handles all standard Spring MVC exceptions and returns RFC 7807 `ProblemDetail` bodies.
+`DispatcherServlet` catches handler exceptions and passes them through a chain of `HandlerExceptionResolver` beans in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@Controller` and `@ControllerAdvice` (highest priority, handles most cases). (2) `ResponseStatusExceptionResolver` — handles `@ResponseStatus` on exception classes and `ResponseStatusException` thrown programmatically. (3) `DefaultHandlerExceptionResolver` — handles standard Spring MVC exceptions (e.g., `MethodArgumentNotValidException` → 400, `HttpRequestMethodNotSupportedException` → 405, `HttpMediaTypeNotSupportedException` → 415). (4) Fallback: unhandled exceptions propagate to the Servlet container, which renders a generic 500 error page. Boot 3.x adds `ResponseEntityExceptionHandler` as a convenient base class for `@ControllerAdvice` that handles all standard Spring MVC exceptions and returns RFC 9457 `ProblemDetail` bodies.
 
 ---
 
@@ -512,7 +512,7 @@ Content negotiation is the process by which Spring MVC selects the response medi
 
 ### Scenario: REST API Gateway at 20k req/sec with Custom Argument Resolution and Content Negotiation
 
-**Context.** A public API gateway fronts dozens of internal services and serves **20,000 requests/sec**. `DispatcherServlet` routes each request through `RequestMappingHandlerMapping` to a `@RestController`. A custom `HandlerMethodArgumentResolver` injects the authenticated principal as `@CurrentUser` parsed from the JWT, avoiding repetitive boilerplate in every handler. The `HttpMessageConverter` chain serves JSON (Jackson) to mobile/web clients and Protobuf binary to high-throughput service-to-service callers, selected by the `Accept` header. Errors are returned as RFC 7807 `ProblemDetail` (Spring 6).
+**Context.** A public API gateway fronts dozens of internal services and serves **20,000 requests/sec**. `DispatcherServlet` routes each request through `RequestMappingHandlerMapping` to a `@RestController`. A custom `HandlerMethodArgumentResolver` injects the authenticated principal as `@CurrentUser` parsed from the JWT, avoiding repetitive boilerplate in every handler. The `HttpMessageConverter` chain serves JSON (Jackson) to mobile/web clients and Protobuf binary to high-throughput service-to-service callers, selected by the `Accept` header. Errors are returned as RFC 9457 `ProblemDetail` (Spring 6).
 
 ### Request Lifecycle
 
@@ -579,7 +579,7 @@ public class ApiErrorAdvice {
     public ProblemDetail handle(NoSuchOrderException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         pd.setType(URI.create("https://api.example.com/errors/order-not-found"));
-        return pd;                                           // RFC 7807, serialized as application/problem+json
+        return pd;                                           // RFC 9457, serialized as application/problem+json
     }
 }
 ```
@@ -650,7 +650,7 @@ class ApiErrorAdvice {
 
 **What is the difference between a `Filter` and a `HandlerInterceptor` for timing?** A servlet `Filter` runs outside the `DispatcherServlet` and sees raw requests/responses for all paths. A `HandlerInterceptor` runs inside the dispatcher with access to the resolved `HandlerMethod`, so it can record per-route metrics and `ModelAndView`, which a generic filter cannot.
 
-**Why use `ProblemDetail` over a custom error DTO?** `ProblemDetail` (Spring 6) implements RFC 7807, serializing as `application/problem+json` with standard `type`, `title`, `status`, `detail`, and extension fields. Clients across services get one predictable error contract instead of each team inventing its own error shape.
+**Why use `ProblemDetail` over a custom error DTO?** `ProblemDetail` (Spring 6) implements RFC 9457, serializing as `application/problem+json` with standard `type`, `title`, `status`, `detail`, and extension fields. Clients across services get one predictable error contract instead of each team inventing its own error shape.
 
 **Why does returning a `String` from a `@Controller` behave differently than from a `@RestController`?** On a plain `@Controller`, a `String` return is interpreted as a view name passed to the `ViewResolver`. `@RestController` (which bundles `@ResponseBody`) routes returns through the message converters to be serialized as the response body, so the same String becomes literal output rather than a view lookup.
 
