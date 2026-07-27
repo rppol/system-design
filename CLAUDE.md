@@ -115,6 +115,44 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 - First sentence = direct answer; following sentences = mechanism / example / gotcha; final sentence = practical guidance
 - **Minimum 15 Q&As per module** — this is a hard floor; see section CLAUDE.md for modules that require 18+
 - **Order by interview importance**: highest-frequency gotchas and traps first, then internal mechanics, then edge cases and advanced scenarios last
+- **The answer must be current, not historical.** Every API, flag, version, model, product
+  and spec named in an answer is the one that is live today — the same REPLACE, DO NOT
+  ANNOTATE rule that governs module prose (see "Modernization" below). An answer never
+  says "`foo()` is deprecated, use `bar()`"; it says `bar()`. Three narrow exceptions:
+  a broken→fixed pair where the old form IS the lesson, an answer whose explicit subject
+  is a migration, and **deprecation-as-subject** — an answer teaching the *discipline*
+  of handling deprecation (surviving a vendor retirement, versioning your own API, a
+  published lifecycle policy, a `deprecated` enum value) is content and stays.
+
+### Planned: authored one-line summaries (NOT YET ACTIVE — do not author these yet)
+
+Today the game derives each MCQ's correct option by taking the answer's first sentence
+and, if it exceeds 220 characters, trimming it at a clause boundary (`make_short()` in
+`game/extract.py`). That produces a weak or mangled option whenever the first sentence is
+long, opens with a code fence, or is not self-contained.
+
+The agreed replacement is an **authored one-line summary per Q&A**, which becomes the MCQ
+option; the full answer stays untouched and is what the quiz reveals after answering. The
+summary is hidden by default in the reader and shown by a toggle.
+
+Target format:
+
+```
+**Q: <question>?**
+**Short:** <one self-contained sentence, 15–220 chars, no code fence, no list>
+
+<the full answer — mechanism, example, gotcha, guidance — unchanged>
+```
+
+**Do not author `**Short:**` lines until `extract.py` understands them.** Until then the
+parser would read the label as part of the answer and ship `"Short: ..."` as the MCQ
+option, which is worse than what it does now. Until the migration lands, **the existing
+rule binds**: the first sentence must be a self-contained direct answer of 15–220
+characters.
+
+Migration requirements, when it runs: `extract.py` prefers `**Short:**` and falls back to
+`make_short()` so un-migrated files keep working; `answerFull` never loses a word; the
+reader hides the line behind a toggle; and the pass doubles as an answer-structure review.
 
 ---
 
@@ -329,6 +367,13 @@ silently dropped from the game or renders wrong. These rules are derived from
 
 - Q&As must sit under a heading matching `^##\s+.*interview\s+q` (case-insensitive)
   — the canonical `## 12. Interview Questions with Answers` works.
+  **`## NN. Interview Tips` does NOT match**, and neither does any heading without the
+  word "questions" after "interview". A file using one contributes **zero** questions to
+  the bank, silently — no error, no warning, it simply never appears in the quiz. This is
+  not hypothetical: 23 `lld` pattern modules use `Interview Tips` and are losing 213 Q&As
+  between them, which is why `lld` shows ~198 questions against `llm`'s 1,987. When adding
+  a module, confirm it reached the bank (`python3 game/extract.py` prints a per-section
+  count) rather than assuming the heading was close enough.
 - Each **question line starts with `**`** and is one of: fully bold `**question?**`
   (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
   wraps across lines. This is why the "bold the question" rule is load-bearing,
