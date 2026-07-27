@@ -885,9 +885,9 @@ public class RateLimiterConfig {
         return new ConcurrentHashMap<>();
     }
 
-    // Per-user token bucket: 100 tokens, refilled at 100/minute
-    // Bucket4j 8.x: Bandwidth.classic(...) / Bandwidth.simple(...) / Refill.greedy(...)
-    // are all deprecated -- use the staged Bandwidth.builder() API instead.
+    // Per-user token bucket: 100 tokens, refilled at 100/minute.
+    // Bucket4j's staged Bandwidth.builder() forces capacity before refill, so an
+    // under-specified bandwidth will not compile.
     public Bucket getBucketForUser(String userId) {
         return userBuckets().computeIfAbsent(userId, k ->
             Bucket.builder()

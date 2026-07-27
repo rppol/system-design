@@ -520,7 +520,7 @@ ps.executeQuery();
 //    the average custom-plan cost. Override with plan_cache_mode.
 
 // Spring JdbcTemplate uses PreparedStatement internally.
-// Use the varargs overload -- query(String, Object[], RowMapper) is @Deprecated since 5.3:
+// Pass bind values as varargs after the RowMapper -- query(String, RowMapper, Object...):
 jdbcTemplate.query(
     "SELECT * FROM orders WHERE user_id = ?",
     rowMapper,

@@ -627,7 +627,7 @@ The broken parser reads `alg` from the untrusted header and treats `none` as alr
 
 | Tool / Library                        | Purpose                                              |
 |---------------------------------------|------------------------------------------------------|
-| Spring Security 6.x / 7.x             | AuthN/AuthZ, CSRF, security headers, method security |
+| Spring Security 7.x                   | AuthN/AuthZ, CSRF, security headers, method security |
 | OWASP Dependency-Check (Maven plugin) | SCA — finds CVEs in direct and transitive deps       |
 | Snyk                                  | SCA with developer-friendly fix suggestions          |
 | Dependabot (GitHub)                   | Automated dependency update PRs                      |
@@ -679,7 +679,7 @@ CSP is an HTTP response header that specifies which sources the browser is allow
 Least privilege means every entity operates with only the minimum permissions required for its function. Examples: (1) Database account for the user-service has SELECT/INSERT/UPDATE on the `users` table only — not DROP, not access to other schemas; (2) IAM role for an EC2 instance running the payments service has GetSecret on the specific Secrets Manager ARN, not `secretsmanager:*`; (3) Kubernetes service account has get/list on its own ConfigMap only, not cluster-wide access. When a component is compromised, least privilege limits the blast radius to what that component actually needed.
 
 **Q: How do you prevent log injection attacks?**
-Log injection occurs when unsanitized user input is logged and the logging system interprets special characters as log delimiters (allowing fake log entries) or, in Log4j's case, as JNDI lookup expressions (enabling RCE). Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) upgrade Log4j to 2.17.1+ which disables JNDI by default.
+Log injection occurs when unsanitized user input is logged and the logging system reads special characters as log delimiters, letting the attacker forge entries. In Log4j's case the injected text was instead read as a JNDI lookup expression, which escalated the same bug to remote code execution. Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) run a current Log4j 2.x release (2.26.x) — message lookups are gone from the layout and JNDI is disabled unless explicitly enabled.
 
 **Q: What are the risks of verbose error messages and how do you handle errors securely?**
 Verbose error messages expose stack traces, class names, DB table names, SQL queries, framework versions, and internal hostnames — all of which aid an attacker during reconnaissance. Secure error handling: (1) catch all unhandled exceptions at a global handler (`@ControllerAdvice` with `@ExceptionHandler(Exception.class)`); (2) log the full stack trace internally with a correlation ID; (3) return only a generic error code and the correlation ID to the client (`{"error":"INTERNAL_ERROR","traceId":"abc123"}`); (4) never return raw exception messages or stack traces in API responses; (5) configure Spring to disable the `/error` Whitelabel Error Page in production.

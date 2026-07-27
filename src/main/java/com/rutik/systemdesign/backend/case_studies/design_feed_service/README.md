@@ -166,10 +166,9 @@ timeline, and merges them with the user's pre-built feed ZSet. An N-way merge by
 ### 2. Redis ZSet as Feed Store
 
 `ZADD feed:{userId} <timestamp_ms> <postId>` stores postIds sorted by timestamp. Reading a page is
-`ZRANGE feed:{userId} <cursor_ts> -inf BYSCORE REV LIMIT 0 20` — O(log N + page_size). (The older
-spelling `ZREVRANGEBYSCORE feed:{userId} <cursor_ts> -inf LIMIT 0 20` does the same thing and is what
-Spring Data Redis' `reverseRangeByScoreWithScores` still issues, but Redis has marked it deprecated
-since 6.2 in favour of `ZRANGE ... BYSCORE REV`.) No offset
+`ZRANGE feed:{userId} <cursor_ts> -inf BYSCORE REV LIMIT 0 20` — O(log N + page_size). (Spring Data
+Redis' `reverseRangeByScoreWithScores` is the binding for this; it still emits the older
+`ZREVRANGEBYSCORE` spelling on the wire, which is behaviourally identical.) No offset
 arithmetic; the score (timestamp) is the cursor. The ZSet is bounded to the last 1,000 post IDs
 per user via `ZREMRANGEBYRANK feed:{userId} 0 -1001` after each fan-out insertion. Older posts are
 served from the database if the user scrolls back far enough (rare in practice).
@@ -669,7 +668,7 @@ public class FeedWarmUpService {
 
 | Technology | Role |
 |---|---|
-| Spring Boot 3.2 | Application framework |
+| Spring Boot 4.1 | Application framework |
 | Redis 7 (Cluster) | Feed ZSet storage, celebrity timelines, post detail cache |
 | Spring Data Redis | RedisTemplate, ZSetOperations, pipeline support |
 | Kafka 4.x (KRaft) | `post-published` topic for async fan-out |

@@ -79,7 +79,7 @@ flowchart LR
 
 **OpenTelemetry Pipeline**
 
-The OTel Collector ingests OTLP from the app SDK, batches and enriches it, then fans out to three specialized backends — Prometheus for metrics, Jaeger/Tempo for traces, and Loki for logs — each feeding its own UI. Note the exporter names: the Collector's dedicated `jaeger` exporter was removed in 2023 (Jaeger accepts OTLP natively) and the `loki` exporter was deprecated in 2024 (Loki 3 accepts OTLP natively), so traces go out over `otlp` and logs over `otlphttp`.
+The OTel Collector ingests OTLP from the app SDK, batches and enriches it, then fans out to three specialized backends — Prometheus for metrics, Jaeger/Tempo for traces, and Loki for logs — each feeding its own UI. Note the exporter names: every trace backend here ingests OTLP natively, so traces leave the Collector over the generic `otlp` exporter and logs over `otlphttp` — there is no backend-specific `jaeger` or `loki` exporter to configure.
 
 ```mermaid
 flowchart LR
@@ -131,7 +131,7 @@ public class OrderService {
             .tag("service", "order")
             .publishPercentiles(0.5, 0.95, 0.99)  // client-side percentiles (memory overhead)
             .publishPercentileHistogram()           // server-side histogram for Prometheus
-            // .sla(...) is deprecated in Micrometer — use serviceLevelObjectives(...)
+            // SLO boundaries become explicit histogram buckets in the scrape output
             .serviceLevelObjectives(Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofMillis(500))
             .register(registry);
 

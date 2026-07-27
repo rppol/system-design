@@ -480,8 +480,8 @@ public class RefreshTokenService {
 
 @Bean
 public RoleHierarchy roleHierarchy() {
-    // setHierarchy() + the no-arg constructor were deprecated in Spring Security 6.3
-    // and removed in 7.0. Use the static factory (or RoleHierarchyImpl.withDefaultRolePrefix()).
+    // Build with the static factory. RoleHierarchyImpl.withDefaultRolePrefix() /
+    // withRolePrefix(...) return a Builder if you prefer to add roles programmatically.
     return RoleHierarchyImpl.fromHierarchy("ROLE_ADMIN > ROLE_MANAGER > ROLE_USER");
 }
 

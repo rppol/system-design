@@ -159,8 +159,8 @@ spring:
   cloud:
     gateway:
       server:
-        webflux:            # prefix since Spring Cloud 2025.0; bare
-          discovery:        # spring.cloud.gateway.* is deprecated and warns
+        webflux:            # server.webflux distinguishes the WebFlux gateway
+          discovery:        # from the Web MVC and proxy-exchange variants
             locator:
               enabled: true
           default-filters:
