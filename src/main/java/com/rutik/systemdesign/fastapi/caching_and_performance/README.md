@@ -131,7 +131,7 @@ paying for themselves, and it is worth knowing that before you spend a sprint on
 
 | Type | Module | TTL Support | Bounded | Thread-Safe | Async-Safe |
 |------|--------|-------------|---------|-------------|------------|
-| LRU eviction | `functools.lru_cache` | No | Yes | Yes (GIL) | No (caches coroutine) |
+| LRU eviction | `functools.lru_cache` | No | Yes | Yes (internal lock) | No (caches coroutine) |
 | LRU eviction | `cachetools.LRUCache` | No | Yes | No (use RLock) | Manual |
 | TTL eviction | `cachetools.TTLCache` | Yes | Yes | No (use RLock) | Manual |
 | TTL eviction | `aiocache.SimpleMemoryCache` | Yes | No | Yes | Yes |
@@ -577,18 +577,21 @@ this reduces Redis latency from `100 × 0.3ms = 30ms` to roughly `0.5ms`.
 ### 6.6 `fastapi-cache2` Decorator Pattern
 
 ```python
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache
 import redis.asyncio as redis
 
-app = FastAPI()
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     r = redis.from_url("redis://localhost:6379", decode_responses=True)
     FastAPICache.init(RedisBackend(r), prefix="fastapi-cache:")
+    yield
+    await r.aclose()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/users/{user_id}")
 @cache(expire=300)
@@ -654,9 +657,10 @@ async def large_dataset() -> list[dict]:
 ```
 
 `orjson` is implemented in Rust and serializes Python objects 3–5x faster than the stdlib
-`json` module. For a 10KB JSON payload, `json.dumps` takes approximately 120µs while
-`orjson.dumps` takes approximately 30µs. The benefit scales linearly with payload size:
-a 1MB response saves ~90ms of pure serialization time per request.
+`json` module. Anchor figures used throughout this section (illustrative — measure on your own
+hardware): for a 10KB JSON payload, `json.dumps` takes approximately 120µs while `orjson.dumps`
+takes approximately 30µs. The benefit scales roughly linearly with payload size, so a 1MB
+response — 100x the bytes — saves about 100 × 90µs = 9ms of pure serialization time per request.
 
 Setting `default_response_class=ORJSONResponse` on the `FastAPI` constructor applies `orjson`
 to all routes without per-endpoint changes.
@@ -739,23 +743,29 @@ cutting both serialization time and network transfer cost.
 
 ## 7. Real-World Examples
 
-**Stripe** uses a two-level cache architecture: an in-process Caffeine cache (JVM equivalent:
-`TTLCache`) for sub-millisecond reads of rate-limit counters, backed by Redis for cross-process
-consistency. The in-process layer absorbs 95% of reads; Redis handles the remaining 5% that
-cross process boundaries.
+**Uber — CacheFront.** Uber's published design puts a Redis cache in front of Docstore at the
+query-engine layer, so callers get caching without changing application code. It serves over
+150 million rows per second at peak. The recommended default TTL is 5 minutes, and one table
+(`orderability_features_ping`) runs a 24-hour TTL and reports a hit rate above 99.9%.
+Invalidation does not delete keys — writes place invalidation markers, which is what buys the
+stronger consistency the design is named for.
 
-**Discord** caches user presence data (online/offline status) in Redis with a 5-second TTL.
-The choice of 5s means presence data is at most 5 seconds stale — acceptable for social
-features. A longer TTL would cause "ghost online" bugs; a shorter TTL would triple Redis load.
+**Salesforce — two-level rate-limit counters.** A published example of the L1/L2 split this
+module recommends: an in-process Caffeine cache in each service instance, backed by Redis for
+the distributed count, with Redis's atomic increment maintaining the shared total.
+Synchronising to Redis once per second rather than on every call held the rate limiter to a p95
+of 1 ms under load — the point being that L1 exists to control how often you touch L2, not to
+replace it.
 
-**Cloudflare** uses HTTP caching aggressively for API responses that change infrequently.
-Their API returns `Cache-Control: max-age=300, s-maxage=60` — 5 minutes in browser, 1 minute
-at edge CDN. `s-maxage` overrides `max-age` for shared caches (CDNs) only.
+**Discord — presence.** Presence is ephemeral and is not persisted to a database; each Elixir
+gateway node holds the presence state of its connected users in memory. It is the clearest
+production example of the "in-process cache is the right answer when the data dies with the
+connection" case in Section 9.
 
-**Uber's** matching service caches driver location data in a Redis cluster with a 2-second TTL.
-Location data older than 2 seconds is stale enough to cause incorrect ETAs. At Uber's scale
-(millions of active drivers), this cache absorbs 40M reads/second that would otherwise hit
-the geospatial database.
+**HTTP caching with `s-maxage`.** The `Cache-Control: max-age=300, s-maxage=60` shape is the
+standard CDN pattern: browsers honour the 5-minute `max-age`, while shared caches (CDNs,
+reverse proxies) use the 60-second `s-maxage` instead, so an edge purge or natural edge refresh
+bounds staleness far tighter than the browser copy does.
 
 ---
 
@@ -1054,12 +1064,16 @@ globally. It does not help when the bottleneck is database I/O or network transf
 serialization — profile first with `py-spy` to confirm serialization is the actual hot path.
 
 **Q9: What is probabilistic early expiration (XFetch) and how does it differ from a mutex?**
-XFetch extends a key's TTL probabilistically before it expires. When a key has TTL remaining
-of `delta`, each fetch has a probability of recomputing equal to `exp(-remaining / (delta × beta))`.
-As expiry approaches, more requests volunteer to recompute, spreading the load. No explicit
-lock is needed; the key is never fully expired, so no stampede window exists. A mutex is
-simpler but creates a "lock wait" period; XFetch eliminates this at the cost of occasionally
-doing redundant recomputations.
+XFetch recomputes a key probabilistically *before* it expires, so the herd never forms.
+Each reader evaluates `now - delta × beta × log(random()) >= expiry` and recomputes if it holds,
+where `delta` is the **measured time the last recomputation took** (stored alongside the value),
+`beta` is a tuning constant defaulting to 1, and `expiry` is the key's absolute expiry time.
+That condition is equivalent to recomputing with probability `exp(-(expiry - now) / (delta × beta))`,
+which is near zero early in the TTL and rises toward 1 as expiry approaches — so slow-to-recompute
+keys start volunteering earlier than cheap ones. Vattani et al. (VLDB 2015) proved this
+exponential gap distribution optimal, and specifically better than a uniform one. A mutex is
+simpler but creates a "lock wait" period; XFetch eliminates the wait at the cost of occasional
+redundant recomputations.
 
 ```mermaid
 xychart-beta
@@ -1085,8 +1099,10 @@ scale the pool or add Redis replicas for read traffic. Setting `max_connections`
 
 **Q11: When should you use `response_model_exclude_unset=True` at the router level vs
 `model.model_dump(exclude_unset=True)` at the handler level?**
-`response_model_exclude_unset=True` on the route decorator (`@app.get(..., response_model_exclude_unset=True)`)
-applies `exclude_unset` automatically during FastAPI's response model serialization — you do
+Use the route-level flag when the response model maps directly to what you return, and the
+handler-level call when you need to shape the dict yourself. `response_model_exclude_unset=True`
+on the route decorator (`@app.get(..., response_model_exclude_unset=True)`) applies
+`exclude_unset` automatically during FastAPI's response model serialization — you do
 not touch the return value. `model.model_dump(exclude_unset=True)` in the handler gives finer
 control: you can apply different exclusions per field or merge the partial update dict. Use
 the route-level option for read endpoints where the model directly maps to the response; use
@@ -1104,16 +1120,16 @@ this can be slow — prefer key-tagging libraries (`cashews`, custom sets of tag
 production-grade selective invalidation.
 
 **Q13: Why does using one global `asyncio.Lock` for all cache misses hurt concurrency, and what is the fix?**
-A single global lock serializes every cache-miss code path regardless of which key is being fetched, so a miss on `item_id=1` blocks a completely unrelated miss on `item_id=999` even though the two lookups share no state and could safely run in parallel. Under high concurrency this collapses what should be N independent DB fetches into one queue, defeating the purpose of caching during the exact traffic spike when caching matters most. The fix is a per-key lock — typically `defaultdict(asyncio.Lock)` keyed by the cache key — so only requests racing for the *same* key contend with each other, while misses on different keys proceed concurrently. The remaining cost is that the lock dictionary itself grows unboundedly unless you periodically clean up locks that no coroutine is waiting on.
+A single global lock serializes every cache-miss code path regardless of which key is being fetched. That means a miss on `item_id=1` blocks a completely unrelated miss on `item_id=999`, even though the two lookups share no state and could safely run in parallel. Under high concurrency this collapses what should be N independent DB fetches into one queue, defeating the purpose of caching during the exact traffic spike when caching matters most. The fix is a per-key lock — typically `defaultdict(asyncio.Lock)` keyed by the cache key — so only requests racing for the *same* key contend with each other, while misses on different keys proceed concurrently. The remaining cost is that the lock dictionary itself grows unboundedly unless you periodically clean up locks that no coroutine is waiting on.
 
 **Q14: How does a Redis pipeline reduce the cost of fetching 100 keys, and what is the mechanism?**
-A pipeline batches multiple Redis commands into a single network round trip instead of sending each command and waiting for its reply before sending the next, cutting 100 sequential `GET` calls at roughly 0.3ms each (about 30ms total) down to roughly 0.5ms for the whole batch. The client buffers all queued commands locally, sends them to Redis in one TCP write, and Redis processes them back-to-back before returning all results together — `async with r.pipeline(transaction=False) as pipe: ...; results = await pipe.execute()`. Setting `transaction=False` skips Redis's `MULTI`/`EXEC` wrapping when you only need batching, not atomicity, across the commands. Use a pipeline whenever a single request needs to read or write more than a handful of independent keys.
+A pipeline batches multiple Redis commands into a single network round trip instead of sending each command and waiting for its reply before sending the next. That cuts 100 sequential `GET` calls at roughly 0.3ms each (about 30ms total) down to roughly 0.5ms for the whole batch. The client buffers all queued commands locally, sends them to Redis in one TCP write, and Redis processes them back-to-back before returning all results together — `async with r.pipeline(transaction=False) as pipe: ...; results = await pipe.execute()`. Setting `transaction=False` skips Redis's `MULTI`/`EXEC` wrapping when you only need batching, not atomicity, across the commands. Use a pipeline whenever a single request needs to read or write more than a handful of independent keys.
 
 **Q15: `cachetools.TTLCache` supports both a size bound and a TTL — so why does the module still wrap it in an `asyncio.Lock`?**
 `cachetools.TTLCache` is not thread-safe or async-safe on its own, so concurrent reads and writes from multiple coroutines can race on the cache's internal eviction bookkeeping. The module's own type table marks it "Thread-Safe: No" and "Async-Safe: Manual" for exactly this reason. Wrapping access in `asyncio.Lock` with the double-checked pattern — check the cache, acquire the lock, check again, then populate — prevents two coroutines from both missing the cache and both fetching from the database simultaneously for the same key. The second check inside the lock is essential: without it, every coroutine that queued up waiting for the lock would still re-fetch from the DB once it finally acquires the lock, recreating the exact stampede the lock was meant to prevent. `asyncio.Lock` is correct here (not `threading.Lock`) because FastAPI's single-threaded event loop needs a lock that yields control while waiting rather than blocking the whole loop.
 
 **Q16: In the multi-tier case study, why is the in-process L1 TTL set to 10 seconds while the Redis L2 TTL is 300 seconds?**
-The two TTLs serve different failure domains: L1 is per-worker-process memory, so a short TTL bounds how long any single worker can serve stale data after an `invalidate_product()` call that only clears that one worker's L1 and the shared Redis key — the other workers' L1 entries simply expire naturally within the 10-second window. L2 (Redis) is shared across all workers and is explicitly invalidated on every write via `r.delete(redis_key)`, so its 300-second TTL only matters as a safety net for writes that bypass the invalidation path, not as the primary consistency mechanism. Making L1 TTL shorter than L2 TTL is a deliberate design rule: the layer with the weakest invalidation guarantee gets the shortest expiry. In the measured results, this combination pushed DB CPU from 100% down to 7% while keeping worst-case staleness bounded to single-digit seconds.
+The two TTLs serve different failure domains, and L1's is short because its invalidation is the weaker of the two. L1 is per-worker-process memory, so a short TTL bounds how long any single worker can serve stale data after an `invalidate_product()` call that only clears that one worker's L1 and the shared Redis key — the other workers' L1 entries simply expire naturally within the 10-second window. L2 (Redis) is shared across all workers and is explicitly invalidated on every write via `r.delete(redis_key)`, so its 300-second TTL only matters as a safety net for writes that bypass the invalidation path, not as the primary consistency mechanism. Making L1 TTL shorter than L2 TTL is a deliberate design rule: the layer with the weakest invalidation guarantee gets the shortest expiry. In the measured results, this combination pushed DB CPU from 100% down to 7% while keeping worst-case staleness bounded to single-digit seconds.
 
 ---
 

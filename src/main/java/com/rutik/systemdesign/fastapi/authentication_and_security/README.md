@@ -20,7 +20,7 @@ Core capabilities covered in this module:
 - Token blacklisting with Redis for explicit logout
 - Cross-links: `../dependency_injection_in_fastapi/README.md`, `../configuration_and_settings_management/README.md`
 
-Python version: 3.12/3.13. FastAPI version: 0.140+. Pydantic version: v2.
+Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
 
 ---
 
@@ -282,7 +282,7 @@ Decoding raises `jwt.ExpiredSignatureError` on an expired token and `jwt.Invalid
 
 `argon2id` is the default choice. It is memory-hard as well as CPU-bound, so a GPU or ASIC cannot amortise an attack across thousands of parallel guesses the way it can against a purely CPU-bound hash. OWASP's Password Storage Cheat Sheet gives a floor of 19 MiB of memory, 2 iterations and 1 degree of parallelism; `argon2-cffi`'s own defaults are RFC 9106's second recommended profile, `m=65536` (64 MiB), `t=3`, `p=4`, comfortably above that floor.
 
-`bcrypt` remains acceptable, particularly for an existing store you are migrating. OWASP's floor is a work factor of 10, tuned upward to whatever verification latency the server can absorb. Its one sharp edge is a **72-byte input limit** in most implementations — bytes beyond that are silently ignored, so cap the accepted password length at 72 bytes rather than letting a long passphrase quietly truncate.
+`bcrypt` remains acceptable, particularly for an existing store you are migrating. OWASP's floor is a work factor of 10, tuned upward to whatever verification latency the server can absorb. Its one sharp edge is a **72-byte input limit**: Python's `bcrypt` since 5.0 raises `ValueError: password cannot be longer than 72 bytes` rather than truncating, which is safer but turns a long passphrase into a 500 on your signup route. Validate and reject above 72 bytes at the schema layer so the error surfaces as a 422, and never "fix" it by pre-hashing naively — OWASP warns that raw pre-hashing reintroduces null-byte and password-shucking risks.
 
 `scrypt` is built into Python's stdlib (`hashlib.scrypt`) and is the accepted substitute where argon2id is unavailable; OWASP's minimum is `N=2^17` (128 MiB), `r=8`, `p=1`.
 
@@ -360,7 +360,7 @@ def create_token(user_id: int) -> str:
 # Store in environment variable: JWT_SECRET_KEY=<64-char hex>
 
 from datetime import datetime, timezone, timedelta
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 import jwt
 
@@ -369,8 +369,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env")
 
 def create_access_token(subject: str, settings: Settings) -> str:
     now = datetime.now(tz=timezone.utc)
@@ -727,7 +726,7 @@ async def get_api_key(
 | bcrypt | CPU-bound | No | 12 (~250 ms) |
 | argon2id | CPU + memory | Yes | m=65536, t=3, p=4 |
 | scrypt | CPU + memory | Yes | N=2^17, r=8, p=1 |
-| PBKDF2-SHA256 | CPU-bound | No | 600000 iterations (NIST 2023) |
+| PBKDF2-SHA256 | CPU-bound | No | 600,000 iterations (OWASP Password Storage Cheat Sheet) |
 
 ---
 
@@ -800,8 +799,8 @@ flowchart LR
 ### Pitfall 1: Algorithm confusion — accepting "none"
 
 ```python
-# BROKEN: no algorithm allowlist — attacker can send alg: "none"
-decoded = jwt.decode(token, secret)   # PyJWT < 2.0 default accepted alg:none
+# BROKEN: no algorithm allowlist — the shape that lets an attacker send alg: "none"
+decoded = jwt.decode(token, secret)
 
 # FIX: always pass explicit algorithms list
 decoded = jwt.decode(
@@ -812,7 +811,7 @@ decoded = jwt.decode(
 )
 ```
 
-The `alg: none` attack: an attacker strips the signature and sets `"alg": "none"` in the header. A library that does not enforce an algorithm allowlist will accept the unsigned token. PyJWT 2.x raises by default, but older versions did not. Always pass `algorithms=["HS256"]` explicitly.
+The `alg: none` attack: an attacker strips the signature and sets `"alg": "none"` in the header. A library that does not enforce an algorithm allowlist will accept the unsigned token. PyJWT 2.x refuses to guess — the broken call above raises `jwt.exceptions.DecodeError: It is required that you pass in a value for the "algorithms" argument when calling decode()`, and once you pass `algorithms=["HS256"]`, an `alg: none` token raises `InvalidAlgorithmError`. Pass the allowlist explicitly on every decode; other JWT libraries are less strict.
 
 ### Pitfall 2: Timing oracle in password comparison
 
@@ -823,10 +822,14 @@ def verify_password_broken(plain: str, hashed: str) -> bool:
     return hashlib.sha256(plain.encode()).hexdigest() == hashed
     # SHA-256 is fast (< 1 ms), vulnerable to brute force AND timing attacks
 
-# FIX: use passlib — internally uses hmac.compare_digest (constant-time)
+# FIX: use a slow, salted KDF via pwdlib (Section 6.4)
+from pwdlib import PasswordHash
+
+password_hash = PasswordHash.recommended()      # argon2id
+
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-    # bcrypt/argon2 hash comparison is constant-time by design
+    return password_hash.verify(plain, hashed)
+    # argon2/bcrypt digest comparison is constant-time by design
 ```
 
 ### Pitfall 3: Refresh token stored in localStorage
@@ -882,15 +885,15 @@ Returning 401 (Unauthenticated) when the user is authenticated but lacks permiss
 
 | Tool | Role | Notes |
 |---|---|---|
-| `PyJWT` (jwt 2.x) | JWT encode/decode | Simpler API, faster, actively maintained; preferred for new projects |
-| `python-jose` | JWT + JWK + JWE | Needed for JWKS endpoint fetching, JWE encryption, OIDC flows |
-| `passlib[bcrypt,argon2]` | Password hashing | Unified API over bcrypt/argon2/scrypt; transparent rehashing |
-| `argon2-cffi` | argon2 hashing | Lower-level argon2 binding; used by passlib internally |
+| `PyJWT` (jwt 2.x) | JWT encode/decode + JWKS | What FastAPI's own security tutorial uses; ships `PyJWKClient`, so OIDC needs no extra library |
+| `python-jose` | JWT + JWK + JWE | Reach for it only when you need JWE (encrypted tokens); PyJWT covers signing and JWKS |
+| `pwdlib[argon2,bcrypt]` | Password hashing | The maintained front end FastAPI's tutorial uses; `PasswordHash.recommended()` is argon2id, `verify_and_update()` rehashes legacy hashes |
+| `argon2-cffi` | argon2 hashing | Lower-level argon2id binding; defaults `m=65536, t=3, p=4`; used by pwdlib under the hood |
 | `cryptography` | RSA/EC key ops | Needed for RS256 key generation and JWKS endpoint |
 | `fastapi.security` | OAuth2/APIKey schemes | Built-in — `OAuth2PasswordBearer`, `APIKeyHeader`, `HTTPBearer` |
-| `redis.asyncio` | Refresh token store, blocklist | Sub-millisecond TTL operations; `redis-py` 4.x includes async client |
+| `redis.asyncio` | Refresh token store, blocklist | Sub-millisecond TTL operations; the async client ships inside `redis-py` itself (no separate `aioredis`) |
 | `authlib` | OAuth2 client / OIDC | Full OAuth2/OIDC client for third-party login flows |
-| `Starlette CORS middleware` | CORS | Already in FastAPI; configure `allow_origins` explicitly |
+| `Starlette CORS middleware` | CORS | Already in FastAPI; list `allow_origins` explicitly — browsers reject `allow_origins=["*"]` together with `allow_credentials=True` |
 
 ---
 
@@ -905,14 +908,14 @@ JWTs are self-contained: the payload carries the user ID, expiry, and scopes, so
 **Q3: What claims should a production access token always include?**
 At minimum: `sub` (subject, the user identifier), `exp` (expiry as Unix timestamp), `iat` (issued-at, for detecting replayed tokens), and `jti` (unique token ID, for blacklisting). Optionally `scopes` (a list of granted permissions). Never embed passwords, raw emails, or other PII — JWT payloads are base64-encoded but not encrypted, visible to anyone who intercepts the token.
 
-**Q4: Why is bcrypt's default cost factor 10 inadequate for production auth in 2025?**
-Cost factor 10 produces ~100 ms on 2015-era hardware but less than 50 ms on a modern CPU. A bcrypt hash is parallelizable to ~1000 attempts/second per GPU. Cost factor 12 (~250 ms) increases GPU attack cost by 4× over factor 10. For high-security applications, use argon2id (memory-hard) which defeats GPU/ASIC parallelism regardless of cost factor by requiring large amounts of RAM per attempt. The OWASP recommendation as of 2024 is bcrypt cost ≥ 12 or argon2id with m=65536.
+**Q4: Why is OWASP's bcrypt floor of work factor 10 a floor rather than a target?**
+Because the cost factor is an exponent that must be re-tuned as CPUs get faster, and 10 is only the point below which bcrypt stops being defensible. Measured on a current server core, cost 10 is roughly 60 ms per verification while cost 12 is roughly 200–250 ms — so the same "minimum" that cost real time in 2015 is now cheap for an attacker. OWASP's rule is to raise the factor until verification latency reaches the highest budget your login path can absorb; Python's `bcrypt` already defaults `gensalt()` to 12. Even so, bcrypt is CPU-hard only, so a well-funded attacker parallelises it across GPUs; argon2id is memory-hard as well and is the primary OWASP recommendation for new systems, at m=19456 KiB, t=2, p=1 or above.
 
 **Q5: Explain refresh token rotation and why it detects token theft.**
 On each use of a refresh token, the server deletes the old token and issues a new one. If an attacker steals the refresh token and uses it first, the server invalidates it. When the legitimate client later presents the (now invalid) token, the mismatch signals a potential theft — the server should revoke the entire token family (all refresh tokens for that user). This is the "refresh token rotation with reuse detection" pattern. Without rotation, a stolen refresh token grants indefinite access.
 
 **Q6: What is the `alg: none` JWT attack and how does PyJWT 2.x prevent it?**
-An attacker strips the JWT signature, sets `"alg": "none"` in the header, and sends it. JWT libraries that do not enforce an algorithm allowlist may accept the unsigned token as valid. PyJWT 2.x raises `InvalidAlgorithmError` if `algorithms` is not explicitly passed to `decode()`. Always pass `algorithms=["HS256"]` (or `["RS256"]` for asymmetric). Never pass `algorithms=jwt.algorithms.get_default_algorithms()` unless you fully understand what it includes.
+An attacker strips the JWT signature, sets `"alg": "none"` in the header, and sends it. JWT libraries that do not enforce an algorithm allowlist may accept the unsigned token as valid. PyJWT 2.x closes this two ways: omitting `algorithms` raises `DecodeError` ("It is required that you pass in a value for the 'algorithms' argument"), and presenting an `alg: none` token against `algorithms=["HS256"]` raises `InvalidAlgorithmError`. Always pass `algorithms=["HS256"]` (or `["RS256"]` for asymmetric). Never pass `algorithms=jwt.algorithms.get_default_algorithms()` unless you fully understand what it includes.
 
 **Q7: When should you use RS256 instead of HS256?**
 Use RS256 when multiple independent services need to verify tokens, or when tokens are consumed by third parties. With RS256, the private key stays on the auth server; services fetch the public key from a JWKS endpoint. A compromised microservice cannot forge tokens because it only has the public key. Use HS256 for single-service applications where the secret can be kept on one server. Never share HS256 secrets across untrusted boundaries.
@@ -939,13 +942,13 @@ PKCE (Proof Key for Code Exchange, RFC 7636) prevents authorization code interce
 OAuth2 is an authorization framework — it issues access tokens that say "you may call this API." It does not define how to get user identity. OIDC (OpenID Connect) is a thin identity layer on top of OAuth2: the token response includes an `id_token` (JWT) containing user claims (`sub`, `email`, `name`, `picture`). Your app verifies the `id_token` signature using the provider's public key from its JWKS endpoint. OIDC also standardizes the discovery endpoint (`/.well-known/openid-configuration`) so you can fetch all configuration automatically.
 
 **Q15: Why should you use `SecretStr` from pydantic for secrets?**
-`SecretStr` stores the underlying string value but overrides `__repr__` and `__str__` to return `'**********'`. This means that if a `Settings` object is accidentally logged, printed in a traceback, or serialized to JSON, the secret value is never exposed. The raw value is only accessible via `.get_secret_value()`, which forces an explicit intent to use the secret. This provides a thin but effective defence-in-depth layer against accidental secret leakage in logs.
+`SecretStr` stores the underlying string value but masks it in both `str()` (which returns `**********`) and `repr()` (which returns `SecretStr('**********')`). This means that if a `Settings` object is accidentally logged, printed in a traceback, or serialized to JSON, the secret value is never exposed. The raw value is only accessible via `.get_secret_value()`, which forces an explicit intent to use the secret. This provides a thin but effective defence-in-depth layer against accidental secret leakage in logs.
 
 **Q16: What are the security implications of long-lived JWTs?**
 A stolen JWT with a 24-hour or 7-day expiry gives an attacker a large window of access. If you use short-lived access tokens (15 min) with refresh token rotation, the maximum exposure window for a stolen access token is 15 minutes. The attacker cannot silently extend access via the refresh endpoint because they do not have the refresh token (or if they do, rotation detects reuse). Long-lived JWTs are never appropriate for user-facing APIs. Use them only for inter-service calls where the services are in the same trust boundary.
 
-**Q17: How does `passlib`'s `deprecated="auto"` feature work?**
-When a `CryptContext` is configured with `schemes=["argon2", "bcrypt"]` and `deprecated="auto"`, the first scheme (`argon2`) is the active scheme. All existing bcrypt hashes are flagged as deprecated. When `pwd_context.verify(plain, hashed)` is called for a bcrypt hash, it returns a tuple `(True, new_hash)` where `new_hash` is the argon2 hash of the same password. The application must detect this case and update the stored hash. This allows zero-downtime algorithm migration: users transparently get argon2 hashes on their next login without ever being logged out.
+**Q17: How do you migrate a password store from bcrypt to argon2id without logging anyone out?**
+Rehash on successful login, using a hasher list whose first entry is the new algorithm. In `pwdlib`, construct `PasswordHash((Argon2Hasher(), BcryptHasher()))` — the first hasher is the one used for new hashes, and the rest are kept only so old hashes still verify. Then call `verify_and_update(plain, stored)` instead of `verify()`: it returns a `(valid, new_hash)` tuple where `new_hash` is a fresh argon2id hash when the stored one used a legacy hasher, and `None` when the stored hash is already current. Persist `new_hash` whenever it is not `None`, and the store converts itself one login at a time. Note the split: `verify()` returns a plain bool, so a migration that calls it will silently never upgrade anything.
 
 **Q18: How do you prevent JWT secret leakage via error messages?**
 Never include token decoding details in HTTP error responses. The response body should be generic (`"detail": "Could not validate credentials"`) regardless of whether the failure was an expired token, wrong signature, or missing claim. Detailed JWT errors belong in server-side structured logs at DEBUG level — and even then, log the failure reason (e.g., `"jwt_error": "ExpiredSignatureError"`) without logging the raw token. Include a correlation ID in the response so operators can trace the specific request in logs if needed.
@@ -961,7 +964,7 @@ Token family tracking groups all refresh tokens issued in a single login session
 
 2. **Always pass `algorithms=["HS256"]` explicitly to `jwt.decode()`.** Prevents algorithm confusion attacks including `alg: none`.
 
-3. **Set bcrypt cost factor to 12 or use argon2id** (`passlib[argon2]`). Measure hash time in your production environment — aim for 200–300 ms for interactive login.
+3. **Use argon2id via `pwdlib[argon2]`, or bcrypt at cost 12 or above if you must.** Measure hash time in your production environment — aim for 200–300 ms for interactive login.
 
 4. **Issue short-lived access tokens (15 min) with refresh rotation.** Never issue access tokens longer than 1 hour for user-facing APIs. Long-lived tokens shift the security model toward API keys and require explicit revocation infrastructure.
 

@@ -7,7 +7,7 @@
 
 ## 1. Concept Overview
 
-SQLAlchemy 2.0 (released January 2023) unified the Core and ORM APIs under a single expression language and introduced first-class async support through `AsyncEngine` and `AsyncSession`. The old 1.x `Query` object is gone; all queries now use the same `select()` / `insert()` / `update()` / `delete()` constructors regardless of whether you are running synchronously or asynchronously.
+SQLAlchemy 2.0 (released January 2023) unified the Core and ORM APIs under a single expression language and introduced first-class async support through `AsyncEngine` and `AsyncSession`. The 1.x `Query` object survives only as a legacy shim on the synchronous `Session`; it is not available on `AsyncSession`, so all async queries use the same `select()` / `insert()` / `update()` / `delete()` constructors that Core has always used.
 
 Core capabilities covered in this module:
 
@@ -24,7 +24,7 @@ Core capabilities covered in this module:
 - Bulk inserts via `session.execute(insert(Model), [...])`
 - SQLModel: Pydantic+SQLAlchemy bridge — when it helps and when it hurts
 
-Python version: 3.11/3.12. SQLAlchemy version: 2.0+. FastAPI version: 0.110+.
+Python version: 3.13/3.14. SQLAlchemy version: 2.0.51. FastAPI version: 0.140+.
 
 ---
 
@@ -34,7 +34,7 @@ Python version: 3.11/3.12. SQLAlchemy version: 2.0+. FastAPI version: 0.110+.
 
 **Mental model.** In synchronous SQLAlchemy 1.x, the ORM could issue database queries at arbitrary points: accessing an unloaded relationship would transparently trigger a new `SELECT`. In async Python that is impossible — there is no implicit I/O. Every database round-trip must be an `await` expression. SQLAlchemy 2.0 enforces this contract: any code path that would issue implicit I/O raises a `MissingGreenlet` error immediately, forcing you to declare all data needs upfront via eager loading options.
 
-**Why it matters.** FastAPI runs on an async event loop (uvicorn). If database calls block the event loop for even 5 ms per request, at 500 RPS you accumulate 2.5 seconds of stalled processing per second — enough to saturate the loop and cascade into latency spikes. Async database access (`asyncpg` delivers ~3× the throughput of psycopg2 in connection-saturated benchmarks) keeps the event loop free for other coroutines while waiting on network I/O.
+**Why it matters.** FastAPI runs on an async event loop (uvicorn). If database calls block the event loop for even 5 ms per request, at 500 RPS you accumulate 2.5 seconds of stalled processing per second — enough to saturate the loop and cascade into latency spikes. Async database access (asyncpg's own benchmark suite reports it averaging 5x faster than psycopg3) keeps the event loop free for other coroutines while waiting on network I/O.
 
 **Key insight.** The SQLAlchemy 2.0 unified API is the same in sync and async: `select(User).where(User.id == 1)` is identical — only the execution step differs (`session.execute(...)` vs `await session.execute(...)`). This means you can write query logic once in a framework-agnostic function and call it from either context.
 
@@ -50,7 +50,7 @@ Python version: 3.11/3.12. SQLAlchemy version: 2.0+. FastAPI version: 0.110+.
 
 **4. Connection pool belongs to the engine, not the session.** The `AsyncEngine` holds the pool. Sessions borrow connections from the pool only for the duration of an active transaction or query. Sessions should be short-lived (one request); engines should be long-lived (application lifetime).
 
-**5. Eager loading by default in async.** Assume any relationship you will touch in a handler must be listed in the query's `options(...)`. Lazy loading is not available; `raise_on_load=True` can be set on relationships to surface accidental lazy access at test time rather than in production.
+**5. Eager loading by default in async.** Assume any relationship you will touch in a handler must be listed in the query's `options(...)`. Lazy loading is not available; `lazy="raise"` can be set on relationships to surface accidental lazy access at test time rather than in production.
 
 ---
 
@@ -61,7 +61,7 @@ Python version: 3.11/3.12. SQLAlchemy version: 2.0+. FastAPI version: 0.110+.
 | Driver | Database | SQLAlchemy dialect | Notes |
 |--------|----------|-------------------|-------|
 | `asyncpg` | PostgreSQL | `postgresql+asyncpg` | Binary protocol, fastest PG driver; no `psycopg2` compatibility |
-| `aiopg` | PostgreSQL | `postgresql+aiopg` | libpq-based; slower than asyncpg; use only if psycopg2 features required |
+| `psycopg` (v3) | PostgreSQL | `postgresql+psycopg` | libpq-based; one dialect serves both sync and async; use when you need libpq features |
 | `aiomysql` | MySQL / MariaDB | `mysql+aiomysql` | Pure-Python async MySQL |
 | `asyncmy` | MySQL / MariaDB | `mysql+asyncmy` | Modern replacement for aiomysql, better maintained |
 | `aiosqlite` | SQLite | `sqlite+aiosqlite` | Dev/test only; single-writer, not for production |
@@ -208,7 +208,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>max_connections = 200", pos: "b", h: 44 }
+    PG@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>max_connections tuned to 200", pos: "b", h: 44 }
     LB("PgBouncer / LB<br/>optional")
     W1(Worker-1)
     W2(Worker-2)
@@ -231,7 +231,7 @@ flowchart TD
     class TOTAL mathOp
 ```
 
-Four Uvicorn workers × (`pool_size=5` + `max_overflow=10`) = 60 connections total, leaving headroom under PostgreSQL's default `max_connections=200` for admin sessions, migrations, and monitoring.
+Four Uvicorn workers × (`pool_size=5` + `max_overflow=10`) = 60 connections total, leaving headroom under a server *tuned* to `max_connections=200` for admin sessions, migrations, and monitoring. Note that 200 is a raised value, not the shipped default — PostgreSQL's own default is 100, which is where the arithmetic below goes wrong.
 
 **What the formula is telling you.** "Every worker gets its own private pool, so the number
 the database actually sees is the per-worker pool multiplied by the worker count — never the
@@ -499,7 +499,7 @@ async def bulk_create_users(
     # await session.execute(insert(User), users)
 ```
 
-Bulk insert sends all rows in one protocol message. For 10,000 rows, `asyncpg` with bulk execute takes ~80 ms vs ~4,000 ms for a Python loop of individual `session.add()` calls.
+Bulk insert sends all rows in one protocol message rather than one per row. Order of magnitude on a local PostgreSQL (illustrative, not a published benchmark — measure on your own hardware): 10,000 rows in a single `execute` land in tens of milliseconds, while a Python loop of individual `session.add()` + `flush()` calls costs a few seconds, because each row pays its own round-trip.
 
 ### 6.6 Alembic async migrations
 
@@ -560,9 +560,9 @@ else:
 
 **Tiangolo's full-stack FastAPI template.** Uses `create_async_engine` with `postgresql+asyncpg`, a global `engine` and `async_sessionmaker` at module level, and a single `get_db` yield dependency injected into every route. `expire_on_commit=False` is explicitly set.
 
-**Pydantic's internal test suite.** Uses `aiosqlite` with `sqlite+aiosqlite` dialect for in-memory database tests, demonstrating the same `async_sessionmaker` pattern across all supported backends.
+**SQLAlchemy's own async test suite.** Ships an `aiosqlite` provisioning backend (`sqlite+aiosqlite`) so the full async ORM suite runs against an in-memory database with no server, which is why `aiosqlite` is the standard choice for FastAPI test fixtures too.
 
-**Encode's Starlette.** While Starlette itself uses `databases` (a thin async wrapper), many production Starlette-based apps have migrated to SQLAlchemy 2.0 async after the 2.0 release stabilized `asyncpg` dialect support.
+**Encode's `databases` library.** A thin async wrapper that predates SQLAlchemy's own async support and was the common choice for Starlette apps before 2.0. Most production apps have since moved to SQLAlchemy 2.0 async, which gives the full ORM rather than Core-only query execution.
 
 **Litestar (formerly Starlite).** Provides first-class SQLAlchemy 2.0 integration via `AdvancedAlchemy` plugin, which generates `AsyncSession` dependencies, health checks, and repository base classes automatically.
 
@@ -577,7 +577,7 @@ else:
 | **ORM maturity** | Very high (20+ years) | Very high | Medium (built on SA) | Medium |
 | **Pydantic integration** | Manual (separate schemas) | Manual | Native (model = schema) | Manual |
 | **Alembic support** | Yes (with run_sync wrapper) | Yes (native) | Yes (via SA) | Limited (own migration tool) |
-| **Driver ecosystem** | asyncpg, aiopg, aiomysql | psycopg2, pymysql, cx_Oracle | Inherits SA | asyncpg, aiopg |
+| **Driver ecosystem** | asyncpg, psycopg3, asyncmy | psycopg2, pymysql, cx_Oracle | Inherits SA | asyncpg, asyncmy |
 | **Django-style ActiveRecord** | No | No | Partial | Yes |
 
 ```mermaid
@@ -601,7 +601,7 @@ Async SQLAlchemy 2.0 buys its high throughput with high complexity (eager loadin
 
 Pros: One class serves as both Pydantic schema and SQLAlchemy table — eliminates the duplication of maintaining separate `UserCreate`, `UserRead`, `UserInDB` models. Reduces boilerplate for small to medium projects.
 
-Cons: The Pydantic model and database model are the same object, which breaks down when validation rules and database constraints diverge (e.g., a `password` field that should never be serialized back). SQLModel also lags behind SQLAlchemy releases; as of 2024, full Mapped[]/mapped_column() support in SQLModel is still incomplete. For production systems with complex validation logic, separate Pydantic schemas plus plain SQLAlchemy models is the more maintainable pattern.
+Cons: The Pydantic model and database model are the same object, which breaks down when validation rules and database constraints diverge (e.g., a `password` field that should never be serialized back). SQLModel also lags behind SQLAlchemy releases: declaring a column with SQLAlchemy 2.0's `Mapped[...] = mapped_column(...)` inside a `table=True` model still fails, because Pydantic cannot build a core schema for the `Mapped[...]` annotation — you have to stay on SQLModel's own `Field()`. For production systems with complex validation logic, separate Pydantic schemas plus plain SQLAlchemy models is the more maintainable pattern.
 
 ---
 
@@ -620,7 +620,7 @@ Cons: The Pydantic model and database model are the same object, which breaks do
 - You are writing a synchronous script, CLI, or batch job — synchronous SQLAlchemy is simpler and lazy loading works
 - Your schema is document-oriented or schema-less — MongoDB with Motor is a better fit
 - You need an ActiveRecord pattern with migrations on a small project — Tortoise ORM or SQLModel may be simpler
-- You are blocked on an `asyncpg` bug and need `psycopg3` async support — `psycopg3` has its own async driver and SA 2.0 dialect but was less mature at 2.0 launch
+- You are blocked on an `asyncpg` bug or need a libpq-specific feature — switch to the `postgresql+psycopg` dialect, which is a first-class SQLAlchemy 2.0 async dialect and a one-line URL change
 - Your team is unfamiliar with async Python and the `MissingGreenlet` errors will slow development unacceptably — start with sync and migrate later
 
 ---
@@ -761,8 +761,9 @@ async def broken_concurrent_reads(session: AsyncSession, ids: list[int]):
         for uid in ids
     ]
     results = await asyncio.gather(*tasks)  # session is not concurrency-safe!
-    # May raise: sqlalchemy.exc.InvalidRequestError: "This transaction is closed"
-    # or produce undefined results from interleaved state
+    # Raises: sqlalchemy.exc.InvalidRequestError: This session is provisioning a
+    # new connection; concurrent operations are not permitted
+    # (or an IllegalStateChangeError once the guard trips during close)
 
 
 # FIX: use separate sessions per concurrent task, or use sequential execution
@@ -787,7 +788,7 @@ async def safe_concurrent_reads(ids: list[int]) -> list[User | None]:
 | **aiomysql / asyncmy** | MySQL/MariaDB async driver | asyncmy is actively maintained | Smaller ecosystem vs asyncpg |
 | **Alembic** | Schema migration | Autogenerate, version control | Requires `run_sync` wrapper for async |
 | **SQLModel** | Pydantic+SA bridge | One class = schema + table | Lags SA releases; limited Mapped[] support |
-| **GreenletIO** | Enables sync-in-async | Powers SA's `run_sync` | Internal; not a user-facing API |
+| **greenlet** | Enables sync-in-async | Powers SA's `run_sync` and the whole async layer | Hard dependency; its absence raises at first connect |
 | **PgBouncer** | Connection pooling proxy | Transaction-mode pooling reduces PG connections | Adds infrastructure complexity |
 
 ---
@@ -828,27 +829,39 @@ Alembic's migration runner is synchronous. The bridge is `connection.run_sync(do
 
 **Q9: How do you implement an upsert (insert-or-update) with async SQLAlchemy on PostgreSQL?**
 
-Use the `postgresql+asyncpg` dialect's `insert().on_conflict_do_update()`:
+Use the PostgreSQL dialect's `insert().on_conflict_do_update()`, binding the statement to a name first so you can reference its `.excluded` pseudo-table. `excluded` is an attribute of the *statement object*, not of the `insert` function, so the two-step form below is required.
 
 ```python
 from sqlalchemy.dialects.postgresql import insert
 
-stmt = (
-    insert(User)
-    .values(email="alice@example.com", name="Alice")
-    .on_conflict_do_update(
-        index_elements=["email"],
-        set_={"name": insert.excluded.name},
-    )
+stmt = insert(User).values(email="alice@example.com", name="Alice")
+stmt = stmt.on_conflict_do_update(
+    index_elements=["email"],
+    set_={"name": stmt.excluded.name},
 )
 await session.execute(stmt)
 ```
 
-`insert.excluded` refers to the row that was proposed for insertion. This compiles to `INSERT ... ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name`.
+`stmt.excluded` refers to the row that was proposed for insertion. This compiles to `INSERT ... ON CONFLICT (email) DO UPDATE SET name = excluded.name`.
 
 **Q10: How do you detect N+1 queries in a SQLAlchemy application?**
 
-Set `echo=True` on the engine during development: all SQL statements are logged to stdout. Count how many `SELECT` statements are emitted per request — if a request that loads 50 users emits 51 queries, you have N+1. For production profiling, use `sqlalchemy-utils` or middleware that wraps the session and counts queries. The `pytest-sqlalchemy-mock` library can assert query counts in tests: `assert query_counter.count == 2`. For continuous monitoring, emit a custom metric from a SQLAlchemy event listener on `after_execute`.
+Set `echo=True` on the engine during development so every SQL statement is logged to stdout. Count how many `SELECT` statements are emitted per request — if a request that loads 50 users emits 51 queries, you have N+1. To assert this in tests rather than eyeball it, attach a counting listener to the engine's `before_cursor_execute` event and assert the count:
+
+```python
+from sqlalchemy import event
+
+stmts: list[str] = []
+
+@event.listens_for(engine.sync_engine, "before_cursor_execute")
+def _count(conn, cursor, statement, params, context, executemany):
+    stmts.append(statement)
+
+# ... exercise the endpoint ...
+assert len(stmts) == 2      # parent query + one selectinload batch
+```
+
+The same listener, incrementing a Prometheus counter instead of a list, gives continuous per-request query-count monitoring in production.
 
 **Q11: Can you use `AsyncSession` inside a Celery task?**
 
@@ -870,18 +883,19 @@ For the entire engine: `create_async_engine(url, isolation_level="REPEATABLE REA
 
 **Q13: How do you test FastAPI routes that use async SQLAlchemy sessions?**
 
-Use `dependency_overrides` to inject a test session that is rolled back after each test:
+Use `dependency_overrides` to inject a test session that is rolled back after each test. Drive the app with `httpx.AsyncClient` over an `ASGITransport` — the old `AsyncClient(app=...)` shortcut was removed in httpx 0.28 and now raises `TypeError`.
 
 ```python
-import pytest
-from httpx import AsyncClient
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from app.main import app
+from app.models import Base
 from app.dependencies import get_async_session
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def async_session():
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
@@ -892,10 +906,11 @@ async def async_session():
         await session.rollback()
     await engine.dispose()
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(async_session: AsyncSession):
     app.dependency_overrides[get_async_session] = lambda: async_session
-    async with AsyncClient(app=app, base_url="http://test") as c:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()
 ```
@@ -927,7 +942,7 @@ Note: do not retry within a failed transaction — roll back first, then retry. 
 
 **Q16: What is the `lazy="raise"` relationship strategy and when should you use it?**
 
-`lazy="raise"` configures a relationship so that accessing it without eager loading raises `InvalidRequestError` immediately with a clear message like "Mapped attribute 'User.posts' is not available due to lazy='raise'". This is used as a defensive default in large teams: setting `lazy="raise"` on all relationships forces developers to explicitly list every relationship they need in query options, preventing accidental N+1 queries from being silently introduced. Use it in production code where strict access patterns are required; revert to `lazy="select"` in data exploration or admin tools where flexibility is more important.
+`lazy="raise"` configures a relationship so that accessing it without eager loading raises `InvalidRequestError` immediately, with the message `'User.posts' is not available due to lazy='raise'`. This is used as a defensive default in large teams: setting `lazy="raise"` on all relationships forces developers to explicitly list every relationship they need in query options, preventing accidental N+1 queries from being silently introduced. Use it in production code where strict access patterns are required; revert to `lazy="select"` in data exploration or admin tools where flexibility is more important.
 
 ---
 
@@ -949,9 +964,9 @@ Note: do not retry within a failed transaction — roll back first, then retry. 
 
 8. **Use `await session.flush()` to get auto-generated IDs before committing.** If you need to reference a just-inserted row's primary key within the same request (e.g., to insert a related row), flush first to trigger the `RETURNING id` round-trip.
 
-9. **Configure `pool_recycle` for long-running processes.** Set it to a value shorter than both PostgreSQL's `idle_in_transaction_session_timeout` and any firewall or load-balancer idle timeout (often 60–300 seconds on cloud providers). `pool_recycle=1800` is a safe default.
+9. **Configure `pool_recycle` for long-running processes.** Set it shorter than the tightest idle timeout on the path — PostgreSQL's `idle_in_transaction_session_timeout`, MySQL's `wait_timeout`, and any firewall or load-balancer idle timeout. `pool_recycle=1800` (30 min) suits a database-only path; behind a cloud load balancer that drops idle connections at 60–350 seconds, drop it below that number instead, or rely on `pool_pre_ping=True` to catch the drop at checkout.
 
-10. **Use `session.execute(insert(Model), list_of_dicts)` for bulk inserts.** For inserting 100+ rows, a single execute call with a list is orders of magnitude faster than looping `session.add()`. Benchmark: 1,000-row bulk insert via `asyncpg` takes ~15 ms; individual adds take ~3,000 ms.
+10. **Use `session.execute(insert(Model), list_of_dicts)` for bulk inserts.** For inserting 100+ rows, a single execute call with a list is orders of magnitude faster than looping `session.add()`, because the whole batch costs one round-trip instead of one per row (see §6.5). Measure the crossover on your own hardware rather than trusting a quoted figure.
 
 11. **Run Alembic autogenerate in CI.** After every model change, run `alembic revision --autogenerate -m "..."` and commit the resulting migration file. Add a CI check that verifies the generated migration is not empty (which would indicate a model change without a corresponding migration).
 
@@ -1186,8 +1201,8 @@ async def delete_user(
 ### Connection pool sizing for this deployment
 
 - 4 Uvicorn workers × (5 pool_size + 10 max_overflow) = 60 max connections
-- PostgreSQL `max_connections = 200`; 60 leaves 140 for read replicas, admin, migrations
-- `pool_timeout=30` s — requests wait up to 30 s for a connection; at 500 RPS with ~8 ms query time, average pool utilization is 500 × 0.008 / 15 connections per worker ≈ 27% — well within capacity
+- RDS for PostgreSQL sets `max_connections` from the instance class: `LEAST({DBInstanceClassMemory/9531392}, 5000)`. A 64 GiB `db.r6g.2xlarge` therefore hits the 5,000 ceiling, so 60 connections is a rounding error — the binding constraint here is per-connection backend memory on the server, not the connection count. (A self-hosted PostgreSQL with the stock `max_connections=100` is the tight case — see §5.3.)
+- `pool_timeout=30` s — requests wait up to 30 s for a connection. At 500 RPS with ~8 ms query time, average in-flight connections are 500 × 0.008 = 4 across the deployment, i.e. 4 / 60 ≈ 7% of the total pool (1 of the 15 slots on each worker) — well within capacity
 
 ### Discussion Questions
 
