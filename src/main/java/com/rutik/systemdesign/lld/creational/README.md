@@ -36,13 +36,13 @@ Creational patterns abstract the instantiation process, decoupling client code f
 |---------|--------|-------------------|-------------|-------------|
 | Singleton | One instance, globally accessible | `Runtime.getRuntime()`, `Collections.emptyList()` | Shared resource (connection pool, config, logger) | Global mutable state; untestable without DI; multi-classloader breaks it |
 | Factory Method | Define creation interface; subclasses decide | `Collection.iterator()`, `DocumentBuilderFactory.newDocumentBuilder()` | Creating one of several related types; subclass controls concrete type | "Factory explosion" — too many subclasses for each type |
-| Abstract Factory | Create families of related, compatible objects | `DocumentBuilderFactory`, `SSLContext` | Cross-platform UIs, pluggable infrastructures | Adding a new product type requires modifying all factories |
-| Builder | Construct complex object step by step | `StringBuilder`, `HttpRequest.newBuilder()`, `Stream.Builder` | Many optional constructor parameters; immutable objects with optional fields | Builder itself becomes complex when the object has required/optional mix |
+| Abstract Factory | Create families of related, compatible objects | `SSLContext` (socket factory + engine), `java.sql.Connection` (`createStatement`/`prepareStatement`/`createBlob`) | Cross-platform UIs, pluggable infrastructures | Adding a new product type requires modifying all factories |
+| Builder | Construct complex object step by step | `HttpRequest.newBuilder()`, `Stream.Builder`, `Locale.Builder` | Many optional constructor parameters; immutable objects with optional fields | Builder itself becomes complex when the object has required/optional mix |
 | Prototype | Copy existing object as creation mechanism | `Object.clone()`, copy constructors, `ArrayList(Collection)` | Expensive initialization (DB query, parsing); config templates | `Cloneable` is broken (shallow copy by default); deep copy is manual |
 
 ---
 
-## 4. Decision Flowchart (ASCII)
+## 4. Decision Flowchart
 
 ```mermaid
 flowchart TD
@@ -91,9 +91,9 @@ Each decision point resolves one axis of variation — instance count, then copy
 | Spring Concept | Creational Pattern | Notes |
 |---------------|-------------------|-------|
 | `BeanFactory` / `ApplicationContext` | Factory Method + Registry | `getBean()` is a factory call; context is the registry |
-| `@Scope("prototype")` | Prototype | Each `getBean()` call returns a new copy |
+| `@Scope("prototype")` | Prototype (name only) | Each `getBean()` call re-runs construction from the bean definition — nothing is cloned from an existing instance |
 | `@Bean` methods | Factory Method | The method is the factory; Spring calls it to create the bean |
-| `FactoryBean<T>` | Abstract Factory | Returns objects of a different type than the bean itself |
+| `FactoryBean<T>` | Factory Method | `getObject()` is the overridable factory method; it returns an object of a different type than the bean itself |
 | Singleton scope (default) | Singleton | Spring manages one instance per container |
 | Builder pattern in `WebClient`, `RestTemplate` | Builder | Fluent API for complex HTTP client configuration |
 
@@ -265,7 +265,7 @@ Questions ordered by interview frequency — gotchas and traps first, then inter
 ---
 
 **Q: Why is Singleton considered an anti-pattern in modern Java?**
-Singleton introduces global mutable state: any class can access it without declaring the dependency, making code hard to test (can't inject a test double), hard to reason about (hidden coupling), and thread-unsafe if state is mutable. The fix is dependency injection — inject the single instance via constructor, letting the DI container manage its lifecycle. The instance is still effectively singleton in scope, but the dependency is now explicit and injectable.
+Singleton introduces global mutable state that any class can reach without declaring the dependency. That makes code hard to test (you can't inject a test double), hard to reason about (hidden coupling), and thread-unsafe if the state is mutable. The fix is dependency injection — inject the single instance via constructor, letting the DI container manage its lifecycle. The instance is still effectively singleton in scope, but the dependency is now explicit and injectable.
 
 **Q: Thread-safe Singleton: DCL + volatile, enum, or Holder idiom — which is correct?**
 All three are correct in Java 5+, but enum is the preferred idiom (Effective Java Item 3): it handles serialization automatically, prevents reflection-based instantiation, and requires no volatile. The Holder idiom (`static class Holder { static final X INSTANCE = new X(); }`) achieves lazy initialization via class-loading semantics without synchronization overhead. DCL + volatile is correct but verbose. Never use DCL without volatile — without it, the JVM's instruction reordering can publish a partially-constructed instance.
@@ -277,13 +277,13 @@ All three are correct in Java 5+, but enum is the preferred idiom (Effective Jav
 Use Abstract Factory when you need to create families of related objects that must be compatible with each other. Example: a UI library with `Button`, `Checkbox`, and `Dialog` — you want either all Windows-style or all Linux-style widgets, never a mix. Factory Method creates ONE type of product; the subclass decides the concrete class. Abstract Factory creates MULTIPLE types of products that belong to the same family. Abstract Factory is often implemented by composing multiple Factory Methods.
 
 **Q: Builder vs telescoping constructors — what's the Effective Java argument?**
-Effective Java Item 2: when a class has many optional parameters, the telescoping constructor pattern (one constructor per combination of parameters) is hard to read and easy to get wrong (two adjacent parameters of the same type are silently swappable). The JavaBeans pattern (no-arg constructor + setters) is readable but leaves the object in an inconsistent intermediate state and prevents immutability. Builder gives you: readable construction, validation at `build()` time, and an immutable product. Cost: more verbose code (extra Builder class); worth it for 4+ parameters.
+Effective Java Item 2 argues that the telescoping constructor pattern — one constructor per combination of parameters — is hard to read and easy to get wrong once a class has many optional parameters. Two adjacent parameters of the same type are silently swappable at the call site. The JavaBeans pattern (no-arg constructor + setters) is readable but leaves the object in an inconsistent intermediate state and prevents immutability. Builder gives you: readable construction, validation at `build()` time, and an immutable product. Cost: more verbose code (extra Builder class); worth it for 4+ parameters.
 
 **Q: What is the static factory method idiom (Effective Java Item 1) and how does it differ from GoF Factory Method?**
 Static factory method (Item 1) is naming a static method `of()`, `from()`, `valueOf()`, `newInstance()`, etc. to create instances — `LocalDate.of(2024, 1, 1)`, `Optional.of(x)`, `List.of(...)`. Benefits: descriptive names, ability to return cached instances, can return a subtype. GoF Factory Method is a class-hierarchy pattern: a base class defines a `createProduct()` method that subclasses override to vary the concrete product type. These are unrelated patterns that share a naming similarity.
 
 **Q: How does Spring use the Prototype pattern?**
-Spring beans are singleton-scoped by default. With `@Scope("prototype")`, every `getBean()` call returns a new instance — the bean is "prototyped" from its definition. This is used for stateful beans that must not be shared (e.g., a per-request helper with mutable state). Gotcha: injecting a prototype bean into a singleton bean breaks the prototype behavior — the singleton holds one reference, so the prototype is only created once. Fix: inject `ApplicationContext` and call `getBean()` each time, or use `@Lookup` method injection.
+Spring borrows the name but not the mechanism: `@Scope("prototype")` re-runs construction from the bean definition on every `getBean()` call rather than cloning an existing instance. Beans are singleton-scoped by default. This is used for stateful beans that must not be shared (e.g., a per-request helper with mutable state). Gotcha: injecting a prototype bean into a singleton bean breaks the prototype behavior — the singleton holds one reference, so the prototype is only created once. Fix: inject `ApplicationContext` and call `getBean()` each time, or use `@Lookup` method injection.
 
 **Q: Abstract Factory vs Strategy — both select an implementation at runtime. What's different?**
 Strategy selects an algorithm (behavior). Abstract Factory selects a family of object creators (construction). A Strategy doesn't create objects — it performs an operation on objects that already exist. An Abstract Factory creates objects but doesn't define what to do with them. The confusion arises because Abstract Factory is often selected at runtime based on configuration (e.g., "Linux" vs "Windows") — which looks like Strategy's algorithm selection — but the output is factories, not computed results.
@@ -291,10 +291,12 @@ Strategy selects an algorithm (behavior). Abstract Factory selects a family of o
 **Q: When does a Builder become over-engineering?**
 When the object has 2–3 non-optional parameters and no future extensibility requirement. A plain constructor is more readable and avoids the boilerplate of a separate Builder class. Builder shines for: 4+ parameters (especially optional ones), immutable objects, objects requiring validation across fields at construction time, and objects where construction order matters. Lombok's `@Builder` annotation generates the Builder class automatically, which makes it low-overhead when using Lombok.
 
-**Q: How does the Prototype pattern enable the "object pool" pattern?**
-An object pool maintains a collection of pre-initialized objects (prototypes) and leases them to callers. When the caller returns the object, the pool resets it (restores to prototype state) and returns it to the pool. `HikariCP` connection pooling, thread pool reuse, and Netty ByteBuf pooling all apply this principle. Prototype provides the initial template; the pool manages the lifecycle of copies.
+**Q: How does the Prototype pattern relate to the "object pool" pattern?**
+They share a motivation but not a mechanism: both avoid re-paying expensive initialization, yet a pool recycles the same instances while Prototype copies a template into a fresh object. An object pool keeps pre-initialized objects, leases them to callers, and resets each one to a known baseline state on return. `HikariCP` connection pooling, thread pool reuse, and Netty `ByteBuf` pooling all work this way — none of them clone a prototype. Where the patterns meet is that "reset to baseline" needs a definition of the baseline, and a prototype instance is one way to express it.
 
 **Q: What is the Holder idiom for Singleton and why does it work without synchronization?**
+
+It puts the instance in a private static nested class, so the JVM's own class-initialization guarantees provide laziness and thread safety for free.
 
 ```java
 public class Singleton {
@@ -306,7 +308,7 @@ public class Singleton {
 }
 ```
 
-The JVM guarantees that static initializers run exactly once, in a thread-safe manner, when the class is first loaded. `Holder` is only loaded when `getInstance()` is called — providing lazy initialization. The initialization happens inside the class loader's lock, so no explicit synchronization is needed. This is the preferred Singleton implementation after enum.
+The JVM guarantees that a class's static initializers run exactly once, on first active use, under a per-class initialization lock (JLS §12.4.2). `Holder` is not initialized until `getInstance()` first reads `Holder.INSTANCE` — providing lazy initialization. Because the JVM takes that initialization lock for you and the completed initialization happens-before every later read, no explicit synchronization and no `volatile` are needed. This is the preferred Singleton implementation after enum.
 
 **Q: Prototype deep copy vs shallow copy — what breaks with shallow?**
 Shallow copy copies references, not the referenced objects. If the original and the copy share a `List<Order>` reference, modifying one's list modifies both. This is a classic defensive copy failure. Fix: implement deep copy manually — clone each mutable field recursively, or serialize/deserialize the object. Immutable fields (String, Integer, LocalDate) are safe to share. Mutable fields (List, Map, Date, arrays) must be deep-copied. The alternative: make the shared state immutable by design, making shallow copy safe.
@@ -315,7 +317,7 @@ Shallow copy copies references, not the referenced objects. If the original and 
 `Enum` serialization is handled by the JVM itself — the serialized form is just the enum name, and deserialization always returns the existing instance via `Enum.valueOf()`. You never get a second instance through deserialization. With a traditional Singleton, you must implement `readResolve()` to return the existing instance after deserialization, or a deserialized copy breaks the single-instance guarantee. Enum eliminates this requirement entirely.
 
 **Q: When would you choose Abstract Factory over a dependency injection framework?**
-Abstract Factory is useful when: (a) the factory itself must be swappable at runtime (e.g., switching between a mock factory in tests and a real factory in production), (b) the creation logic is complex and must stay in the domain layer (not the DI container's scope), or (c) the system has no DI framework. In practice, most modern Java applications use Spring's DI container as the Abstract Factory — `@Profile("test")` selects the test factory, `@Profile("prod")` selects the prod factory. Pure Abstract Factory code is more common in library design (where you can't assume a DI framework).
+Reach for Abstract Factory when the factory itself must be swappable at runtime, when creation logic belongs in the domain layer rather than the container's scope, or when there is no DI framework at all. Concretely, that covers switching between a mock factory in tests and a real factory in production, and keeping complex construction rules next to the domain model they encode. In practice, most modern Java applications use Spring's DI container as the Abstract Factory — `@Profile("test")` selects the test factory, `@Profile("prod")` selects the prod factory. Pure Abstract Factory code is more common in library design (where you can't assume a DI framework).
 
 **Q: Why does adding a new product type require modifying all Abstract Factories?**
 Abstract Factory defines the set of products it creates (e.g., `createButton()`, `createCheckbox()`). Adding a new product (e.g., `createDialog()`) requires adding that method to the factory interface AND to every concrete factory. This is the "Open/Closed Principle violation" in Abstract Factory — it's closed to modification (you can add new concrete factories freely) but not open to new product types without modifying the interface. Mitigation: use a generic factory (`create(Class<T> type)`) or accept that product type extension is rare and the modification cost is justified.

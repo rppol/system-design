@@ -278,12 +278,13 @@ Protocol Buffers (protobuf) is Google's language-neutral, platform-neutral seria
 Every gRPC service at Google, and the majority of gRPC services industry-wide, exchanges protobuf
 messages. The generated Java code uses the Builder pattern to produce immutable `Message` objects.
 
-At Google's scale, microservices exchange over 10 billion protobuf messages per day. The Builder
-pattern in protobuf is optimized for zero GC pressure at steady state: the builder reuses internal
-byte arrays, and `build()` calls `buildPartial()` which does a single allocation of the final
-immutable message object. A JVM service processing 1 million messages/second with properly pooled
-builders and no intermediate allocations maintains GC pause times under 10ms (G1GC default: 200ms
-pause goal; well-tuned services see < 5ms at p99).
+The generated `build()` calls `buildPartial()` to construct the immutable message and then checks
+`isInitialized()`, so a completed build materializes the message in one step rather than mutating a
+shared object. Note what protobuf-java does *not* do: there is no builder pooling and no
+`ThreadLocal` reuse in the generated code or the Java runtime — every `newBuilder()` allocates.
+Throughput figures below (1 million messages/second, GC pauses under 10ms) are an **illustrative**
+steady-state workload, not published Google telemetry; the G1GC default pause goal of 200ms
+(`-XX:MaxGCPauseMillis`) is the one hard number here.
 
 ```mermaid
 flowchart LR
@@ -310,26 +311,26 @@ flowchart LR
     class F frozen
 ```
 
-*OrderProcessor's steady-state path (Java 17 LTS, 1M messages/sec): the pooled `OrderRequest.Builder` (step 3) is reused across requests so only `build()` (step 5) allocates — producing the immutable, thread-safe `OrderResponse` (step 6) that keeps G1GC pause times under 10ms even at this throughput.*
+*OrderProcessor's steady-state path (Java 25 LTS, illustrative 1M messages/sec): the application-pooled `OrderRequest.Builder` (step 3) is reused across requests so only `build()` (step 5) allocates — producing the immutable, thread-safe `OrderResponse` (step 6) and keeping G1GC pause times low even at this throughput. The pooling is something the service does itself; protobuf's generated code allocates a fresh builder per `newBuilder()`.*
 
 ### Famous Codebase Usages
 
 | Library | Builder Class | Version | Key Feature |
 |---------|--------------|---------|-------------|
-| `java.lang.StringBuilder` | `StringBuilder.append().toString()` | Java 1.0+ | Canonical builder — terminal op is `toString()` |
-| `java.net.http.HttpRequest` | `HttpRequest.newBuilder()...build()` | Java 11 LTS | Immutable request; required method (GET/POST) enforced |
-| Google Protobuf 3.x | `MessageType.newBuilder()...build()` | Protobuf 3.0+ | Zero GC pressure at 1M msg/sec with builder pooling |
-| Google Guava | `ImmutableList.builder()...build()`, `ImmutableMap.Builder` | Guava 12+ | Enforces immutability at build time |
-| OkHttp 4.x | `OkHttpClient.Builder()...build()`, `Request.Builder()...build()` | OkHttp 4.0+ | Required fields caught at build(); timeout/interceptor chaining |
+| `java.time.format.DateTimeFormatterBuilder` | `new DateTimeFormatterBuilder()...toFormatter()` | Java 8+ | Ordered construction steps; terminal op is `toFormatter()` |
+| `java.net.http.HttpRequest` | `HttpRequest.newBuilder()...build()` | Java 11 LTS | Immutable request; `uri` is required (`build()` throws `IllegalStateException` if unset), method defaults to GET |
+| Google Protobuf | `MessageType.newBuilder()...build()` | protobuf-java 4.x | `build()` delegates to `buildPartial()`, then verifies `isInitialized()` |
+| Google Guava | `ImmutableList.builder()...build()`, `ImmutableMap.Builder` | Guava 2.0+ | Enforces immutability at build time |
+| OkHttp | `OkHttpClient.Builder()...build()`, `Request.Builder()...build()` | OkHttp 5.x | Required fields caught at build(); timeout/interceptor chaining |
 | gRPC Java | `ManagedChannelBuilder.forAddress()...build()` | gRPC 1.0+ | Channel construction with TLS, retry, load balancing options |
-| Spring (Spring Boot 3.x) | `UriComponentsBuilder`, `ServerResponse.ok().body()` | Spring Boot 3.0+ | WebFlux response builder; functional endpoint construction |
-| Hibernate 6.x | `CriteriaBuilder` (JPA 2.0+) | Hibernate 6.0+ | Type-safe query builder; `build()` equivalent is `createQuery()` |
+| Spring Framework | `UriComponentsBuilder`, `ServerResponse.ok().body()` | Spring Boot 3.x / 4.x | Functional endpoint response builder (WebFlux and WebMvc.fn) |
+| Hibernate ORM | `CriteriaBuilder` (Jakarta Persistence) | Hibernate 6.x / 7.x | Type-safe query builder; the assembled `CriteriaQuery` is handed to `EntityManager.createQuery()` |
 | Lombok | `@Builder` annotation | Lombok 1.16+ | Generates full builder at compile time; supports `@Builder.Default`, `toBuilder()` |
 
-### Production-Grade Code: Protobuf-Style Builder with Pooling (Java 17 LTS)
+### Production-Grade Code: Protobuf-Style Builder with Pooling (Java 25 LTS)
 
 ```java
-// Java 17 LTS — production-grade immutable message with builder pooling.
+// Java 25 LTS — production-grade immutable message with builder pooling.
 // Models how protobuf's generated Java code works internally:
 // immutable product, fluent builder, validation at build(), builder reuse via reset().
 
@@ -449,7 +450,7 @@ public class OrderProcessor {
 // 500ms later — far from the null origin, hard to debug.
 
 @Builder  // generates: Builder.orderId(), Builder.customerId(), Builder.build()
-@Value   // Lombok immutable class: generates @AllArgsConstructor(access=PRIVATE) + getters + equals/hashCode
+@Value   // Lombok immutable class: final class + private final fields + getters + equals/hashCode/toString
 public class Payment {
     private final String orderId;      // Lombok allows null — no validation
     private final String customerId;   // Lombok allows null — no validation
@@ -466,30 +467,33 @@ Payment bad = Payment.builder()
 ```
 
 ```java
-// FIX 1: Override Lombok's build() with a custom builder that adds validation.
-// Lombok generates the setter methods; we override build() for invariant enforcement.
-@Data
-@Builder(builderClassName = "UnsafeBuilder", buildMethodName = "buildInternal")
+// FIX 1: put @Builder on a hand-written constructor and validate there.
+// Lombok routes its generated build() through the annotated constructor, so every
+// path that produces a Payment runs these checks. (A subclass of the generated
+// builder does NOT work: Payment.builder() returns the generated type, so the
+// subclass's build() is never reached.)
+@Value
 public class Payment {
-    private final String orderId;
-    private final String customerId;
-    private final long   amountCents;
-    private final String currency;
+    String orderId;
+    String customerId;
+    long   amountCents;
+    String currency;
 
-    // Custom builder extends Lombok-generated builder and overrides build()
-    public static class Builder extends UnsafeBuilder {
-        public Payment build() {
-            Payment p = buildInternal();
-            if (p.orderId == null || p.orderId.isBlank())
-                throw new IllegalStateException("orderId must not be blank");
-            if (p.customerId == null || p.customerId.isBlank())
-                throw new IllegalStateException("customerId must not be blank");
-            if (p.amountCents <= 0)
-                throw new IllegalStateException("amountCents must be > 0, got: " + p.amountCents);
-            return p;
-        }
+    @Builder
+    private Payment(String orderId, String customerId, long amountCents, String currency) {
+        if (orderId == null || orderId.isBlank())
+            throw new IllegalArgumentException("orderId must not be blank");
+        if (customerId == null || customerId.isBlank())
+            throw new IllegalArgumentException("customerId must not be blank");
+        if (amountCents <= 0)
+            throw new IllegalArgumentException("amountCents must be > 0, got: " + amountCents);
+        this.orderId     = orderId;
+        this.customerId  = customerId;
+        this.amountCents = amountCents;
+        this.currency    = currency;
     }
 }
+// Payment.builder().orderId(null).amountCents(-500).build() now throws at build() time.
 ```
 
 ```java
@@ -610,7 +614,7 @@ edge cases with inheritance) and make validation visible in code review.
 At 1M OrderEvents/sec, allocating a Builder per event creates 1M short-lived objects/sec.
 G1GC handles this well (Eden space fills, minor GC reclaims in < 5ms), but if GC pause
 SLA is < 1ms, switch to a ThreadLocal builder pool with an explicit reset() method between uses.
-Protobuf 3.x uses this technique internally for generated code.
+This is a technique you apply yourself — protobuf-java's generated code does not pool builders.
 
 **Visualized as an escalation path:**
 
@@ -754,16 +758,16 @@ A: The Product has all-`final` fields. Because `final` fields must be set in the
 A: `@Builder` is a Lombok annotation that auto-generates the static nested Builder class with all the fluent setters and `build()` method, eliminating manual boilerplate while implementing the same pattern.
 
 **Q: Builder vs. telescoping constructors vs. JavaBeans setters — what are the concrete tradeoffs?**
-A: Telescoping constructors (overloaded constructors for every parameter combination) give you immutability and required-field enforcement at compile time, but the combinatorial explosion becomes unmanageable past 4-5 optional parameters and callers can't tell which positional argument means what — `new Pizza("Large", "Thin", true, false, true)` is unreadable. The JavaBeans pattern (`new Pizza(); p.setSize(...); p.setCrust(...)`) solves readability with named setters, but sacrifices immutability (every field must be non-`final`) and thread-safety (the object is mutable and visible in a partially-constructed state between `new` and the last setter call) — two threads could observe `Pizza` mid-configuration. Builder gives you the readability of named setters AND the immutability of telescoping constructors, at the cost of one extra class per product: required fields go in the Builder's constructor (enforced at compile time, same as telescoping constructors), optional fields get named fluent setters (same readability as JavaBeans), and `build()` produces a `final`-field, fully-initialized, thread-safe-to-share `Product`. The practical guidance: choose telescoping constructors for 1-2 optional params, JavaBeans only when the object is inherently mutable (e.g., a UI component), and Builder for 3+ optional params on an otherwise-immutable object.
+A: Telescoping constructors buy compile-time immutability and required-field enforcement, JavaBeans setters buy readability at the cost of both, and Builder is the one option that gives you all three. Telescoping constructors — one overload per parameter combination — become unmanageable past 4-5 optional parameters, and callers can't tell which positional argument means what: `new Pizza("Large", "Thin", true, false, true)` is unreadable. The JavaBeans pattern (`new Pizza(); p.setSize(...); p.setCrust(...)`) solves readability with named setters, but sacrifices immutability (every field must be non-`final`) and thread-safety (the object is mutable and visible in a partially-constructed state between `new` and the last setter call) — two threads could observe `Pizza` mid-configuration. Builder gives you the readability of named setters AND the immutability of telescoping constructors, at the cost of one extra class per product: required fields go in the Builder's constructor (enforced at compile time, same as telescoping constructors), optional fields get named fluent setters (same readability as JavaBeans), and `build()` produces a `final`-field, fully-initialized, thread-safe-to-share `Product`. The practical guidance: choose telescoping constructors for 1-2 optional params, JavaBeans only when the object is inherently mutable (e.g., a UI component), and Builder for 3+ optional params on an otherwise-immutable object.
 
 **Q: Lombok `@Builder` vs. a hand-written builder — when do you reach for each?**
-A: Lombok `@Builder` eliminates all boilerplate for simple immutable DTOs (2-6 fields, no cross-field invariants) — annotate the class, and you get a full static nested `Builder` with fluent setters and `build()` for free, which is ideal at API/gRPC boundaries where objects are plain data carriers. The moment you need validation — "orderId must not be blank," "if currency is JPY, amountCents must be a whole number," "GET requests must have no body" — Lombok's generated `build()` has none of that by default, and bolting it on requires either `@Builder(builderClassName=..., buildMethodName=...)` plus a hand-written subclass overriding `build()` (workable for 3-5 simple checks), or abandoning `@Builder` for a fully hand-written builder once cross-field constraints multiply. A real 2022 incident illustrates the risk: a `@Builder`-generated `Payment.build()` silently accepted `customerId = null` and `amountCents = -500`, and the failure only surfaced 500ms later as a database constraint violation — far from the actual bug. The practical guidance: start with Lombok for greenfield DTOs, but treat "the first validation rule appears" as the trigger to add a custom `build()` override, not a reason to keep stacking `if` statements into setters.
+A: Use Lombok for plain data carriers with no invariants, and hand-write the builder the moment validation enters the picture. Lombok `@Builder` eliminates all boilerplate for simple immutable DTOs (2-6 fields, no cross-field invariants): annotate the class and you get a full static nested `Builder` with fluent setters and `build()` for free, which is ideal at API/gRPC boundaries. The moment you need validation — "orderId must not be blank," "if currency is JPY, amountCents must be a whole number," "GET requests must have no body" — Lombok's generated `build()` has none of that by default, and bolting it on means either putting `@Builder` on a hand-written constructor that validates (workable for 3-5 simple checks, because Lombok routes its generated `build()` through that constructor), or abandoning `@Builder` for a fully hand-written builder once cross-field constraints multiply. Note the trap: subclassing the generated builder to override `build()` does *not* work, because `Payment.builder()` returns the generated builder type and never your subclass, so the override is unreachable and validation silently never runs. That is exactly the failure shape to watch for — a `@Builder`-generated `build()` accepting `customerId = null` and `amountCents = -500`, with the error surfacing much later as a database constraint violation far from the actual bug. The practical guidance: start with Lombok for greenfield DTOs, but treat "the first validation rule appears" as the trigger to move validation into an `@Builder`-annotated constructor, not a reason to keep stacking `if` statements into setters.
 
 **Q: How do you validate invariants in `build()` vs. in each setter — and why does it matter?**
-A: Validating in individual setters (`public Builder ovenTempC(int t) { if (t < 100) throw ...; this.ovenTempC = t; return this; }`) only catches single-field constraints and fails for cross-field invariants — e.g., "GET requests must not have a body" can't be checked when `.method("GET")` and `.body(...)` are called independently and possibly in either order. Validating only in `build()` means every setter is "unsafe" individually, but `build()` sees the complete picture and can enforce constraints that span multiple fields, plus it runs exactly once regardless of how many setters were called or in what order. The practical guidance: do cheap, single-field, fail-fast sanity checks in setters when it improves the error message's locality (e.g., `ovenTempC` must be a positive integer — reject `-5` immediately rather than waiting), but always do cross-field and "is this object complete and consistent" validation in `build()` — never assume setters alone can guarantee a valid final object.
+A: Setters can only check one field at a time, so cross-field invariants have to wait for `build()`, which is the one place that sees the whole object. A setter-level check such as `public Builder ovenTempC(int t) { if (t < 100) throw ...; this.ovenTempC = t; return this; }` cannot express "GET requests must not have a body," since `.method("GET")` and `.body(...)` are called independently and possibly in either order. Validating only in `build()` means every setter is "unsafe" individually, but `build()` sees the complete picture and can enforce constraints that span multiple fields, plus it runs exactly once regardless of how many setters were called or in what order. The practical guidance: do cheap, single-field, fail-fast sanity checks in setters when it improves the error message's locality (e.g., `ovenTempC` must be a positive integer — reject `-5` immediately rather than waiting), but always do cross-field and "is this object complete and consistent" validation in `build()` — never assume setters alone can guarantee a valid final object.
 
 **Q: What is the "self-type" / generic builder problem when Builder meets inheritance, and how do you solve it in Java?**
-A: When a `Vehicle.Builder` has fluent setters returning `Builder`, and `Car extends Vehicle` adds its own `Car.Builder extends Vehicle.Builder` with car-specific setters, calling `new Car.Builder().wheels(4).color("red")` breaks — `wheels(4)` is inherited from `Vehicle.Builder` and returns the static type `Vehicle.Builder`, which has no `.color(...)` method, so the chain doesn't compile even though the runtime object is a `Car.Builder`. Effective Java's solution is a generic "self-type" via a recursive type parameter: `abstract class Builder<T extends Builder<T>>` where every setter returns `self()` (an abstract method each concrete builder implements as `return (T) this;`), so `Vehicle.Builder<T>.wheels(4)` returns `T`, which `Car.Builder` binds to itself — `Car.Builder extends Vehicle.Builder<Car.Builder>`. This is genuinely awkward boilerplate (the unchecked cast in `self()` is a known wart), which is why many teams avoid builder inheritance entirely and instead favor composition (a `Car` *has a* `VehicleSpec` built separately) or simply don't support subclassing of builder-based products.
+A: An inherited fluent setter returns the *parent* builder's static type, so the chain loses access to the subclass's own setters and stops compiling. Concretely: with `Car.Builder extends Vehicle.Builder`, `new Car.Builder().wheels(4).color("red")` fails because `wheels(4)` is declared on `Vehicle.Builder` and returns `Vehicle.Builder`, which has no `.color(...)` — even though the runtime object really is a `Car.Builder`. Effective Java's solution is a generic "self-type" via a recursive type parameter: `abstract class Builder<T extends Builder<T>>` where every setter returns `self()` (an abstract method each concrete builder implements as `return (T) this;`), so `Vehicle.Builder<T>.wheels(4)` returns `T`, which `Car.Builder` binds to itself — `Car.Builder extends Vehicle.Builder<Car.Builder>`. This is genuinely awkward boilerplate (the unchecked cast in `self()` is a known wart), which is why many teams avoid builder inheritance entirely and instead favor composition (a `Car` *has a* `VehicleSpec` built separately) or simply don't support subclassing of builder-based products.
 
 ### Key Phrases to Use
 - "Telescoping constructor problem"
@@ -793,13 +797,13 @@ A: When a `Vehicle.Builder` has fluent setters returning `Builder`, and `Car ext
 
 2. **Make the Product immutable** — declare all Product fields as `final`. The whole point of the Builder is to allow incremental configuration before a complete, valid, frozen object is created.
 
-3. **Validate in `build()`** — never in individual setter methods. Validation at build time sees all fields together, enabling cross-field constraint checks.
+3. **Do the completeness and cross-field validation in `build()`** — only build time sees all fields together. Cheap single-field sanity checks may also sit in the setter (or the Builder constructor, for required fields) when a local error message helps, but never rely on setters alone to guarantee a valid object.
 
 4. **Defensive copy mutable fields** — when the Product copies a `List` or `Map` from the Builder, wrap it: `Collections.unmodifiableList(new ArrayList<>(builder.items))`.
 
 5. **Return `this` from all Builder setters** — this is what enables fluent method chaining. A setter that returns `void` is an anti-pattern in a Builder.
 
-6. **Use `@Builder` from Lombok for production code** — hand-written builders are good for learning but create maintenance burden. Lombok auto-generates correct, consistent builders with zero boilerplate.
+6. **Reach for Lombok's `@Builder` on plain DTOs, and hand-write the builder once invariants appear** — Lombok removes the boilerplate but generates no validation. When a rule shows up, put `@Builder` on a hand-written constructor that validates, and move to a fully hand-written builder once cross-field constraints multiply.
 
 7. **Name setter methods after the field, not the action** — prefer `.timeout(5000)` over `.setTimeout(5000)` in a fluent Builder. It reads more naturally in a chain.
 

@@ -214,8 +214,8 @@ ConcreteFactory1 realizes the "Family 1" set (ProductA1 + ProductB1); ConcreteFa
 Java Swing's `LookAndFeel` system is the most widely deployed Abstract Factory implementation in
 the Java ecosystem. `UIManager.setLookAndFeel()` selects a factory; every subsequent call to
 `UIManager.getUI(component)` creates a component renderer from that factory's product family.
-At Oracle, Swing rendered tens of thousands of enterprise desktop applications across Windows,
-macOS, and Linux with a single codebase. The guarantee: all components rendered in any one JVM
+It has carried a generation of cross-platform enterprise desktop applications on Windows, macOS,
+and Linux from a single codebase. The guarantee: all components rendered in any one JVM
 come from the same platform family — no mixing of Windows buttons with macOS scrollbars.
 
 `javax.swing.LookAndFeel` is the AbstractFactory. Its concrete implementations
@@ -259,15 +259,15 @@ Swapping the `setLookAndFeel()` call is the only change between the two deployme
 |--------------------|-----------------|-------------------|--------------------|
 | `javax.swing.LookAndFeel` | `LookAndFeel.getDefaults()` + `UIManager` | `WindowsLookAndFeel`, `NimbusLookAndFeel`, `AquaLookAndFeel`, `MetalLookAndFeel` | `ButtonUI`, `TextFieldUI`, `ScrollBarUI`, `TableUI` |
 | JDBC (java.sql) | `java.sql.Driver.connect()` + `Connection` | MySQL Driver, PostgreSQL Driver, Oracle Driver | `Connection`, `Statement`, `PreparedStatement`, `ResultSet` |
-| `javax.xml.parsers` | `DocumentBuilderFactory`, `SAXParserFactory` | Xerces, Crimson, JDK built-in | `DocumentBuilder`, `SAXParser`, `Transformer` |
-| AWS SDK v2 | `SdkHttpClient` / transport factory | `ApacheHttpClient`, `UrlConnectionHttpClient`, `NettyNioAsyncHttpClient` | HTTP client, request executor, response decoder |
-| Spring Framework 6 | `ApplicationContext` creates related bean families | `AnnotationConfigApplicationContext`, `WebApplicationContext`, `ReactiveWebApplicationContext` | `BeanFactory`, `Environment`, `ResourceLoader`, `MessageSource` |
+| `javax.net.ssl.SSLContext` | one configured `SSLContext` instance | `SSLContext.getInstance("TLSv1.3")`, a custom `SSLContextSpi` provider | `SSLSocketFactory`, `SSLServerSocketFactory`, `SSLEngine` — all sharing the context's key/trust material |
+| AWS SDK v2 | `SdkHttpClient.Builder` / `SdkAsyncHttpClient.Builder` | `ApacheHttpClient`, `UrlConnectionHttpClient`, `NettyNioAsyncHttpClient` (async) | HTTP client, request executor, response decoder |
+| Spring Framework | `ApplicationContext` creates related bean families | `AnnotationConfigApplicationContext`, `WebApplicationContext`, `ReactiveWebApplicationContext` | `BeanFactory`, `Environment`, `ResourceLoader`, `MessageSource` |
 
-### Production-Grade Code: Cross-Platform Notification System (Java 17 LTS)
+### Production-Grade Code: Cross-Platform Notification System (Java 25 LTS)
 
 ```java
-// Java 17 LTS — Abstract Factory for cross-platform notification delivery.
-// In production at a fintech company: production uses SendGrid (email) + Twilio (SMS);
+// Java 25 LTS — Abstract Factory for cross-platform notification delivery.
+// Illustrative deployment shape: production uses SendGrid (email) + Twilio (SMS);
 // staging uses log-based fakes; tests use in-memory captures.
 // Switching environments = swapping the factory. Zero client code changes.
 
@@ -312,14 +312,14 @@ public class ProductionNotificationFactory implements NotificationFactory {
     public EmailSender createEmailSender() {
         return new SendGridEmailSender(sendGridApiKey);
         // SendGridEmailSender: HTTP call to https://api.sendgrid.com/v3/mail/send
-        // p99 delivery acknowledgement: 120ms; retry on 429/503 with exponential backoff
+        // illustrative p99 delivery acknowledgement: 120ms; retry on 429/503 with exponential backoff
     }
 
     @Override
     public SmsSender createSmsSender() {
         return new TwilioSmsSender(twilioAccountSid, twilioAuthToken);
         // TwilioSmsSender: HTTP call to https://api.twilio.com/2010-04-01/Accounts/.../Messages
-        // p99: 80ms; cost: $0.0079/SMS
+        // illustrative p99: 80ms; US long-code outbound list price: $0.0083/SMS plus carrier fees
     }
 
     @Override
@@ -442,17 +442,21 @@ public class SlackNotificationFactory implements NotificationFactory {
 ### Anti-Pattern 2: Mixing Products from Different Families
 
 ```java
-// BROKEN: mixing AWS and GCP storage objects — their authentication, retry, and
-// serialization contracts are incompatible. This causes runtime errors at scale.
+// BROKEN: one logical write split across two cloud families. Each client authenticates
+// fine on its own — the bug is that the *family* is mixed, so the object and the metadata
+// record that points at it have no shared consistency, precondition, or failure model.
 public class BrokenStorageClient {
-    private final S3Client s3Client;      // AWS family
-    private final GcsClient gcsClient;   // GCP family — incompatible auth
+    private final S3ObjectStorage    storage;   // AWS family: SigV4, S3 ETags, S3 error codes
+    private final FirestoreMetaStore metadata;  // GCP family: OAuth2, GCS generation numbers
 
     public void upload(byte[] data, String key) {
-        // AWS S3 request signed with AWS SigV4, GCS request signed with OAuth2
-        // Mixing these in one flow causes 403 Forbidden at runtime on every request
-        s3Client.putObject(key, data);   // AWS
-        gcsClient.upload(key, data);     // GCP — different auth, different error codes
+        String etag = storage.put(key, data);        // AWS: returns an S3 ETag
+        // GCP-side conditional writes use generation/metageneration preconditions and
+        // cannot express "only if the S3 ETag still matches" — so the guard is silently lost.
+        metadata.record(key, etag);
+        // If this second call fails, there is no shared retry or rollback story: the object
+        // exists in S3 with no metadata row, and each side reports a different error shape.
+        // Half-written state, not a 403 — which is exactly what makes it hard to find.
     }
 }
 ```
@@ -508,12 +512,13 @@ public interface NotificationFactory {
 
 ### AWS SDK v2 Transport Factory: Real-World Abstract Factory
 
-AWS SDK v2 uses an internal `SdkHttpClientFactory` abstraction. `ApacheHttpClient`,
-`UrlConnectionHttpClient`, and `NettyNioAsyncHttpClient` are concrete factories. Each produces
-a consistent family: HTTP request executor, connection manager, response parser, retry handler.
+AWS SDK v2 exposes the transport abstraction as `SdkHttpClient.Builder<T>` (and
+`SdkAsyncHttpClient.Builder<T>` for the async path). `ApacheHttpClient`,
+`UrlConnectionHttpClient`, and `NettyNioAsyncHttpClient` supply the concrete builders. Each
+produces a consistent family: HTTP request executor, connection manager, response parser, retry handler.
 
 ```java
-// Java 17 LTS, AWS SDK v2 (2.x) — selecting the HTTP transport factory
+// Java 25 LTS, AWS SDK v2 (2.x) — selecting the HTTP transport factory
 // SdkHttpClient acts as Product; the builder acts as the Abstract Factory
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -539,12 +544,18 @@ S3Client s3WithUrlConn = S3Client.builder()
 
 ### Performance Numbers
 
-- Swing LookAndFeel factory resolution: `UIManager.getUI(component)` adds ~5 microseconds per
-  component render on first call; subsequent calls hit a `UIDefaults` cache in ~200 nanoseconds.
-- AWS SDK v2 ApacheHttpClient at 2,000 S3 requests/sec: connection pool of 200 eliminates
-  TCP handshake overhead (each handshake = ~10ms); steady-state p99 < 40ms per request.
-- InMemoryNotificationFactory in unit tests: ~10 nanoseconds per send() call vs. ~120ms for
-  real SendGrid HTTP call — 12 million times faster, enabling 10,000+ test cases per second.
+All figures in this section are **illustrative** orders of magnitude, not measured benchmarks.
+The durable point is the ratio between an in-process factory call and a network round trip.
+
+- Swing LookAndFeel factory resolution: `UIManager.getUI(component)` costs microseconds on the
+  first call, when `UIDefaults` resolves and caches the UI class and its `createUI` method;
+  later calls are a cached lookup plus one reflective `createUI` invocation.
+- AWS SDK v2 ApacheHttpClient at 2,000 S3 requests/sec: a connection pool of 200 amortizes away
+  TCP/TLS handshake cost (a handshake being on the order of 10ms), keeping the steady-state
+  request path off the handshake entirely.
+- InMemoryNotificationFactory in unit tests: tens of nanoseconds per `send()` call vs. ~120ms for
+  a real SendGrid HTTP call — roughly seven orders of magnitude, which is what makes running
+  thousands of test cases per second feasible.
 
 ### Migration Story: When to Adopt Abstract Factory and When to Abandon It
 
@@ -559,7 +570,7 @@ S3Client s3WithUrlConn = S3Client.builder()
 **Abandon or simplify Abstract Factory** when:
 - You have only one real ConcreteFactory and the pattern exists "for future extensibility"
   that never materializes. Two years later, the abstraction is overhead with no benefit.
-- A Spring Boot 3.x `@Profile`-based configuration swap (`@Profile("prod")` vs
+- A Spring Boot `@Profile`-based configuration swap (`@Profile("prod")` vs
   `@Profile("test")`) achieves the same family switching with zero custom factory code.
 - Your product type set grows frequently (new notification channels every month). The
   interface-change cost is too high; consider a plugin registry pattern instead.
@@ -601,7 +612,7 @@ S3Client s3WithUrlConn = S3Client.builder()
    Answer: The application code is written entirely against `java.sql.Connection`, `Statement`, `PreparedStatement`, and `ResultSet` — the AbstractProduct interfaces — and never imports `com.mysql.cj.jdbc.*` or `org.postgresql.*` directly. At startup, `DriverManager.getConnection(jdbcUrl, ...)` picks the registered `Driver` (the ConcreteFactory) whose `acceptsURL()` matches the URL scheme, and from that point on every `Statement`, `PreparedStatement`, and `ResultSet` created from that `Connection` belongs to the same driver family — switching from MySQL to PostgreSQL in production is a one-line change to the JDBC URL and driver dependency, with zero changes to DAO or repository code. This is the same mechanism behind Swing's `LookAndFeel`: `UIManager.setLookAndFeel(...)` swaps the entire `ButtonUI`/`TextFieldUI`/`ScrollBarUI` family in one call, and every subsequently rendered component picks up the new family automatically.
 
 7. **"How do you test code that depends on an Abstract Factory?"**
-   Answer: Inject a test-double `ConcreteFactory` (e.g., `InMemoryNotificationFactory`) that returns fakes/stubs for every product method — since the client (`NotificationService`) depends only on the `NotificationFactory` interface, constructing it with the in-memory factory in a unit test requires zero mocking framework setup and exercises the exact same code path as production. The key benefit over mocking each product individually with Mockito is that the *whole family* swaps atomically and consistently — you don't risk a test where `EmailSender` is mocked but `AuditLogger` accidentally hits the real CloudWatch client. As a concrete number from the example in this module: `InMemoryNotificationFactory.createEmailSender().send()` runs in ~10 nanoseconds vs. ~120ms for a real SendGrid HTTP call — a 12-million-times speedup that makes 10,000+ test cases per second feasible.
+   Answer: Inject a test-double `ConcreteFactory` (e.g., `InMemoryNotificationFactory`) that returns fakes/stubs for every product method — since the client (`NotificationService`) depends only on the `NotificationFactory` interface, constructing it with the in-memory factory in a unit test requires zero mocking framework setup and exercises the exact same code path as production. The key benefit over mocking each product individually with Mockito is that the *whole family* swaps atomically and consistently — you don't risk a test where `EmailSender` is mocked but `AuditLogger` accidentally hits the real CloudWatch client. As an illustrative order of magnitude from the example in this module: `InMemoryNotificationFactory.createEmailSender().send()` runs in tens of nanoseconds vs. ~120ms for a real SendGrid HTTP call — roughly seven orders of magnitude, which is what makes running thousands of test cases per second feasible.
 
 8. **"What is the 'static factory of factories' anti-pattern?"**
    Answer: This is when a class exposes a static method like `FactoryProvider.getFactory(String env)` that internally does an `if-else`/`switch` to `new` up and return the right `ConcreteFactory` — it looks like dependency injection but is actually a hidden global `Service Locator` with the same testability problems as Singleton: callers invoke the static method directly, so the dependency on "which factory" is invisible from constructors and can't be swapped per-test without static-state hacks. The fix is to let a DI container (Spring's `@Profile`-based `@Configuration` classes, or a manually-wired composition root) decide which `ConcreteFactory` implementation to instantiate and inject it as a constructor argument — the selection logic moves from a static method body to bean wiring, which is overridable per test context via `@TestConfiguration` or `@ActiveProfiles`.

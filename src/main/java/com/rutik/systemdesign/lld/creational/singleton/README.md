@@ -247,12 +247,12 @@ flowchart LR
 
 ### Anti-Pattern 1: DCL Without `volatile` — The Classic Production Bug
 
-The double-checked locking (DCL) pattern is broken without `volatile`. This was a real source of
-JVM-level memory visibility bugs before Java 5.
+The double-checked locking (DCL) pattern is broken without `volatile` — on every Java version, not
+just the pre-Java-5 ones. It remains a live source of JVM-level memory visibility bugs today.
 
 ```java
-// BROKEN: DCL without volatile (pre-Java 5 or with missing volatile)
-// Seen in production codebases as late as 2015 in legacy banking systems.
+// BROKEN: DCL with the volatile modifier missing — broken on every Java version
+// Illustrative: this shape still turns up in long-lived enterprise codebases.
 public class ConfigRegistry {
     // BUG: without volatile, JVM may reorder:
     //   1. Allocate memory for ConfigRegistry
@@ -292,7 +292,7 @@ sequenceDiagram
     A->>A: enter synchronized block
     A->>F: 1. allocate memory
     A->>F: 2. assign reference to INSTANCE
-    Note over F: missing volatile - JVM/CPU may reorder step 2 before step 3
+    Note over F: missing volatile - JVM/CPU may publish the reference before the constructor runs
     B->>F: read INSTANCE (non-null!)
     F-->>B: return partially-built object
     Note over B: reads default/half-initialized state<br/>(can surface as a NullPointerException)
@@ -302,8 +302,9 @@ sequenceDiagram
 *Without `volatile`, the JVM/CPU may reorder step 2 (publishing the reference) ahead of step 3 (running the constructor). Thread B's null-check then sees a non-null `INSTANCE` whose fields are still zeroed, reading a half-built object — the exact race the interview answer below asks you to draw out step by step.*
 
 ```java
-// FIX: add volatile to INSTANCE — required since Java 5 (Java Memory Model update)
-// volatile prevents the JVM from reordering the assignment before full construction.
+// FIX: add volatile to INSTANCE. volatile was always required; what Java 5's JSR-133
+// memory model changed is that volatile is now strong enough to make DCL correct.
+// It prevents the JVM from reordering the assignment before full construction.
 public class ConfigRegistry {
     private static volatile ConfigRegistry INSTANCE; // volatile guarantees visibility
 
@@ -449,15 +450,17 @@ figures depend on JVM, CPU architecture, and contention, and none of these are p
 | Eager static field | ~1 ns (plain field read) | Yes | No (needs readResolve) | No |
 | Bill Pugh holder idiom | ~1 ns after the one-time class init | Yes | No (needs readResolve) | No |
 | DCL + `volatile` | ~1–5 ns (volatile read; free on x86, a load-acquire on ARM) | Yes | No (needs readResolve) | No |
-| `synchronized getInstance()` | tens of ns uncontended, far worse once threads contend | Yes | No | No |
+| `synchronized getInstance()` | tens of ns uncontended, hundreds of ns once threads contend | Yes | No | No |
 | Enum Singleton | ~1 ns (plain field read) | Yes | Yes (built-in) | Yes (JVM blocks) |
 
-Working the arithmetic on the illustrative 500k reads/sec: at ~200 ns per call a `synchronized
-getInstance()` burns 500,000 x 200 ns = 0.1 s of CPU per second — roughly 10% of one core, and worse
-still once the monitor is actually contended and threads park. The lock-free forms (enum, holder idiom,
+Working the arithmetic on the illustrative 500k reads/sec, using the contended ~200 ns figure from the
+row above: a `synchronized getInstance()` burns 500,000 x 200 ns = 0.1 s of CPU per second — roughly
+10% of one core, and worse still once threads actually park. At the uncontended end of that row
+(~20 ns) the same rate costs 0.01 s/s, about 1% of a core. The lock-free forms (enum, holder idiom,
 or DCL with `volatile`) cost a plain field read, so at the same rate their overhead is negligible.
-Note that JSR-133's own FAQ recommends the holder idiom over DCL on readability grounds even though
-DCL-with-`volatile` is correct.
+Note that JSR-133's own FAQ recommends the holder idiom over DCL — it is "thread-safe and a lot
+easier to understand," and the FAQ argues the performance advantage that originally motivated DCL
+no longer exists — even though DCL-with-`volatile` is correct.
 
 ### Migration Story: When to Move TO Enum Singleton, and When to Move AWAY
 
@@ -556,7 +559,7 @@ flowchart TD
    Answer: Each class loader that loads the Singleton's `.class` file creates an independent `Class` object, and therefore an independent static `INSTANCE` field — so you can end up with multiple "singletons," one per class loader, silently violating the "exactly one instance" guarantee. This commonly bites when a JAR containing the Singleton is bundled inside multiple WARs deployed to the same Tomcat instance, or when an OSGi bundle is reloaded and re-instantiates its singletons. The fix is architectural: place shared Singleton classes in a parent/shared class loader (e.g., Tomcat's `common` or `shared` lib directory) so all child class loaders delegate to the same loaded class, or avoid the assumption entirely and use an external shared store (Redis, a database row) for state that must truly be process-wide.
 
 10. **"Walk through the Bill Pugh holder idiom — why is it thread-safe without any explicit synchronization?"**
-   Answer: The idiom declares a `private static class Holder { static final Singleton INSTANCE = new Singleton(); }` and has `getInstance()` return `Holder.INSTANCE`. The JVM specification guarantees that a class is initialized — and its static fields assigned — only on first active use, and that class initialization is implicitly synchronized and happens-before any subsequent access (JLS §12.4). So `Holder` is not loaded (and `INSTANCE` is not created) until the first call to `getInstance()`, giving lazy initialization, but every subsequent read of `Holder.INSTANCE` is a plain field access with no lock — giving the same near-zero overhead as eager initialization. This is why it's the preferred idiom over `synchronized getInstance()` or DCL: it gets laziness, thread safety, and zero per-call synchronization cost simultaneously, with no `volatile` needed.
+   Answer: The idiom declares a `private static class Holder { static final Singleton INSTANCE = new Singleton(); }` and has `getInstance()` return `Holder.INSTANCE`. The JVM specification guarantees that a class is initialized — and its static fields assigned — only on first active use, and that class initialization runs under a per-class initialization lock and happens-before any subsequent access (JLS §12.4.2). So `Holder` is not initialized (and `INSTANCE` is not created) until the first call to `getInstance()`, giving lazy initialization, but every subsequent read of `Holder.INSTANCE` is a plain field access with no lock — giving the same near-zero overhead as eager initialization. This is why it's the preferred idiom over `synchronized getInstance()` or DCL: it gets laziness, thread safety, and zero per-call synchronization cost simultaneously, with no `volatile` needed.
 
 **Key Phrases to Use:**
 - "Lazy vs. eager initialization"
