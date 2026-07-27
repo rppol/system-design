@@ -6,8 +6,15 @@
 
 ## Definition and Intent
 
-> "If S is a subtype of T, then objects of type T may be replaced with objects of type S without altering any of the desirable properties of the program."
-> — Barbara Liskov, 1987 (Turing Award recipient)
+> "What is wanted here is something like the following substitution property: If for each object o1 of type S there is an object o2 of type T such that for all programs P defined in terms of T, the behavior of P is unchanged when o1 is substituted for o2, then S is a subtype of T."
+> — Barbara Liskov, OOPSLA 1987 keynote *Data Abstraction and Hierarchy* (Turing Award 2008)
+
+Liskov and Jeannette Wing formalized this as **behavioral subtyping** seven years later:
+
+> "Let φ(x) be a property provable about objects x of type T. Then φ(y) should be true for objects y of type S where S is a subtype of T."
+> — Liskov & Wing, *A Behavioral Notion of Subtyping*, ACM TOPLAS 16(6), November 1994
+
+The familiar one-liner — "objects of type T may be replaced with objects of subtype S without altering the correctness of the program" — is a popular paraphrase of these two statements, not a direct quotation from either.
 
 In plain terms: **anywhere your code uses a base class or interface, you should be able to plug in a subclass and have the program still work correctly — without the caller needing to know which subclass it is dealing with.**
 
@@ -37,7 +44,7 @@ LSP is rooted in Design by Contract (Eiffel language concept). For a subclass to
 2. **Postconditions cannot be weakened.** The subclass must deliver at least what the parent promised — it can deliver more, but not less.
 3. **Invariants must be preserved.** Any property the base class guarantees about its state must hold in the subclass.
 4. **The history constraint.** Subclass methods must not introduce mutations that the base class did not allow (a read-only parent should not have a mutable subclass that modifies shared state unexpectedly).
-5. **Exceptions:** A subclass should not throw new, checked exceptions that the base class does not throw.
+5. **Exceptions:** A subclass should not throw new exception types beyond those the base method declares, unless they are subtypes of exceptions the base already throws. Java's compiler enforces this for checked exceptions on overrides; unchecked exceptions slip through, which is why an added `UnsupportedOperationException` compiles cleanly and still breaks LSP.
 
 ---
 
@@ -318,6 +325,10 @@ public void depositFiveDollars(BankAccount account) {
 ```java
 // Base class guarantees list is never null and is sorted
 public class SortedDataProvider {
+    protected List<Integer> fetchFromDB() {
+        return new ArrayList<>(List.of(5, 1, 3));   // arrives in arbitrary order
+    }
+
     public List<Integer> getData() {
         List<Integer> data = fetchFromDB();
         Collections.sort(data);
@@ -334,7 +345,7 @@ public class FastDataProvider extends SortedDataProvider {
 }
 
 // Caller depends on the postcondition
-public void processData(SortedDataProvider provider) {
+public void processData(SortedDataProvider provider, int targetValue) {
     List<Integer> data = provider.getData();
     // Relies on sorted order for binary search — breaks silently with FastDataProvider
     int idx = Collections.binarySearch(data, targetValue);

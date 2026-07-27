@@ -6,12 +6,15 @@
 
 ## Definition and Intent
 
-> "A class should have one, and only one, reason to change."
-> — Robert C. Martin
+> "A class should have only one reason to change."
+> — Robert C. Martin, *Agile Software Development: Principles, Patterns, and Practices* (2002)
 
 The more precise formulation from Martin's later writing:
 
 > "A module should be responsible to one, and only one, actor."
+> — Robert C. Martin, *Clean Architecture* (2017), Ch. 7
+
+Martin has restated SRP explicitly to kill the common misreading: the principle is about **one reason to change / one actor**, not "a class should do one thing."
 
 An **actor** is a group of stakeholders whose requirements drive changes to the module. "One reason to change" is equivalent to "one actor." If your `UserService` is changed both when the HR department asks for a new report format AND when the authentication team changes the login flow, it has two reasons to change — it violates SRP.
 

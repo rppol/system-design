@@ -343,7 +343,7 @@ public class UserReportService {
 
     public Report generateReport() {
         List<User> users = userReader.findAll();
-        // ...
+        return new Report(users);   // built purely from the read-side view
     }
 }
 

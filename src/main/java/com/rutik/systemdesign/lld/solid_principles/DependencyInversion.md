@@ -370,6 +370,15 @@ Arrows point inward. Infrastructure implements domain interfaces — the domain 
 
 public class UserServiceTest {
 
+    // The in-memory double: ~10 lines, no schema, no container, no network
+    static class InMemoryUserRepository implements UserRepository {
+        private final Map<String, User> byEmail = new HashMap<>();
+
+        @Override public User findById(long id) { return null; }
+        @Override public void save(User user) { byEmail.put(user.getEmail(), user); }
+        @Override public boolean existsByEmail(String email) { return byEmail.containsKey(email); }
+    }
+
     @Test
     void registerUser_savesUserAndSendsEmail() {
         // Arrange — pure in-memory test doubles, no external systems needed

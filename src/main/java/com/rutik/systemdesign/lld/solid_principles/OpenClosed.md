@@ -71,6 +71,13 @@ class Rectangle {
     public double getWidth() { return width; }
     public double getHeight() { return height; }
 }
+
+class Triangle {
+    private double base, height;
+    public Triangle(double b, double h) { this.base = b; this.height = h; }
+    public double getBase() { return base; }
+    public double getHeight() { return height; }
+}
 ```
 
 **What goes wrong:**
@@ -192,7 +199,11 @@ public class PaymentProcessor {
         }
     }
 }
+```
 
+The OCP-compliant rewrite keeps the class name `PaymentProcessor` but changes what it depends on, so the two versions belong in separate compilation units:
+
+```java
 // OCP-COMPLIANT SOLUTION:
 public interface PaymentGateway {
     void processPayment(double amount);
@@ -414,7 +425,7 @@ A: Strategy is one of the primary design patterns that embodies OCP. The context
 
 **Q: Can you give an example of OCP violation and how you refactored it?**
 
-A: [Tell a concrete story about a notification system or report generator with a type switch. Describe adding a new notification type by writing a new class versus by opening the switch statement. Emphasize the regression risk of the latter and the zero-risk nature of the former.]
+A: The classic one is a notification service with a `switch (type)` over EMAIL, SMS, and PUSH, where every new channel means reopening the same method. Adding SLACK there meant editing a method that already had three tested branches, so the whole existing suite had to be re-run and any shared state in the method was a regression risk. The refactor extracted a `NotificationSender` interface with one implementation per channel and a registry keyed by type; SLACK then arrived as one new class plus one new test, with zero edits to the existing senders or the dispatcher. State the contrast explicitly in the interview: the switch version puts working code at risk on every addition, the interface version cannot.
 
 ---
 
