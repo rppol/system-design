@@ -51,7 +51,7 @@ Per-task averages:
 
 Daily token volume:
   50,000 tasks x 51,000 tokens = 2.55B tokens/day
-  Claude Opus 4.7 list price: $5/MTok input, $25/MTok output
+  Claude Opus 5 list price: $5/MTok input, $25/MTok output
   Per action: 1,500 in x $5/MTok + 200 out x $25/MTok = $0.0125
   Blended across the 1,700-token action: $0.00735/1K
   50,000 tasks x 30 actions x $0.0125 = $18,750/day LLM cost
@@ -87,8 +87,8 @@ Total daily infrastructure cost:
 Action cycle (target 1,000ms, SLA 2,000ms):
   Screenshot capture (X11/CDP):    50ms
   Image compression + hashing:     20ms
-  VLM inference (Claude claude-haiku-4-5):  150ms  [element detection]
-  VLM escalation (Claude claude-opus-4-7): 800ms  [reasoning, when triggered]
+  VLM inference (claude-haiku-4-5):        150ms  [element detection]
+  VLM escalation (claude-opus-5):          800ms  [reasoning, when triggered]
   Action classification:            5ms
   Action gate check:                10ms
   Action execution (xdotool/CDP):   100ms
@@ -120,7 +120,7 @@ flowchart TD
     SM --> ACG["Action Confirmation Gate\n(for write/irreversible actions)"]
     VMO --> SC["Screenshot Capturer\n(X11/CDP)"]
     VMO --> CKPT["State Checkpoint\n(S3 + Redis)"]
-    SC --> VLMR["VLM Router\n(claude-haiku-4-5 / claude-opus-4-7)"]
+    SC --> VLMR["VLM Router\n(claude-haiku-4-5 / claude-opus-5)"]
     VLMR --> GE["Grounding Engine\n(AXTree + visual fallback)"]
     GE --> AE["Action Executor\n(xdotool / Playwright CDP)"]
     AE --> RV["Result Verifier\n(screenshot diff hash)"]
@@ -181,12 +181,12 @@ See also: [Agent Durability Patterns](./cross_cutting/agent_durability_patterns.
 
 ### 4.1 Screenshot Tokenization and VLM Routing
 
-A full 1080p screenshot renders to approximately 2,800 tokens when sent to Claude at native resolution — Anthropic bills roughly `(width x height) / 750` tokens per image, so 1920x1080 is about 2,765 tokens — which is 84,000 tokens per task at 30 actions. This alone costs $0.42 per task at Claude Opus 4.7's $5/MTok input rate and pushes inference latency to 2-3 seconds per action.
+A full 1080p screenshot renders to approximately 2,800 tokens when sent to Claude at native resolution — Anthropic bills roughly `(width x height) / 750` tokens per image, so 1920x1080 is about 2,765 tokens — which is 84,000 tokens per task at 30 actions. This alone costs $0.42 per task at Claude Opus 5's $5/MTok input rate and pushes inference latency to 2-3 seconds per action.
 
 Three optimizations reduce this to 1,500 tokens per screenshot:
 
 1. Crop to the active window, not the full desktop. Tokens scale with pixel area, not file size: a 1280x880 browser-viewport crop is ~1,500 tokens against ~2,765 for the full 1920x1080 desktop, a 46% cut. Re-compressing at lower JPEG quality saves upload bytes but zero tokens.
-2. Use Claude claude-haiku-4-5 for element detection (cheap, fast, 150 ms), escalate to Claude claude-opus-4-7 only when the haiku model's confidence score falls below 0.7 or when the task step requires multi-hop reasoning.
+2. Use Claude Haiku 4.5 (`claude-haiku-4-5`) for element detection (cheap, fast, 150 ms), escalate to Claude Opus 5 (`claude-opus-5`) only when the haiku model's confidence score falls below 0.7 or when the task step requires multi-hop reasoning.
 3. Skip the VLM call entirely when no visual change has occurred since the last screenshot, detected by perceptual hash.
 
 ```python
@@ -276,7 +276,7 @@ class ScreenshotOptimizer:
         raise NotImplementedError  # X11: Xlib.display.Display().screen().root.get_image()
 ```
 
-VLM routing logic: every screenshot goes first to `claude-haiku-4-5` with a structured grounding prompt. If the response includes `confidence < 0.7` or the step type is `REASONING`, the same screenshot is immediately forwarded to `claude-opus-4-7`. At list prices the haiku call costs $0.0025 per action (1,500 input + 200 output tokens at $1/$5 per MTok); the opus escalation costs $0.0125 (at $5/$25 per MTok). Escalation rate in production is approximately 25% of actions, yielding a blended cost of $0.005 per action versus $0.0125 if opus were used for everything.
+VLM routing logic: every screenshot goes first to `claude-haiku-4-5` with a structured grounding prompt. If the response includes `confidence < 0.7` or the step type is `REASONING`, the same screenshot is immediately forwarded to `claude-opus-5`. At list prices the haiku call costs $0.0025 per action (1,500 input + 200 output tokens at $1/$5 per MTok); the opus escalation costs $0.0125 (at $5/$25 per MTok). Escalation rate in production is approximately 25% of actions, yielding a blended cost of $0.005 per action versus $0.0125 if opus were used for everything.
 
 ### 4.2 Action Classification and Confirmation Gate
 
@@ -784,16 +784,16 @@ no vendor publishes the latter. List prices are per 1K tokens, quoted as input /
 
 | Model | Grounding accuracy (internal eval) | Tokens/Screenshot | Latency (p50) | Cost per 1K tokens (in / out) |
 |-------|------------------------|-------------------|---------------|--------------------|
-| Claude Opus 4.7 | Best (96%) | 1,500 | 800ms | $0.005 / $0.025 |
+| Claude Opus 5 | Best (96%) | 1,500 | 800ms | $0.005 / $0.025 |
 | Claude Haiku 4.5 | Good (82%) | 1,500 | 150ms | $0.001 / $0.005 |
-| OpenAI GPT-5.6 (mid tier) | Best (95%) | 1,500 | 600ms | $0.0025 / $0.015 |
+| OpenAI GPT-5.6 Terra (mid tier) | Best (95%) | 1,500 | 600ms | $0.0025 / $0.015 |
 | Google Gemini 3.1 Pro | Good (88%) | 1,200 | 500ms | $0.002 / $0.012 |
 
-Model IDs churn faster than anything else in this design — the bare `gpt-5` and
-`o3` IDs an earlier draft of this table used are now deprecated, and Gemini 1.5/2.0
-have been shut down outright. Treat the vendor/tier as the durable choice and the
-exact model string as configuration. Verify prices at the vendor pricing page before
-you build a cost model on them; the ratios matter more than the absolute numbers.
+Model IDs churn faster than anything else in this design — a table like this one
+is stale within two release cycles. Treat the vendor and the tier as the durable
+choice and the exact model string as configuration you can swap. Verify prices at
+the vendor pricing page before you build a cost model on them; the ratios between
+tiers matter more than the absolute numbers.
 
 ### Sandbox Options
 
@@ -1030,8 +1030,8 @@ LLM cost at 500K tasks/day (all-opus baseline):
   Revenue needed at $1.50/task: $750,000/day
   Gross margin: ($750K - $187.5K - $396 - overhead) / $750K ≈ 75%
 
-Model cost sensitivity (Opus 4.7 $5/$25 per MTok; Haiku 4.5 $1/$5 per MTok):
-  Switching from claude-opus-4-7 (100% usage) to tiered routing (75% haiku, 25% opus):
+Model cost sensitivity (Opus 5 $5/$25 per MTok; Haiku 4.5 $1/$5 per MTok):
+  Switching from claude-opus-5 (100% usage) to tiered routing (75% haiku, 25% opus):
     Haiku cost per action: 1,500 in x $1/MTok + 200 out x $5/MTok  = $0.0025
     Opus cost per action:  1,500 in x $5/MTok + 200 out x $25/MTok = $0.0125
     Blended: 0.75 x $0.0025 + 0.25 x $0.0125 = $0.005/action vs $0.0125 all-opus
@@ -1057,7 +1057,7 @@ CAPTCHAs are specifically designed to defeat automated computer vision, and mode
 
 **Q: Why separate the grounding step from the reasoning step?**
 
-Grounding (what element to click) and reasoning (what the next step of the task is) are different cognitive tasks that benefit from different models and should be separated to control cost. Reasoning requires understanding the task goal, the current page state, and the history of actions taken — it benefits from a large, capable model like claude-opus-4-7. Grounding requires identifying a specific UI element on the current screenshot — a smaller, faster model like claude-haiku-4-5 achieves 82% accuracy at one-fifth the cost (Haiku 4.5 lists at $1/$5 per MTok against Opus 4.7's $5/$25). By routing the reasoning step to opus and the grounding step to haiku, and escalating haiku to opus only when confidence is below 0.7, the system achieves a 60% cost reduction while maintaining task success rates within 3 percentage points of all-opus routing. Additionally, separating grounding allows for AXTree-based grounding as a first-class approach that entirely bypasses the VLM for element selection when accessibility data is available.
+Grounding (what element to click) and reasoning (what the next step of the task is) are different cognitive tasks that benefit from different models and should be separated to control cost. Reasoning requires understanding the task goal, the current page state, and the history of actions taken — it benefits from a large, capable model like `claude-opus-5`. Grounding requires identifying a specific UI element on the current screenshot — a smaller, faster model like `claude-haiku-4-5` achieves 82% accuracy at one-fifth the cost (Haiku 4.5 lists at $1/$5 per MTok against Opus 5's $5/$25). By routing the reasoning step to opus and the grounding step to haiku, and escalating haiku to opus only when confidence is below 0.7, the system achieves a 60% cost reduction while maintaining task success rates within 3 percentage points of all-opus routing. Additionally, separating grounding allows for AXTree-based grounding as a first-class approach that entirely bypasses the VLM for element selection when accessibility data is available.
 
 **Q: How does the action confirmation gate affect user experience, and what is the right timeout for irreversible actions?**
 

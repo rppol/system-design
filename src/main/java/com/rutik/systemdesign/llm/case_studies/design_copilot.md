@@ -238,17 +238,17 @@ Performance:
 ### 4.4 Speculative Decoding for Low Latency
 
 ```
-Problem: GPT-4 completion of 40 tokens takes 150ms+ on A100.
+Problem: A frontier chat model emitting 40 tokens takes 150ms+ on an A100.
          Developers feel >300ms total latency.
 
 Solution: Speculative decoding
 
-                Small draft model (GPT-3.5 equivalent, 6B params)
+                Small draft model (1-3B params, same tokenizer)
                          |
          Generates 8 tokens speculatively (fast, ~10ms)
                          |
                          v
-                Large verifier model (GPT-4o, 200B params)
+                Large verifier model (the served frontier FIM model)
                          |
          Verifies all 8 tokens in single forward pass (parallel attention)
                          |
@@ -426,7 +426,7 @@ Usage analytics:
 | Cache | Local LRU (IDE) | Server-side cache | Privacy; instant retrieval for recent completions |
 | Repo indexing | Local FAISS | Remote vector DB | Zero latency; no code leaves machine |
 | License filter | Training-time hash index | Runtime search | Millisecond lookup vs seconds |
-| Chat model | GPT-4o | GPT-3.5 | Quality requires best model; latency acceptable |
+| Chat model | Frontier tier (Claude Sonnet 5 / GPT-5.6 Terra) | Cheap tier (GPT-5.6 Luna) | Quality requires the best model; chat latency budget tolerates it |
 | Multi-line | Generate up to N lines | Always single line | Better UX for boilerplate; trim on mismatch |
 
 ---
@@ -550,7 +550,7 @@ Cross-reference: See [GPU Pool Economics](./cross_cutting/gpu_pool_economics.md)
 
 **Fill-in-Middle Token Layout:**
 
-GitHub Copilot's FIM prompt uses the `<PRE>`, `<SUF>`, `<MID>` token convention (Codestral/StarCoder2 style) or the equivalent sentinel tokens from Code Llama. The exact format for Codestral:
+GitHub Copilot's FIM prompt wraps the code before and after the cursor in sentinel tokens that mark the infill slot. The exact token strings differ per model family — StarCoder2 uses `<fim_prefix>`/`<fim_suffix>`/`<fim_middle>`, Qwen3-Coder uses `<|fim_prefix|>`/`<|fim_suffix|>`/`<|fim_middle|>`, and Mistral's Codestral FIM endpoint takes `prompt` and `suffix` as separate request fields rather than inline sentinels. This document uses the generic shorthand:
 
 ```
 <PRE> {prefix_code} <SUF> {suffix_code} <MID>
@@ -562,7 +562,7 @@ The model generates tokens that fill the `<MID>` slot, terminating at `<EOT>` (e
 Priority 1: Current file, cursor-adjacent code (1,200 tokens: 800 prefix + 400 suffix)
 Priority 2: Open tabs in IDE (300 tokens total, most recently viewed files first)
 Priority 3: Imported file signatures (200 tokens: function signatures only, not bodies)
-Priority 4: Repository-level context (deprecated for inline; used only for agent mode)
+Priority 4: Repository-level context (agent mode only — excluded from the inline path)
 ```
 
 **Latency Budget Breakdown (P50 at GitHub scale):**
@@ -749,7 +749,7 @@ class DecodingStats:
 
 
 class SpeculativeDecoder:
-    # Draft: CodeLlama-7B equivalent, 22ms for 5 tokens.
+    # Draft: 1-3B FIM code model, 22ms for 5 tokens.
     # Target: 70B FIM model, single forward pass verification = 80ms.
     # P50 latency: 185ms with vs 310ms without = 40% reduction. Acceptance: 72%.
     ACCEPTANCE_THRESHOLD = 0.85  # accept draft token if target probability ratio >= 0.85
@@ -915,11 +915,11 @@ Cost:
 
 ## Additional Interview Questions
 
-**Why does GitHub Copilot use a separate FIM-trained model rather than a general instruction-tuned model?** Instruction-tuned models (e.g., GPT-4o) are trained to follow natural language instructions and generate complete responses, optimizing for coherence across a full reply. FIM training specifically teaches the model to predict a middle span given prefix and suffix, which is the exact task of inline code completion. Instruction-tuned models perform poorly on FIM tasks (they tend to generate preamble text or complete functions when the cursor is mid-line) because their pretraining objective never required predicting a bounded middle span. The FIM objective also teaches the model to terminate at natural code boundaries (end of statement, end of block) rather than generating until a stop token.
+**Why does GitHub Copilot use a separate FIM-trained model rather than a general instruction-tuned model?** Instruction-tuned chat models are trained to follow natural language instructions and generate complete responses, optimizing for coherence across a full reply. FIM training specifically teaches the model to predict a middle span given prefix and suffix, which is the exact task of inline code completion. Instruction-tuned models perform poorly on FIM tasks (they tend to generate preamble text or complete functions when the cursor is mid-line) because their pretraining objective never required predicting a bounded middle span. The FIM objective also teaches the model to terminate at natural code boundaries (end of statement, end of block) rather than generating until a stop token.
 
 **How does Copilot handle multi-cursor and multi-selection completions in editors that support them?** Multi-cursor completions are treated as independent requests, one per cursor, submitted in parallel. The completions are generated independently (no shared state between cursors) and displayed simultaneously. This means two cursors in different parts of the file may generate inconsistent completions (e.g., different variable names for the same concept). Advanced editors (VS Code with a Copilot Labs experiment) attempted "consistent multi-cursor" where cursor 1's accepted completion was added to cursor 2's context, but this increased latency by 200-300ms and was not pursued in production. The latency cost of consistency outweighed the rare benefit.
 
-**What is the difference between Copilot's inline completion mode and Copilot Chat, and how does the architecture differ?** Inline completions optimize for TTFT (target <200ms), use FIM models, process short contexts (<2,000 tokens), stream the first token immediately, and are ephemeral (no conversation history). Copilot Chat uses instruction-tuned models (GPT-4o), processes long contexts (up to 128k tokens for full workspace context), maintains conversation history, and accepts TTFT up to 3s because the user explicitly submitted a query. Inline completions use a separate inference cluster with A100s optimized for high-throughput short requests; Chat uses a shared API (OpenAI API or Azure OpenAI) with less strict latency requirements. The shared latency SLAs are fundamentally incompatible — they must be separated.
+**What is the difference between Copilot's inline completion mode and Copilot Chat, and how does the architecture differ?** Inline completions optimize for TTFT (target <200ms), use FIM models, process short contexts (<2,000 tokens), stream the first token immediately, and are ephemeral (no conversation history). Copilot Chat uses instruction-tuned frontier models (Claude Sonnet 5, GPT-5.6, Gemini 3.1 Pro are all selectable in the model picker), processes long contexts (up to 128k tokens for full workspace context), maintains conversation history, and accepts TTFT up to 3s because the user explicitly submitted a query. Inline completions use a separate inference cluster with A100s optimized for high-throughput short requests; Chat uses a shared API (OpenAI API or Azure OpenAI) with less strict latency requirements. The shared latency SLAs are fundamentally incompatible — they must be separated.
 
 **How would you design Copilot's telemetry pipeline to measure acceptance rate at 15,000 completions/second?** Client-side telemetry: each completion is assigned a UUID at generation time. When the user accepts (Tab) or dismisses (Esc/continues typing), the client sends an event with `{completion_id, accepted: bool, language, trigger_context, latency_ms}`. Events are batched client-side (send every 30 seconds or every 20 events) and sent to a Kafka topic. A Flink streaming job aggregates acceptance rate per language, file type, and model version in 1-minute windows. The acceptance rate metric is available in Grafana with a 90-second lag. The pipeline handles 15,000 completions/second × 1 event each = 15,000 events/second — modest for Kafka (which handles millions/second), but the batching (30-second window) reduces actual event rate to ~500/second.
 
@@ -977,7 +977,7 @@ Peak rate (business hours, 5× average):
   Peak: 38,889 × 5 = 194,444 completions/sec
 
 FIM model inference requirements:
-  Model: CodeLlama-13B (FIM variant), on A100 80GB
+  Model: 13B-class FIM-trained code model, on A100 80GB
   Throughput: A100 handles ~400 FIM completions/sec at p99 < 200ms
   Required A100s: 194,444 / 400 = 486 A100s at peak
   With 40% utilization headroom: 810 A100s

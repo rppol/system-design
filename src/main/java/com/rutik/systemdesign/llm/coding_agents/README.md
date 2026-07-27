@@ -76,7 +76,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     ISSUE["Issue: 'Tests for foo are failing'"]
-    LLM["LLM (GPT-4 / Claude)\nthinks about problem\ndecides next ACI command"]
+    LLM["LLM (Claude / GPT-5.x)\nthinks about problem\ndecides next ACI command"]
     ACI["ACI commands\nfind_file foo · goto 142\nedit 142:145 · run_tests · submit"]
     SBX["Sandbox runtime executes"]
     OBS["Observation back to LLM"]
@@ -416,7 +416,7 @@ After edits, run the full test suite (not just tests for changed files). If unre
 Cursor: $0.05-$0.50 per multi-file edit (single Claude/GPT call burst). Devin: $1-$20 per autonomous session (hours of compute, many LLM calls). Cursor's lower cost reflects shorter loops; Devin's higher cost reflects more autonomous exploration and longer task scope.
 
 **Q: How do you measure coding agent quality beyond SWE-bench?**
-Production metrics: PR acceptance rate (% of agent-generated PRs merged without major revisions), code review feedback rate (how often human reviewers request changes), test pass rate at PR submission time, time-to-PR vs human baseline, cost per merged PR. SWE-bench measures capability; production metrics measure usefulness.
+Track production outcomes, not benchmark scores. The metrics that matter: PR acceptance rate (% of agent-generated PRs merged without major revisions), code review feedback rate (how often human reviewers request changes), test pass rate at PR submission time, time-to-PR vs human baseline, and cost per merged PR. SWE-bench measures capability; production metrics measure usefulness.
 
 **Q: Why is Aider's git-per-change pattern useful?**
 Each agent edit becomes a separate git commit with a meaningful message. Benefits: easy to revert individual changes (git revert), clean PR review (reviewer sees each logical step), bisect-friendly history. Counter: noisy history if agent does many small edits.
@@ -431,7 +431,7 @@ Coarse-grained: bash (powerful but error-prone, leaks context). Fine-grained: 20
 Best-in-class agents ask clarifying questions before coding. Devin posts questions in Slack; Cursor Composer prompts in IDE; Claude Code uses CLI prompts. Worst pattern: agent guesses, ships code that solves the wrong problem. Always design for "agent can ask".
 
 **Q: What's the security model for coding agents?**
-[Sandboxed bash](../agents_and_tool_use/sandboxed_code_execution.md) (E2B, Docker), no production credential access, approval gates on destructive ops, separate dev/prod environments (agent runs in dev), audit logs of all tool calls. Treat agent like an intern with potentially poor judgment — they're well-meaning but can make costly mistakes without guardrails.
+Treat the agent as untrusted code with no production access. Concretely: [sandboxed bash](../agents_and_tool_use/sandboxed_code_execution.md) (E2B, Docker), no production credentials, approval gates on destructive ops, separate dev/prod environments (agent runs in dev), and audit logs of all tool calls. Treat agent like an intern with potentially poor judgment — they're well-meaning but can make costly mistakes without guardrails.
 
 ---
 

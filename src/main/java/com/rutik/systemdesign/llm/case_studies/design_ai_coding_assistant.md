@@ -183,11 +183,10 @@ Tight latency budget breakdown:
 Model selection for completions:
   Requirement: fast inference, good code quality, FIM support
   Options:
-    Codestral (Mistral, current release 25.08, FIM-native via a dedicated
-      fill-in-the-middle endpoint): the standard hosted choice. Note the
-      original Codestral 22B and Codestral 25.01 are retired — do not cite
-      the 22B parameter count as current, Mistral no longer publishes a
-      size for the Codestral line.
+    Codestral 25.08 (Mistral, FIM-native via a dedicated fill-in-the-middle
+      endpoint, 256K context, $0.30/M in and $0.90/M out): the standard
+      hosted choice. Mistral does not publish a parameter count for the
+      Codestral line, so size it by measured throughput, not by params.
     A small local code model (1-3B, quantized): ~30ms but lower quality
     A general chat model without native FIM: worse for mid-file completions,
       because it must reconstruct the suffix rather than condition on it
@@ -389,10 +388,8 @@ For on-premise / private cloud:
     line) served locally
   Local inference: vLLM cluster inside customer network
   Local index: FAISS index on developer's machine or local server
-  No external API calls: the web_search tool is repointed at internal docs.
-    Note the Bing Search API was retired by Microsoft in 2025 and its docs
-    moved to the archive, so a design that assumed Bing as the default
-    external search backend needs replacing regardless of deployment mode.
+  No external API calls: the web_search tool is repointed at an internal
+    docs index (self-hosted search over vendored docs and the company wiki)
   Audit log: stored in customer's own storage
 
 Code handling policy:
@@ -526,9 +523,6 @@ def build_context_window(
 Standard text chunking (by character count or line count) splits code at syntactically meaningless points. Tree-sitter parses code into a concrete syntax tree and enables semantically-aware chunking:
 
 ```python
-# NOTE: the old `tree_sitter_languages` package is unmaintained and breaks
-# against current tree-sitter core. Use `tree-sitter-language-pack`, which
-# exposes the same get_parser/get_language helpers.
 from tree_sitter_language_pack import get_parser
 
 def extract_semantic_chunks(
@@ -728,7 +722,7 @@ The team upgraded from SQLAlchemy 1.3 to 2.0. The code RAG index still contained
 
 **How does tree-sitter AST-based chunking improve code RAG quality compared to character-based chunking?** Character-based chunking cuts at arbitrary positions — potentially in the middle of a function, between a method signature and its body, or between a class definition and its methods. When these malformed chunks are embedded and retrieved, the embedding model cannot produce a meaningful representation of an incomplete code fragment, measurably reducing retrieval accuracy on code search — though the size of the gap depends heavily on language, chunk size, and embedding model, so treat any single headline percentage with suspicion. Tree-sitter ensures every chunk is a syntactically complete unit (a function, a class, a method), which produces coherent embeddings and prevents context fragments from being retrieved that are meaningless in isolation.
 
-**What is the agent reliability gap between "Devin-style" full autonomy and "Copilot Chat-style" assisted generation, and when should each be used?** Full autonomy agents can complete multi-step engineering tasks without human checkpoints, but they still introduce subtle bugs that only surface at runtime, and their headline benchmark numbers overstate real-world reliability. Be careful quoting SWE-bench here: the mid-2024 figures often repeated in interviews (roughly 70% of SWE-bench Verified tasks unsolved at state of the art) are badly out of date — frontier scores climbed steeply through 2025, and by 2026 the major labs had largely stopped leading with SWE-bench Verified in favour of harder agentic suites (Anthropic's Opus 5 launch, for instance, reports Frontier-Bench, CursorBench, Terminal-Bench-style agent indices and OSWorld rather than SWE-bench). Quote the benchmark you actually ran, with its date. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes, requires human approval, and achieves near-100% accuracy on the specific change the human requested because the human validates it. In production codebases, full autonomy is appropriate for low-risk tasks (writing tests for existing functions, generating boilerplate, updating documentation); assisted generation is required for any change that modifies business logic, database schemas, or security-sensitive code.
+**What is the agent reliability gap between "Devin-style" full autonomy and "Copilot Chat-style" assisted generation, and when should each be used?** Full autonomy agents can complete multi-step engineering tasks without human checkpoints, but they still introduce subtle bugs that only surface at runtime, and their headline benchmark numbers overstate real-world reliability. Be careful quoting SWE-bench here: SWE-bench Verified now sits at 85-95% for frontier models, close enough to saturation that the major labs lead with harder agentic suites instead (Anthropic's Opus 5 launch, for instance, reports Frontier-Bench, CursorBench, Terminal-Bench-style agent indices and OSWorld rather than SWE-bench), while SWE-bench Pro's public set tops out near 60%. Quote the benchmark you actually ran, with its date. Assisted generation (Copilot Chat, Cursor) shows the diff before applying changes, requires human approval, and achieves near-100% accuracy on the specific change the human requested because the human validates it. In production codebases, full autonomy is appropriate for low-risk tasks (writing tests for existing functions, generating boilerplate, updating documentation); assisted generation is required for any change that modifies business logic, database schemas, or security-sensitive code.
 
 **How do you implement "explain this code" across multiple files with dependency traversal?** When the user highlights a function and asks "explain this," the system: (1) extracts the function's AST using tree-sitter; (2) identifies all external symbols called within the function (function calls, class references, global variables); (3) resolves each symbol to its definition file via the language server protocol (LSP) using `textDocument/definition`; (4) retrieves the signatures (not full bodies) of all direct dependencies; (5) builds a context window with the target function + dependency signatures. This produces an explanation that correctly describes what `process_payment()` does even when it calls `stripe_client.charge()` from a third-party library — the function's signature is retrieved and included, so the LLM understands the interface even without the implementation.
 
@@ -802,7 +796,7 @@ Completion serving (self-hosted FIM model)
   1,500 prefill tokens is 21 TFLOP per request, so 350/sec would demand
   7.4 PFLOPS from a single card — more than any single accelerator shipped.
 
-Chat serving (frontier API model, gpt-5.4 at $2.50/M in, $15/M out):
+Chat serving (frontier API model, gpt-5.6 Terra at $2.50/M in, $15/M out):
   Output: 160,000 × 2,000 tok = 320M tok/day × $15/M = $4,800/day
   Input:  160,000 × 3,000 tok = 480M tok/day × $2.50/M = $1,200/day
   Chat total: $6,000/day = $2.19M/year

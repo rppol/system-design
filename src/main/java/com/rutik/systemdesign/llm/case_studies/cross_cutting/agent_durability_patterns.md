@@ -591,7 +591,7 @@ A customer support automation agent was designed to send a resolution email afte
 | LangGraph SqliteSaver | LangGraph-native checkpoint | `langgraph.checkpoint.sqlite.SqliteSaver`; WAL mode; good for development |
 | LangGraph PostgresSaver | LangGraph-native checkpoint | `langgraph.checkpoint.postgres.PostgresSaver`; production-grade |
 | asyncpg | Postgres async client | Used in custom checkpoint stores; 3–5ms save latency; connection pooling via `create_pool` |
-| Redis / aioredis | Idempotency cache | `redis.asyncio`; 24h TTL per idempotency key; ~1ms lookup latency |
+| Redis (`redis.asyncio`) | Idempotency cache | Async client ships inside `redis-py` itself; 24h TTL per idempotency key; ~1ms lookup latency |
 | Prefect | Task orchestration | `@task` decorator with result persistence; useful for batch agent pipelines |
 | Celery + result backend | Task queue | `celery[redis]`; stores task results in Redis or Postgres; less suited to streaming agent state |
 | SQLite | Lightweight local checkpoint | Single file, WAL mode; suitable for development and single-process production agents |
