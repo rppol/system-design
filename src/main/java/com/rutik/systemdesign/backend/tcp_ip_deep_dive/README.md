@@ -270,7 +270,7 @@ Selective Acknowledgment (SACK) option allows the receiver to inform the sender 
 
 ### 6.2 TIME_WAIT and Its Server-Side Implications
 
-After active close, the closer enters TIME_WAIT for 2*MSL (Maximum Segment Lifetime). RFC 793 suggests an MSL of 2 minutes, which would make TIME_WAIT 240 seconds; Linux does not derive it from MSL at all — it hardcodes `TCP_TIMEWAIT_LEN` in `include/net/tcp.h` at **60 seconds** and exposes no sysctl to change it (only a kernel rebuild does). Windows and the BSDs sit nearer the 120-second mark. The purpose: ensure the final ACK reaches the other side, and absorb stale duplicate packets from previous connection incarnations.
+After active close, the closer enters TIME_WAIT for 2*MSL (Maximum Segment Lifetime). RFC 9293 §3.4.2 takes MSL to be 2 minutes, which would make TIME_WAIT 240 seconds; Linux does not derive it from MSL at all — it hardcodes `TCP_TIMEWAIT_LEN` in `include/net/tcp.h` at **60 seconds** and exposes no sysctl to change it (only a kernel rebuild does). Windows and the BSDs sit nearer the 120-second mark. The purpose: ensure the final ACK reaches the other side, and absorb stale duplicate packets from previous connection incarnations.
 
 **Problem**: A high-throughput HTTP server making many outbound connections (reverse proxy, service mesh, database client) accumulates TIME_WAIT sockets. The Linux ephemeral port range defaults to 32,768–60,999 (IANA's own suggested range is 49,152–65,535). At 60,000 TIME_WAIT sockets, new connections fail with "Cannot assign requested address" (EADDRNOTAVAIL).
 
@@ -280,7 +280,7 @@ This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the 
 
 | Symbol | What it is |
 |--------|------------|
-| MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. RFC 793 suggests 2 min |
+| MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. RFC 9293 takes it as 2 min |
 | TIME_WAIT | 2×MSL in the RFC. Linux ignores the derivation and hardcodes 60 s (`TCP_TIMEWAIT_LEN`); other stacks use ~120 s |
 | Port pool | Ephemeral range width, `60999 − 32768 + 1` = 28,232 ports by default |
 | Sustainable rate | `port pool ÷ 2×MSL` — new connections per second before ports run out |
@@ -555,7 +555,7 @@ BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it
 Client sends SYN with its initial sequence number. Server responds with SYN+ACK, acknowledging the client's sequence and sending its own sequence. Client sends ACK, acknowledging the server's sequence. Three steps are required because both sides need to agree on initial sequence numbers independently. A 2-way handshake would not establish the server's sequence number acknowledgment before data flows.
 
 **Q: What is TIME_WAIT and why does it exist?**
-TIME_WAIT is the state the active closer enters after sending the final ACK, nominally lasting 2*MSL but fixed at 60 seconds on Linux. Linux hardcodes this as `TCP_TIMEWAIT_LEN` and offers no sysctl for it, while stacks that follow RFC 793's suggested 2-minute MSL sit closer to 120–240 seconds. It serves two purposes: ensuring the final ACK reaches the other side (if lost, the passive closer retransmits FIN and the active closer re-sends ACK), and ensuring all duplicate packets from the previous connection expire before the port pair is reused (preventing data corruption in a new connection).
+TIME_WAIT is the state the active closer enters after sending the final ACK, nominally lasting 2*MSL but fixed at 60 seconds on Linux. Linux hardcodes this as `TCP_TIMEWAIT_LEN` and offers no sysctl for it, while stacks that follow RFC 9293's 2-minute MSL sit closer to 120–240 seconds. It serves two purposes: ensuring the final ACK reaches the other side (if lost, the passive closer retransmits FIN and the active closer re-sends ACK), and ensuring all duplicate packets from the previous connection expire before the port pair is reused (preventing data corruption in a new connection).
 
 **Q: How does TIME_WAIT cause problems on busy servers and how do you fix it?**
 High-throughput servers making many short-lived outbound connections accumulate TIME_WAIT sockets that hold ports until expiry. If the ephemeral port range is exhausted, new connections fail with EADDRNOTAVAIL. Fix: (1) use persistent connections/connection pooling to reduce connection churn; (2) widen ephemeral port range to 1024–65000; (3) enable tcp_tw_reuse=1 for outbound connections; (4) never use tcp_tw_recycle (broken with NAT).
@@ -606,7 +606,7 @@ The second argument to listen() sets the maximum length of the accept queue (com
 Load balancers have idle connection timeouts. When a backend connection has been idle for the configured timeout (commonly 60–300 seconds), the load balancer closes it, often by sending RST. If the backend application has no connection validation and reuses the connection, the next request will fail with a broken pipe error. This is why connection pools should have maxLifetime shorter than the LB idle timeout, and why keepalive probes should be shorter than the LB timeout.
 
 **Q: Explain the relationship between TCP window size and throughput.**
-Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link gives 640 KB/s maximum throughput, regardless of bandwidth. The TCP window scale option (originally RFC 1323, superseded by RFC 7323 in 2014) extends the window to about 1 GB via a shift factor capped at 14. For high-BDP (bandwidth-delay product) links, increasing socket buffers is critical. `net.core.rmem_max` and `net.core.wmem_max` control maximum buffer sizes.
+Throughput = window_size / RTT. A TCP window of 64 KB over a 100ms RTT link gives 640 KB/s maximum throughput, regardless of bandwidth. The TCP window scale option (RFC 7323) extends the window to about 1 GB via a shift factor capped at 14. For high-BDP (bandwidth-delay product) links, increasing socket buffers is critical. `net.core.rmem_max` and `net.core.wmem_max` control maximum buffer sizes.
 
 ---
 

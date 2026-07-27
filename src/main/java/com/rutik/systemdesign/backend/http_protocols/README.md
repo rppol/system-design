@@ -46,7 +46,7 @@ HTTP/1.1 added persistent connections and chunked transfer but remained fundamen
 | TLS | Optional | Optional | Practical requirement | Mandatory (TLS 1.3, RFC 9001) |
 | Binary framing | No | No | Yes | Yes |
 
-RFC 9110 (HTTP Semantics), 9111 (HTTP Caching) and 9112 (HTTP/1.1) — all June 2022 — obsolete the RFC 7230-7235 series, which in turn had obsoleted RFC 2616. RFC 9113 obsoletes RFC 7540. Cite the 911x numbers, not the older ones.
+The HTTP core is split across three June 2022 documents: RFC 9110 defines the version-independent semantics (methods, status codes, header fields, conditional requests), RFC 9111 defines caching, and RFC 9112 defines the HTTP/1.1 message syntax. RFC 9113 defines HTTP/2 and RFC 9114 defines HTTP/3.
 
 ### 4.2 TLS Version Comparison
 
@@ -380,8 +380,7 @@ Idempotent: sending the same request N times has the same effect as sending it o
 ```nginx
 server {
     listen 443 ssl;
-    http2 on;            # nginx >= 1.25.1. The old `listen ... http2` parameter
-                         # is deprecated in favour of this directive.
+    http2 on;            # nginx >= 1.25.1
     server_name api.example.com;
 
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -393,9 +392,8 @@ server {
     # Enable HSTS
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # Do NOT use http2_push -- obsolete since nginx 1.25.1, and Chrome has
-    # ignored HTTP/2 push since Chrome 106. Use 103 Early Hints instead
-    # (nginx >= 1.29.0; the directive takes a condition string, not on/off):
+    # Hint critical sub-resources with 103 Early Hints (nginx >= 1.29.0;
+    # the directive takes a condition string, not on/off):
     #   early_hints $early_hints;
 }
 ```
@@ -443,7 +441,7 @@ Browser support from caniuse.com; site adoption from W3Techs, July 2026 (W3Techs
 
 ## 9. When to Use / When NOT to Use
 
-**HTTP/2**: Use for all modern APIs. The single-connection model with HPACK compression reduces bandwidth and improves latency for mobile clients. Do not rely on HTTP/2 server push — it was rarely effective and Chrome removed it in Chrome 106.
+**HTTP/2**: Use for all modern APIs. The single-connection model with HPACK compression reduces bandwidth and improves latency for mobile clients. To get critical sub-resources to the client early, use `<link rel="preload">` or a 103 Early Hints response — no major browser implements HTTP/2 or HTTP/3 push.
 
 **HTTP/3**: Use for public-facing endpoints serving mobile or high-latency users. Requires infrastructure support (UDP on port 443). Fall back gracefully to HTTP/2. Not needed for internal service-to-service communication on reliable networks.
 

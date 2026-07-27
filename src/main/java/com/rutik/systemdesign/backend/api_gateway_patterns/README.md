@@ -225,53 +225,55 @@ A single gateway instance is a SPOF; running a minimum of three behind a load ba
 ### Spring Cloud Gateway Configuration
 
 ```yaml
-# application.yml — Spring Cloud Gateway
+# application.yml — Spring Cloud Gateway (spring-cloud-starter-gateway-server-webflux)
 spring:
   cloud:
     gateway:
-      routes:
-        - id: user-service
-          uri: lb://USER-SERVICE
-          predicates:
-            - Path=/api/v1/users/**
-          filters:
-            - StripPrefix=2
-            - name: CircuitBreaker
-              args:
-                name: userServiceCB
-                fallbackUri: forward:/fallback/users
-            - name: RequestRateLimiter
-              args:
-                redis-rate-limiter.replenishRate: 100
-                redis-rate-limiter.burstCapacity: 200
-                key-resolver: "#{@userKeyResolver}"
+      server:
+        webflux:
+          routes:
+            - id: user-service
+              uri: lb://USER-SERVICE
+              predicates:
+                - Path=/api/v1/users/**
+              filters:
+                - StripPrefix=2
+                - name: CircuitBreaker
+                  args:
+                    name: userServiceCB
+                    fallbackUri: forward:/fallback/users
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 100
+                    redis-rate-limiter.burstCapacity: 200
+                    key-resolver: "#{@userKeyResolver}"
 
-        - id: order-service
-          uri: lb://ORDER-SERVICE
-          predicates:
-            - Path=/api/v1/orders/**
-            - Header=X-API-Version, 2
-          filters:
-            - StripPrefix=2
-            - AddRequestHeader=X-Internal-Request, true
-            - name: Retry
-              args:
-                retries: 3
-                statuses: SERVICE_UNAVAILABLE
-                methods: GET
-                backoff:
-                  firstBackoff: 50ms
-                  maxBackoff: 500ms
-                  factor: 2
+            - id: order-service
+              uri: lb://ORDER-SERVICE
+              predicates:
+                - Path=/api/v1/orders/**
+                - Header=X-API-Version, 2
+              filters:
+                - StripPrefix=2
+                - AddRequestHeader=X-Internal-Request, true
+                - name: Retry
+                  args:
+                    retries: 3
+                    statuses: SERVICE_UNAVAILABLE
+                    methods: GET
+                    backoff:
+                      firstBackoff: 50ms
+                      maxBackoff: 500ms
+                      factor: 2
 
-      default-filters:
-        - AddResponseHeader=X-Gateway-Version, 1.0
-        - name: RequestSize
-          args:
-            maxSize: 5MB
+          default-filters:
+            - AddResponseHeader=X-Gateway-Version, 1.0
+            - name: RequestSize
+              args:
+                maxSize: 5MB
 ```
 
-Property-prefix note: from Spring Cloud 2025.0 the gateway modules were renamed and `spring.cloud.gateway.*` is deprecated in favour of `spring.cloud.gateway.server.webflux.*`. The old prefix above still binds (it logs a deprecation warning, and `spring-boot-properties-migrator` maps it); on Spring Cloud 2025.0 or later, prefer the new one.
+The `server.webflux` segment in the prefix names which gateway you are configuring. Spring Cloud Gateway ships one module (and one property namespace) per web stack: `spring.cloud.gateway.server.webflux.*` for the reactive Netty-based server used throughout this module, and `spring.cloud.gateway.server.webmvc.*` for the blocking servlet one.
 
 **In plain terms.** "Every caller gets 100 requests per second forever, plus a one-time 200-request cushion for bursts — and a failed GET is retried three times with the wait doubling each round."
 

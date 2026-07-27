@@ -308,8 +308,10 @@ public class DepartmentDataLoader {
                 ids.stream().map(byId::get).collect(Collectors.toList())
             );
         };
-        return DataLoader.newDataLoader(batchLoader,
-            DataLoaderOptions.newOptions().setCachingEnabled(true));
+        return DataLoaderFactory.newDataLoader(batchLoader,
+            DataLoaderOptions.newOptions()   // returns a Builder
+                .setCachingEnabled(true)
+                .build());
     }
 }
 
@@ -474,7 +476,7 @@ Benefits:
 | Caching | Complex (POST, variable responses) | Simple (GET + URL-based) |
 | N+1 queries | Requires DataLoader | Handled at endpoint |
 | Learning curve | Higher | Lower |
-| Tooling | Excellent (GraphiQL, Apollo Studio) | Excellent (curl, Postman) |
+| Tooling | Excellent (GraphiQL, Apollo GraphOS Studio) | Excellent (curl, Postman) |
 | Error handling | Non-standard (HTTP 200 with errors) | Standard HTTP codes |
 | File uploads | Not in spec (workarounds exist) | Native multipart |
 | Type safety | Strong (introspection) | Optional (OpenAPI) |
@@ -500,7 +502,7 @@ Benefits:
 
 **Exposing internal schema via introspection in production**: Introspection reveals your entire schema — all types, fields, and descriptions. This is a recon goldmine for attackers. Disable introspection in production (`introspection: false` in server config) or restrict it to authenticated requests.
 
-**Schema changes without deprecation**: Removing a field breaks all clients using it. Always deprecate with `@deprecated(reason: "...")` and monitor usage via metrics before removing. Use Apollo Studio or similar schema management to track field usage.
+**Schema changes without deprecation**: Removing a field breaks all clients using it. Always deprecate with `@deprecated(reason: "...")` and monitor usage via metrics before removing. Use Apollo GraphOS Studio or similar schema management to track field usage.
 
 ---
 
@@ -517,7 +519,7 @@ Benefits:
 | Apollo Federation | Distributed schema composition |
 | Apollo Router | Rust-based federation gateway |
 | GraphiQL | In-browser GraphQL IDE |
-| Apollo Studio | Schema management, observability |
+| Apollo GraphOS Studio | Schema management, observability |
 | `graphql-code-generator` | Generate types from schema |
 
 ---
@@ -534,13 +536,13 @@ When resolving a list of objects with a related field (e.g., 10 users and their 
 GraphQL always returns HTTP 200, with a `data` field for results and an `errors` array for errors. Errors include a message, locations in the query, and a path to the failing field. Partial responses are possible: some fields may resolve successfully while others fail. This differs fundamentally from REST where HTTP status codes communicate success/failure. For monitoring, you must parse the errors array, not rely on HTTP status codes.
 
 **Q: What are GraphQL subscriptions and how are they implemented?**
-Subscriptions are real-time operations where the server pushes updates to clients. They are typically implemented over WebSocket (using graphql-ws or subscriptions-transport-ws protocols). The client subscribes with a subscription operation; the server publishes events when underlying data changes (via a pub/sub system like Redis). In production, you need a stateful connection manager — WebSocket connections cannot be horizontally scaled without shared state (Redis pub/sub or similar).
+Subscriptions are real-time operations where the server pushes updates to clients. They are typically implemented over WebSocket using the `graphql-ws` protocol (`graphql-transport-ws` subprotocol), which every current server and client library speaks; GraphQL over SSE is the alternative where a plain HTTP stream is preferred. The client subscribes with a subscription operation; the server publishes events when underlying data changes (via a pub/sub system like Redis). In production, you need a stateful connection manager — WebSocket connections cannot be horizontally scaled without shared state (Redis pub/sub or similar).
 
 **Q: What is the difference between schema stitching and Apollo Federation?**
 Schema stitching merges multiple GraphQL schemas at the gateway level using shared types and remote execution. It is older, requires more manual configuration, and can create tight coupling. Apollo Federation is a specification for a distributed graph where each service owns part of the schema and can extend types defined in other services using @key and @external directives. The Apollo Router (or Gateway) composes them automatically. Federation is the modern approach for microservices.
 
 **Q: How do you prevent abuse of GraphQL with malicious queries?**
-Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), query whitelisting / persisted queries (only allow registered query hashes in production), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
+Bound every query before it executes, using five layers that each cap a different axis of cost. Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), query whitelisting / persisted queries (only allow registered query hashes in production), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
 
 **Q: What are persisted queries and why are they used?**
 Persisted queries associate a hash (SHA-256 of the query string) with the full query on the server. Clients send only the hash at runtime. Benefits: (1) reduced request size; (2) GET requests with hash + variables are cacheable by CDN (unlike POST with full query body); (3) security — reject any query not in the registry, preventing query injection; (4) performance — queries can be pre-validated and pre-analyzed. Used in production by most large GraphQL deployments.
@@ -549,10 +551,10 @@ Persisted queries associate a hash (SHA-256 of the query string) with the full q
 Relay-style connections are the standard: a Connection type with edges (cursor + node) and pageInfo (hasNextPage, endCursor). Query: `users(first: 20, after: "cursor")`. This enables cursor-based pagination, consistent even with concurrent writes. Simple pagination: `users(limit: 20, offset: 0)` is simpler but has offset performance problems at scale. Use Relay connections for user-facing paginated lists; offset for admin interfaces.
 
 **Q: What is GraphQL introspection and should you disable it?**
-Introspection allows clients to query the schema itself: what types exist, what fields they have, what arguments each field takes. It powers GraphiQL, Apollo Sandbox, and code generators. In production, disable it for public APIs to prevent schema reconnaissance: `GraphQL.newGraphQL().introspection(false)`. For internal APIs with authenticated access, it's acceptable to leave enabled. Always ensure query depth limits are set before enabling introspection to prevent introspection-based DoS.
+Introspection allows clients to query the schema itself: what types exist, what fields they have, what arguments each field takes. It powers GraphiQL, Apollo Sandbox, and code generators. In production, disable it for public APIs to prevent schema reconnaissance: in graphql-java call `Introspection.enabledJvmWide(false)` (or put `Introspection.INTROSPECTION_DISABLED` in the per-request `GraphQLContext`); in Spring for GraphQL set `spring.graphql.schema.introspection.enabled=false`. For internal APIs with authenticated access, it's acceptable to leave enabled. Always ensure query depth limits are set before enabling introspection to prevent introspection-based DoS.
 
 **Q: How does GraphQL handle schema evolution compared to REST?**
-GraphQL schemas evolve additively: add new fields, types, and operations freely — existing clients are unaffected (they only request what they know about). Deprecate old fields with @deprecated. Never remove a field without checking usage metrics first. Breaking changes (removing fields, changing types, renaming arguments) require versioning. Unlike REST, GraphQL has no built-in versioning mechanism — additive evolution is the primary strategy. Apollo Studio tracks field usage to safely identify when deprecated fields can be removed.
+GraphQL schemas evolve additively: add new fields, types, and operations freely — existing clients are unaffected (they only request what they know about). Deprecate old fields with @deprecated. Never remove a field without checking usage metrics first. Breaking changes (removing fields, changing types, renaming arguments) require versioning. Unlike REST, GraphQL has no built-in versioning mechanism — additive evolution is the primary strategy. Apollo GraphOS Studio tracks field usage to safely identify when deprecated fields can be removed.
 
 **Q: What is the difference between queries and mutations in GraphQL execution?**
 Queries can execute root-level resolvers in parallel (the spec allows this for optimization). Mutations execute sequentially — the spec requires that each root-level mutation completes before the next starts. This ensures mutations like `createOrder` followed by `sendConfirmation` execute in order. Nested resolvers within a single mutation execute normally (DataLoader still batches). For multiple independent mutations, clients should send separate requests.
@@ -581,7 +583,7 @@ Field-level authorization is enforced per-field, either inside a resolver or via
 - Disable introspection in production or restrict it to authenticated requests.
 - Use persisted queries in production for security and CDN cacheability.
 - Follow Relay connection spec for paginated lists.
-- Deprecate, never remove fields; monitor usage with Apollo Studio or similar.
+- Deprecate, never remove fields; monitor usage with Apollo GraphOS Studio or similar.
 - Return structured errors with error codes in extensions: `{"code": "NOT_FOUND", "field": "userId"}`.
 - Use Input types for mutations (not inline arguments) to enable clean schema evolution.
 

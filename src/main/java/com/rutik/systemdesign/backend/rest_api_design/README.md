@@ -71,7 +71,7 @@ URI versioning is most pragmatic for public APIs. Internal APIs can use header v
 
 ### 4.3 HTTP Status Code Reference
 
-Names and semantics below follow **RFC 9110** (HTTP Semantics, 2022), which obsoleted RFC 7231 and RFC 2616 — cite 9110, not the retired documents. 429 is still defined by RFC 6585.
+Names and semantics below follow **RFC 9110** (HTTP Semantics, 2022), the document that registers the status codes and defines their meaning. 429 is defined separately, by RFC 6585.
 
 | Code | Name | Use Case |
 |------|------|---------|
@@ -88,7 +88,7 @@ Names and semantics below follow **RFC 9110** (HTTP Semantics, 2022), which obso
 | 405 | Method Not Allowed | HTTP method not supported for this resource |
 | 409 | Conflict | Conflict with current state (duplicate, optimistic lock) |
 | 410 | Gone | Resource permanently deleted (stronger than 404) |
-| 422 | Unprocessable Content | Semantic validation errors (not syntax). RFC 9110 §15.5.21 renamed it from "Unprocessable Entity", its WebDAV name (RFC 4918) |
+| 422 | Unprocessable Content | Semantic validation errors (not syntax). RFC 9110 §15.5.21; many frameworks still label it "Unprocessable Entity" |
 | 429 | Too Many Requests | Rate limit exceeded (include Retry-After header) |
 | 500 | Internal Server Error | Unhandled server error |
 | 502 | Bad Gateway | Upstream service returned invalid response |
@@ -182,7 +182,7 @@ The first request is served entirely from the CDN edge cache. The second forces 
 
 ### RFC 9457 Problem Details Error Response
 
-RFC 9457 (2023) obsoleted RFC 7807; the media type is unchanged (`application/problem+json`), so cite 9457 in new work.
+RFC 9457 (2023) defines a machine-readable error body carried as `application/problem+json`.
 
 ```json
 {
@@ -396,7 +396,7 @@ private String encodeCursor(Long id) {
 
 **Offset pagination in production**: An application that works fine at launch fails when the database grows to millions of rows. `SELECT * FROM orders ORDER BY created_at OFFSET 500000 LIMIT 20` scans and discards 500,000 rows. Migrate to keyset pagination before this becomes a problem.
 
-**Inconsistent error formats**: Different endpoints returning different error structures (some with "message", others with "error", others with "detail") make client error handling a mess of special cases. Adopt RFC 9457 Problem Details (which obsoleted RFC 7807) across all endpoints from day one.
+**Inconsistent error formats**: Different endpoints returning different error structures (some with "message", others with "error", others with "detail") make client error handling a mess of special cases. Adopt RFC 9457 Problem Details across all endpoints from day one.
 
 ---
 
@@ -436,7 +436,7 @@ Idempotency means sending the same request N times has the same side effect as s
 Use cursor-based (keyset) pagination: instead of OFFSET N, use WHERE id > last_seen_id LIMIT 20. This costs O(log n + page size) — one B-tree descent plus a sequential read of the page — at any depth, instead of the O(offset) walk that OFFSET forces. The cursor is an opaque base64-encoded value (e.g., JSON with id and timestamp) so the implementation can change. Provide a next_cursor field in responses. Large feed and log APIs converge on this pattern; Stripe (`starting_after`) and several GitHub endpoints (`before`/`after`) are public examples.
 
 **Q: What is RFC 9457 Problem Details?**
-RFC 9457 defines the standard error response format for HTTP APIs, and it obsoleted RFC 7807 in 2023. The media type is unchanged (`application/problem+json`), so citing 7807 is not wrong on the wire, just out of date. The members are: type (URI identifying the error class), title (human-readable summary), status (HTTP status code), detail (specific explanation for this occurrence), and instance (URI identifying this occurrence). Additional extension members can be added. Using Problem Details ensures all errors have a consistent, machine-parseable format across endpoints.
+RFC 9457 defines the standard error response format for HTTP APIs, served with the media type `application/problem+json`. The members are: type (URI identifying the error class), title (human-readable summary), status (HTTP status code), detail (specific explanation for this occurrence), and instance (URI identifying this occurrence). Additional extension members can be added. Using Problem Details ensures all errors have a consistent, machine-parseable format across endpoints.
 
 **Q: How do you design a REST API for a file upload?**
 For small files (<10 MB): multipart/form-data POST with the file as a form field. For large files: use a signed URL pattern — client requests a signed upload URL from the API, uploads directly to object storage (S3, GCS), then notifies the API of completion. This offloads bandwidth from the API server and enables resumable uploads. Never buffer large files in the API server's memory.
@@ -469,7 +469,7 @@ Implement at the API gateway or a filter/middleware layer. Return 429 Too Many R
 - Use nouns for resource URLs; HTTP methods express the operation.
 - Return the created resource in the POST response body (not just a 201 with Location).
 - Include a trace/correlation ID in every error response for debugging.
-- Adopt RFC 9457 Problem Details (`application/problem+json`) for all error responses from day one; RFC 7807 is obsolete.
+- Adopt RFC 9457 Problem Details (`application/problem+json`) for all error responses from day one.
 - Implement Idempotency-Key for all state-changing POST endpoints that create resources.
 - Use cursor-based pagination from the start; migrating later is painful.
 - Set ETag + Cache-Control on all GET responses — even short-lived cache headers (max-age=5) dramatically reduce origin load.
