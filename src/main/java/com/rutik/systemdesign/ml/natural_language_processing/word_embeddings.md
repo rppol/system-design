@@ -301,7 +301,8 @@ common than one-in-100,000 mostly gets thrown away before training ever sees it.
 The subtle win is not the speedup — it is that deleting "the" from between two content words pulls them
 inside each other's window. A fixed `c = 5` window therefore reaches *further* in semantic terms on
 stopword-heavy text, which is why subsampling improves rare-word vectors instead of merely making training
-cheaper. Set `t` too high (say `1e-3`) and almost nothing is dropped; set it to `0` and the feature is off.
+cheaper. Raise `t` to `1e-3` (gensim's default) and the pruning gets much gentler — "the" keeps 14.1% of its
+occurrences instead of 1.4%, and anything below `f = 1e-3` is never touched; set `t` to `0` and it is off.
 
 **CBOW (Continuous Bag of Words).** The mirror image of skip-gram: average the context word vectors and
 predict the center word. It trains ~faster (one prediction per window vs `2c`) and is better on frequent
@@ -389,7 +390,7 @@ have never seen still gets a vector, as long as its chunks are familiar."
            ------------------
     sum    [0.93, 1.65, 1.20]
 
-  "kicked" reuses <ki kic ick cki ; "singing" reuses ing ng> . The overlap in the
+  "kicked" reuses <ki kic ick ; "singing" reuses ing ng> . The overlap in the
   summed chunks is exactly why morphological relatives land near each other.
 ```
 
@@ -670,15 +671,19 @@ def analogy(wv, a: str, b: str, c: str, topn: int = 1) -> list[tuple[str, float]
     """a is to b as c is to ?  e.g. analogy(wv, 'man', 'king', 'woman') -> queen."""
     target = wv[b] - wv[a] + wv[c]
     target /= np.linalg.norm(target)
-    # exclude the three query words from the answer (the classic 3COSADD rule)
-    return wv.most_similar(positive=[target], topn=topn + 3)
+    # 3COSADD: passing a raw vector makes gensim score the WHOLE vocab, so the three
+    # query words must be dropped by hand -- fetch three extra hits, then filter.
+    hits = wv.most_similar(positive=[target], topn=topn + 3)
+    return [(w, s) for w, s in hits if w not in {a, b, c}][:topn]
 
 
 # Intrinsic eval: Spearman correlation of model cosine vs human ratings (WordSim-353, SimLex-999)
 from scipy.stats import spearmanr
 model_sims = [wv.similarity(w1, w2) for w1, w2, _ in pairs if w1 in wv and w2 in wv]
 human_sims = [h for w1, w2, h in pairs if w1 in wv and w2 in wv]
-correlation = spearmanr(model_sims, human_sims).correlation  # ~0.65-0.75 for good vectors
+# Read the number against the dataset: good static vectors score ~0.65-0.75 on WordSim-353
+# (relatedness) but only ~0.35-0.45 on SimLex-999, which scores strict similarity.
+correlation = spearmanr(model_sims, human_sims).correlation
 ```
 
 **How to read it.** `target = wv[b] - wv[a] + wv[c]` says: "take the step that turns 'man' into 'king', apply
@@ -751,18 +756,20 @@ def build_embedding_layer(
 
 ## 7. Real-World Examples
 
-**Google — word2vec (2013).** The original release trained on ~100 billion words of Google News and shipped
-3 million 300-dim phrase vectors (`GoogleNews-vectors-negative300.bin`, ~3.5GB) — the default pretrained
-embedding for a decade of NLP pipelines and the source of the `king - man + woman ≈ queen` demo. Training
-used skip-gram with negative sampling (`k=5`), subsampling at `t=1e-5`, and phrase detection ("New_York" as
-one token).
+**Google — word2vec (2013).** The original release trained on part of the Google News dataset (~100 billion
+words) and shipped 300-dim vectors for **3 million words and phrases**
+(`GoogleNews-vectors-negative300.bin`, ~3.5GB uncompressed) — the default pretrained embedding for a decade
+of NLP pipelines and the source of the `king - man + woman ≈ queen` demo. The release used negative sampling
+(hence the filename) and phrase detection ("New_York" as one token); Google never published the exact
+window, `k`, or subsampling threshold behind that artifact.
 
 **Stanford — GloVe (2014).** Pennington, Socher, and Manning released `glove.6B` (400K words, 6B tokens of
 Wikipedia + Gigaword) through `glove.840B.300d` (2.2M words, 840B tokens of Common Crawl). GloVe became the
-academic standard because it is deterministic given the co-occurrence matrix and trains on aggregate counts,
-making runs reproducible.
+academic standard because the corpus statistics are computed once into a fixed co-occurrence matrix that
+every run reuses; the AdaGrad fit on top of it is still stochastic, so vectors vary slightly by seed.
 
-**Facebook — fastText (2016).** Bojanowski et al. released pretrained vectors for **157 languages** built
+**Facebook — fastText (2016).** Bojanowski et al. introduced the subword model and evaluated it on nine
+languages; Grave et al. (LREC 2018) then released pretrained vectors for **157 languages** built
 from character n-grams — transformative for morphologically rich languages (Finnish, Turkish, Arabic) where
 word2vec's vocabulary explodes. fastText also powers Facebook's fast supervised text classifier, used
 internally for language identification and tagging at scale.
@@ -796,7 +803,7 @@ in [Recommender Systems](../recommender_systems/README.md).
 | Paradigm | predictive (local windows) | count-based (global matrix) | predictive + subword |
 | OOV words | none | none | compositional |
 | Morphology | ignored | ignored | captured via n-grams |
-| Reproducibility | stochastic (SGD order) | deterministic given matrix | stochastic |
+| Reproducibility | stochastic (SGD order) | fixed matrix, stochastic fit | stochastic |
 | Memory at train | streams windows, low RAM | co-occurrence matrix can be huge | streams + n-gram buckets |
 | Typo robustness | poor | poor | good (shared n-grams) |
 
@@ -1030,8 +1037,9 @@ input matrix is kept as the embeddings; some setups average the two.
 **Q: How does GloVe differ from word2vec?**
 GloVe is count-based: it factorizes a global word-word co-occurrence matrix rather than streaming local
 windows. It fits `w_i · w̃_j + b_i + b̃_j ≈ log X_ij` with a weighted least-squares loss, so it uses aggregate
-corpus statistics directly and is deterministic given the matrix. word2vec is predictive and stochastic.
-Quality is comparable; GloVe is favored for reproducibility, word2vec for streaming/online training.
+corpus statistics directly instead of a sampled stream of windows. word2vec is predictive and streaming.
+Quality is comparable; GloVe is favored when you want one fixed statistic to refit against, word2vec for
+streaming/online training.
 
 **Q: What does GloVe's weighting function f(x) do?**
 It damps the influence of very frequent co-occurrences and zeroes out empty cells so the loss skips them.
@@ -1205,7 +1213,7 @@ DeBERTa. Blended Macro-F1 **0.85** at **~1/5** the average serving cost of DeBER
 - **Hybrid init (GloVe + domain fastText)** beat either alone; **discriminative learning rates** (1e-4 on the
   embedding layer, 1e-3 on the head) let 8K labels adapt the vectors without destroying pretrained structure —
   the small-data analog of transformer catastrophic-forgetting guardrails.
-- **Static embeddings were not obsolete** — they delivered 94% of the transformer's F1 at 1/5 the cost by
+- **Static embeddings were not obsolete** — they delivered 93% of the transformer's F1 (0.81 vs 0.87) by
   handling the easy majority, reserving the transformer for the ambiguous tail. Cross-links:
   [feature_engineering](../feature_engineering/README.md),
   [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/).

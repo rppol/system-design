@@ -29,7 +29,7 @@ The lineage is a straight line of increasing sophistication:
 - **pLSA** (Hofmann, 1999): a probabilistic latent-variable model fit by EM, but with no priors.
 - **LDA** (Blei, Ng, Jordan, 2003): pLSA plus Dirichlet priors — the field's workhorse for two decades.
 - **NMF**: non-negative matrix factorization — non-probabilistic, parts-based, fast, strong on short text.
-- **BERTopic / neural topic models** (2020–2022): contextual embeddings replace bag-of-words.
+- **BERTopic / neural topic models** (2017–2022): contextual embeddings replace bag-of-words.
 
 Every one of these is, at its core, a **low-rank factorization** of a term-document matrix into a
 document-topic matrix and a topic-word matrix, where the shared inner dimension `K` is the number
@@ -429,7 +429,9 @@ xychart-beta
 ```
 
 Coherence rises, peaks around `K = 40` (`c_v ≈ 0.61`), then degrades as topics fragment into
-near-duplicates. The peak is the defensible choice.
+near-duplicates. The peak is the defensible choice. This curve and the one in §5.4 are an illustrative LDA
+sweep over medium-length documents; the short-ticket corpus in §14 peaks lower and earlier (`c_v = 0.49`
+at `K = 30`), which is exactly the short-text penalty in §10, Pitfall 6.
 
 ### 5.4 Perplexity keeps falling — why it is the wrong selection criterion
 
@@ -1036,7 +1038,7 @@ train a supervised model if you need reliable labels.
 | `scikit-learn` | `LatentDirichletAllocation`, `NMF`, `TruncatedSVD` | LDA uses online variational Bayes; remember it needs raw counts |
 | `BERTopic` | Embedding + UMAP + HDBSCAN + c-TF-IDF | Modern default for semantic/short-text topics; auto-K |
 | `Top2Vec` | Joint document/word embedding clustering | Alternative neural topic model, no K needed |
-| MALLET | Java, optimized collapsed Gibbs LDA | Historically higher-quality topics than variational; `gensim` wrapper |
+| MALLET | Java, optimized collapsed Gibbs LDA | Often higher-quality topics than variational; drive it from its CLI, or use `tomotopy` for in-process Gibbs |
 | `tomotopy` | Fast C++ Gibbs LDA/HDP/DTM/CTM with Python bindings | Much faster than pure-Python Gibbs; supports many variants |
 | `pyLDAvis` | Interactive intertopic-distance + relevance visualization | The standard way to inspect and label LDA topics |
 | OCTIS | Topic-model evaluation and hyperparameter search framework | Standardized coherence/diversity benchmarking |
