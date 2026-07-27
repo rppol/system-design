@@ -249,6 +249,8 @@ The abstraction and implementation can now change independently. The only coupli
 
 ### Production Anchor: Multi-Channel Notification System
 
+*Worked scenario, not a report on a named company. Every figure below (volumes, latency budgets, the ~200ns indirection cost, per-object byte counts) is an illustrative number for this one hypothetical setup — not a published benchmark.*
+
 A B2C product sends 2M notifications/day across Email, SMS, and Push (FCM/APNs). Each channel can carry the message in Markdown, Plain text, or HTML — and the product team adds a new channel (WhatsApp) and a new format (AMP-Email) every quarter. Naive class explosion would yield 3 channels × 3 formats = 9 classes today, scaling to 4×4 = 16 next quarter, then 5×5 = 25. Bridge separates `NotificationSender` (channel — the abstraction) from `MessageFormatter` (format — the implementor). Adding WhatsApp adds 1 class. Adding AMP-Email adds 1 class. The two axes vary independently. Latency budget per notification: 50ms p99 (composition is in-process; channel I/O dominates). Throughput: 25 notifications/sec sustained, 500/sec burst during product launches.
 
 ```mermaid
@@ -386,7 +388,7 @@ class EmailMarkdownSender { ... }
 class EmailHtmlSender    { ... }
 class EmailPlainSender   { ... }
 class SmsMarkdownSender  { ... }     // ...and 5 more, growing quadratically
-// Adding "WhatsApp" + "AMP-Email" requires writing 9 new classes.
+// Adding "WhatsApp" + "AMP-Email" grows 3x3=9 to 4x4=16 — 7 new classes to write.
 
 // FIX — Bridge: N + M classes; composition picks the combination
 NotificationSender s = new EmailSender(new MarkdownFormatter(), ses);
@@ -436,7 +438,7 @@ public final class HtmlFormatter implements MessageFormatter {
 
 - In-process composition cost: ~200ns per `send()` call for the indirection (one extra virtual dispatch on the formatter). Channel I/O (SES, SNS, FCM) is 20-200ms — bridge overhead is invisible.
 - Memory: each `(channel, formatter)` combination is one object pair (~64 bytes). Pre-Bridge, 9 subclasses meant 9 class metadata entries (~3KB each in metaspace); post-Bridge, 3 + 3 = 6 classes.
-- Adding WhatsApp + AMP-Email post-Bridge: 2 new classes, ~150 LoC each, 4 hours from PR to production. Pre-Bridge equivalent: 9 new combination classes, ~500 LoC each, with cross-cutting test churn.
+- Adding WhatsApp + AMP-Email post-Bridge: 2 new classes, ~150 LoC each, 4 hours from PR to production. Pre-Bridge equivalent: 3x3=9 combination classes become 4x4=16, so 7 new ones, ~500 LoC each, with cross-cutting test churn.
 
 ### Migration Story
 

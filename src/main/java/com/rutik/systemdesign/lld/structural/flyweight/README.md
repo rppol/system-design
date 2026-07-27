@@ -217,9 +217,11 @@ Use Flyweight when **ALL** of the following are true:
 
 ### Production Anchor: Text Rendering Engine for a Game UI
 
-A 2D game renders chat, HUD, and dialogue text — up to 10M on-screen character instances per frame at 60 FPS (16ms frame budget). Naive approach: each character is an object holding font face, bitmap, advance width, kerning table — about 2KB per glyph. 10M × 2KB = 20GB. Impossible.
+*Worked scenario, not a report on a shipped engine. The instance counts, per-object byte sizes, and timings are illustrative figures for this one hypothetical setup — the arithmetic is exact for the stated inputs, but the inputs themselves are chosen, not measured.*
 
-Flyweight approach: `GlyphData` (font face + codepoint + bitmap + metrics) is shared. The font has 256 unique codepoints used in this scene; 256 × 2KB = 512KB total. Each on-screen character is a tiny `GlyphInstance(glyph, x, y, color)` of ~24 bytes. Total: 10M × 24 = 240MB for instances + 512KB for glyphs. 80x memory reduction. JLS §5.1.7 mandates the analogous behavior for `Integer.valueOf(127)` returning a cached instance.
+A 2D game keeps chat, HUD, and dialogue text in retained buffers — up to 10M live character instances across the scene, redrawn at 60 FPS (16ms frame budget). Naive approach: each character is an object holding font face, bitmap, advance width, kerning table — about 2KB per glyph. 10M × 2KB = 20GB. Impossible.
+
+Flyweight approach: `GlyphData` (font face + codepoint + bitmap + metrics) is shared. The font has 256 unique codepoints used in this scene; 256 × 2KB = 512KB total. Each character instance is a tiny `GlyphInstance(glyph, x, y, color)` — one reference plus two floats and an int, which on 64-bit HotSpot with compressed oops is a 12-byte header + 16 bytes of fields, rounded up to **32 bytes**. Total: 10M × 32 = 320MB for instances + 512KB for glyphs. ~64x memory reduction. JLS §5.1.7 mandates the analogous behavior for `Integer.valueOf(127)` returning a cached instance.
 
 **The idea behind it.** Stated as a formula, Flyweight replaces `N × S_total` with
 `U × S_intrinsic + N × S_extrinsic` — "pay for the heavy shared part once per *distinct* value
@@ -232,7 +234,7 @@ per-instance extrinsic bytes.
 | `N` | Total object instances live at once — 10M on-screen characters here |
 | `U` | Number of *distinct* intrinsic values — 256 unique codepoints in this scene |
 | `S_intrinsic` | Shareable immutable bytes per distinct value — 2KB of glyph bitmap/metrics |
-| `S_extrinsic` | Bytes of per-instance state that cannot be shared — 24 bytes of `(x, y, color)` |
+| `S_extrinsic` | Bytes of per-instance state that cannot be shared — a 32-byte `GlyphInstance` (header + ref + `x, y, color`) |
 | `N / U` | Sharing factor — how many instances reuse each flyweight; the whole source of the win |
 
 **Walk one example.** The 10M-character frame from above, both ways:
@@ -241,20 +243,20 @@ per-instance extrinsic bytes.
 given   N           = 10,000,000 instances
         U           =        256 distinct glyphs
         S_intrinsic =      2,048 bytes  (2 KB per glyph)
-        S_extrinsic =         24 bytes  (x, y, color)
+        S_extrinsic =         32 bytes  (12-B header + ref + x + y + color, 8-B aligned)
 
 naive       N x S_total = 10,000,000 x 2,048      = 20,480,000,000 B = 20.48 GB
 flyweight   U x S_intrinsic =    256 x 2,048      =        524,288 B =  0.52 MB
-          + N x S_extrinsic = 10,000,000 x 24     =    240,000,000 B =    240 MB
-                                            total =    240,524,288 B = 240.5 MB
+          + N x S_extrinsic = 10,000,000 x 32     =    320,000,000 B =    320 MB
+                                            total =    320,524,288 B = 320.5 MB
 
-reduction   20,480,000,000 / 240,524,288                             = 85.1x
+reduction   20,480,000,000 / 320,524,288                             = 63.9x
 
 sharing factor  N / U = 10,000,000 / 256                             = 39,062 instances/glyph
 ```
 
-Result: 20.48GB collapses to 240.5MB — the difference between an OOM kill and a frame that fits
-in RAM. Notice that the shared glyph table is only 0.52MB of the 240.5MB total: past a sharing
+Result: 20.48GB collapses to 320.5MB — the difference between an OOM kill and a frame that fits
+in RAM. Notice that the shared glyph table is only 0.52MB of the 320.5MB total: past a sharing
 factor this large, essentially *all* remaining memory is extrinsic state, so further shrinking
 `S_intrinsic` buys nothing and shrinking `S_extrinsic` buys everything.
 
@@ -304,6 +306,9 @@ public final class GlyphData {
         g.drawBitmap(bitmap, x, y, rgba);
     }
     public float advance() { return advance; }
+    // Kerning is intrinsic too: the pair offset depends only on the two glyphs,
+    // never on where they sit on screen. Used by TextRenderer below.
+    public float kerningOffset(char prev) { return kerning.getOrDefault(prev, 0f); }
 }
 ```
 
@@ -361,8 +366,8 @@ public final class TextRenderer {
 - **`Boolean.valueOf(boolean)`** — only ever returns `Boolean.TRUE` or `Boolean.FALSE`; two instances total in the JVM.
 - **`Byte.valueOf`, `Short.valueOf`, `Character.valueOf`, `Long.valueOf`** — caches over standard ranges (-128..127 for Byte/Short/Long; 0..127 for Character).
 - **Enum constants** — each enum value is effectively a Flyweight; `Color.RED == Color.RED` always, no matter how often referenced.
-- **`java.util.regex.Pattern.compile(regex)`** — applications typically cache compiled patterns (the JDK caches a small number internally for `String.matches`-style helpers).
-- **AWT `java.awt.Font`** — `Font.getFont(attrs)` returns a shared instance for matching attributes.
+- **`java.util.regex.Pattern.compile(regex)`** — an application-level flyweight you have to build yourself: `String.matches`/`replaceAll` call `Pattern.compile` on **every** invocation (`String.matches` is literally `return Pattern.matches(regex, this)`), so hoist the compiled `Pattern` into a `static final` field or a cache. `java.util.Scanner` is one of the few JDK classes that does cache them, in a 7-entry `PatternLRUCache`.
+- **AWT fonts** — the flyweight is one layer below `java.awt.Font`: `Font.getFont(attrs)` returns a **new** `Font` each call (equal, not identical), but each `Font` is a thin handle onto a `sun.font.Font2D` obtained from the font manager, and many `Font` objects share one `Font2D` and its cached glyph strikes.
 - **Game engines** (Unity sprite atlases, Unreal texture references) — texture/mesh resources shared across thousands of entities; per-entity state holds only transform + tint.
 
 ### Anti-patterns
@@ -426,10 +431,10 @@ public final class Session {
 
 ### Performance and Correctness Numbers
 
-- Memory: 10M character instances × 24 bytes (GlyphInstance) + 256 shared glyphs × 2KB = 240MB + 0.5MB. Without Flyweight: ~20GB. 80x reduction; the difference between "fits in RAM" and "OOM kill".
+- Memory: 10M character instances × 32 bytes (GlyphInstance) + 256 shared glyphs × 2KB = 320MB + 0.5MB. Without Flyweight: ~20GB. ~64x reduction; the difference between "fits in RAM" and "OOM kill".
 - Glyph rasterization: 5ms per glyph; under a 4-thread render warmup, naive code rasterizes each glyph 1-4 times. `computeIfAbsent` reduces this to exactly once — saving ~1s of wall-clock startup time for a 256-glyph font.
-- Frame render time with Flyweight: cache hit lookup ~30ns; rendering 1000 characters/frame stays well within the 16ms (60 FPS) budget — actual render time ~2.4ms.
-- `Integer.valueOf` cache hit ratio in typical autoboxing-heavy code (loop counters, small ints): >95%. Disabling the cache (`IntegerCache.high=-1`) measurably increases GC pressure in benchmarks.
+- Frame render time with Flyweight: cache hit lookup ~30ns; the ~1,000 characters actually visible in a given frame stay well within the 16ms (60 FPS) budget — around 2.4ms of that frame in this scenario.
+- `Integer.valueOf`'s cache cannot be turned off: `IntegerCache` clamps the configured high to `Math.max(value, 127)`, so -128..127 is always cached — a floor the JLS requires. Only the upper bound is tunable (`-XX:AutoBoxCacheMax` / `-Djava.lang.Integer.IntegerCache.high`), and raising it trades a larger permanently-retained cache array for fewer autoboxing allocations.
 
 ### Migration Story
 

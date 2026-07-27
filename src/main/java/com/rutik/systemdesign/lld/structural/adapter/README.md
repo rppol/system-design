@@ -81,7 +81,7 @@ classDiagram
     note for Adapter "request() delegates internally to specificRequest()"
 ```
 
-*Adapter multiply-inherits from both `Target` and `Adaptee`, so `request()` and `specificRequest()` live in one class — this variant needs multiple class inheritance, which Java doesn't support.*
+*Adapter inherits from both `Target` and `Adaptee`, so `request()` and `specificRequest()` live in one class. This compiles in Java as `class Adapter extends Adaptee implements Target` because `Target` is an interface; GoF describe it as multiple inheritance because in C++ the Target is a class too. The Java cost is that a class adapter binds to exactly one adaptee class and exposes the adaptee's public API through the adapter.*
 
 ### Object Adapter (using composition — preferred)
 ```mermaid
@@ -159,7 +159,7 @@ The client is decoupled from the adaptee. Neither needs to know about the other.
 | **Adapter** | The translator | Implements Target, wraps Adaptee, translates calls |
 
 **Two variants:**
-- **Class Adapter:** Adapter extends Adaptee (uses multiple inheritance — only possible in languages supporting it like C++)
+- **Class Adapter:** Adapter extends Adaptee and implements Target (legal in Java whenever Target is an interface; bound to one adaptee class)
 - **Object Adapter:** Adapter holds a reference to Adaptee (uses composition — preferred in Java)
 
 ---
@@ -241,6 +241,8 @@ The client is decoupled from the adaptee. Neither needs to know about the other.
 ## 14. Real-World Usage
 
 ### Production Anchor: Legacy LDAP -> OAuth2 Migration
+
+*Worked scenario, not a report on a named company. Every figure below (call-site counts, latencies, the 1.2µs adapter overhead) is an illustrative number for this one hypothetical setup, chosen so the tradeoffs are concrete — not a published benchmark.*
 
 A mid-size SaaS platform has 40 call sites scattered across 12 microservices invoking an in-house `LdapAuthService` running against an aging Active Directory cluster. Scale: ~500 auth requests/sec at peak, p99 latency 80ms, 99.95% availability requirement. Leadership decides to migrate to Okta OAuth2 over 6 months, but a flag-day cutover is impossible — different services have different release trains. Solution: introduce a new `AuthProvider` interface; build `OAuth2AuthProvider` (new) and `LdapAuthProviderAdapter` (wraps the legacy service). Callers depend only on `AuthProvider`; a feature flag routes between the two. Net result: zero changes to the 40 call sites during migration; rollback is a config flip.
 
@@ -440,7 +442,7 @@ Month 1: introduce `AuthProvider` interface; ship `LdapAuthProviderAdapter` as t
 A: The Adapter pattern converts one interface to another that a client expects. Use it when integrating third-party libraries or legacy systems whose interfaces differ from your domain model.
 
 **Q: What's the difference between Class Adapter and Object Adapter?**
-A: Class Adapter uses inheritance to extend the Adaptee and implement the Target — requires multiple inheritance (not directly supported in Java). Object Adapter uses composition, holding an Adaptee reference — the preferred approach in Java because it's more flexible and doesn't suffer from inheritance coupling.
+A: Class Adapter uses inheritance — `class Adapter extends Adaptee implements Target`, which does compile in Java whenever Target is an interface (the common Java case); GoF call it multiple inheritance because in C++ Target is a class as well. Object Adapter uses composition, holding an Adaptee reference — the preferred approach in Java because one adapter works for every adaptee subclass, the adaptee can be swapped or mocked at runtime, and the adaptee's public API is not re-exported through the adapter.
 
 **Q: How does Adapter differ from Facade?**
 A: Adapter makes two existing incompatible interfaces work together. Facade creates a new simplified interface to a complex subsystem. Adapter is about compatibility; Facade is about simplification.

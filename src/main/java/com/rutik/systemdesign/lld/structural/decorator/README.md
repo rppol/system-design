@@ -54,7 +54,7 @@ BufferedGzipEncryptedFileInputStream
 ... (2^n combinations for n features)
 ```
 
-With 7 features, you'd need up to 128 subclasses. Adding a single new feature requires up to 64 new subclasses for every existing combination. This is clearly untenable.
+With 7 features, you'd need up to 2^7 = 128 classes to cover every combination. Adding one more feature doubles that to 256 — one new subclass for every combination that already exists. This is clearly untenable.
 
 Additionally:
 - You can't mix features at runtime with inheritance.
@@ -72,10 +72,10 @@ Define a **Decorator base class** that:
 
 Concrete Decorators extend the base decorator and add specific behavior. You compose them by wrapping:
 ```java
-InputStream in = new ChecksumInputStream(
-                     new GzipInputStream(
+InputStream in = new CheckedInputStream(
+                     new GZIPInputStream(
                          new BufferedInputStream(
-                             new FileInputStream("data.gz"))));
+                             new FileInputStream("data.gz"))), new CRC32());
 ```
 
 Each wrapper adds one layer of behavior. The chain is transparent — everything still looks like an `InputStream`.
@@ -257,7 +257,9 @@ The key insight: every object in the chain sees the same interface. Decorators a
 
 ### Production Anchor: Resilient HTTP Client Stack
 
-A backend service makes ~100k HTTP calls/day to a flaky third-party payments API. The team needs retries with exponential backoff, a circuit breaker to fail fast during outages, Prometheus metrics on every call, and a mutating header injector for the auth token. Each concern must be independently testable, removable, and orderable — and a junior engineer should be able to disable retries in dev without touching production code. Decorator stack: `MetricsClient -> CircuitBreakerClient -> RetryClient -> AuthClient -> BaseHttpClient`. After deployment, the retry decorator dropped the user-visible error rate from 2.0% to 0.10% (transient 502s now recovered); the circuit breaker bounded outage blast radius from 30s of timeouts to 5s of fast-fail.
+*Worked scenario, not a report on a named company. Every figure below (call volumes, error rates, per-layer overhead) is an illustrative number for this one hypothetical setup — not a published benchmark.*
+
+A backend service makes ~100k HTTP calls/day to a flaky third-party payments API. The team needs retries with exponential backoff, a circuit breaker to fail fast during outages, Prometheus metrics on every call, and a mutating header injector for the auth token. Each concern must be independently testable, removable, and orderable — and a junior engineer should be able to disable retries in dev without touching production code. Decorator stack: `MetricsClient -> CircuitBreakerClient -> RetryClient -> AuthClient -> BaseHttpClient`. After deployment, the retry decorator dropped the user-visible error rate from 2.0% to 0.10% (transient 502s now recovered); the circuit breaker cut the caller's wait during an outage from a 30s timeout to a 5ms fast-fail, with the breaker itself staying open for 5s between probes.
 
 ```mermaid
 flowchart LR
@@ -283,7 +285,7 @@ flowchart LR
     class BaseHttp io
 ```
 
-*The call threads through every decorator in a fixed order before reaching the real network I/O — the retry decorator dropped the user-visible error rate from 2.0% to 0.10%, and the circuit breaker bounded outage blast radius from 30s of timeouts to 5s of fast-fail (numbers from the scenario above).*
+*The call threads through every decorator in a fixed order before reaching the real network I/O — the retry decorator dropped the user-visible error rate from 2.0% to 0.10%, and the circuit breaker cut the caller's wait during an outage from a 30s timeout to a 5ms fast-fail (numbers from the scenario above).*
 
 ```java
 public interface HttpClient {
@@ -418,6 +420,11 @@ public abstract class HttpClientDecorator implements HttpClient {
     @Override public boolean equals(Object o) { return delegate.equals(o); }
     @Override public int hashCode()           { return delegate.hashCode(); }
 }
+// Caveat: this is ASYMMETRIC — wrapped.equals(base) is true but base.equals(wrapped) is false,
+// so seen.contains(wrapped) works only because `base` went into the set first. Insert the
+// wrapper first and contains(base) is false again. Symmetry needs BOTH sides to unwrap
+// (e.g. a shared `unwrap()` and equals comparing unwrapped identities), or accept that
+// decorated and undecorated forms are simply different keys.
 ```
 
 **2. Wrong decorator order, silently incorrect behavior**
@@ -467,13 +474,13 @@ public final class StandardHeadersDecorator extends HttpClientDecorator {   // m
 ### Performance and Correctness Numbers
 
 - Per-call decorator overhead (5-layer stack): ~3µs total — negligible vs. typical 50-200ms HTTP round trips.
-- Retry decorator: dropped p50 error rate from 2.0% to 0.10% on a flaky upstream; cost 1.2x extra outbound bandwidth during incident windows.
+- Retry decorator: dropped the user-visible error rate from 2.0% to 0.10% on a flaky upstream; cost 1.2x extra outbound bandwidth during incident windows.
 - Circuit breaker (sliding window of 100 calls, open at 50% failure rate, half-open after 5s): cut p99 latency during a downstream outage from 30s (timeout) to 5ms (fast-fail) — a 6000x improvement that prevented thread-pool exhaustion in the upstream service.
 - Metrics decorator: emits 4 timer samples and 1 counter per call; ~800ns total overhead with Micrometer + Prometheus registry.
 
 ### Migration Story
 
-The original implementation embedded retry and metrics directly inside `BaseHttpClient` — about 200 LoC of mixed concerns. When the team needed to add the circuit breaker, the inline approach would have pushed `BaseHttpClient` past 400 LoC and made unit testing the breaker logic require mocking the network. The refactor extracted each concern into a decorator (1 day per concern, including tests), introduced the abstract `HttpClientDecorator` with identity delegation, and replaced the constructor-spaghetti at call sites with the `ResilientHttpClientBuilder`. A surprising win: a dev-mode flag now disables retries with `.withRetries(0)`, making it possible to reproduce upstream failures locally without exponential-backoff hiding them.
+The original implementation embedded retry and metrics directly inside `BaseHttpClient` — about 200 LoC of mixed concerns. When the team needed to add the circuit breaker, the inline approach would have pushed `BaseHttpClient` past 400 LoC and made unit testing the breaker logic require mocking the network. The refactor extracted each concern into a decorator (1 day per concern, including tests), introduced the abstract `HttpClientDecorator` with identity delegation, and replaced the constructor-spaghetti at call sites with the `ResilientHttpClientBuilder`. A surprising win: a dev-mode flag now disables retrying with `.withRetries(1)` — `maxAttempts` counts total attempts, so 1 means "send it once, surface the failure" (0 would send nothing at all and fail every call) — making it possible to reproduce upstream failures locally without exponential-backoff hiding them.
 
 ---
 
@@ -519,7 +526,7 @@ A: The order in which decorators are applied matters. For example, in I/O: compr
 A: Suppose a `Coffee` can independently have Milk, Sugar, and Whip added. With inheritance, you'd need a subclass for every combination — `Coffee`, `CoffeeWithMilk`, `CoffeeWithSugar`, `CoffeeWithWhip`, `CoffeeWithMilkAndSugar`, `CoffeeWithMilkAndWhip`, ... — for 3 optional add-ons that's 2^3 = 8 classes, and a 4th add-on doubles it to 16. With Decorator, you write 1 base `Coffee` class plus 3 decorator classes (`MilkDecorator`, `SugarDecorator`, `WhipDecorator`) — 4 classes total — and any combination is achieved by wrapping at runtime (`new WhipDecorator(new MilkDecorator(new Coffee()))`), with a 4th add-on only adding 1 more class (5 total). The exponential-vs-linear framing (2^n vs n+1) is the sharpest way to make this point in an interview, mirroring the multiplicative argument used for Bridge but driven by combinations rather than two independent axes.
 
 **Q: Does wrapping an object in a Decorator break `equals()` and `hashCode()` semantics?**
-A: Yes, by default — if `Decorator` doesn't override `equals()`/`hashCode()`, it inherits `Object`'s identity-based implementation, so a decorated object will never be `.equals()` to the underlying object it wraps, and two different decorator instances wrapping equal underlying objects won't be equal to each other either. This becomes a real bug when decorated objects are placed in a `HashSet`/`HashMap` or compared after passing through different decoration paths — e.g., caching a `Service` instance keyed by equality, then later receiving a freshly-wrapped `LoggingServiceDecorator` around an equal underlying service, gets treated as a different key. The fix, if identity-through-wrapping matters, is to override `equals()`/`hashCode()` on the decorator to delegate to the wrapped component's `equals()`/`hashCode()` (and ensure all decorators in the chain do the same) — but this is easy to forget, so the practical guidance is to avoid relying on equality across decorated and undecorated forms of the same object unless you've explicitly designed for it.
+A: Yes, by default — if `Decorator` doesn't override `equals()`/`hashCode()`, it inherits `Object`'s identity-based implementation, so a decorated object will never be `.equals()` to the underlying object it wraps, and two different decorator instances wrapping equal underlying objects won't be equal to each other either. This becomes a real bug when decorated objects are placed in a `HashSet`/`HashMap` or compared after passing through different decoration paths — e.g., caching a `Service` instance keyed by equality, then later receiving a freshly-wrapped `LoggingServiceDecorator` around an equal underlying service, gets treated as a different key. The usual fix, if identity-through-wrapping matters, is to override `equals()`/`hashCode()` on the decorator to delegate to the wrapped component's — but note that delegating only on the wrapper's side is asymmetric (`wrapped.equals(base)` is `true` while `base.equals(wrapped)` is `false`), which breaks the `Object.equals` contract and makes `HashSet` membership depend on which form you inserted first; genuine symmetry requires both sides to unwrap before comparing. The practical guidance is therefore to avoid relying on equality across decorated and undecorated forms of the same object unless you've explicitly designed for it.
 
 **Q: Name Decorator examples in `java.util.Collections` beyond the I/O package.**
 A: `Collections.unmodifiableList(list)`, `unmodifiableMap`, `unmodifiableSet`, etc. return a decorator that wraps the given collection and throws `UnsupportedOperationException` on any mutating call while delegating all read operations to the wrapped collection — adding a "read-only" responsibility without changing the underlying type. `Collections.synchronizedList(list)` similarly wraps a `List` and adds a synchronization responsibility by wrapping every method with a `synchronized` block on an internal lock, delegating the actual work to the wrapped list. Both are textbook Decorators: same `List`/`Collection` interface as what they wrap, composable (you can do `synchronizedList(unmodifiableList(list))`), and each adds exactly one orthogonal responsibility. These are useful answers when an interviewer asks for Decorator examples "beyond `java.io`," since they show the pattern isn't limited to streams.

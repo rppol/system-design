@@ -34,7 +34,7 @@ Key distinction: these patterns operate at the structural level — the relation
 
 | Pattern | Link | Intent | Classic Java Example | Key Pitfall |
 |---------|------|--------|---------------------|-------------|
-| Adapter | [adapter/](adapter/) | Convert one interface to another | `InputStreamReader` wrapping `InputStream`; `Arrays.asList()` | Class adapter requires multiple inheritance (use object adapter in Java) |
+| Adapter | [adapter/](adapter/) | Convert one interface to another | `InputStreamReader` wrapping `InputStream`; `Arrays.asList()` | Class adapter (`extends Adaptee implements Target`) is legal in Java but locks you to one adaptee class — prefer the object adapter |
 | Bridge | [bridge/](bridge/) | Separate abstraction from implementation so both can vary independently | JDBC: `java.sql.Driver` (abstraction) + vendor driver (implementation) | Often mistaken for Adapter — Bridge is designed upfront; Adapter retrofits |
 | Composite | [composite/](composite/) | Treat individual objects and compositions uniformly via a tree | `java.awt.Container` + `Component`; `jakarta.faces.component.UIComponent` | Leaf-specific operations (e.g., `add()`) don't make sense on leaves; breaks type safety |
 | Decorator | [decorator/](decorator/) | Attach additional responsibilities to an object dynamically | `BufferedReader(new InputStreamReader(socket.getInputStream()))` | Deep stacking makes debugging hard; ordering of decorators affects behavior |
@@ -212,7 +212,7 @@ Per-call figures above are order-of-magnitude only. On modern JDKs the JDK-proxy
 
 | Pattern | Java Standard Library | Spring Framework | Third-Party |
 |---------|----------------------|-----------------|-------------|
-| Adapter | `java.io.InputStreamReader`, `Arrays.asList()`, `Collections.unmodifiableList()` | `HandlerAdapter`, `MessageConverter` | MapStruct (DTO adapters) |
+| Adapter | `java.io.InputStreamReader`, `Arrays.asList()`, `Executors.callable(Runnable)` | `HandlerAdapter`, `MessageConverter` | MapStruct (DTO adapters) |
 | Bridge | JDBC (`java.sql.Driver`), `java.util.logging.Handler` | N/A — architectural choice | N/A |
 | Composite | `java.awt.Container`, `jakarta.faces.component.UIComponent` | `CompositePropertySource`, `CompositeCacheManager`, `CompositeHealthContributor` | Apache Commons Configuration |
 | Decorator | `java.io.*` streams, `java.util.Collections.synchronized*` | `BeanDefinitionDecorator` | Lombok `@Delegate` |
@@ -289,7 +289,7 @@ When the subsystem needs to remain fully accessible to some clients. Facade simp
 ---
 
 **Q: Object adapter vs class adapter in Java — which do you use and why?**
-Java doesn't support multiple inheritance of classes, so the GoF class adapter (which inherits from both the target interface and the adaptee class simultaneously) isn't possible. Java uses object adapter: the adapter holds a reference to an adaptee instance and delegates calls. Benefit of object adapter: you can adapt an object of any subclass of adaptee (not just one specific class). Benefit of class adapter (where available, e.g., C++): direct method access without delegation overhead. In Java, always use object adapter.
+Use the object adapter: it holds a reference to an adaptee instance and delegates, so it can adapt any subclass of the adaptee. Both variants compile in Java — a class adapter is written `class Adapter extends Adaptee implements Target`, which is legal because `Target` is an interface (Java only forbids inheriting from two *classes*). What Java's single class inheritance costs you is flexibility, not legality: a class adapter is bound to exactly one adaptee class, cannot adapt a subclass instance handed to it at runtime, cannot adapt a `Target` that is itself a class, and leaks the adaptee's whole public API through the adapter. In Java, default to object adapter; reach for a class adapter only when you also want to override adaptee behaviour.
 
 ---
 
@@ -310,7 +310,7 @@ Proxy, Decorator-vs-Proxy, and Adapter-vs-Bridge come up most, because each need
 
 ## 13. Best Practices
 
-- **Adapter**: prefer object adapter over class adapter in Java — it supports adaptee subclass substitution and doesn't depend on language features Java lacks (multiple class inheritance).
+- **Adapter**: prefer object adapter over class adapter in Java — it supports adaptee subclass substitution and keeps the adaptee's API out of the adapter's public surface, neither of which a class adapter can do.
 - **Bridge**: introduce Bridge early in design, not as a refactor — adding it later when N×M subclasses already exist is painful. Use when you can see two independent dimensions of variation.
 - **Composite**: decide the transparency vs safety tradeoff explicitly and document it — don't let it be an accident. Prefer safety (option b) unless the uniform API is a hard requirement.
 - **Decorator**: define a canonical decorator order in a factory method. Never let callers construct arbitrary stacks — ordering bugs are silent and hard to reproduce.

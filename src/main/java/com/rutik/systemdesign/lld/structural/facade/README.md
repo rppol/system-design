@@ -226,7 +226,9 @@ The client issues a single call; the Facade fans it out into the exact subsystem
 
 ### Production Anchor: AWS SDK v2 S3Client
 
-A data platform ingests ~50k S3 operations/day across 20 microservices: object puts (event logs), multipart uploads (backups), pre-signed URL generation (user uploads), and bucket listings. The AWS SDK v2 `S3Client` is a Facade over a complex subsystem: HTTP transport (Apache or Netty), Sigv4 request signing, CRC32C checksum computation, automatic retry with exponential backoff, multipart upload coordination, XML/JSON error parsing, and endpoint discovery. A caller writes `s3.putObject(req, body)` — one line that internally coordinates ~200 LoC of subsystem work. Quantified impact: feature teams previously wrote 400+ LoC of S3 integration code per use case; with the Facade, integrations average 40 LoC. p99 latency for a small put is 80ms (network-bound); facade overhead is <0.5ms.
+*The `S3Client` subsystem breakdown is real (see the AWS SDK v2 source); the surrounding usage story is a worked scenario — its operation counts, LoC figures, and PR-throughput numbers are illustrative for this one hypothetical platform, not published measurements.*
+
+A data platform ingests ~50k S3 operations/day across 20 microservices: object puts (event logs), multipart uploads (backups), pre-signed URL generation (user uploads), and bucket listings. The AWS SDK v2 `S3Client` is a Facade over a complex subsystem: HTTP transport (Apache or Netty), Sigv4 request signing, CRC-based checksum computation (CRC32 by default since SDK for Java 2.30.0; CRC32C or CRC64NVME on request), automatic retry with exponential backoff, multipart upload coordination, XML/JSON error parsing, and endpoint discovery. A caller writes `s3.putObject(req, body)` — one line that internally coordinates ~200 LoC of subsystem work. Quantified impact: feature teams previously wrote 400+ LoC of S3 integration code per use case; with the Facade, integrations average 40 LoC. p99 latency for a small put is 80ms (network-bound); facade overhead is <0.5ms.
 
 ```mermaid
 classDiagram
@@ -337,7 +339,7 @@ public final class OrderQueryFacade {                          // separate facad
 - **AWS SDK v2** — `S3Client`, `DynamoDbClient`, `LambdaClient`, `SqsClient`. Each is a Facade over signing, retry, transport, marshalling, and endpoint resolution.
 - **SLF4J `LoggerFactory.getLogger(Class)`** — Facade over backend binding (Logback/Log4j2/JUL) and logger lookup.
 - **Spring `JdbcTemplate.queryForObject(sql, RowMapper, args)`** — Facade over connection acquisition, prepared statement, parameter binding, result set iteration, exception translation, and connection release.
-- **Spring `RestTemplate` / `WebClient`** — Facades over HTTP transport, message conversion, error handling.
+- **Spring `RestClient` / `WebClient`** — Facades over HTTP transport, message conversion, error handling.
 - **Hibernate `Session`** — Facade over connection pool, first-level cache, dirty tracking, flush, transaction coordination.
 - **`java.net.URL.openStream()`** — Facade over DNS, socket, TLS, HTTP protocol handling.
 - **Apache Commons `FileUtils.copyFile(src, dst)`** — Facade over NIO file channels, buffer management, atomic-move semantics.
@@ -404,7 +406,7 @@ public class OrderFacade { public void placeOrder(...) {...} }   // the ONLY pub
 
 - `S3Client.putObject` Facade overhead: <0.5ms (signing + checksum computation), vs. 80ms p99 network round-trip — 0.6% of total. Invisible.
 - Integration LoC for a new S3 use case: 40 LoC with facade, vs. 400 LoC raw (transport setup, signer, retry policy, error parsing, multipart coordination). 10x productivity multiplier confirmed across 12 feature teams.
-- Splitting the 80-method `OrderFacade` into 4 focused facades: PR throughput on the order module rose from 8/week to 22/week (3x), measured over the quarter after the split.
+- Splitting the 80-method `OrderFacade` into the 3 focused facades of the migration story below: PR throughput on the order module rose from 8/week to 22/week (~3x), over the quarter after the split.
 - Making subsystem services package-private caught 3 misuses at compile time during the migration that would otherwise have been data-corruption bugs.
 
 ### Migration Story

@@ -439,7 +439,7 @@ JDK, or graph shape. Measure your own tree before quoting any of them.
 - 10k-node graph traversal with cycle detection: 38ms p99 in that setup — under its 50ms budget. The algorithmic claim behind it is the durable part: `HashSet<BuildTask>` membership is **O(1) average** (O(n) worst case if hashes collide badly), so the visited-set check adds a constant factor rather than another traversal.
 - Cache check per leaf: ~4µs in that setup (mtime + content hash lookup in a memory-mapped index). The 92% hit rate is this scenario's observed ratio, so ~9,200 of 10,000 leaves returned `cached` — a healthy incremental build, not a figure any build tool guarantees.
 - Memory footprint of the graph in that setup: on the order of 80 bytes per `LeafTask` (object header + refs, 64-bit HotSpot with compressed oops) plus child-list overhead in groups; 10k nodes landed around 1.5MB heap. Exact per-object size is JVM- and layout-dependent — verify with JOL rather than assuming.
-- Cycle errors are reported with the full path (`build -> compile -> compile`) instead of a stack trace. The durable claim is qualitative: a named cycle path is diagnosable in seconds, a bare `StackOverflowError` is not.
+- Cycle errors name the offending task (`Cycle detected at task: compileMain`) instead of blowing the stack — that is exactly what `executeSafe` above throws. Reconstructing the full path costs one more field (pass an ordered `Deque` alongside the visited `Set`). The durable claim is qualitative: a named task is diagnosable in seconds, a bare `StackOverflowError` is not.
 
 ### Migration Story
 
