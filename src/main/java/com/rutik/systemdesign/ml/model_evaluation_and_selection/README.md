@@ -133,7 +133,7 @@ The lopsided model flags almost nothing but is right when it does — 90% precis
 
 | Method             | Strategy                            | When to use                        |
 |--------------------|-------------------------------------|------------------------------------|
-| GridSearchCV       | Exhaustive grid search              | Small param grid (< 100 combos)    |
+| GridSearchCV       | Exhaustive grid search              | Small param grid (< 30 combos)     |
 | RandomizedSearchCV | Random sampling from distributions  | Larger grids; budget set by you     |
 | Optuna (TPE)       | Bayesian / Tree-structured Parzen   | Large grids, expensive models      |
 | Hyperopt           | Bayesian (TPE, ATPE)                | Similar to Optuna                  |
@@ -588,8 +588,8 @@ def demonstrate_auc_pr_importance(
     print("Model B (poor at minority):")
     print(f"  AUC-ROC: {roc_auc_score(y_true, y_prob_bad):.4f}")
     print(f"  AUC-PR:  {average_precision_score(y_true, y_prob_bad):.4f}")
-    # Observation: AUC-ROC gap may be small (e.g., 0.89 vs 0.85)
-    # AUC-PR gap will be large (e.g., 0.72 vs 0.31) — AUC-PR is more diagnostic
+    # Observation: AUC-ROC gap may be small (e.g., 0.96 vs 0.94)
+    # AUC-PR gap will be large (e.g., 0.72 vs 0.41) — AUC-PR is more diagnostic
 
 
 # ── Regression metrics ────────────────────────────────────────────────────────
@@ -640,9 +640,8 @@ def calibrate_model(
     Expected calibration error (ECE): average abs difference between confidence
       and accuracy across probability bins.
     """
-    # sklearn deprecated cv="prefit" in 1.6 and removed it in 1.8: wrap the
-    # already-fitted estimator in FrozenEstimator so .fit() trains only the
-    # calibrator. You must still keep model-fitting and calibration data disjoint.
+    # Wrap the already-fitted estimator in FrozenEstimator so .fit() trains only
+    # the calibrator. Keep model-fitting and calibration data disjoint.
     calibrated = CalibratedClassifierCV(FrozenEstimator(model), method=method)
     calibrated.fit(X_val, y_val)  # fit calibrator on held-out validation set
 
@@ -782,7 +781,7 @@ def compare_models_mcnemar(
 
 **Financial time series (TimeSeriesSplit):** A team used random 5-fold CV on daily stock features. Validation AUC-ROC was 0.79. After switching to `TimeSeriesSplit(n_splits=5)` (always train on past, validate on future), CV AUC dropped to 0.61 — closer to actual live performance of 0.59. The gap was entirely caused by future data leaking into training folds.
 
-**Optuna hyperparameter search:** GBM model with GridSearchCV over 4 hyperparameters (5 values each = 625 fits * 5 CV = 3,125 model fits, ~4 hours). Optuna TPE with 200 trials found the same best AUC-ROC (0.8312 vs grid 0.8309) in 200 * 5 = 1,000 fits (~80 minutes). Pruner stopped 43 of 200 trials early, saving additional ~25% time.
+**Optuna hyperparameter search:** GBM model with GridSearchCV over 4 hyperparameters (5 values each = 625 fits * 5 CV = 3,125 model fits, ~4 hours). Optuna TPE with 200 trials found the same best AUC-ROC (0.8312 vs grid 0.8309) in 200 * 5 = 1,000 fits (~80 minutes). Pruner stopped 43 of 200 trials early after the first fold, saving a further ~17% of fit time (43 trials x 4 skipped folds out of 1,000 fits).
 
 ---
 
@@ -829,7 +828,7 @@ def compare_models_mcnemar(
 
 **Calibration — must do when:** model output is used as a probability estimate to drive decisions (insurance pricing, medical risk, auction bid pricing). Not needed if you only care about ranking (recommendation systems, information retrieval).
 
-**Optuna / Bayesian tuning — use when:** each model fit is expensive (> 1 minute), the parameter space is large (> 4 parameters), or you have conditional parameters (depth only matters if n_estimators > 500). Use GridSearchCV for small grids (< 30 combinations) — overhead is not justified.
+**Optuna / Bayesian tuning — use when:** each model fit is expensive (> 30 seconds), the parameter space is large (> 4 parameters), or you have conditional parameters (depth only matters if n_estimators > 500). Use GridSearchCV for small grids (< 30 combinations) — overhead is not justified.
 
 **LOO-CV — avoid for large n**: O(n) fits; 100,000 rows = 100,000 model trains. Use only when n < 200 and you need the lowest-bias estimate possible (medical studies, rare event research).
 
@@ -889,7 +888,7 @@ mape_safe = np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), epsilo
 AUC-ROC measures the probability that the model scores a random positive higher than a random negative; it is threshold-agnostic and runs 0 to 1, with 0.5 meaning random ranking. AUC-PR measures the area under the precision-recall curve; its baseline equals the positive class prevalence (e.g., 0.05 for 5% positives). For heavily imbalanced datasets (< 5% positives), AUC-ROC is misleadingly optimistic because the huge pool of true negatives sits in the FPR denominator, so hundreds of false alarms barely move the x-axis (TPR is unaffected — it never touches TN). AUC-PR directly measures how well the model retrieves the minority class. Use AUC-PR for fraud detection, rare disease prediction, and any setting where the minority class is the primary concern.
 
 **Q: Why must you use StratifiedKFold instead of KFold for classification with imbalanced classes?**
-Plain KFold assigns rows to folds randomly; with 1% positive rate and 1,000 rows, some folds may contain zero positive examples, making AUC computation undefined and giving wildly variable estimates. StratifiedKFold ensures each fold has approximately the same positive rate as the full dataset (here ~10 positives per fold). This produces stable, unbiased cross-validation estimates. Always use StratifiedKFold as the default for classification.
+Plain KFold assigns rows to folds randomly; with 1% positive rate and 1,000 rows, some folds may contain zero positive examples, making AUC computation undefined and giving wildly variable estimates. StratifiedKFold ensures each fold has approximately the same positive rate as the full dataset (here 10 positives in total, so ~2 per fold at k=5). This produces stable, unbiased cross-validation estimates. Always use StratifiedKFold as the default for classification.
 
 **Q: Explain the bias-variance tradeoff and how you diagnose each.**
 Bias is systematic error from a model too simple to capture the true relationship (underfitting); variance is error from a model too sensitive to training data fluctuations (overfitting). Diagnose: if training score is low and CV score is similar (both ~65%), the model underfits — add features, use more complex model. If training score is high (95%) but CV score is low (70%), the model overfits — regularize, reduce complexity, add more data. Learning curves (train/val score vs training set size) visualize this: high variance = large gap that closes as n increases; high bias = gap is small but both scores are low.

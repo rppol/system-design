@@ -55,7 +55,7 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 |-----------|---------------|-----------|-----------|
 | Auto-sklearn | meta-learning warm-start + Bayesian (SMAC) | greedy ensemble of top pipelines | tabular, sklearn ecosystem |
 | TPOT | genetic programming over pipelines | pipeline is the output | tabular, interpretable pipeline export |
-| H2O AutoML | random grid + Bayesian | stacked ensembles (super learner) | tabular, enterprise/Java |
+| H2O AutoML | random grid search over a fixed algorithm portfolio (no Bayesian model) | stacked ensembles (super learner) | tabular, enterprise/Java |
 | AutoGluon | fixed portfolio, minimal HPO | multi-layer stacking + bagging | tabular/vision/text, fast strong baseline |
 | Google Vertex AI AutoML | proprietary search + HPO | managed | no-infra teams; tabular and image only since the Text/Video AutoML shutdowns in 2025 |
 
@@ -260,8 +260,6 @@ def run_auto_sklearn(X_train: np.ndarray, y_train: np.ndarray) -> object:
     automl = autosklearn.classification.AutoSklearnClassifier(
         time_left_for_this_task=3600,     # total wall-clock budget (seconds)
         per_run_time_limit=300,           # kill any single pipeline after 5 min
-        # `ensemble_size=` is deprecated (removal announced for 0.16); the
-        # supported form is ensemble_kwargs.
         ensemble_kwargs={"ensemble_size": 50},   # ensemble the 50 best models
         metric=autosklearn.metrics.roc_auc,
         resampling_strategy="cv",
@@ -306,8 +304,7 @@ def train_fn(config: dict) -> None:
     model = build_model(config)
     for epoch in range(config["max_epochs"]):
         val_acc = train_one_epoch(model, config)
-        # Current Ray API: tune.report(metrics: dict, *, checkpoint=None).
-        # The old kwargs form tune.report(val_acc=...) no longer exists.
+        # tune.report(metrics: dict, *, checkpoint=None)
         tune.report({"val_acc": val_acc})   # value at this rung's budget
 
 
@@ -715,6 +712,7 @@ EfficientNet-B0 has the highest raw accuracy and still finishes last, because 25
 ```
 
 A FLOP count would have ranked these blocks completely differently — depthwise convolutions are FLOP-cheap but memory-bandwidth-bound, so on this SoC they cost far more wall-clock than their arithmetic suggests. Putting measured milliseconds in the objective is what let the search find a 27 ms model when three weeks of FLOP-guided hand-tuning could not clear both budgets at once.
+
 4. **Estimation** — a Once-for-All-style elastic supernet trained once (~1200 GPU-hours across 8 GPUs via DDP — see [../distributed_training/README.md](../distributed_training/README.md)), then sub-nets extracted per latency budget with no retraining.
 5. **Search** — ASHA over sub-net candidates ranked by the supernet, top-10 retrained standalone to correct weight-sharing rank disorder.
 6. **Compression** — the chosen sub-net is INT8 quantization-aware-trained and pruned per [../model_compression_and_efficiency/README.md](../model_compression_and_efficiency/README.md), landing under both budgets.
