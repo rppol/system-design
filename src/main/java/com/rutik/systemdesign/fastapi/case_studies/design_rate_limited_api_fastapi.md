@@ -9,14 +9,15 @@ Design a production-grade rate limiter for a public API with the following requi
 **Functional requirements:**
 - Limit each API key to 100 requests per minute (sliding window) and 1000 requests per day.
 - Enforce limits across all pods in a horizontally scaled deployment — no in-process state.
-- Return HTTP 429 with a `Retry-After` header and an RFC 7807 Problem Details error body on limit breach.
+- Return HTTP 429 with a `Retry-After` header and an RFC 9457 Problem Details error body on limit breach.
 - Fail open: if Redis is unavailable, allow traffic rather than blocking the entire API.
 - Expose the limiter as a `Depends()`-injected service so individual routes can override their own limits.
 
 **Non-functional requirements:**
 - P99 overhead added by the rate-limiter check: under 2 ms at 5000 req/s.
 - No single point of failure — Redis Sentinel or Cluster is acceptable; the app must not crash if Redis goes down.
-- Limits must be accurate to within ±1 request at bucket boundaries (sliding window, not fixed window).
+- The counter must be exact under concurrency: at 5000 req/s no client may be admitted past its limit
+  inside a single window because two requests raced (no check-then-act).
 
 **Out of scope:**
 - IP-based limiting (shown as extension in Interview Discussion Points).
@@ -89,11 +90,13 @@ Example keys
 
 ## Key Design Decisions
 
-**1. Sliding window counter vs token bucket vs fixed window**
+**1. Fixed window counter vs token bucket vs sliding window log**
 
-A fixed window counter has a well-known boundary spike: a client can fire 100 requests in the last second of minute N and 100 more in the first second of minute N+1 — 200 requests in 2 seconds while staying within both windows. The token bucket eliminates spikes entirely but requires storing per-key float state (last-fill timestamp, token count) and is harder to inspect in Redis. The sliding window counter used here approximates a true sliding window: the key is bucketed to the start of the current 60-second window, and all requests within that window share one counter. This eliminates the boundary spike at the cost of resetting the counter at each exact window boundary (not a continuous roll). For interview purposes, explain this trade-off and note that a sliding window *log* (storing timestamps of every request) gives perfect accuracy but requires O(request-count) Redis memory per key.
+This design uses a **fixed window counter**: the key is bucketed to the start of the current 60-second window (`floor(now/60)*60`), and all requests inside that window share one counter, which disappears when the window rolls. That is O(1) memory per key, one Redis round-trip, and trivially inspectable — but it keeps the well-known boundary spike. A client can fire 100 requests in the last second of window N and 100 more in the first second of window N+1: 200 requests in 2 seconds, each window individually compliant. The worst case is bounded at 2x the limit over a 2-window span, and that is the price this design pays for O(1) state.
 
-Both windows are individually compliant with the 100 req/min rule, yet the client still bursts 200 requests into a 2-second span at the seam between them:
+The two alternatives buy a smoother curve at a cost. A **sliding window log** (a sorted set of per-request timestamps, `ZREMRANGEBYSCORE` + `ZCARD`) is exact over any 60-second span but uses O(requests-per-window) memory per key. A **weighted sliding window counter** reads both the current and previous window keys and prorates the older one by the fraction of the window that has elapsed — near-exact at O(1) memory, but it touches two keys, which on Redis Cluster forces a hash tag so both land on the same slot. Pick the log when a hard bound matters (billing, quota enforcement), the fixed window when throughput protection is the goal.
+
+The counter is compliant inside each window, yet the client still bursts 200 requests into a 2-second span at the seam between them:
 
 ```mermaid
 xychart-beta
@@ -134,7 +137,7 @@ The minute window (100 req/min) prevents burst abuse. The day window (1000 req/d
 ### Dependencies and models
 
 ```python
-# requirements: fastapi>=0.111, redis[asyncio]>=5.0, pydantic>=2.0, uvicorn>=0.29
+# requirements: fastapi>=0.140, redis>=8.0, pydantic>=2.13, uvicorn>=0.51
 
 from __future__ import annotations
 
@@ -181,7 +184,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(lifespan=lifespan)
 ```
 
-### RFC 7807 Problem Details error model and custom exception
+### RFC 9457 Problem Details error model and custom exception
 
 ```python
 class ProblemDetail(BaseModel):
@@ -210,6 +213,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRe
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content=body.model_dump(),
+        media_type="application/problem+json",  # required by RFC 9457
         headers={"Retry-After": str(exc.retry_after)},
     )
 ```
@@ -282,8 +286,10 @@ def _minute_key(api_key: str) -> str:
 
 
 def _day_key(api_key: str) -> str:
-    from datetime import date
-    return f"rate::{api_key}::day::{date.today().isoformat()}"
+    # UTC, not local time: the Retry-After below counts down to UTC midnight,
+    # so the bucket must roll at UTC midnight too.
+    from datetime import datetime, timezone
+    return f"rate::{api_key}::day::{datetime.now(tz=timezone.utc).date().isoformat()}"
 
 
 class RateLimiter:
@@ -504,10 +510,10 @@ async def test_fail_open_on_redis_error() -> None:
 | Dimension | This design | Alternative | When to switch |
 |-----------|-------------|-------------|----------------|
 | Enforcement point | `Depends()` per route | ASGI middleware | When all routes share identical limits and you want zero risk of a route forgetting to declare the dependency |
-| Atomicity | Lua script (`EVAL`) | Redis pipeline with `MULTI`/`EXEC` | Never — `MULTI`/`EXEC` in a pipeline is optimistic, not atomic; Lua is strictly safer |
+| Atomicity | Lua script (`EVAL`) | `MULTI`/`EXEC` transaction | Never for this job — `MULTI`/`EXEC` is atomic and isolated, but queued commands return nothing until `EXEC`, so you cannot branch on the count inside it; that needs `WATCH` + a client retry loop. Lua does the read, the branch and the write server-side in one pass |
 | State store | Redis (distributed) | In-process `dict` + `asyncio.Lock` | Single-pod deployments only; breaks immediately with a second pod |
-| Algorithm | Sliding window counter (fixed boundary) | Sliding window log (true sliding) | When ±1 request accuracy at window boundaries is a hard requirement; log uses O(N) memory per key where N = requests per window |
-| Algorithm | Sliding window counter | Token bucket | When burst capacity is a feature, not a bug (e.g., allow 20-request bursts then refill at 1.67 req/s) |
+| Algorithm | Fixed window counter | Sliding window log (true sliding) | When a hard bound over any 60-second span is required; log uses O(N) memory per key where N = requests per window |
+| Algorithm | Fixed window counter | Token bucket | When burst capacity is a feature, not a bug (e.g., allow 20-request bursts then refill at 1.67 req/s) |
 | Fail behavior | Fail-open (allow on Redis error) | Fail-closed (503 on Redis error) | High-security APIs (financial, auth) where an uncontrolled burst is worse than temporary unavailability |
 
 ---
@@ -517,11 +523,11 @@ async def test_fail_open_on_redis_error() -> None:
 **Q: Why use a Lua script instead of separate GET + INCR commands?**
 The separate approach has a TOCTOU race: two concurrent requests can both read `count = N`, both pass the `N < limit` check, and both increment — writing `N+1` and `N+2` while one of them should have been rejected. The Lua script runs as a single atomic operation on the Redis server (which is single-threaded for command execution), so no other command can interleave. It also saves one network round-trip compared to a GET + INCR + EXPIRE sequence.
 
-**Q: What is the sliding window counter algorithm and how does it differ from a true sliding window log?**
-The sliding window counter buckets time into discrete windows (e.g., each 60-second interval). All requests in the same window share one counter. At the exact second a new window starts, the counter resets. A true sliding window log stores the timestamp of every request in a sorted set; to check the limit you count entries from `now - 60s` to `now` and evict the rest. The log gives perfect accuracy but uses O(requests) memory per key and requires two Redis commands (`ZREMRANGEBYSCORE` + `ZCARD`). The counter approximation uses O(1) memory but can allow a small overcount if requests cluster near a window boundary.
+**Q: What is the fixed window counter algorithm and how does it differ from a true sliding window log?**
+The fixed window counter buckets time into discrete windows (e.g., each 60-second interval). All requests in the same window share one counter. At the exact second a new window starts, the counter resets. A true sliding window log stores the timestamp of every request in a sorted set; to check the limit you count entries from `now - 60s` to `now` and evict the rest. The log gives perfect accuracy but uses O(requests) memory per key and requires two Redis commands (`ZREMRANGEBYSCORE` + `ZCARD`). The counter uses O(1) memory but admits up to 2x the limit across a window boundary when requests cluster on the seam.
 
 **Q: How would you add per-IP limits alongside per-API-key limits?**
-Add a second `RateLimiter` variant that keys on `request.client.host` instead of the `X-Api-Key` header. Apply it as an additional dependency or stack both: `dependencies=[Depends(ip_limiter), Depends(key_limiter)]`. The two limiters are independent; either one can trigger a 429. Use separate key namespaces — `rate::ip::{ip}::minute::...` — to avoid collisions.
+Add a second `RateLimiter` variant that keys on `request.client.host` instead of the `X-Api-Key` header. Apply it as an additional dependency or stack both: `dependencies=[Depends(ip_limiter), Depends(key_limiter)]`. The two limiters are independent; either one can trigger a 429. Use separate key namespaces — `rate::ip::{ip}::minute::...` — to avoid collisions. Behind a proxy, `request.client.host` is the proxy's address, so you must run Uvicorn with `--proxy-headers --forwarded-allow-ips=<lb-cidr>` and let it rewrite `client.host` from `X-Forwarded-For`. Never read `X-Forwarded-For` yourself and never trust the leftmost entry: a client can send any header it likes, so an attacker rotates a fake value per request and the IP limit becomes a no-op. Take the rightmost hop your own infrastructure appended, and pin `forwarded-allow-ips` to the load balancer's addresses so unproxied traffic cannot spoof it at all.
 
 **Q: What happens if Redis goes down mid-deployment?**
 The `except aioredis.RedisError` block in `__call__` catches all connection errors, timeouts, and cluster failures. It logs a warning (which should trigger a PagerDuty alert via your log aggregator) and returns without raising, allowing the request to proceed to the route handler. This means the API stays up but rate limiting is suspended. If you prefer fail-closed, replace the `logger.warning` with `raise HTTPException(status_code=503)`.
@@ -569,7 +575,7 @@ Add an ASGI middleware that runs after the `RateLimiter` dependency has populate
 A class instance can hold configuration (`minute_limit`, `day_limit`) set at construction time. A plain function has a fixed signature; to parameterize it you need `functools.partial` or a closure factory, both of which are harder to read and introspect. `Depends(RateLimiter(minute_limit=10))` reads as a self-documenting declaration. FastAPI resolves callable instances exactly like coroutine functions.
 
 **Q: If you need rate limiting at 50,000 req/s across 20 pods, does a single Redis instance hold up?**
-A single Redis node handles roughly 100,000 simple SET/GET operations per second on commodity hardware. A Lua script is slightly heavier — benchmark at ~60,000–80,000 eval/s. At 50,000 req/s across 20 pods each doing one `eval` call per request, that is 50,000 Redis operations/s — within single-node headroom. For headroom beyond that, shard by API key prefix across a Redis Cluster (use consistent hashing so the same key always lands on the same shard). Avoid cross-slot Lua scripts; ensure each key touches exactly one hash slot.
+Do the arithmetic before answering, and note that this design issues **two** `eval` calls per request — one for the minute window, one for the day window. 50,000 req/s is therefore 100,000 Redis operations/s, not 50,000. Redis's own published benchmark guidance puts a single node in the low hundreds of thousands of simple ops/s on commodity hardware without pipelining, so 100,000 evals/s is plausible but leaves little headroom and must be measured on your own hardware with `redis-benchmark` before you commit to it. Cheap fixes first: collapse the two windows into one script (needs a hash tag so both keys share a slot), or check the day window only on a sampled fraction of requests. Beyond that, shard by API key across a Redis Cluster so the same key always lands on the same shard, and keep every script single-key so it never spans slots.
 
 **Q: How would you handle a Redis Cluster where Lua scripts cannot span multiple keys?**
 Each rate-limit key (`rate::{api_key}::minute::...`) is a single key, not a multi-key operation, so there is no cross-slot problem. If you needed to atomically update two keys (e.g., minute key and day key in one script), you would have to use Redis hash tags — `{api_key}` — to force both keys onto the same slot. The current design runs two independent Lua scripts (one per window) and accepts that they are not atomically linked; the practical risk (one window passes, the other fails, leaving a partial increment) is acceptable because each window's counter is independently consistent.

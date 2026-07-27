@@ -43,7 +43,7 @@ flowchart LR
 
     Client(["POST /orders"])
     Handler("FastAPI Handler<br/>under 200 ms")
-    Queue@{ icon: "logos:redis", form: "square", label: "Redis Queue<br/>arq:default/high", pos: "b", h: 44 }
+    Queue@{ icon: "logos:redis", form: "square", label: "Redis Queue<br/>arq:queue sorted set", pos: "b", h: 44 }
     Workers("ARQ Workers<br/>N processes<br/>send_email · gen_invoice · update_erp")
     Idem@{ icon: "logos:redis", form: "square", label: "Redis<br/>Idempotency Store", pos: "b", h: 44 }
     Results@{ icon: "logos:redis", form: "square", label: "Redis<br/>Result Backend", pos: "b", h: 44 }
@@ -186,41 +186,58 @@ may execute more than once and defends with an idempotency key.
 ```
 Key format:  idem:{order_id}:{task_name}
 TTL:         48 hours (covers any retry window)
-Set on:      successful task completion
-Check on:    task entry, before doing work
+Claimed on:  task entry, atomically, before doing work
+Released on: failure, so the retry can claim it again
 ```
 
-`Redis SET NX EX` is atomic: if the key already exists the SET returns 0 and the handler returns
-immediately without re-sending the email or re-calling the ERP.
+The claim must be a **single atomic command**, not a check followed by a write. `EXISTS` then
+`SET` is a check-then-act race: two workers handed the same at-least-once redelivery both see
+the key absent, both proceed, and the customer gets two emails. `SET key 1 NX EX 172800`
+collapses both steps into one server-side operation — it returns `True` for exactly one caller
+and `None` for every other, so only one worker ever does the work.
+
+Claim-before-work also changes the failure semantics: because the key is set *before* the
+SendGrid call rather than after it, a task that fails must `DELETE` the key on its way out, or
+the retry would see its own claim and skip the work forever. The handlers below do exactly that.
 
 ---
 
 ### 3. Retry strategy — exponential backoff with jitter
 
-ARQ exposes `retry` inside a job function via the context dict. The formula used:
+ARQ counts attempts for you: the worker puts a 1-indexed `job_try` into the job context dict on
+every execution. **Read the attempt number from `ctx["job_try"]`, never from a job argument.**
+Raising `Retry` re-queues the *same* job with the *same* serialised arguments, so a handler
+that took `attempt: int = 1` as a parameter would see `attempt == 1` on every single execution,
+never reach its `attempt >= max_retries` branch, and never dead-letter anything. The formula
+used:
 
 ```
-delay = min(base * 2^attempt, cap) + random.uniform(0, jitter)
+delay = min(base * 2^(attempt-1), cap) + random.uniform(0, jitter)
 base  = 5 s
 cap   = 60 s
 jitter = 10 s
-attempts 1→2→3: ~5 s, ~15 s, ~45 s (approximate; jitter varies)
+attempt 1 fails -> defer 5 s  + jitter
+attempt 2 fails -> defer 10 s + jitter
+attempt 3 fails -> dead-letter, no further defer
 ```
 
 ```mermaid
 xychart-beta
-    title "Backoff delay by retry attempt (base 5 s, cap 60 s)"
-    x-axis ["Attempt 1", "Attempt 2", "Attempt 3"]
-    y-axis "Delay before retry (seconds)" 0 --> 60
-    bar [5, 15, 45]
+    title "Deferred delay after each failure (base 5 s, jitter 0-10 s)"
+    x-axis ["After attempt 1", "After attempt 2", "After attempt 3"]
+    y-axis "Delay before next run (seconds)" 0 --> 30
+    bar [5, 10, 0]
 ```
 
-The delay roughly doubles each attempt (`5 × 2^attempt`) before jitter is added; growth would
-flatten at the 60 s cap, but this system dead-letters after the 3rd attempt and never reaches it.
+The exponential term doubles each attempt (`5 × 2^(attempt-1)` = 5 s, 10 s, 20 s), so growth
+would flatten at the 60 s cap only from attempt 5 onward; this system dead-letters after the 3rd
+attempt and therefore never reaches the cap. The third bar is zero because attempt 3 does not
+defer — it dead-letters.
 
 After 3 failures the worker catches the terminal exception, serialises the job metadata to the DLQ
-list, and marks the ARQ job as complete (so ARQ stops retrying). The DLQ entry contains enough
-context to re-enqueue manually.
+list, and returns normally so ARQ marks the job complete and stops retrying. `WorkerSettings.max_tries`
+is set to the same ceiling as a backstop, so a handler bug that forgets to dead-letter still cannot
+retry forever. The DLQ entry contains enough context to re-enqueue manually.
 
 ---
 
@@ -319,15 +336,22 @@ from typing import Any
 import redis.asyncio as aioredis
 
 
-async def is_duplicate(redis: aioredis.Redis, order_id: str, task_name: str) -> bool:
-    """Return True if this task already completed successfully."""
+async def claim(redis: aioredis.Redis, order_id: str, task_name: str) -> bool:
+    """
+    Atomically claim this (order, task) pair. Returns True for exactly one
+    caller; False for every duplicate delivery.
+
+    SET ... NX EX is one round trip and one server-side operation. An
+    EXISTS-then-SET pair would be a check-then-act race: two concurrent
+    redeliveries both observe the key absent and both do the work.
+    """
     key = f"idem:{order_id}:{task_name}"
-    return await redis.exists(key) == 1
+    return await redis.set(key, "1", nx=True, ex=settings.idempotency_ttl_seconds) is True
 
 
-async def mark_complete(redis: aioredis.Redis, order_id: str, task_name: str) -> None:
-    key = f"idem:{order_id}:{task_name}"
-    await redis.set(key, "1", ex=settings.idempotency_ttl_seconds)
+async def release(redis: aioredis.Redis, order_id: str, task_name: str) -> None:
+    """Drop the claim so a retry may run. Called on every failure path."""
+    await redis.delete(f"idem:{order_id}:{task_name}")
 
 
 async def store_result(
@@ -349,7 +373,15 @@ async def push_dlq(redis: aioredis.Redis, metadata: dict[str, Any]) -> None:
 
 
 def backoff_delay(attempt: int) -> float:
-    """Exponential backoff with full jitter (attempt is 1-indexed)."""
+    """
+    Capped exponential backoff plus additive jitter (attempt is 1-indexed).
+
+    Note this is NOT "full jitter", which is random(0, min(cap, base*2^n))
+    and can return a near-zero delay. This variant always waits at least the
+    capped exponential term and adds 0-10 s of spread on top, which keeps a
+    guaranteed floor between attempts against a downstream that needs time
+    to recover.
+    """
     exp = settings.task_base_delay * (2 ** (attempt - 1))
     capped = min(exp, settings.task_max_delay)
     return capped + random.uniform(0, settings.task_jitter)
@@ -366,9 +398,9 @@ from arq import Retry
 
 from .helpers import (
     backoff_delay,
-    is_duplicate,
-    mark_complete,
+    claim,
     push_dlq,
+    release,
     store_result,
 )
 
@@ -377,13 +409,16 @@ async def _get_redis(ctx: dict[str, Any]) -> aioredis.Redis:
     return ctx["redis"]
 
 
-async def send_confirmation_email(ctx: dict[str, Any], order_id: str, attempt: int = 1) -> str:
+async def send_confirmation_email(ctx: dict[str, Any], order_id: str) -> str:
     """Send order confirmation email via SendGrid. Idempotent via Redis NX key."""
     redis = await _get_redis(ctx)
     job_id: str = ctx["job_id"]
+    # ARQ owns the attempt counter. Do NOT pass one as a job argument: a
+    # Retry re-runs the job with identical arguments, so it would never move.
+    attempt: int = ctx["job_try"]
     start = time.monotonic()
 
-    if await is_duplicate(redis, order_id, "send_confirmation_email"):
+    if not await claim(redis, order_id, "send_confirmation_email"):
         await store_result(redis, job_id, "skipped_duplicate", 0.0)
         return "duplicate"
 
@@ -397,12 +432,13 @@ async def send_confirmation_email(ctx: dict[str, Any], order_id: str, attempt: i
             ) as resp:
                 resp.raise_for_status()
 
-        await mark_complete(redis, order_id, "send_confirmation_email")
         duration = (time.monotonic() - start) * 1000
         await store_result(redis, job_id, "success", duration)
         return "ok"
 
     except Exception as exc:
+        # The claim was taken before the work; drop it so the retry can run.
+        await release(redis, order_id, "send_confirmation_email")
         if attempt >= settings.task_max_retries:
             await push_dlq(
                 redis,
@@ -420,13 +456,14 @@ async def send_confirmation_email(ctx: dict[str, Any], order_id: str, attempt: i
         raise Retry(defer=backoff_delay(attempt)) from exc
 
 
-async def generate_invoice(ctx: dict[str, Any], order_id: str, attempt: int = 1) -> str:
+async def generate_invoice(ctx: dict[str, Any], order_id: str) -> str:
     """Generate PDF invoice and upload to S3. Idempotent."""
     redis = await _get_redis(ctx)
     job_id: str = ctx["job_id"]
+    attempt: int = ctx["job_try"]
     start = time.monotonic()
 
-    if await is_duplicate(redis, order_id, "generate_invoice"):
+    if not await claim(redis, order_id, "generate_invoice"):
         await store_result(redis, job_id, "skipped_duplicate", 0.0)
         return "duplicate"
 
@@ -436,12 +473,12 @@ async def generate_invoice(ctx: dict[str, Any], order_id: str, attempt: int = 1)
         pdf_key = f"invoices/{order_id}.pdf"
         # await s3_client.upload_fileobj(pdf_bytes, bucket, pdf_key)
 
-        await mark_complete(redis, order_id, "generate_invoice")
         duration = (time.monotonic() - start) * 1000
         await store_result(redis, job_id, "success", duration)
         return pdf_key
 
     except Exception as exc:
+        await release(redis, order_id, "generate_invoice")
         if attempt >= settings.task_max_retries:
             await push_dlq(
                 redis,
@@ -454,32 +491,33 @@ async def generate_invoice(ctx: dict[str, Any], order_id: str, attempt: int = 1)
         raise Retry(defer=backoff_delay(attempt)) from exc
 
 
-async def update_erp_inventory(ctx: dict[str, Any], order_id: str, attempt: int = 1) -> str:
+async def update_erp_inventory(ctx: dict[str, Any], order_id: str) -> str:
     """Push inventory delta to SAP ERP. Idempotent via ERP idempotency header."""
     redis = await _get_redis(ctx)
     job_id: str = ctx["job_id"]
+    attempt: int = ctx["job_try"]
     start = time.monotonic()
 
-    if await is_duplicate(redis, order_id, "update_erp_inventory"):
+    if not await claim(redis, order_id, "update_erp_inventory"):
         await store_result(redis, job_id, "skipped_duplicate", 0.0)
         return "duplicate"
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"https://erp.internal/inventory/update",
+                "https://erp.internal/inventory/update",
                 json={"order_id": order_id},
                 headers={"Idempotency-Key": f"{order_id}:update_erp_inventory"},
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as resp:
                 resp.raise_for_status()
 
-        await mark_complete(redis, order_id, "update_erp_inventory")
         duration = (time.monotonic() - start) * 1000
         await store_result(redis, job_id, "success", duration)
         return "ok"
 
     except Exception as exc:
+        await release(redis, order_id, "update_erp_inventory")
         if attempt >= settings.task_max_retries:
             await push_dlq(
                 redis,
@@ -514,9 +552,11 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_dsn)
-    max_jobs = settings.arq_max_jobs
-    job_timeout = 30  # seconds; kills hung tasks
+    max_jobs = settings.arq_max_jobs        # ARQ's own default is 10
+    job_timeout = 30  # seconds; kills hung tasks (ARQ default is 300)
     keep_result = settings.result_ttl_seconds
+    max_tries = settings.task_max_retries   # backstop; ARQ's default is 5
+    queue_name = "arq:queue"                # one queue per worker process
 
 
 # Run with: python -m arq src.worker.WorkerSettings
@@ -538,9 +578,9 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 async def enqueue_order_tasks(pool: ArqRedis, order_id: str) -> None:
     """Enqueue all three post-order tasks. Each runs independently."""
-    await pool.enqueue_job("send_confirmation_email", order_id, attempt=1)
-    await pool.enqueue_job("generate_invoice", order_id, attempt=1)
-    await pool.enqueue_job("update_erp_inventory", order_id, attempt=1)
+    await pool.enqueue_job("send_confirmation_email", order_id)
+    await pool.enqueue_job("generate_invoice", order_id)
+    await pool.enqueue_job("update_erp_inventory", order_id)
 
 
 @router.post("/", response_model=OrderResponse, status_code=201)
@@ -586,7 +626,7 @@ async def requeue_dlq_item(
     """Remove idempotency key and re-enqueue a DLQ task."""
     idem_key = f"idem:{order_id}:{task_name}"
     await redis.delete(idem_key)
-    await arq_pool.enqueue_job(task_name, order_id, attempt=1)
+    await arq_pool.enqueue_job(task_name, order_id)
     return {"status": "requeued", "task": task_name, "order_id": order_id}
 
 
@@ -619,7 +659,7 @@ app.include_router(admin_router)
 
 | Component | Role |
 |-----------|------|
-| `arq` | Async task queue backed by Redis Streams; `Retry` exception triggers deferred retry |
+| `arq` | Async task queue backed by a Redis **sorted set** (`arq:queue`, score = scheduled run time) plus one `arq:job:<id>` string per job — not Redis Streams; `Retry` exception triggers a deferred re-run |
 | `arq.connections.ArqRedis` | Connection pool injected into FastAPI via `Depends` |
 | `redis.asyncio` | Direct Redis client for idempotency keys, result records, DLQ list |
 | `fastapi.BackgroundTasks` | **Not used for durable work** — shown in broken example only |
@@ -683,10 +723,13 @@ business-critical tasks like invoice generation and ERP updates it is not — th
 broker.
 
 **Q: How do you prevent a retried task from sending the email twice?**
-Before doing any work, the handler checks a Redis key `idem:{order_id}:{task_name}` using a GET.
-If the key exists (set by a previous successful run), the handler returns immediately without
-calling SendGrid. The key is set atomically with `SET key 1 EX 172800` only after the downstream
-call succeeds. The 48-hour TTL covers all realistic retry windows.
+Before doing any work, the handler claims the key `idem:{order_id}:{task_name}` with a single
+`SET key 1 NX EX 172800`. That command returns a value for exactly one caller and `None` for
+every duplicate delivery, so only one worker proceeds to SendGrid. A `GET` followed by a `SET`
+would not do: it is a check-then-act race, and two concurrent redeliveries would both read the
+key as absent and both send the email. Because the claim is taken *before* the call, every
+failure path deletes the key so the retry can claim it again. The 48-hour TTL covers all
+realistic retry windows.
 
 **Q: What is the retry delay formula and why add jitter?**
 Delay = `min(5 * 2^(attempt-1), 60) + uniform(0, 10)`. Without jitter, all workers that fail on
@@ -701,10 +744,13 @@ via `GET /admin/dlq` and items can be re-enqueued after manual investigation via
 `POST /admin/dlq/requeue`.
 
 **Q: How do you scale the worker pool under load?**
-Each ARQ worker runs `max_jobs=50` concurrent async tasks (I/O-bound, so no thread contention).
-Horizontal scaling is straightforward: add worker replicas as Kubernetes Deployments. Workers
-compete on the same Redis queue; no coordination is needed. Monitor queue depth with
-`LLEN arq:default` and add replicas when depth stays above 1000 for more than 60 seconds.
+Each ARQ worker runs `max_jobs=50` concurrent async tasks (I/O-bound, so no thread contention);
+ARQ's own default is 10, so this is a deliberate raise. Horizontal scaling is straightforward: add
+worker replicas as Kubernetes Deployments. Workers compete on the same Redis queue; no coordination
+is needed. The queue is a sorted set, not a list, so monitor depth with `ZCARD arq:queue` (`LLEN`
+returns a WRONGTYPE error against it) and add replicas when depth stays above 1000 for more than
+60 seconds. `ZCOUNT arq:queue -inf <now_ms>` is the more useful signal: it counts only jobs whose
+scheduled time has already arrived, excluding retries still sitting out their backoff.
 
 **Q: What is the ordering guarantee across the three tasks?**
 None — they are enqueued independently and may complete in any order. This is intentional: email,
@@ -726,10 +772,14 @@ an exception on the first N calls to simulate failures, then assert the DLQ list
 final attempt equals 1.
 
 **Q: How would you add task prioritization?**
-ARQ supports multiple queues: `queue_name` parameter on `enqueue_job` and a `queue_read_burst_limit`
-in `WorkerSettings`. Define `arq:high` and `arq:default`. Invoice generation (user-visible) goes to
-`arq:high`; ERP updates (internal) go to `arq:default`. Workers poll `arq:high` first, falling back
-to `arq:default` when it is empty.
+ARQ has no priority queue and no multi-queue worker — `queue_name` in `WorkerSettings` is a single
+string, so one worker process reads exactly one queue. Prioritization is therefore a deployment
+concern, not a config flag: create `arq:high` and `arq:queue`, route with the `_queue_name`
+argument to `enqueue_job` (invoice generation, which is user-visible, goes to `arq:high`; ERP
+updates go to the default), and run two Deployments — a larger replica count on the high-priority
+queue. That gives real isolation rather than best-effort ordering: a flood of ERP retries cannot
+starve invoices, because they are consumed by different processes. Within a single queue the sorted
+set is ordered by scheduled run time, so the only lever you have is to enqueue with `_defer_by`.
 
 **Q: What observability would you add in production?**
 Structured log lines at task start and completion (order_id, task_name, attempt, duration_ms,

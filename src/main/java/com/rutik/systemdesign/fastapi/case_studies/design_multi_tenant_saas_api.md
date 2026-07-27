@@ -47,7 +47,7 @@ flowchart LR
     subgraph pod["FastAPI Pod (x N)"]
         direction LR
         mw["1. JWTMiddleware<br/>decode + attach<br/>TenantContext"] --> gt["2. get_tenant()<br/>extract tenant_id"]
-        gt --> gdb["3. get_db()<br/>SET LOCAL<br/>app.tenant_id"]
+        gt --> gdb["3. get_db()<br/>set_config<br/>app.tenant_id, local"]
         gdb --> gcu["4. get_current_user()<br/>load user + roles"]
         gcu --> rh["5. Route handler<br/>query projects / tasks"]
     end
@@ -75,7 +75,7 @@ flowchart LR
 **Request flow:**
 1. Client sends `Authorization: Bearer <JWT>` with every request.
 2. `JWTMiddleware` decodes the token, verifies signature, and stores `tenant_id` + `user_id` in `request.state`.
-3. `get_db()` opens an `AsyncSession`, then executes `SET LOCAL app.current_tenant_id = '<id>'` so every subsequent query in the transaction is scoped by the RLS policy.
+3. `get_db()` opens an `AsyncSession`, then executes `SELECT set_config('app.current_tenant_id', $1, true)` so every subsequent query in the transaction is scoped by the RLS policy.
 4. `get_current_user()` loads the `User` row and their `Role` for the current tenant.
 5. Route handlers query normally; PostgreSQL's RLS policy silently filters all rows to the current tenant.
 
@@ -111,7 +111,7 @@ Plotting the same three strategies on isolation strength vs operational complexi
 
 **Decision: RLS with a PostgreSQL session variable.**
 
-PostgreSQL RLS policies run inside the query executor — even a bug in application code cannot bypass them once the session variable is set to a valid tenant. With 500 tenants a schema-per-tenant approach would mean 500 × N tables, making `pg_class` bloat a real operational problem. RLS keeps one schema, one migration path, and allows a fully shared connection pool.
+PostgreSQL RLS policies run inside the query executor, so once the table is correctly configured a bug in application code cannot bypass them. "Correctly configured" is doing real work in that sentence: `ENABLE ROW LEVEL SECURITY` does not apply to the table's owner, and the application role usually *is* the owner, so the table must also carry `FORCE ROW LEVEL SECURITY` (see the migration below) and the application role must never hold `BYPASSRLS` or superuser. With 500 tenants a schema-per-tenant approach would mean 500 × N tables, making `pg_class` bloat a real operational problem. RLS keeps one schema, one migration path, and allows a fully shared connection pool.
 
 ### 2. Tenant Resolution: JWT `tenant_id` claim
 
@@ -123,9 +123,11 @@ Encoding roles inside the JWT would speed up permission checks but requires toke
 
 ### 4. Connection Pool: Shared `asyncpg` pool with RLS context per transaction
 
-Per-tenant connection pools would require pre-creating 500 min-pools, wasting 500 × `min_size` idle connections. A single shared pool with `SET LOCAL` (transaction-scoped, not session-scoped) guarantees that when a connection is returned to the pool the RLS variable resets automatically at transaction end.
+Per-tenant connection pools would require pre-creating 500 min-pools, wasting 500 × `min_size` idle connections. A single shared pool set transaction-locally guarantees that when a connection is returned to the pool the RLS variable resets automatically at transaction end.
 
-`SET LOCAL` is critical — `SET` (session-scoped) would leak the tenant context to the next request that reuses the connection.
+The transaction-local scope is the critical part — a session-scoped `SET` would leak the tenant context to the next request that reuses the connection.
+
+**Size the pool against `max_connections`, not against request concurrency.** `get_db` opens the transaction during dependency resolution and holds the connection until the response, so a request in flight is a connection in use. PostgreSQL's `max_connections` defaults to 100, and each backend costs a few MB plus per-backend planner state, so a single cluster realistically serves a few hundred direct connections, not thousands. With 20 connections per pod (`pool_size=5` + 15 overflow), 8 pods already reach 160 — past a stock 100-connection cluster. Two consequences: raise `max_connections` deliberately (and size shared memory with it), and put PgBouncer in **transaction** pooling mode in front so the API's 5,000 concurrent requests multiplex onto a couple of hundred real backends. Transaction pooling is compatible with this design precisely because the tenant context is transaction-local — a session-scoped `SET` would break under PgBouncer, since the client session and the server connection are no longer the same thing.
 
 ### 5. Alembic Migration: Single migration deploys RLS policies for all tenants
 
@@ -182,35 +184,70 @@ CREATE TABLE tasks (
 CREATE INDEX ON projects (tenant_id);
 CREATE INDEX ON tasks (tenant_id, project_id);
 
--- Enable RLS
+-- Enable RLS on EVERY tenant-scoped table, not just the two the handlers
+-- happen to query without a WHERE clause.
+ALTER TABLE users    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE roles    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks    ENABLE ROW LEVEL SECURITY;
 
--- RLS policies — use current_setting() to read the session variable
+-- ENABLE alone is NOT enough. Superusers and roles with BYPASSRLS always
+-- skip row security, and the TABLE OWNER skips it too unless forced. The
+-- application role is normally the owner (migrations created the tables),
+-- so with ENABLE only, every policy below is a no-op for the app and all
+-- tenants see all rows. FORCE makes the owner subject to its own policies.
+ALTER TABLE users    FORCE ROW LEVEL SECURITY;
+ALTER TABLE roles    FORCE ROW LEVEL SECURITY;
+ALTER TABLE projects FORCE ROW LEVEL SECURITY;
+ALTER TABLE tasks    FORCE ROW LEVEL SECURITY;
+
+-- RLS policies — use current_setting() to read the session variable.
+-- The single-argument form raises "unrecognized configuration parameter"
+-- when the variable was never set, which is the behaviour you want: a
+-- forgotten SET LOCAL fails loudly instead of quietly returning nothing.
+CREATE POLICY tenant_isolation_users ON users
+    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+
+CREATE POLICY tenant_isolation_roles ON roles
+    USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+
 CREATE POLICY tenant_isolation_projects ON projects
     USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 CREATE POLICY tenant_isolation_tasks ON tasks
     USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+
+-- A policy with only USING implicitly reuses that expression as its
+-- WITH CHECK, so INSERT and UPDATE cannot write a foreign tenant_id either.
+
+-- Belt and braces: run the API as a role that owns nothing, so even a
+-- forgotten FORCE cannot open the door.
+-- CREATE ROLE app_api LOGIN;  GRANT SELECT,INSERT,UPDATE,DELETE ON ALL
+-- TABLES IN SCHEMA public TO app_api;  -- and never grant it BYPASSRLS.
 ```
+
+The failure mode is worth seeing concretely. On PostgreSQL 16, with `ENABLE ROW
+LEVEL SECURITY` but no `FORCE`, connecting as the table owner and setting the
+tenant variable to tenant A returns **both** tenants' rows — the policy is
+simply not applied. Adding `FORCE ROW LEVEL SECURITY` returns tenant A's row
+only. The one-word difference is the whole isolation guarantee.
 
 ### Application configuration
 
 ```python
 # app/config.py
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     database_url: str          # asyncpg DSN
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
     db_pool_min_size: int = 5
     db_pool_max_size: int = 20
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
@@ -371,15 +408,18 @@ async def get_tenant(
 
 
 # BROKEN: opens a session but NEVER sets app.current_tenant_id
-# PostgreSQL's RLS policy reads current_setting('app.current_tenant_id')
-# If the variable is not set, current_setting() raises an error OR
-# returns empty string — depending on the missing_ok flag used when
-# the policy was created. Either way: either a 500 error on every
-# request, or (if missing_ok=true was used) RLS is silently bypassed
-# and ALL rows from ALL tenants are returned.
+# PostgreSQL's RLS policy reads current_setting('app.current_tenant_id').
+# One-arg form  -> ERROR: unrecognized configuration parameter, so every
+#                  request 500s. Loud, but at least not a leak.
+# missing_ok=true -> returns NULL (not ""), so `tenant_id = NULL::uuid`
+#                  evaluates to NULL, no row passes, and the endpoint
+#                  returns an empty list. Silently wrong, never a leak.
+# The real leak in this file is not here -- it is forgetting
+# FORCE ROW LEVEL SECURITY, which disables the policy entirely for the
+# table owner and returns every tenant's rows.
 async def get_db_broken():
     async with AsyncSessionLocal() as session:
-        yield session  # RLS context never set -- data leak or crash
+        yield session  # RLS context never set -- 500s or returns nothing
 ```
 
 **FIX** — set `app.current_tenant_id` with `SET LOCAL` at transaction start:
@@ -412,16 +452,22 @@ async def get_db(
 ) -> AsyncGenerator[AsyncSession, None]:
     """
     Open a scoped AsyncSession and set the RLS context variable for the
-    current tenant using SET LOCAL (transaction-scoped, not session-scoped).
+    current tenant, transaction-scoped rather than session-scoped.
 
-    SET LOCAL resets automatically when the transaction ends, so the
-    connection returning to the pool never carries stale tenant context.
+    A transaction-local setting resets automatically when the transaction
+    ends, so the connection returning to the pool never carries stale
+    tenant context.
     """
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # SET LOCAL is transaction-scoped: automatically cleared on commit/rollback
+            # set_config(name, value, is_local=true) is the parameterizable
+            # equivalent of SET LOCAL. `SET LOCAL app.x = $1` is a SYNTAX
+            # ERROR -- SET is a utility statement and takes a literal, not a
+            # bind parameter, so the driver rejects it before PostgreSQL runs
+            # it. Never build it by string interpolation to work around that:
+            # tenant_id would become an injection point.
             await session.execute(
-                text("SET LOCAL app.current_tenant_id = :tid"),
+                text("SELECT set_config('app.current_tenant_id', :tid, true)"),
                 {"tid": str(ctx.tenant_id)},
             )
             yield session
@@ -590,8 +636,9 @@ from app.routers import projects
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Schema is owned by Alembic, not by create_all: metadata.create_all
+    # knows nothing about RLS policies or FORCE ROW LEVEL SECURITY, so a
+    # process that bootstrapped its own tables would run with isolation off.
     yield
     await engine.dispose()
 
@@ -613,12 +660,12 @@ app = create_app()
 |---|---|
 | `HTTPBearer` dependency | Extracts the `Authorization: Bearer` token from every request without custom middleware. |
 | `Depends()` chaining | `get_db` depends on `get_tenant`; `get_current_user` depends on both. FastAPI resolves the dependency graph once per request and caches results within the request. |
-| `AsyncSession` + `session.begin()` | `async with session.begin()` opens an explicit transaction; `SET LOCAL` inside this block is automatically rolled back if the handler raises an exception, preventing a half-committed RLS context. |
-| `text()` from SQLAlchemy | Used to execute raw `SET LOCAL` SQL that has no ORM abstraction. The `text()` construct allows bound parameters (`:tid`) avoiding SQL injection. |
-| RLS policies in PostgreSQL | Enforced inside the query executor — immune to application-layer bugs. A miscoded query that omits a `WHERE tenant_id = ...` clause is still safe. |
+| `AsyncSession` + `session.begin()` | `async with session.begin()` opens an explicit transaction; the transaction-local RLS setting inside this block is automatically discarded if the handler raises, preventing a half-committed RLS context. |
+| `text()` from SQLAlchemy | Executes the raw `set_config(...)` call that has no ORM abstraction, with a bound parameter (`:tid`) so the tenant id can never be interpolated into SQL. `SET LOCAL` itself accepts no bind parameters, which is precisely why `set_config` is used. |
+| RLS policies in PostgreSQL | Enforced inside the query executor — immune to application-layer bugs *provided* the table carries `FORCE ROW LEVEL SECURITY` and the app role is not superuser/`BYPASSRLS`. Under those conditions a miscoded query that omits a `WHERE tenant_id = ...` clause is still safe. |
 | `require_role()` factory | Returns a parameterized `Depends` — a clean pattern for expressing endpoint-level RBAC without repeating permission checks in every handler. |
 | `model_config = {"from_attributes": True}` | Pydantic v2 setting that allows `model_validate(orm_object)` to work with SQLAlchemy model instances. |
-| `lifespan` context manager | Replaces deprecated `on_event("startup")`. Ensures the connection pool is disposed cleanly on shutdown, preventing connection leaks in Kubernetes pod restarts. |
+| `lifespan` context manager | Runs startup and shutdown code exactly once per process, around the `yield`. Ensures the connection pool is disposed cleanly on shutdown, preventing connection leaks in Kubernetes pod restarts. |
 | `mapped_column` + `Mapped[]` | SQLAlchemy 2.0 style — fully typed ORM columns with Python type inference, compatible with mypy. |
 
 ---
@@ -633,7 +680,7 @@ app = create_app()
 | Connection pooling | Full shared pool | Limited (schema switching overhead) | Impossible to share |
 | Migration complexity | Single migration | N migrations or dynamic SQL | N migrations + N connections |
 | `pg_class` bloat at 500 tenants | None (1 schema) | High (500 × table count) | N/A |
-| Noisy neighbour risk | Mitigated by RLS; query planner sees full table | Same | None |
+| Noisy neighbour risk | Not addressed by RLS — one shared cluster, so a heavy tenant burns shared CPU and I/O; needs per-tenant rate limiting at the edge | Same | None |
 | Tenant onboarding speed | Instant (new row in tenants) | Schema creation required | Database creation required |
 | Regulatory isolation (GDPR delete) | `DELETE WHERE tenant_id = ?` | `DROP SCHEMA` | `DROP DATABASE` |
 | Cost | Low | Medium | High ($$ per DB instance) |
@@ -686,7 +733,7 @@ Subdomain resolution requires the API gateway to parse the `Host` header and inj
 ## Interview Discussion Points
 
 **Q: Why use `SET LOCAL` instead of `SET` for the RLS context variable?**
-`SET LOCAL` is transaction-scoped and reverts automatically at transaction end. `SET` is session-scoped and persists on the connection even after it returns to the pool, which would cause the next request reusing that connection to execute under the previous tenant's RLS context — a critical data leak. `SET LOCAL` is the only safe choice in a pooled async environment.
+`SET LOCAL` is transaction-scoped and reverts automatically at transaction end. `SET` is session-scoped and persists on the connection even after it returns to the pool, which would cause the next request reusing that connection to execute under the previous tenant's RLS context — a critical data leak. Transaction scope is the only safe choice in a pooled async environment. In code, express it as `set_config('app.current_tenant_id', :tid, true)` rather than the `SET LOCAL` statement: the third argument means "local", and unlike `SET` it accepts a bind parameter, so the tenant id never has to be interpolated into SQL.
 
 **Q: What happens if a request handler raises an exception before `SET LOCAL` commits?**
 The `async with session.begin()` block rolls back the transaction on any unhandled exception, which also reverts `SET LOCAL`. The connection is returned to the pool in a clean state. Even partial writes are rolled back, ensuring atomicity.
@@ -698,13 +745,13 @@ The 404 response for `DELETE /projects/{id}` is intentional. Returning 403 (Forb
 RLS filtering happens at the query level; a noisy tenant increases PostgreSQL CPU and I/O but does not affect other tenants' connection availability because the pool is shared. To enforce true per-tenant QoS, add a token-bucket rate limiter at the API gateway keyed on `tenant_id` (extracted from the JWT). This limits burst throughput per tenant before the request reaches the database.
 
 **Q: What is the risk of storing `tenant_id` only in the JWT and not re-validating it in every query?**
-The risk is mitigated by RLS. The database enforces `tenant_id` isolation independently of application logic. However, the application still validates that the `user_id` in the JWT belongs to the claimed `tenant_id` (the `User` lookup in `get_current_user` includes `User.tenant_id == ctx.tenant_id`) — preventing a token-swap attack where a valid user forges a `tenant_id` claim.
+The risk is mitigated by RLS. The database enforces `tenant_id` isolation independently of application logic. A user cannot simply edit the `tenant_id` claim — that would invalidate the signature. What the extra check defends against is a *mis-issued* token: a bug in the login path, an admin impersonation feature, or a shared signing key across environments can all mint a correctly signed token whose `user_id` and `tenant_id` do not belong together. The `User` lookup in `get_current_user` includes `User.tenant_id == ctx.tenant_id`, so such a token authenticates but resolves to no user and is rejected. Treat it as defence in depth against your own issuer, not as protection against forgery.
 
 **Q: How would you implement tenant-scoped rate limiting?**
 Use Redis with a sliding window counter keyed on `f"ratelimit:{tenant_id}:{window}"`. Inject it as a FastAPI dependency that runs after `get_tenant()`. Limits can be per-plan (e.g., free tier: 1,000 req/min, pro: 10,000 req/min) stored in a `tenant_config` table and cached in Redis with a short TTL.
 
 **Q: How do you run Alembic migrations without taking downtime?**
-RLS policies are `CREATE POLICY` DDL, which in PostgreSQL acquires an `ACCESS SHARE` lock (not a full table lock) on the target table. New columns should use `ADD COLUMN ... DEFAULT NULL` (non-locking in PostgreSQL 11+). The migration runs against the single schema, applies to all tenants simultaneously, and does not require per-tenant steps.
+Plan around the lock levels rather than assuming they are cheap. `CREATE POLICY` takes an `ACCESS EXCLUSIVE` lock on the target table — verifiable with `SELECT mode FROM pg_locks` inside an open transaction — so it blocks every reader and writer for its duration. It is fast (a catalog insert, no table rewrite), so the practical rule is: set a short `lock_timeout`, retry, and never let it queue behind a long-running query, because a blocked `ACCESS EXCLUSIVE` request also blocks everything behind it. `ADD COLUMN` likewise takes `ACCESS EXCLUSIVE`, but since PostgreSQL 11 a non-volatile default no longer forces a table rewrite, so the lock is held for milliseconds instead of the length of a full rewrite. The migration runs against the single schema, applies to all tenants simultaneously, and does not require per-tenant steps.
 
 **Q: How would you add a new tenant at runtime?**
 Insert a row into `tenants`, create the first user row, assign the `owner` role, and issue a JWT. No schema or database creation is required. The RLS policy already covers the new `tenant_id` because it uses a runtime `current_setting()` check rather than a static list.

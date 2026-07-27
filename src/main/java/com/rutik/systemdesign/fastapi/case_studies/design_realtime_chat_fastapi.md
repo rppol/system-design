@@ -84,7 +84,7 @@ Every connection passes through the same states before going bidirectional — t
 | Redis pub/sub | Cross-pod message fan-out; one channel per room |
 | `asyncio` background subscriber | Per-pod coroutine that reads from Redis and pushes to local connections |
 | PostgreSQL + SQLAlchemy (async) | Durable message persistence |
-| JWT (python-jose) | Stateless auth validated on first WS message |
+| JWT (PyJWT) | Stateless auth validated on first WS message |
 
 ---
 
@@ -106,7 +106,9 @@ The broken approach (shown in Implementation) stores connections only in a per-p
 
 **Choice: Async background task (broadcast-first, persist-via-task).**
 
-Writing to PostgreSQL synchronously before broadcasting adds 5-20 ms database latency to every message delivery, violating the P99 < 200 ms target under load. Instead, the handler broadcasts via Redis immediately, then enqueues a background task (via FastAPI `BackgroundTasks`) to persist to PostgreSQL. The tradeoff is a small durability window: if the pod crashes between publish and persist, that message is lost. For most chat applications this is acceptable. For financial or compliance-critical chat, a write-ahead log or outbox pattern would be required.
+Writing to PostgreSQL synchronously before broadcasting adds 5-20 ms database latency to every message delivery, violating the P99 < 200 ms target under load. Instead, the handler broadcasts via Redis immediately, then spawns a persistence coroutine with `asyncio.create_task`. The tradeoff is a small durability window: if the pod crashes between publish and persist, that message is lost. For most chat applications this is acceptable. For financial or compliance-critical chat, a write-ahead log or outbox pattern would be required.
+
+**Do not reach for `BackgroundTasks` here.** FastAPI runs background tasks after the *HTTP response* is sent, and a WebSocket route has no response cycle — the parameter still injects, `add_task` still returns cleanly, and the task **never runs**. Every message would be broadcast and silently never persisted, which is the exact opposite of the durability requirement. `BackgroundTasks` is for HTTP routes only.
 
 ```mermaid
 sequenceDiagram
@@ -119,7 +121,7 @@ sequenceDiagram
 
     CA->>P1: send message frame
     P1->>R: publish(room channel, payload)
-    Note right of P1: schedule background<br/>persist task (not awaited)
+    Note right of P1: asyncio.create_task<br/>persist (not awaited)
     R-->>P1: fan-out (self, skip)
     R-->>P2: fan-out
     P1-->>P1: deliver to local<br/>room connections
@@ -138,11 +140,15 @@ The sender is acknowledged and every subscriber is fanned out to in low single-d
 
 Passing a JWT as a query parameter (`/ws/room?token=xxx`) is a common shortcut but embeds the token in server access logs, proxy logs, and browser history — a significant security risk. The WebSocket HTTP upgrade request does not support the `Authorization` header in most browsers. The correct approach is to complete the WebSocket handshake unauthenticated, then require the client to send a structured `{"type":"auth","token":"<JWT>"}` frame as its very first message. The server sends an error frame and closes the connection if auth fails or the timeout elapses.
 
+Authentication is not authorization: a valid JWT proves *who* the caller is, not that they belong to the room in the URL path. Without a membership check any authenticated user can open `/ws/{room_id}` for any room and receive its entire live feed. The auth phase therefore does both — verify the token, then verify `(user_id, room_id)` against the membership table — before the connection is registered for fan-out.
+
 ### 5. Backpressure and Stale Connection Detection
 
 **Choice: Per-connection `asyncio.Queue` with bounded capacity and periodic ping.**
 
-A slow consumer (e.g., a mobile client on a poor connection) can stall `await websocket.send_text()` indefinitely, blocking the subscriber coroutine for all connections in that room. Each connection gets an `asyncio.Queue(maxsize=64)` as a buffer. The sender puts messages into the queue without blocking; a per-connection writer coroutine drains the queue. If the queue is full (slow consumer), the message is dropped and the connection is flagged for eviction. Additionally, the server sends a WebSocket ping frame every 20 seconds; if no pong is received within 10 seconds, the connection is closed and removed from the registry.
+A slow consumer (e.g., a mobile client on a poor connection) can stall `await websocket.send_text()` indefinitely, blocking the subscriber coroutine for all connections in that room. Each connection gets an `asyncio.Queue(maxsize=64)` as a buffer. The sender puts messages into the queue without blocking; a per-connection writer coroutine drains the queue. If the queue is full (slow consumer), the message is dropped and the connection is flagged for eviction. Additionally, the server sends an application-level ping every 20 seconds; if no pong is received within 10 seconds, the connection is closed and removed from the registry.
+
+The ping is application-level (a JSON frame) rather than a protocol-level control frame for two reasons. Starlette's `WebSocket` exposes no ping API, and Uvicorn's own protocol keepalive defaults to `--ws-ping-interval 20 --ws-ping-timeout 20`, a 40-second worst case that misses the 30-second cleanup requirement. An application ping also lets the pong flow through the same receive loop as chat traffic, which matters because **only one coroutine may call `receive_text()` on a socket**: a second reader silently steals frames from the first, so chat messages would vanish into the heartbeat. The heartbeat therefore waits on an `asyncio.Event` that the main loop sets.
 
 ```mermaid
 flowchart LR
@@ -313,10 +319,10 @@ class ConnectionManager:
                 for ws_id in dead:
                     room.pop(ws_id, None)
         except asyncio.CancelledError:
-            pass
+            raise  # never swallow cancellation
         finally:
             await pubsub.unsubscribe(channel_name)
-            await pubsub.close()
+            await pubsub.aclose()
 ```
 
 ### WebSocket Endpoint with JWT Auth and Heartbeat
@@ -330,16 +336,21 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from .auth import verify_jwt
 from .connection_manager import ConnectionManager, PING_INTERVAL, PONG_TIMEOUT
+from .membership import is_room_member
 from .persistence import persist_message
-from .dependencies import get_manager  # returns singleton from app.state
+from .dependencies import get_manager, get_session_factory  # singletons from app.state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# asyncio only holds a weak reference to a running Task; without a strong
+# reference the persistence task can be garbage-collected mid-write.
+_persist_tasks: set[asyncio.Task[None]] = set()
 
 
 class ChatMessage(BaseModel):
@@ -355,13 +366,16 @@ AUTH_TIMEOUT = 10.0  # seconds to send auth frame after connect
 async def websocket_endpoint(
     room_id: str,
     websocket: WebSocket,
-    background_tasks: BackgroundTasks,
-    manager: ConnectionManager = ...,  # injected via Depends in actual app
+    manager: ConnectionManager = Depends(get_manager),
+    session_factory=Depends(get_session_factory),
 ) -> None:
+    # NOTE: no BackgroundTasks parameter. FastAPI only drains background tasks
+    # after an HTTP response; on a WebSocket route they are never executed.
     send_queue = await manager.connect(room_id, websocket)
     user_id: str | None = None
+    pong_event = asyncio.Event()
 
-    # --- Phase 1: authenticate ---
+    # --- Phase 1: authenticate AND authorize ---
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT)
     except asyncio.TimeoutError:
@@ -375,8 +389,15 @@ async def websocket_endpoint(
             raise ValueError("expected auth frame")
         claims = verify_jwt(first.token)
         user_id = claims["sub"]
-    except Exception as exc:
-        await websocket.close(code=4003, reason=f"auth failed: {exc}")
+        # Authentication proves identity; membership proves entitlement to
+        # THIS room. Without it any valid token can read any room's feed.
+        if not await is_room_member(session_factory, user_id, room_id):
+            raise PermissionError("not a member of this room")
+    except Exception:
+        # Fixed, short reason: a close frame carries at most 123 bytes of
+        # reason text, and echoing the exception leaks internals to the client.
+        logger.info("Auth rejected for room %s", room_id, exc_info=True)
+        await websocket.close(code=4003, reason="auth failed")
         manager.disconnect(room_id, websocket)
         return
 
@@ -389,7 +410,7 @@ async def websocket_endpoint(
         name=f"writer-{id(websocket)}",
     )
     ping_task = asyncio.create_task(
-        _heartbeat(websocket, manager, room_id),
+        _heartbeat(websocket, pong_event, room_id),
         name=f"ping-{id(websocket)}",
     )
 
@@ -399,7 +420,10 @@ async def websocket_endpoint(
             msg = ChatMessage.model_validate_json(raw)
 
             if msg.type == "pong":
-                # heartbeat response — handled inside _heartbeat via event
+                # Only ONE coroutine may call receive_text() on a socket. The
+                # heartbeat waits on this event instead of reading frames
+                # itself, otherwise it steals chat messages from this loop.
+                pong_event.set()
                 continue
 
             if msg.type == "message" and msg.content:
@@ -412,7 +436,9 @@ async def websocket_endpoint(
                 }
                 # broadcast-first via Redis, persist asynchronously
                 await manager.publish(room_id, payload)
-                background_tasks.add_task(persist_message, payload)
+                task = asyncio.create_task(persist_message(payload, session_factory))
+                _persist_tasks.add(task)
+                task.add_done_callback(_persist_tasks.discard)
 
     except WebSocketDisconnect:
         logger.info("User %s disconnected from room %s", user_id, room_id)
@@ -428,39 +454,33 @@ async def _queue_writer(ws: WebSocket, q: asyncio.Queue[str]) -> None:
         while True:
             text = await q.get()
             await ws.send_text(text)
-    except (asyncio.CancelledError, Exception):
-        pass
+    except asyncio.CancelledError:
+        raise                      # CancelledError is BaseException: re-raise
+    except Exception:
+        logger.exception("Writer stopped for ws=%s", id(ws))
 
 
 async def _heartbeat(
     ws: WebSocket,
-    manager: ConnectionManager,
+    pong_event: asyncio.Event,
     room_id: str,
 ) -> None:
     """Sends periodic pings; closes connection if no pong within PONG_TIMEOUT."""
     try:
         while True:
             await asyncio.sleep(PING_INTERVAL)
+            pong_event.clear()
             await ws.send_text(json.dumps({"type": "ping"}))
             try:
-                await asyncio.wait_for(_wait_pong(ws), timeout=PONG_TIMEOUT)
+                await asyncio.wait_for(pong_event.wait(), timeout=PONG_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("Ping timeout for ws=%s in room=%s", id(ws), room_id)
                 await ws.close(code=1001, reason="ping timeout")
                 return
-    except (asyncio.CancelledError, Exception):
-        pass
-
-
-async def _wait_pong(ws: WebSocket) -> None:
-    """Reads frames until a pong is seen (non-pong frames are re-dispatched)."""
-    # In production, integrate with the main receive loop via asyncio.Event.
-    # Simplified here for clarity.
-    while True:
-        raw = await ws.receive_text()
-        msg = ChatMessage.model_validate_json(raw)
-        if msg.type == "pong":
-            return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Heartbeat stopped for ws=%s", id(ws))
 ```
 
 ### Message Persistence (SQLAlchemy Async)
@@ -480,17 +500,14 @@ logger = logging.getLogger(__name__)
 
 async def persist_message(
     payload: dict,
-    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """
     Write a chat message to PostgreSQL.
-    Called as a BackgroundTask — failures are logged but do not affect delivery.
+    Spawned with asyncio.create_task — failures are logged but do not affect
+    delivery. The session factory is required, not optional: an optional
+    argument that silently no-ops turns "durable persistence" into a log line.
     """
-    if session_factory is None:
-        # In production, inject via app.state; simplified here
-        logger.error("No session_factory — message not persisted: %s", payload)
-        return
-
     try:
         async with session_factory() as session:
             await session.execute(
@@ -556,23 +573,26 @@ app.include_router(router)
 # src/chat/auth.py
 from __future__ import annotations
 
-from jose import JWTError, jwt
+import os
 
-SECRET_KEY = "change-me-in-production"
+import jwt                      # PyJWT
+from jwt import InvalidTokenError
+
+SECRET_KEY = os.environ["CHAT_JWT_SECRET"]   # never a literal in source
 ALGORITHM = "HS256"
 
 
 def verify_jwt(token: str) -> dict:
     """
     Decode and verify a JWT. Raises ValueError on failure.
-    In production, use RS256 with a public key fetched from JWKS endpoint.
+    In production, use RS256 with a public key fetched from a JWKS endpoint.
     """
     try:
         claims: dict = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if "sub" not in claims:
             raise ValueError("missing 'sub' claim")
         return claims
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise ValueError(f"invalid token: {exc}") from exc
 ```
 
@@ -584,15 +604,15 @@ def verify_jwt(token: str) -> dict:
 |-----------|-------|
 | `fastapi.WebSocket` | Manages individual WS connection lifecycle (accept, receive, send, close) |
 | `fastapi.WebSocketDisconnect` | Exception raised when client closes the connection |
-| `fastapi.BackgroundTasks` | Defers PostgreSQL write to after the broadcast returns |
+| `asyncio.create_task` + a task-reference set | Defers the PostgreSQL write off the broadcast path. `BackgroundTasks` is deliberately NOT used: it only drains after an HTTP response, so on a WebSocket route the task never runs |
 | `asyncio.Queue` | Per-connection bounded buffer that decouples slow consumers from the Redis subscriber |
-| `asyncio.create_task` | Spawns per-connection writer and heartbeat coroutines concurrently with the main receive loop |
+| `asyncio.create_task` | Spawns per-connection writer and heartbeat coroutines concurrently with the main receive loop; the returned Task must be kept referenced or it can be garbage-collected mid-flight |
 | `asyncio.wait_for` | Enforces auth timeout (10 s) and pong timeout (10 s) |
 | `redis.asyncio` (aioredis) | Async Redis client; `pubsub()` for subscription, `publish()` for fan-out |
 | `sqlalchemy.ext.asyncio` | Async PostgreSQL session for non-blocking persistence |
 | `pydantic.BaseModel` | Validates inbound WebSocket JSON frames (ChatMessage) |
 | `contextlib.asynccontextmanager` | Lifespan handler for startup/shutdown of Redis and DB connections |
-| `python-jose` | JWT decode and validation |
+| `PyJWT` | JWT decode and validation (the library the FastAPI security docs use) |
 
 ---
 
@@ -604,7 +624,7 @@ def verify_jwt(token: str) -> dict:
 |-----------|-----------|-----|--------------|
 | Directionality | Full-duplex | Server-to-client only | Server-to-client (client re-connects for each poll) |
 | Latency | ~1 ms (single TCP frame) | ~10 ms (HTTP headers per chunk) | 50-200 ms (new TCP + HTTP per poll) |
-| Browser support | Excellent | Excellent (except older IE) | Universal |
+| Browser support | Universal | Universal | Universal |
 | Proxy compatibility | Can be blocked by older proxies | HTTP/1.1 compatible | HTTP/1.1 compatible |
 | Server connection cost | 1 fd + asyncio task | 1 fd + asyncio task | 1 fd per poll cycle |
 | Best for | Chat, collaboration, games | Feeds, dashboards, notifications | Fallback or firewall-constrained environments |
@@ -615,7 +635,7 @@ def verify_jwt(token: str) -> dict:
 |-----------|--------------|-------|
 | Delivery guarantee | At-most-once (no persistence) | At-least-once with offsets |
 | Message retention | None (fire-and-forget) | Configurable (hours to weeks) |
-| Throughput | ~1M msg/s single node | Millions/s with partitioning |
+| Throughput | Six figures of ops/s on one node, but a `PUBLISH` costs O(subscribers) | Millions/s with partitioning |
 | Latency | Sub-millisecond | 5-15 ms typical |
 | Fan-out model | All subscribers in channel | Consumer group per subscriber |
 | Operational complexity | Low | High |
@@ -641,7 +661,7 @@ The background-task approach is the right default for general chat. The outbox p
 Each pod maintains its own in-memory dict of WebSocket connections. A message received by pod 1 is only delivered to connections on pod 1. Users connected to pods 2 through N never see it. Redis pub/sub acts as a shared message bus — any pod publishes to a channel, and all pods receive the broadcast and forward it to their local connections.
 
 **Q: What happens if Redis goes down?**
-New messages cannot be published or delivered. Existing WebSocket connections remain open but messages are silently dropped. On reconnect after Redis recovery, clients should request message history via a REST endpoint backed by PostgreSQL. To reduce the blast radius, use Redis Sentinel (automatic failover in ~5-10 seconds) or Redis Cluster. The app should catch `aioredis.ConnectionError` and either enqueue messages locally for retry or immediately return an error frame to the sender.
+New messages cannot be published or delivered. Existing WebSocket connections remain open but messages are silently dropped. On reconnect after Redis recovery, clients should request message history via a REST endpoint backed by PostgreSQL. To reduce the blast radius, use Redis Sentinel or Redis Cluster — but know the real failover budget: Sentinel's `down-after-milliseconds` defaults to 30,000 ms, so with stock configuration a master failure is not even *detected* for 30 seconds before the election starts. Chat can tolerate that only if the client retries; to get single-digit-second failover you must lower `down-after-milliseconds` explicitly and accept the higher false-positive rate on a flaky network. The app should catch `aioredis.ConnectionError` and either enqueue messages locally for retry or immediately return an error frame to the sender.
 
 **Q: How does the per-connection asyncio.Queue solve the slow consumer problem?**
 Without a queue, the Redis subscriber coroutine calls `await ws.send_text()` directly on each connection. A slow client causes this await to block, stalling delivery for all other connections in the room. The queue decouples publishing from delivery: the subscriber does a non-blocking `put_nowait()` into each connection's queue. A separate writer coroutine per connection drains the queue. If the queue is full (`maxsize=64`), the message is dropped and the connection is eventually evicted — this is the correct backpressure response.
@@ -656,7 +676,7 @@ On reconnect, the client re-authenticates and re-joins the room. It should inclu
 Between `await manager.publish()` and the background task writing to PostgreSQL, a pod crash loses that message permanently — typically a window of 10-50 ms. For general chat this is acceptable. To close the gap, use an outbox pattern: write the message to a `message_outbox` table in PostgreSQL atomically with the chat record (single transaction), then have a separate process tail the outbox and publish to Redis. On crash, the outbox tails from the last committed row.
 
 **Q: How would you scale to 100k concurrent connections?**
-Scale horizontally to 10 pods (10k connections per pod). Each pod runs a single asyncio event loop — there is no GIL contention for I/O-bound WebSocket operations. Ensure Redis pub/sub capacity: a single Redis node handles ~1M pub/sub messages per second, well above 100k connected users sending messages at typical chat rates (1-5 msg/min average). For connection memory, each asyncio WebSocket plus a 64-item queue costs roughly 50-100 KB — 10k connections per pod is approximately 500 MB-1 GB of RAM, within a standard 2-4 GB pod allocation.
+Scale horizontally to 10 pods (10k connections per pod). Each pod runs a single asyncio event loop — there is no GIL contention for I/O-bound WebSocket operations. Size Redis from the fan-out, not from the publish rate: 100k users at 3 msg/min is ~5,000 `PUBLISH` calls/s, but each one is delivered to every pod subscribed to that room, so with 10 pods the server does ~50,000 message deliveries/s. `PUBLISH` is O(subscribers), so it is the delivery count, not the publish count, that has to fit — 50k/s sits comfortably inside a single node's measured throughput, but re-measure with `redis-benchmark` before trusting it. For connection memory, each asyncio WebSocket plus a 64-item queue costs roughly 50-100 KB — 10k connections per pod is approximately 500 MB-1 GB of RAM, within a standard 2-4 GB pod allocation. Raise the pod's file-descriptor limit too: 10k sockets needs `ulimit -n` well above the common 1024 default.
 
 **Q: How do you detect and clean up zombie connections (client crash without sending a CLOSE frame)?**
 The TCP FIN/RST may not arrive if the client's network disappears (mobile, NAT timeout). The server-side ping-pong loop sends a JSON `{"type":"ping"}` every 20 seconds. If no `{"type":"pong"}` arrives within 10 seconds, the server closes the WebSocket with code 1001 and calls `manager.disconnect()`. This bounds the zombie window to at most 30 seconds (20 s interval + 10 s timeout), which satisfies the 30-second cleanup requirement.
