@@ -220,7 +220,7 @@ The kink at `y*f = 1` is where hinge differs from every smooth loss. Log loss ke
 | RBF (Gaussian) | exp(-gamma * ||x-z||^2) | gamma | General-purpose, unknown boundary shape |
 | Polynomial | (gamma * x^T z + r)^d | gamma, d, r | Image classification, NLP (some tasks) |
 | Sigmoid | tanh(gamma * x^T z + r) | gamma, r | Rarely used; behaves like RBF in practice |
-| Chi-squared | sum_k (x_k - z_k)^2 / (x_k + z_k) | None | Histogram features (bag-of-words variants) |
+| Chi-squared | exp(-gamma * sum_k (x_k - z_k)^2 / (x_k + z_k)) | gamma | Histogram features (bag-of-words variants) |
 
 **What the formula is telling you.** "Every one of these is a stand-in for a dot product in some other, bigger space — you get the geometry of that space while only ever touching the original coordinates."
 
@@ -456,6 +456,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKF
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC, SVR, OneClassSVM
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     classification_report, roc_auc_score, mean_squared_error,
 )
@@ -466,7 +467,7 @@ def svm_pipeline_example() -> None:
     Correct SVM pipeline:
     1. StandardScaler is mandatory — SVM uses Euclidean distances
     2. Always tune C and gamma together (they interact)
-    3. Use probability=True only if you need calibrated probabilities (adds Platt scaling cost)
+    3. Wrap in CalibratedClassifierCV only if you need probabilities (adds Platt scaling cost)
     """
     # Non-linearly separable data — needs RBF kernel
     X, y = make_moons(n_samples=2000, noise=0.25, random_state=42)
@@ -476,9 +477,15 @@ def svm_pipeline_example() -> None:
 
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        # probability=True adds significant overhead (5-fold internal CV for Platt scaling)
-        # Only set True if you need predict_proba()
-        ("svm", SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=42)),
+        # Calibration adds significant overhead (5-fold internal CV for Platt scaling).
+        # Only wrap the SVC if you need predict_proba(); ensemble=False refits one
+        # SVC on all the data and calibrates it, instead of averaging five models.
+        ("svm", CalibratedClassifierCV(
+            SVC(kernel="rbf", C=1.0, gamma="scale", random_state=42),
+            method="sigmoid",
+            cv=5,
+            ensemble=False,
+        )),
     ])
     pipeline.fit(X_train, y_train)
 
@@ -499,7 +506,7 @@ def tune_svm_hyperparameters(
     """
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("svm", SVC(kernel="rbf", probability=True, random_state=42)),
+        ("svm", SVC(kernel="rbf", random_state=42)),
     ])
 
     param_grid = {
@@ -761,8 +768,8 @@ An NLP team tried SVC with RBF kernel on 500,000 text documents. Training ran fo
 **Pitfall 3 — Tuning C and gamma independently**
 A team did a grid search: first tuned C (fixing gamma="scale"), then tuned gamma (fixing best C). This missed the interaction — at large C, small gamma performs differently than at small C. C and gamma must be tuned jointly in a 2D grid search. The optimal point (C=10, gamma=0.01) may be far from the result of sequential tuning.
 
-**Pitfall 4 — probability=True overhead misunderstood**
-SVC(probability=True) performs an internal 5-fold cross-validation to fit Platt scaling parameters. This multiplies training time by ~5x. A team set probability=True by default in all experiments even when they only needed the class prediction (not probability). Fix: set probability=False for all experiments where predict_proba is not needed. If calibrated probabilities are needed, consider CalibratedClassifierCV as a wrapper around SVC(probability=False) — more flexible.
+**Pitfall 4 — probability calibration overhead misunderstood**
+Fitting Platt scaling on top of an SVM runs an internal 5-fold cross-validation, multiplying training time by roughly 5x. A team wrapped every SVM in a calibrator by default even when they only needed the class prediction (not the probability), paying that 5x on every experiment. Fix: leave a bare `SVC` in the pipeline whenever `predict_proba` is not needed — `decision_function` already gives a rankable score, so ROC-AUC scoring works without calibration. When probabilities genuinely are required, wrap explicitly: `CalibratedClassifierCV(SVC(), method="sigmoid", cv=5, ensemble=False)`.
 
 **Pitfall 5 — One-Class SVM for structured anomalies**
 A team used One-Class SVM to detect network intrusions but found 80% false negative rate on novel attack patterns. One-Class SVM works when anomalies are "far from normal." If anomalies cluster in a specific region of feature space (a known attack signature), a binary SVM (trained on labeled examples of normal and attack) outperforms the one-class variant. One-class SVM is the right tool only when anomalies are genuinely unknown and diverse.
@@ -783,7 +790,7 @@ SVR's epsilon parameter is in the units of the target variable. If the target ha
 | sklearn OneClassSVM | Anomaly detection | nu parameter controls boundary tightness |
 | libsvm | C library underlying sklearn SVC | Direct access for custom kernels |
 | ThunderSVM | GPU-accelerated SVM | 10-100x speedup for large datasets |
-| sklearn CalibratedClassifierCV | Add probability calibration to SVC | Wraps SVC(probability=False) |
+| sklearn CalibratedClassifierCV | Add probability calibration to SVC | The only route to predict_proba; use ensemble=False |
 
 ---
 
@@ -805,7 +812,7 @@ The primal is a d-dimensional QP (d = feature dimension): minimize over w, b. Th
 Gamma controls the width of the Gaussian kernel: K(x, z) = exp(-gamma * ||x-z||^2). Large gamma: the Gaussian is narrow — each training point influences only its immediate neighborhood. The decision boundary becomes complex and wiggly, following individual training points closely — high variance, risk of overfitting. Small gamma: wide Gaussian — each point influences a broad region. The boundary is smooth and almost linear — high bias, risk of underfitting. gamma="scale" (default in sklearn) sets gamma = 1/(n_features * X.var()), which is a good starting point.
 
 **Q: Why is SVM effective in high-dimensional spaces despite the curse of dimensionality?**
-SVM maximizes the margin, which provides a generalization bound independent of the input dimensionality d. The VC dimension of a linear SVM is min(d, n) + 1, but the effective VC dimension (fat-shattering dimension) of the margin classifier is bounded by the margin, not d. In high-dimensional sparse spaces (text), the data is often linearly separable with a large margin — SVM exploits this. This contrasts with k-NN, where all distances collapse in high dimensions.
+SVM maximizes the margin, which provides a generalization bound independent of the input dimensionality d. The VC dimension of an unconstrained hyperplane in d dimensions is d + 1, but for margin-gamma hyperplanes over data inside a ball of radius R the effective (fat-shattering) dimension is bounded by min(d, R^2 / gamma^2) + 1 — so a large margin, not a small d, is what caps capacity. In high-dimensional sparse spaces (text), the data is often linearly separable with a large margin — SVM exploits this. This contrasts with k-NN, where all distances collapse in high dimensions.
 
 **Q: Compare SVM and logistic regression. When would you choose each?**
 Both SVM (hinge loss + L2) and logistic regression (log-loss + L2) produce linear classifiers in their primal form and have similar generalization performance on large datasets. Choose SVM: small dataset where maximizing margin matters, kernel trick for non-linearity, sparse text features (LinearSVC). Choose logistic regression: when you need calibrated probabilities, interpretable coefficients, faster training on large data, or online learning. SVM does not natively output calibrated probabilities (Platt scaling is an approximation). On very large datasets, SGD-based logistic regression (sklearn SGDClassifier with log loss) wins on speed.
@@ -819,14 +826,14 @@ Sequential Minimal Optimization (Platt 1998) decomposes the large n-variable QP 
 **Q: How do you use an SVM for multi-class classification?**
 sklearn SVC uses One-vs-One (OvO) by default: for K classes, it trains K(K-1)/2 binary classifiers and uses majority vote. For 10 classes, that is 45 classifiers. LinearSVC uses One-vs-Rest (OvR): K classifiers, each separating one class from all others; assign the class with highest decision function value. OvO is typically more accurate because each binary classifier trains on a balanced subset; OvR is faster. For K > 10, OvR or the Crammer-Singer multi-class SVM formulation are preferred.
 
-**Q: Why does SVM with probability=True slow training significantly?**
-SVC(probability=True) adds Platt scaling: after the SVM is trained, it fits a sigmoid function A * f(x) + B = logit(P(y=1|x)) using another internal k-fold cross-validation (default 5-fold). This multiplies total training time by approximately 5-6x. The resulting probabilities are approximate and the sigmoid fitting can be unstable for small datasets or when class distributions are extreme. For better-calibrated probabilities, use CalibratedClassifierCV with cv=5 externally, giving more control over the calibration process.
+**Q: Why does adding probability calibration to an SVM slow training significantly?**
+Calibrating an SVM adds Platt scaling: after the SVM is trained, a sigmoid P(y=1|x) = 1 / (1 + exp(A * f(x) + B)) is fitted to the decision values using an internal k-fold cross-validation (5-fold by default). That multiplies total training time by approximately 5-6x, since the SVM itself is refitted once per fold. The resulting probabilities are approximate and the sigmoid fit can be unstable for small datasets or extreme class distributions. Use `CalibratedClassifierCV(SVC(), method="sigmoid", cv=5, ensemble=False)`; `ensemble=False` refits a single SVC on all the data and calibrates it, rather than averaging the five fold models.
 
 **Q: What is the hinge loss and how does it relate to the SVM objective?**
 Hinge loss for a single example: L = max(0, 1 - y * f(x)), where y in {-1, +1} and f(x) = w^T x + b. It is zero when the example is correctly classified with margin >= 1, and linear in the margin violation otherwise. The soft-margin SVM minimizes (1/2)||w||^2 + C * sum_i max(0, 1 - y_i f(x_i)), which is L2 regularization of the weight vector plus C times the sum of hinge losses. This is exactly a regularized ERM with hinge loss. Compared to logistic regression's log loss, hinge loss is zero beyond the margin (sparser gradient updates, fewer support vectors) but is not differentiable at margin = 1.
 
 **Q: How would you debug an SVM that achieves near-random performance on a binary classification task?**
-Systematic diagnosis: (1) check that features are scaled — unscaled features with high variance dominate RBF kernel; (2) print n_support_ — very high number (~50% of training data) indicates the model is underfitting (C too low or data is not separable with current kernel); (3) try LinearSVC first — if linear kernel fails, the boundary is genuinely non-linear; (4) reduce the dataset to 2 features and plot the decision boundary to visually confirm the kernel is learning; (5) check for label issues — if classes are mislabeled or highly imbalanced and class_weight is not set, the model predicts all-majority-class; (6) verify C and gamma range in grid search — if the optimal point is at the boundary of your grid, expand the search.
+Work through six checks in order, from cheapest to most expensive. They are: (1) check that features are scaled — unscaled features with high variance dominate RBF kernel; (2) print n_support_ — very high number (~50% of training data) indicates the model is underfitting (C too low or data is not separable with current kernel); (3) try LinearSVC first — if linear kernel fails, the boundary is genuinely non-linear; (4) reduce the dataset to 2 features and plot the decision boundary to visually confirm the kernel is learning; (5) check for label issues — if classes are mislabeled or highly imbalanced and class_weight is not set, the model predicts all-majority-class; (6) verify C and gamma range in grid search — if the optimal point is at the boundary of your grid, expand the search.
 
 **Q: How does SVR differ from linear regression, and when would you prefer it?**
 SVR minimizes ||w||^2 subject to all predictions being within epsilon of the true values — errors within the tube incur no loss (epsilon-insensitivity). Points outside the tube are penalized linearly. This produces a sparser solution than OLS (only out-of-tube points are support vectors) and is more robust to outliers (the epsilon tube absorbs small errors). SVR is preferred when: the target has significant noise that should be ignored (measured sensor readings with ±5% instrument error); outliers in y are possible and should not dominate the fit; a non-linear kernel gives better generalization than polynomial feature expansion. For most tabular regression tasks, gradient boosted trees dominate SVR in practice.
@@ -850,7 +857,7 @@ For linear SVM: the weight vector w = sum_i alpha_i y_i x_i is explicitly availa
 
 3. For n > 50,000 with a linear kernel, use LinearSVC instead of SVC(kernel="linear"). LinearSVC uses the liblinear solver, which scales as O(n * iter) rather than O(n^2).
 
-4. Set probability=False unless predict_proba is genuinely needed. The overhead of Platt scaling (5x training time) is not justified for experiments where only class predictions are needed.
+4. Leave the SVC uncalibrated unless predict_proba is genuinely needed. The overhead of Platt scaling (5x training time) is not justified for experiments where only class predictions or a rankable decision_function score are needed.
 
 5. For anomaly detection with labeled normal data only, use OneClassSVM with nu set to the expected contamination rate in training (e.g., nu=0.01 if you expect 1% of your training data to be mislabeled anomalies).
 

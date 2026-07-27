@@ -154,7 +154,7 @@ Big-O here is a shopping guide, not a benchmark. The point is that two algorithm
   k-NN                (nothing)        = 0                      =               0
 
   SVM's lower bound alone is 250x the linear-regression cost; its upper bound
-  is roughly 30 million times larger. That single gap is the whole "<100k rows"
+  is 25 million times larger. That single gap is the whole "<100k rows"
   guidance in Section 9.
 ```
 
@@ -346,6 +346,7 @@ from sklearn.datasets import make_classification, make_regression
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
@@ -390,8 +391,14 @@ def build_classification_benchmark(
         ]),
         "SVM_RBF": Pipeline([
             ("scaler", StandardScaler()),
-            # SVM is not scale-invariant — scaler is mandatory
-            ("clf", SVC(kernel="rbf", C=1.0, gamma="scale", probability=True, random_state=random_state)),
+            # SVM is not scale-invariant — scaler is mandatory.
+            # SVC has no probability estimates of its own; wrap it in
+            # CalibratedClassifierCV to get predict_proba (Platt scaling).
+            ("clf", CalibratedClassifierCV(
+                SVC(kernel="rbf", C=1.0, gamma="scale", random_state=random_state),
+                method="sigmoid",
+                ensemble=False,
+            )),
         ]),
         "DecisionTree": Pipeline([
             # Decision trees do not require scaling, but including it does no harm
@@ -464,8 +471,9 @@ def tune_with_cv(X_train: np.ndarray, y_train: np.ndarray) -> LogisticRegression
 
     param_grid = {
         "clf__C": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
-        "clf__penalty": ["l1", "l2"],
-        "clf__solver": ["liblinear"],   # liblinear supports both l1 and l2
+        # l1_ratio is the penalty control: 0.0 = L2, 1.0 = L1, in between = ElasticNet
+        "clf__l1_ratio": [0.0, 1.0],
+        "clf__solver": ["liblinear"],   # liblinear supports l1_ratio 0 and 1
     }
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -668,10 +676,10 @@ Total expected test error decomposes into Bias^2 + Variance + Irreducible Noise.
 Data leakage occurs when information from the test set (or from the future) influences model training, producing optimistic evaluation metrics that do not reflect production performance. The two main forms are feature leakage (features that encode the target) and preprocessing leakage (fitting scalers or encoders on all data before splitting). Prevention: use sklearn Pipeline so all preprocessing fits only on training folds; enforce temporal ordering for time-series data; audit every feature for causal impossibility.
 
 **Q: When would you choose logistic regression over a more powerful model like gradient boosting?**
-Choose logistic regression when interpretability is required (regulated industries, clinical decisions), when training data is small (logistic regression generalizes well with limited samples), when you need fast training and inference in a high-throughput system, or as a calibrated probability baseline. Gradient boosting wins when predictive accuracy matters most and interpretability is secondary.
+Choose logistic regression whenever a constraint other than raw accuracy dominates. That covers interpretability requirements (regulated industries, clinical decisions), small training sets where it generalizes well with limited samples, high-throughput systems needing fast training and inference, and calibrated probability baselines. Gradient boosting wins when predictive accuracy matters most and interpretability is secondary.
 
 **Q: How do you handle class imbalance in a classification problem?**
-Use multiple complementary strategies: (1) choose appropriate metrics — AUC-ROC, F1, precision-recall curve instead of accuracy; (2) apply class_weight="balanced" in sklearn algorithms; (3) oversample the minority class with SMOTE or ADASYN; (4) undersample the majority class; (5) use threshold tuning on the predicted probability to trade precision for recall. The right balance depends on the cost ratio of false positives to false negatives in the business context.
+Combine several complementary strategies rather than relying on any single one. Those are: (1) choose appropriate metrics — AUC-ROC, F1, precision-recall curve instead of accuracy; (2) apply class_weight="balanced" in sklearn algorithms; (3) oversample the minority class with SMOTE or ADASYN; (4) undersample the majority class; (5) use threshold tuning on the predicted probability to trade precision for recall. The right balance depends on the cost ratio of false positives to false negatives in the business context.
 
 **Q: What is the curse of dimensionality and how does it affect supervised learning?**
 As feature dimensionality d increases, the volume of the space grows exponentially, so training points become sparse. Distance-based methods (k-NN, SVM RBF) suffer most: all points appear equidistant, destroying the neighborhood structure. Linear models are less affected but require n >> d to avoid overfitting. Solutions: feature selection, dimensionality reduction (PCA, UMAP), regularization (L1 sparsity), and collecting more data.
@@ -874,7 +882,10 @@ def explain_predictions(
     classifier = pipeline.named_steps["classifier"]
     X_transformed = preprocessor.transform(X_sample)
 
-    explainer = shap.TreeExplainer(classifier.estimator)
+    # CalibratedClassifierCV.estimator is the UNFITTED template. The fitted
+    # forests live on calibrated_classifiers_ — one per CV fold.
+    fitted_forest = classifier.calibrated_classifiers_[0].estimator
+    explainer = shap.TreeExplainer(fitted_forest)
     shap_values = explainer.shap_values(X_transformed)
     fraud_shap = shap_values[1]   # class=1 (fraud)
 
@@ -979,14 +990,14 @@ Pinning recall first is what makes the comparison honest. Any model can drive fa
 
 **Interview discussion points:**
 
-**Why use BalancedRandomForestClassifier over SMOTE + standard RandomForest for fraud detection?** BalancedRandomForest resamples the majority class within each tree's bootstrap sample rather than synthesising minority examples globally. This avoids SMOTE's risk of generating synthetic frauds that lie in majority-class territory, and keeps memory bounded since no augmented dataset is stored in RAM. In production with 2.4B rows, global SMOTE would require 190M synthetic rows; per-tree bootstrap stays at 60K rows per tree regardless of dataset size.
+**Why use BalancedRandomForestClassifier over SMOTE + standard RandomForest for fraud detection?** BalancedRandomForest resamples the majority class within each tree's bootstrap sample rather than synthesising minority examples globally. This avoids SMOTE's risk of generating synthetic frauds that lie in majority-class territory, and keeps memory bounded since no augmented dataset is stored in RAM. In production with 2.4B rows at a 0.08% fraud rate there are only 1.92M real frauds, so balancing globally with SMOTE would have to materialise roughly 2.4B synthetic rows; the per-tree undersample is capped at about 3.8M rows (twice the fraud count) no matter how large the majority class grows.
 
 **How does probability calibration improve business outcomes beyond AUC?** An uncalibrated BalancedRF outputs probabilities clustered near 0 and 1, making the 0.3-0.7 "step-up auth" band nearly empty. Isotonic regression calibration spreads predicted probabilities to match empirical fraud rates, so the threshold ranges become operationally meaningful: 22% of transactions fall in step-up range, giving agents a workable review queue instead of binary block/pass decisions.
 
-**What is the risk of using SHAP with CalibratedClassifierCV and how do you fix it?** CalibratedClassifierCV wraps the base estimator in a meta-estimator, so TreeExplainer must be called on the inner estimator (`clf.estimator`), not the wrapper. Calling TreeExplainer on the wrapper raises a TypeError or silently uses a slow kernel explainer, adding 400ms per request. The fix is to extract `pipeline.named_steps["classifier"].estimator` before creating the explainer, then apply the same preprocessing transform manually.
+**What is the risk of using SHAP with CalibratedClassifierCV and how do you fix it?** CalibratedClassifierCV wraps the base estimator in a meta-estimator, so TreeExplainer must be called on a fitted inner forest, not on the wrapper. Two traps compound here: calling TreeExplainer on the wrapper raises a TypeError or silently falls back to a slow kernel explainer, and `clf.estimator` is only the unfitted constructor template, so passing it raises NotFittedError. The fix is to read `clf.calibrated_classifiers_[i].estimator` — one fitted forest per CV fold — then apply the same preprocessing transform manually before explaining.
 
 **Why is StratifiedKFold essential here rather than standard KFold?** With 0.08% fraud rate, a 5-fold split with random KFold can place 0 fraud examples in a validation fold by chance in smaller shards, making AUC-ROC undefined. StratifiedKFold guarantees each fold has the same class ratio (approximately 0.08% fraud), so every validation set has at minimum 192 fraud examples in a 240K-row validation fold, giving statistically stable AUC estimates with confidence intervals below +/-0.003.
 
 **How would you handle concept drift as merchant fraud patterns shift?** Deploy a shadow model retrained weekly on a 90-day rolling window, comparing its AUC-PR against the production model on a held-out recent window. If shadow AUC-PR exceeds production by more than 0.015, trigger a blue-green promotion. Additionally, monitor input feature distribution shift using Population Stability Index (PSI) on velocity features daily; PSI > 0.2 triggers retraining regardless of model performance delta.
 
-**What tradeoff exists between model size (1.4 GB) and inference latency for the p99 < 15ms SLA?** The 500-tree forest must be loaded into CPU cache for low-latency prediction; at 1.4 GB it spans multiple NUMA nodes on a 32-core machine, causing cache misses that push p99 to 18ms. The fix is to reduce to 200 trees (800 MB, fits in LLC on dual-socket Xeon) accepting AUC-ROC drop from 0.987 to 0.983, or to use model quantization (int8 leaf values) cutting model size to 380 MB with only 0.001 AUC-ROC loss, achieving p99 of 11ms.
+**What tradeoff exists between model size (1.4 GB) and inference latency for the p99 < 15ms SLA?** A 1.4 GB forest cannot sit in cache at all — a dual-socket Xeon has tens of MB of last-level cache — so every traversal walks scattered DRAM, and on a 32-core box the allocation spans both NUMA nodes, adding remote-memory hops that push p99 to 18ms. The fix is to shrink the working set: 200 of the 500 trees is 560 MB at the same 2.8 MB per tree, accepting an AUC-ROC drop from 0.987 to 0.983, or quantize leaf values to int8 to cut the 1.4 GB to roughly 380 MB with about 0.001 AUC-ROC loss, reaching p99 of 11ms.

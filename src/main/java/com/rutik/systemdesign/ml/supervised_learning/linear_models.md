@@ -239,7 +239,7 @@ Exponentiating before normalizing is what makes softmax *soft*: it preserves the
 
 That final line is the invariant worth memorizing: the *ratio* of any two softmax probabilities is `exp` of their logit difference, and nothing else in the vector affects it. It also shows why adding a constant to every logit changes nothing — the constant factors out of numerator and denominator, which is exactly the trick numerically-stable implementations use (subtract the max logit before exponentiating, so `exp` never overflows).
 
-**One-vs-Rest (OvR)**: train K binary classifiers, predict class with highest probability. Default for most sklearn solvers.
+**One-vs-Rest (OvR)**: train K binary classifiers, predict class with highest probability. sklearn's LogisticRegression fits the multinomial (softmax) objective directly on every solver that supports multiclass — `lbfgs`, `newton-cg`, `newton-cholesky`, `sag`, `saga` — so OvR is no longer a mode of the estimator. `liblinear` is binary-only and raises a ValueError on three or more classes; wrap it in `OneVsRestClassifier` if you want OvR explicitly.
 
 **Ordinal logistic regression**: for ordered categories (low/medium/high), uses proportional odds model.
 
@@ -623,7 +623,7 @@ def logistic_regression_full_example() -> None:
         ("scaler", StandardScaler()),
         ("lr", LogisticRegression(
             C=1.0,
-            penalty="l2",
+            l1_ratio=0.0,          # 0.0 = pure L2, 1.0 = pure L1, in between = ElasticNet
             max_iter=1000,
             class_weight="balanced",
             solver="lbfgs",
@@ -642,6 +642,9 @@ def logistic_regression_full_example() -> None:
 def multinomial_logistic_regression() -> None:
     """
     Multi-class logistic regression using softmax.
+    Every multiclass-capable solver (lbfgs, newton-cg, newton-cholesky, sag,
+    saga) optimizes the multinomial objective directly — softmax(decision_function)
+    equals predict_proba exactly. There is no switch to flip.
     """
     from sklearn.datasets import load_iris
 
@@ -655,10 +658,10 @@ def multinomial_logistic_regression() -> None:
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
         ("lr", LogisticRegression(
-            multi_class="multinomial",  # softmax instead of OvR
-            solver="lbfgs",
+            solver="lbfgs",             # multinomial softmax for 3 iris classes
             max_iter=1000,
             C=1.0,
+            l1_ratio=0.0,
         )),
     ])
     pipeline.fit(X_train, y_train)
@@ -805,7 +808,7 @@ The odds ratio is constant down that middle column; the probability change is no
 
 **Credit Card Approval (Logistic Regression)**: FICO scoring models are logistic regression under the hood. Features: payment history (35%), credit utilization (30%), account age (15%), credit mix (10%), new inquiries (10%). Coefficients are fixed globally and updated quarterly. Regulators require the bank to provide the top 4 reasons for any rejection — logistic regression coefficient signs make this trivial.
 
-**House Price Prediction (Ridge Regression)**: Zillow's Zestimate (in its early form) used Ridge regression with hundreds of property features. L2 regularization was critical because many features (square footage, lot size, number of rooms) are correlated. Ridge prevents individual correlated features from getting absurdly large compensating weights.
+**House Price Prediction (Ridge Regression)**: automated valuation models built on hundreds of property features are a standard Ridge use case — L2 regularization is critical because square footage, lot size and room count are heavily correlated, and Ridge prevents individual correlated features from getting absurdly large compensating weights. (Zillow's own Zestimate is not this model: it ran roughly a thousand per-market algorithms before Zillow replaced it with the neural Zestimate in June 2021.)
 
 **A/B Test Uplift Modeling (Logistic Regression)**: E-commerce companies estimate the causal effect of promotional emails using logistic regression with an interaction term between treatment assignment and user features. The coefficients on the interaction terms are the estimated heterogeneous treatment effects.
 
@@ -872,7 +875,7 @@ Lasso has a tendency to arbitrarily select one feature from a group of correlate
 | Tool | Use |
 |------|-----|
 | sklearn LinearRegression / Ridge / Lasso / ElasticNet | Standard implementations |
-| sklearn LogisticRegression | Binary and multiclass; supports L1, L2, ElasticNet penalties |
+| sklearn LogisticRegression | Binary and multiclass; L1 / L2 / ElasticNet selected via l1_ratio (0 = L2, 1 = L1) |
 | statsmodels OLS / Logit | Full statistical inference: p-values, confidence intervals, AIC/BIC |
 | scipy.stats | Correlation tests, hypothesis tests for coefficient significance |
 | statsmodels VIF | Variance Inflation Factor for multicollinearity detection |
@@ -893,7 +896,7 @@ Geometrically, the L1 constraint region is a diamond (in 2D) with corners on the
 The Normal Equation is w = (X^T X)^{-1} X^T y. When features are collinear, X^T X becomes singular (or near-singular), making the inverse numerically unstable and the coefficients explode. Ridge adds a regularization term: w = (X^T X + alpha * I)^{-1} X^T y. Adding alpha to the diagonal makes the matrix strictly positive definite and always invertible, producing stable, shrunk coefficients. This is the closed-form Ridge solution.
 
 **Q: When would you choose Lasso over Ridge?**
-Choose Lasso when you believe only a small subset of features are truly predictive and you want automatic feature selection — Lasso will zero out irrelevant coefficients, producing a sparse model that is easier to interpret and faster at inference. Choose Ridge when features are correlated (Lasso arbitrarily picks one of a correlated pair) or when you want all features to contribute with small weights rather than hard zeros.
+Choose Lasso when you believe only a small subset of features are truly predictive and you want automatic feature selection. Lasso zeroes out irrelevant coefficients, producing a sparse model that is easier to interpret and faster at inference. Choose Ridge when features are correlated (Lasso arbitrarily picks one of a correlated pair) or when you want all features to contribute with small weights rather than hard zeros.
 
 **Q: What is the VIF and what threshold indicates a problem?**
 Variance Inflation Factor (VIF) for feature j is 1 / (1 - R^2_j), where R^2_j is the R-squared from regressing feature j on all other features. VIF = 1 means no correlation with other features. VIF = 5 is the soft warning threshold; VIF > 10 indicates severe multicollinearity and requires action (drop the feature, combine features, or switch to Ridge). VIF above 100 means near-perfect multicollinearity.
@@ -920,13 +923,13 @@ ElasticNet combines L1 and L2 penalties: alpha * [l1_ratio * ||w||_1 + (1 - l1_r
 Detection: plot residuals vs. fitted values — systematic patterns (U-shape, funnel) indicate non-linearity or heteroscedasticity. Also plot each feature vs. the target residuals. Handling options: (1) polynomial features (x^2, x^3, x1*x2 interactions) — sklearn PolynomialFeatures; (2) log/sqrt transformation of skewed features; (3) spline regression (piecewise polynomial, smooth at knots); (4) generalized additive models (GAMs) via pyGAM library. If non-linearity is pervasive and unstructured, switch to gradient boosted trees or a neural network.
 
 **Q: What solver should you use for sklearn LogisticRegression and why?**
-Solver choice depends on the dataset: lbfgs is the default and handles L2 penalty well for small-to-medium datasets; it supports multinomial (softmax). liblinear is fast for small datasets and supports L1 penalty but is limited to OvR multi-class. saga supports L1, L2, ElasticNet, is faster on large datasets (stochastic gradient), and supports multinomial. sag (without A) supports only L2 but is faster on very large datasets. Always check that your chosen penalty is supported by the chosen solver — sklearn raises an error if incompatible.
+Solver choice depends on the dataset and on which penalty you need, expressed through `l1_ratio`. lbfgs is the default, handles the L2 case (`l1_ratio=0`) well on small-to-medium data, and fits the multinomial softmax objective. liblinear accepts `l1_ratio=0` or `1` and is fast on small data, but it is binary-only — three or more classes raise a ValueError unless you wrap it in `OneVsRestClassifier`. saga is the only solver accepting any `l1_ratio` in [0, 1], so ElasticNet needs it; it is also the fastest on large data and supports multinomial. sag and newton-cholesky take `l1_ratio=0` only, with newton-cholesky strong when n is far larger than d. Always check that your `l1_ratio` is supported by the chosen solver — sklearn raises an error if incompatible.
 
 **Q: How does probability calibration work and when is it necessary?**
 A model is well-calibrated if predicted probability 0.8 corresponds to an 80% empirical event rate. Logistic regression is generally well-calibrated; SVM and boosted trees are not — they tend to push probabilities toward 0 and 1. Calibration is necessary whenever the downstream system uses the raw probability (expected value calculations, risk scoring, multi-model ensemble). Fix with sklearn CalibratedClassifierCV: use Platt scaling (sigmoid fit) for small datasets or isotonic regression for larger ones.
 
 **Q: Explain the difference between L-BFGS and gradient descent for optimizing logistic regression.**
-Gradient descent makes small steps in the direction of the negative gradient, requiring O(1/epsilon^2) iterations for epsilon-accuracy. L-BFGS (Limited-memory Broyden–Fletcher–Goldfarb–Shanno) approximates the inverse Hessian (second-order information) using a fixed-size history of gradient vectors, achieving superlinear convergence — O(1/epsilon) iterations or better. L-BFGS uses more memory per iteration but converges in far fewer iterations. For logistic regression, L-BFGS (solver="lbfgs") is typically 5-20x faster than gradient descent in wall time.
+Gradient descent makes small steps along the negative gradient, needing O(1/epsilon) iterations for epsilon-accuracy on a smooth convex loss. L-BFGS (Limited-memory Broyden–Fletcher–Goldfarb–Shanno) approximates the inverse Hessian (second-order information) from a fixed-size history of gradient and step vectors, which buys superlinear local convergence — once near the optimum, each iteration roughly squares the remaining error, so the last digits of accuracy are nearly free. L-BFGS uses more memory per iteration but converges in far fewer iterations, which is why it is sklearn's default solver for logistic regression.
 
 **Q: How do you choose C (regularization strength) for logistic regression in production?**
 Use k-fold cross-validation (typically 5-fold or 10-fold, stratified for imbalanced data) with a logarithmic grid: C in [0.0001, 0.001, 0.01, 0.1, 1, 10, 100]. sklearn's LogisticRegressionCV does this efficiently by exploiting the warm-start property of the solver. Optimize for your business metric — AUC-ROC for ranking, F1 for balanced precision/recall, log-loss for probability calibration. Once C is chosen, retrain on the full training set (train + validation) before final evaluation on the held-out test set.
@@ -977,7 +980,7 @@ flowchart TD
 
     raw(["Raw claim JSON"]) --> fe["Feature Engineering<br/>log(claim_amount) — right-skewed<br/>days_since_policy_start<br/>prior_claims_count (capped at 10)<br/>filing_delay_days<br/>claim_type (OHE, 11 categories)<br/>region (target-encoded, 50 states)"]
     fe --> scaler["StandardScaler<br/>fit on 80% training portion<br/>of 2-year window"]
-    scaler --> lr["LogisticRegression<br/>C=0.01, penalty=l2, max_iter=1000<br/>class_weight=balanced, solver=lbfgs"]
+    scaler --> lr["LogisticRegression<br/>C=0.01, l1_ratio=0 (L2), max_iter=1000<br/>class_weight=balanced, solver=lbfgs"]
     lr --> thresh["Threshold calibration: 0.30<br/>FP=$200 investigator time<br/>FN=$4,500 avg fraud loss"]
 
     class raw io

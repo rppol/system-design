@@ -132,7 +132,7 @@ Prediction in leaf: y_bar (mean of training samples in leaf)
 
 The good split leaves each child with variance `5.0`, so the tree predicts `6.0` for small houses and `23.0` for large ones and is off by about `2.2` on average. The bad split strands one cheap house among expensive ones in each child, and the leaf means (`8.75`, `20.25`) fit nobody well. Because the leaf always predicts the mean, variance reduction is not an analogy for squared error — it *is* the training squared error the tree would incur, which is why sklearn calls this criterion `"squared_error"`.
 
-**Best split search**: for each feature, sort the n samples by feature value (O(n log n)), then scan all n-1 split thresholds. Total per node: O(d * n log n). Full tree training: O(d * n * log^2(n)) amortized.
+**Best split search**: for each feature, sort the n samples by feature value (O(n log n)), then scan all n-1 split thresholds. Total per node: O(d * n log n). sklearn caches the sorted index order so features are not re-sorted at every node, which brings full tree training to O(d * n * log n).
 
 ---
 
@@ -548,10 +548,15 @@ def visualize_tree_rules(tree: DecisionTreeClassifier, feature_names: list[str])
 ```python
 def missing_value_strategies_for_trees() -> None:
     """
-    Decision trees in sklearn do NOT handle missing values natively (as of sklearn 1.x).
-    CART implementations in R and XGBoost/LightGBM handle missing values natively.
+    sklearn's DecisionTreeClassifier/Regressor accept NaN directly with the
+    default splitter="best": at each split the tree evaluates sending all
+    missing values left and sending them all right, and keeps whichever gives
+    the larger impurity decrease — the same idea XGBoost and LightGBM use.
+    RandomForest and HistGradientBoosting inherit this.
 
-    Strategies for sklearn DecisionTreeClassifier with missing data:
+    Imputation is therefore a choice, not a requirement. It is still worth
+    benchmarking, because an imputer can beat native handling when missingness
+    is random rather than informative:
     """
     from sklearn.impute import SimpleImputer, KNNImputer
 
@@ -586,9 +591,11 @@ def missing_value_strategies_for_trees() -> None:
         acc = pipeline.score(X_test, y_test)
         print(f"{name:20s}  accuracy={acc:.4f}")
 
-    # NOTE: XGBoost and LightGBM handle NaN natively — they learn which child branch
-    # to send missing values down during training (optimal direction per split).
-    # This is generally superior to imputation for tree-based models.
+    # Baseline: no imputer at all — the tree routes NaN itself.
+    native = DecisionTreeClassifier(max_depth=5, random_state=42).fit(X_train, y_train)
+    print(f"{'native_nan':20s}  accuracy={native.score(X_test, y_test):.4f}")
+    # Native handling is usually the better default when missingness is
+    # informative, because the learned branch direction encodes that signal.
 ```
 
 ### 6.4 Decision Tree Regression
@@ -643,7 +650,7 @@ def regression_tree_example() -> None:
 | Variance | High (overfit) | Low (averaged) | Low (boosted) |
 | Bias | Low (flexible) | Low | Very low |
 | Training speed | Fast O(nd log n) | Slower (100x trees) | Slower (sequential) |
-| Missing values | No (sklearn) | No (sklearn) | Yes (XGBoost, LGB) |
+| Missing values | Yes (learned branch) | Yes (learned branch) | Yes (XGBoost, LGB) |
 | Feature scaling needed | No | No | No |
 | Non-linear boundaries | Yes | Yes | Yes |
 | Extrapolation | Poor (step function) | Poor | Poor |
@@ -661,7 +668,7 @@ def regression_tree_example() -> None:
 **Do NOT use a single decision tree when**:
 - Predictive accuracy is the primary goal (use Random Forest or gradient boosting)
 - Dataset is large and feature space is continuous — trees can grow very deep and overfit
-- Features have many missing values and you need native handling (use XGBoost or LightGBM)
+- Features have many missing values AND the dataset is large enough that a single tree's variance dominates (use XGBoost or LightGBM, which pair native missing-value handling with an ensemble)
 - Target relationships are smooth and continuous (regression trees produce piecewise constant predictions — poor extrapolation)
 
 ---
@@ -713,7 +720,7 @@ Gini impurity measures the probability that a randomly chosen sample from a node
 Entropy uses a logarithm: H(t) = -sum_k p_k log2(p_k). Both measure node impurity and produce nearly identical trees in practice. Gini is computationally cheaper (no log operation). Entropy is slightly more sensitive to changes in the class distribution near zero probability (the log term goes to infinity). In practice, the choice rarely matters — cross-validate both if it is uncertain. sklearn default is Gini; ID3 and C4.5 algorithms use entropy.
 
 **Q: Explain the CART algorithm step by step.**
-CART (Classification and Regression Trees) builds a binary tree: (1) at the root, consider all features and all possible split thresholds; (2) for each candidate split, compute the weighted average impurity of the two resulting child nodes; (3) select the feature and threshold that minimizes this weighted impurity (maximizes information gain); (4) split the node into two children; (5) recursively apply steps 1-4 to each child; (6) stop recursion when a stopping criterion is met (max_depth, min_samples_split, all samples in node are same class, or impurity gain below threshold). Leaves predict the majority class (classification) or mean value (regression).
+CART builds a binary tree by greedily choosing, at every node, the one feature-threshold pair that most reduces child impurity. The full loop is: (1) at the root, consider all features and all possible split thresholds; (2) for each candidate split, compute the weighted average impurity of the two resulting child nodes; (3) select the feature and threshold that minimizes this weighted impurity (maximizes information gain); (4) split the node into two children; (5) recursively apply steps 1-4 to each child; (6) stop recursion when a stopping criterion is met (max_depth, min_samples_split, all samples in node are same class, or impurity gain below threshold). Leaves predict the majority class (classification) or mean value (regression).
 
 **Q: What is the time complexity of training a decision tree?**
 For a balanced tree of depth log(n): at each level, we scan through d features and sort n samples per feature — O(d * n log n) per level, times log(n) levels = O(d * n * log^2(n)) total. sklearn's implementation sorts once per feature and reuses the sorted order across splits, achieving O(d * n * log n) for the full tree. Inference is O(depth) — follow one path from root to leaf.
@@ -728,7 +735,7 @@ Mean Decrease in Impurity (MDI): sum over all nodes where feature f is used of (
 sklearn's decision tree does not natively support string categoricals — you must encode them first. Options: (1) ordinal encoding for ordered categories; (2) one-hot encoding for nominal categories (creates binary features); (3) target encoding (replace each category with its mean target value — beware of leakage, use cross-fitted target encoding). CART implementations in R, XGBoost, and LightGBM support optimal categorical splitting: for a feature with K categories, the algorithm searches over 2^K possible binary splits (exact for K <= 32) to find the one that maximizes impurity gain. This is exponential but fast in practice for K <= 10.
 
 **Q: What is the relationship between decision trees and random forests?**
-A random forest is an ensemble of decision trees trained via bagging (bootstrap aggregating): each tree is trained on a bootstrap sample (n samples drawn with replacement from training data) and at each split considers a random subset of sqrt(d) features (for classification) or d/3 features (for regression). The forest prediction is the majority vote (classification) or mean (regression) across all trees. Random forests reduce variance without increasing bias — a single deep tree has high variance; averaging many independently trained trees cancels out their individual errors. The bias of the ensemble equals the bias of each individual tree.
+A random forest is an ensemble of decision trees trained via bagging, with an extra layer of randomness at each split. Each tree is trained on a bootstrap sample (n samples drawn with replacement from training data) and at each split considers a random subset of features — sqrt(d) is sklearn's default for classification, and Breiman's original recommendation for regression is d/3, though sklearn's RandomForestRegressor defaults to using all d. The forest prediction is the majority vote (classification) or mean (regression) across all trees. Random forests reduce variance without increasing bias — a single deep tree has high variance; averaging many independently trained trees cancels out their individual errors. The bias of the ensemble equals the bias of each individual tree.
 
 **Q: Why can a decision tree overfit even with max_depth set?**
 Even with max_depth=6, a tree can overfit if min_samples_split and min_samples_leaf are too low. A node with 2 samples at depth 5 can still create a leaf that perfectly separates those 2 samples, memorizing noise. Additionally, with many features, the tree can find spurious correlations that disappear in new data. Setting min_samples_leaf=10 to 50 (depending on dataset size) prevents leaves from being defined by too few samples. Cross-validation on validation data is the only reliable way to detect overfitting.
@@ -773,7 +780,7 @@ On a typical tabular dataset with n=10,000 samples and d=20 features, a tree wit
 
 6. Prefer a single decision tree only when interpretability is a hard requirement. For predictive performance, use Random Forest or gradient boosting (XGBoost, LightGBM, CatBoost) — they consistently outperform single trees.
 
-7. When the dataset has missing values and you are using sklearn trees, use SimpleImputer with sentinel value (-9999 or a domain-specific constant) rather than mean/median imputation. This allows the tree to learn a specific branch for missing values. Alternatively, switch to XGBoost or LightGBM, which handle missing values natively by learning the optimal branch direction during training.
+7. When the dataset has missing values, pass NaN straight to the sklearn tree. With the default splitter="best" it evaluates both directions for the missing group at every split and keeps the better one, so it learns the branch direction instead of inheriting whatever an imputer invented. Benchmark against a SimpleImputer baseline anyway — imputation can win when missingness carries no signal.
 
 8. For very large datasets (n > 1M), sklearn's decision tree is slow. Use histogram-based methods (HistGradientBoostingClassifier in sklearn, LightGBM) which discretize features into 256 bins and run much faster.
 
