@@ -276,10 +276,10 @@ The recursion bottoms out at the two `VariableExpr` leaves before bubbling resul
 
 `@PreAuthorize("hasRole('ADMIN') and #userId == authentication.principal.id")` is the canonical Java Interpreter in production. Spring Security parses the SpEL string into an AST (`OpAnd`, `MethodReference`, `VariableReference`, `PropertyOrFieldReference`, `StringLiteral`) and evaluates it against an `EvaluationContext` populated with method arguments and the current authentication.
 
-Observed numbers in a high-throughput API gateway at 200k authorization checks/sec:
+Illustrative numbers for a high-throughput API gateway at 200k authorization checks/sec (order-of-magnitude, not a published benchmark):
 - First parse + evaluate: ~12 µs (tokenize + AST build + eval).
 - Cached compiled expression (warm): **< 0.1 µs** per evaluation — pure tree walk.
-- Without caching: parser allocates ~40 short-lived objects per parse -> ~80 MB/sec garbage and a measurable G1 young-GC bump (+8% pause frequency).
+- Without caching: the parser allocates ~40 short-lived objects per parse; at 200k parses/sec that is ~8M objects/sec, on the order of 400 MB/sec of young-gen garbage and a measurable G1 young-GC bump.
 - Result-cache for time-invariant expressions (no method calls): another ~5x reduction on hot paths.
 - A single missing cache layer once caused a 4x CPU regression in production; fix was 8 lines (ConcurrentHashMap of parsed expressions).
 
@@ -350,6 +350,10 @@ public record HasRoleExpression(String role) implements Expression {
 ```
 
 ```java
+// Local parser abstraction: String -> Expression (the AST built in the block above).
+@FunctionalInterface
+public interface ExpressionParser { Expression parse(String source); }
+
 public final class CachingExpressionEngine {
     // 200k req/sec * cold parse = catastrophic. Cache compiled ASTs.
     private static final int MAX_ENTRIES = 10_000;
@@ -373,7 +377,7 @@ public final class CachingExpressionEngine {
 ### Famous Java/Spring usages
 - `org.springframework.expression.ExpressionParser` / `SpelExpressionParser` — SpEL, full Interpreter with operators, method invocation, projection, selection.
 - `org.springframework.expression.spel.support.SimpleEvaluationContext` — sandboxed SpEL context for untrusted expressions.
-- `java.util.regex.Pattern` — regex compiled to an internal Interpreter (NFA/DFA hybrid).
+- `java.util.regex.Pattern` — regex compiled to a linked chain of `Node` objects walked by a backtracking NFA engine (the javadoc: "traditional NFA-based matching with ordered alternation as occurs in Perl 5").
 - `jakarta.el.ExpressionFactory` — Jakarta Expression Language for Jakarta Faces / JSP (`${user.name}`).
 - `java.sql.PreparedStatement` — SQL is parsed and interpreted by the DB engine.
 - `ognl.OgnlContext` — OGNL used by Struts/MyBatis for property navigation.
@@ -451,8 +455,9 @@ EvaluationContext sandbox = SimpleEvaluationContext
         .build();
 Object result = parser.parseExpression(filter).getValue(sandbox, model);
 // Also: validate the expression string against an allow-list of operators
-// before parsing; cap evaluation time with a watchdog (SpEL DoS via
-// quadratic backtracking is real — see CVE-2022-22950).
+// before parsing; cap evaluation time and expression size with a watchdog.
+// A crafted SpEL expression really can exhaust resources — CVE-2022-22950 is
+// classified CWE-770 (allocation without limits), not a regex-style backtrack.
 ```
 
 ### Migration story

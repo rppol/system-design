@@ -236,14 +236,14 @@ Two single dispatches compose into one double dispatch: `elementA.accept(visitor
 
 ### Production Anchor: Tenant-Filter Visitor for SQL ASTs
 
-A multi-tenant SaaS database layer must guarantee row-level isolation: every `SELECT` against shared tables silently gets a `WHERE tenant_id = ?` predicate. The naive approach (`String.format(" AND tenant_id=%d", id)`) is a SQL-injection disaster. The production approach: parse the user's SQL into an AST, run a `TenantFilterVisitor` that rewrites every `SelectNode`, then re-serialise. Hibernate's `@Filter` and platforms like Crunchy Data, PlanetScale, Vitess use this pattern.
+A multi-tenant SaaS database layer must guarantee row-level isolation: every `SELECT` against shared tables silently gets a `WHERE tenant_id = ?` predicate. The naive approach (`String.format(" AND tenant_id=%d", id)`) is a SQL-injection disaster. The production approach: parse the user's SQL into an AST, run a `TenantFilterVisitor` that rewrites every `SelectNode`, then re-serialise. Vitess (and PlanetScale, which is built on it) does exactly this — its `sqlparser` package builds an AST and rewrites it with `Walk`/`Rewrite` visitors. Hibernate's `@Filter` reaches the same outcome by a different route: it injects the predicate during HQL-to-SQL translation rather than re-parsing emitted SQL. At the database layer, PostgreSQL row-level security enforces the same invariant without any rewriting at all.
 
-Observed numbers in a B2B SaaS at 500 queries/sec sustained, 4k QPS burst:
+Illustrative numbers for a B2B SaaS at 500 queries/sec sustained, 4k QPS burst (order-of-magnitude, not a published benchmark):
 - AST parse: ~0.3 ms (JSqlParser).
 - Visitor traversal + rewrite: **< 0.5 ms p99** for queries up to 200 tokens.
 - Re-serialise + JDBC dispatch: ~0.4 ms.
 - Cache hit on prepared statement skips parse entirely (~0.05 ms total visitor cost).
-- Zero tenant-data-leakage incidents in 18 months post-adoption vs 4 in the prior year using string concatenation.
+- The decisive win is structural, not numeric: with a Visitor the compiler forces every node type to be handled, so a new clause (UNION, CTE) cannot be silently skipped the way a missed `instanceof` branch is.
 
 ```mermaid
 flowchart LR
@@ -297,6 +297,7 @@ public final class SelectNode implements SqlNode {
     public WhereNode where() { return where; }
     public void replaceWhere(WhereNode w) { this.where = w; }
     public FromNode from() { return from; }
+    public List<JoinNode> joins() { return List.copyOf(joins); }   // read-only view for visitors
 }
 ```
 
@@ -335,11 +336,11 @@ public final class TenantFilterVisitor implements SqlVisitor<SqlNode> {
 - `javax.lang.model.element.ElementVisitor` — annotation processing in javac (visits `TypeElement`, `VariableElement`, `ExecutableElement`).
 - `com.sun.source.tree.TreeVisitor` — javac AST visitor used by Error Prone, Lombok, NullAway.
 - `org.eclipse.jdt.core.dom.ASTVisitor` — Eclipse JDT visitor powering refactorings, Quick Fixes, code formatting.
-- `java.nio.file.FileVisitor` — `Files.walkFileTree()`; `SimpleFileVisitor` is the default-method base.
-- `org.apache.poi.ss.usermodel.Cell` walks via visitor-style callbacks in POI streaming reader.
-- `com.fasterxml.jackson.databind.JsonNode` traversal via visitor in jackson-databind extensions.
-- Hibernate `HqlAstVisitor` / `SqmVisitor` — HQL semantic model visitors used by the JPA criteria implementation.
-- Checkstyle, PMD, SpotBugs — every static analysis rule is a visitor over a Java AST.
+- `java.nio.file.FileVisitor` — `Files.walkFileTree()`; `SimpleFileVisitor` is the abstract base whose four methods already return `CONTINUE`, so you override only what you need.
+- `org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler.SheetContentsHandler` — POI's streaming (event) reader calls back per cell/row instead of materialising the sheet.
+- `com.fasterxml.jackson.databind.jsonFormatVisitors.JsonFormatVisitorWrapper` — driven by `ObjectMapper.acceptJsonFormatVisitor()`; how JSON Schema generators walk a type without the type knowing about them.
+- Hibernate `org.hibernate.query.sqm.spi.SemanticQueryWalker` (and its `BaseSemanticQueryWalker` no-op base) — the visitor over Hibernate 6's SQM tree, which is what HQL and the JPA Criteria API both compile into.
+- Checkstyle and PMD — every rule is a visitor over a Java source AST; SpotBugs is the same shape one level down, visiting compiled bytecode via ASM/BCEL detectors.
 
 ### Anti-pattern 1: Scattered instanceof instead of a Visitor
 
@@ -458,7 +459,7 @@ The two axes that decide Visitor's fit — operation count and element-hierarchy
 |---|---|---|
 | Purpose | Perform an operation across elements | Traverse elements sequentially |
 | Type awareness | Type-specific logic per element type | Treats all elements uniformly |
-| Element modification | No — operates on existing structure | No — traversal only |
+| Element modification | Commonly yes — rewriting visitors mutate or rebuild nodes (the tenant-filter rewrite above) | No — traversal only |
 | Best for | Multiple operations on heterogeneous types | Sequential access to homogeneous collection |
 
 ### Visitor vs Strategy

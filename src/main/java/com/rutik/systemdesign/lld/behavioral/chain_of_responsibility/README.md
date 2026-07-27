@@ -328,7 +328,7 @@ flowchart LR
 
     subgraph SGA["Context and Headers (1-4)"]
         direction LR
-        F1("1 WebAsyncManager<br/>Integration") --> F2("2 SecurityContext<br/>Persistence")
+        F1("1 WebAsyncManager<br/>Integration") --> F2("2 SecurityContext<br/>HolderFilter")
         F2 --> F3("3 HeaderWriter<br/>(X-Frame, HSTS)")
         F3 --> F4("4 CorsFilter")
     end
@@ -341,7 +341,7 @@ flowchart LR
     subgraph SGC["Authentication (7-9)"]
         direction LR
         F7("7 UsernamePassword<br/>(form login)") --> F8("8 BasicAuthentication")
-        F8 --> F9("9 BearerToken<br/>(JWT)")
+        F8 --> F9("9 BearerToken<br/>Authentication (JWT)")
     end
 
     subgraph SGD["Post-Auth Context (10-13)"]
@@ -353,7 +353,7 @@ flowchart LR
 
     subgraph SGE["Authorization Decision (14-15)"]
         direction LR
-        F14("14 ExceptionTranslation<br/>(AccessDenied to 403)") --> F15("15 FilterSecurityInterceptor<br/>final authz decision")
+        F14("14 ExceptionTranslation<br/>(AccessDenied to 403)") --> F15("15 AuthorizationFilter<br/>final authz decision")
     end
 
     F4 --> F5
@@ -372,11 +372,12 @@ flowchart LR
 
 *Every filter only knows about forwarding to the next link (or short-circuiting by writing a response directly) — the strict left-to-right order shown here is a security invariant, not an implementation detail (see the reordering anti-pattern below).*
 
-Observed numbers at 50k req/sec on a 16-vCPU JVM cluster:
+Illustrative numbers for a 50k req/sec, 16-vCPU JVM cluster (order-of-magnitude, not a published benchmark):
 - Full 15-filter traversal overhead: **< 2 ms p99** (most filters are no-ops on cache hit).
 - Short-circuit on auth failure at filter 8: returns in **~0.4 ms** without traversing filters 9–15.
 - Memory: filter chain is a singleton list; per-request state lives in `SecurityContextHolder` (ThreadLocal).
-- Filter ordering bugs accounted for **3 of 7 CVEs** in Spring Security 5.x — ordering is load-bearing.
+- Filter order is a security invariant, not an implementation detail: a misordered chain can authorize
+  before authenticating, or log request bodies before auth has rejected them.
 
 ### Production-grade handler base + chain
 
@@ -413,6 +414,8 @@ public final class RateLimitHandler extends Handler<HttpContext> {
 }
 
 public final class AuthHandler extends Handler<HttpContext> {
+    private final JwtVerifier jwt;
+    public AuthHandler(JwtVerifier jwt) { this.jwt = jwt; }
     @Override protected boolean canHandle(HttpContext c) {
         return c.header("Authorization") != null;
     }
@@ -425,8 +428,8 @@ public final class AuthHandler extends Handler<HttpContext> {
 ```
 
 ### Famous Java/Spring usages
-- `javax.servlet.FilterChain` — JEE servlet filter chain (`doFilter()` continues, no call terminates).
-- `org.springframework.security.web.FilterChainProxy` — Spring Security 15+ filter pipeline.
+- `jakarta.servlet.FilterChain` — Jakarta EE servlet filter chain (`doFilter()` continues, no call terminates).
+- `org.springframework.security.web.FilterChainProxy` — Spring Security's strictly-ordered 15+ filter pipeline.
 - `org.springframework.web.servlet.HandlerInterceptor` chain — `preHandle/postHandle/afterCompletion` around MVC handlers.
 - `org.springframework.web.filter.OncePerRequestFilter` — base for per-request filters.
 - `io.netty.channel.ChannelPipeline` — inbound/outbound `ChannelHandler` chain.
@@ -437,15 +440,25 @@ public final class AuthHandler extends Handler<HttpContext> {
 ### Anti-pattern 1: Chain with no terminal handler
 
 ```java
-// BROKEN: request walks the end of the chain; null next, nothing responds.
-// Client sees the connection hang until timeout (default 30s).
+// BROKEN: a naive base handler with no terminal branch. When `next` is null the
+// call just returns without writing a response; the client hangs until timeout.
+public void handle(C ctx) {
+    if (canHandle(ctx)) { doHandle(ctx); return; }
+    if (next != null) next.handle(ctx);             // null next -> silent no-op
+}
+
 auth.setNext(authz).setNext(business);              // no fallback after business
-business.handle(ctx);                               // if !canHandle, falls off the end
+auth.handle(ctx);                                   // if nothing matches, no response is written
 ```
 
 ```java
-// FIX: always terminate with a default/catch-all handler.
+// FIX: give the base handle() an else-branch (terminateWithDefault, as in the
+// production-grade Handler above) AND terminate the chain with a catch-all handler.
+// setNext() returns the handler it was GIVEN, so the fluent expression evaluates to
+// the TAIL of the chain -- keep the head in its own variable.
+Handler<HttpContext> head = auth;
 auth.setNext(authz).setNext(business).setNext(new NotFoundHandler());
+head.handle(ctx);
 
 public final class NotFoundHandler extends Handler<HttpContext> {
     @Override protected boolean canHandle(HttpContext c) { return true; }
@@ -484,18 +497,21 @@ public final class SpecialHandler extends Handler<Request> {
 // only authenticated users count toward the quota. Now 429 responses include
 // the authenticated principal in the response body / logs / WWW-Authenticate
 // header -> identity leak to attackers spraying credentials.
-chain = auth.setNext(rateLimit).setNext(business);
+auth.setNext(rateLimit).setNext(business);
+Handler<HttpContext> chain = auth;                  // head of the chain
 ```
 
 ```java
 // FIX: document ordering invariants and assert them in unit tests.
 // Rate-limit MUST precede auth so 429s are identity-agnostic.
-chain = rateLimit.setNext(auth).setNext(business);
+// NOTE: setNext() returns its ARGUMENT, so the fluent expression evaluates to the
+// TAIL. Build the order list explicitly rather than assigning the expression.
+List<Handler<HttpContext>> order = List.of(rateLimit, auth, business);
+order.get(0).setNext(order.get(1)).setNext(order.get(2));
 
 @Test void rateLimitMustPrecedeAuth() {
-    var order = chain.toList();
     assertTrue(order.indexOf(rateLimit) < order.indexOf(auth),
-        "rate limiter must run before auth (CVE-2022-XXXX class issue)");
+        "rate limiter must run before auth so 429s stay identity-agnostic");
 }
 ```
 

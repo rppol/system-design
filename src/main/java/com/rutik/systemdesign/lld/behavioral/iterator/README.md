@@ -252,7 +252,7 @@ sequenceDiagram
 
 1. **`ConcurrentModificationException`** — modifying a collection while iterating it (adding/removing elements) causes this exception. Use `iterator.remove()` instead of `collection.remove()` during iteration, or use a `CopyOnWriteArrayList`.
 
-2. **Not closing resource iterators** — iterators over databases, files, or network streams must be closed. Use try-with-resources (`for (X x : stream)` auto-closes in Java 7+).
+2. **Not closing resource iterators** — iterators over databases, files, or network streams must be closed. A for-each loop does NOT close anything; wrap the resource in try-with-resources and iterate inside it: `try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) { for (Path p : ds) { ... } }`.
 
 3. **Implementing `next()` without checking `hasNext()`** — if the client calls `next()` when exhausted, it should throw `NoSuchElementException`, not return null (null return is ambiguous).
 
@@ -317,7 +317,7 @@ flowchart LR
 *`OrderPageSpliterator` lazily pages the 50M-row table into a parallel `Stream`, holding only ~500 KB (one page) in heap at a time instead of the ~25 GB a full load would need; `trySplit()` then hands each of 8 threads a disjoint key range.*
 
 ```java
-// Java 17 LTS — Custom Spliterator for lazy paginated PostgreSQL cursor
+// Java 25 LTS — Custom Spliterator for lazy paginated PostgreSQL cursor
 // Streams 50M records with constant ~500 KB heap usage
 
 public class OrderPageSpliterator implements Spliterator<Order> {
@@ -326,7 +326,7 @@ public class OrderPageSpliterator implements Spliterator<Order> {
 
     private final JdbcTemplate jdbc;
     private final long minId;
-    private final long maxId;
+    private long maxId;                 // NOT final — trySplit() shrinks this half's range
 
     private List<Order> currentPage = Collections.emptyList();
     private int pageIndex = 0;
@@ -367,8 +367,11 @@ public class OrderPageSpliterator implements Spliterator<Order> {
         long remaining = maxId - lastSeenId;
         if (remaining < PAGE_SIZE * 2) return null;  // too small to split further
         long midId = lastSeenId + remaining / 2;
-        // This half: [lastSeenId, midId]; new split: [midId, maxId]
-        Spliterator<Order> split = new OrderPageSpliterator(jdbc, midId, maxId);
+        // Half-open at midId so the ranges are DISJOINT: this half keeps
+        // (lastSeenId, midId]; the split takes (midId, maxId]. Passing midId (not
+        // midId + 1) as the split's minId would emit row midId from BOTH halves,
+        // because the constructor sets lastSeenId = minId - 1 and fetchPage uses `id > ?`.
+        Spliterator<Order> split = new OrderPageSpliterator(jdbc, midId + 1, maxId);
         this.maxId = midId;   // shrink our range
         return split;         // parallel stream processes the split independently
     }
@@ -497,29 +500,30 @@ Spliterator<Order> split = root.trySplit();  // splits ownership — no shared s
 ### Anti-Pattern 3: Fail-Fast Iterator on Shared Collection in Long Transaction
 
 ```java
-// BROKEN — iterator used inside a long-running @Transactional method.
-// Another thread modifies the collection (or Hibernate flushes) mid-iteration.
-// Fail-fast iterator throws ConcurrentModificationException inside the transaction.
-// Transaction rolls back; all work lost.
+// BROKEN — iterating a MANAGED entity's lazily-loaded persistent collection
+// (a Hibernate PersistentBag/PersistentSet, not a detached query result) while the
+// loop mutates that same collection. The fail-fast iterator throws
+// ConcurrentModificationException inside the transaction; the transaction rolls back.
+// NOTE: repository.findAll() returns a plain detached ArrayList — that one is safe.
 
 @Transactional
-public void processAllOrders() {
-    List<Order> orders = orderRepo.findAll();  // returns live Hibernate collection
-    for (Order order : orders) {               // fail-fast iterator on live collection
-        // Hibernate auto-flush may modify the underlying collection here
-        orderService.process(order);           // triggers flush -> CME -> rollback
+public void cancelBackorderedLines(long orderId) {
+    Order order = orderRepo.findById(orderId).orElseThrow();
+    for (LineItem line : order.getLineItems()) {   // live PersistentBag, fail-fast iterator
+        if (line.isBackordered()) {
+            order.getLineItems().remove(line);      // structural change during iteration -> CME
+        }
     }
 }
 ```
 
 ```java
-// FIX Option A — take a snapshot (new ArrayList) to decouple iteration from live collection
+// FIX Option A — mutate through the iterator, or snapshot before iterating
 @Transactional
-public void processAllOrders() {
-    List<Order> snapshot = new ArrayList<>(orderRepo.findAll());  // defensive copy
-    for (Order order : snapshot) {
-        orderService.process(order);  // modifying DB does not affect snapshot iterator
-    }
+public void cancelBackorderedLines(long orderId) {
+    Order order = orderRepo.findById(orderId).orElseThrow();
+    order.getLineItems().removeIf(LineItem::isBackordered);   // Iterator.remove() under the hood
+    // Equivalent: for (LineItem l : new ArrayList<>(order.getLineItems())) { ... }
 }
 
 // FIX Option B — use CopyOnWriteArrayList when read-heavy, write-rare, and thread contention exists
@@ -619,7 +623,7 @@ A: Java 8's parallel-aware iterator that can split itself for parallel processin
 A: Use `Stream` when you're describing a transformation pipeline (filter, map, reduce, collect) over a source — it's more expressive, often lazy, and can be parallelized with `.parallelStream()` without manual thread management. Use a custom `Iterator`/`Iterable` when you're modeling a *data structure* that needs to support external, stateful, step-by-step traversal — e.g., a tree that callers walk node-by-node, or a cursor over paginated API results where the caller controls pacing. In practice, a well-designed `Iterable` gives you `Stream` for free (`StreamSupport.stream(spliterator(), false)`), so the two aren't mutually exclusive — implement `Iterable` for the data structure, and let callers choose `for-each` or `.stream()` depending on whether they need control flow or a pipeline.
 
 **Q: Explain `ConcurrentModificationException` mechanics — why does `ArrayList.Itr` throw it, and how do `CopyOnWriteArrayList`/`ConcurrentHashMap` avoid it?**
-A: `ArrayList` (and most `java.util` collections) maintain a `modCount` field incremented on every structural modification (add/remove, not set); `ArrayList.Itr` captures `expectedModCount` at creation and checks `modCount == expectedModCount` on every `next()` call, throwing `ConcurrentModificationException` (fail-fast) if they diverge. `CopyOnWriteArrayList` avoids this entirely because every write (`add`/`remove`) creates a brand-new backing array — the iterator was handed a reference to the *old* array at creation time and simply never sees the new one, so there's nothing to detect a conflict against; reads are always consistent with a point-in-time snapshot. `ConcurrentHashMap`'s iterators are "weakly consistent" — they tolerate concurrent modification and may or may not reflect updates made during iteration, but never throw CME, because the map is segmented and each segment's traversal doesn't rely on a single global modification counter.
+A: `ArrayList` (and most `java.util` collections) maintain a `modCount` field incremented on every structural modification (add/remove, not set); `ArrayList.Itr` captures `expectedModCount` at creation and checks `modCount == expectedModCount` on every `next()` call, throwing `ConcurrentModificationException` (fail-fast) if they diverge. `CopyOnWriteArrayList` avoids this entirely because every write (`add`/`remove`) creates a brand-new backing array — the iterator was handed a reference to the *old* array at creation time and simply never sees the new one, so there's nothing to detect a conflict against; reads are always consistent with a point-in-time snapshot. `ConcurrentHashMap`'s iterators are "weakly consistent" — they tolerate concurrent modification and may or may not reflect updates made during iteration, but never throw CME, because the traversal walks the live bin table directly and there is no modification counter to compare against (Java 8 replaced the old segment array with per-bin locking, so there is no global count to invalidate).
 
 **Q: What's the difference between external and internal iteration, and what control-flow tradeoffs come with each?**
 A: External iteration (`while (it.hasNext()) { T x = it.next(); ... }`) puts the client in control of the loop — the client can `break`, `return`, skip elements, or interleave iteration with other logic mid-loop. Internal iteration (`collection.forEach(x -> ...)`, or `Stream` operations) hands control to the collection/library, which calls back into a lambda for each element — this enables the library to optimize (parallelize, fuse operations, short-circuit via `findFirst`/`anyMatch`) but makes early-exit and cross-iteration state awkward (no `break`; mutable captured variables need `AtomicInteger`-style workarounds). Practical guidance: prefer internal iteration (`forEach`, streams) for simple "do this to every element" cases since it's more concise and parallelizable; fall back to external iteration when you need fine-grained control flow (early termination with side effects, coordinating two iterators in lockstep).

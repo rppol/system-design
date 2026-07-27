@@ -336,7 +336,7 @@ flowchart LR
 ```
 
 ```java
-// Java 17 LTS — Command interface and concrete implementations
+// Java 25 LTS — Command interface and concrete implementations
 // Collaborative document editor undo/redo
 
 public interface DocumentCommand {
@@ -378,7 +378,9 @@ public class DocumentCommandInvoker {
 
     private static final int MAX_HISTORY = 1_000;
 
-    // ArrayDeque as bounded ring buffer (remove oldest when full)
+    // ArrayDeque as a bounded ring buffer. push() == addFirst(), so the NEWEST
+    // command is at the head and the OLDEST is at the tail -- evict with pollLast().
+    // (The constructor arg is only an initial capacity; the size check below is what bounds it.)
     private final Deque<DocumentCommand> undoStack = new ArrayDeque<>(MAX_HISTORY);
     private final Deque<DocumentCommand> redoStack = new ArrayDeque<>();
     private final DocumentEditor editor;
@@ -389,7 +391,7 @@ public class DocumentCommandInvoker {
 
     public void execute(DocumentCommand cmd) {
         if (undoStack.size() == MAX_HISTORY) {
-            undoStack.pollFirst();  // compact: discard oldest, trigger snapshot asynchronously
+            undoStack.pollLast();   // compact: discard OLDEST (tail), not the newest
         }
         cmd.execute(editor);
         undoStack.push(cmd);
@@ -413,7 +415,7 @@ public class DocumentCommandInvoker {
 ```
 
 ```java
-// Java 17 LTS — Spring @Async + Callable as Command pattern
+// Java 25 LTS — Spring @Async + Callable as Command pattern
 // Background export job using Callable (Command with return value)
 
 @Service
@@ -448,8 +450,9 @@ public class DocumentExportService {
   is a Command object composed into a `Job`; supports restart, skip, retry — built-in undo analogue.
 - **Spring Integration `MessageHandler`**: `handleMessage(Message<?>)` is a Command that processes
   a queued message; handlers compose into integration flows.
-- **Flyway / Liquibase migrations**: each migration script is a Command with `up` (execute) and
-  `down` (undo/rollback) — the canonical enterprise undo pattern.
+- **Flyway / Liquibase migrations**: each migration is a Command with a forward step and an
+  inverse — Liquibase `rollback` blocks, and Flyway's `U`-prefixed undo migrations (a paid
+  Redgate Flyway feature, hand-written per `V` migration) — the canonical enterprise undo pattern.
 
 ---
 
@@ -462,6 +465,14 @@ public class DocumentExportService {
 public class DeleteTextCommand implements DocumentCommand {
     private final int position;
     private final int length;
+    private final String commandId = UUID.randomUUID().toString();
+
+    public DeleteTextCommand(int position, int length) {
+        this.position = position;
+        this.length = length;
+    }
+
+    @Override public String commandId() { return commandId; }
 
     @Override
     public void execute(DocumentEditor editor) {
@@ -544,6 +555,11 @@ public final class ProcessOrderCommand implements DocumentCommand {
     // Injected via constructor, not created inside Command
     private final OrderFulfillmentService fulfillmentService;
 
+    public ProcessOrderCommand(String orderId, OrderFulfillmentService fulfillmentService) {
+        this.orderId = orderId;
+        this.fulfillmentService = fulfillmentService;
+    }
+
     @Override
     public void execute(DocumentEditor editor) {
         preState = fulfillmentService.snapshot(orderId);  // capture before mutation
@@ -565,8 +581,9 @@ public final class ProcessOrderCommand implements DocumentCommand {
 
 ```java
 // BROKEN — ArrayList accumulates all commands ever executed.
-// A document with 10,000 edits holds 10,000 Command objects (~2 MB).
-// After 1 hour of active editing across 10,000 documents: ~20 GB heap.
+// A long-lived session with 10,000 edits holds 10,000 Command objects (~2 MB).
+// Nothing is ever evicted, so at the file's stated 100k ops/hour the log reaches
+// 2.4M commands (~480 MB) after one day and keeps growing until OOM.
 
 public class DocumentCommandInvoker {
     private final List<DocumentCommand> history = new ArrayList<>();  // unbounded
@@ -589,7 +606,7 @@ public class DocumentCommandInvoker {
 
     public void execute(DocumentCommand cmd) {
         if (undoStack.size() == MAX_HISTORY) {
-            undoStack.pollFirst();  // evict oldest command
+            undoStack.pollLast();   // evict oldest command (tail; push() adds at the head)
             // Optionally: trigger async snapshot so oldest state is still recoverable from DB
             snapshotService.persistSnapshotAsync(documentId, currentState());
         }
@@ -609,7 +626,7 @@ public class DocumentCommandInvoker {
 | Undo/redo latency (in-memory) | < 5 ms for 1,000-command log |
 | Command log compaction (1,000 cmds) | 200 KB -> < 10 KB net document state |
 | Spring Callable dispatch latency | < 2 ms to `ThreadPoolTaskExecutor` queue |
-| Flyway migration undo safety | 100% reproducible rollback with recorded down() script |
+| Flyway undo migrations | hand-written `U`-prefixed scripts; a paid (Redgate Flyway Pro/Enterprise) feature |
 
 ### Migration Story
 

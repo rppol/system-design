@@ -213,14 +213,14 @@ sequenceDiagram
 
 ### Production Anchor: JDBC Savepoints in a multi-step order workflow
 
-The canonical Java Memento in production is JDBC `Connection.setSavepoint()` / `rollbackToSavepoint()`. A multi-step order workflow — validate, reserve inventory, charge payment, create shipment — wraps each step in a savepoint so a failure rolls back only that step, not the entire transaction. The database is the Caretaker; the `Savepoint` handle is the Memento; the transaction's internal undo log is the snapshot.
+The canonical Java Memento in production is JDBC `Connection.setSavepoint()` / `Connection.rollback(Savepoint)`. A multi-step order workflow — validate, reserve inventory, charge payment, create shipment — wraps each step in a savepoint so a failure rolls back only that step, not the entire transaction. The database is the Caretaker; the `Savepoint` handle is the Memento; the transaction's internal undo log is the snapshot.
 
-Observed numbers in an order-processing service at 10k attempted orders/day:
-- Savepoint creation: ~0.2 ms (server-side, no network round-trip on most drivers when batched).
-- `rollbackToSavepoint()` p99: **< 5 ms** for steps touching < 100 rows.
-- Full transaction rollback would have cost p99 ~80 ms (rebuilds entire write set).
+Illustrative numbers for an order-processing service at 10k attempted orders/day (order-of-magnitude, not a published benchmark):
+- Savepoint creation: ~0.2 ms — `setSavepoint()` issues a `SAVEPOINT` statement, so it does cost a round-trip.
+- `rollback(Savepoint)` p99: **< 5 ms** for steps touching < 100 rows.
+- Full transaction rollback discards the whole write set, so the ~80 ms p99 is the cost of REDOING the earlier steps on retry, not of the rollback itself.
 - Without savepoints, a fraud-flag step at the tail forced full rollback + restart, doubling order latency from 220 ms to 510 ms.
-- Savepoint-per-step pattern reduced retry storms by 73% during a payment-gateway flap incident.
+- Savepoint-per-step sharply reduced retry storms during a payment-gateway flap, because a failed tail step no longer forced the whole workflow to restart.
 
 ```mermaid
 sequenceDiagram
@@ -236,11 +236,11 @@ sequenceDiagram
     Note over TX: undo log = [SP1][SP2][SP3]
 
     Note over OF,TX: fraud check fails!
-    OF->>TX: rollbackToSavepoint(SP2)
+    OF->>TX: rollback(SP2)
     Note over TX: undo log = [SP1][SP2]<br/>charge undone, reserve kept
 ```
 
-*Each `setSavepoint()` call is a Memento checkpoint on the Transaction's undo log; `rollbackToSavepoint(SP2)` restores to the "reserved" point, discarding only the failed "charged" step while keeping "reserve inventory" intact.*
+*Each `setSavepoint()` call is a Memento checkpoint on the Transaction's undo log; `rollback(SP2)` restores to the "reserved" point, discarding only the failed "charged" step while keeping "reserve inventory" intact.*
 
 ### Production-grade Memento (inner-class, encapsulated state)
 
@@ -259,11 +259,14 @@ public final class Order {
     // Memento as a static inner class — only Order can read its fields.
     public static final class Snapshot {
         private final OrderStatus status;
-        private final List<LineItem> items;       // deep copy
+        private final List<LineItem> items;       // immutable copy of the LIST
         private final Money charged;
         private Snapshot(Order o) {
             this.status  = o.status;
-            this.items   = List.copyOf(o.items);  // immutable deep copy
+            // List.copyOf is a SHALLOW copy: the list can no longer be structurally
+            // changed, but the LineItem elements are shared. That is safe here only
+            // because LineItem is immutable; if it were not, copy each element too.
+            this.items   = List.copyOf(o.items);
             this.charged = o.charged;             // Money is itself immutable
         }
     }
@@ -282,21 +285,25 @@ public final class Order {
 public final class OrderWorkflow {
     public void run(Order order, Connection conn) throws SQLException {
         conn.setAutoCommit(false);
-        Savepoint reserved = null;
-        Order.Snapshot domainBefore = order.snapshot();   // in-memory memento
+        Order.Snapshot domainBefore = order.snapshot();   // in-memory memento, pre-workflow
         try {
             validate(order);
-            reserved = conn.setSavepoint("RESERVED");     // JDBC memento
             inventory.reserve(order, conn);
+            // Both mementos are taken AFTER the reservation, so rolling back to them
+            // undoes the charge and KEEPS the reservation. Taking the savepoint before
+            // inventory.reserve() would silently discard the reservation too.
+            Savepoint reserved = conn.setSavepoint("RESERVED");   // JDBC memento
+            Order.Snapshot afterReserve = order.snapshot();       // in-memory memento
             payment.charge(order, conn);
             if (fraud.flagged(order)) {
-                conn.rollback(reserved);                  // rollback DB to SP
-                order.restore(domainBefore);              // restore in-memory state
-                throw new FraudException();
-            }
+                conn.rollback(reserved);       // DB: undo the charge only
+                order.restore(afterReserve);   // memory: undo the charge only
+                conn.commit();                 // the reservation survives in both layers
+                throw new FraudException();    // unchecked -- must NOT hit the catch below,
+            }                                  // or conn.rollback() would discard it again
             conn.commit();
-        } catch (Exception e) {
-            conn.rollback();
+        } catch (SQLException e) {
+            conn.rollback();                   // infrastructure failure -> abort everything
             order.restore(domainBefore);
             throw e;
         }
@@ -305,9 +312,9 @@ public final class OrderWorkflow {
 ```
 
 ### Famous Java/library usages
-- `java.sql.Connection.setSavepoint()` / `rollbackToSavepoint()` — JDBC savepoint = Memento.
+- `java.sql.Connection.setSavepoint()` / `rollback(Savepoint)` / `releaseSavepoint(Savepoint)` — JDBC savepoint = Memento.
 - `javax.swing.undo.UndoManager` + `UndoableEdit` — Swing undo stack.
-- `com.fasterxml.jackson.core.JsonParser.mark()` / `reset()` — backtracking parser (note: not all parsers support; some use `JsonLocation` snapshots).
+- `java.io.BufferedReader.mark(int)` / `reset()` and `java.io.BufferedInputStream.mark(int)` / `reset()` — stream position snapshot for backtracking parsers (`markSupported()` reports whether a given stream offers it).
 - `java.nio.ByteBuffer.mark()` / `reset()` — buffer position snapshot.
 - `java.util.regex.Matcher` resettable state.
 - Git commits — each commit object is a Memento of the full working-tree state; the commit DAG is the Caretaker.
@@ -328,8 +335,10 @@ public static final class Snapshot {
 ```
 
 ```java
-// FIX: deep copy at snapshot time. Use List.copyOf (Java 10+) for an
-// immutable copy, or new ArrayList<>(o.items) if you need mutability.
+// FIX: copy the list at snapshot time. List.copyOf gives an immutable copy of the
+// LIST (new ArrayList<>(o.items) if you need it mutable) -- both are SHALLOW, so
+// they only fix aliasing when the elements themselves are immutable. If LineItem
+// is mutable, copy each element: o.items.stream().map(LineItem::copy).toList().
 private Snapshot(Order o) { this.items = List.copyOf(o.items); }
 ```
 
@@ -427,7 +436,7 @@ A: The naive approach — a full deep copy on every save point — scales linear
 A: The canonical Java idiom is a `private static final class Snapshot` (or `Memento`) nested inside the Originator class. Because a nested class has access to its enclosing class's private members, `Snapshot`'s private constructor can read `Order`'s private fields (`status`, `items`, `charged`) directly when building the snapshot, and `Order.restore(Snapshot s)` can read `s`'s private fields directly to write them back — but no class *outside* `Order` can construct a `Snapshot`, read its fields, or do anything with it except hold the reference and pass it back to `restore()`. This gives the Caretaker a token it can store in a stack/list (it needs the *type* `Order.Snapshot` to declare the variable) without any ability to inspect or tamper with its contents — encapsulation is enforced by Java's access-modifier rules, not by convention.
 
 **Q: How does Memento relate to database transaction rollback / savepoints?**
-A: A JDBC `Savepoint` (from `Connection.setSavepoint()`) is literally a Memento at the database layer: the `Connection` (Originator) creates an opaque `Savepoint` token, the calling code (Caretaker) holds onto it without inspecting it, and `rollbackToSavepoint(sp)` restores the transaction's state to that point without undoing everything before it. This file's production anchor shows the pattern combined at two layers — JDBC savepoints for the database's undo log, and an in-memory `Order.Snapshot` for the application object's state — rolled back together so a failed fraud check undoes only the "charge" step while keeping "reserve inventory" intact. The broader principle: whenever you need rollback granularity *finer* than "abort the entire transaction," you're looking for a Memento-shaped solution, whether that's a DB savepoint, an in-memory snapshot, or both in coordination.
+A: A JDBC `Savepoint` (from `Connection.setSavepoint()`) is literally a Memento at the database layer: the `Connection` (Originator) creates an opaque `Savepoint` token, the calling code (Caretaker) holds onto it without inspecting it, and `connection.rollback(savepoint)` restores the transaction's state to that point without undoing everything before it. This file's production anchor shows the pattern combined at two layers — JDBC savepoints for the database's undo log, and an in-memory `Order.Snapshot` for the application object's state — rolled back together so a failed fraud check undoes only the "charge" step while keeping "reserve inventory" intact. The broader principle: whenever you need rollback granularity *finer* than "abort the entire transaction," you're looking for a Memento-shaped solution, whether that's a DB savepoint, an in-memory snapshot, or both in coordination.
 
 **Q: What are the tradeoffs of a serialization-based Memento (Java serialization or JSON)?**
 A: Serializing the Originator's state to bytes or JSON gives you a Memento that can survive process restarts, be sent over a network, or be stored in a database/file — useful for game saves, document auto-recovery, or `Activity.onSaveInstanceState(Bundle)` on Android. The cost is versioning: if the Originator's internal structure changes (a field renamed or removed), old serialized Mementos may fail to deserialize or silently populate fields with defaults — this is the same "schema evolution" problem that any persisted format faces, and Java's default serialization is especially brittle here (a missing `serialVersionUID` or a renamed field breaks deserialization). For long-lived persisted Mementos, prefer a versioned format (JSON/Protobuf with explicit schema versioning and migration logic) over raw Java `Serializable`, and write a test that deserializes a Memento captured by an *older* version of the class to catch breakage early.

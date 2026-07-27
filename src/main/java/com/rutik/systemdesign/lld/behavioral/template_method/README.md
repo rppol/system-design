@@ -244,9 +244,9 @@ a single buggy mapper would exhaust the 20-connection pool in seconds, causing a
 **Scale numbers:**
 - 10,000 queries/sec; HikariCP default pool size 10 (production tuned to 20)
 - Connection acquisition: < 1 ms from HikariCP pool under normal load
-- JdbcTemplate overhead vs raw JDBC: ~5 us per query (reflection for exception translation)
+- JdbcTemplate overhead vs raw JDBC: ~5 us per query (callback indirection and result-set iteration; exception translation only costs anything on the error path)
 - RowMapper call frequency: once per row; 1,000-row result set = 1,000 mapRow() calls per query
-- AbstractBatchConfiguration batch job: 50,000 items/chunk, 200 chunks/job = 10M records/job
+- Batch job sizing: 500 items/chunk, 20,000 chunks/job = 10M records/job
 
 The template method (`JdbcTemplate.query()`) owns every invariant step — connection acquisition, statement prep, execution, resource release, and exception translation — while the caller's `RowMapper.mapRow()` hook supplies only the row-to-object mapping:
 
@@ -278,7 +278,7 @@ sequenceDiagram
 ```
 
 ```java
-// Java 17 LTS — JdbcTemplate RowMapper as a Template Method hook
+// Java 25 LTS — JdbcTemplate RowMapper as a Template Method hook
 // The template (JdbcTemplate.query) is invariant; only mapRow() varies per use case.
 
 @Repository
@@ -305,7 +305,7 @@ public class OrderRepository {
         );
     }
 
-    // NamedParameterJdbcTemplate variant — same template, different SQL binding hook
+    // Same template, different hook: queryForObject supplies the row type instead of a RowMapper
     public int countByMerchant(String merchantId) {
         return jdbc.queryForObject(
             "SELECT COUNT(*) FROM orders WHERE merchant_id = ?",
@@ -317,33 +317,35 @@ public class OrderRepository {
 ```
 
 ```java
-// Java 17 LTS — Spring Batch AbstractBatchConfiguration as Template Method
-// Template defines the batch lifecycle; subclass provides Reader, Processor, Writer hooks
+// Java 25 LTS / Spring Batch 6 — DefaultBatchConfiguration as Template Method
+// Template defines the batch infrastructure and lifecycle; you override only the hooks.
 
 @Configuration
-@EnableBatchProcessing
-public class OrderExportBatchConfig extends DefaultBatchConfigurer {
+public class OrderExportBatchConfig extends DefaultBatchConfiguration {
 
-    // DefaultBatchConfigurer.createJobRepository() is the template method:
-    // it calls getDataSource(), getTransactionManager() — hooks the subclass can override.
-    // Subclass does NOT override the full job-launch sequence, only specific steps.
+    // org.springframework.batch.core.configuration.support.DefaultBatchConfiguration
+    // is the template: jobRepository()/jobLauncher() are built from overridable hooks
+    // such as getDataSource(), getTransactionManager(), and getIsolationLevelForCreate().
+    // Subclasses never re-implement the job-launch sequence, only those steps.
 
     @Bean
-    public Job orderExportJob(JobBuilderFactory jobs, Step exportStep) {
-        return jobs.get("orderExportJob")
+    public Job orderExportJob(JobRepository jobRepository, Step exportStep) {
+        return new JobBuilder("orderExportJob", jobRepository)
             .incrementer(new RunIdIncrementer())
-            .flow(exportStep)
-            .end()
+            .start(exportStep)
             .build();
     }
 
     @Bean
-    public Step exportStep(StepBuilderFactory steps,
+    public Step exportStep(JobRepository jobRepository,
+                           PlatformTransactionManager transactionManager,
                            ItemReader<Order> reader,
                            ItemProcessor<Order, OrderCsv> processor,
                            ItemWriter<OrderCsv> writer) {
-        return steps.get("exportStep")
-            .<Order, OrderCsv>chunk(50_000)   // chunk = one template iteration unit
+        return new StepBuilder("exportStep", jobRepository)
+            // chunk = one template iteration unit AND one transaction, so keep it small
+            // enough that a rollback is cheap; 100-1,000 is the usual production range.
+            .<Order, OrderCsv>chunk(500, transactionManager)
             .reader(reader)        // hook: what to read (DB cursor)
             .processor(processor)  // hook: how to transform (Order -> OrderCsv)
             .writer(writer)        // hook: where to write (S3 CSV)
@@ -356,20 +358,28 @@ public class OrderExportBatchConfig extends DefaultBatchConfigurer {
 
 ### Famous Codebase Usages
 
-- **`java.io.InputStream.read(byte[], int, int)`**: the template method implemented using the
-  single-byte abstract `read()` hook; `FileInputStream`, `ByteArrayInputStream`, `GZIPInputStream`
-  each implement `read()` — the loop logic in the 3-arg version is invariant across all.
-- **`java.util.AbstractList`**: `get(int)` and `size()` are the abstract hooks; `iterator()`,
-  `indexOf()`, `subList()`, `contains()`, `toArray()` are all concrete template methods built
-  on top. `ArrayList`, `LinkedList`, `UnmodifiableList` only implement the two hooks.
-- **`javax.servlet.HttpServlet.service()`**: dispatches to `doGet()`, `doPost()`, `doPut()`,
+- **`java.io.InputStream.read(byte[], int, int)`**: the template method, implemented as a loop over
+  the single-byte abstract `read()` hook — so a minimal custom stream gets bulk reads for free by
+  implementing one method. Note that the JDK's own concrete streams (`FileInputStream`,
+  `ByteArrayInputStream`, `InflaterInputStream`/`GZIPInputStream`) all OVERRIDE the 3-arg version
+  with a bulk implementation; the template is the correctness fallback, not the hot path.
+- **`java.util.AbstractList`**: `get(int)` and the inherited `size()` are the abstract hooks;
+  `iterator()`, `indexOf()`, `subList()` (and, from `AbstractCollection`, `contains()`/`toArray()`)
+  are concrete template methods built on top — so a read-only custom `List` needs only those two
+  methods. `ArrayList` and `LinkedList` extend it but override most of those for performance, and
+  `Collections.unmodifiableList()` does not extend it at all (it delegates to the wrapped list).
+- **`jakarta.servlet.http.HttpServlet.service()`**: dispatches to `doGet()`, `doPost()`, `doPut()`,
   `doDelete()` based on HTTP method — the dispatch logic is the template; each `doXxx()` is a hook.
 - **`JdbcTemplate.execute(ConnectionCallback<T>)`**: wraps the connection lifecycle around the
-  caller's `ConnectionCallback.doInConnection()` — the original 2003 Spring template method.
-- **`AbstractBatchJobLauncher`** (Spring Batch): `run(Job, JobParameters)` is the template;
-  hooks `JobRepository.createJobExecution()`, `job.execute()`, `handleStep()` are overridable.
-- **JUnit 4 `TestCase.runBare()`**: calls `setUp()` before and `tearDown()` after `runTest()` —
-  the first widely-known Java template method for test lifecycle management.
+  caller's `ConnectionCallback.doInConnection()` — Spring's original template method.
+- **Spring Batch `AbstractJob`**: `execute(JobExecution)` is the template — it opens the execution,
+  calls the abstract `doExecute()` hook (`SimpleJob` implements it by looping `handleStep()`), then
+  always updates status and closes the execution. `TaskExecutorJobLauncher.run(Job, JobParameters)`
+  wraps the same invariant create-execution / launch / persist sequence.
+- **JUnit's `junit.framework.TestCase.runBare()`** (JUnit 3): calls `setUp()` before and
+  `tearDown()` after `runTest()` — the first widely-known Java template method for test lifecycle
+  management. JUnit 5 keeps the same fixed lifecycle but drives it from annotations
+  (`@BeforeEach` -> `@Test` -> `@AfterEach`) rather than an inherited base class.
 
 ---
 
@@ -508,13 +518,16 @@ public abstract class DataPipeline {
             writeSink(row);
         }
         auditLog();   // optional hook — no-op default
-        cleanup();    // mandatory
+        cleanup();    // optional hook — no-op default
     }
 
     // Mandatory hooks — subclasses MUST implement these
     protected abstract void connectSource();
     protected abstract void connectSink();
+    protected abstract boolean hasNext();
+    protected abstract Row nextRow();
     protected abstract Row transformRow(Row row);
+    protected abstract void writeSink(Row row);
 
     // Optional hooks — default implementations do nothing; override only if needed
     protected void handleNulls(Row row) {}        // no-op default
@@ -522,7 +535,7 @@ public abstract class DataPipeline {
     protected void auditLog() {}                  // no-op default
     protected void cleanup() {}                   // no-op default
 }
-// SimplePipeline extends DataPipeline and implements only the 3 mandatory hooks.
+// SimplePipeline extends DataPipeline and implements only the 6 mandatory hooks.
 ```
 
 ---
@@ -531,11 +544,11 @@ public abstract class DataPipeline {
 
 | Metric | Value |
 |---|---|
-| JdbcTemplate overhead vs raw JDBC | ~5 us per query (exception translation reflection) |
+| JdbcTemplate overhead vs raw JDBC | ~5 us per query (callback indirection; exception translation costs only on the error path) |
 | HikariCP connection acquisition | < 1 ms under normal load (pool size 20) |
 | Connection leak prevention | 100% — JdbcTemplate finally block always releases |
-| Spring Batch chunk processing | 50,000 items/chunk; 10M records/job at ~500k items/min |
-| AbstractList template overhead | ~0 ns — get()/size() called directly, no dispatch indirection |
+| Spring Batch chunk processing | 500 items/chunk (one chunk = one transaction); 20,000 chunks = 10M records/job |
+| AbstractList template overhead | one virtual call per element (get()/size()); usually inlined by the JIT at monomorphic call sites |
 
 ### Migration Story
 

@@ -243,19 +243,21 @@ CREATED -> PAYMENT_PENDING -> PAID -> FULFILLING -> SHIPPED -> DELIVERED, with s
 to CANCELLED (from CREATED, PAYMENT_PENDING, or PAID) and REFUNDED (from DELIVERED).
 
 The original implementation handled all states with a 1,200-line `OrderService` containing
-nested `if-else` blocks keyed on `order.getStatus()`. Adding a new state (PARTIAL_REFUND, 2022)
-required three engineers, 4 weeks, and produced two P1 production incidents from missed
-transition guards. Illegal transitions (SHIPPED -> CREATED) were silently ignored — no exception,
-no log, just a no-op that left the database in an inconsistent state.
+nested `if-else` blocks keyed on `order.getStatus()`. This is an illustrative composite, not a
+published case study: adding a state meant auditing every branch, and missed transition guards
+were the usual source of incidents. Illegal transitions (SHIPPED -> CREATED) were silently
+ignored — no exception, no log, just a no-op that left the database in an inconsistent state.
 
 The State pattern extracted each state into a separate class. Adding PARTIAL_REFUND required
-one new class and one line in the transition registry — zero changes to existing states.
+one new state plus an edit to the single existing state that transitions into it — every other
+state was untouched. (The transition edge is what forces the edit; see the Open/Closed Q&A in
+Section 16 for why "zero changes" is only true for states that cannot reach the new one.)
 
 **Scale numbers:**
 - 500,000 orders/day = ~5.8 orders/sec average, ~40 orders/sec at peak
 - State object per order: ~64 bytes (singleton flyweight states, not per-order instances)
 - Illegal transition detection: < 0.1 ms (guard throws `IllegalStateTransitionException`)
-- Adding new state (PARTIAL_REFUND): 1 new class, 1 test file, 0 existing class changes
+- Adding new state (PARTIAL_REFUND): 1 new state, 1 test file — plus an edit to whichever existing state can transition INTO it (with an enum, that also means adding the constant to the enum declaration)
 - Before State pattern: 1,200-line OrderService; After: 8 state classes x ~80 lines each
 
 ```mermaid
@@ -278,15 +280,15 @@ stateDiagram-v2
     REFUNDED --> [*]
 
     note right of PARTIAL_REFUND
-        Added 2022: 1 new class,
-        0 changes to existing states
+        Added later: 1 new state;
+        only CANCELLED changed
     end note
 ```
 
-Context = `Order` (holds a reference to the current `OrderState`); each state is a class — here, a singleton enum constant — whose `pay()/ship()/cancel()/refund()` either transitions or throws. `CANCELLED` merges the three cancel paths from `CREATED`, `PAYMENT_PENDING`, and `PAID`; `PARTIAL_REFUND` was added in 2022 as one new class with zero changes to the existing six.
+Context = `Order` (holds a reference to the current `OrderState`); each state is a class — here, a singleton enum constant — whose `pay()/ship()/cancel()/refund()` either transitions or throws. `CANCELLED` merges the three cancel paths from `CREATED`, `PAYMENT_PENDING`, and `PAID`; `PARTIAL_REFUND` was added as one new state, touching only `CANCELLED` (the one state with an edge into it) and leaving the other seven untouched.
 
 ```java
-// Java 17 LTS — Order state machine with explicit guard enforcement
+// Java 25 LTS — Order state machine with explicit guard enforcement
 
 public interface OrderState {
     OrderState pay(Order order);
@@ -294,7 +296,9 @@ public interface OrderState {
     OrderState deliver(Order order);
     OrderState cancel(Order order);
     OrderState refund(Order order);
-    String name();
+    // NOTE: do NOT declare String name() here. java.lang.Enum.name() is final, so an
+    // enum-based implementation cannot override it -- the file would not compile.
+    // Enum constants already supply name() for free.
 }
 
 // Singleton flyweight state — one instance shared across all orders in this state
@@ -313,7 +317,6 @@ public enum OrderStates implements OrderState {
         @Override public OrderState ship(Order order)    { throw illegal("CREATED", "SHIPPED"); }
         @Override public OrderState deliver(Order order) { throw illegal("CREATED", "DELIVERED"); }
         @Override public OrderState refund(Order order)  { throw illegal("CREATED", "REFUNDED"); }
-        @Override public String name() { return "CREATED"; }
     },
 
     PAYMENT_PENDING {
@@ -328,7 +331,6 @@ public enum OrderStates implements OrderState {
         @Override public OrderState ship(Order order)    { throw illegal("PAYMENT_PENDING", "SHIPPED"); }
         @Override public OrderState deliver(Order order) { throw illegal("PAYMENT_PENDING", "DELIVERED"); }
         @Override public OrderState refund(Order order)  { throw illegal("PAYMENT_PENDING", "REFUNDED"); }
-        @Override public String name() { return "PAYMENT_PENDING"; }
     },
 
     PAID {
@@ -344,7 +346,6 @@ public enum OrderStates implements OrderState {
         @Override public OrderState pay(Order order)     { throw illegal("PAID", "PAYMENT_PENDING"); }
         @Override public OrderState deliver(Order order) { throw illegal("PAID", "DELIVERED"); }
         @Override public OrderState refund(Order order)  { throw illegal("PAID", "REFUNDED"); }
-        @Override public String name() { return "PAID"; }
     };
 
     // Remaining states (FULFILLING, SHIPPED, DELIVERED, CANCELLED, REFUNDED) follow same pattern
@@ -477,7 +478,9 @@ public class OrderService {
 // its Order reference, creating a circular reference. Jackson throws StackOverflowError.
 // JPA entity graph becomes unresolvable.
 
-public class PaidState implements OrderState {
+// (Note the shape: because the state STORES its Context, its methods take no Order
+// argument -- so this class cannot implement the parameter-passing OrderState above.)
+public class PaidState {
     private final Order order;  // CIRCULAR REFERENCE
 
     public PaidState(Order order) { this.order = order; }
@@ -516,7 +519,7 @@ public enum OrderStates implements OrderState {
 |---|---|
 | State enum flyweight memory | ~64 bytes per state constant (8 states = ~512 bytes total) |
 | Illegal transition detection | < 0.1 ms (local throw, no I/O) |
-| Adding new state (PARTIAL_REFUND) | 1 new class, 1 test, 0 existing changes |
+| Adding new state (PARTIAL_REFUND) | 1 new state + 1 test; only the states that transition to/from it change |
 | Before State pattern: OrderService | 1,200 lines, 3 engineers per new state |
 | After State pattern: per-state class | ~80 lines each, 1 engineer per new state |
 
@@ -610,7 +613,7 @@ A: The pattern itself does not enforce a valid transition graph — it only guar
 
 **HLD View — Where State Appears in Distributed Systems**
 
-- **Circuit breaker** — The most famous HLD State pattern application: CLOSED (passing through) → OPEN (failing fast) → HALF-OPEN (probing). Each state handles service calls differently. Resilience4j and Hystrix implement this as a State machine.
+- **Circuit breaker** — The most famous HLD State pattern application: CLOSED (passing through) → OPEN (failing fast) → HALF-OPEN (probing). Each state handles service calls differently. Resilience4j implements this as a State machine (its `CircuitBreaker.State` adds DISABLED, FORCED_OPEN, and METRICS_ONLY alongside the three core states).
 - **Order lifecycle management** — Distributed order management systems track order state (PENDING → CONFIRMED → SHIPPED → DELIVERED → RETURNED). Each state allows different transitions and different API operations, preventing invalid state jumps like shipping an unconfirmed order.
 - **Connection state machines** — TCP connections, WebSocket sessions, and database connections each have state machines. The protocol behavior is entirely determined by the current state — exactly the State pattern motivation.
 - **Workflow engines** — Temporal, Apache Airflow, and AWS Step Functions execute workflow definitions as state machines. Each step is a state; transitions are triggered by task completion, timeout, or failure events.

@@ -213,12 +213,12 @@ Four participants need six direct connections without a mediator, growing quadra
 | Observer | `java.util.EventListener`, `ApplicationEventPublisher`, `Flow.Subscriber` (reactive) |
 | Strategy | `java.util.Comparator`, `AuthenticationProvider` |
 | Iterator | `java.util.Iterator`, enhanced `for-each`, `java.util.Spliterator` |
-| Command | `java.lang.Runnable`, `java.util.concurrent.Callable`, `java.awt.Action` |
+| Command | `java.lang.Runnable`, `java.util.concurrent.Callable`, `javax.swing.Action` |
 | Template Method | `AbstractList`, `JdbcTemplate`, `Spring Batch ItemReader/ItemProcessor/ItemWriter chain`, `HttpServlet.doGet` |
-| Chain of Responsibility | `javax.servlet.Filter`, `javax.servlet.FilterChain`, Spring Security `FilterChainProxy`, `HandlerInterceptor` |
-| State | Spring State Machine, `javax.faces.lifecycle.Lifecycle` |
+| Chain of Responsibility | `jakarta.servlet.Filter`, `jakarta.servlet.FilterChain`, Spring Security `FilterChainProxy`, `HandlerInterceptor` |
+| State | Spring State Machine, `jakarta.faces.lifecycle.Lifecycle` |
 | Memento | `javax.swing.undo.UndoableEdit`, Event Sourcing aggregate snapshots |
-| Visitor | `javax.lang.model.element.ElementVisitor`, `ClassFileVisitor` (ASM), JavaParser visitors |
+| Visitor | `javax.lang.model.element.ElementVisitor`, `ClassVisitor` (ASM), JavaParser visitors |
 | Mediator | Spring MVC `DispatcherServlet`, `ApplicationContext` as mediator between beans |
 | Interpreter | Spring Expression Language (SpEL), OGNL, Thymeleaf expression engine |
 
@@ -354,7 +354,7 @@ Java uses single dispatch — the method that runs is determined solely by the r
 
 **Q: Which behavioral pattern is most abused in enterprise Java?**
 
-Observer/Listener. The three most common abuses: (1) observers that perform heavy I/O or database calls synchronously, blocking the publisher thread and causing cascading timeouts; (2) memory leaks from listeners that are never unregistered — a static event bus or `EventListenerList` holds a strong reference to the listener object, preventing garbage collection even after the owning component is logically destroyed; (3) observers with shared mutable state that makes execution order matter, violating the contract that observers are independent and order-agnostic. Fixes: use `@Async` or a dedicated executor for I/O listeners; use weak references or explicit `removeListener()` in lifecycle hooks; and enforce that observers share no mutable state.
+Observer/Listener is the most abused behavioral pattern in enterprise Java. The three most common abuses: (1) observers that perform heavy I/O or database calls synchronously, blocking the publisher thread and causing cascading timeouts; (2) memory leaks from listeners that are never unregistered — a static event bus or `EventListenerList` holds a strong reference to the listener object, preventing garbage collection even after the owning component is logically destroyed; (3) observers with shared mutable state that makes execution order matter, violating the contract that observers are independent and order-agnostic. Fixes: use `@Async` or a dedicated executor for I/O listeners; use weak references or explicit `removeListener()` in lifecycle hooks; and enforce that observers share no mutable state.
 
 ---
 
@@ -372,7 +372,7 @@ Iterator is external iteration — the caller drives `hasNext()`/`next()` and co
 
 **Q: What forces you to choose Visitor over a simple `instanceof` dispatch?**
 
-Three forces: type safety (the compiler enforces that all element types have a corresponding visit method — adding a new element type without updating visitors causes a compile error, which `instanceof` chains never provide); separation of concerns (new operations are added as new Visitor implementations, not as new methods on the element classes — the element classes are closed for modification); and open/closed principle compliance (elements are open for new visitor operations without touching their source). The tradeoff is the opposite of the extensibility axis: adding a new element type requires updating every existing Visitor, while `instanceof` chains only require adding one branch. Choose Visitor when element types are stable but operations change frequently; choose `instanceof` (or sealed classes with pattern matching in Java 17+) when operations are stable but element types change.
+Three forces push you to Visitor: type safety, separation of concerns, and open/closed compliance. Type safety means the compiler enforces that all element types have a corresponding visit method — adding a new element type without updating visitors causes a compile error, which `instanceof` chains never provide); separation of concerns (new operations are added as new Visitor implementations, not as new methods on the element classes — the element classes are closed for modification); and open/closed principle compliance (elements are open for new visitor operations without touching their source). The tradeoff is the opposite of the extensibility axis: adding a new element type requires updating every existing Visitor, while `instanceof` chains only require adding one branch. Choose Visitor when element types are stable but operations change frequently; choose `instanceof` (or sealed interfaces with pattern-matching `switch`, final since Java 21) when operations are stable but element types change.
 
 ---
 

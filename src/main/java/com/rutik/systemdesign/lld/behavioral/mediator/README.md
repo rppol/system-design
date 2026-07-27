@@ -270,7 +270,7 @@ PasswordField never references ConfirmPasswordField, SubmitButton, or StatusLabe
 
 A large e-commerce checkout flow involves 8 collaborating services: cart, inventory, pricing, tax, payment, fraud, notification, audit. Without a mediator, each service ends up calling 3–5 others — yielding ~20 cross-service edges, ~12k LOC of intertwined calls, and one new service requiring touch-ups in 6 existing classes. With an `OrderMediator`, every service only knows the mediator interface; new collaborators plug in via a single registration.
 
-Observed numbers in a Tomcat cluster (200 worker threads, 10k req/sec sustained):
+Illustrative numbers for a Tomcat cluster (200 worker threads, 10k req/sec sustained) — order-of-magnitude, not a published benchmark:
 - p50 checkout latency: 38 ms (mediator overhead ~0.4 ms, mostly thread-safe dispatch).
 - p99: 180 ms (dominated by payment gateway, not mediator).
 - Adding a new fraud-check colleague: 1 class + 1 registration line, zero modifications to existing colleagues.

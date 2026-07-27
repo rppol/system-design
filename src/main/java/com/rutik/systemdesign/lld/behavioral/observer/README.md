@@ -21,7 +21,7 @@ Define a one-to-many dependency between objects so that when one object (the Sub
 
 **Mental model**: An object (Subject/Observable) has a list of dependents (Observers). When the Subject changes state, it iterates the list and notifies each Observer. Observers register/unregister themselves. The Subject never needs to know what Observers do with the notification — they're decoupled. This is the foundation of event-driven programming, reactive systems, and the publish-subscribe pattern.
 
-**Why it matters**: Observer is one of the most widely used patterns in software — Java's EventListener, React's useState hooks, Redux reducers, Kafka consumers, DOM event listeners, and Spring's ApplicationEventPublisher all implement Observer semantics. Event-driven architecture at scale is built on this pattern.
+**Why it matters**: Observer is one of the most widely used patterns in software — Java's EventListener, React's useState hooks, Redux's `store.subscribe`, Kafka consumers, DOM event listeners, and Spring's ApplicationEventPublisher all implement Observer semantics. Event-driven architecture at scale is built on this pattern.
 
 **Key insight**: The key tradeoff is decoupling vs. unpredictability. Observers are decoupled from the Subject, but the order of notification is undefined, and observers can have cascading side effects. In complex systems, use Observable/reactive frameworks (RxJava, Project Reactor) instead of raw Observer implementations.
 
@@ -240,7 +240,7 @@ processes asynchronously within its own executor thread.
 - Guava `EventBus` (sync, no I/O): ~900,000 dispatches/sec on a single core
 - `AsyncEventBus` with 16-thread pool: payment thread post latency drops from 800ms to <1ms
 - Bounded queue (capacity 10,000): back-pressure prevents OOM during subscriber lag spikes
-- Memory: each `@Subscribe` registration costs ~80 bytes (method handle + WeakReference wrapper)
+- Memory: each `@Subscribe` registration costs ~80 bytes (a `Subscriber` holding a reflective `Method` plus a STRONG reference to the target — Guava never wraps subscribers in a `WeakReference`)
 - Fraud subscriber SLA: 200ms; async executor isolates timeout from payment thread
 
 **Production Architecture — Payment Event Fan-Out via AsyncEventBus**
@@ -315,7 +315,10 @@ public class PaymentEventBusConfig {
     public AsyncEventBus paymentEventBus() {
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
             8,                              // corePoolSize
-            16,                             // maximumPoolSize
+            16,                             // maximumPoolSize — NOTE: ThreadPoolExecutor only
+                                            // grows past the core size once the queue is FULL,
+                                            // so with a 10k-deep queue this runs 8 threads in
+                                            // practice. Shrink the queue if you want 16 sooner.
             60, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(10_000),  // bounded — back-pressure
             new ThreadPoolExecutor.CallerRunsPolicy()  // slow payment thread if queue full
@@ -380,7 +383,8 @@ public class FraudCheckSubscriber {
   `ApplicationEvent` objects to all `ApplicationListener<E>` beans; `@TransactionalEventListener`
   guarantees delivery only after the surrounding transaction commits (eliminates phantom events).
 - **Java Swing `EventListenerList`** (`javax.swing.event`): stores `(type, listener)` pairs in a flat
-  array for O(1) iteration; `fireStateChanged()` in `AbstractButton` iterates this list directly.
+  `Object[]`, so iteration is O(n) with zero per-notification allocation; `fireStateChanged()` in
+  `AbstractButton` walks that array backwards directly.
 - **Java `PropertyChangeSupport`** (`java.beans`): `firePropertyChange(name, old, new)` is the JDK's
   built-in observer for JavaBeans; used by Swing `JComponent` for bound properties.
 - **RxJava `Observable.subscribe()`**: reactive push-based observer with backpressure, error channels,
@@ -427,8 +431,10 @@ public class PaymentSubject {
         }
     }
 }
-// Better yet: use AsyncEventBus — subscriber exceptions are caught internally by
-// EventBus.SubscriberExceptionHandler, isolated per-subscriber, never propagated to poster.
+// Better yet: use Guava's EventBus at all. BOTH the synchronous EventBus and
+// AsyncEventBus route a subscriber's exception to the SubscriberExceptionHandler
+// (default: LoggingHandler) instead of aborting the dispatch loop or propagating to
+// the poster. AsyncEventBus additionally moves the LATENCY off the posting thread.
 ```
 
 ---
@@ -503,6 +509,8 @@ public class WeakSubscriberWrapper implements AutoCloseable {
 public class FraudObserver implements PaymentObserver {
     private final PaymentSubject subject;  // reference to live object
 
+    public FraudObserver(PaymentSubject subject) { this.subject = subject; }
+
     @Override
     public void onPayment() {
         // WRONG: reads *current* state, not state at event-fire time
@@ -539,10 +547,10 @@ public class FraudObserver {
 
 | Approach | Post latency | Subscriber isolation | Memory per subscriber |
 |---|---|---|---|
-| Synchronous EventBus (no I/O) | ~1 us | None — exception aborts loop | ~80 bytes |
-| Synchronous EventBus (with DB write) | 200-800 ms | None | ~80 bytes |
+| Synchronous EventBus (no I/O) | ~1 us | Per-subscriber — `Subscriber.dispatchEvent` catches and routes to the `SubscriberExceptionHandler` | ~80 bytes |
+| Synchronous EventBus (with DB write) | 200-800 ms | Exceptions isolated, but latency is not — the poster's thread runs every subscriber | ~80 bytes |
 | AsyncEventBus, 16-thread pool | < 1 ms | Full — exception caught by handler | ~80 bytes + thread stack |
-| Spring @TransactionalEventListener | < 1 ms (post-commit) | Full per-listener | ~200 bytes (proxy) |
+| Spring @TransactionalEventListener | < 1 ms (post-commit) | None by default — `SimpleApplicationEventMulticaster` only wraps listeners when an `ErrorHandler` is configured | ~200 bytes (proxy) |
 | RxJava Observable.subscribe() | < 1 ms | Full per stream | ~300 bytes (subscription) |
 
 ### Migration Story
@@ -753,7 +761,7 @@ public class BillingSubscriber {
 | Framework / Library | Class / Method | Notes |
 |---|---|---|
 | **Java SDK** | `java.beans.PropertyChangeSupport` | `firePropertyChange()` notifies all `PropertyChangeListener`s; used in JavaBeans/Swing data binding |
-| **Java Swing/AWT** | `AbstractButton.addActionListener()` | Every `addXxxListener()` = `attach()`; listener list = `EventListenerList` (thread-safe) |
+| **Java Swing/AWT** | `AbstractButton.addActionListener()` | Every `addXxxListener()` = `attach()`; listener list = `EventListenerList` (`add`/`remove` are synchronized and swap in a fresh array, so a live iteration is never disturbed) |
 | **Spring Framework** | `SimpleApplicationEventMulticaster.multicastEvent()` | Synchronous default; becomes async if `taskExecutor` is set |
 | **RxJava** | `Observable.subscribe(Observer)` | Reactive Observer with `onNext`, `onError`, `onComplete`; adds backpressure via `Flowable` |
 | **Reactor** | `Flux.subscribe(CoreSubscriber)` | Project Reactor's reactive Observer; `publishOn` / `subscribeOn` control thread dispatch |
@@ -954,7 +962,7 @@ A: In Observer, the Subject knows its Observers (holds references). In Pub/Sub, 
 A: Synchronous notification is simple and gives the Subject a guarantee that all Observers have processed the event before `notify()` returns, but a slow or blocked Observer stalls the Subject and every other Observer behind it. Asynchronous notification — dispatching to an executor, queue, or event bus — isolates failures and latency spikes in one Observer from the rest, at the cost of weaker ordering and harder-to-debug causality. Pick synchronous for in-process invariant updates (e.g., recalculating a derived field) and asynchronous for side effects like sending emails or writing audit logs.
 
 **Q: If one Observer throws an exception during notification, should it block the others?**
-A: No — by default, wrap each Observer's `update()` call in its own try/catch so one misbehaving Observer cannot prevent the rest from being notified. Log or collect the exception (e.g., into a list of `Throwable` to report after the loop) rather than letting it propagate from inside the iteration. This is exactly why frameworks like Spring's `ApplicationEventMulticaster` catch and log exceptions per-listener instead of failing the whole `publishEvent()` call.
+A: No — wrap each Observer's `update()` call in its own try/catch so one misbehaving Observer cannot prevent the rest from being notified. Log or collect the exception (e.g., into a list of `Throwable` to report after the loop) rather than letting it propagate from inside the iteration. Note that frameworks differ here: Guava's `EventBus` isolates by default (a subscriber's exception goes to the `SubscriberExceptionHandler`), whereas Spring's `SimpleApplicationEventMulticaster` propagates by default and aborts the remaining listeners — it only isolates once you call `setErrorHandler(...)`, so configure one explicitly if you rely on isolation.
 
 **Q: What does the JDK itself give you for Observer, and when do you use each?**
 A: Three options: your own listener interface, `java.beans.PropertyChangeSupport` for bean-style property notification, and `java.util.concurrent.Flow` for async streams. A hand-written interface (`interface PriceListener { void onPriceChanged(PriceChangedEvent e); }`) plus a `CopyOnWriteArrayList` is the default choice — it is typed, testable, and has no framework coupling. `PropertyChangeSupport` does the bookkeeping for you (`addPropertyChangeListener`, `removePropertyChangeListener`, and a `firePropertyChange(name, old, new)` that skips the notification when the value did not actually change), so a Subject just delegates to an instance of it. `java.util.concurrent.Flow` (JEP 266) is the Reactive Streams contract in the JDK — `Publisher`, `Subscriber`, `Subscription`, `Processor` with `request(n)` backpressure; use it when the producer can outrun the consumer, and reach for Reactor or RxJava rather than implementing `Flow` by hand. At application level, Spring's `ApplicationEventPublisher` plus `@TransactionalEventListener` covers most in-process fan-out.
@@ -963,7 +971,7 @@ A: Three options: your own listener interface, `java.beans.PropertyChangeSupport
 A: It can, and the GoF pattern makes no guarantee about ordering — it depends on the iteration order of the underlying collection (e.g., a `List` preserves insertion order, a `Set` may not). If ordering matters — for example, a logging Observer must run before a cache-invalidation Observer — either use an ordered collection and document the dependency, or assign explicit priorities (Spring's `@Order` / `Ordered` interface on `ApplicationListener`). Avoid designs where correctness silently depends on registration order; make ordering explicit if it's required.
 
 **Q: How do you avoid the lapsed listener problem without requiring callers to remember `detach()`?**
-A: Use weak references for the observer list (e.g., `WeakHashMap`-backed registration or `WeakReference<Observer>`) so the garbage collector can reclaim an Observer even if it was never explicitly detached — the Subject then just skips stale entries during notification. This trades a small runtime check for eliminating an entire class of memory-leak bugs, which is why Swing's `WeakListeners` and JavaFX's listener helpers exist. The tradeoff is that the Observer might disappear "silently" mid-lifecycle, so this is best for UI/cache-style listeners, not for Observers whose absence would be a correctness bug.
+A: Use weak references for the observer list (e.g., `WeakHashMap`-backed registration or `WeakReference<Observer>`) so the garbage collector can reclaim an Observer even if it was never explicitly detached — the Subject then just skips stale entries during notification. This trades a small runtime check for eliminating an entire class of memory-leak bugs, which is why JavaFX ships `WeakChangeListener`/`WeakInvalidationListener` and Android's `LiveData` auto-unregisters on `DESTROYED`. The tradeoff is that the Observer might disappear "silently" mid-lifecycle, so this is best for UI/cache-style listeners, not for Observers whose absence would be a correctness bug.
 
 ---
 

@@ -268,7 +268,7 @@ flowchart LR
 *`StrategySelector` is the single registry-backed decision point: currency, country, card network, and live processor availability route each of the ~80 TPS peak requests to exactly one stateless strategy, which then makes the outbound call under the 200ms, circuit-breaker-gated SLA.*
 
 ```java
-// Java 17 LTS — Payment strategy interface and registry
+// Java 25 LTS — Payment strategy interface and registry
 // Each strategy is a stateless singleton injected by Spring
 
 public interface PaymentStrategy {
@@ -363,7 +363,7 @@ public class PaymentService {
 // and owning the regression risk for all 3 existing processors.
 
 public PaymentResult processPayment(PaymentRequest req) {
-    if ("USD".equals(req.currency()) && req.cardNetwork() == Visa) {
+    if ("USD".equals(req.currency()) && req.cardNetwork() == CardNetwork.VISA) {
         if (stripeAvailability > 0.95) {
             return stripeClient.charge(req);
         } else {
@@ -549,7 +549,7 @@ A: Inject a test double — either a hand-written stub Strategy, a lambda implem
 **HLD View — Where Strategy Appears in Distributed Systems**
 
 - **Load balancing algorithms** — Round-robin, weighted, least-connections, and consistent-hash are Strategy implementations behind a `LoadBalancingStrategy` interface. The load balancer swaps algorithms at runtime via config without restarting.
-- **Cache eviction policies** — LRU, LFU, TTL, and ARC eviction algorithms are Strategies in cache implementations (Caffeine, Guava, Redis). Each encapsulates when and what to evict; the cache infrastructure is the context.
+- **Cache eviction policies** — LRU, LFU, TTL, and W-TinyLFU eviction algorithms are Strategies in cache implementations (Caffeine's W-TinyLFU admission filter, Guava's size/time-based eviction, Redis's configurable `maxmemory-policy`). Each encapsulates when and what to evict; the cache infrastructure is the context.
 - **Sharding strategies** — Hash, range, and directory-based sharding are Strategies in the shard router. Changing the sharding approach means deploying a new strategy, not rewriting the router.
 - **Retry and backoff** — Retry strategies (fixed interval, exponential backoff, exponential backoff with jitter) are Strategies in resilience libraries (Resilience4j). Configuring per-service retry behavior is a strategy selection, not code change.
 
@@ -569,6 +569,6 @@ A: Inject a test double — either a hand-written stub Strategy, a lambda implem
 
 6. **Name strategies descriptively** — `CreditCardPaymentStrategy`, `BubbleSortStrategy` — the name should make the concrete algorithm clear.
 
-7. **Use `@Strategy` documentation pattern** — annotate or document the strategy interface clearly: what invariants must all implementations uphold, what the inputs/outputs mean, and what exceptions are allowed.
+7. **Document the strategy contract on the interface** — javadoc the `Strategy` interface itself: what invariants every implementation must uphold, what the inputs/outputs mean, and which exceptions are allowed. (There is no `@Strategy` annotation in Java or Spring; the contract lives in the javadoc and the tests.)
 
 8. **Consider the Null Object Strategy** — instead of checking `if (strategy != null)` before delegating, provide a default no-op strategy (`NoOpPaymentStrategy`) to avoid null checks.
