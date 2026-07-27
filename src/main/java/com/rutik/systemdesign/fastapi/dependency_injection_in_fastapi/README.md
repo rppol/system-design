@@ -11,14 +11,14 @@ Core capabilities covered in this module:
 - `Depends()` — the primary injection mechanism
 - Sub-dependencies — arbitrary depth DAG resolution
 - `yield`-based dependencies — setup/teardown lifecycle per request
-- Dependency caching and scope control (`use_cache=False`)
+- Dependency caching and lifetime control (`use_cache=False`, `scope="function"`)
 - Class-based dependencies — callable classes as parameter bundles
 - `dependency_overrides` — test-time substitution without monkey-patching
 - Router-level and application-level global dependencies
 - `Security()` — `Depends()` variant that exposes OpenAPI security schemes
 - OAuth2 + JWT dependency chains
 
-Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
+Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
 
 ---
 
@@ -44,7 +44,7 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
 
 **4. Single execution per request (default).** Within one request, a dependency callable is invoked at most once regardless of how many routes or sub-dependencies reference it. This is the caching guarantee.
 
-**5. Lifecycle ownership.** A `yield` dependency owns setup and teardown of a resource. Teardown runs after the response is sent, in LIFO order, even if an exception occurred in the handler.
+**5. Lifecycle ownership.** A `yield` dependency owns setup and teardown of a resource. Under the default `scope="request"`, teardown runs after the response is sent, in LIFO order, even if an exception occurred in the handler; `Depends(fn, scope="function")` moves it to just after the handler returns, before the response goes out.
 
 **6. Testability by design.** `app.dependency_overrides` is a dict mapping any dependency callable to a replacement. Tests can substitute a real DB session with an in-memory one without modifying production code.
 
@@ -338,7 +338,7 @@ When a request arrives, FastAPI's `solve_dependencies()` function:
 2. Traverses the `Dependant` tree depth-first.
 3. For each node, checks the cache using `(callable, use_cache)` as the key.
 4. If not cached (or `use_cache=False`), calls the callable with its own resolved args.
-5. If the callable is a generator (yield dep), wraps it in a context manager; stores the teardown on the `BackgroundTasks`-adjacent cleanup stack.
+5. If the callable is a generator (yield dep), wraps it in a `contextmanager`/`asynccontextmanager` and enters it on one of the request's two `contextlib.AsyncExitStack`s — the request-scoped stack (default), unwound after the response is sent, or the function-scoped stack when `scope="function"` is passed, unwound as soon as the handler returns.
 
 ### 6.3 yield dependency teardown order
 
@@ -814,7 +814,7 @@ flowchart TD
 |---|---|---|
 | Function | Simple values, no state | Cannot encapsulate multiple params cleanly |
 | Class | Query param bundles, stateless config | Slightly more verbose |
-| yield function | Resources requiring teardown | Teardown runs post-response; cannot abort response |
+| yield function | Resources requiring teardown | Teardown is post-response by default; `scope="function"` moves it earlier |
 | `Security()` | OAuth2 scopes in OpenAPI | Cosmetic over `Depends()` at runtime |
 
 ---
@@ -833,7 +833,7 @@ flowchart TD
 
 - The logic is trivial (one line) and only used in one route — inline it for clarity.
 - You need the result before the route layer (e.g., in a middleware) — use `request.state` or a pure middleware instead.
-- The dependency has side effects that must complete before the response is committed — `yield` deps run teardown after the response. Use `BackgroundTasks` for post-response work you initiate.
+- The dependency has side effects that must complete before the response is committed — `yield` teardown is post-response by default. Either pass `Depends(fn, scope="function")` to close it before the response is sent, or use `BackgroundTasks` for genuinely post-response work.
 - You want app-level singletons (a DB engine, a connection pool) — create those in a `lifespan` context manager, not in a `Depends()`.
 - The "dependency" is configuration that never changes per request — inject it once at startup via `lifespan` and close over it.
 
@@ -994,7 +994,7 @@ class QueryFilter:
 
 | Tool / Library | Role | Notes |
 |---|---|---|
-| FastAPI 0.110+ | DI framework | `Depends`, `Security`, `dependency_overrides` |
+| FastAPI 0.140+ | DI framework | `Depends`, `Security`, `dependency_overrides` |
 | Pydantic v2 | Data validation for dep outputs | `model_validate`, `BaseModel` |
 | SQLAlchemy 2.x | DB sessions via yield deps | Both sync `Session` and async `AsyncSession` |
 | `pytest` + `httpx` | Test client + async test support | `AsyncClient` for async routes |
@@ -1008,7 +1008,7 @@ class QueryFilter:
 | Testable without framework | Yes (`dependency_overrides`) | Requires app context | Requires Django test runner | Yes (manual wiring) |
 | Teardown support | Yes (yield) | No native | No native | Yes (destroy callbacks) |
 
-Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../../spring/dependency_injection/README.md`](../../spring/dependency_injection/README.md).
+Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../../spring/dependency_injection/README.md`](../../spring/dependency_injection/README.md).
 
 ---
 
@@ -1044,11 +1044,11 @@ Teardown executes in LIFO (last-in, first-out) order, mirroring the nesting sema
 **Q10: How do you handle exceptions in a yield dependency's teardown?**
 Exceptions raised in the `finally` block of a yield dependency propagate and can mask the original exception from the handler. Best practice: catch and log in `finally`, never re-raise unless you intend to replace the original error. For DB sessions, swallow all teardown errors after logging since the session close may fail if the connection is already broken. Use `contextlib.suppress` or explicit try/except inside `finally` for robust teardown.
 
-**Q11: What is the difference between `Depends` and `app.on_event("startup")` (or `lifespan`)?**
-`Depends()` creates a new resource instance per request (or per invocation if `use_cache=False`). `lifespan` (the modern replacement for `on_event`) creates a resource once for the lifetime of the application process. Use `lifespan` for expensive singleton resources: DB engine, connection pool, ML model, HTTP client session. Use `Depends()` for per-request resources: individual DB sessions checked out from the pool, per-request tokens, and context objects derived from the incoming request.
+**Q11: What is the difference between `Depends` and the `lifespan` context manager?**
+`Depends()` creates a new resource instance per request (or per invocation if `use_cache=False`), while `lifespan` creates a resource once for the lifetime of the application process. Use `lifespan` for expensive singleton resources: DB engine, connection pool, ML model, HTTP client session. Use `Depends()` for per-request resources: individual DB sessions checked out from the pool, per-request tokens, and context objects derived from the incoming request.
 
 **Q12: Can a dependency raise an `HTTPException`? What happens?**
-Yes. An `HTTPException` raised inside a dependency short-circuits the resolution chain. FastAPI's exception handlers catch it, and the route handler never executes. This is the standard pattern for auth guards: `get_current_user` raises `401` if the token is missing or invalid, and the protected handler is never called. All yield dependency teardowns that have already been set up still run in LIFO order before the error response is sent.
+Yes. An `HTTPException` raised inside a dependency short-circuits the resolution chain. FastAPI's exception handlers catch it, and the route handler never executes. This is the standard pattern for auth guards: `get_current_user` raises `401` if the token is missing or invalid, and the protected handler is never called. Every yield dependency that already reached its `yield` still tears down in LIFO order — after the 401 response has been sent, since request-scoped teardown always trails the response.
 
 **Q13: How do you share a single DB connection across nested dependencies?**
 By default, FastAPI caches the result of each dependency callable once per request. If `get_db` is declared at the innermost level and multiple sub-dependencies all declare `Depends(get_db)`, they all receive the same `Session` object. This is the correct behavior — one transaction per request, shared across all data-access operations. No additional coordination is needed as long as all dependencies reference the same callable object.
@@ -1057,6 +1057,7 @@ By default, FastAPI caches the result of each dependency callable once per reque
 FastAPI runs sync dependencies in a thread pool executor (using `anyio.to_thread.run_sync`) and async dependencies on the event loop. You can freely mix sync and async dependencies in the same DAG. FastAPI handles the thread-pool/event-loop boundary transparently. The one constraint: a sync dependency cannot `await` — it must be either fully sync or fully async.
 
 **Q15: How do you implement a per-request request ID for tracing?**
+Declare a dependency that takes `Request`, reads the inbound `X-Request-ID` header, and falls back to a fresh UUID when the header is absent.
 ```python
 import uuid
 from starlette.requests import Request
@@ -1077,16 +1078,16 @@ def get_data(
 Router-level dependencies are attached to the `APIRouter` and appear in the route's dependency list the same way per-endpoint dependencies do. `dependency_overrides` applies to them identically: `app.dependency_overrides[router_dep_fn] = mock_fn`. There is no separate mechanism needed for router vs endpoint dependencies.
 
 **Q17: How do you inject settings from environment variables exactly once?**
-Use `functools.lru_cache` on the settings factory and inject with `Depends`:
+Put `functools.lru_cache` on the settings factory and inject the factory with `Depends`.
 ```python
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     database_url: str
     secret_key: str
-    class Config:
-        env_file = ".env"
 
 @lru_cache
 def get_settings() -> Settings:
@@ -1099,6 +1100,7 @@ def health(settings: Settings = Depends(get_settings)) -> dict:
 `lru_cache` ensures the `Settings` object is constructed once per process. `Depends(get_settings)` is still per-request in theory but the `lru_cache` short-circuits the actual `Settings()` constructor call.
 
 **Q18: How would you implement a dependency that conditionally skips expensive work?**
+Branch on injected settings inside the dependency so the expensive path is configuration-gated, and return the same type either way.
 ```python
 from fastapi import Header
 
@@ -1143,7 +1145,7 @@ This defines the type alias once and reuses it without repeating `Depends(...)` 
 
 **8. Validate dependency output with Pydantic.** Return typed Pydantic models from dependencies so callers get validated, IDE-typed objects rather than raw dicts. Use `model_validate` for ORM-to-schema conversion inside the dependency.
 
-**9. Avoid circular dependencies.** FastAPI raises a `ValueError` at startup for circular `Depends()` chains. Design your dependency graph as a DAG: settings → db → user → permissions, never back-edges.
+**9. Avoid circular dependencies.** FastAPI has no cycle detector — a circular `Depends()` chain makes the startup-time graph walk recurse until Python raises `RecursionError` at import, with a traceback that names `get_dependant` rather than your cycle. Design your dependency graph as a DAG: settings → db → user → permissions, never back-edges.
 
 **10. Use `Depends()` on `APIRouter` for cross-cutting concerns.** Auth, rate limiting, tenant resolution, and audit logging all belong at the router level, not repeated on every endpoint.
 
@@ -1188,18 +1190,17 @@ import jwt
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Security, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # ---------- Settings ----------
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     database_url: str = "postgresql+asyncpg://user:pw@localhost/db"
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
-
-    class Config:
-        env_file = ".env"
 
 @lru_cache
 def get_settings() -> Settings:
@@ -1209,17 +1210,17 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 # ---------- Database ----------
 
-def _make_engine(settings: Settings):
-    return create_async_engine(settings.database_url, pool_size=10, max_overflow=20)
-
 @lru_cache
-def get_engine(settings: Settings = Depends(get_settings)):
-    return _make_engine(settings)
+def _make_engine(database_url: str):
+    # Keyed on the URL (a hashable str), so the engine — and its pool — is built once
+    # per process. Never put lru_cache on a function whose parameter is a Depends()
+    # marker: the marker is only resolved inside a request, and Settings is unhashable.
+    return create_async_engine(database_url, pool_size=10, max_overflow=20)
 
 async def get_db(
     settings: SettingsDep,
 ) -> AsyncGenerator[AsyncSession, None]:
-    engine = _make_engine(settings)
+    engine = _make_engine(settings.database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         try:

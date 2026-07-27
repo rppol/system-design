@@ -14,9 +14,9 @@ Key capabilities this module covers:
 
 - `HTTPException` — when to raise it, what `status_code`, `detail`, and `headers` mean
 - Custom domain exceptions and `@app.exception_handler` registration
-- `RequestValidationError` — Pydantic v2's 422 response, its `loc`/`msg`/`type`/`url` structure,
-  and how to reshape it into your own envelope
-- RFC 7807 Problem Details (`application/problem+json`): `type`, `title`, `status`, `detail`,
+- `RequestValidationError` — Pydantic v2's 422 response, its `loc`/`msg`/`type`/`input`/`ctx`
+  structure, and how to reshape it into your own envelope
+- RFC 9457 Problem Details (`application/problem+json`): `type`, `title`, `status`, `detail`,
   `instance` fields and why they matter for API consumers
 - Consistent error envelopes: `{"error": {"code": "...", "message": "...", "details": [...]}}`
 - Exception handler execution order in Starlette and how middleware interacts with it
@@ -25,7 +25,7 @@ Key capabilities this module covers:
 - Union discriminated return types for typed error responses
 - `status` library vs hardcoded integers
 
-Python version: 3.11/3.12. FastAPI 0.103+. Pydantic v2.
+Python version: 3.13/3.14. FastAPI 0.140+. Pydantic v2.
 
 Cross-references:
 - Pydantic v2 validators and model internals: `../pydantic_v2_deep_dive/README.md`
@@ -68,7 +68,7 @@ panic inside a handler ever reaches the outer ring's middleware backstop.
 
 **Why it matters:** Poorly structured error responses are one of the top API usability complaints.
 Clients either parse status codes and guess at the body, or they treat every non-200 as fatal.
-RFC 7807 gives a standard contract. Consistent envelopes let frontend teams and API consumers
+RFC 9457 gives a standard contract. Consistent envelopes let frontend teams and API consumers
 write a single error-handling path.
 
 **Key insight:** The place where an error is *detected* (service layer, repository, validator)
@@ -97,13 +97,14 @@ FastAPI codebases.
    be a stable string constant (`USER_NOT_FOUND`, `QUOTA_EXCEEDED`). The `message` field can be
    localised. Clients key on `code`; humans read `message`.
 
-6. **RFC 7807 compliance is optional but recommended.** The `application/problem+json` content
-   type and its five fields (`type`, `title`, `status`, `detail`, `instance`) are understood by
+6. **RFC 9457 compliance is optional but recommended.** The `application/problem+json` content
+   type and its five members (`type`, `title`, `status`, `detail`, `instance`) are understood by
    standard HTTP tooling, API gateways, and monitoring systems.
 
-7. **Exception handler order is reverse-registration order in Starlette.** The last handler
-   registered for a given exception class wins. Always register specific exceptions before
-   general ones.
+7. **Handler dispatch follows the exception's MRO, not registration order.** Starlette keeps a
+   `dict` keyed by exception class and walks `type(exc).__mro__` for the first class that has an
+   entry. Registration order between *different* classes is irrelevant; only re-registering the
+   *same* class overwrites.
 
 ---
 
@@ -175,10 +176,10 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 ```
 
-Starlette walks exception handlers from the most-recently-registered to the oldest. A handler
-registered for `UserNotFoundError` (subclass) will be checked before one registered for
-`AppError` (base class) — but only if `UserNotFoundError` was registered after `AppError`.
-Safest approach: register the base class handler first, then subclass handlers.
+Starlette resolves handlers by walking the raised exception's MRO and taking the first class
+that has an entry in its handler dict. A handler registered for `UserNotFoundError` (subclass)
+therefore always wins over one registered for `AppError` (base class), regardless of which was
+registered first — registration order between different classes has no effect at all.
 
 ### 4.3 RequestValidationError — Pydantic v2 422 responses
 
@@ -192,19 +193,22 @@ raises `fastapi.exceptions.RequestValidationError`. The default handler returns:
       "type": "missing",
       "loc": ["body", "email"],
       "msg": "Field required",
-      "input": {},
-      "url": "https://errors.pydantic.dev/2.5/v/missing"
+      "input": {"items": [{"price": -1}]}
     }
   ]
 }
 ```
 
-Pydantic v2 fields in each error item:
+Fields in each error item:
 - `type` — machine-readable error type (e.g., `"missing"`, `"string_type"`, `"value_error"`)
 - `loc` — tuple path from root to the failing field; first element is `"body"`, `"query"`, `"path"`
 - `msg` — human-readable English message
-- `input` — the input value that failed (may be omitted if sensitive)
-- `url` — link to Pydantic docs for this error type (v2 only)
+- `input` — the value that was rejected, echoed back verbatim
+- `ctx` — present only for constrained types, carrying the bound that was violated
+
+Pydantic itself also attaches a `url` pointing at its docs, but FastAPI calls
+`exc.errors(include_url=False)` when building `RequestValidationError`, so `url` never reaches
+the response — there is nothing to strip.
 
 **In plain terms.** "`loc` is not a field name — it is a full route from the request root down to
 the exact value that failed, with array indices included. Read it left to right and it tells you
@@ -271,18 +275,18 @@ async def validation_error_handler(
     )
 ```
 
-### 4.4 RFC 7807 Problem Details
+### 4.4 RFC 9457 Problem Details
 
-RFC 7807 defines a standard JSON body for HTTP error responses with Content-Type
-`application/problem+json`. The five standard fields:
+RFC 9457 (which obsoletes RFC 7807) defines a standard JSON body for HTTP error responses with
+Content-Type `application/problem+json`. All five standard members are optional:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | URI | no | A URI reference that identifies the problem type |
+| `type` | URI reference | no | Identifies the problem type; defaults to `about:blank` |
 | `title` | string | no | Short, human-readable summary of the problem type |
-| `status` | integer | yes | HTTP status code |
+| `status` | integer | no | Advisory copy of the HTTP status code; must match the response |
 | `detail` | string | no | Human-readable explanation specific to this occurrence |
-| `instance` | URI | no | URI identifying the specific occurrence (e.g. request ID) |
+| `instance` | URI reference | no | Identifies the specific occurrence; may be relative |
 
 ```python
 from fastapi.responses import JSONResponse
@@ -470,8 +474,9 @@ body.
 
 ### 6.1 HTTPException internals
 
-`HTTPException` inherits from `Exception` (not from Starlette's `HTTPException` in older
-versions — in FastAPI 0.95+ they are the same class). FastAPI pre-registers:
+`fastapi.HTTPException` subclasses `starlette.exceptions.HTTPException` — it is a distinct
+class, adding the `headers` argument, so a handler registered for the Starlette class also
+catches the FastAPI one via the MRO, but not the reverse. FastAPI pre-registers:
 
 ```python
 # FastAPI registers these two handlers at startup:
@@ -573,9 +578,10 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse: ..
 async def user_not_found_handler(request: Request, exc: UserNotFoundError) -> JSONResponse: ...
 ```
 
-Register the base class handler first (earlier in file / earlier `add_exception_handler` call)
-so subclass-specific handlers registered later take precedence in Starlette's internal dict
-update semantics.
+Order of registration does not matter here: the handlers live in a `dict` keyed by exception
+class, and the subclass entry wins purely because `UserNotFoundError` precedes `AppError` in
+the MRO. The only thing registration order changes is which handler survives when you register
+two for the *same* class — there the later call overwrites the earlier one.
 
 ### 6.3 Middleware vs exception handlers
 
@@ -612,23 +618,27 @@ Each item in `RequestValidationError.errors()` is a `dict` with:
 - `loc`: tuple[str | int, ...] — path from request root; first segment is source (`"body"`,
   `"query"`, `"path"`, `"header"`, `"cookie"`)
 - `msg`: str — English message
-- `input`: any — the value that was rejected
-- `ctx`: dict | None — extra context (e.g. `{"min_length": 3}` for `string_too_short`)
-- `url`: str — Pydantic docs URL (v2 only)
+- `input`: any — the value that was rejected, echoed back verbatim
+- `ctx`: dict — present only for constrained types (e.g. `{"min_length": 3}` for
+  `string_too_short`)
 
-To strip the `url` field (which reveals your Pydantic version to clients):
+The field worth removing is `input`, not `url`. FastAPI already suppresses `url`, but `input`
+reflects the client's own payload back into the response body — for a `missing` error on a
+top-level field, `input` is the *entire* submitted object, so a rejected registration request
+returns the plaintext password the client just sent, and it lands in every access log and error
+tracker that captures response bodies:
 
 ```python
 @app.exception_handler(RequestValidationError)
 async def clean_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     clean_errors = [
-        {k: v for k, v in err.items() if k != "url"}
+        {k: v for k, v in err.items() if k != "input"}
         for err in exc.errors()
     ]
     return JSONResponse(status_code=422, content={"detail": clean_errors})
 ```
 
-### 6.5 uvicorn status code breakdown
+### 6.5 Status code breakdown
 
 - **422 Unprocessable Entity** — Pydantic validation failed on the request input. Always a
   client error. Raised by FastAPI before the route handler runs.
@@ -663,7 +673,7 @@ Key lessons: machine-readable `code`, optional sub-code (`decline_code`), identi
 offending parameter (`param`), and separates error category (`type`) from specific cause
 (`code`). This pattern maps directly onto the FastAPI envelope approach.
 
-### 7.2 GitHub API — RFC 7807-style
+### 7.2 GitHub API — its own error envelope
 
 GitHub v3 returns:
 
@@ -681,14 +691,15 @@ GitHub v3 returns:
 }
 ```
 
-The `documentation_url` serves the same purpose as RFC 7807's `type` — a stable reference for
-the error category. FastAPI apps often add a `docs_url` field pointing to internal API docs.
+This is not Problem Details — GitHub predates it and uses `message` + `errors[]` — but
+`documentation_url` serves the same purpose as RFC 9457's `type`: a stable reference for the
+error category. FastAPI apps often add a `docs_url` field pointing to internal API docs.
 
 ### 7.3 Google Cloud APIs
 
 Google uses `google.rpc.Status` with `code` (gRPC status code), `message`, and `details`
-(list of Any proto messages). The HTTP mapping follows RFC 7807 conventions. For REST,
-the body is:
+(list of Any proto messages). This is Google's own AIP error model, not Problem Details, and
+its `code` is a gRPC code rather than an HTTP one. For REST, the body is:
 
 ```json
 {
@@ -711,7 +722,7 @@ FastAPI pattern of having both `status_code` on the response and `error_code` in
 |----------|------|------|---------|
 | `HTTPException` everywhere | Simple, minimal code | Couples service to HTTP, hard to test | Tiny scripts, single-file apps |
 | Domain exceptions + handlers | Clean separation, testable services | More files, more ceremony | Any app with a service layer |
-| RFC 7807 | Standard, tooling support | Slightly more verbose | Public APIs, B2B integrations |
+| RFC 9457 | Standard, tooling support | Slightly more verbose | Public APIs, B2B integrations |
 | Custom envelope (`{"error": {...}}`) | Full control, consistent | Non-standard, clients must know schema | Internal APIs, mobile backends |
 | Typed union return (`Result[T, E]`) | No exceptions in signature | Verbose, unusual in Python | High-reliability services |
 | Middleware catch-all | Catches everything | Hides error types, hard to customise per exception | Final backstop only |
@@ -746,7 +757,7 @@ FastAPI pattern of having both `status_code` on the response and `error_code` in
 - You want a single place to change how a given error maps to HTTP status
 - You are building a public API and need consistent error shapes
 
-### Use RFC 7807 when:
+### Use RFC 9457 Problem Details when:
 
 - Building a public or partner-facing API
 - Clients are consuming your API programmatically (not just browsers)
@@ -895,18 +906,18 @@ async def catch_all(request: Request, exc: Exception) -> JSONResponse:
     )
 ```
 
-### Pitfall 4: Using string status codes instead of `status` constants
+### Pitfall 4: Using magic numbers instead of `status` constants
 
 ```python
 # BROKEN: magic numbers throughout the codebase
 raise HTTPException(status_code=401, detail="Not authenticated")
 raise HTTPException(status_code=422, detail="Invalid")
 
-# FIX: use the status module (available in fastapi.status or starlette.status)
+# FIX: use the status module (fastapi.status re-exports starlette.status)
 from fastapi import status
 
 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid")
+raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Invalid")
 ```
 
 The constants are self-documenting, searchable, and prevent typos like `401` vs `410`.
@@ -918,9 +929,9 @@ The constants are self-documenting, searchable, and prevent typos like `401` vs 
 | Tool / Library | Role | Key Feature | FastAPI Integration |
 |---------------|------|-------------|---------------------|
 | `fastapi.HTTPException` | Built-in HTTP error | `status_code`, `detail`, `headers` | Pre-registered handler |
-| `fastapi.exceptions.RequestValidationError` | Pydantic request failure | `errors()` with loc/msg/type | Pre-registered 422 handler |
+| `fastapi.exceptions.RequestValidationError` | Pydantic request failure | `errors()` with loc/msg/type/input | Pre-registered 422 handler |
 | `pydantic.ValidationError` | Model validation failure | Same structure, raised for response models | Starlette catches → 500 |
-| `starlette.status` / `fastapi.status` | Status code constants | `HTTP_404_NOT_FOUND`, etc. | Import and use directly |
+| `starlette.status` / `fastapi.status` | Status code constants | `HTTP_404_NOT_FOUND`, etc.; `fastapi.status` IS `starlette.status` | Import and use directly |
 | `fastapi.responses.JSONResponse` | Shaped error responses | `status_code`, `content`, `media_type` | Used in exception handlers |
 | `pydantic.BaseModel` | Error response schemas | Typed error envelopes | Used as `response_model` |
 | `structlog` / `logging` | Error logging | Structured log context | Called inside handlers |
@@ -940,7 +951,7 @@ status.HTTP_401_UNAUTHORIZED  # 401
 status.HTTP_403_FORBIDDEN     # 403
 status.HTTP_404_NOT_FOUND     # 404
 status.HTTP_409_CONFLICT      # 409
-status.HTTP_422_UNPROCESSABLE_ENTITY  # 422
+status.HTTP_422_UNPROCESSABLE_CONTENT # 422
 status.HTTP_429_TOO_MANY_REQUESTS     # 429
 status.HTTP_500_INTERNAL_SERVER_ERROR # 500
 status.HTTP_502_BAD_GATEWAY   # 502
@@ -952,32 +963,36 @@ status.HTTP_503_SERVICE_UNAVAILABLE   # 503
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `HTTPException` and a custom domain exception in FastAPI?**
-`HTTPException` is a Starlette exception that FastAPI's built-in handler converts directly to an
-HTTP response — it carries `status_code`, `detail`, and `headers`. A custom domain exception is
+`HTTPException` is a subclass of Starlette's `HTTPException` that FastAPI's built-in handler
+converts directly to an HTTP response, carrying `status_code`, `detail`, and `headers`. A custom domain exception is
 a plain Python `Exception` subclass with no HTTP knowledge; you register an `@app.exception_handler`
 that translates it to HTTP at the application boundary. Use `HTTPException` for simple cases in
 thin route handlers; use custom exceptions when you have a service layer that must remain testable
 without HTTP.
 
 **Q2: In what order does Starlette execute exception handlers?**
-Starlette resolves handlers by walking the MRO of the raised exception class. If `UserNotFoundError`
-subclasses `AppError`, and both have registered handlers, the `UserNotFoundError` handler fires
-because it appears first in the MRO. Starlette stores handlers in a plain dict keyed by exception
-type; the last `add_exception_handler` call for a given type overwrites the previous one. Register
-base class handlers first, subclass handlers after.
+Starlette resolves handlers by walking the MRO of the raised exception class, not by
+registration order. If `UserNotFoundError` subclasses `AppError` and both have registered
+handlers, the `UserNotFoundError` handler fires because it appears first in the MRO — whichever
+one you registered first. Starlette stores handlers in a plain dict keyed by exception type, so
+registration order matters only when you register two handlers for the *same* type: there the
+last `add_exception_handler` call overwrites the previous one.
 
 **Q3: What does a Pydantic v2 `RequestValidationError` look like and how do you reshape it?**
-Each error in `exc.errors()` is a dict with `type`, `loc` (path tuple starting with `"body"`,
-`"query"`, etc.), `msg`, `input`, `ctx`, and `url`. Override the handler with
+Each error in `exc.errors()` is a dict with `type`, `loc` (a path tuple starting with `"body"`,
+`"query"`, etc.), `msg`, `input`, and — for constrained types — `ctx`; FastAPI strips Pydantic's
+`url` by calling `errors(include_url=False)`. Override the handler with
 `@app.exception_handler(RequestValidationError)`, iterate `exc.errors()`, extract the fields you
 want, and return a `JSONResponse` with your own envelope. Always keep `loc` information so clients
 know which field failed.
 
-**Q4: What is RFC 7807 and when should you use it?**
-RFC 7807 (Problem Details for HTTP APIs) defines a standard JSON error body with five fields:
-`type` (URI identifying the problem type), `title` (short summary), `status` (HTTP status integer),
-`detail` (occurrence-specific explanation), and `instance` (URI for this specific error). Use it
-for public or partner-facing APIs where standard tooling — API gateways, monitoring dashboards,
+**Q4: What is RFC 9457 and when should you use it?**
+RFC 9457, Problem Details for HTTP APIs, is the current standard JSON shape for HTTP error
+bodies; it obsoletes RFC 7807. It defines five members, all optional: `type` (URI reference
+identifying the problem type, defaulting to `about:blank`), `title` (short summary), `status`
+(an advisory copy of the HTTP status that must match the response), `detail` (occurrence-specific
+explanation), and `instance` (URI reference for this specific error, which may be relative). Use
+it for public or partner-facing APIs where standard tooling — API gateways, monitoring dashboards,
 client SDKs — can parse errors without custom documentation. Serve it with
 `Content-Type: application/problem+json`.
 
@@ -1017,7 +1032,7 @@ For global headers across all errors, use middleware that intercepts the respons
 or override each handler.
 
 **Q10: How do you document error responses in FastAPI's OpenAPI schema?**
-Add `responses` to the path operation decorator:
+Declare them in the `responses` argument of the path operation decorator.
 ```python
 @router.get(
     "/users/{user_id}",
@@ -1031,7 +1046,7 @@ FastAPI merges these with the auto-generated 200/422 entries. `model` must be a 
 so FastAPI can generate the JSON schema for the response body.
 
 **Q11: How do you test exception handlers in FastAPI?**
-Use `TestClient` and assert on `response.status_code` and `response.json()`:
+Drive the app with `TestClient` and assert on both `response.status_code` and the error body.
 ```python
 from fastapi.testclient import TestClient
 client = TestClient(app)
@@ -1056,13 +1071,13 @@ and convert it to an `HTTPException`, or register a separate
 `502 Bad Gateway` means your service reached the downstream dependency but received an invalid or unusable response from it — a malformed body, a connection reset mid-response, or an unexpected protocol error. `503 Service Unavailable` means your service determined the downstream dependency (or your own service) is currently overloaded or intentionally not ready to handle the request, such as a circuit breaker that is open or a connection pool that is exhausted. Choosing correctly matters for client retry logic: `503` conventionally pairs with a `Retry-After` header telling the client when to try again, while `502` signals a protocol-level problem that a naive retry might repeat immediately. Raise `HTTPException(status_code=502, ...)` when a call to an upstream service fails or returns garbage, and `503` when you deliberately reject the request due to your own capacity limits.
 
 **Q14: In the multi-tenant case study, why does `QuotaExceededError` get its own exception handler when the generic `AppError` handler would already catch it via MRO?**
-`QuotaExceededError` inherits from `AppError`, so without a dedicated handler, Starlette's MRO-based dispatch would route it to the generic `AppError` handler and produce a correct status code and envelope — but that generic handler has no knowledge of the `Retry-After` header a 429 response should carry. Registering a separate `@app.exception_handler(QuotaExceededError)` lets that specific handler read `exc.retry_after_seconds` and attach `headers={"Retry-After": ...}` to the response, something the generic handler's uniform shape cannot express without special-casing every subclass. This illustrates the general rule from Q2: register the base class handler for the common case, and add subclass-specific handlers only when a particular error type needs response shaping the generic handler cannot provide. The base `AppError` handler still exists as a safety net for any future subclass that does not need special treatment.
+Because a 429 needs a `Retry-After` header that the generic handler cannot produce. `QuotaExceededError` inherits from `AppError`, so without a dedicated handler Starlette's MRO-based dispatch routes it to the generic `AppError` handler, which yields a correct status code and envelope but no `Retry-After`. Registering a separate `@app.exception_handler(QuotaExceededError)` lets that specific handler read `exc.retry_after_seconds` and attach `headers={"Retry-After": ...}` to the response, something the generic handler's uniform shape cannot express without special-casing every subclass. This illustrates the general rule from Q2: register the base class handler for the common case, and add subclass-specific handlers only when a particular error type needs response shaping the generic handler cannot provide. The base `AppError` handler still exists as a safety net for any future subclass that does not need special treatment.
 
-**Q15: Why should you strip the `url` field from a Pydantic v2 validation error before returning it to API clients?**
-The `url` field in each Pydantic v2 error dict links to a docs page whose address embeds the exact Pydantic version running in production, an unnecessary fingerprint to hand external clients. Section 6.4 shows the fix: filter `{k: v for k, v in err.items() if k != "url"}` inside the `RequestValidationError` handler before serializing the response, keeping `type`, `loc`, `msg`, and `ctx` — the fields a client actually needs to fix its input. Leaving `url` in place costs nothing functionally, since clients rarely follow it, but it is still an avoidable disclosure: version strings help an attacker match your stack against known CVEs. Treat every field in a validation error payload as something to justify keeping, not something to include by default.
+**Q15: Which field of a Pydantic v2 validation error should you strip before returning it to API clients, and why?**
+Strip `input` — it echoes the client's own submitted value straight back into the response body. For a `missing` error on a top-level field there is no single failing value to point at, so `input` is set to the *entire* object that was submitted; a rejected signup therefore returns the plaintext password in a 422, and that body is then captured by every access log, error tracker and APM that records response payloads. Section 6.4 shows the fix: filter `{k: v for k, v in err.items() if k != "input"}` inside the `RequestValidationError` handler, keeping `type`, `loc`, `msg` and `ctx` — the fields a client actually needs to fix its request. Note that Pydantic's `url` field is *already* gone by this point: FastAPI builds `RequestValidationError` from `exc.errors(include_url=False)`, so there is nothing left to strip there.
 
 **Q16: Why is `HTTPException(detail=str(db_exc))` dangerous, and what should replace it?**
-Passing a raw exception's string representation directly into `detail` can leak internal implementation details to API clients — SQL fragments, stack trace text, internal hostnames, or file paths — because `str(db_exc)` on a database driver exception often includes exactly that information by design, for the benefit of a developer reading server logs, not an external caller. The fix is to return a generic, stable message in the client-facing `detail` (or your error envelope's `message` field) while logging the full exception server-side with `exc_info=True`, where only your own team can see it. This split — generic message to the client, full detail to the logs — is the same principle behind the case study's `backstop_handler`, which always responds with "An unexpected error occurred" regardless of what actually broke. Treat every 5xx exception message as a potential information-disclosure vector before it ever reaches `JSONResponse`.
+It leaks internal implementation detail to API clients: SQL fragments, stack trace text, internal hostnames, or file paths. `str(db_exc)` on a database driver exception often includes exactly that information by design, for the benefit of a developer reading server logs, not an external caller. The fix is to return a generic, stable message in the client-facing `detail` (or your error envelope's `message` field) while logging the full exception server-side with `exc_info=True`, where only your own team can see it. This split — generic message to the client, full detail to the logs — is the same principle behind the case study's `backstop_handler`, which always responds with "An unexpected error occurred" regardless of what actually broke. Treat every 5xx exception message as a potential information-disclosure vector before it ever reaches `JSONResponse`.
 
 ---
 
@@ -1089,9 +1104,10 @@ Passing a raw exception's string representation directly into `detail` can leak 
    `request.state.request_id`, and include it as `"instance"` in the error envelope. This enables
    correlation across client logs and server logs.
 
-7. **Strip Pydantic's `url` field from validation errors.** The `url` field in Pydantic v2 error
-   objects reveals your Pydantic version and points to external documentation. Strip it before
-   sending to clients.
+7. **Strip the `input` field from validation errors.** Each error item echoes the rejected value
+   back, and for a `missing` error on a top-level field that value is the whole request body —
+   so a failed signup returns the plaintext password the client just sent. Drop `input` in your
+   `RequestValidationError` handler and keep `type`, `loc`, `msg` and `ctx`.
 
 8. **Document all error responses in OpenAPI.** Add `responses={404: {"model": ErrorResponse}}`
    to path operations so clients can generate typed SDK clients.
@@ -1117,7 +1133,7 @@ errors that customer engineering teams can handle programmatically.
 - 422 validation errors use the same envelope with field-level details
 - 5xx errors never expose internal details
 - Every error response includes a `request_id` for support correlation
-- RFC 7807 `Content-Type` for partner integrations
+- RFC 9457 `Content-Type` for partner integrations
 
 #### Architecture
 
@@ -1286,7 +1302,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         ]
         return _error_response(
             request,
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code="VALIDATION_ERROR",
             message="Request validation failed",
             details=details,
@@ -1455,7 +1471,8 @@ well-behaved client to retry 720 times before the quota actually refills.
    preferred language? (Answer: store `error_code` as the stable identifier; perform message
    lookup in the exception handler using the tenant's locale from `request.state`.)
 
-4. The `_instance_uri` function returns `/requests/{request_id}`. Per RFC 7807, `instance` should
-   be an absolute URI reference. How would you make it fully RFC 7807 compliant? (Answer: prepend
-   the API base URL: `f"https://api.example.com/requests/{request_id}"`, ideally read from
-   settings.)
+4. The `_instance_uri` function returns `/requests/{request_id}`. RFC 9457 permits a relative
+   URI reference here (resolved against the response's base URI), so this is already compliant —
+   but what does an absolute one buy you? (Answer: `f"https://api.example.com/requests/{id}"`,
+   read from settings, survives being copied into a ticket or a log aggregator where no base URI
+   is available to resolve against.)

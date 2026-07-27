@@ -115,7 +115,7 @@ flowchart LR
     file("FileResponse")
     stream("StreamingResponse")
 
-    respBase -->|"default;<br/>orjson/json"| json
+    respBase -->|"default for<br/>dict / BaseModel"| json
     respBase -->|"text/html"| html
     respBase -->|"text/plain"| plain
     respBase -->|"307/301/302"| redirect
@@ -137,8 +137,8 @@ FastAPI maps Python built-in types and Pydantic types to OpenAPI schema types:
 | `int`                    | integer       | must be a valid integer                  |
 | `float`                  | number        | must be a valid float                    |
 | `str`                    | string        | any string                               |
-| `bool`                   | boolean       | `true`/`false`/`1`/`0`                  |
-| `UUID`                   | string/uuid   | must be a valid UUID4                    |
+| `bool`                   | boolean       | `true`/`false`/`1`/`0`/`on`/`off`/`yes`/`no` |
+| `UUID`                   | string/uuid   | any valid UUID (version not enforced)    |
 | `Annotated[int, Path(ge=1)]` | integer  | integer >= 1                             |
 | Pydantic `BaseModel`     | object        | full JSON schema from model              |
 
@@ -162,7 +162,7 @@ flowchart TD
 
     subgraph UV["Uvicorn"]
         loop("libuv / asyncio<br/>event loop")
-        parser("HTTP parser h11:<br/>builds scope dict")
+        parser("HTTP parser<br/>httptools or h11:<br/>builds scope dict")
         loop --> parser
     end
 
@@ -345,7 +345,7 @@ scope = {
 }
 ```
 
-### 6.3 The lifespan Context Manager (FastAPI 0.110+)
+### 6.3 The lifespan Context Manager (FastAPI 0.93+)
 
 ```python
 # main.py
@@ -590,9 +590,9 @@ app = FastAPI(
 
 
 class Item(BaseModel):
-    item_id: int = Field(..., ge=1, description="Unique item identifier", example=42)
-    name: str = Field(..., min_length=1, max_length=128, example="Widget Pro")
-    price: float = Field(..., gt=0, example=19.99)
+    item_id: int = Field(..., ge=1, description="Unique item identifier", examples=[42])
+    name: str = Field(..., min_length=1, max_length=128, examples=["Widget Pro"])
+    price: float = Field(..., gt=0, examples=[19.99])
 
 
 @app.get(
@@ -619,14 +619,17 @@ ReDoc at `/redoc`.
 # Development: single worker, hot reload
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 --reload
 
-# Production: multiple workers (use gunicorn as process manager)
-gunicorn main:app \
-    --worker-class uvicorn.workers.UvicornWorker \
+# Production: Uvicorn's own process supervisor forks the workers
+uvicorn main:app \
+    --host 0.0.0.0 --port 8000 \
     --workers 4 \
-    --bind 0.0.0.0:8000 \
-    --timeout 30 \
-    --graceful-timeout 30
+    --timeout-graceful-shutdown 30
 ```
+
+Uvicorn supervises its own worker processes; `--workers N` is the supported way to
+run multiple processes. If your platform standardises on Gunicorn as the process
+manager, install the separate `uvicorn-worker` package and pass
+`--worker-class uvicorn_worker.UvicornWorker`.
 
 `--workers 1` is the correct default for async apps; multiple workers multiply memory
 usage without improving concurrency for I/O-bound workloads unless CPU is the bottleneck.
@@ -704,26 +707,24 @@ bounded at 40 no matter how much hardware you add.
 
 ## 7. Real-World Examples
 
-**Stripe's internal tooling.** Stripe adopted FastAPI for several internal microservices after
-benchmarking its throughput at roughly 3x Django REST Framework under async I/O workloads.
-The auto-generated OpenAPI schema is fed into their internal SDK generator, eliminating manual
-spec maintenance.
+**Netflix Dispatch (incident management).** Netflix's open-source incident-management platform
+pins FastAPI, SQLAlchemy 2.0 and Pydantic v2 in its `pyproject.toml` and serves its whole REST
+surface through them; the auto-generated OpenAPI schema is what its Vue front end codes against,
+so the API contract is never hand-maintained.
 
-**Netflix Dispatch (incident management).** Uses FastAPI 0.100+ with Starlette lifespan to
-manage startup of Celery task connections and SQLAlchemy async engines. The OpenAPI spec is
-used to drive integration tests against a generated TypeScript client.
+**vLLM's OpenAI-compatible server.** `vllm/entrypoints/openai/api_server.py` builds a
+`FastAPI(lifespan=lifespan)` app: the lifespan context owns the engine and its GPU memory,
+`StreamingResponse` carries token-by-token SSE output, and a custom `RequestValidationError`
+handler reshapes 422s into OpenAI's error envelope. It is a compact demonstration of every
+mechanism in this module.
 
-**CERN's accelerator data API.** Switched from a Tornado-based WSGI API to FastAPI for its
-real-time streaming endpoints. `StreamingResponse` wrapping an async generator reduced memory
-allocation per request by 60% compared to buffering entire responses.
+**Open WebUI.** Its backend pins `fastapi`, `uvicorn[standard]` and `pydantic` v2, and fronts a
+mix of REST endpoints, WebSocket channels and SSE streams from a single ASGI app — the
+"one transport abstraction for three protocols" property from §2.
 
-**Microsoft semantic-kernel Python.** Uses FastAPI as the HTTP transport layer for its plugin
-server. Route decorators on tool functions are auto-inspected to produce OpenAPI plugin manifests
-that ChatGPT and Copilot can consume.
-
-**Uber's ML feature serving.** Deployed FastAPI behind a Kubernetes ingress to serve feature
-vectors. The `response_model` enforcement ensures that downstream model training code never
-receives unexpected feature keys that could silently corrupt training data.
+**The general pattern.** FastAPI's typical production niche is the I/O-bound service that must
+also publish a machine-readable contract: model-inference gateways, internal platform APIs, and
+BFF layers where an OpenAPI schema drives client SDK generation and contract tests.
 
 ---
 
@@ -731,14 +732,14 @@ receives unexpected feature keys that could silently corrupt training data.
 
 ### FastAPI vs Alternatives
 
-| Dimension               | FastAPI 0.110+        | Django REST Framework | Flask + marshmallow   | Litestar              |
+| Dimension               | FastAPI 0.140+        | Django REST Framework | Flask + marshmallow   | Litestar              |
 |-------------------------|-----------------------|-----------------------|-----------------------|-----------------------|
 | Async-native            | Yes (ASGI)            | Partial (ASGI mode)   | No (WSGI; Quart fork) | Yes (ASGI)            |
 | Auto OpenAPI            | Yes, zero config      | drf-spectacular plugin| apispec plugin        | Yes, zero config      |
 | Validation              | Pydantic v2 (Rust)    | DRF serializers       | marshmallow           | Pydantic/attrs        |
-| Startup time            | ~0.3s (small app)     | ~1.5s                 | ~0.1s                 | ~0.2s                 |
+| Import-time weight      | Light                 | Heavy (Django apps)   | Lightest              | Light                 |
 | Learning curve          | Low-medium            | Medium                | Low                   | Medium                |
-| Ecosystem maturity      | High (2019+)          | Very high (2011+)     | Very high (2010+)     | Medium (2023+)        |
+| Ecosystem maturity      | High (2018+)          | Very high (2011+)     | Very high (2010+)     | Medium (2021+)        |
 | WebSocket               | Native                | Via Channels addon    | Via Flask-SocketIO    | Native                |
 
 ### ASGI Concurrency Model Tradeoffs
@@ -762,8 +763,8 @@ receives unexpected feature keys that could silently corrupt training data.
 - You need WebSocket or Server-Sent Events alongside REST on the same server.
 - Auto-generated OpenAPI is required (client SDK generation, contract testing).
 - The team knows Python 3.10+ typing well; they will benefit from inline validation.
-- You want Pydantic v2's Rust-backed validation performance (10–50x faster than v1 for
-  large payloads).
+- You want Pydantic v2's Rust-backed validation performance (5–50x faster than v1, per
+  Pydantic's own published comparison).
 - Service needs graceful startup/shutdown for resource pools (DB, ML models, Kafka consumers).
 
 ### Do NOT use FastAPI + ASGI when:
@@ -785,9 +786,10 @@ receives unexpected feature keys that could silently corrupt training data.
 
 ### Pitfall 1 — BROKEN: Using deprecated `on_startup` / `on_shutdown` event handlers
 
-FastAPI 0.95 deprecated `@app.on_event("startup")` and `@app.on_event("shutdown")` in favour
-of the `lifespan` context manager. The old handlers have no way to share state with request
-handlers.
+`@app.on_event("startup")` and `@app.on_event("shutdown")` are deprecated in favour of the
+`lifespan` context manager, available since FastAPI 0.93 and carrying an explicit
+`@deprecated` marker on `FastAPI.on_event` today. The old handlers have no way to share state
+with request handlers.
 
 ```python
 # BROKEN — deprecated API, no way to share pool with route handlers
@@ -797,7 +799,7 @@ import asyncpg
 app = FastAPI()
 pool = None  # module-level global — threading / import issues
 
-@app.on_event("startup")           # DeprecationWarning in FastAPI 0.95+
+@app.on_event("startup")           # deprecated; emits DeprecationWarning
 async def startup():
     global pool
     pool = await asyncpg.create_pool(dsn="postgresql://...")
@@ -812,7 +814,7 @@ async def list_users():
 ```
 
 ```python
-# FIX — lifespan context manager (FastAPI 0.110+)
+# FIX — lifespan context manager (FastAPI 0.93+)
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -1003,15 +1005,15 @@ list mutated in a route handler is shared across all concurrent requests. Use a 
 
 ### ASGI Server Comparison
 
-| Dimension              | Uvicorn 0.29+              | Hypercorn 0.16+            | Daphne 4.0+             | Gunicorn + UvicornWorker   |
+| Dimension              | Uvicorn 0.51+              | Hypercorn 0.18+            | Daphne 4.2+             | Gunicorn + uvicorn-worker  |
 |------------------------|----------------------------|----------------------------|-------------------------|----------------------------|
 | ASGI compliance        | Full ASGI 3                | Full ASGI 3                | Full ASGI 3             | Full ASGI 3                |
 | HTTP/2                 | No (HTTP/1.1 only)         | Yes                        | No                      | No (Uvicorn limitation)    |
 | WebSocket              | Yes                        | Yes                        | Yes (Django Channels)   | Yes                        |
 | Graceful reload        | Yes (`--reload` dev only)  | Yes                        | No                      | Yes (SIGHUP)               |
-| Worker model           | Single process + asyncio   | Single process + asyncio   | Twisted reactor         | Multi-process              |
-| Production readiness   | High                       | Medium                     | Medium (Django-centric) | Very High                  |
-| Process management     | Manual / systemd           | Manual / systemd           | Manual                  | Built-in (gunicorn)        |
+| Worker model           | Multi-process (--workers)  | Single process + asyncio   | Twisted reactor         | Multi-process              |
+| Production readiness   | High                       | Medium                     | Medium (Django-centric) | High                       |
+| Process management     | Built-in supervisor        | Manual / systemd           | Manual                  | Built-in (gunicorn)        |
 | Typical use case       | Dev + K8s pods             | HTTP/2 required            | Django Channels         | Traditional VM deployments |
 | gRPC support           | No                         | No                         | No                      | No                         |
 
@@ -1019,13 +1021,13 @@ list mutated in a route handler is shared across all concurrent requests. Use a 
 
 | Library         | Role                                         | Version |
 |-----------------|----------------------------------------------|---------|
-| Starlette       | ASGI toolkit FastAPI is built on             | 0.37+   |
-| Pydantic        | Data validation / serialization              | 2.7+    |
-| asyncpg         | Async PostgreSQL driver (no thread pool)     | 0.29+   |
+| Starlette       | ASGI toolkit FastAPI is built on             | 1.3+    |
+| Pydantic        | Data validation / serialization              | 2.13+   |
+| asyncpg         | Async PostgreSQL driver (no thread pool)     | 0.31+   |
 | SQLAlchemy      | ORM with async support via `async_engine`    | 2.0+    |
-| httpx           | Async HTTP client for external calls         | 0.27+   |
-| anyio           | Backend-agnostic async primitives            | 4.3+    |
-| pytest-anyio    | Async test support                           | 4.3+    |
+| httpx           | Async HTTP client for external calls         | 0.28+   |
+| anyio           | Backend-agnostic async primitives; its       | 4.14+   |
+|                 | pytest plugin gives `@pytest.mark.anyio`     |         |
 
 ---
 
@@ -1049,14 +1051,16 @@ and awaits `send` for each piece of output.
 
 **Q3: What is Starlette and how does FastAPI relate to it?**
 Starlette is a lightweight ASGI framework providing routing, middleware, request/response
-abstractions, sessions, background tasks, and test client. FastAPI subclasses Starlette's
-`APIRouter` and `Request` and adds automatic Pydantic validation, dependency injection, and
-OpenAPI generation on top. You can add Starlette middleware directly to a FastAPI app, and
-a FastAPI route can return any Starlette `Response` subclass.
+abstractions, sessions, background tasks, and test client. `FastAPI` is a subclass of
+Starlette's `Starlette` application and `fastapi.APIRouter` subclasses Starlette's `Router`,
+adding automatic Pydantic validation, dependency injection, and OpenAPI generation;
+`fastapi.Request` and `fastapi.responses.*` are Starlette's own classes re-exported, not
+subclasses. You can add Starlette middleware directly to a FastAPI app, and a FastAPI route
+can return any Starlette `Response` subclass.
 
 **Q4: Why use `lifespan` instead of `on_startup` / `on_shutdown`?**
-The `lifespan` context manager was introduced to replace the deprecated event handlers in
-FastAPI 0.95. It solves two problems the old API could not: (1) it provides a `yield`-based
+The `lifespan` context manager landed in FastAPI 0.93 and `FastAPI.on_event` now carries an
+explicit `@deprecated` marker. It solves two problems the old API could not: (1) it provides a `yield`-based
 structure so resources created in startup are automatically closed in shutdown even if an
 exception occurs; (2) the `dict` yielded from the context manager is injected into
 `app.state` and accessible via `request.state` in every route handler, removing the need
@@ -1102,14 +1106,15 @@ non-blocking I/O via `select`/`epoll`/`kqueue`; asyncio wraps these in awaitable
 `Future` objects.
 
 **Q10: Where does FastAPI generate the OpenAPI schema and how is it customised?**
-FastAPI builds the OpenAPI 3.1 schema object in memory at startup by inspecting every
-registered route: path, method, path/query parameters, request body (inferred from the
-first Pydantic parameter), `response_model`, status codes, and tags. The schema is
+FastAPI builds the OpenAPI 3.1.0 schema object in memory at startup by inspecting every
+registered route. Each route contributes its path, method, path/query parameters, request
+body (inferred from the first Pydantic parameter), `response_model`, status codes, and tags.
+The schema is
 serialised to JSON and served at `GET /openapi.json`. Swagger UI is served at `GET /docs`
 and ReDoc at `GET /redoc`. Customisation points include: `title`, `version`, `description`,
 `openapi_tags` on the `FastAPI` constructor; `summary`, `description`, `tags`, `responses`,
 `include_in_schema=False` on individual route decorators; and `Field(description=...,
-example=...)` on Pydantic model fields.
+examples=[...])` on Pydantic model fields.
 
 **Q11: What is `StreamingResponse` used for and how does it work under ASGI?**
 `StreamingResponse` wraps an async generator (or sync generator run in a thread) that
@@ -1148,9 +1153,12 @@ is purely positional: changing `@app.get("/items/{item_id}")` to `@app.get("/ite
 function body.
 
 **Q15: What is the difference between `FileResponse` and `StreamingResponse` for serving large files?**
-`FileResponse` uses `aiofiles` (or `anyio`) to send a file from disk using the OS's
-`sendfile` syscall when available, which copies data from disk to the socket buffer without
-passing through Python's heap. It also handles `Range` requests for partial content (required
+`FileResponse` takes a path on disk; `StreamingResponse` takes a generator you write.
+`FileResponse` streams the file with `anyio.open_file`, so the disk reads happen on a worker
+thread instead of the event loop, and it emits the ASGI `http.response.pathsend` event
+instead when the server advertises that extension — in which case the server sends the file
+itself and the bytes never enter the Python heap at all. It
+also handles `Range` requests for partial content (required
 for video seek). `StreamingResponse` wraps a Python generator and allocates chunks in the
 Python heap. For files already on disk, `FileResponse` is more memory-efficient. For
 dynamically generated content (S3 proxy streaming, LLM token output, live sensor data),
@@ -1161,8 +1169,8 @@ A single Uvicorn worker runs one asyncio event loop and handles thousands of con
 I/O-bound requests efficiently. Adding workers spawns new OS processes, each with its own
 event loop and memory copy of the application — including ML models, DB connection pools,
 and in-memory caches. For I/O-bound services, scaling is better achieved horizontally (more
-pods/containers) via the orchestrator. Increase `--workers` (or use Gunicorn + UvicornWorker)
-when the bottleneck is CPU — Python parsing, Pydantic validation of very large payloads, or
+pods/containers) via the orchestrator. Increase `--workers` (Uvicorn supervises the forked
+processes itself) when the bottleneck is CPU — Python parsing, Pydantic validation of very large payloads, or
 synchronous business logic — since each extra worker can utilise an additional CPU core
 independently of the GIL.
 
@@ -1189,9 +1197,11 @@ are enforced before the handler runs.
 **Set `openapi_tags` and per-route `tags` from day one.** Swagger UI groups routes by tag;
 teams without tags end up with one unnavigable flat list of 200 endpoints.
 
-**Use `response_class=ORJSONResponse` for high-throughput JSON endpoints.** FastAPI ships with
-`from fastapi.responses import ORJSONResponse`, which uses the `orjson` library and is roughly
-3-5x faster than the stdlib `json` serializer for typical API payloads.
+**Declare a return type or `response_model` on every JSON endpoint and let FastAPI serialize.**
+When the route's output type is known, FastAPI serializes straight to JSON bytes through
+Pydantic v2's Rust core — faster than routing the value through a custom response class, and
+it is why `ORJSONResponse` and `UJSONResponse` now carry deprecation markers. Reach for a
+custom `response_class` only for non-JSON media types.
 
 **Add `include_in_schema=False` to internal endpoints.** Health checks, internal metrics
 scrapers, and readiness probes (`/healthz`, `/readyz`) should not appear in the public API
@@ -1204,9 +1214,9 @@ Swagger UI "Try it out" links and incorrect `servers` entries in the OpenAPI spe
 `routers/users.py`, etc., and `include_router` in `main.py`. This keeps route files
 small and allows per-router prefix and dependency overrides.
 
-**Pin Pydantic to v2 explicitly.** FastAPI 0.110+ defaults to Pydantic v2, but library
-dependencies may install v1. Pin `pydantic>=2.0` in `pyproject.toml` and test with `pydantic
---version` in CI.
+**Pin Pydantic to v2 explicitly.** Current FastAPI resolves to Pydantic v2, but a transitive
+dependency can still pull v1 into the environment. Pin `pydantic>=2` in `pyproject.toml` and
+assert it in CI with `python -c "import pydantic; assert pydantic.VERSION.startswith('2')"`.
 
 ---
 
@@ -1232,7 +1242,7 @@ app = FastAPI()
 _pool: asyncpg.Pool | None = None   # module-level global — test unfriendly
 
 
-@app.on_event("startup")            # DeprecationWarning in FastAPI 0.95+
+@app.on_event("startup")            # deprecated; emits DeprecationWarning
 async def startup() -> None:
     global _pool
     _pool = await asyncpg.create_pool(
@@ -1272,14 +1282,14 @@ Problems:
 ### FIX — lifespan, response_model, error handling, and OpenAPI tags
 
 ```python
-# FIX: inventory_service.py — FastAPI 0.110+, Python 3.11+
+# FIX: inventory_service.py — FastAPI 0.140+, Python 3.13+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Path, Request
-from fastapi.responses import JSONResponse, ORJSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -1293,9 +1303,9 @@ class ItemPublic(BaseModel):
 
 
 class ItemCreate(BaseModel):
-    sku: str = Field(..., min_length=1, max_length=64, example="WIDGET-001")
-    quantity: int = Field(..., ge=0, example=100)
-    cost_price: float = Field(..., gt=0, example=4.99)   # accepted on write
+    sku: str = Field(..., min_length=1, max_length=64, examples=["WIDGET-001"])
+    quantity: int = Field(..., ge=0, examples=[100])
+    cost_price: float = Field(..., gt=0, examples=[4.99])   # accepted on write
 
 
 class HealthResponse(BaseModel):
@@ -1339,7 +1349,6 @@ app = FastAPI(
         {"name": "ops", "description": "Health and readiness probes."},
     ],
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,   # orjson for all JSON responses
 )
 
 
@@ -1416,28 +1425,25 @@ async def health(request: Request) -> HealthResponse:
 - `response_model=ItemPublic` on `create_item` means `cost_price` is never included in
   the response even though the handler processes it internally.
 - `include_in_schema=False` keeps `/healthz` out of the Swagger UI.
-- `default_response_class=ORJSONResponse` applies orjson serialisation globally.
 - `Annotated[int, Path(ge=1)]` validates path parameters with constraints visible in OpenAPI.
 
 ### Running the service
 
 ```bash
 # Install dependencies
-pip install "fastapi[standard]>=0.110" asyncpg "pydantic>=2.7" orjson
+pip install "fastapi[standard]>=0.140" asyncpg "pydantic>=2.13"
 
 # Start with Uvicorn (development)
 uvicorn inventory_service:app --host 0.0.0.0 --port 8000 --reload
 
-# Production — Gunicorn process manager + Uvicorn workers
-gunicorn inventory_service:app \
-    --worker-class uvicorn.workers.UvicornWorker \
+# Production — Uvicorn supervises its own worker processes
+uvicorn inventory_service:app \
+    --host 0.0.0.0 --port 8000 \
     --workers 2 \
-    --bind 0.0.0.0:8000 \
-    --graceful-timeout 30 \
-    --timeout 60
+    --timeout-graceful-shutdown 30
 ```
 
-### Testing with pytest-anyio
+### Testing with anyio's pytest plugin
 
 ```python
 # test_inventory.py

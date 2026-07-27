@@ -16,11 +16,12 @@ Key capabilities covered in this sub-file:
 - `use_cache=False` for intentional multiple instances
 - Nested `yield` dependencies and DAG teardown order (LIFO)
 - Request scope vs app scope: why connection pools belong in `lifespan`, not `Depends`
+- `scope="function"` for teardown that must finish before the response is sent
 - Class-based `yield` dependencies using `__call__` as an async generator
 - Testing: `dependency_overrides` with generator replacements
-- Performance characteristics: ~0.05 ms overhead per dependency per request
+- Performance characteristics: single-digit microseconds per async yield dependency
 
-Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2.
+Python version: 3.13/3.14. FastAPI version: 0.140+. Pydantic version: v2.
 
 Cross-reference: [Dependency Injection in FastAPI](../README.md)
 
@@ -34,13 +35,13 @@ Cross-reference: [Dependency Injection in FastAPI](../README.md)
 
 **Why it matters.** Resources like database sessions, file handles, HTTP clients, and Redis connections must be released regardless of whether the handler succeeded, raised a validation error, or caused an unhandled 500. Without `yield` dependencies you either leak resources or write brittle try/finally blocks in every handler. With `yield`, the teardown contract is encoded once in the dependency.
 
-**Key insight.** Teardown runs after the response is sent. This means client latency is unaffected by cleanup work. A slow `session.commit()` or `await client.aclose()` does not add to the observed response time — though it still consumes server resources. Design teardown accordingly: keep it fast; if cleanup is expensive, offload to a background task.
+**Key insight.** Under the default `scope="request"`, teardown runs after the response is sent. This means client latency is unaffected by cleanup work. A slow `session.commit()` or `await client.aclose()` does not add to the observed response time — though it still consumes server resources. Design teardown accordingly: keep it fast; if cleanup is expensive, offload to a background task.
 
 ---
 
 ## 3. Core Principles
 
-**1. Generator contract.** A `yield` dependency must yield exactly once. Yielding zero times (returning early) causes a `RuntimeError`. Yielding more than once causes `StopIteration` to be raised from FastAPI's driving code.
+**1. Generator contract.** A `yield` dependency must yield exactly once. Both violations surface as a `RuntimeError` from the `contextmanager` wrapper and become a 500: returning without yielding raises `RuntimeError: generator didn't yield`, and yielding a second time raises `RuntimeError: generator didn't stop`. In the second case the handler still ran to completion with the first yielded value; the failure only appears at teardown.
 
 **2. Teardown guarantee.** FastAPI drives the generator inside a try/finally equivalent. Even if the route handler raises an unhandled exception, or an `HTTPException` is raised, the generator's teardown code executes. Use `finally:` not bare post-`yield` code to be explicit.
 
@@ -50,7 +51,7 @@ Cross-reference: [Dependency Injection in FastAPI](../README.md)
 
 **5. LIFO teardown.** Nested `yield` dependencies tear down in reverse dependency order. If A depends on B, and B `yield`s first, B tears down before A. FastAPI builds a DAG at startup and executes teardown in leaf-first (reverse topological) order.
 
-**6. Scope separation.** Request-scoped resources (DB session, per-request HTTP client, tenant context) belong in `Depends`. Application-scoped resources (connection pools, global HTTP clients, shared caches) belong in `lifespan`. Mixing them causes expensive re-initialization on every request.
+**6. Scope separation.** Request-scoped resources (DB session, per-request HTTP client, tenant context) belong in `Depends`. Application-scoped resources (connection pools, global HTTP clients, shared caches) belong in `lifespan`. Mixing them causes expensive re-initialization on every request. Within `Depends` there is a third choice, `scope="function"`, which keeps the resource request-local but closes it before the response is sent instead of after.
 
 ---
 
@@ -63,6 +64,7 @@ Cross-reference: [Dependency Injection in FastAPI](../README.md)
 | Plain `Depends` | Regular function/async function | None | Per request | Parsed parameters, auth tokens |
 | `yield` sync dep | Generator function (`def … yield`) | Yes, after response | Per request | SQLite sessions, file handles |
 | `yield` async dep | Async generator function (`async def … yield`) | Yes, after response | Per request | asyncpg connections, aiohttp sessions |
+| `yield` dep, `scope="function"` | Same, plus `Depends(fn, scope="function")` | Yes, before response | Per request | Cleanup whose failure must still change the response |
 | `lifespan` | `@asynccontextmanager` on FastAPI app | On app shutdown | App lifetime | Connection pools, global clients |
 | Class `__call__` yield | Class instance whose `__call__` is an async gen | Yes, after response | Per request (one instance per request) | Configurable dep with injected config |
 
@@ -379,6 +381,12 @@ async def read_data(conn: asyncpg.Connection = Depends(get_conn)):
 
 **Why it matters**: At 100 req/s the broken version creates and destroys 100 pools per second. Each pool opens 5–20 TCP connections to Postgres. That is 500–2000 TCP handshakes per second instead of 5–20 persistent connections. The fix reduces Postgres connection load by 99%.
 
+The `~500 ms` used throughout this section is an illustrative round number for the cost of
+building a pool of `min_size=5` against a remote Postgres — it stands for "one TLS handshake and
+authentication round trip per connection, times `min_size`", which is network-dependent and can be
+an order of magnitude either way on your infrastructure. The arithmetic below is what matters; the
+conclusion holds for any value large enough to notice.
+
 #### Decoding the scope mistake
 
 Every number in that paragraph comes from one substitution — swapping *per process* for *per
@@ -594,7 +602,7 @@ async def lifespan(app: FastAPI):
         max_connections=20,
     )
     yield
-    await app.state.redis.close()
+    await app.state.redis.aclose()
 ```
 
 ### 6.8 HTTP Client Yield Dependency
@@ -674,16 +682,22 @@ Yield dependencies are scoped to the request, not to background tasks:
 @router.post("/send-email")
 async def send_email(
     payload: EmailPayload,
+    background_tasks: BackgroundTasks,          # no default: must precede defaulted params
     session: AsyncSession = Depends(get_db),
-    background_tasks: BackgroundTasks,
 ):
     record = EmailRecord(**payload.model_dump())
     session.add(record)
-    # session.commit() happens in teardown — BEFORE background task runs
-    # Background task must open its own session; it cannot capture `session` from the closure
+    await session.commit()                      # commit HERE, not in teardown
+    # Ordering: response sent -> background task -> yield-dep teardown. The session is
+    # therefore still open while the task runs, but relying on that would hold a pooled
+    # connection for the whole task and breaks the moment anyone adds scope="function".
     background_tasks.add_task(deliver_email, record.id)  # Pass ID, not session object
     return {"status": "queued"}
 ```
+
+Note the parameter order: `BackgroundTasks` has no default, so it must be declared before any
+parameter that does (including every `Depends(...)`), or Python raises
+`SyntaxError: parameter without a default follows parameter with a default` at import.
 
 ---
 
@@ -704,13 +718,13 @@ async def send_email(
 
 | Dimension | `def get_db(): yield` | `async def get_db(): yield` |
 |-----------|----------------------|----------------------------|
-| Blocking I/O in setup/teardown | Blocks event loop thread | Non-blocking |
-| CPU-bound setup | Fine | Fine (but yields control) |
+| Blocking I/O in setup/teardown | Runs on a worker thread | Non-blocking |
+| CPU-bound setup | Off the loop, but costs a thread | Blocks the loop |
 | Use with async libraries | Cannot call `await` | Natural |
-| Overhead | ~0.03ms | ~0.05ms |
-| Use case | Sync ORMs (psycopg2/SQLite) | asyncpg, aioredis, httpx |
+| Overhead | ~0.16 ms (two thread hops) | ~0.006 ms |
+| Use case | Sync ORMs (psycopg2/SQLite) | asyncpg, redis.asyncio, httpx |
 
-#### Decoding the ~0.05 ms overhead figure
+#### Decoding the per-dependency overhead figure
 
 A per-dependency cost only becomes interesting once you multiply it by the two things that
 scale — tree size and traffic:
@@ -723,38 +737,46 @@ cpu_ms_per_second = resolution_ms_per_request x RPS
 core_fraction     = cpu_ms_per_second / 1000
 ```
 
-**Read it like this.** "Each distinct dependency in the tree costs about 0.05 ms, so the tax is
-the size of your dependency graph times how often you resolve it." *Distinct* is the load-bearing
-word — the request cache means a dependency referenced five times is resolved once, so the
-multiplier is the node count of the DAG, not the edge count.
+**Read it like this.** "Each distinct dependency in the tree costs a fixed slice of CPU, so the
+tax is the size of your dependency graph times how often you resolve it." *Distinct* is the
+load-bearing word — the request cache means a dependency referenced five times is resolved once,
+so the multiplier is the node count of the DAG, not the edge count.
+
+The two overhead figures come from timing a FastAPI app over an in-process ASGI transport with
+4 and with 20 trivial yield dependencies and taking the slope, so they exclude fixed per-request
+cost. They are the shape of the cost, not a portable benchmark — re-measure on your own hardware
+before designing around them.
 
 | Symbol | What it is |
 |--------|------------|
-| `overhead_ms` | `~0.05` for async yield deps, `~0.03` for sync — the row above |
+| `overhead_ms` | `~0.006` for async yield deps, `~0.16` for sync — the row above |
 | `distinct_dependencies` | Unique callables resolved this request. Cached repeats are free |
 | `resolution_ms_per_request` | DI's slice of one request's latency budget |
 | `RPS` | Requests per second on this worker |
 | `cpu_ms_per_second` | Milliseconds of CPU per wall-clock second spent purely resolving deps |
 | `core_fraction` | `cpu_ms_per_second / 1000` — the share of one core DI consumes |
 
-**Walk one example.** Async yield deps at `0.05 ms`, worker serving `1,000` req/s:
+**Walk one example.** Worker serving `1,000` req/s, async yield deps at `0.006 ms`:
 
 ```
-  distinct deps   per-request DI cost      CPU per second       share of one core
-      1           1 x 0.05 = 0.05 ms        0.05 x 1000 =  50 ms        5%
-      3           3 x 0.05 = 0.15 ms        0.15 x 1000 = 150 ms       15%
-      6           6 x 0.05 = 0.30 ms        0.30 x 1000 = 300 ms       30%
-     10          10 x 0.05 = 0.50 ms        0.50 x 1000 = 500 ms       50%
+  distinct deps   per-request DI cost        CPU per second        share of one core
+      1           1 x 0.006 = 0.006 ms       0.006 x 1000 =   6 ms       0.6%
+      3           3 x 0.006 = 0.018 ms       0.018 x 1000 =  18 ms       1.8%
+      6           6 x 0.006 = 0.036 ms       0.036 x 1000 =  36 ms       3.6%
+     10          10 x 0.006 = 0.060 ms       0.060 x 1000 =  60 ms       6.0%
 
-  Sync deps instead (0.03 ms), 6 distinct:
-      6 x 0.03 = 0.18 ms  ->  180 ms/s  ->  18% of a core
-      but any blocking I/O inside them stalls the loop, so the 0.02 ms saved
-      is never the reason to choose sync.
+  Same six deps written as SYNC generators (0.16 ms each):
+      6 x 0.16 = 0.96 ms  ->  960 ms/s  ->  96% of a core
+      27x the async cost, and none of it is your code: each sync generator's
+      setup and its teardown are separate hops onto the 40-token anyio
+      thread pool, so one dependency costs two dispatches.
 ```
 
-At a 6-dependency tree and 1,000 req/s, DI resolution alone is 30% of a core — invisible in a
-profile of one request (`0.30 ms`), unmissable in aggregate. That is the case for keeping auth
-chains shallow and for never adding a dependency purely to tidy up a signature.
+The direction here is the opposite of the usual intuition: a *sync* `yield` dependency is far
+more expensive than an async one, because FastAPI must bounce both halves of the generator
+through a worker thread. Six sync deps at 1,000 req/s is most of a core spent on nothing but
+thread handoffs. Async yield deps are cheap enough that DI overhead is essentially never the
+bottleneck — but that is an argument for writing them `async def`, not for adding them freely.
 
 ### use_cache=True vs use_cache=False
 
@@ -789,13 +811,13 @@ chains shallow and for never adding a dependency purely to tidy up a signature.
 
 ## 10. Common Pitfalls
 
-### Pitfall 1: Teardown does not run for background tasks
+### Pitfall 1: Background tasks that borrow the request's session
 
 **Symptom**: Background task accesses a closed session; `DetachedInstanceError` or `ResourceClosedError`.
 
-**Cause**: The route handler's `yield` dependency tears down after the response is sent, which is before background tasks execute. The teardown closes the session; the background task's closure holds a reference to the now-closed session.
+**Cause**: Ordering. With the default `scope="request"` the sequence is response sent -> background tasks -> yield-dep teardown, so a task that captures the session *appears* to work: the session is still open. It is still wrong. The task now pins a pooled connection for its entire duration, outside the request's error handling, and the moment anyone adds `Depends(..., scope="function")` — which closes the dependency before the response is sent — every such task starts raising `DetachedInstanceError` at once.
 
-**Fix**: Pass only serializable IDs to background tasks, never live ORM objects or session references. The background task opens its own session via `async with AsyncSessionLocal() as session:`.
+**Fix**: Pass only serializable IDs to background tasks, never live ORM objects or session references. The background task opens its own session via `async with AsyncSessionLocal() as session:`. Then the ordering stops mattering.
 
 ```mermaid
 flowchart LR
@@ -807,9 +829,10 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    H["Route handler<br/>returns"] --> R(["Response sent<br/>to client"])
-    R --> TD["yield dep teardown<br/>session.close()"]
-    TD -.->|"session now closed"| BG["Background task<br/>runs after response"]
+    H["Route handler<br/>returns"] -.->|"scope=function:<br/>teardown HERE"| TD
+    H --> R(["Response sent<br/>to client"])
+    R --> BG["Background task<br/>runs after response"]
+    BG -->|"scope=request default:<br/>teardown HERE"| TD["yield dep teardown<br/>session.close()"]
     BG --> DEC{"Task touches a live<br/>ORM object?"}
     DEC -->|"Yes"| FAIL(["DetachedInstanceError /<br/>ResourceClosedError"])
     DEC -->|"No - passes ID only"| OK(["Opens its own session<br/>- succeeds"])
@@ -823,18 +846,19 @@ flowchart LR
     class OK train
 ```
 
-Teardown fires as soon as the response is sent — before any background task runs — so a task that captures the ORM object instead of its ID touches an already-closed session.
+By default teardown trails the background task, so a captured ORM object survives by accident while pinning a pooled connection; switch the dependency to `scope="function"` and teardown jumps ahead of the task, turning that accident into a `DetachedInstanceError`. Passing the ID makes the task correct under both orderings.
 
 ```python
-# BROKEN: background task captures closed session from outer scope
+# BROKEN: background task captures the request's session (and would not even import —
+#         `tasks` has no default, so it must come before the defaulted `session`)
 @router.post("/process")
-async def process(session: AsyncSession = Depends(get_db), tasks: BackgroundTasks):
+async def process(tasks: BackgroundTasks, session: AsyncSession = Depends(get_db)):
     record = await session.get(Record, 1)
-    tasks.add_task(do_work, record)  # BROKEN: record is detached after session closes
+    tasks.add_task(do_work, record)  # BROKEN: pins the session; detaches under scope="function"
 
 # FIX: pass the ID; background task opens its own session
 @router.post("/process")
-async def process(session: AsyncSession = Depends(get_db), tasks: BackgroundTasks):
+async def process(tasks: BackgroundTasks, session: AsyncSession = Depends(get_db)):
     record = await session.get(Record, 1)
     tasks.add_task(do_work, record.id)  # FIX: ID is just an int; session-independent
 
@@ -848,7 +872,7 @@ async def do_work(record_id: int) -> None:
 
 **Symptom**: Resource leaks on exceptions; session never closed when handler raises.
 
-**Cause**: Code after `yield` only executes on clean generator advancement. If an exception is thrown into the generator and there is no `try/finally`, the generator is garbage-collected without running teardown.
+**Cause**: Code after `yield` only executes on clean generator advancement. FastAPI *does* throw the exception into the generator, but with no `try`/`finally` around the `yield` the throw propagates straight out of the generator frame, so the cleanup line below `yield` is simply never reached — nothing is swallowed and nothing is garbage-collected silently.
 
 ```python
 # BROKEN: no finally; session.close() skipped on exception
@@ -874,9 +898,9 @@ See Section 6.3 for the complete BROKEN → FIX example. Creating a connection p
 
 ### Pitfall 4: Swallowing exceptions in teardown
 
-**Symptom**: Route handler raises `ValueError`; client receives 200 OK with empty body.
+**Symptom**: Route handler raises `ValueError`; client receives a 500 with no trace of the real error, and the log shows `FastAPIError: Response not awaited.` instead.
 
-**Cause**: A bare `except:` or `except Exception: pass` after `yield` swallows the exception. FastAPI sees no exception and generates a 200 response.
+**Cause**: A bare `except:` or `except Exception: pass` after `yield` swallows the exception. The handler never produced a response, and now no exception is propagating either, so FastAPI detects the impossible state and raises `FastAPIError` — you lose the original `ValueError` entirely, which is worse than the 500 you would otherwise have got.
 
 ```python
 # BROKEN: swallows the exception
@@ -938,11 +962,11 @@ app.dependency_overrides[get_db] = override_db
 |----------------|------|----------------------|
 | SQLAlchemy 2.0 `async_sessionmaker` | Async ORM session factory | Wrap `AsyncSession` in yield dep; `async_sessionmaker` provides context manager |
 | asyncpg | PostgreSQL async driver | Pool in lifespan; `pool.acquire()` context in yield dep |
-| aioredis / redis-py 4+ | Redis async client | Pool in lifespan; client reference yielded directly |
+| redis-py 6+ (`redis.asyncio`) | Redis async client | Pool in lifespan; client reference yielded directly; close with `aclose()` |
 | httpx `AsyncClient` | Async HTTP client | Shared client in lifespan or short-lived client per request in yield dep |
 | `contextlib.asynccontextmanager` | FastAPI's underlying mechanism | FastAPI uses this internally; you can also wrap existing CMs manually |
 | pytest + `httpx.AsyncClient` | Test client for async FastAPI | Use `dependency_overrides` to replace yield deps in tests |
-| anyio | Async test backend | `anyio.pytest_plugin` enables `@pytest.mark.anyio` for testing async generators |
+| anyio | Async test backend + thread pool | Its bundled pytest plugin enables `@pytest.mark.anyio`; its 40-token limiter is what sync yield deps queue on |
 
 ---
 
@@ -955,7 +979,7 @@ A `yield` dependency is a generator function used with `Depends`; code before `y
 FastAPI wraps the generator in an `asynccontextmanager` equivalent and drives teardown in a `finally` block. If the handler raises, FastAPI calls `generator.throw(exc)` which resumes execution inside the generator's `except`/`finally` block. The teardown code always runs as long as it is inside `finally:`.
 
 **Q: What happens if you raise an exception inside the teardown of a yield dependency?**
-FastAPI propagates it. If teardown raises a different exception than the one thrown in, the new exception replaces the original. This means careless teardown can mask handler errors. Always log and re-raise or use `finally` to keep teardown non-raising.
+It depends on whether the response has already gone out. On the error path — teardown reached because the handler raised — raising a new exception (typically an `HTTPException`) replaces the original and shapes the response, which is the documented way to translate a driver error into a 409. On the success path, however, the response was already sent before request-scoped teardown ran, so there is nothing left to change: Starlette raises `RuntimeError: Caught handled exception, but response already started.` and the client keeps the 200 it already received. Keep success-path teardown non-raising; log instead.
 
 **Q: Explain the caching behavior of yield dependencies. When is a dependency called more than once?**
 FastAPI caches the result of each dependency callable keyed by the function object within a single request. If three route parameters all declare `Depends(get_db)`, `get_db()` is called once; all three receive the same session. To force a new instance, pass `use_cache=False` to the second `Depends` call.
@@ -997,10 +1021,10 @@ If the route handler raises, FastAPI calls `throw(exc)` on the generator — the
 At app startup, FastAPI inspects each dependency using `inspect.isgeneratorfunction()` and `inspect.isasyncgenfunction()`. For class-based dependencies, it checks the `__call__` method. This inspection happens once at import/startup; at request time FastAPI follows a pre-computed execution plan.
 
 **Q: What are the performance characteristics of yield dependencies?**
-Dependency resolution adds approximately 0.05 ms per dependency per request for async generator deps. Caching makes repeated references to the same dep essentially free (a dict lookup). The dominant cost is always the I/O inside the dep (e.g., acquiring a DB connection from a pool: ~0.1–1ms), not FastAPI's wrapping overhead.
+An async yield dependency costs single-digit microseconds of framework overhead — around 0.006 ms per distinct dependency, measured as the slope between 4- and 20-dependency trees. A sync one costs roughly 0.16 ms, about 25x more, because both halves of the generator are dispatched onto the anyio thread pool. Caching makes repeated references to the same dep essentially free (a dict lookup). For async deps the dominant cost is always the I/O inside them (acquiring a pooled DB connection: ~0.1–1 ms), not FastAPI's wrapping.
 
 **Q: Can you use a yield dependency to manage a distributed lock?**
-Yes — and it is a clean pattern:
+Yes, and it is a clean pattern: acquire before `yield`, release in `finally`, so the lock cannot outlive the request even when the handler raises.
 
 ```python
 import asyncio
@@ -1024,7 +1048,7 @@ Teardown is guaranteed even if the handler raises, which prevents lock leaks.
 The instance is bound to the request's dependency resolution context. FastAPI creates a fresh dependency graph per request. Sharing instances across requests would introduce concurrency hazards — two concurrent requests modifying the same SQLAlchemy session would corrupt internal state. App-scoped shared state must be thread/async-safe and belongs in `lifespan` or module-level singletons.
 
 **Q: What happens if a yield dependency yields more than once?**
-FastAPI drives the generator with `next()` (or `send()`) once to get the yielded value. After handler teardown it calls `next()` again expecting `StopIteration`. If the generator yields a second value instead of stopping, FastAPI's wrapping code raises `RuntimeError: generator didn't stop after throw()`. Always `yield` exactly once.
+The request fails with a 500 at teardown, not at setup. FastAPI advances the generator once to get the injected value and runs the handler with it; at teardown the `contextmanager` wrapper advances it again expecting `StopIteration`, gets a second value instead, and raises `RuntimeError: generator didn't stop`. The mirror case, returning without ever yielding, raises `RuntimeError: generator didn't yield` before the handler runs. Always `yield` exactly once.
 
 ---
 
@@ -1042,7 +1066,7 @@ FastAPI drives the generator with `next()` (or `send()`) once to get the yielded
 
 **Override must mirror original in tests.** If the production dep is a generator, the test override must also be a generator. If the production dep is a plain function, a plain override suffices. Mismatching causes teardown skips that produce false-passing tests with resource leaks.
 
-**Avoid circular yield dependencies.** FastAPI detects circular deps at startup and raises `ValueError: Circular dependency detected`. Design dependency graphs as DAGs. If two resources truly need each other, extract a third dependency that creates both.
+**Avoid circular yield dependencies.** There is no cycle detector: FastAPI walks the dependency graph when the route is registered, so a cycle recurses until Python raises `RecursionError` at import time, pointing at FastAPI internals rather than at your cycle. Design dependency graphs as DAGs. If two resources truly need each other, extract a third dependency that creates both.
 
 **Use `contextlib.suppress` judiciously in finally blocks.** Suppressing all exceptions in teardown can hide serious errors. At minimum, log suppressed exceptions. A session rollback failure that is silently swallowed means dirty data; you want to know about it.
 
@@ -1130,13 +1154,13 @@ async def lifespan(app: FastAPI):
     )
     app.state.http_client = httpx.AsyncClient(
         base_url=DOWNSTREAM_BASE,
-        timeout=httpx.Timeout(connect=2.0, read=10.0),
+        timeout=httpx.Timeout(connect=2.0, read=10.0, write=5.0, pool=2.0),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     )
     yield
     logger.info("Shutting down — closing shared resources")
     await app.state.pool.close()
-    await app.state.redis.close()
+    await app.state.redis.aclose()
     await app.state.http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
@@ -1220,4 +1244,8 @@ async def test_get_order_not_found(test_client):
     assert resp.status_code == 404
 ```
 
-This pattern is used by production FastAPI deployments at companies including Weights & Biases (ML platform API), Pydantic's own internal services, and numerous fintech platforms handling PCI-scope database transactions.
+This two-level split — expensive shared resources built once in `lifespan`, thin per-request
+accessors in `Depends` — is the shape FastAPI's own documentation recommends, and it is what you
+will find in open-source FastAPI services that manage real connection pools, such as vLLM's
+OpenAI-compatible server, whose lifespan owns the inference engine while its routes take only
+per-request handles.
