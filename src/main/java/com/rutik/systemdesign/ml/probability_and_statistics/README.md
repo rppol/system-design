@@ -803,9 +803,9 @@ def bayesian_coin_inference(
 
 **Cross-entropy loss is MLE**: Training a 10-class image classifier with softmax output and cross-entropy loss is equivalent to maximum likelihood estimation under a categorical noise model. The ground-truth label is "what we observed"; the model's softmax output is its estimate of the class probabilities; minimizing cross-entropy = maximizing log P(labels | images, parameters).
 
-**L2 regularization is Gaussian prior MAP**: Weight decay in neural networks (add lambda * ||W||^2 to loss) is MAP estimation with a Gaussian prior N(0, 1/lambda). This is why weight decay keeps weights small but rarely exactly zero, while L1 regularization (Laplace prior) produces sparse weights.
+**L2 regularization is Gaussian prior MAP**: Weight decay in neural networks (add lambda * ||W||^2 to the negative log-likelihood) is MAP estimation with a Gaussian prior N(0, 1/(2*lambda)) — the same lambda = 1/(2*sigma_w^2) relation derived in Section 12. This is why weight decay keeps weights small but rarely exactly zero, while L1 regularization (Laplace prior) produces sparse weights.
 
-**A/B testing is hypothesis testing**: A product team changed a recommendation algorithm and measured click-through rate on 50,000 users per group. CTR_A = 0.032, CTR_B = 0.035. Two-proportion z-test gives p=0.003 < 0.05, so they rejected H0 and shipped the change. Without statistical testing they would not know whether the 0.3% improvement was real or sampling noise.
+**A/B testing is hypothesis testing**: A product team changed a recommendation algorithm and measured click-through rate on 50,000 users per group. CTR_A = 0.032, CTR_B = 0.035. The pooled two-proportion z-test gives z = 2.64 and p = 0.0084 < 0.05, so they rejected H0 and shipped the change. Without statistical testing they would not know whether the 0.3 percentage-point improvement was real or sampling noise.
 
 **CLT enables batch training**: Stochastic gradient descent works because mini-batch gradient estimates are approximately unbiased estimates of the true gradient. By CLT, with batch size 256, the mean of 256 gradient samples converges to a Gaussian around the true gradient. Larger batches reduce gradient variance but cost more compute.
 
@@ -876,7 +876,7 @@ sigma_sq = np.var(data, ddof=1)   # divides by n-1
 | PyMC | Full Bayesian inference via MCMC, variational inference |
 | scikit-learn | Cross-validation, calibration, model comparison utilities |
 | Pingouin | User-friendly hypothesis tests, effect sizes, power analysis |
-| bootstrapped (Shopify) | Bootstrap confidence intervals for arbitrary metrics |
+| SciPy `stats.bootstrap` | Bootstrap confidence intervals (BCa, percentile) for arbitrary metrics |
 
 ---
 
@@ -901,19 +901,19 @@ The p-value is the probability of observing data at least as extreme as the actu
 The Binomial(n, p) models the count of successes in n fixed independent trials. The Poisson(lambda) models the count of events in a fixed interval when events occur independently at a constant rate. Poisson is the limit of Binomial as n -> inf and p -> 0 with np = lambda constant — it applies when events are rare and the total number of possible events is very large. Use Binomial for "number of users who click a button out of 1000 shown it"; use Poisson for "number of errors per hour in a service."
 
 **Q: What is overfitting from a probabilistic perspective?**
-Overfitting is when the model maximizes likelihood on training data by memorizing noise rather than signal. A model with more parameters than data points can achieve perfect likelihood (loss = 0) on training data by explaining each data point individually, but the parameters encode noise specific to those samples. Regularization addresses this by incorporating a prior that penalizes complex parameter configurations (large weights), effectively performing MAP instead of MLE. Early stopping is approximately equivalent to an exponential prior on the number of gradient descent steps.
+Overfitting is when the model maximizes likelihood on training data by memorizing noise rather than signal. A model with more parameters than data points can achieve perfect likelihood (loss = 0) on training data by explaining each data point individually, but the parameters encode noise specific to those samples. Regularization addresses this by incorporating a prior that penalizes complex parameter configurations (large weights), effectively performing MAP instead of MLE. Early stopping is approximately equivalent to L2 regularization — on a quadratic objective, stopping after t steps of gradient descent with learning rate eta gives the same solution as a ridge penalty of roughly 1/(eta*t), so it too is MAP with a Gaussian prior.
 
 **Q: What is covariance and how does it differ from correlation?**
 Covariance Cov(X,Y) = E[(X-mu_X)(Y-mu_Y)] measures how two variables move together. If X and Y tend to both be above/below their means simultaneously, covariance is positive. Correlation rho = Cov(X,Y) / (std(X) * std(Y)) normalizes covariance to [-1, +1], making it scale-invariant. Correlation is a pure measure of linear relationship; covariance retains units (e.g., height in cm covariance with weight in kg has units cm*kg). Pearson correlation assumes linearity; Spearman rank correlation is robust to monotone nonlinear relationships.
 
 **Q: Why does a Gaussian prior on weights in a neural network not produce exact zeros?**
-The Gaussian prior N(0, sigma^2) has its density concentrated near zero but never exactly at zero; the gradient of the prior term -||w||^2/(2sigma^2) pushes weights toward zero proportionally to their magnitude, so large weights shrink faster but small weights are never zeroed out exactly. A Laplace prior (L1 regularization) has a sharp peak at zero with non-differentiable kink; the subgradient is constant for nonzero weights (not proportional to magnitude), which creates a "pull toward exactly zero" that can take small weights all the way to zero.
+A Gaussian prior shrinks every weight in proportion to its own magnitude, so the pull toward zero vanishes as the weight does and never reaches it. Concretely, the gradient of the prior term -||w||^2/(2 sigma^2) is proportional to w: large weights shrink fast, small weights shrink ever more slowly, and exactly zero is only approached in the limit. A Laplace prior (L1 regularization) has a sharp peak at zero with non-differentiable kink; the subgradient is constant for nonzero weights (not proportional to magnitude), which creates a "pull toward exactly zero" that can take small weights all the way to zero.
 
 **Q: What is the Beta distribution and why is it used as a prior for probabilities?**
 The Beta(alpha, beta) distribution is supported on [0,1], making it a natural prior for any probability parameter. Beta(1,1) is Uniform(0,1) — a non-informative prior. Beta(10,10) encodes a belief that the probability is near 0.5 with moderate confidence. It is the conjugate prior for the Bernoulli/Binomial likelihood: if prior is Beta(alpha, beta) and you observe h heads and t tails, the posterior is Beta(alpha+h, beta+t), allowing cheap analytic updates without MCMC.
 
 **Q: How do you design an A/B test to detect a 5% relative improvement in conversion rate?**
-First determine the baseline conversion rate (say p=0.10) and the minimum detectable effect (MDE = 5% relative = 0.005 absolute). Choose alpha=0.05 and power=0.80. Compute the required sample size: n = 2 * (z_alpha/2 + z_beta)^2 * p*(1-p) / delta^2 where delta=0.005; this gives approximately 28,000 per group. Run the test without peeking until the target n is reached. Report both p-value and 95% CI on the absolute difference; if CI lower bound > 0, the result is practically significant.
+First determine the baseline conversion rate (say p=0.10) and the minimum detectable effect (MDE = 5% relative = 0.005 absolute). Choose alpha=0.05 and power=0.80. Compute the required sample size: n = 2 * (z_alpha/2 + z_beta)^2 * p*(1-p) / delta^2 where delta=0.005; with z_alpha/2=1.96 and z_beta=0.842 this gives approximately 57,000 per group. Run the test without peeking until the target n is reached. Report both p-value and 95% CI on the absolute difference; a CI lower bound above 0 makes it statistically significant, and a CI lower bound above the MDE makes it practically significant too.
 
 **Q: What is the difference between MLE and MAP, and when do they coincide?**
 MLE maximizes P(data|theta) with no prior, while MAP maximizes P(theta|data) by adding a log-prior term, and they coincide when the prior is uniform. MAP = argmax [log P(data|theta) + log P(theta)], so a flat prior makes the prior term constant and MAP reduces to MLE. MAP also converges to MLE as data grows, because the likelihood scales with n while the fixed prior is eventually swamped. Practically, prefer MAP (regularization) with little data and a meaningful prior; MLE is fine once data dwarfs the number of parameters.
@@ -1048,7 +1048,7 @@ def run_frequentist_test(
     treatment_n: int,
     alpha: float = 0.05,
 ) -> dict[str, float]:
-    """Two-proportion z-test with continuity correction."""
+    """Pooled two-proportion z-test (no continuity correction)."""
     stat, p_value = proportions_ztest(
         count=[treatment_conversions, control_conversions],
         nobs=[treatment_n, control_n],
@@ -1125,8 +1125,8 @@ def compute_msprt_statistic(
     # Pooled variance under null
     sigma2 = theta_null * (1 - theta_null) * (1 / n_c + 1 / n_t)
 
-    # mSPRT log-likelihood ratio with Gaussian mixture prior
-    # lambda = (1 + prior_variance / sigma2)^{-0.5} * exp(delta_hat^2 / (2 * (sigma2 + prior_variance)))
+    # mSPRT log-likelihood ratio with Gaussian mixture prior (tau2 = prior_variance)
+    # lambda = (1 + tau2/sigma2)^-0.5 * exp(delta_hat^2 * tau2 / (2*sigma2*(sigma2 + tau2)))
     var_ratio = prior_variance / (sigma2 + prior_variance)
     log_lambda = (
         -0.5 * math.log(1 + prior_variance / sigma2)
@@ -1166,7 +1166,7 @@ for day in range(1, 30):
     results = run_frequentist_test(ctrl_conv[day], ctrl_n[day], trt_conv[day], trt_n[day])
     if results["p_value"] < 0.05:
         print(f"Day {day}: Significant! p={results['p_value']:.4f}")
-        stop_experiment()   # false positive rate inflates to ~26% for 14 peeks
+        stop_experiment()   # false positive rate inflates to ~22% for 14 peeks
         break
 
 # FIX: use mSPRT which provides always-valid inference at any stopping time
@@ -1188,10 +1188,11 @@ significant = [r["p_value"] < 0.05 for r in results]   # 35% FDR observed
 # FIX: apply Benjamini-Hochberg FDR correction across all concurrent tests
 p_values = [r["p_value"] for r in results]
 bh_significant = apply_benjamini_hochberg(p_values, fdr_threshold=0.05)
-# BH controls expected FDR at 5%; 60 tests with 5% true null rate -> 0.15 expected FDPs
+# BH bounds the EXPECTED SHARE of false positives among the rejections at 5% --
+# not the count: declare 20 winners and at most ~1 of them is expected to be spurious
 ```
 
-**Pitfall 3 - Using user-level assignment but session-level analysis (SUTVA violation):**
+**Pitfall 3 - Using user-level assignment but session-level analysis (analysis-unit mismatch):**
 ```python
 # BROKEN: randomise at user level but compute conversion rate from sessions
 # Users have multiple sessions; sessions within a user are not independent
@@ -1213,7 +1214,7 @@ stat, p_value = stats.ttest_ind(user_control, user_treatment)
 |---|---|---|
 | False positive rate (empirical) | 35% | 4.8% |
 | Avg experiment duration | 8 days (stopped early) | 21 days (planned) |
-| True positives confirmed (6mo) | 3 of 8 "wins" | 9 of 10 "wins" |
+| True positives confirmed (6mo) | 5 of 8 "wins" | 9 of 10 "wins" |
 | Experiments reaching planned n | 22% | 91% |
 | Simultaneous tests corrected | No | Yes (BH, FDR=5%) |
 | Onboarding flow lift (final result) | N/A | +3.1pp retention (validated) |
@@ -1222,14 +1223,14 @@ stat, p_value = stats.ttest_ind(user_control, user_treatment)
 
 **Interview discussion points:**
 
-**What is the precise statistical error introduced by peeking and why does it inflate Type I error?** Peeking exploits the fact that if you check a standard z-test p-value at multiple points during data collection, the probability of seeing p < 0.05 at least once is much higher than 5%. Formally, if you peek 14 times at equally spaced intervals during a fixed-horizon test, the actual Type I error rate rises to approximately 26% (Armitage 1969). This occurs because the p-value is not uniformly distributed under repeated observation; the test statistic is a random walk, and the probability that it ever crosses a fixed threshold is higher than the probability it exceeds the threshold at a single predetermined time.
+**What is the precise statistical error introduced by peeking and why does it inflate Type I error?** Peeking exploits the fact that if you check a standard z-test p-value at multiple points during data collection, the probability of seeing p < 0.05 at least once is much higher than 5%. Formally, repeating a two-sided alpha=0.05 test at 14 equally spaced interim looks during a fixed-horizon experiment lifts the true Type I error to roughly 22%, and past 30% if you look 50 times — the effect first quantified by Armitage, McPherson and Rowe (1969). This occurs because the p-value is not uniformly distributed under repeated observation; the test statistic is a random walk, and the probability that it ever crosses a fixed threshold is higher than the probability it exceeds the threshold at a single predetermined time.
 
 **How does the Benjamini-Hochberg procedure differ from Bonferroni correction and why is it preferred for A/B testing platforms?** Bonferroni controls the familywise error rate (FWER): the probability of making even one Type I error among all tests. For 60 simultaneous tests at FWER 5%, each test uses alpha = 0.05/60 = 0.00083, requiring 4x larger samples for the same power. BH controls the false discovery rate (FDR): the expected proportion of false positives among all rejected hypotheses. BH uses each test's original p-value ranked against adaptive thresholds, maintaining much higher power. For an A/B platform where some false positives are acceptable (they'll be caught by downstream business review), FDR control at 5% is more practical than FWER control.
 
-**What is the SUTVA violation when assignment unit differs from analysis unit?** SUTVA (Stable Unit Treatment Value Assumption) requires each unit's outcome to depend only on its own treatment. When users are assigned to variants but analysis uses sessions, sessions from the same user share the same treatment, making them correlated rather than independent. The standard error of the treatment effect estimator is underestimated (inflates t-statistic), because the effective sample size is n_users not n_sessions. The fix is always to aggregate outcomes to the randomisation unit (user) before computing the test statistic.
+**What goes wrong when the assignment unit differs from the analysis unit?** The test's independence assumption breaks, not SUTVA itself — SUTVA (Stable Unit Treatment Value Assumption) is about one unit's outcome not depending on *other* units' treatment, which is a different failure (network effects, shared inventory). When users are assigned to variants but analysis uses sessions, sessions from the same user share the same treatment and are correlated rather than independent, so the standard error of the treatment effect is underestimated and the t-statistic inflated: the effective sample size is n_users, not n_sessions. The fix is to aggregate outcomes to the randomisation unit (user) before computing the test statistic, or to use a cluster-robust / delta-method variance that accounts for the within-user correlation.
 
 **When should you use a one-sided versus two-sided hypothesis test for product experiments?** Two-sided tests are appropriate when the new feature could plausibly harm or help (e.g., UI redesign might increase or decrease conversion). One-sided tests are appropriate only when a harm direction is genuinely impossible or would lead to immediate rollback regardless of significance (e.g., testing a performance optimisation where slower performance is obviously rolled back without a test). Using one-sided tests to gain statistical power while claiming two-sided inference is a common form of p-hacking that inflates Type I error: the effective alpha is 0.025 for one direction, but experimenters cherry-pick the direction post-hoc.
 
-**What minimum detectable effect (MDE) should be chosen and how does it affect duration?** MDE should reflect the smallest effect that would change a business decision, not the smallest effect the team hopes to detect. For the onboarding experiment with 30-day retention at 42%, a 1pp absolute lift (MDE=0.01) requires n=57,400 per variant (72 days at current traffic), while 2.5pp MDE requires n=9,100 (11 days). Choosing MDE=1% when the business would only act on a 2.5% lift wastes 6x the experiment duration, blocking experiment slots needed for other tests. The correct MDE is determined by the product roadmap cost of implementing the feature: if implementation costs $200K, a 2pp lift generating $500K/year ROI sets the practical minimum.
+**What minimum detectable effect (MDE) should be chosen and how does it affect duration?** MDE should reflect the smallest effect that would change a business decision, not the smallest effect the team hopes to detect. For the onboarding experiment with 30-day retention at 42%, a 1pp absolute lift (MDE=0.01) requires n=38,400 per variant, while 2.5pp MDE requires n=6,200 — 6.2x fewer users. At the 20,000 eligible users per variant per day assumed above that is roughly two days of enrolment versus a third of a day, on top of the 30-day retention window every cohort must still sit through. Choosing MDE=1% when the business would only act on a 2.5% lift wastes 6x the enrolment, blocking experiment slots needed for other tests. The correct MDE is determined by the product roadmap cost of implementing the feature: if implementation costs $200K, a 2pp lift generating $500K/year ROI sets the practical minimum.
 
 **What is the mSPRT's relationship to Bayes factors and why does it enable valid early stopping?** The mSPRT statistic is the ratio of the marginal likelihood under a mixture alternative hypothesis to the likelihood under the null hypothesis. By Ville's inequality, for any stopping time T, P(lambda_T >= 1/alpha | H0) <= alpha - meaning that regardless of when you look at the data, the probability of falsely rejecting H0 is bounded by alpha. This is fundamentally different from the classical p-value, which is only valid at a pre-specified fixed sample size. The mixture prior over effect sizes (normal with variance tau^2) determines the test's power profile: larger tau^2 gives more power for large effects but less for small ones.

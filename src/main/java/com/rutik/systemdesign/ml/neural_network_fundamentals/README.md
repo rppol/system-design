@@ -508,7 +508,7 @@ Common bug: calling `optimizer.zero_grad()` AFTER `loss.backward()` discards com
 
 **Feature extraction backbone**: the final hidden layer of a trained MLP produces dense embeddings used for similarity search (cosine distance, FAISS retrieval).
 
-**BatchNorm in production**: at Meta, BatchNorm in models serving recommendations caused silent bugs when batch sizes dropped to 1 during low-traffic periods. Running stats diverged from true statistics. Fix: switch to LayerNorm or GroupNorm for variable batch-size scenarios.
+**BatchNorm in production** (illustrative composite): recommendation models left in training mode at serving time produce unstable scores when batch sizes drop to 1 during low-traffic periods, because BatchNorm then normalises each request against its own degenerate one-sample batch statistics instead of the stored running stats. Fix: call `model.eval()` at inference, and prefer LayerNorm or GroupNorm for variable batch-size scenarios.
 
 ---
 
@@ -580,10 +580,10 @@ def predict(model, x):
 A team initialized all linear layer weights to zero "for reproducibility." The model's loss did not decrease over 50 epochs. Because all neurons in each layer produce the same output, all neurons receive identical gradients. All weights update identically. The network never breaks symmetry and remains effectively a single neuron. Fix: use `kaiming_normal_` or `xavier_uniform_`.
 
 **War story 3 — Gradient accumulation without zero_grad:**
-A training script forgot `optimizer.zero_grad()` inside the loop. Gradients accumulated across all batches. After 100 batches the gradient norm was 10,000x larger than expected. The optimizer step moved parameters catastrophically far. Loss spiked to NaN. Fix: always zero gradients at the top of every iteration.
+A training script forgot `optimizer.zero_grad()` inside the loop. Gradients accumulated across all batches, so by batch k the gradient was the sum of k per-batch gradients. After 100 batches the gradient norm was roughly 100x larger than expected. The optimizer step moved parameters catastrophically far. Loss spiked to NaN. Fix: always zero gradients at the top of every iteration.
 
 **War story 4 — Dead ReLU neurons at scale:**
-A deep network (32 layers, ReLU activations) was initialized with a high learning rate (0.1). After 100 steps, ~40% of neurons had negative biases and were permanently outputting zero. The effective capacity of the network halved. Fix: use a lower initial learning rate (0.001), use He initialization, or switch to Leaky ReLU / GELU.
+A deep network (32 layers, ReLU activations) was initialized with a high learning rate (0.1). After 100 steps, ~40% of neurons had pre-activations that were negative for every input and were permanently outputting zero. The effective capacity of the network fell by roughly 40%. Fix: use a lower initial learning rate (0.001), use He initialization, or switch to Leaky ReLU / GELU.
 
 ---
 
@@ -600,7 +600,7 @@ A deep network (32 layers, ReLU activations) was initialized with a high learnin
 
 Key PyTorch APIs:
 - `nn.Module`, `nn.Linear`, `nn.BatchNorm1d`, `nn.Dropout`, `nn.GELU`
-- `optim.Adam(lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)`
+- `optim.AdamW(lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)`
 - `nn.CrossEntropyLoss()`, `nn.MSELoss()`
 - `torch.no_grad()` context manager for inference
 - `model.train()` / `model.eval()` mode switching
@@ -619,7 +619,7 @@ A ReLU neuron becomes dead when its pre-activation is always negative, causing i
 Zero initialization causes the symmetry problem: all neurons in a layer compute identical weighted sums and identical gradients. They update identically and remain identical forever, so the entire layer effectively acts as a single neuron. Random initialization (Xavier, He) breaks this symmetry so neurons can specialize. Bias terms can be initialized to zero because they do not participate in the symmetry argument.
 
 **Q: What does batch normalization do and why does it help?**
-BatchNorm normalizes layer inputs across the batch dimension to have zero mean and unit variance, then applies learnable scale (gamma) and shift (beta). Benefits: reduces internal covariate shift (distribution of layer inputs changes as earlier layers update, destabilizing training), allows higher learning rates, acts as slight regularizer. The momentum parameter (0.1 by default) controls the exponential moving average of running statistics used at inference.
+BatchNorm normalizes layer inputs across the batch dimension to have zero mean and unit variance, then applies learnable scale (gamma) and shift (beta). Benefits: it allows higher learning rates, speeds convergence, and acts as a slight regularizer through mini-batch noise. The mechanism is a smoother, better-conditioned loss landscape — Santurkar et al. (2018) measured layer-input distributions directly and found the original "internal covariate shift" explanation does not hold. The momentum parameter (0.1 by default) controls the exponential moving average of running statistics used at inference.
 
 **Q: What is the difference between model.train() and model.eval()?**
 `model.train()` activates training-mode behavior for layers like BatchNorm (use batch statistics, update running stats) and Dropout (randomly zero neurons). `model.eval()` switches BatchNorm to use stored running statistics (deterministic, batch-independent) and disables Dropout (identity). Forgetting to call `model.eval()` before inference is one of the most common production bugs in deep learning.
@@ -672,7 +672,7 @@ Shuffling breaks any ordering in the dataset so each mini-batch is a representat
 - Monitor gradient norms (log `torch.nn.utils.clip_grad_norm_` return value) to detect exploding gradients before they cause NaN losses.
 - Set `DataLoader(num_workers=4, pin_memory=True)` for GPU training — this overlaps data loading with GPU computation and eliminates the CPU-GPU copy bottleneck.
 - Typical batch sizes: 32–256 for images, 16–64 for NLP. Larger batches need learning rate scaling (linear rule: multiply LR by batch_scale factor).
-- Weight decay (L2 regularization) belongs in the optimizer, not as an explicit loss term: `optim.Adam(model.parameters(), weight_decay=1e-4)`.
+- Weight decay belongs in the optimizer, not as an explicit loss term, and it should be the decoupled form: `optim.AdamW(model.parameters(), weight_decay=0.01)`. `Adam(weight_decay=...)` adds an L2 term to the gradient, which the adaptive denominator then rescales per parameter.
 
 ---
 
@@ -943,20 +943,21 @@ criterion = nn.BCEWithLogitsLoss()   # no pos_weight
 # Recall = 0.0, FPR = 0.0, model is useless
 
 # FIX option A: BCEWithLogitsLoss pos_weight= (n_negative / n_positive)
-pos_weight = torch.tensor([19_998.0])   # 0.05% fraud rate -> 1999.8x ratio; cap at 100-200
+pos_weight = torch.tensor([1999.0])   # 0.05% fraud rate -> 1999x ratio; cap at 100-200
 criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([150.0]))
 
 # FIX option B: WeightedRandomSampler to oversample fraud in each batch
 sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(dataset), replacement=True)
 loader = DataLoader(dataset, batch_size=4096, sampler=sampler)
-# Each mini-batch has ~50% fraud vs 0.05% in unsampled data; recall improves to 0.94
+# Each mini-batch has ~50% fraud vs 0.05% in unsampled data; recall improves to 0.93
 ```
 
 **Pitfall 3 - Using sigmoid in the model then BCELoss causes numerical instability for extreme logits:**
 ```python
-# BROKEN: manual sigmoid before BCELoss; BCE computes log(p) which is -inf for p=0
-model_output = torch.sigmoid(logits)   # p near 0 or 1 for confident predictions
-loss = nn.BCELoss()(model_output, labels)   # log(0) = -inf -> NaN loss
+# BROKEN: manual sigmoid before BCELoss; BCE computes log(p), unbounded as p -> 0
+model_output = torch.sigmoid(logits)   # saturates to exactly 0.0 or 1.0 in float32
+loss = nn.BCELoss()(model_output, labels)   # log term clamped at -100; backward divides
+                                            # by p*(1-p), floored at 1e-12 -> ~1e12 gradients
 
 # FIX: use BCEWithLogitsLoss which applies numerically stable log-sum-exp trick
 # Internally: loss = max(logit, 0) - logit*label + log(1 + exp(-|logit|))
@@ -981,11 +982,11 @@ loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)   # never NaN
 
 **Interview discussion points:**
 
-**Why does batch normalisation improve MLP training stability and convergence speed?** Without batch normalisation, the input distribution to each layer shifts as parameters in preceding layers change during training (internal covariate shift). The activations entering layer 3 depend on the weights of layers 1 and 2; as those weights update, the distribution seen by layer 3 changes unpredictably, requiring smaller learning rates to avoid instability. BatchNorm normalises each layer's input to zero mean and unit variance per mini-batch, then applies learnable scale (gamma) and shift (beta) parameters. This allows each layer to learn independently of the distribution shifts caused by preceding layers, enabling 3-5x larger learning rates and halving convergence time from 80 to 45 epochs.
+**Why does batch normalisation improve MLP training stability and convergence speed?** BatchNorm normalises each layer's input to zero mean and unit variance per mini-batch, then applies learnable scale (gamma) and shift (beta) parameters. The original paper attributed the benefit to suppressing internal covariate shift, but Santurkar et al. (2018) showed that distributional stability is not the cause: injecting deliberate distribution shift after BatchNorm leaves the speedup intact. The mechanism that does hold up is conditioning — normalisation makes the loss and its gradients markedly smoother and more Lipschitz, so larger steps stay in a region where the local gradient still predicts the loss. In this fraud model that supported 3-5x larger learning rates and cut convergence from 80 epochs to 45.
 
 **What is the dead ReLU problem and how does batch normalisation before ReLU mitigate it?** A ReLU neuron becomes "dead" when its pre-activation input is always negative, causing the gradient to be permanently zero and the neuron to never update. This happens when weight initialisation or large learning rate updates push biases to large negative values. Batch normalisation before ReLU ensures the pre-activation has zero mean at initialisation, meaning approximately 50% of neurons fire in the first epoch. Without BN, aggressive learning rates cause ~15% of neurons to die in the first 5 epochs; with BN, dead neurons are essentially eliminated because the centering mechanism prevents systematic negative pre-activations.
 
-**Why is BCEWithLogitsLoss numerically superior to sigmoid followed by BCELoss?** For a logit x = 20 (very confident positive prediction), torch.sigmoid(20) = 1.0 due to float32 precision limits, then log(1.0) = 0 exactly. But the true gradient at x=20 is approximately exp(-20) = 2e-9, not zero. BCEWithLogitsLoss uses the numerically stable log-sum-exp reformulation: log(1 + exp(-x)) for positive x, which evaluates correctly to ~2e-9 at x=20 using extended precision arithmetic. The practical consequence is that BCEWithLogitsLoss provides correct gradients for confident correct predictions, while BCELoss produces exactly-zero gradients for any logit where sigmoid saturates to exactly 0 or 1.
+**Why is BCEWithLogitsLoss numerically superior to sigmoid followed by BCELoss?** For a logit x = 20, torch.sigmoid(20) rounds to exactly 1.0 in float32 (the true value is 1 - 2.1e-9, well inside float32's 1.2e-7 spacing near 1.0), so the probability handed to BCELoss has already lost all information about how confident the model was. If the label is 0, BCELoss must evaluate log(1 - p) = log(0): PyTorch clamps that log output at -100 so the loss stays finite, but the backward pass computes (p - y) / max(p(1-p), 1e-12), producing a gradient of magnitude ~1e12 that blows up the update. BCEWithLogitsLoss never forms p at all — it evaluates max(x, 0) - x*y + log(1 + exp(-|x|)), which returns exactly 20.0 here, and its gradient is simply sigmoid(x) - y, bounded in [-1, 1] for every logit. The practical consequence is a loss that keeps distinguishing confident-but-wrong predictions and a gradient that can never explode from saturation.
 
 **How does WeightedRandomSampler change the effective training distribution and what is the implication for threshold calibration?** WeightedRandomSampler makes each mini-batch contain approximately 50% fraud examples (from the 50x oversample ratio), while the true fraud rate is 0.05%. The model's output probabilities are calibrated to the training distribution, meaning p(fraud=1|x) from the model reflects the 50% fraud rate of the training batches, not the true 0.05% rate. The decision threshold must be adjusted post-training: the model outputs 0.5 for a transaction with equal probability of being the 0.05% fraud or 99.95% legitimate; calibrate the threshold using Platt scaling or isotonic regression on a calibration holdout set with the true class distribution.
 

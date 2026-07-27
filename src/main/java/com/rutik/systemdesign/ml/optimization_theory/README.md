@@ -119,7 +119,7 @@ The first jump is a bargain and the last is a disaster: full-batch GD buys the c
 
 **Momentum-based**: Add a velocity term to dampen oscillations in high-curvature directions and accelerate in low-curvature directions. Nesterov momentum (NAG) uses lookahead gradient.
 
-**Adaptive learning rate**: RMSProp divides lr by running average of squared gradients. Adam combines momentum + RMSProp. AdaGrad sums all past squared gradients (lr monotonically decreases — good for NLP word embeddings, bad for deep nets).
+**Adaptive learning rate**: RMSProp divides lr by an exponential moving average of squared gradients (decay 0.9 in Hinton's lecture; PyTorch's `alpha` defaults to 0.99). Adam combines momentum + RMSProp. AdaGrad sums all past squared gradients (lr monotonically decreases — good for NLP word embeddings, bad for deep nets).
 
 **Second-order**: Newton's method uses Hessian. L-BFGS approximates inverse Hessian with limited memory. Good for small models and smooth convex objectives; infeasible for large neural networks.
 
@@ -187,8 +187,8 @@ SGD + Momentum (beta=0.9):
   theta = theta + v
   (v accumulates gradient history; smooths updates)
 
-RMSProp (beta2=0.999):
-  s = beta2 * s + (1 - beta2) * g^2
+RMSProp (rho=0.9, Hinton's original value):
+  s = rho * s + (1 - rho) * g^2
   theta = theta - lr * g / (sqrt(s) + eps)
   (s = running mean of squared gradients; scales lr per parameter)
 
@@ -341,7 +341,7 @@ Uncorrected, that ratio is `(1 - beta1^t) / sqrt(1 - beta2^t)` — `3.16x` at `t
   0            0              10000.000000           division by zero -> NaN
 ```
 
-A parameter whose gradient has been ~0 for many steps — a frozen embedding row, a dead ReLU, a masked token — drives `v_hat` toward 0, and the update explodes or becomes NaN the instant a gradient finally arrives. `eps` caps the worst case at `lr / eps`. Note it also means `eps` is not purely cosmetic: raise it to `1e-4` and you meaningfully shrink the steps of every small-gradient parameter, which is why some transformer recipes tune it deliberately rather than leaving the default.
+A parameter whose gradient has been ~0 for many steps — a frozen embedding row, a dead ReLU, a masked token — drives `v_hat` toward 0, and the update explodes or becomes NaN the instant a gradient finally arrives. `eps` caps the worst case at `lr * m_hat / eps` — `1e-3 * 0.1 / 1e-8 = 10,000`, the bottom row of the table. Note it also means `eps` is not purely cosmetic: raise it to `1e-4` and you meaningfully shrink the steps of every small-gradient parameter, which is why some transformer recipes tune it deliberately rather than leaving the default.
 
 ### Optimizer Convergence Trajectories
 
@@ -379,8 +379,9 @@ Step decay (the staircase) holds the rate flat then cuts it by gamma at fixed
 intervals; cosine annealing decays smoothly from lr_max=3e-4 to lr_min=3e-5;
 warmup+cosine (the curve that starts at 0) ramps linearly over the first ~10% of
 steps before the same cosine decay. The warmup segment is what prevents Adam
-diverging at step 0, when the second moment v is still near 0 and the
-bias-corrected step size would otherwise explode (Section 10, Pitfall 2).
+diverging early, when the second moment v is estimated from a handful of
+gradients and the per-parameter step size is wildly variable (Section 10,
+Pitfall 2).
 
 ### Convex vs Non-Convex Loss Landscape
 
@@ -623,6 +624,7 @@ def linear_warmup_cosine_decay(
 
 def lr_range_test(
     loss_fn,
+    grad_fn,
     params: np.ndarray,
     data: np.ndarray,
     labels: np.ndarray,
@@ -633,6 +635,7 @@ def lr_range_test(
     """
     Smith's LR range test: increase LR exponentially and record loss.
     Optimal LR is slightly before the point where loss starts increasing.
+    grad_fn(params, data, labels) returns the gradient vector (same shape as params).
     Returns (lr_values, loss_values) for plotting.
     """
     lr_multiplier = (lr_end / lr_start) ** (1 / n_steps)
@@ -641,11 +644,9 @@ def lr_range_test(
 
     params_copy = params.copy()
     for step in range(n_steps):
-        # Single gradient step
         loss = loss_fn(params_copy, data, labels)
-        grads = np.gradient(np.array([loss_fn(params_copy + 1e-5 * np.ones_like(params_copy),
-                                               data, labels)]))[0]
-        params_copy -= lr * grads
+        grads = grad_fn(params_copy, data, labels)
+        params_copy = params_copy - lr * grads
 
         lrs.append(lr)
         losses.append(float(loss))
@@ -697,7 +698,7 @@ The two answer different questions. The gradient norm asks "am I at a critical p
 
 ## 7. Real-World Examples
 
-**Transformer training with warmup**: GPT-3 was trained with AdamW (beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.1) and a cosine learning rate schedule with 375 million warmup tokens out of 300 billion total. Without warmup, Adam diverges at initialization because the second moment v starts at 0, making bias-corrected v_hat very small, which makes the adaptive lr extremely large.
+**Transformer training with warmup**: GPT-3 was trained with AdamW (beta1=0.9, beta2=0.95, eps=1e-8, weight_decay=0.1) and a cosine learning rate schedule with 375 million warmup tokens out of 300 billion total. Without warmup, Adam destabilises at initialization because the second moment v is estimated from too few gradients, so the per-parameter adaptive step size swings wildly between parameters.
 
 **Gradient clipping in RNNs**: LSTM training for language modeling clips gradient norm to 1.0. Without clipping, a single bad batch can cause gradient magnitudes of 10^6, making weights jump to NaN. The clip is applied to the global gradient norm (all parameters combined), not per-parameter, so relative directions are preserved: `g = g * (max_norm / max(norm, max_norm))`.
 
@@ -777,7 +778,7 @@ The model in the paragraph above has `10^8` parameters. Requiring a hundred mill
 
 **Do NOT use Adagrad for deep network training**: the accumulated squared gradients in the denominator grow monotonically, causing the effective learning rate to shrink to near-zero during training. This is acceptable for sparse problems (word embeddings, where infrequent words get larger effective updates) but fatal for dense networks.
 
-**Always use warmup with Adam** when training transformers from scratch. The first few hundred steps with small beta2 lead to highly variable effective learning rates; warmup prevents the early chaos from setting weights in bad regions.
+**Always use warmup with Adam** when training transformers from scratch. The first few hundred steps estimate the second moment from very few gradients, so the effective per-parameter learning rate is highly variable; warmup prevents the early chaos from setting weights in bad regions.
 
 **Do NOT use a constant learning rate for long training runs**: learning rate decay consistently improves final performance because large lr is good for exploration early, while small lr is good for fine-grained convergence late.
 
@@ -792,12 +793,12 @@ The model in the paragraph above has `10^8` parameters. Requiring a hundred mill
 grad = compute_gradient(loss) + weight_decay * params
 params = adam.step(params, grad)  # weight decay is scaled by 1/sqrt(v)
 
-# Fixed: AdamW decouples weight decay
-adam_update = adam.step(params, compute_gradient(loss))
-params = params * (1 - lr * weight_decay) - adam_update  # weight decay unscaled
+# Fixed: AdamW decouples weight decay — shrink params first, then apply the
+# unmodified Adam step (adamw.step() returns the already-updated parameters)
+params = adamw.step(params, compute_gradient(loss))
 ```
 
-**Pitfall 2 — Learning rate too high without warmup causes NaN**: A team trained a GPT-style model with lr=3e-4 and no warmup. At step 1, the second moment v is 0; after bias correction, v_hat = g^2 / (1 - beta2^1) = g^2 / 0.001, which is very small for small g. The effective step size = lr * m_hat / sqrt(v_hat) is enormous. Large initial updates sent weights to NaN within 10 steps. Fix: always warm up lr linearly for 1-2% of total training steps.
+**Pitfall 2 — Learning rate too high without warmup causes NaN**: A team trained a GPT-style model with lr=3e-4 and no warmup. Bias correction makes the *typical* first step exactly lr in magnitude (at t=1, m_hat = g and v_hat = g^2, so lr * m_hat / sqrt(v_hat) = lr), so the danger is not the average step size but its variance: v_hat is estimated from one gradient, and any parameter whose first gradients happen to be atypically small gets an effective step far larger than lr's worth of movement (Liu et al., RAdam, 2020, show warmup acts as variance reduction on exactly this quantity). Those outsized updates sent weights to NaN within 10 steps. Fix: always warm up lr linearly for 1-2% of total training steps.
 
 **Pitfall 3 — Gradient accumulation with wrong loss scaling**: When using gradient accumulation (accumulating gradients over K micro-batches before updating), the loss must be divided by K before calling backward(), otherwise the gradient is K times too large. A production training run used accumulation steps=8 without dividing the loss, resulting in an effective learning rate 8x higher than intended. The model appeared to converge quickly but had poor generalization — the sharp minimum was due to the oversized steps.
 
@@ -830,7 +831,7 @@ optimizer.step()
 | transformers (HuggingFace) | get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup |
 | Apex (NVIDIA) | FusedAdam: faster Adam for GPU; mixed precision training |
 | Sophia | Second-order optimizer for LLMs; uses diagonal Hessian estimate |
-| Adan | Novel optimizer from 2023; claims faster convergence than Adam |
+| Adan | Adaptive Nesterov momentum optimizer (Xie et al., 2022); reports faster convergence than Adam |
 
 ---
 
@@ -843,10 +844,10 @@ Batch GD computes the exact gradient using all N training samples before each up
 Momentum addresses two issues: oscillation and slow convergence in ravine-shaped loss surfaces. Without momentum, gradient descent oscillates across a narrow valley because the gradient perpendicular to the valley bottom is large, leading to zig-zag steps. Momentum accumulates velocity — updates in consistent directions grow while oscillating directions cancel out. It also accelerates convergence when the gradient consistently points in the same direction. The effective learning rate in a consistent direction is lr / (1 - beta) = 10x for beta=0.9.
 
 **Q: Explain Adam's two moment estimates and why bias correction is needed.**
-Adam maintains m (first moment — exponential moving average of gradients, like momentum) and v (second moment — exponential moving average of squared gradients, like RMSProp). At step t, both are initialized to 0, so early values are biased toward 0. Bias correction computes m_hat = m / (1 - beta1^t) and v_hat = v / (1 - beta2^t). At t=1 with beta1=0.9: m_hat = m / 0.1, which counteracts the 90% discounting of the first gradient. Without bias correction, the effective learning rate at early steps would be nearly 0 for v (since 1 - beta2^1 = 0.001 makes v_hat very small), then explode as t grows.
+Adam maintains m (first moment — exponential moving average of gradients, like momentum) and v (second moment — exponential moving average of squared gradients, like RMSProp). At step t, both are initialized to 0, so early values are biased toward 0. Bias correction computes m_hat = m / (1 - beta1^t) and v_hat = v / (1 - beta2^t). At t=1 with beta1=0.9: m_hat = m / 0.1, which counteracts the 90% discounting of the first gradient. The two biases do not cancel: uncorrected m is 10x too small while uncorrected sqrt(v) is about 31.6x too small, so an uncorrected first step comes out 3.16x LARGER than lr. That inflation factor, (1 - beta1^t) / sqrt(1 - beta2^t), is still 3.24x at t=100 and only settles near 1.0 after a few thousand steps, so it distorts the whole early phase rather than one step.
 
 **Q: Why does Adam sometimes generalize worse than SGD for vision tasks?**
-Adam's adaptive learning rates find sharp minima (narrow valleys in the loss landscape) because it can take large steps along low-curvature directions and small steps along high-curvature directions, converging to tighter local minima. SGD with momentum, lacking this adaptivity, tends to find flatter minima with wider basins that generalize better — the flat minima hypothesis (Hochreiter & Schmidhuber, 1997) suggests parameters in flat regions are more robust to small perturbations. For NLP tasks where the loss landscape geometry differs, this trade-off reverses and Adam is superior.
+Adam's adaptive learning rates tend to find sharp minima — narrow valleys in the loss landscape that generalize worse. It gets there by taking large steps along low-curvature directions and small steps along high-curvature ones, which converges into tighter basins. SGD with momentum, lacking this adaptivity, tends to find flatter minima with wider basins that generalize better — the flat minima hypothesis (Hochreiter & Schmidhuber, 1997) suggests parameters in flat regions are more robust to small perturbations. For NLP tasks where the loss landscape geometry differs, this trade-off reverses and Adam is superior.
 
 **Q: What is AdamW and why is it preferred over Adam with weight decay?**
 Standard Adam with L2 regularization adds lambda * theta to the gradient before the adaptive update. This means weight decay is divided by sqrt(v_hat), making its effective strength different for each parameter and time step — parameters with small squared gradients get less effective regularization. AdamW (decoupled weight decay) applies weight decay directly to the parameters: theta = theta * (1 - lr * lambda) - adam_update. This makes the effective regularization strength consistent and independent of the adaptive scaling. AdamW is the standard for all transformer training (GPT, BERT, LLaMA use AdamW).
@@ -861,10 +862,10 @@ A saddle point is a point where the gradient is zero but which is not a local mi
 A function is convex if the line segment between any two points on the function lies above the function: f(lambda*x + (1-lambda)*y) <= lambda*f(x) + (1-lambda)*f(y). For convex functions, every local minimum is a global minimum, and gradient descent is guaranteed to converge. Logistic regression loss is convex; neural network loss is not. Non-convex optimization offers no global convergence guarantee, but in practice overparameterized networks seem to have many equivalent global minima, and SGD noise helps avoid poor local minima.
 
 **Q: How does the learning rate schedule affect training, and what is warmup?**
-The learning rate controls how large each gradient step is. Early in training, large steps help explore the loss landscape quickly; late in training, small steps allow fine-grained convergence to a good minimum. Learning rate decay (step, exponential, cosine) implements this intuition. Warmup increases lr from near 0 to the target lr over the first 1-5% of training steps. This is critical for Adam because at initialization v is near 0, making the effective step size very large; warmup gives v time to accumulate before taking large steps, preventing early divergence.
+The learning rate controls how large each gradient step is. Early in training, large steps help explore the loss landscape quickly; late in training, small steps allow fine-grained convergence to a good minimum. Learning rate decay (step, exponential, cosine) implements this intuition. Warmup increases lr from near 0 to the target lr over the first 1-5% of training steps. This is critical for Adam because at initialization the second moment v rests on only a handful of gradients, so the per-parameter step size has very high variance; warmup keeps steps small until v is a reliable scale estimate, preventing early divergence.
 
 **Q: Why is second-order optimization not used for large neural networks?**
-Newton's method computes the parameter update as theta = theta - H^{-1} * g where H is the n x n Hessian. For a model with n = 10^9 parameters, the Hessian has 10^18 entries — storing it requires petabytes of memory. Even computing the Hessian-vector product (Hv) without explicitly forming H takes O(n) time but requires a second backward pass. L-BFGS approximates the inverse Hessian with m previous gradient differences (m=10-20), reducing memory to O(m*n) but still O(n^2) per step. Adam approximates the diagonal of the Hessian via the second moment v — a rough but practical substitute that captures per-parameter curvature.
+Newton's method computes the parameter update as theta = theta - H^{-1} * g where H is the n x n Hessian. For a model with n = 10^9 parameters, the Hessian has 10^18 entries — storing it requires petabytes of memory. Even computing the Hessian-vector product (Hv) without explicitly forming H takes O(n) time but requires a second backward pass. L-BFGS approximates the inverse Hessian with m previous gradient/step difference pairs (m=10-20), so its two-loop recursion costs only O(m*n) memory and O(m*n) time per step — cheap in principle, but it needs a line search over the full-batch loss, which is what rules it out for stochastic mini-batch training. Adam approximates the diagonal of the Hessian via the second moment v — a rough but practical substitute that captures per-parameter curvature.
 
 **Q: What is the effect of batch size on optimization and generalization?**
 Larger batch sizes produce lower-variance gradient estimates, allowing larger learning rates and faster wall-clock convergence. However, large batches tend to find sharper minima with worse generalization (the "generalization gap" for large batches, Keskar et al. 2017). Empirically, linear scaling rule: when batch size is multiplied by k, multiply lr by k (with warmup). Small batches (16-32) regularize implicitly through gradient noise and often find flatter minima, but are slower due to GPU underutilization. GPT-3 used batch size 3.2M tokens — large batch enabled by learning rate scaling.
@@ -879,10 +880,10 @@ Both accumulate a velocity vector, but Nesterov evaluates the gradient at the lo
 Cosine annealing decays the lr smoothly from lr_max to lr_min following a half-cosine curve, avoiding the abrupt discontinuities of step decay. Step decay holds the lr constant then divides it by gamma (often 10x) at fixed epochs, so the model oscillates in one region until each drop, and the drop schedule adds extra hyperparameters to tune. Cosine keeps a large useful lr early for exploration and eases into small steps near convergence with only two parameters (lr_max, lr_min). It is the de facto standard for transformer pretraining, usually paired with linear warmup.
 
 **Q: Why does Adagrad's learning rate decay to zero, and how do RMSProp and Adam fix it?**
-Adagrad accumulates the sum of all past squared gradients in its denominator, so the effective learning rate only ever shrinks and eventually decays to zero. RMSProp replaces the cumulative sum with an exponential moving average (beta2=0.999), so the denominator reflects recent gradients and stays bounded; Adam builds on RMSProp's EMA second moment and adds a momentum first moment plus bias correction. Adagrad's decaying behavior is actually desirable for sparse features like word embeddings, where rarely-updated parameters keep larger effective steps, but it is fatal for dense deep networks that stall before convergence.
+Adagrad accumulates the sum of all past squared gradients in its denominator, so the effective learning rate only ever shrinks and eventually decays to zero. RMSProp replaces the cumulative sum with an exponential moving average (decay 0.9 in Hinton's original lecture, 0.99 as PyTorch's `alpha` default), so the denominator reflects recent gradients and stays bounded; Adam builds on that EMA second moment with beta2=0.999 and adds a momentum first moment plus bias correction. Adagrad's decaying behavior is actually desirable for sparse features like word embeddings, where rarely-updated parameters keep larger effective steps, but it is fatal for dense deep networks that stall before convergence.
 
 **Q: What do Adam's beta1 and beta2 hyperparameters control, and when would you lower beta2?**
-beta1 controls the decay of the first-moment (momentum) EMA and beta2 controls the decay of the second-moment (squared-gradient) EMA. The default beta2=0.999 averages over roughly the last 1/(1-beta2)=1000 gradients — very smooth but slow to react to changing gradient statistics. Lowering beta2 to 0.95 or 0.98, as GPT-3 and Chinchilla did, makes the variance estimate more responsive and improves stability for large-batch LLM training where statistics shift quickly. Lowering beta1 makes updates react faster but noisier and is rarely changed from 0.9.
+beta1 controls the decay of the first-moment (momentum) EMA and beta2 controls the decay of the second-moment (squared-gradient) EMA. The default beta2=0.999 averages over roughly the last 1/(1-beta2)=1000 gradients — very smooth but slow to react to changing gradient statistics. Lowering beta2 to 0.95, as GPT-3 and the Llama models did, makes the variance estimate more responsive and improves stability for large-batch LLM training where statistics shift quickly. Lowering beta1 makes updates react faster but noisier and is rarely changed from 0.9.
 
 **Q: How does the learning-rate range test (LR finder) work?**
 Start at a tiny lr such as 1e-7 and increase it geometrically each mini-batch while recording the loss, then plot loss versus lr. The loss stays flat while lr is too small, drops steeply through the useful range, then diverges once lr is too large, so you pick a maximum lr slightly below the point of steepest descent (often about 10x below the minimum-loss lr). Introduced by Leslie Smith in 2017, it replaces a blind grid search over lr with a single short sweep of a few hundred steps. For one-cycle training, the chosen value becomes the peak lr.
@@ -909,7 +910,7 @@ Gradient accumulation sums gradients over K micro-batches before a single optimi
 
 ## 14. Case Study
 
-**Scenario:** A research lab fine-tunes a 7B-parameter LLaMA-3 variant on a 120B-token instruction dataset using 8 A100-80GB GPUs. The baseline run with Adam at lr=1e-4 diverges at step 2,400 due to gradient norm explosion, while conservative lr=1e-5 converges but reaches perplexity 3.41 after 72 hours, still above the target of 2.85. The goal: implement AdamW with gradient clipping, warmup + cosine LR schedule, and loss scaling for bf16 mixed precision, achieving perplexity <= 2.90 within 48 hours on the same 8-GPU setup.
+**Scenario:** A research lab fine-tunes an 8B-parameter Llama 3 variant on a 120B-token instruction dataset using 8 A100-80GB GPUs. The baseline run with Adam at lr=1e-4 diverges at step 2,400 due to gradient norm explosion, while conservative lr=1e-5 converges but reaches perplexity 3.41 after 72 hours, still above the target of 2.85. The goal: implement AdamW with gradient clipping, warmup + cosine LR schedule, and loss scaling for bf16 mixed precision, achieving perplexity <= 2.90 within 48 hours on the same 8-GPU setup.
 
 **Architecture:**
 ```
@@ -919,15 +920,15 @@ Data Pipeline
   Effective batch size: 4 * 8 (GPUs) * 8 (accum) = 256 sequences = 1M tokens/step
          |
          v
-Model: LLaMA-3 7B
-  bf16 parameters (14 GB), fp32 master weights (28 GB)
+Model: Llama 3 8B
+  bf16 parameters (16 GB), fp32 master weights (32 GB)
   Flash Attention 2 for O(n) memory attention
          |
          v
 Optimizer: AdamW
   lr: cosine from peak 3e-4 -> 3e-5 (10% warmup, 90% cosine decay)
   weight decay: 0.1 (applied to non-bias, non-norm params only)
-  beta1=0.9, beta2=0.95, eps=1e-8   (Chinchilla settings)
+  beta1=0.9, beta2=0.95, eps=1e-8   (GPT-3 / Llama settings)
   gradient clipping: max_norm=1.0 before optimizer step
          |
          v
@@ -995,7 +996,7 @@ def build_optimizer(
 ```
 
 ```python
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler, autocast
 from contextlib import contextmanager
 import torch.distributed as dist
 
@@ -1016,7 +1017,7 @@ class TrainingLoop:
         self.max_grad_norm = max_grad_norm
         self.use_bf16 = use_bf16
         # GradScaler only needed for fp16; bf16 does not require loss scaling
-        self.scaler = GradScaler() if not use_bf16 else None
+        self.scaler = GradScaler("cuda") if not use_bf16 else None
 
     def train_step(
         self,
@@ -1026,8 +1027,8 @@ class TrainingLoop:
     ) -> float:
         is_accumulation_step = (step + 1) % self.gradient_accumulation_steps != 0
 
-        ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16) if self.use_bf16 else \
-              torch.cuda.amp.autocast(dtype=torch.float16)
+        ctx = autocast("cuda", dtype=torch.bfloat16) if self.use_bf16 else \
+              autocast("cuda", dtype=torch.float16)
 
         with ctx:
             outputs = self.model(input_ids=input_ids, labels=labels)
@@ -1192,9 +1193,9 @@ optimizer = AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
 
 **What is the cosine learning rate schedule's advantage over step decay for LLM training?** Step decay maintains a constant LR between drops, causing the model to oscillate in a region of the loss landscape before abruptly jumping to a lower LR. This oscillation wastes compute. Cosine decay smoothly reduces the LR following a cosine curve from peak to minimum, maintaining the largest useful learning rate early when gradients are informative and gradually reducing as the model approaches convergence. For the 120B-token run, cosine decay achieves perplexity 2.87 versus step decay's 3.04 at the same compute budget, because the smooth transition allows better exploration of the loss landscape near convergence.
 
-**Why is bf16 preferred over fp16 for LLM training and does it require GradScaler?** fp16 has a maximum representable value of 65,504; gradient norms exceeding this overflow to infinity, causing NaN loss. GradScaler addresses this by scaling the loss up before backprop and unscaling gradients before the optimizer step, adding complexity and a runtime overhead of ~3%. bf16 has the same dynamic range as fp32 (8 exponent bits versus 5 for fp16), eliminating overflow risk entirely. No GradScaler is needed with bf16; the master weights are kept in fp32 for numerical precision in the optimizer state, while forward/backward passes use bf16, reducing memory from ~80 GB to ~74 GB for 7B parameters.
+**Why is bf16 preferred over fp16 for LLM training and does it require GradScaler?** fp16 has a maximum representable value of 65,504; gradient norms exceeding this overflow to infinity, causing NaN loss. GradScaler addresses this by scaling the loss up before backprop and unscaling gradients before the optimizer step, adding complexity and a runtime overhead of ~3%. bf16 has the same dynamic range as fp32 (8 exponent bits versus 5 for fp16), eliminating overflow risk entirely. No GradScaler is needed with bf16; the master weights are kept in fp32 for numerical precision in the optimizer state, while forward/backward passes use bf16, reducing memory from ~80 GB to ~74 GB per GPU for this 8B model.
 
-**What is gradient accumulation and how does it affect the effective batch size and training stability?** Gradient accumulation runs multiple forward-backward passes without clearing gradients, then performs a single optimizer step with the accumulated gradient (average over accumulation steps). With 4 sequences per GPU, 8 GPUs, and 8 accumulation steps, the effective batch size is 256 sequences of 4096 tokens = 1.05M tokens per optimizer step. Larger effective batch sizes reduce gradient noise (lower variance per step), allowing a higher peak learning rate (linear scaling rule: peak_lr scales as sqrt(batch_size_ratio)) and fewer total optimizer steps for the same number of tokens, improving training stability and hardware utilisation.
+**What is gradient accumulation and how does it affect the effective batch size and training stability?** Gradient accumulation runs multiple forward-backward passes without clearing gradients, then performs a single optimizer step with the accumulated gradient (average over accumulation steps). With 4 sequences per GPU, 8 GPUs, and 8 accumulation steps, the effective batch size is 256 sequences of 4096 tokens = 1.05M tokens per optimizer step. Larger effective batch sizes reduce gradient noise (lower variance per step), allowing a higher peak learning rate (linear scaling rule: peak_lr scales linearly with batch_size_ratio, with square-root scaling used once batches get large enough that linear diverges) and fewer total optimizer steps for the same number of tokens, improving training stability and hardware utilisation.
 
 **How do you detect and respond to gradient norm explosion during training?** Monitor the gradient norm before clipping at every step. A sudden spike (e.g., norm jumps from 0.9 to 142) typically indicates a corrupt batch (NaN activations from division-by-zero in attention or feed-forward), an extreme outlier in training data (e.g., a document with 10K repeated tokens), or an LR that is too high for the current loss landscape region. The fix is: (1) implement nan-safe attention (add eps to softmax denominator); (2) filter training data for repetitive or degenerate sequences during preprocessing; (3) set gradient clipping at max_norm=1.0 as a safety net; (4) checkpoint every 500 steps so recovery from divergence loses at most 500 steps of compute.
 
