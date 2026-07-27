@@ -38,6 +38,7 @@ classDiagram
         +reserveBook(memberId, isbn) void
         +searchByTitle(keyword) List~Book~
         +searchByGenre(genre) List~Book~
+        +searchByAuthor(author) List~Book~
     }
 
     class Book {
@@ -45,7 +46,7 @@ classDiagram
         +String title
         +String author
         +String genre
-        +int copies
+        +int totalCopies
     }
     note for Book "Instances are constructed via Book.Builder (Builder pattern)"
 

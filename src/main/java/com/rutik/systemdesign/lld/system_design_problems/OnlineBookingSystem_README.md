@@ -4,7 +4,7 @@
 
 > **One-line analogy**: Online Booking is a concurrency problem dressed as a design problem — the interesting challenge isn't the class hierarchy, it's preventing two users from booking the same seat simultaneously at scale.
 
-**Mental model**: The functional model is straightforward: Show → Seats → Booking → Payment. The real design challenge is the seat reservation race condition. At BookMyShow scale (1M+ bookings/day), two users can click the same seat in milliseconds. The solution is a short-lived pessimistic lock (optimistic locking with version checks, or a `reserved` flag + TTL) that holds the seat while the user completes payment. Dynamic pricing (Strategy pattern) then applies multipliers based on seat type, show time, and membership tier.
+**Mental model**: The functional model is straightforward: Show → Seats → Booking → Payment. The real design challenge is the seat reservation race condition. At BookMyShow scale (1M+ bookings/day), two users can click the same seat in milliseconds. Two families of fix exist and they are not the same thing: a **pessimistic** short-lived lock (`SELECT ... FOR UPDATE`, or a Redis key with a TTL) that holds the seat while the user pays, versus **optimistic** locking (a `version` column plus a conditional `UPDATE`) that lets both proceed and rejects the loser at commit time. Dynamic pricing (Strategy pattern) then applies multipliers based on seat type, show time, and membership tier.
 
 **Why it matters**: This problem combines Builder (complex Movie/Show construction), Strategy (pricing algorithms), Observer (email/SMS/loyalty notifications), and concurrency thinking — making it a comprehensive interview problem that tests both patterns and distributed systems instincts.
 
@@ -65,7 +65,7 @@ classDiagram
 
     class Seat {
         -seatId String
-        -row int
+        -row String
         -number int
         -type SeatType
         -basePrice double
@@ -88,7 +88,7 @@ classDiagram
     }
     class RegularPricing
     class PeakHourPricing
-    class MemberDiscount
+    class MemberDiscountPricing
     class ChildPricing
     class GroupPricing
 
@@ -97,8 +97,8 @@ classDiagram
         +onBookingConfirmed(booking)
         +onBookingCancelled(booking)
     }
-    class EmailService
-    class SMSService
+    class EmailNotificationService
+    class SMSNotificationService
     class LoyaltyPointsService
 
     class BookingService {
@@ -117,11 +117,11 @@ classDiagram
     Booking "*" --> "1" PricingStrategy : pricingStrategy
     PricingStrategy <|.. RegularPricing
     PricingStrategy <|.. PeakHourPricing
-    PricingStrategy <|.. MemberDiscount
+    PricingStrategy <|.. MemberDiscountPricing
     PricingStrategy <|.. ChildPricing
     PricingStrategy <|.. GroupPricing
-    BookingObserver <|.. EmailService
-    BookingObserver <|.. SMSService
+    BookingObserver <|.. EmailNotificationService
+    BookingObserver <|.. SMSNotificationService
     BookingObserver <|.. LoyaltyPointsService
     BookingService "1" --> "*" Show : manages
     BookingService "1" --> "*" BookingObserver : notifies
@@ -248,11 +248,17 @@ SELECT * FROM seats WHERE seat_id = 'A1' FOR UPDATE;
 ```
 
 **3. Redis Distributed Lock**
+
+`SETNX` itself takes no expiry, so the atomic form is `SET key value NX PX <ms>` — one round trip that both acquires and arms the TTL. A bare `SETNX` followed by a separate `EXPIRE` is the classic bug: a crash between the two leaves the seat locked forever.
+
 ```java
-String key = "seat_lock:" + seatId;
-boolean locked = redis.setNX(key, userId, 10, TimeUnit.SECONDS);
-if (!locked) throw new SeatAlreadyTakenException();
-// ... proceed with booking
+// Jedis
+String key   = "seat_lock:" + seatId;
+String token = UUID.randomUUID().toString();   // fencing token: only the owner may release
+String ok = jedis.set(key, token, SetParams.setParams().nx().px(10_000));
+if (ok == null) throw new SeatAlreadyTakenException(seatId);
+// ... take payment, then release with a compare-and-delete Lua script so a lock
+// that already expired and was re-acquired by someone else is never deleted.
 ```
 
 **4. Database Transaction with Isolation Level**
@@ -261,7 +267,7 @@ if (!locked) throw new SeatAlreadyTakenException();
 public Booking selectAndBook(...) { ... }
 ```
 
-The current implementation uses in-memory synchronization suitable for single-instance; production needs option 1 or 3.
+The current implementation makes `BookingService.selectAndBook` and `cancelBooking` `synchronized`, so the "is this seat free? then reserve it" check-then-act is atomic **within one JVM**. That is the whole guarantee: put two instances of this service behind a load balancer and the race in the diagram above returns unchanged, because each JVM has its own monitor. Production needs option 1 or 3.
 
 ---
 
@@ -347,7 +353,7 @@ CREATE TABLE booking_seats (
 
 ## Scale Estimates (BookMyShow India scale)
 
-- 5M bookings/day → ~60 bookings/sec average, ~300/sec peak
+- 5M bookings/day → 5,000,000 / 86,400 ≈ 58 bookings/sec average; assume a 5x evening/weekend peak → ~300/sec
 - 10K shows/day, 200 seats/show → 2M seat records/day
 - Caching: show catalog (Redis, TTL 1hr), seat availability (Redis, TTL 5min)
 - Sharding by show_id for seats table

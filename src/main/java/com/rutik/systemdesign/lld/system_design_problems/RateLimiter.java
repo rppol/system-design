@@ -90,11 +90,11 @@ class FixedWindowCounterRateLimiter implements RateLimiter {
 
     /** Per-client state: which window we're in, and how many requests so far. */
     private static class WindowCounter {
-        long windowStartEpochSeconds;
+        long windowStartMs;
         int count;
 
-        WindowCounter(long windowStartEpochSeconds, int count) {
-            this.windowStartEpochSeconds = windowStartEpochSeconds;
+        WindowCounter(long windowStartMs, int count) {
+            this.windowStartMs = windowStartMs;
             this.count = count;
         }
     }
@@ -116,9 +116,9 @@ class FixedWindowCounterRateLimiter implements RateLimiter {
         WindowCounter counter = windows.computeIfAbsent(clientId, id -> new WindowCounter(currentWindowStart, 0));
 
         synchronized (counter) {
-            if (counter.windowStartEpochSeconds != currentWindowStart) {
+            if (counter.windowStartMs != currentWindowStart) {
                 // New window has started — reset the counter.
-                counter.windowStartEpochSeconds = currentWindowStart;
+                counter.windowStartMs = currentWindowStart;
                 counter.count = 0;
             }
             if (counter.count < limit) {

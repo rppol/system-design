@@ -287,15 +287,23 @@ get(1)       -> "A"  | freq{1=[2, 3], 3=[1]}
              -> EVICTED key=2 (value=B, was least frequently used)
 put(4, "D")  -> freq{1=[3, 4], 3=[1]}
 
---- LRU vs LFU contrast ---
-Same access pattern, different eviction:
-  LRU  would evict key=3 (least *recently* used)
-  LFU  evicted  key=2 (least *frequently* used)
+--- LRU vs LFU contrast (same operation sequence, both caches live) ---
+Sequence: put 1,2,3 | get(1) x3 | get(2) | get(3) | put(4)
+  LRU  evicted key=1 (least *recently* used)
+  LFU  evicted key=2 (least *frequently* used)
+  LRU final: [4=D, 3=C, 2=B]
+  LFU final: freq{1=[4], 2=[3], 4=[1]}
+LRU discarded the most-frequently-used key because two one-off
+accesses pushed it to the tail — exactly the case LFU is built for.
 
 ========================================
               Demo complete
 ========================================
 ```
+
+The contrast block feeds **both** caches the identical operation sequence and prints the key each one actually evicted, rather than asserting what the other policy "would" do. It is deliberately chosen so the two disagree: after `get(1)` three times key 1 has frequency 4, but the two trailing one-off accesses `get(2)`/`get(3)` push it to the LRU tail, so **LRU throws away the hottest key** while LFU keeps it and drops key 2. On the earlier `LFUCache` sequence above (`put 1,2,3; get(1); get(1)`) the two policies would in fact agree on evicting key 2 — a contrast needs a pattern that separates recency from frequency.
+
+The `ThreadSafeLRUCache` block submits four tasks to a four-thread pool, so its line ordering is a valid interleaving, not a guaranteed one; only the final state and the absence of corruption are invariant.
 
 ---
 

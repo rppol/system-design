@@ -332,7 +332,10 @@ class Transaction {
 //  settling transactions using two max-heaps (creditors / debtors).
 //  Complexity: O(N log N) for N users; bound is at most N-1 transactions.
 //  NOT guaranteed minimal: computing the true minimum (the debts-clearing
-//  problem) is NP-hard in the strong sense, by reduction from subset-sum.
+//  problem) is NP-hard in the strong sense — it is a zero-sum set-packing
+//  problem that 3-Partition reduces to (Verhoeff, Informatics in Education
+//  3(1):105-126, 2004). Subset-sum is only weakly NP-hard and would not
+//  establish strong hardness.
 // ─────────────────────────────────────────────
 
 class DebtSimplifier {

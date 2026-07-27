@@ -31,7 +31,7 @@ Design a parking lot system that can:
 
 ### Non-Functional
 - Thread-safe singleton for the lot instance
-- O(1) spot lookup per type per floor (grouping by ParkingSpotType)
+- Spot lookup scoped to one type per floor: grouping by `ParkingSpotType` cuts the scan from every spot in the lot to O(n/k) — the correctly-sized spots on one floor. It is not O(1); `findAvailableSpot` still scans that sub-list for the first free spot
 - Easy to add new vehicle types or pricing models without modifying existing classes
 
 ---
@@ -148,11 +148,13 @@ classDiagram
 
 **How**: `PricingStrategy` interface with `calculateFee(Duration, ParkingSpotType)`. The lot holds a reference that can be swapped at runtime via `setPricingStrategy()`.
 
-| Implementation  | Algorithm                                   |
-|-----------------|---------------------------------------------|
-| HourlyPricing   | ceil(minutes/60) × rate-per-spot-type       |
-| DailyPricing    | ceil(hours/24) × daily-rate-per-spot-type   |
-| WeekendPricing  | flat fee per entry, independent of duration |
+| Implementation  | Algorithm                                              | Rates (SMALL / MEDIUM / LARGE) |
+|-----------------|--------------------------------------------------------|--------------------------------|
+| HourlyPricing   | `max(1, ceil(minutes/60))` × rate-per-spot-type        | $2.00 / $3.50 / $5.00 per hour |
+| DailyPricing    | `max(1, ceil(hours/24))` × daily-rate-per-spot-type    | $15 / $25 / $40 per day        |
+| WeekendPricing  | flat fee per entry, independent of duration            | $8 / $12 / $18 flat            |
+
+The `max(1, ...)` floor is not decoration: it is why a vehicle that leaves after 40 seconds is still billed one full hour ($2.00 for a motorcycle in the sample output below), which is how real lots price. Drop it and every sub-hour stay is free.
 
 ---
 
@@ -163,8 +165,10 @@ classDiagram
 
 ---
 
-### 4. Factory — `VehicleFactory`
+### 4. Simple Factory — `VehicleFactory`
 **Why**: Callers should not need to know which concrete Vehicle subclass to instantiate. The factory centralises the mapping from `VehicleType` enum to subclass, making it easy to add new types.
+
+**Name it precisely**: `VehicleFactory.create(type, plate)` is a static method switching on an enum — a **Simple Factory**, which is not in the GoF catalogue. GoF **Factory Method** would make creation an overridable instance method on a subclass; **Abstract Factory** would produce families of related products. Simple Factory is the right tool here, but say which one you mean.
 
 ---
 
@@ -237,12 +241,17 @@ sequenceDiagram
 
 --- Parking vehicles ---
   [Board-ENTRY] Floor F1  | SMALL    available: 1
-  [Board-APP]   Floor F1  | SMALL    available: 1
+  [Board-APP] Floor F1  | SMALL    available: 1
 [Lot] MOTORCYCLE(MBC-001) parked → spot S1-01 on F1 | TKT-1001
   [Board-ENTRY] Floor F1  | MEDIUM   available: 1
-  [Board-APP]   Floor F1  | MEDIUM   available: 1
+  [Board-APP] Floor F1  | MEDIUM   available: 1
 [Lot] CAR(CAR-101) parked → spot M1-01 on F1 | TKT-1002
 ...
+
+--- Availability snapshot ---
+[Lot] Availability snapshot:
+  Floor F1: {SMALL=1, MEDIUM=0, LARGE=0}
+  Floor F2: {SMALL=1, MEDIUM=1, LARGE=1}
 
 --- Exiting vehicles (Hourly pricing) ---
 [Lot] MOTORCYCLE(MBC-001) exited | Duration: 0h 0m | Fee: $2.00

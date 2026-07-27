@@ -196,10 +196,23 @@ class ElevatorCar {
         this.state = newState;
     }
 
-    public void addDestination(int floor) { destinations.add(floor); }
+    public void addDestination(int floor) {
+        destinations.add(floor);
+        // Commit to a direction as soon as there is somewhere to go, so the SCAN
+        // scheduler can see it. Without this, getDirection() stays IDLE until the
+        // car actually moves and SCAN degenerates to "nearest car".
+        if (direction == Direction.IDLE && floor != currentFloor) {
+            direction = (floor > currentFloor) ? Direction.UP : Direction.DOWN;
+        }
+    }
 
     /** Moves one step towards the next destination in the queue. */
     public void step() {
+        if (state instanceof MaintenanceState) {
+            System.out.printf("  [Elevator %d | MAINTENANCE] Out of service — queue frozen at %s%n",
+                    id, destinations);
+            return;
+        }
         if (destinations.isEmpty()) {
             direction = Direction.IDLE;
             if (!(state instanceof StoppedState)) setState(new StoppedState());
@@ -329,10 +342,14 @@ class ElevatorController {
         elevator.requestFloor(floor);
     }
 
-    /** Runs all pending stops in sequence. */
+    /** Runs all pending stops in sequence. A car in MAINTENANCE is skipped entirely. */
     public void processAllRequests() {
         System.out.printf("[Controller] Elevator %d: processing queue — %s%n",
                 elevator.getId(), elevator);
+        if (!elevator.isAvailable()) {
+            System.out.printf("[Controller] Elevator %d: in MAINTENANCE, skipped%n", elevator.getId());
+            return;
+        }
         while (elevator.pendingStops() > 0) {
             elevator.step();
         }
@@ -345,7 +362,7 @@ class ElevatorController {
 //  ELEVATOR SYSTEM — top-level coordinator
 // ─────────────────────────────────────────────
 
-class ElevatorSystem {
+public class ElevatorSystem {
     private final int                        totalFloors;
     private final List<ElevatorController>   controllers = new ArrayList<>();
     private final List<ElevatorCar>          elevators   = new ArrayList<>();
@@ -393,13 +410,10 @@ class ElevatorSystem {
         System.out.println("[System] Current elevator status:");
         for (ElevatorCar e : elevators) System.out.println("  " + e);
     }
-}
 
-// ─────────────────────────────────────────────
-//  DEMO / MAIN
-// ─────────────────────────────────────────────
-
-public class ElevatorSystem {
+    // ─────────────────────────────────────────────
+    //  DEMO / MAIN
+    // ─────────────────────────────────────────────
 
     public static void main(String[] args) {
         System.out.println("========================================");
@@ -407,7 +421,7 @@ public class ElevatorSystem {
         System.out.println("========================================\n");
 
         // 1. Build system: 10-floor building, 2 elevators, SCAN scheduler
-        elevator.lld.ElevatorSystem system = new elevator.lld.ElevatorSystem(10, new SCANScheduler());
+        ElevatorSystem system = new ElevatorSystem(10, new SCANScheduler());
 
         ElevatorCar e1 = new ElevatorCar(1, 1);   // starts at floor 1
         ElevatorCar e2 = new ElevatorCar(2, 5);   // starts at floor 5

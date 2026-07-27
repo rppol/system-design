@@ -409,10 +409,14 @@ class BookingService {
     }
 
     /**
-     * Selects seats — in production this would use optimistic locking or
-     * a distributed lock to prevent double-booking.
+     * Selects seats and books them. The whole check-then-reserve sequence is
+     * `synchronized` because it is a check-then-act: without the lock, two threads
+     * can both observe seat A1 as free and both reserve it. This makes the method
+     * correct within ONE JVM only — across service instances the same race returns,
+     * which is why production needs optimistic locking (a version column) or a
+     * distributed lock (Redis SET NX PX).
      */
-    public Optional<Booking> selectAndBook(String userId, String showId,
+    public synchronized Optional<Booking> selectAndBook(String userId, String showId,
                                             List<String> seatIds,
                                             PricingStrategy pricingStrategy) {
         Show show = shows.get(showId);
@@ -447,7 +451,9 @@ class BookingService {
         return Optional.of(booking);
     }
 
-    public boolean cancelBooking(String bookingId) {
+    /** Synchronized on the same monitor as selectAndBook so a release can never
+     *  interleave with a concurrent reservation of the seats being freed. */
+    public synchronized boolean cancelBooking(String bookingId) {
         Booking booking = bookings.get(bookingId);
         if (booking == null || booking.getStatus() == BookingStatus.CANCELLED) return false;
 

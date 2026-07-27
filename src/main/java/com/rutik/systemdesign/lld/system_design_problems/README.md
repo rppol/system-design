@@ -14,20 +14,25 @@ LLD interview problems test five distinct skills:
 4. **Concurrency handling** — reasoning about race conditions (two users booking the same seat)
 5. **Communication under pressure** — delivering a coherent design in 30 minutes with a live audience
 
-| Problem | File | Primary Patterns | Has State Machine | Concurrency? |
+Patterns below are the ones the companion `<Name>.java` **actually implements**, not the ones the
+problem is often described with. Where a "Factory" appears it is a **Simple Factory** (a static
+method switching on an enum), which is not a GoF pattern — say so rather than calling it Factory
+Method. The concurrency column describes the reference implementation, not the production system.
+
+| Problem | File | Primary Patterns | Has State Machine | Concurrency in the reference code |
 |---------|------|-----------------|-------------------|-------------|
-| Parking Lot | [ParkingLot_README.md](ParkingLot_README.md) | Strategy (pricing), Factory (spot type), State (spot status) | Yes | Yes |
-| Elevator System | [ElevatorSystem_README.md](ElevatorSystem_README.md) | State (IDLE/MOVING/DOOR_OPEN), Observer (floor requests) | Yes (complex) | Yes |
-| Library Management | [LibraryManagement_README.md](LibraryManagement_README.md) | Builder (borrowing record), Observer (overdue), Strategy (search) | No | Minimal |
-| Chess Game | [ChessGame_README.md](ChessGame_README.md) | Composite (board), Command (move history + undo), State (game phase) | Yes | No |
-| Vending Machine | [VendingMachine_README.md](VendingMachine_README.md) | State (IDLE/HAS_MONEY/DISPENSING/OUT_OF_STOCK), Strategy (payment), Factory | Yes (primary) | Minimal |
-| ATM | [ATM_README.md](ATM_README.md) | State (IDLE/CARD_INSERTED/PIN_VERIFIED/TRANSACTION), Template Method (transaction) | Yes | Minimal |
-| Online Booking System | [OnlineBookingSystem_README.md](OnlineBookingSystem_README.md) | Strategy (pricing), Observer (confirmation), Builder (booking record) | Yes | Yes (double-booking) |
-| Ride Sharing | [RideSharing_README.md](RideSharing_README.md) | Strategy (fare calculation), Observer (ride status), Factory (vehicle type), State (ride lifecycle) | Yes | Minimal |
-| LRU Cache | [LRUCache_README.md](LRUCache_README.md) | Decorator (thread-safe wrapper), Observer (eviction listener) | No | Yes (lock-based) |
-| Rate Limiter | [RateLimiter_README.md](RateLimiter_README.md) | Strategy (4 algorithms), Factory (algorithm selection) | No | Yes (ConcurrentHashMap) |
-| Tic-Tac-Toe | [TicTacToe_README.md](TicTacToe_README.md) | Strategy (AI move selection), State (game state) | Yes | No |
-| Splitwise | [Splitwise_README.md](Splitwise_README.md) | Strategy (split type), Factory (split-strategy selection) | No | No |
+| Parking Lot | [ParkingLot_README.md](ParkingLot_README.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Simple Factory (vehicle type) | No — a spot is just occupied or free | `synchronized getInstance()` only |
+| Elevator System | [ElevatorSystem_README.md](ElevatorSystem_README.md) | State (STOPPED/MOVING/MAINTENANCE), Strategy (FCFS/SCAN dispatch), Observer (arrival notifications) | Yes | None — single-threaded simulation |
+| Library Management | [LibraryManagement_README.md](LibraryManagement_README.md) | Builder (`Book.Builder`), Iterator (`BookCatalog implements Iterable`), Observer (notifications) | No | None |
+| Chess Game | [ChessGame_README.md](ChessGame_README.md) | Command (move + undo stack), Observer (game events), Singleton (board) | Yes (turn + game-over) | None |
+| Vending Machine | [VendingMachine_README.md](VendingMachine_README.md) | State (IDLE/HAS_MONEY/PRODUCT_SELECTED/DISPENSING/OUT_OF_STOCK), Flyweight (shared state objects) | Yes (primary) | None |
+| ATM | [ATM_README.md](ATM_README.md) | State (IDLE/CARD_INSERTED/PIN_VERIFIED/TRANSACTION/OUT_OF_CASH), Command (transaction + rollback log), Facade | Yes | None |
+| Online Booking System | [OnlineBookingSystem_README.md](OnlineBookingSystem_README.md) | Builder (`Movie`, `Show`), Strategy (5 pricing rules), Observer (email/SMS/loyalty) | Yes (seat status) | `synchronized` booking — single-JVM only |
+| Ride Sharing | [RideSharing_README.md](RideSharing_README.md) | Strategy (fare), Observer (ride status), Simple Factory (vehicle tier), enum transition table (ride lifecycle) | Yes | None |
+| LRU Cache | [LRUCache_README.md](LRUCache_README.md) | Decorator (thread-safe wrapper), Observer (eviction listener) | No | Yes — `ReentrantLock` decorator |
+| Rate Limiter | [RateLimiter_README.md](RateLimiter_README.md) | Strategy (4 algorithms), Simple Factory (algorithm selection) | No | Yes — `ConcurrentHashMap` + per-client monitor |
+| Tic-Tac-Toe | [TicTacToe_README.md](TicTacToe_README.md) | Strategy (AI move selection), enum `GameState` gating | Yes | None |
+| Splitwise | [Splitwise_README.md](Splitwise_README.md) | Strategy (split type), Simple Factory (split-strategy selection) | No | None |
 
 ---
 
@@ -162,7 +167,7 @@ Collapsing check-and-reserve into one `compareAndSet` call makes Thread B observ
 
 ## 7. State Machine Quick Reference
 
-State machines appear in 5 of the 7 problems. Recognizing the states and transitions early is the key to choosing the right pattern.
+Seven state machines are drawn below. Recognizing the states and transitions early is the key to choosing the right pattern. Two of these are the *design* machines an interviewer expects, one step ahead of the reference code: the parking-spot machine includes `RESERVED`, which only exists once you add the reservations follow-up (`ParkingLot.java` tracks a spot as simply occupied or free), and the seat machine's timed `RESERVED` hold is the lock-with-TTL design, not the `synchronized` block the demo ships.
 
 **Parking Spot:**
 ```mermaid
@@ -192,7 +197,7 @@ stateDiagram-v2
     DOOR_OPEN --> MOVING_DOWN : door closes, pending request below
 ```
 
-`DOOR_OPEN` is the decision point: it fans back out to `IDLE` or either direction depending on what's still queued — exactly the seam SCAN/LOOK scheduling plugs into (see the Q&A below).
+`DOOR_OPEN` is the decision point: it fans back out to `IDLE` or either direction depending on what's still queued — exactly the seam SCAN/LOOK scheduling plugs into (see the Q&A below). This is the *direction-carrying* model. `ElevatorSystem.java` factors the same machine differently — three states (`STOPPED`, `MOVING`, `MAINTENANCE`) plus a separate `Direction` enum on the car — which keeps the state classes small and lets `MAINTENANCE` be a real out-of-service state. Both are defensible; pick one and be consistent about where direction lives.
 
 **Vending Machine:**
 ```mermaid
@@ -444,7 +449,8 @@ classDiagram
         +requestRide(rider, pickup, dropoff, vehicleType) Ride
     }
     class VehicleFactory {
-        +create(VehicleType) Vehicle
+        <<Simple Factory>>
+        +create(VehicleType, plate) Vehicle
     }
     class Vehicle
     class EconomyVehicle
@@ -491,8 +497,8 @@ classDiagram
     Ride --> FareStrategy
     Ride "1" --> "*" RideObserver : notifies
     FareStrategy <|.. StandardFareStrategy
-    FareStrategy <|.. SurgePricingFareStrategy
-    FareStrategy <|.. PremiumFareStrategy
+    StandardFareStrategy <|-- SurgePricingFareStrategy
+    StandardFareStrategy <|-- PremiumFareStrategy
     RideObserver <|.. RiderNotifier
     RideObserver <|.. DriverNotifier
     RideObserver <|.. DispatchDashboard
@@ -506,7 +512,7 @@ Four patterns share one diagram: Factory (`VehicleFactory`) builds the `Vehicle`
 classDiagram
     class LRUCacheImpl~K,V~ {
         -capacity: int
-        -index: HashMap~K, Node~
+        -map: HashMap~K, Node~
         -head: Node~K,V~
         -tail: Node~K,V~
         +get(key) V
@@ -530,12 +536,12 @@ classDiagram
         +onEviction(key, value)
     }
 
-    LRUCacheImpl~K,V~ "1" *-- "*" Node~K,V~ : index, head, tail
+    LRUCacheImpl~K,V~ "1" *-- "*" Node~K,V~ : map, head, tail
     LRUCacheImpl~K,V~ ..> CacheEventListener~K,V~ : notifies on eviction
     ThreadSafeLRUCache~K,V~ --> LRUCacheImpl~K,V~ : delegate
 ```
 
-`index` gives O(1) key lookup while the `head`/`tail` sentinels keep MRU at the front and LRU at `tail.prev`, so `get()` moves a node to the front and a full `put()` evicts `tail.prev` before inserting at the front — `ThreadSafeLRUCache` wraps both operations behind a single `ReentrantLock` without touching either.
+`map` gives O(1) key lookup while the `head`/`tail` sentinels keep MRU at the front and LRU at `tail.prev`, so `get()` moves a node to the front and a full `put()` evicts `tail.prev` before inserting at the front — `ThreadSafeLRUCache` wraps both operations behind a single `ReentrantLock` without touching either.
 
 ---
 
@@ -547,7 +553,7 @@ classDiagram
 | `AtomicReference.compareAndSet()` | Spot / seat reservation race conditions on single machine |
 | `ReentrantLock` | Elevator controller sequential access to request queue; `ThreadSafeLRUCache` wrapper around `LRUCacheImpl` |
 | `ScheduledExecutorService` | Library overdue notifications without polling |
-| `BigDecimal` | Money in ATM, Booking System, and Splitwise (split amounts, settlements) |
+| `BigDecimal` | Money anywhere it is added, split, or compared. `Splitwise.java` uses it throughout, with `RoundingMode.HALF_UP` and scale 2; `ATM.java` and `OnlineBookingSystem.java` use `double` for brevity in the demo, which is exactly what you must NOT do in a real ledger |
 | Spring `@Scheduled` | Production-grade overdue book notification job |
 | JPA `@Version` (optimistic locking) | Double-booking prevention in Online Booking System |
 | `Deque<Command>` | Chess move history for undo/redo |
@@ -583,7 +589,7 @@ A switch statement puts all state logic in one class, violating OCP — adding a
 
 **Q: Chess: how does the Command pattern enable undo of moves?**
 
-Each move is a `Command` object: `MoveCommand(piece, fromSquare, toSquare, capturedPiece)`. `execute()` moves the piece; `undo()` moves it back and restores the captured piece. A `Deque<MoveCommand>` is the history stack. Ctrl+Z pops the stack and calls `undo()`. The benefit: the `Board` class doesn't need any undo logic — it just responds to `move()` and `restore()` calls. The history management is entirely in the `MoveCommand` and the client. Chess engines also use this for "what-if" analysis: execute a speculative move, evaluate the board, undo it.
+Each move is a `Command` object wrapping a `Move` value object that carries `(from, to, piece, capturedPiece)`. `execute()` applies the move; `undo()` puts the piece back, restores the captured piece, and resets the piece's `hasMoved` flag so a pawn regains its two-square option. A `Deque<MoveCommand>` is the history stack. Ctrl+Z pops the stack and calls `undo()`. The benefit: the game class needs no undo logic — it just pushes commands and pops them. The history management is entirely in the `MoveCommand` and the client. Chess engines also use this for "what-if" analysis: execute a speculative move, evaluate the board, undo it.
 
 ---
 
@@ -683,6 +689,6 @@ The naive line is literally `N^2`; the incremental-counter line is a flat 4 rega
 
 **Q: Splitwise: what does "debt simplification" mean, and is it guaranteed to find the minimum number of transactions?**
 
-Debt simplification takes a tangle of pairwise debts within a group (Alice owes Bob $10, Bob owes Carol $10) and reduces it to the minimum set of direct payments that settle everyone's net balance (Alice pays Carol $10 directly — Bob is removed from the chain entirely). The standard interview-feasible algorithm computes each user's net balance, then greedily matches the largest creditor with the largest debtor using two max-heaps, repeating until all balances are zero — this runs in O(N log N) and produces at most N-1 transactions for N participants. It is NOT guaranteed to find the absolute theoretical minimum in every case (that variant is NP-hard, related to subset-sum partitioning), but the greedy max-heap approach is the answer interviewers expect and performs well in practice. Mention `BigDecimal` throughout — splitting `$100.00` three ways produces `$33.33 + $33.33 + $33.34` (the extra cent goes to the first payer), never `double` arithmetic.
+Debt simplification collapses a tangle of pairwise debts into a smaller set of direct payments that settle everyone's net balance. If Alice owes Bob $10 and Bob owes Carol $10, the two debts net out to one payment: Alice pays Carol $10 and Bob leaves the chain entirely. The standard interview-feasible algorithm computes each user's net balance, then greedily matches the largest creditor with the largest debtor using two max-heaps, repeating until all balances are zero — this runs in O(N log N) and produces at most N-1 transactions for N participants. It is a **heuristic**, not a minimiser: the true minimum-transaction problem is NP-hard **in the strong sense** (it is zero-sum set packing, with the hardness coming from 3-Partition — not from subset-sum, which is only weakly NP-hard). Say "heuristic bounded by N-1", never "minimum"; the greedy max-heap approach is still the answer interviewers expect and it performs well in practice. Mention `BigDecimal` throughout — splitting `$100.00` three ways produces `$33.33 + $33.33 + $33.34` (the extra cent goes to the first payer), never `double` arithmetic.
 
 ---

@@ -94,7 +94,7 @@ classDiagram
     VendingMachine o-- VendingMachineState : delegates to
 ```
 
-All five concrete states realize `VendingMachineState` and hold a back-reference to their `VendingMachine` context; the context itself holds only a single `currentState` pointer, so reassigning that one field — not a growing `if/else` — is the entire transition (Flyweight: the five state instances are created once in the constructor and reused for the life of the machine, per the Patterns Used table above).
+All five concrete states realize `VendingMachineState` and hold a back-reference to their `VendingMachine` context; the context itself holds only a single `currentState` pointer, so reassigning that one field — not a growing `if/else` — is the entire transition. The five state instances are created once in the constructor and reused for the life of the machine (Flyweight; see the Patterns Used table below).
 
 ---
 
@@ -133,8 +133,9 @@ Each state class handles its own behavior. Adding `MaintenanceState` means creat
 | Pattern | Where | Why |
 |---------|-------|-----|
 | **State** | All 5 states | Each state encapsulates behavior for that state |
-| **Singleton** | VendingMachine instance | Only one machine per physical unit |
-| **Flyweight** | State objects | Reuse state instances (no per-request creation) |
+| **Flyweight** | State objects | The five state instances are created once in the `VendingMachine` constructor and reused for the life of the machine — no allocation per transition |
+
+Singleton is **not** used here, and deliberately: `VendingMachine` has an ordinary public constructor taking an `Inventory`, so a test (or a bank of machines in one process) can hold several independent machines. "One machine per physical unit" is a fact about the hardware, not a reason to make the class globally unique. Compare `ParkingLot`, where the Singleton earns its place because every entry and exit must funnel through one coordinator.
 
 ---
 
@@ -242,7 +243,7 @@ In `HasMoneyState.selectProduct()` — the state that has context about balance.
   VENDING MACHINE DEMO
 ═══════════════════════════════════════
   ┌─────────────────────────────────┐
-  │         AVAILABLE ITEMS          │
+  │         AVAILABLE ITEMS         │
   ├─────────────────────────────────┤
   │ [A1] Coke         $1.50 (qty=2) │
   │ [B1] Chips        $1.00 (qty=1) │
@@ -251,14 +252,25 @@ In `HasMoneyState.selectProduct()` — the state that has context about balance.
   └─────────────────────────────────┘
 
 --- Scenario 1: Normal Purchase ---
+  [IDLE] Coin inserted: $1.00. Total balance: $1.00
   [STATE] IDLE → HAS_MONEY
-  [HAS_MONEY] Added $1.00. Total balance: $1.00
-  [HAS_MONEY] Added $1.00. Total balance: $2.00  (wait - second insertCoin)
-  [STATE] HAS_MONEY → PRODUCT_SELECTED
+  [HAS_MONEY] Added $1.00. Total balance: $2.00
   [HAS_MONEY] Selected: Coke
+  [STATE] HAS_MONEY → PRODUCT_SELECTED
   [STATE] PRODUCT_SELECTED → DISPENSING
   [DISPENSING] >>> Dispensing: Coke <<<
   [DISPENSING] Returning change: $0.50
   [STATE] DISPENSING → IDLE
   [DISPENSING] Thank you! Enjoy your Coke!
+  [Machine] State: IDLE                 Balance: $0.00
+
+--- Scenario 4: Out of Stock ---
+  [IDLE] Coin inserted: $1.00. Total balance: $1.00
+  [STATE] IDLE → HAS_MONEY
+  [HAS_MONEY] Item 'D1' is out of stock.
+  [STATE] HAS_MONEY → OUT_OF_STOCK
+  [OUT_OF_STOCK] Refunded $1.00
+  [STATE] OUT_OF_STOCK → IDLE
 ```
+
+Note the ordering in Scenario 1: the *first* coin is handled by `IdleState.insertCoin()`, which prints its own line and only then flips the state, so `[IDLE] Coin inserted` precedes `[STATE] IDLE → HAS_MONEY`. The second coin is handled by `HasMoneyState`, which prints `Added`. The same "act, then transition" order explains why `[HAS_MONEY] Selected: Coke` appears before `[STATE] HAS_MONEY → PRODUCT_SELECTED`.

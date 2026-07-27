@@ -27,7 +27,7 @@ Design a ride-sharing system (Uber/Lyft-style) that supports:
 1. Register riders and drivers (with a current location and, for drivers, a vehicle)
 2. `requestRide(rider, pickup, dropoff, vehicleType)` — find the nearest available driver of the requested tier and create a `Ride`
 3. Walk a ride through its lifecycle: `acceptRide → arriveAtPickup → startRide → completeRide`
-4. Support `cancelRide` from any non-terminal state
+4. Support `cancelRide` from `REQUESTED`, `ACCEPTED` and `DRIVER_ARRIVED` — but **not** from `IN_PROGRESS`: once the rider is in the car the ride ends by completing it, not by cancelling
 5. Calculate fare using a pluggable strategy (standard, surge, premium)
 6. Notify all interested parties (rider, driver, dispatch dashboard) on every state transition
 7. Record a rating for the driver once the ride completes
@@ -136,8 +136,8 @@ classDiagram
 
     Ride o-- FareStrategy : fareStrategy
     FareStrategy <|.. StandardFareStrategy
-    FareStrategy <|.. SurgePricingFareStrategy
-    FareStrategy <|.. PremiumFareStrategy
+    StandardFareStrategy <|-- SurgePricingFareStrategy
+    StandardFareStrategy <|-- PremiumFareStrategy
 
     Ride --> RideState : state
     Ride "1" --> "*" RideObserver : notifies
@@ -162,7 +162,7 @@ classDiagram
 | Implementation | Algorithm |
 |-----------------|-----------|
 | `StandardFareStrategy` | `baseFare + (perKmRate × distance) + (perMinRate × duration)`, rates scaled by vehicle tier |
-| `SurgePricingFareStrategy` | Wraps `StandardFareStrategy`'s result and multiplies by a `surgeMultiplier` (1.5x–2.5x) |
+| `SurgePricingFareStrategy` | `extends StandardFareStrategy`, calls `super.calculateFare(...)` and multiplies by a `surgeMultiplier` (validated `>= 1.0`; typically 1.5x–2.5x). Note this is inheritance, not a Decorator — it can only surge the one strategy it subclasses |
 | `PremiumFareStrategy` | Higher base fare + a flat luxury surcharge, on top of the standard distance/time formula |
 
 ---
@@ -175,7 +175,7 @@ classDiagram
 | Observer | Reacts to |
 |----------|-----------|
 | `RiderNotifier` | Prints rider-facing status updates ("Your driver has arrived") |
-| `DriverNotifier` | Prints driver-facing status updates ("New ride request assigned") |
+| `DriverNotifier` | Prints the driver-facing assignment message on `REQUESTED` only, and ignores every later transition |
 | `DispatchDashboard` | Logs every transition for operations monitoring |
 
 ---
@@ -187,7 +187,9 @@ classDiagram
 
 ---
 
-### 4. State — `Ride` / `RideState`
+### 4. State machine (transition table, not GoF State) — `Ride` / `RideState`
+**Name it precisely**: `RideState.canTransitionTo()` is a `switch (this)` inside an enum — a **guarded transition table**, not the GoF **State** pattern, which would give each state its own class implementing a common handler interface (as `ElevatorSystem` and `ATM` do). The table is the better fit here: the states carry no behaviour of their own, only legality rules, so six handler classes would be five files of ceremony around one `switch`. Say which one you built and why.
+
 **Why**: A ride must move through a strict sequence — you cannot start a ride that was never accepted, and you cannot re-accept a completed ride. Letting any caller set `ride.status = X` directly invites corrupted lifecycles (e.g., double-billing a completed ride).
 
 **How**: `RideState` enum defines the six states and a `canTransitionTo(RideState)` method encoding the legal-transition table. `Ride.requestTransition(newState)` checks `canTransitionTo` before mutating state; an illegal request throws `IllegalStateException` with the current and attempted states named.

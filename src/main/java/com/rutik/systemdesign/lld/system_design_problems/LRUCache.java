@@ -428,10 +428,33 @@ public class LRUCache {
         System.out.println("put(4, \"D\")  -> freq" + lfu.frequencySnapshot());
 
         // ── 4. LRU vs LFU contrast on the same access pattern ─────────────
-        System.out.println("\n--- LRU vs LFU contrast ---");
-        System.out.println("Same access pattern, different eviction:");
-        System.out.println("  LRU  would evict key=3 (least *recently* used — key=1 was accessed twice after it)");
-        System.out.println("  LFU  evicted  key=2 (least *frequently* used — both 2 and 3 had freq=1, but 2 is older)");
+        // Both caches are fed the IDENTICAL operation sequence and each reports the
+        // key it actually evicts — no hand-waving about what LRU "would" do.
+        //   put 1,2,3 ; get(1) x3 ; get(2) ; get(3) ; put 4
+        //   recency (MRU -> LRU) = 3, 2, 1     -> LRU evicts key=1, the hottest key
+        //   frequency            = 1:4, 2:2, 3:2 -> LFU evicts key=2 (older of the freq-2 tie)
+        System.out.println("\n--- LRU vs LFU contrast (same operation sequence, both caches live) ---");
+        LRUCacheImpl<Integer, String> lruC = new LRUCacheImpl<>(3);
+        LFUCache<Integer, String>     lfuC = new LFUCache<>(3);
+        lruC.setEventListener((k, v) ->
+                System.out.printf("  LRU  evicted key=%s (least *recently* used)%n", k));
+        lfuC.setEventListener((k, v) ->
+                System.out.printf("  LFU  evicted key=%s (least *frequently* used)%n", k));
+
+        lruC.put(1, "A"); lfuC.put(1, "A");
+        lruC.put(2, "B"); lfuC.put(2, "B");
+        lruC.put(3, "C"); lfuC.put(3, "C");
+        for (int i = 0; i < 3; i++) { lruC.get(1); lfuC.get(1); }   // key 1 is the hot key
+        lruC.get(2); lfuC.get(2);
+        lruC.get(3); lfuC.get(3);
+
+        System.out.println("Sequence: put 1,2,3 | get(1) x3 | get(2) | get(3) | put(4)");
+        lruC.put(4, "D");
+        lfuC.put(4, "D");
+        System.out.println("  LRU final: " + lruC.snapshot());
+        System.out.println("  LFU final: freq" + lfuC.frequencySnapshot());
+        System.out.println("LRU discarded the most-frequently-used key because two one-off");
+        System.out.println("accesses pushed it to the tail — exactly the case LFU is built for.");
 
         System.out.println("\n========================================");
         System.out.println("              Demo complete");

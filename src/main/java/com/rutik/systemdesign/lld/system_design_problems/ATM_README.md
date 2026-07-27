@@ -6,9 +6,9 @@
 
 **Mental model**: An ATM has well-defined states (Idle → Card Inserted → PIN Verified → Transaction) and transitions between them are triggered by events (insertCard, enterPIN, selectTransaction). Without a State pattern, every operation becomes a maze of `if (state == X)` checks. With it, each state is an object that knows exactly what to do when any event fires — and invalid events are simply no-ops.
 
-**Why it matters**: This problem exercises State pattern, Chain of Responsibility (for cash dispensing denominations), Command pattern (reversible transactions), and Observer (receipts). It's a rich pattern playground in a familiar real-world context.
+**Why it matters**: This problem exercises the State pattern (session phases), the Command pattern (reversible transactions with a rollback log), and Facade (collapsing the five-step protocol into one call). It's a rich pattern playground in a familiar real-world context.
 
-**Key insight**: The cash dispensing algorithm (largest denomination first — greedy) and the lockout-after-3-failures logic are where most candidates stumble. Think through these edge cases before reaching for the keyboard.
+**Key insight**: The cash dispensing algorithm (largest denomination first — greedy) and the lockout-after-3-failures logic are where most candidates stumble. Greedy is the *obvious* answer and it is not a complete one — say so before the interviewer does.
 
 ---
 
@@ -44,11 +44,11 @@ stateDiagram-v2
     TRANSACTION --> OUT_OF_CASH : processTransaction() success, cash exhausted
     TRANSACTION --> IDLE : ejectCard()
 
-    OUT_OF_CASH --> OUT_OF_CASH : any action rejected
-    OUT_OF_CASH --> IDLE : technician refills cash
+    OUT_OF_CASH --> OUT_OF_CASH : any customer action rejected
+    OUT_OF_CASH --> IDLE : refillCash() by technician
 ```
 
-Five states, one absorbing state: `ejectCard()` and three wrong PIN attempts always fall back to `IDLE`, `processTransaction()` forks to `OUT_OF_CASH` the instant the cassette empties, and only a technician refill escapes `OUT_OF_CASH` — the table below is the authoritative version this diagram mirrors.
+Five states: `ejectCard()` and three wrong PIN attempts always fall back to `IDLE`, `processTransaction()` forks to `OUT_OF_CASH` the instant the cassette empties, and `OUT_OF_CASH` rejects every *customer* action — only `ATMContext.refillCash()`, a technician action deliberately kept off the `ATMStateHandler` interface, returns the machine to `IDLE`. The table below is the authoritative version this diagram mirrors.
 
 **Valid transitions summary:**
 
@@ -62,7 +62,8 @@ Five states, one absorbing state: `ejectCard()` and three wrong PIN attempts alw
 | PIN_VERIFIED     | ejectCard()             | IDLE             |
 | TRANSACTION      | processTransaction()    | PIN_VERIFIED / OUT_OF_CASH |
 | TRANSACTION      | ejectCard()             | IDLE             |
-| OUT_OF_CASH      | (any)                   | OUT_OF_CASH      |
+| OUT_OF_CASH      | (any customer action)   | OUT_OF_CASH      |
+| OUT_OF_CASH      | refillCash() [technician] | IDLE           |
 
 ---
 
@@ -142,6 +143,7 @@ classDiagram
         +selectTransaction()
         +processTransaction()
         +ejectCard()
+        +refillCash(Map)
     }
 
     class ATMFacade {
@@ -178,9 +180,9 @@ State (`ATMStateHandler` + 5 handlers), Command (`Transaction` + 4 concrete tran
 
 ---
 
-## Cash Dispensing Algorithm (Chain of Responsibility)
+## Cash Dispensing Algorithm (greedy, largest denomination first)
 
-The Intuition section flags denomination-aware dispensing as a place candidates stumble: each denomination behaves like a handler in a chain, greedily taking as many notes as it can before passing the remainder to the next-smaller denomination.
+The Intuition section flags denomination-aware dispensing as a place candidates stumble. `Cash` keeps its denominations in a `TreeMap` sorted high-to-low and walks it once, taking as many notes of each denomination as the remainder and the note count allow. It is a single greedy pass over a sorted map — *not* a Chain of Responsibility: there are no handler objects and no successor links, only loop iterations.
 
 ```mermaid
 flowchart LR
@@ -192,9 +194,9 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    In(["remaining = withdrawal amount"]) --> H1["Highest-denomination handler<br/>take as many notes as possible"]
-    H1 --> H2["Next-denomination handler<br/>same rule on the remainder"]
-    H2 --> H3["Lowest-denomination handler<br/>same rule on the remainder"]
+    In(["remaining = withdrawal amount"]) --> H1["Highest denomination<br/>take as many notes as possible"]
+    H1 --> H2["Next denomination<br/>same rule on the remainder"]
+    H2 --> H3["Lowest denomination<br/>same rule on the remainder"]
     H3 --> Chk{"remainder is zero?"}
     Chk -->|"yes"| Ok(["dispense approved<br/>Cash.dispense()"])
     Chk -->|"no"| Bad(["reject: no partial dispense<br/>Cash.canDispense() = false"])
@@ -206,7 +208,9 @@ flowchart LR
     class Bad lossN
 ```
 
-This is exactly the `Cash.canDispense()` / `Cash.dispense()` pair from the class diagram above, made concrete: the ATM never partially dispenses, so a chain that bottoms out with a nonzero remainder must reject the whole withdrawal rather than hand over an incomplete stack of notes.
+This is exactly the `Cash.canDispense()` / `Cash.dispense()` pair from the class diagram above, made concrete: the ATM never partially dispenses, so a pass that bottoms out with a nonzero remainder must reject the whole withdrawal rather than hand over an incomplete stack of notes.
+
+**Greedy is not exhaustive — and this is the interview trap.** A single high-to-low pass finds a valid combination only when the denominations are *canonical* (each note divides evenly into the ones above it, as US $100/$50/$20/$10 nearly is) **and** every needed note is in stock. Once note counts are finite, greedy rejects amounts that are genuinely dispensable: with one $50 and three $20s in the cassettes, `canDispense(60)` takes the $50 first, is left with $10 it cannot make, and returns `false` — even though three $20s pay it exactly. An exhaustive answer needs a bounded-knapsack DP or backtracking over `(denomination, count)` pairs; state the greedy limitation explicitly rather than letting the interviewer find it.
 
 ---
 

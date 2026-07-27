@@ -4,7 +4,7 @@
 
 > **Design intuition**: Tic-Tac-Toe looks trivial at 3x3, which is exactly why interviewers use it to probe generalization skill — can you design a board that works for any NxN size, and can you reason about the *cost* of checking for a win after every move? It also gives you a clean, low-stakes surface to demonstrate Player abstraction (human vs. AI) and a State-driven game lifecycle.
 
-**Key insight**: A naive win-check rescans the entire board after every move — O(N^2) cell reads for an NxN board. A senior solution instead maintains incremental counters for every row, column, and the two diagonals, and updates only the four counters touched by the *last* move — O(N) (in fact O(1) amortized per axis, O(N) total across the four checks). For N=1000, that's the difference between 1,000,000 cell checks per move versus 4 integer updates. This single optimization is the detail that separates junior from senior solutions on this problem.
+**Key insight**: A naive win-check rescans the entire board after every move — O(N^2) cell reads for an NxN board. A senior solution instead maintains incremental counters for every row, column, and the two diagonals, and updates only the four counters touched by the *last* move: four increments and four comparisons, so the whole win-check is **O(1) per move, independent of N**. (The counter *arrays* are O(N) space; the per-move work is not.) For N=1000, that's the difference between 1,000,000 cell checks per move versus 4 integer updates. This single optimization is the detail that separates junior from senior solutions on this problem.
 
 ---
 
@@ -31,7 +31,7 @@ Design an NxN Tic-Tac-Toe game that supports:
 6. Support pluggable player types (`HumanPlayer`, `AIPlayer`) behind a common `Player` abstraction
 
 ### Non-Functional
-- The win-check must be **O(N)**, not O(N^2), so the design scales to large boards (this is the primary thing the interviewer is grading)
+- The win-check must be **O(1) per move**, not O(N^2), so the design scales to large boards (this is the primary thing the interviewer is grading); the counters cost O(N) *space*, which is the trade being made
 - `Board` encapsulates its grid and counters — no external class mutates cells directly
 - The design must be extensible to new player types (e.g., remote/networked players) without modifying `TicTacToeGame`
 - `GameState` must gate which operations are valid — no moves once the game is `WIN` or `DRAW`
@@ -188,7 +188,7 @@ A `PlayerFactory` was considered for creating `HumanPlayer`/`AIPlayer` instances
 
 | Decision | Alternative | Reason chosen |
 |----------|-------------|---------------|
-| O(N) incremental row/col/diagonal counters, updated on each move | O(N^2) full-board rescan after each move | At N=3 the difference is negligible (9 vs. 4 checks), but at N=1000 it's 1,000,000 cell reads vs. 4 counter updates per move — incremental counters are the only approach that scales |
+| O(1)-per-move incremental row/col/diagonal counters (O(N) space) | O(N^2) full-board rescan after each move | At N=3 the difference is negligible (9 vs. 4 checks), but at N=1000 it's 1,000,000 cell reads vs. 4 counter updates per move — incremental counters are the only approach that scales |
 | Generalized NxN `Board` (size passed to constructor) | Hardcoded 3x3 arrays/constants | Interviewers explicitly probe generalization; a `final int size` field and loops parameterized on it cost nothing extra in the 3x3 case |
 | Per-symbol counter encoding via separate `+1`/`-1` contributions summed into a single `int[]` per axis | Separate counter arrays per symbol (`xRowCounts[]`, `oRowCounts[]`) | A signed running sum (X contributes +1, O contributes -1) lets a single comparison (`== size` or `== -size`) detect a win for either symbol, halving the state to maintain; documented inline since the encoding is non-obvious |
 | 2D `Symbol[][]` grid | Flat 1D array with `row * size + col` indexing | 2D array reads as `grid[row][col]`, matching the problem's natural mental model; the flat array's minor cache-locality benefit isn't worth the indexing-bug risk in an interview setting |
@@ -292,7 +292,7 @@ Turn 7: Human(X) moves
 -----------
  O | O | X
 
->>> Game Over: X_WINS   (main diagonal: (0,0)-(1,1)-(2,2))
+>>> Game Over: X_WINS
 
 --- Invalid move demo ---
 Attempting to play on occupied cell (1,1)...
@@ -300,9 +300,13 @@ Caught: Cell (1,1) is already occupied.
 
 Attempting to play out-of-bounds cell (3,3)...
 Caught: Move (3,3) is out of bounds for a 3x3 board.
+
+========================================
+              Demo complete
+========================================
 ```
 
-This run shows a "fork": X's move on turn 3 threatens the top row `(0,0)-(0,1)-(0,2)`, so O blocks at `(0,2)` on turn 4. X's move on turn 5 (center) simultaneously threatens column 1 `(0,1)-(1,1)-(2,1)` and the main diagonal `(0,0)-(1,1)-(2,2)`. O can only block one (column 1, turn 6); X completes the main diagonal on turn 7 and wins. Each of these checks is a single counter comparison, not a board rescan.
+X wins on the main diagonal `(0,0)-(1,1)-(2,2)`. This run shows a "fork": X's move on turn 3 threatens the top row `(0,0)-(0,1)-(0,2)`, so O blocks at `(0,2)` on turn 4. X's move on turn 5 (center) simultaneously threatens column 1 `(0,1)-(1,1)-(2,1)` and the main diagonal `(0,0)-(1,1)-(2,2)`. O can only block one (column 1, turn 6); X completes the main diagonal on turn 7 and wins. Each of these checks is a single counter comparison, not a board rescan.
 
 ---
 

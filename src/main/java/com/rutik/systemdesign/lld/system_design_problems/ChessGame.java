@@ -70,6 +70,8 @@ abstract class Piece {
     public PieceType getType() { return type; }
     public boolean hasMoved()  { return hasMoved; }
     public void setMoved()     { hasMoved = true; }
+    /** Restores the flag when a move is undone (a pawn regains its two-square option). */
+    public void setMoved(boolean moved) { hasMoved = moved; }
 
     /** Returns all positions this piece could legally move to (ignores check). */
     public abstract List<Position> getValidMoves(Position current, Board board);
@@ -92,7 +94,12 @@ abstract class Piece {
 
     @Override
     public String toString() {
-        return color.name().charAt(0) + type.name().substring(0, 1);
+        // Standard algebraic letters: the knight is N, so it does not collide with the king.
+        String letter = switch (type) {
+            case KNIGHT -> "N";
+            default     -> type.name().substring(0, 1);
+        };
+        return color.name().charAt(0) + letter;
     }
 }
 
@@ -268,10 +275,15 @@ class Board {
         return Optional.empty();
     }
 
-    /** Standard chess starting position. */
+    /** Clears every square. */
+    public void clearAll() {
+        for (Optional<Piece>[] row : grid) Arrays.fill(row, Optional.empty());
+    }
+
+    /** Standard chess starting position, applied to THIS board instance. */
     public void setupInitialPosition() {
-        reset();
-        Board b = getInstance();
+        clearAll();
+        Board b = this;
         // White back rank
         b.setPiece(new Position(0,0), new Rook(Color.WHITE));
         b.setPiece(new Position(0,1), new Knight(Color.WHITE));
@@ -354,14 +366,22 @@ interface MoveCommand {
 class ChessMoveCommand implements MoveCommand {
     private final Move move;
     private final Board board;
+    private boolean pieceHadMovedBefore; // captured at execute() so undo() can restore it
 
     public ChessMoveCommand(Move move, Board board) {
         this.move  = move;
         this.board = board;
     }
 
-    @Override public void execute() { board.applyMove(move); }
-    @Override public void undo()    { board.undoMove(move); }
+    @Override public void execute() {
+        pieceHadMovedBefore = move.getPiece().hasMoved();
+        board.applyMove(move);
+    }
+
+    @Override public void undo() {
+        board.undoMove(move);
+        move.getPiece().setMoved(pieceHadMovedBefore);
+    }
     @Override public Move getMove() { return move; }
 }
 
@@ -475,7 +495,7 @@ class GameClock {
  *   - Check / checkmate detection
  *   - Notifying all registered observers
  */
-class ChessGame {
+public class ChessGame {
     private final Board board;
     private final MoveHistory history = new MoveHistory();
     private final List<GameObserver> observers = new ArrayList<>();
@@ -643,13 +663,10 @@ class ChessGame {
     public MoveHistory getHistory() { return history; }
     public Board getBoard()       { return board; }
     public boolean isGameOver()   { return gameOver; }
-}
 
-// ─────────────────────────────────────────────
-// MAIN / DEMO
-// ─────────────────────────────────────────────
-
-public class ChessGame {
+    // ─────────────────────────────────────────────
+    // MAIN / DEMO
+    // ─────────────────────────────────────────────
 
     public static void main(String[] args) {
         System.out.println("╔══════════════════════════════════════╗");
@@ -701,19 +718,19 @@ public class ChessGame {
 
         // ── Scenario 8: Scholar's Mate setup (manual check demo) ─
         System.out.println("\n>>> Scenario 8: Quick check detection demo");
-        // Reset to a position where White queen threatens Black king
+        // Reset to a position where the White queen threatens the Black king
         Board.reset();
-        Board freshBoard = Board.getInstance();
-        // Place minimal pieces: White queen at d5, Black king at e8
-        freshBoard.setPiece(new Position(7, 4), new King(Color.BLACK));
-        freshBoard.setPiece(new Position(0, 4), new King(Color.WHITE));
-        freshBoard.setPiece(new Position(4, 3), new Queen(Color.WHITE)); // d5
-
         GameClock clock2 = new GameClock(600000, 600000);
-        ChessGame game2  = new ChessGame(clock2) {
-            // Override to use the manually-set board (skip setupInitialPosition)
-        };
-        // We'll check manually:
+        ChessGame game2  = new ChessGame(clock2);
+
+        // Wipe the standard opening and place a minimal position instead:
+        // White queen e5, Black king e8 (same file, nothing in between) -> Black is in check.
+        Board freshBoard = game2.getBoard();
+        freshBoard.clearAll();
+        freshBoard.setPiece(new Position(7, 4), new King(Color.BLACK));   // e8
+        freshBoard.setPiece(new Position(0, 4), new King(Color.WHITE));   // e1
+        freshBoard.setPiece(new Position(4, 4), new Queen(Color.WHITE));  // e5
+
         boolean whiteInCheck = game2.isInCheck(Color.WHITE);
         boolean blackInCheck = game2.isInCheck(Color.BLACK);
         System.out.println("White in check: " + whiteInCheck);

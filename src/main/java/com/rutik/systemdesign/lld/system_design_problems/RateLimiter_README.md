@@ -99,9 +99,15 @@ classDiagram
         TOKEN_BUCKET
     }
 
-    class WindowCounter {
-        -windowStartSec long
+    class FixedWindowCounter["FixedWindowCounterRateLimiter.WindowCounter"] {
+        -windowStartMs long
         -count int
+    }
+
+    class SlidingWindowCounter["SlidingWindowCounterRateLimiter.WindowCounter"] {
+        -currentWindowStart long
+        -currentCount int
+        -previousCount int
     }
 
     class Bucket {
@@ -116,12 +122,12 @@ classDiagram
     RateLimiterFactory ..> RateLimiterConfig : reads
     RateLimiterFactory ..> RateLimiterType : switches on
     RateLimiterFactory ..> RateLimiter : creates
-    FixedWindowCounterRateLimiter "1" *-- "*" WindowCounter : per-client state
-    SlidingWindowCounterRateLimiter "1" *-- "*" WindowCounter : per-client state
+    FixedWindowCounterRateLimiter "1" *-- "*" FixedWindowCounter : per-client state
+    SlidingWindowCounterRateLimiter "1" *-- "*" SlidingWindowCounter : per-client state
     TokenBucketRateLimiter "1" *-- "*" Bucket : per-client state
 ```
 
-Strategy (`RateLimiter` realized by all four algorithms), Factory (`RateLimiterFactory` turns a `RateLimiterType` + `RateLimiterConfig` into the right concrete class), and the per-client state records (`WindowCounter` shared by the two window-based algorithms, `Bucket` for Token Bucket) that keep each implementation's memory footprint at O(1) — `SlidingWindowLogRateLimiter` is the odd one out, storing a `Deque<Long>` of raw timestamps per client instead, which is exactly the O(N) memory tradeoff called out below.
+Strategy (`RateLimiter` realized by all four algorithms), Factory (`RateLimiterFactory` turns a `RateLimiterType` + `RateLimiterConfig` into the right concrete class), and the per-client state records that keep each implementation's memory footprint at O(1). The two window algorithms each declare their **own** private `WindowCounter` nested class — same name, different fields: Fixed Window needs only `(windowStartMs, count)`, while Sliding Window Counter also carries `previousCount` so it can weight the overlap. `SlidingWindowLogRateLimiter` is the odd one out, storing a `Deque<Long>` of raw timestamps per client instead, which is exactly the O(N) memory tradeoff called out below.
 
 ---
 
@@ -134,7 +140,9 @@ Strategy (`RateLimiter` realized by all four algorithms), Factory (`RateLimiterF
 
 ---
 
-### 2. Factory — `RateLimiterFactory`
+### 2. Simple Factory — `RateLimiterFactory`
+**Name it precisely**: this is a **Simple Factory** — one static `create(...)` switching on an enum — not the GoF **Factory Method** (which defers instantiation to a subclass overriding a factory operation) and not **Abstract Factory** (families of related products). Simple Factory is not in the GoF catalogue at all; calling it "Factory Method" in an interview is a cheap point to lose.
+
 **Why**: Centralizes the mapping from a `RateLimiterType` enum + `RateLimiterConfig` to the correct concrete class, so callers never instantiate `new TokenBucketRateLimiter(...)` directly. This keeps construction logic in one place and makes it trivial to add a fifth algorithm later without touching call sites.
 
 **How**: `RateLimiterFactory.create(RateLimiterType type, RateLimiterConfig config)` switches on the enum and returns the matching `RateLimiter` implementation, passing through only the config fields that algorithm needs (e.g., Token Bucket ignores `windowSizeMs` and reads `bucketCapacity` / `refillTokensPerSecond` instead).
@@ -175,7 +183,7 @@ sequenceDiagram
 |-----------|-------------------|-------------------------------|-----------------|----------------------------|
 | **Fixed Window Counter** | O(1) — one counter + one timestamp | Poor — allows up to **2x the limit** in a short window straddling two windows (e.g., limit=5, a client can send 5 requests at 0:59.9 and 5 more at 1:00.1 = 10 in 0.2s) | None beyond the 2x boundary artifact | Lowest — one map, one comparison, one reset |
 | **Sliding Window Log** | O(N) where N = limit (e.g., 1000 timestamps stored per client for a 1000 req/min limit — roughly 8KB/client at 8 bytes/timestamp) | Exact — never over- or under-counts, by definition | None — strictly enforces the limit over any rolling window | Medium — deque eviction on every call, O(N) worst case per check |
-| **Sliding Window Counter** | O(1) — two counters (current + previous window) | Good approximation — error bounded by the assumption that requests are evenly distributed within each window; used by Cloudflare and Kong in production | Smooths the 2x boundary artifact down to a small, bounded overshoot | Medium — requires weighted-overlap arithmetic each call |
+| **Sliding Window Counter** | O(1) — two counters (current + previous window) | Good approximation — error bounded by the assumption that requests are evenly distributed within each window. Cloudflare measured 0.003% of requests wrongly allowed or limited over 400M requests, with a 6% average gap between the real and approximated rate; Kong's Rate Limiting Advanced plugin ships the same weighted-previous-window scheme as its default and recommended window type | Smooths the 2x boundary artifact down to a small, bounded overshoot | Medium — requires weighted-overlap arithmetic each call |
 | **Token Bucket** | O(1) — two fields per client (`tokens`, `lastRefillTimestamp`) | N/A (not window-based) — enforces an average rate, not a per-window count | **Best** — explicitly designed to allow a controlled burst up to `bucketCapacity`, then throttle to `refillRate` | Medium — lazy refill calculation (elapsed time × rate) on every call |
 
 **Why Token Bucket is the most commonly chosen default in production**: O(1) memory, allows legitimate bursty traffic (a user who was idle for 10 seconds and then clicks 5 things rapidly shouldn't be punished), and the two tunables (`capacity`, `refillRate`) map intuitively onto SLA language ("burst up to 10, sustained 1/sec").
@@ -225,6 +233,13 @@ Result: the same fleet costs 8GB under Sliding Window Log and 16MB under Token B
 gap, and the concrete reason the "exact" algorithm loses in production despite being correct.
 Note that the log's bill grows when you make the limit *more generous*, which is the opposite of
 the intuition that a looser limit is cheaper to enforce.
+
+Every figure above uses 8 bytes = one primitive `long`, which is the **floor**. The implementation
+stores boxed values in an `ArrayDeque<Long>`, so each entry really costs a 24-byte `Long` object
+(12-byte header + 8-byte payload, padded to 24) plus the array slot holding the reference — about
+28 bytes with compressed oops, 32 without. That is 3.5-4x the floor. A `long[]` ring buffer per
+client is the standard fix; either way the 500x gap is a lower bound on how badly the log loses,
+not an upper one.
 
 Turning the tradeoffs above into a concrete decision procedure for the interview:
 

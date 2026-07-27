@@ -515,6 +515,18 @@ class ATMContext {
     public void processTransaction(Transaction t)  { state.processTransaction(this, t); }
     public void ejectCard()                        { state.ejectCard(this); }
 
+    /**
+     * Technician action (not a customer action, so it is not on ATMStateHandler):
+     * refills the cassettes and returns an out-of-cash machine to service.
+     */
+    public void refillCash(Map<Integer, Integer> notes) {
+        cash.addCash(notes);
+        if (state instanceof OutOfCashState) {
+            System.out.println("[Technician] Cash refilled — ATM back in service.");
+            state = new IdleState();
+        }
+    }
+
     // ── Accessors used by state implementations ────────────────
 
     public void setState(ATMStateHandler s)          { this.state = s; }

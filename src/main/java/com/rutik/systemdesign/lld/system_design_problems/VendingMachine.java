@@ -22,7 +22,7 @@ package com.rutik.systemdesign.lld.system_design_problems; /**
  *   * ──outOfStock──► OutOfStock ──restock──► Idle
  */
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 // ─────────────────────────────────────────────────────────────
@@ -51,8 +51,10 @@ class Item {
 }
 
 class Inventory {
-    private final Map<String, Item> items = new HashMap<>();
-    private final Map<String, Integer> quantities = new HashMap<>();
+    // LinkedHashMap, not HashMap: the menu must print in the order items were
+    // stocked (A1, B1, C1, D1), not in hash order.
+    private final Map<String, Item> items = new LinkedHashMap<>();
+    private final Map<String, Integer> quantities = new LinkedHashMap<>();
 
     public void addItem(Item item, int quantity) {
         items.put(item.getCode(), item);
@@ -79,11 +81,13 @@ class Inventory {
 
     public void displayMenu() {
         System.out.println("  ┌─────────────────────────────────┐");
-        System.out.println("  │         AVAILABLE ITEMS          │");
+        System.out.println("  │         AVAILABLE ITEMS         │");
         System.out.println("  ├─────────────────────────────────┤");
         items.forEach((code, item) -> {
             int qty = quantities.getOrDefault(code, 0);
-            String status = qty > 0 ? "qty=" + qty : "OUT OF STOCK";
+            // "OUT" not "OUT OF STOCK": the long form overflows the 32-column
+            // cell and pushes the right border out of line.
+            String status = qty > 0 ? "qty=" + qty : "OUT";
             System.out.printf("  │ %-32s│%n",
                     String.format("[%s] %-12s $%.2f (%s)", code, item.getName(), item.getPrice(), status));
         });

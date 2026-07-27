@@ -268,6 +268,11 @@ class ParkingFloor {
         notifyObservers(spot.getSpotType());
     }
 
+    /** True if this floor owns the given spot — used to vacate on the right floor. */
+    public boolean hasSpot(ParkingSpot spot) {
+        return spotsByType.get(spot.getSpotType()).contains(spot);
+    }
+
     // Notify all registered observers about the updated count (Observer pattern)
     private void notifyObservers(ParkingSpotType type) {
         long available = spotsByType.get(type).stream().filter(ParkingSpot::isAvailable).count();
@@ -357,10 +362,12 @@ class ParkingLotSystem {
         ticket.markPaid(fee);
         activeTickets.remove(ticket.getTicketId());
 
-        // Vacate the spot on the owning floor
+        // Vacate the spot on the floor that actually owns it. Testing
+        // spot.isAvailable() here would be a bug: the condition does not depend on
+        // `floor`, so every exit would notify floor 0's display boards.
         ParkingSpot spot = ticket.getSpot();
         for (ParkingFloor floor : floors) {
-            if (!spot.isAvailable()) { // still occupied → this is the floor to free
+            if (floor.hasSpot(spot)) {
                 floor.vacateSpot(spot);
                 break;
             }

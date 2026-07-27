@@ -80,15 +80,13 @@ class Board {
     }
 
     /**
-     * Places {@code symbol} at (row, col), updates the O(N)-maintainable
-     * row/column/diagonal counters in O(1), and returns whether this move
-     * just completed a winning line.
+     * Places {@code symbol} at (row, col), updates the row/column/diagonal
+     * counters, and returns whether this move just completed a winning line.
      *
-     * Total work per move is O(1) for the grid write plus O(1) for each of
-     * the (up to) four counters touched — O(1) amortized, O(N) only in the
-     * sense that each counter itself ranges over N cells conceptually; we
-     * never iterate over those N cells again. Contrast with a full-board
-     * rescan, which is O(N^2) per move.
+     * Total work per move is O(1): one grid write, at most four counter
+     * increments, and four comparisons against {@code size} — no loop over N
+     * anywhere. The counter arrays cost O(N) SPACE; that is the trade. Contrast
+     * with a full-board rescan, which is O(N^2) per move.
      */
     public boolean placeMove(int row, int col, Symbol symbol) {
         if (!isInBounds(row, col)) {

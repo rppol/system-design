@@ -8,7 +8,7 @@
 
 **Why it matters**: This problem exercises State pattern (elevator states), Strategy pattern (scheduling algorithms), Observer pattern (passenger notifications), and Command pattern (queued requests). It demonstrates how to combine multiple patterns coherently.
 
-**Key insight**: The hardest design decision is the dispatch interface — `ElevatorScheduler.assignElevator(List<Elevator>, Request)`. Get this abstraction right and swapping algorithms becomes trivial. Get it wrong and every algorithm change requires touching `ElevatorCar`.
+**Key insight**: The hardest design decision is the dispatch interface — `ElevatorScheduler.selectElevator(List<ElevatorCar>, Request)`. Get this abstraction right and swapping algorithms becomes trivial. Get it wrong and every algorithm change requires touching `ElevatorCar`.
 
 ---
 
@@ -56,17 +56,17 @@ classDiagram
     }
     class ElevatorScheduler {
         <<interface>>
-        +selectElevator()
+        +selectElevator(cars, req)
     }
     class FCFSScheduler {
-        +selectElevator()
+        +selectElevator(cars, req)
     }
     class SCANScheduler {
-        +selectElevator()
+        +selectElevator(cars, req)
     }
     class ElevatorController {
         +addRequest()
-        +processAllReqs()
+        +processAllRequests()
     }
     class ElevatorCar {
         <<Context>>
@@ -88,6 +88,7 @@ classDiagram
         +openDoor()
         +closeDoor()
         +emergencyStop()
+        +stateName() String
     }
     class MovingState {
         +requestFloor()
@@ -161,8 +162,10 @@ classDiagram
 
 | Scheduler    | Algorithm                                                       | Best for                |
 |--------------|-----------------------------------------------------------------|-------------------------|
-| FCFSScheduler| Assign to elevator with fewest pending stops                    | Low traffic, simplicity |
-| SCANScheduler| Prefer same-direction elevator that hasn't passed the floor yet | High traffic, efficiency|
+| FCFSScheduler| Assign to the available elevator with fewest pending stops      | Low traffic, simplicity |
+| SCANScheduler| Cost = floor distance, +10 penalty if the car must reverse      | High traffic, efficiency|
+
+**Name the policy honestly in an interview.** `FCFSScheduler` is the conventional label for the "no clever dispatch" baseline, but what it actually implements is **least-loaded / shortest-queue** selection: `min(pendingStops)` over available cars. Strict first-come-first-served would serve calls in arrival order regardless of car position, which is worse still. `SCANScheduler` likewise implements the *cost-function* flavour of SCAN — nearest car, plus a fixed 10-floor penalty when the car would have to reverse — rather than a literal sweep to the top of the shaft and back. Both are the right shape for an LLD answer; claiming they are the textbook algorithms verbatim is not.
 
 ```mermaid
 flowchart LR
@@ -310,9 +313,16 @@ FCFS can cause thrashing (elevators reversing direction constantly).
   [Elevator 1] State: STOPPED → MOVING
 [System] Request(floor=7, dir=DOWN) → assigned to Elevator 2
   [Elevator 2 | STOPPED] Floor 7 added. Starting movement.
+  [Elevator 2] State: STOPPED → MOVING
+...
 
 --- Processing all requests ---
-[Controller] Elevator 1: processing queue
+[Controller] Elevator 1: processing queue — Elevator[id=1, floor=1, dir=UP, state=MOVING, pending=[2, 3, 6]]
+  [Elevator 1] Arrived at floor 2 (dir=UP, remaining=[3, 6])
+  [Elevator 1] State: MOVING → STOPPED
+  [Elevator 1 | STOPPED] Doors opening at floor 2.
+  [Elevator 1 | STOPPED] Doors closing.
+  [Elevator 1] State: STOPPED → MOVING
   [Elevator 1] Arrived at floor 3 (dir=UP, remaining=[6])
   [Elevator 1] State: MOVING → STOPPED
   [Elevator 1 | STOPPED] Doors opening at floor 3.
@@ -321,7 +331,16 @@ FCFS can cause thrashing (elevators reversing direction constantly).
 ...
 
 --- Emergency stop on Elevator 1 ---
+  [Elevator 1 | STOPPED] Floor 8 added. Starting movement.
+  [Elevator 1] State: STOPPED → MOVING
   [Elevator 1 | MOVING] EMERGENCY STOP at floor 6!
   [Elevator 1] State: MOVING → MAINTENANCE
   [Elevator 1 | MAINTENANCE] Cannot accept requests.
+
+--- Switching to FCFS scheduler ---
+[System] Request(floor=4, dir=UP) → assigned to Elevator 2
+[Controller] Elevator 1: processing queue — Elevator[id=1, floor=6, dir=UP, state=MAINTENANCE, pending=[8]]
+[Controller] Elevator 1: in MAINTENANCE, skipped
 ```
+
+The last two lines are the point of the MAINTENANCE state: floor 8 is still queued, but the car stays out of service and the controller refuses to step it — the queue is frozen, not served.
