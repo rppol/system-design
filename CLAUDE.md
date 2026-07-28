@@ -124,6 +124,29 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
   of handling deprecation (surviving a vendor retirement, versioning your own API, a
   published lifecycle policy, a `deprecated` enum value) is content and stays.
 
+### Case-study Q&As are NEVER part of the quiz (owner-set 2026-07-28)
+
+**Both forms are excluded, repo-wide:** a dedicated file under `case_studies/`, and a
+`## N. Case Study` section inside a module README or sub-file. A case study's Q&As are
+discussion prompts tied to one scenario — they do not stand alone as MCQ items, and the
+distractor pool would be drawn from an unrelated scenario.
+
+`extract.py` already satisfies this: `case_studies/` paths are skipped outright, and an
+in-file Q&A span opens only on a heading matching `interview q` and closes at the next `##`,
+so anything parked under `## N. Case Study` falls outside it. **182 in-file case-study Q&As
+(llm 99, hld 83) are correctly excluded today — that is the rule working, not a bug.**
+
+The consequence for authors: **do not "rescue" case-study Q&As by moving them under the
+interview heading**, and do not file a bug when a `## N. Case Study` Q&A is missing from the
+bank. If a question is genuinely a general interview question, it belongs in
+`## 12. Interview Questions with Answers` on its merits, not because it was hidden.
+
+**What IS a real loss** is a Q&A under a mislabeled *interview* heading — see the game
+compatibility section below. Measured 2026-07-28: **229 such Q&As, 223 of them in `lld`.**
+Measure these directly (bold `**Q:` lines outside any `interview q` span, excluding
+`case_studies/` and `## N. Case Study` sections); a scan for modules with a ZERO question
+count cannot see a partial loss inside an otherwise-healthy module.
+
 ### Planned: authored one-line summaries (NOT YET ACTIVE — do not author these yet)
 
 Today the game derives each MCQ's correct option by taking the answer's first sentence
