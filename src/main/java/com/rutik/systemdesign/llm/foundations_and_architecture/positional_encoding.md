@@ -785,6 +785,38 @@ def build_alibi_bias(
     return alibi  # Add to attention scores before softmax
 ```
 
+### LongRoPE: Searched, Non-Uniform Rescaling
+
+PI, NTK and YaRN all pick their per-dimension treatment from a *formula* — a uniform scale, a
+power law in the base, a ramp between two band edges. LongRoPE (Ding et al., Microsoft, 2024)
+drops the formula and **searches** for the rescale factors instead, exploiting two non-uniformities
+that the closed forms only approximate:
+
+1. **Across RoPE dimensions.** Each dimension pair `i` gets its own learned scale `lambda_i`, so
+   `theta_i -> theta_i / lambda_i` per pair. YaRN's `beta_fast`/`beta_slow` ramp is the two-parameter
+   approximation of this; LongRoPE lets the search assign `d/2` independent values.
+2. **Across token positions.** The first `n_hat` tokens keep their *original*, unscaled positions —
+   interpolating them would blur exactly the local structure the attention sinks and the opening
+   instructions live in. `n_hat` is searched too.
+
+The search is evolutionary: sample populations of `(lambda_0..lambda_{d/2-1}, n_hat)` vectors, mutate
+and recombine, and score each candidate by perplexity on a long-context corpus with **no fine-tuning
+at all**. That is why the same machinery serves two regimes — as a training-free method it buys an
+8x window immediately, and as an initialization it makes the fine-tuned extension far cheaper.
+
+The extension itself is **progressive**, not one jump. Fine-tune to 256K first, run a *second*
+round of positional interpolation on that already-extended model, and only then reach the final
+window — up to 2,048K tokens on LLaMA-2 and Mistral, using at most 1K fine-tuning steps and never
+training on sequences longer than 256K. The last step is the one people forget: **readjust on 8K to
+recover short-context quality**, because a schedule tuned for 2M positions is wrong for a 2K prompt.
+
+That readjustment is why a LongRoPE config carries *two* factor vectors rather than one. Phi-3-mini-128K
+ships `short_factor` and `long_factor` alongside `original_max_position_embeddings`, and the model
+switches between them at runtime on whether the current sequence exceeds the original trained
+window. Serving gotcha: the switch is per-sequence, so a cached prefix built under `short_factor`
+is not reusable once the sequence crosses the threshold and the model flips to `long_factor` — the
+cached keys were rotated with the wrong frequencies.
+
 ---
 
 ## 7. Real-World Examples
@@ -1012,6 +1044,9 @@ Position Interpolation scales the position index: position m is mapped to m×(L/
 
 **Q: What are the three components of YaRN and why is each necessary?**
 YaRN (Peng et al., 2023) extends RoPE with: (1) "NTK-by-parts" interpolation — each dimension pair is ramped between untouched and fully position-interpolated according to `r_i = L / wavelength_i`, the number of complete turns it made inside the trained context. (2) Short-range integrity — this falls out of (1): high-frequency dimensions have large `r_i` and are left unchanged. These dimensions cycle rapidly and capture fine-grained local position differences; scaling them (as plain PI does) would destroy local position information. The band edges are `beta_fast = 32` and `beta_slow = 1`. (3) Temperature adjustment — spreading attention over `s` times more positions flattens the softmax, so YaRN multiplies the attention scale by `sqrt(1/t) = 0.1 * ln(s) + 1` (their fitted form for LLaMA; 1.208 at s=8). Together these give the best published quality for context extension at a few hundred fine-tuning steps.
+
+**Q: How does LongRoPE differ from YaRN, and why does a LongRoPE config carry two factor vectors?**
+LongRoPE searches for a per-dimension RoPE rescale factor with an evolutionary algorithm instead of deriving it from a formula, and it additionally leaves the first `n_hat` token positions unscaled. Those are the two non-uniformities it exploits: across RoPE dimensions (YaRN's `beta_fast`/`beta_slow` ramp is the two-parameter approximation of what LongRoPE searches over `d/2` independent values) and across token positions (early tokens keep their original positions, since interpolating them blurs the local structure at the start of the prompt). Candidates are scored by perplexity on long-context text with no fine-tuning, which is why the same method serves both a training-free 8x extension and a cheap initialization for a fine-tuned one. The extension is staged: fine-tune to 256K, apply a second round of interpolation on the extended model, reach up to 2,048K on LLaMA-2 and Mistral in at most 1K fine-tuning steps without ever training past 256K, then **readjust on 8K to recover short-context quality** — a schedule tuned for 2M positions is wrong for a 2K prompt. That last step is why the config has two vectors: Phi-3-mini-128K ships `short_factor` and `long_factor`, and HuggingFace picks `long_factor` only when the sequence exceeds `original_max_position_embeddings`. The serving consequence is that a prefix cached under `short_factor` cannot be reused once a request crosses that threshold, because the cached keys were rotated at the other set of frequencies.
 
 **Q: Why does ALiBi extrapolate better than sinusoidal APE?**
 Sinusoidal APE assigns each absolute position a fixed code via sin/cos frequencies. These codes are used as inputs to the attention computation. A model trained on positions 0..4095 has never seen position code 4096+; the attention weights were not calibrated for these codes. Extrapolation fails because the model encounters OOD inputs. ALiBi never modifies the token embeddings — positions are only reflected in the attention score bias: `m × (j - i)`. For positions beyond the training length, the model sees a larger negative bias for distant tokens. This is mathematically valid: the model was trained to understand that larger negative biases mean less relevant positions. Since the bias grows linearly (not discretely), positions 0..∞ all produce valid biases. The model generalizes: "this token is very far away → high penalty → attend to it less." This is semantically consistent extrapolation.

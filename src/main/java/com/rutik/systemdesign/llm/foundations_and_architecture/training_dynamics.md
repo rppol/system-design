@@ -541,6 +541,50 @@ borderline `3.1x`. The factor of `3.0` is set loose *on purpose* — a tighter t
 would page on-call for ordinary batch-to-batch variance (`0.6 + 4 x 0.15 = 1.2` is still only `2.0x`
 the mean), and an alarm that cries wolf gets muted, which is how a six-figure divergence goes unnoticed.
 
+### Attention Logit Growth: QK-Norm and Logit Soft-Capping
+
+Section 4.4's "Numerical" row names attention as a source of inf/nan without saying how attention
+produces one. The mechanism is **attention logit growth**: nothing in `QK^T / sqrt(d_k)` bounds the
+score, so if training drives `||q||` and `||k||` upward the maximum logit grows with them, softmax
+saturates to one-hot, the gradient through it collapses, and in BF16 the run either stalls or
+spikes. Wortsman et al. (2023, "Small-scale proxies for large-scale Transformer training
+instabilities") showed this is one of exactly two instabilities that reproduce in *small* models
+simply by raising the learning rate — the other being divergence of the output logits from log
+probabilities — and that the mitigations used at large scale work unchanged at proxy scale. That is
+the practically useful part: a 100M-parameter run at a deliberately high LR is a legitimate test rig
+for a 70B stability decision, in the same spirit as muP's proxy-model transfer above.
+
+Two interventions, applied at different points in the block:
+
+**QK-norm** normalizes the query and key *before* the dot product, per head:
+
+```python
+# Per-head RMSNorm on q and k before the score matmul (Gemma 3 / Chameleon / OLMo 2 style).
+q = self.q_norm(q)                      # RMSNorm over the head_dim axis
+k = self.k_norm(k)                      # separate weights for q and k
+scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+```
+
+RMS-normalizing sets `||q|| = ||k|| = sqrt(d_k)` up to the learned per-channel gain, so the raw
+score is capped near `d_k` and the scaled logit near `sqrt(d_k)` (~11.3 at `d_k = 128`) no matter
+what the projections learn. The failure mode is removed structurally instead of being detected by
+the monitor above. It costs two extra norms per attention layer and is Flash-Attention-compatible,
+because it happens on q and k before the kernel is ever called.
+
+**Logit soft-capping** squashes the score itself: `logits <- cap * tanh(logits / cap)`. Gemma 2 used
+`cap = 50.0` on attention logits and `30.0` on the final LM-head logits. It is a hard bound, but it
+is an elementwise op *on the N x N score matrix*, which is exactly the tensor Flash Attention
+refuses to materialize — enabling it silently forces the slow path (the same trap as Pitfall 1 in
+[attention_mechanisms.md](attention_mechanisms.md)).
+
+The direction of travel is unambiguous: Gemma 3's report states it "replace[s] the soft-capping of
+Gemma 2 with QK-norm", citing the ViT-22B, Wortsman and Chameleon lines of work. For a new run, put
+QK-norm in the architecture from step 0 — retrofitting it into a checkpoint that already has large
+q/k norms changes the function the model computes and needs re-training, so it is not a fix you can
+reach for once the spikes start. The sibling intervention for the *other* instability, output-logit
+divergence, is an auxiliary z-loss on the log-partition; its MoE-router analogue is covered in
+[Mixture of Experts](../mixture_of_experts/README.md).
+
 ### BF16 vs FP16 Numerical Analysis
 
 ```python
@@ -1138,6 +1182,9 @@ def batch_size_schedule(
 
 **Q: Why does transformer training require learning rate warmup but CNN training typically does not?**
 Transformers have strong inter-layer interactions at initialization that make early training unstable without warmup. The Q/K/V projection matrices are initialized randomly, causing attention patterns to be essentially uniform (all positions weighted equally) at step 0. Large gradient updates applied immediately can cause these patterns to collapse (one head attends to only one position) or diverge. Warmup allows gradient magnitudes to start small, giving attention heads time to converge to meaningful patterns before large updates are applied. CNNs have a different inductive bias: convolutional filters are relatively independent of each other at initialization (they process local patches in parallel). There is no equivalent attention-collapse failure mode. The clearest public evidence is indirect but consistent: every published billion-parameter transformer recipe (GPT-3, PaLM, LLaMA, OPT) specifies a warmup phase, and the Post-LN/Pre-LN literature attributes the requirement specifically to gradient magnitudes at early layers.
+
+**Q: What is QK-norm and which training failure does it prevent?**
+QK-norm applies a per-head RMSNorm or LayerNorm to the query and key vectors before their dot product, bounding the attention logits so they cannot grow without limit as training proceeds. The failure it prevents is attention logit growth: nothing in `QK^T/sqrt(d_k)` bounds the score, so a run that steadily inflates `||q||` and `||k||` eventually saturates the softmax to one-hot, kills the gradient through it, and spikes or stalls. Wortsman et al. (2023) showed this instability and output-logit divergence are the two large-scale failures that reproduce in small models purely by raising the learning rate — which is what makes a cheap proxy run a valid test rig for the decision. The main alternative, logit soft-capping (`cap * tanh(logits/cap)`; Gemma 2 used 50.0 for attention and 30.0 for the LM head), bounds the same quantity but operates on the N×N score matrix, so it is incompatible with Flash Attention and silently forces the slow path; QK-norm acts on q and k before the kernel is called and is therefore free of that constraint. Gemma 3 states it replaced Gemma 2's soft-capping with QK-norm. Decide this at architecture time — bolting QK-norm onto a checkpoint whose q/k norms are already large changes the function it computes and requires re-training.
 
 **Q: What is the critical batch size and why does batch scaling above it fail?**
 The critical batch size is the point at which increasing batch size no longer improves convergence per gradient update. Below the critical batch, stochastic gradient estimates are noisy — each mini-batch gives a different gradient direction. Averaging more samples (larger batch) gives a better gradient estimate, and each step makes more progress. Above the critical batch, the gradient estimate is essentially noise-free — it closely approximates the true full-batch gradient. Additional samples provide redundant signal; doubling the batch from 1M tokens to 2M tokens doubles the compute cost per step but provides no additional gradient information per step. The linear scaling rule (double batch → double LR) is valid below and at the critical batch but fails above it (the LR increase is not justified by noise reduction). For GPT-3-class models, the critical batch is approximately 1-3 million tokens; for 70B models, ~2-5 million tokens. LAMB addresses this by adjusting LR per layer based on gradient-to-weight ratio, enabling effective training at larger batches.

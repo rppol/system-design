@@ -698,6 +698,48 @@ class SinkKVCache:
         return full_k, full_v
 ```
 
+### Trainable Sparse Attention (NSA, DeepSeek DSA)
+
+Section 4.3's sparse family (Longformer, BigBird) failed for a reason that is easy to state and was
+easy to miss: the sparsity pattern was **hand-designed and bolted on after pre-training**, so the
+model had never learned to route information through it, and the custom kernels were slower than
+dense Flash Attention at the context lengths people actually served. The 2025 generation fixes both
+halves — the pattern is *learned end-to-end during pre-training*, and the kernel is written so the
+sparsity translates into real memory-traffic savings.
+
+**NSA (Native Sparse Attention, DeepSeek, 2025)** runs three branches per query and mixes them with
+a learned gate `g` per branch:
+
+```
+  branch          what it attends to                              cost
+  ------------    --------------------------------------------    ---------------
+  compression     every block of l=32 tokens, stride d=16,         O(N/d) keys
+                  pooled into one key/value by a learned MLP
+  selection       the top-n=16 blocks of l'=64 tokens, ranked      O(n * l') keys
+                  by importance scores derived from the
+                  compression branch's attention weights
+  sliding window  the last w=512 tokens verbatim                   O(w) keys
+
+  output_t = sum over branches of  g_t^c * Attn(q_t, K_c, V_c)
+```
+
+The design detail that makes it fast is **GQA alignment**: importance scores are summed across all
+query heads in a group so every head in the group selects the *same* blocks, which means one KV read
+serves the whole group. Without that, each head would pull a different set of blocks and decoding
+would become bandwidth-bound again. On 64K sequences NSA reports 9.0x forward, 6.0x backward and up
+to 11.6x decoding speedup over full attention, and matches or beats a full-attention baseline on
+general, long-context and reasoning benchmarks. The decoding number is the largest because decoding
+is memory-bound — one token is produced per full read of the KV cache — so the speedup tracks the
+*KV bytes read*, not the FLOPs saved.
+
+**DeepSeek Sparse Attention (DSA)**, shipped in DeepSeek-V3.2-Exp, is the same idea narrowed for
+production: a lightweight "lightning indexer" scores the cached keys and each query attends to only
+the **top 2,048 tokens**, on top of MLA. It was obtained by continued training from V3.1-Terminus
+rather than pre-training from scratch, and DeepSeek reports output quality on par with the dense
+predecessor. Kernels shipped alongside it in FlashMLA (sparse attention) and DeepGEMM (indexer
+logits, including paged variants), which is the point worth carrying into an interview: a sparse
+attention scheme is only real when its kernel is.
+
 ---
 
 ## 7. Real-World Examples
@@ -921,6 +963,9 @@ The standard backward pass for attention requires storing the attention matrix `
 
 **Q: Explain sparse attention (Longformer, BigBird) and when these approaches fell out of favor.**
 Sparse attention restricts the full O(N²) attention to structured subsets of token pairs, achieving O(N×W) complexity. Longformer: each token attends to a local window of W tokens plus a small set of global tokens (like [CLS], or task-specific tokens like question tokens in QA). BigBird: extends Longformer with random attention connections (each token additionally attends to r random other tokens), providing theoretical guarantees of being a universal approximator. These approaches required custom CUDA kernels that were complex to implement and maintain. Flash Attention changed the equation: FA-2 makes full O(N²) attention cheap enough that sparse attention's complexity savings are often unnecessary. For 8K context, FA-2 attention is fast enough. For 128K+ context where even FA-2 is memory-limited, modern solutions prefer RingAttention (distributes attention across devices) or sliding window attention. Sparse attention patterns (Longformer-style) are still used in some long-context encoder models.
+
+**Q: What changed to make sparse attention viable again after Longformer and BigBird fell out of favor?**
+Trainable sparse attention learns its sparsity pattern during pre-training rather than imposing a fixed hand-designed one afterwards. Longformer/BigBird patterns were chosen by a human and applied to a model that had never been trained to route information through them, and their kernels lost to dense Flash Attention at practical context lengths — so you paid a quality tax for no wall-clock win. NSA (DeepSeek, 2025) instead trains three gated branches end-to-end: compressed block summaries (block 32, stride 16), the top-16 selected blocks of 64 tokens, and a 512-token sliding window. Crucially the block-importance scores are summed across the query heads of a GQA group so all heads in a group select the same blocks — one KV read serves the group, which is what turns sparsity into bandwidth savings rather than scattered reads. NSA reports 9.0x forward, 6.0x backward and up to 11.6x decoding speedup at 64K context while matching full attention on benchmarks; decoding gains most because decoding is memory-bound, so the win tracks KV bytes read. DeepSeek-V3.2-Exp ships the production form, DSA: a lightning indexer selects the top 2,048 tokens per query on top of MLA, obtained by continued training from V3.1-Terminus with kernels released in FlashMLA and DeepGEMM. The interview point: sparse attention is a co-design of pattern, training procedure and kernel — any one of the three missing and it loses to dense FA-2.
 
 **Q: How does the KV cache grow and what strategies exist to manage it?**
 KV cache size = 2 (K+V) × num_kv_heads × d_head × seq_len × num_layers × bytes_per_element. It grows linearly with sequence length. At 128K tokens with LLaMA 3 70B (GQA, 8 KV heads, 80 layers, d_head 128, FP16): ~42GB per sequence. Strategies: (1) GQA/MQA: reduce num_kv_heads (most impactful; discussed above); (2) KV cache quantization: INT8 or FP8 KV cache reduces by 2-4x with <0.5 PPL loss; (3) PagedAttention (vLLM): virtualizes KV cache into fixed-size pages, eliminating fragmentation and enabling 100% KV cache utilization; (4) Prefix caching: share KV cache across requests with common prefixes (e.g., same system prompt); (5) KV eviction (H2O, StreamingLLM): evict low-importance tokens from cache; must keep attention sinks; (6) Sliding window cache: discard all but recent W tokens (loses long-range context).

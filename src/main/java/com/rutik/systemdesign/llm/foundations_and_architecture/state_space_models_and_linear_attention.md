@@ -604,6 +604,49 @@ def parallel_scan(A_seq: torch.Tensor, b_seq: torch.Tensor) -> torch.Tensor:
     return h_reduced
 ```
 
+### 6.5 The Delta Rule: Overwriting a Key Instead of Fading the Whole State
+
+Section 3.6's gate `g_t` can only **fade the entire state uniformly**. That is the wrong tool for
+the most common memory operation in language: the text says "the capital is Paris", then later says
+"the capital is Lyon", and the state must *replace* the value stored under one key while leaving
+every other key untouched. A decay gate cannot express that — turning `g_t` down to erase the stale
+Paris association also erases everything else the state is holding.
+
+The **delta rule** (DeltaNet) writes that operation directly:
+
+```python
+# state S: (d_k, d_v).  k_t, v_t: one step's key and value.  beta_t in [0, 1].
+old = S.T @ k_t                       # what the state currently returns for this key
+S   = S + beta_t * torch.outer(k_t, v_t - old)
+# algebraically identical to:  S = (I - beta_t * k_t k_t^T) @ S + beta_t * outer(k_t, v_t)
+```
+
+This is the classical Widrow-Hoff delta rule, i.e. exactly one gradient step on
+`0.5 * ||S^T k_t - v_t||^2` with step size `beta_t`: at `beta_t = 1` the state's answer for `k_t`
+is overwritten with `v_t` and directions orthogonal to `k_t` are mathematically untouched; at
+`beta_t = 0` nothing is written. Compare with the plain linear-attention update of Section 6.3,
+`S += outer(k_t, v_t)`, which *accumulates* the new value on top of the stale one and leaves the
+read to average the two — the mechanism behind the recall weakness in Section 8.1.
+
+**Gated DeltaNet** (Yang, Kautz & Hatamizadeh, NVIDIA, 2024) keeps both knobs, because they do
+different jobs — the gate gives rapid, wholesale erasure (useful at a document boundary), the delta
+rule gives targeted overwrite:
+
+```
+S_t = alpha_t * (I - beta_t k_t k_t^T) S_{t-1} + beta_t k_t v_t^T
+       ^gate            ^delta rule
+```
+
+It reports beating both Mamba-2 and ungated DeltaNet on language modeling, common-sense reasoning,
+in-context retrieval, length extrapolation and long-context understanding, and — like every other
+family in this file — its authors ship hybrids, pairing Gated DeltaNet layers with sliding-window
+attention or Mamba-2 layers. This is no longer research-only: **Qwen3-Next** (Alibaba, 2025) uses
+Gated DeltaNet for three of every four layers with full gated attention in the fourth, having found
+it stronger on in-context learning than either sliding-window attention or Mamba-2 in their own
+ablations. The generalization worth carrying: `A_t` in Section 3.1 need not be a scalar or diagonal
+decay — a rank-one correction `I - beta k k^T` is still cheap enough to scan, and buys the one
+capability a fixed-size state most obviously lacks.
+
 ---
 
 ## 7. Real-World Examples
@@ -874,6 +917,9 @@ First, check the attention-layer ratio and placement (§5.4) — too few attenti
 
 **Q16: "Will SSMs/linear attention replace Transformer attention?" — how do you frame this for an interviewer?**
 The honest framing is "probably not wholesale, but hybrids are increasingly standard for long-context models." Pure SSMs solve a real problem (KV-cache memory/throughput at long context, §2) but have a real, structural weakness (recall, §8.1) that hasn't been fully closed by gating improvements alone. The trend as of 2026 is **hybrids** (Jamba, Zamba, and others) that get most of the memory benefit while keeping enough attention to preserve recall — and **task-specific pure SSM adoption** where the recall weakness doesn't matter (streaming TTS/audio, §7). Framing it as "attention is being supplemented for specific bottlenecks, not categorically replaced" demonstrates nuanced understanding rather than either "SSMs are a fad" or "SSMs are the future" extremes.
+
+**Q17: What does the delta rule add over a decay gate, and where is it used in production?**
+A decay gate can only fade the whole state uniformly, while the delta rule overwrites the value stored under one specific key and leaves every other direction untouched. Concretely, DeltaNet's update is `S_t = (I - beta_t k_t k_t^T) S_{t-1} + beta_t k_t v_t^T`, which is exactly one Widrow-Hoff gradient step on `0.5*||S^T k_t - v_t||^2` with step size `beta_t` — at `beta_t = 1` the state's answer for `k_t` becomes `v_t` outright. That is the operation plain linear attention (§6.3) cannot do: `S += k_t v_t^T` accumulates the new value on top of the stale one, so a read averages "Paris" and "Lyon" instead of replacing one with the other, which is a direct contributor to the recall gap in §8.1. Gated DeltaNet (NVIDIA, 2024) keeps both knobs because they do different jobs — `alpha_t` for wholesale erasure at a document boundary, the rank-one delta term for targeted overwrite — and reports beating Mamba-2 and ungated DeltaNet on language modeling, in-context retrieval and long-context understanding. It is shipped, not research-only: Qwen3-Next uses Gated DeltaNet for three of every four layers with full gated attention in the fourth, after finding it stronger on in-context learning than sliding-window attention or Mamba-2 in their own ablations. The generalization to state: `A_t` need not be scalar or diagonal decay — a rank-one correction is still cheap enough to scan.
 
 ---
 
