@@ -352,6 +352,57 @@ training_args = TrainingArguments(
 )
 ```
 
+### 3.6 Scaling Past One GPU — FSDP-QLoRA
+
+Everything above is a single-card story, and the obvious next question is what happens when
+the 4-bit model still does not fit. Naively adding FSDP does not work, for a reason worth
+understanding: FSDP shards **float** parameters, and bitsandbytes packs two 4-bit weights per
+`uint8`. An integer-typed parameter is not something FSDP will shard, so the quantized base
+sits unsharded on every rank and you have gained nothing.
+
+The fix, shipped by Answer.AI with bitsandbytes and HuggingFace, is to let the 4-bit payload
+be *stored* in a float container. `Params4bit` reads and writes quantized weights
+independently of the storage dtype, so the same bits can live in a `bfloat16` tensor that FSDP
+is willing to shard:
+
+```python
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_storage=torch.bfloat16,   # the one line that enables FSDP
+)
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-2-70b",
+    quantization_config=bnb_config,
+    torch_dtype=torch.bfloat16,              # MUST equal bnb_4bit_quant_storage
+)
+peft_config = LoraConfig(r=64, lora_alpha=16, lora_dropout=0.1,
+                         bias="none", task_type="CAUSAL_LM",
+                         target_modules="all-linear")
+```
+
+**The silent failure mode is the dtype mismatch.** FSDP can only wrap modules that share one
+floating dtype. If `torch_dtype` and `bnb_4bit_quant_storage` disagree, nothing raises — every
+`Linear4bit` is simply wrapped *individually* instead of joining the surrounding block, which
+destroys the sharding granularity and the memory win with it. Set both, and set them equal.
+
+```
+  70B base, NF4:  70e9 x 0.5 B = 35 GB of weights to place
+
+    1 GPU, no sharding    35.0 GB  -> needs a 48GB or 80GB card
+    2-way FSDP shard      17.5 GB/GPU + adapters, grads, activations
+                                    -> fits 2 x 24GB with gradient
+                                       checkpointing and CPU offload
+```
+
+That is the Answer.AI result: a 70B fine-tune on two 24GB consumer cards. Launch it as a
+distributed job (`accelerate launch` or `torchrun`) with an FSDP config — PEFT ships
+`examples/sft/fsdp_config_qlora.yaml` and `run_peft_qlora_fsdp.sh` as working references.
+Note what this does to the Section 7 decision table: "multi-GPU cluster available" is no
+longer automatically an argument for full fine-tuning.
+
 ---
 
 ## 4. Architecture Diagram
@@ -582,6 +633,9 @@ A: On the benchmarks the QLoRA paper actually measured, there is essentially no 
 
 **Q: How do you diagnose and fix 4-bit training instability in QLoRA?**
 A: Training instability in QLoRA manifests as loss spikes (sudden jumps of 0.5-2.0 in training loss followed by partial or no recovery) or divergence (loss trend consistently increasing after the first few hundred steps). Diagnosis: enable per-layer gradient norm logging and identify which layers produce abnormally large gradients immediately before loss spikes — these are typically the layers where NF4 quantization error is highest relative to the weight magnitude. The most reliable fixes: (1) enable double quantization (`bnb_4bit_use_double_quant=True`) — double quantization reduces the quantization constants' error, which is the most common source of instability; (2) reduce the learning rate by 2-3× (from 2e-4 to 7e-5) — lower LR gives the adapter more time to compensate for quantization noise in the base model; (3) use `bf16=True` with `tf32=False` to ensure full BF16 precision in adapter computations; (4) lower the gradient clipping threshold from 1.0 to 0.3, which prevents single large gradient steps from destabilizing the adapter. If instability persists after these changes, the model has quantization sensitivity in critical layers — switch to 8-bit quantization (`load_in_8bit=True`) or standard BF16 LoRA if the hardware permits.
+
+**Q: How do you run QLoRA across multiple GPUs, and why does adding FSDP naively fail?**
+A: You set `bnb_4bit_quant_storage=torch.bfloat16` so the 4-bit weights are stored in a float container FSDP is willing to shard. FSDP shards floating-point parameters only, and bitsandbytes packs two NF4 values into a `uint8` by default — an integer parameter FSDP will not shard, so the quantized base is replicated on every rank and you get no memory benefit from adding GPUs. `Params4bit` reads and writes quantized weights independently of their storage dtype, so bitsandbytes can hand FSDP a `bfloat16`-typed tensor holding the same bits. The trap is that `torch_dtype` on the model must equal `bnb_4bit_quant_storage`: FSDP only wraps modules sharing one floating dtype, and on a mismatch nothing errors — each `Linear4bit` is wrapped individually instead of with its block, silently destroying the sharding granularity. With both set, a 70B NF4 base is 35GB of weights that shards to 17.5GB per rank, which is the Answer.AI FSDP-QLoRA result: a 70B fine-tune on two 24GB consumer GPUs with gradient checkpointing and CPU offload. Launch with `accelerate launch` or `torchrun` against an FSDP config; PEFT ships `fsdp_config_qlora.yaml` and `run_peft_qlora_fsdp.sh` as references.
 
 ---
 

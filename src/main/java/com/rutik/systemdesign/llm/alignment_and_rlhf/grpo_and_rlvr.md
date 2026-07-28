@@ -480,6 +480,51 @@ up to `14.4 million` generated tokens per step producing no gradient at all. Cur
 is not hygiene here; at 70-85% of wall-clock spent on rollouts, it is the single largest lever on
 throughput, and it is exactly what DAPO's dynamic sampling automates.
 
+### 6.6 The rollout-training mismatch — when "on-policy" silently is not
+
+Section 6.3 disaggregates generation onto vLLM and updates on FSDP because rollouts are 70-85%
+of wall-clock. That split has a consequence the algorithm never accounted for: **the two
+engines do not agree on the probability of the tokens they just produced.** Same parameters
+`theta`, same tokens, different kernels, different batching, different reduction order — so
+`pi_vllm(a|theta)` and `pi_fsdp(a|theta)` differ. Yao et al. (2025) report cases where the two
+give *contradictory* verdicts on a token, `pi_vllm = 1` against `pi_fsdp = 0`, and show the gap
+survives patching vLLM to expose true sampling probabilities and casting its `lm_head` to fp32.
+It is not a bug in one engine; it is inherent to hybrid backends.
+
+What the update is actually computing, then, is not on-policy:
+
+```
+  intended     theta <- theta + mu * E_{a ~ pi_fsdp}[ R(a) * grad log pi_fsdp(a) ]
+  actual       theta <- theta + mu * E_{a ~ pi_vllm}[ R(a) * grad log pi_fsdp(a) ]
+                              ^^^^^^^^^^ sampled here, scored there
+```
+
+Note this is a *different* failure from Pitfall 5's stale weights. There the weights genuinely
+differ and syncing fixes it. Here the weights are identical and syncing cannot help.
+
+The fix is the textbook one for sampling from the wrong distribution — reweight by the
+importance ratio, truncated so a single outlier cannot dominate the batch:
+
+```
+  w(a) = min( pi_fsdp(a | theta) / pi_vllm(a | theta) ,  C )
+
+  grad = E_{a ~ pi_vllm}[ w(a) * R(a) * grad log pi_fsdp(a) ]
+```
+
+Truncation is what makes it work: the untruncated ratio and the variant that swaps
+`pi_vllm` into PPO's clipping both collapse to near-zero accuracy under INT8 rollouts, where
+the gap is widest. Truncated importance sampling (TIS) holds, which is what lets you run
+quantized rollouts for the throughput and keep the accuracy.
+
+**Operationally.** In veRL this lives under `algorithm.rollout_correction` and requires
+`actor_rollout_ref.rollout.calculate_log_probs: true` so the rollout's own log-probs are kept
+rather than recomputed; `rollout_is` picks `"token"` or `"sequence"` aggregation and
+`rollout_is_threshold` is the cap `C` (2.0 is the documented starting point). Watch
+`rollout_is_mean` — healthy is 0.9 to 1.1 — and `rollout_is_eff_sample_size`, where below 0.3
+of the batch means the correction is carrying too few effective samples. A separate 2025 line
+of work argues the root cause is BF16's rounding error and that training and generating in
+**FP16** removes most of the mismatch outright, at no algorithmic cost.
+
 ---
 
 ## 7. Real-World Examples
@@ -601,6 +646,9 @@ DPO when you have offline pairwise preference data and no verifier — it is an 
 
 **Q17: Why did Qwen3 move from GRPO to GSPO?**
 GRPO computes importance ratios per token, but the reward and advantage are per sequence — a unit mismatch that injects high-variance noise, which compounds over thousands-of-token generations. For MoE models it is worse: small policy updates change expert routing, making per-token ratios swing wildly even when sequence-level behavior is stable (Qwen reported needing hacks like "routing replay" under GRPO). GSPO defines a single sequence-level importance ratio (length-normalized product of token ratios) and clips at sequence granularity, matching the unit of the reward. Result per Qwen: stabler MoE training, better scaling, no routing hacks.
+
+**Q18: Your GRPO run generates with vLLM and trains with FSDP on identical weights. Why is it still off-policy?**
+Because the two engines compute different token probabilities for the same tokens under the same parameters — different kernels, batching and reduction order — so you sample from `pi_vllm` and take gradients against `pi_fsdp`. Yao et al. (2025) found tokens where the two flatly contradict each other (`pi_vllm = 1` against `pi_fsdp = 0`), and showed the gap persists after patching vLLM to expose true sampling probabilities and casting its `lm_head` to fp32 — it is inherent to hybrid rollout/trainer designs, not a bug in one engine. This is distinct from the stale-weights bug: there the weights really differ and a sync fixes it, here they are identical and a sync cannot. The fix is truncated importance sampling (TIS): reweight each sample by `min(pi_fsdp/pi_vllm, C)` before the policy-gradient term. Truncation is load-bearing — the untruncated ratio and the variant that substitutes `pi_vllm` into PPO's clipping both collapse to near-zero accuracy with INT8 rollouts, while TIS holds, which is what makes quantized rollouts usable for throughput. In veRL it is `algorithm.rollout_correction` with `rollout.calculate_log_probs: true`, threshold `C` around 2.0, monitored via `rollout_is_mean` (healthy 0.9-1.1) and `rollout_is_eff_sample_size` (warn below 0.3). A parallel result argues BF16 rounding error is the root cause and that running both sides in FP16 removes most of the mismatch outright.
 
 ---
 

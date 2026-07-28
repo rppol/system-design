@@ -114,6 +114,50 @@ Perplexity is the more honest number to report because it is a *count*, not an a
 
 **Why the learning rate sits in the middle.** Initial pre-training starts from noise, so large steps are safe and necessary. SFT starts from a model that is already right and only needs its behaviour nudged, so steps must be tiny. CPT starts from a model that is right about English and wrong about the domain — it needs to move representations substantially without destroying them. `5e-5` to `1e-4` is that compromise, and the case study's forgetting incident is what happens at the aggressive end of it.
 
+**The schedule shape matters as much as the peak.** The config above does not just pick a
+learning rate, it picks a *shape*: linear warmup, then cosine decay. That is deliberate, and
+Ibrahim et al. (TMLR 2024, [arXiv:2403.08763](https://arxiv.org/abs/2403.08763)) is the study
+that measured why. Pre-training on 300B tokens of the Pile and continuing on SlimPajama (weak
+shift) or German Common Crawl (strong shift), they compared holding the LR constant at the
+base run's final value against **re-warming and re-decaying** it:
+
+```
+  base pre-training:  eta_max = 3e-4  ->  cosine  ->  eta_min = 3e-5
+
+  CPT strategy                       adaptation to domain     forgetting
+  ----------------------------------------------------------------------
+  constant at eta_min (3e-5)              worst                least
+  re-warm to 0.5x eta_max (1.5e-4)        good                 low
+  re-warm to 1.0x eta_max (3e-4)          better               moderate
+  re-warm to 2.0x eta_max (6e-4)          best                 most
+
+  In every case: linear re-warmup, then cosine re-decay to 0.1 x eta_max
+  over the CPT token budget.
+```
+
+Both halves are load-bearing. Skipping the re-warm leaves the model at the tail of the
+previous cosine, where steps are too small to move representations and adaptation stalls;
+skipping the re-decay leaves it at a high LR at the end of the run, where the weights never
+settle. Re-warm and re-decay together dominate either constant baseline on adaptation for both
+shifts, and `eta_max` is then a single dial trading adaptation against forgetting in the same
+direction — higher gives you more of both.
+
+**The spike is partly self-inflicted, and that is diagnostic.** Re-warming causes a loss
+increase on the previous distribution *even with no distribution shift at all*: continuing to
+pre-train Pile-on-Pile with `eta_max = 3e-4` still raised Pile validation loss by about 0.1
+at its peak. So the first-thousand-step loss jump you see at the start of CPT is not proof
+that your domain corpus is hostile — some of it is just the optimizer being re-energized.
+Distinguish them by running a short same-distribution control, or by checking whether the
+curve recovers as the cosine re-decays.
+
+Two consequences for how you start a run. If you control the base checkpoint, take a
+**non-decayed** one from mid-pre-training so the LR transitions smoothly instead of having to
+climb back up — this is what DeepSeek-V2 did for its 6T-token continued pre-training, together
+with 30% replay of the original data. And if you expect to continue pre-training repeatedly,
+an *infinite* LR schedule (warmup, then a long constant plateau across tasks, with a final
+exponential decay whenever you decide to stop) sidesteps re-warming entirely and does not
+commit you to a fixed token budget up front.
+
 ### 3.2 Data Mixing Strategy
 
 Pure domain corpus fine-tuning without mixing causes catastrophic forgetting:
@@ -670,6 +714,9 @@ A: Always maintain two parallel evaluation suites and set explicit acceptance cr
 
 **Q: What is a replay buffer in the context of continual learning for domain adaptation, and how is it implemented?**
 A: A replay buffer is a fixed-size collection of general-domain examples that are mixed into domain training batches throughout CPT, directly analogous to experience replay in reinforcement learning. The mechanism: maintain a buffer of N general examples (typically 10,000-100,000 examples from The Pile or C4); at each training step, sample a fraction (5-15%) of the batch from the replay buffer and the remainder from the domain corpus. This continuously provides gradient signal to preserve general capabilities without requiring a full general corpus to be present at every step. The buffer is populated once before training and remains fixed — it is not updated during training. Implementation: `interleave_datasets([domain_dataset, replay_buffer], probabilities=[0.90, 0.10], seed=42)`. The replay buffer approach is particularly useful when the domain corpus is streamed and a fixed general data mix ratio is difficult to maintain; the buffer provides deterministic general coverage regardless of domain data sampling variability.
+
+**Q: What learning rate schedule should continued pre-training use, and why is a constant low LR the wrong default?**
+A: Re-warm the learning rate and then re-decay it with a cosine over the CPT token budget; holding it constant at the base run's final value adapts the least of any strategy tested. Ibrahim et al. (TMLR 2024) measured this on 300B Pile then SlimPajama (weak shift) or German Common Crawl (strong shift): a model held constant at `eta_min = 3e-5` forgets the least but barely adapts, while re-warming to 0.5x, 1x or 2x the pre-training `eta_max = 3e-4` and cosine-re-decaying to `0.1 x eta_max` beats it on adaptation for both shifts. Both halves are load-bearing — no re-warm and the steps are too small to move representations off the tail of the previous cosine; no re-decay and the weights never settle at the end. `eta_max` then becomes a single dial that trades adaptation against forgetting in the same direction, which is why the pairing with replay matters. One diagnostic subtlety: re-warming causes a loss increase on the previous distribution even with *no* shift at all (Pile-to-Pile at 3e-4 still peaked about 0.1 higher), so the loss jump at the start of CPT is not by itself evidence that your corpus is hostile. If you control the base checkpoint, start from a non-decayed mid-pre-training one so the LR transitions smoothly — the recipe DeepSeek-V2 used for its 6T-token continued pre-training alongside 30% replay.
 
 ---
 

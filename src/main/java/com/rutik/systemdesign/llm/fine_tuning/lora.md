@@ -286,6 +286,56 @@ is what the LoRA paper's subspace-similarity analysis found: the top singular
 directions of an r=8 adapter and an r=64 adapter overlap strongly while the rest do
 not, i.e. fine-tuning moves the weights mostly along a handful of directions.
 
+### Rank-Stabilized Scaling — Why the Rank Ladder Flattens Out
+
+The `alpha/r` form above holds the adapter's *loudness* constant as `r` grows, which is what
+makes a rank sweep clean. It also does something nobody intended: it divides the adapter's
+gradients down as `r` grows. Kalajdzievski (November 2023,
+[arXiv:2312.03732](https://arxiv.org/abs/2312.03732)) proves that dividing by `r` is too
+aggressive, and that the scaling which keeps adapter activations and gradients stable across
+ranks is `alpha/sqrt(r)` — rank-stabilized LoRA, rsLoRA.
+
+```
+  LoRA      scale = alpha / r
+  rsLoRA    scale = alpha / sqrt(r)
+
+  alpha = 32, sweeping the rank:
+
+     r     alpha/r      alpha/sqrt(r)     rsLoRA / LoRA
+     8      4.000           11.31             2.83x
+    16      2.000            8.00             4.00x
+    32      1.000            5.66             5.66x
+    64      0.500            4.00             8.00x
+   128      0.250            2.83            11.31x
+   256      0.125            2.00            16.00x
+
+  The gap is exactly sqrt(r). At r=256 the classic scaling damps the adapter 16x
+  harder than the rank-stabilized one, so the same LR trains it 16x more slowly.
+```
+
+**What this says about the ladder above.** Reread the `r=64` line — "approaching full
+fine-tune quality; diminishing returns" — and `r=128`, "almost never justified." Under
+`alpha/r` those are partly an artifact of the scaling rather than a statement about capacity:
+the high-rank adapter has the extra directions, but its effective step size has been divided
+down until it learns too slowly to use them within the usual 1-3 epochs. rsLoRA's framing is
+blunt — the reason LoRA "has generally been limited to very low ranks" in practice is the
+scaling factor, not the low-rank hypothesis.
+
+One flag, no other config change, and inference cost is untouched because the scale folds
+into the merge either way:
+
+```python
+LoraConfig(r=64, lora_alpha=32, use_rslora=True, ...)   # scale = 32/sqrt(64) = 4.0
+```
+
+**When to reach for it.** At `r <= 16` the two scalings differ by under 4x and a tuned
+learning rate absorbs the difference — which is why the `r=16, alpha=32` default is
+well-behaved and why most recipes never noticed the problem. It matters when you deliberately
+spend rank to buy quality (r=64 through 256 on hard tasks with large datasets), exactly the
+regime the ladder calls "rare in practice." With `use_rslora=True` a rank sweep is a real
+compute-for-quality trade; without it, the sweep moves capacity up and step size down at the
+same time and reports the sum as "rank didn't help."
+
 ### 3.4 Target Module Selection
 
 ```
@@ -686,6 +736,9 @@ A: Targeting only attention layers (q_proj, v_proj) is the standard starting poi
 
 **Q: How do you prevent catastrophic forgetting of general capabilities during LoRA fine-tuning?**
 A: LoRA's frozen base weights are the primary defense against forgetting — general capabilities encoded in W are never updated. However, the adapter output B×A×x can steer the model's responses in ways that effectively suppress general capabilities even without changing W. The main risk is heavy domain concentration in training data. Mitigation strategies: mix 10-20% general instruction-following examples (e.g., Alpaca, ShareGPT) into the training set alongside domain-specific data; this regularizes the adapter to maintain general response quality. Use a lower learning rate for LoRA (1e-4 rather than 3e-4) to constrain how strongly the adapter shifts model behavior. Monitor general capability benchmarks (MMLU, MT-Bench, or a held-out general instruction set) alongside task-specific metrics throughout training; if general scores drop more than 5% relative, reduce the learning rate or increase the general data mixture. Gradient clipping at 1.0 also helps prevent large adapter updates that dominate base model representations.
+
+**Q: What is rsLoRA, and when does the standard alpha/r scaling actively hurt you?**
+A: rsLoRA replaces LoRA's `alpha/r` scaling with `alpha/sqrt(r)`, which stops the adapter's gradients and activations from collapsing as the rank grows. Kalajdzievski (arXiv:2312.03732) proves that `sqrt(r)` is the divisor that keeps the adapter's output and gradient magnitudes scale-invariant in the rank, so `1/r` over-damps by a further factor of sqrt(r) at every rank increase. The consequence is that the familiar "rank 64 gives diminishing returns, rank 128 is never justified" folklore is partly a scaling artifact — the capacity is there, but at r=256 the classic scaling damps the adapter 16× harder than the stabilized one, so it learns too slowly to use the extra directions in the usual 1-3 epochs. Below r=16 the difference is under 4× and a tuned learning rate hides it, which is why the r=16/alpha=32 default never exposed the problem. Set `use_rslora=True` in `LoraConfig` whenever you are deliberately spending rank to buy quality (r=64 to 256 on hard tasks with large datasets); inference cost is identical because the scale folds into the merge either way.
 
 ---
 

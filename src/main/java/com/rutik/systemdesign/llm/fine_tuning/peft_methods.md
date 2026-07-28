@@ -501,6 +501,44 @@ extreme-thin end; prompt tuning in particular only reaches full-fine-tuning qual
 very large model scales. LoRA's higher parameter budget is what buys its reliable
 quality across model sizes.
 
+### 3.8 Where the Adapter Starts — Initialization Is a PEFT Choice
+
+Every method above has been costed by *how many* parameters it trains and *where* it injects
+them. There is a third axis the table does not show: what those parameters are set to at step
+zero. PEFT's default (`init_lora_weights=True`) is Kaiming-uniform for `A` and zeros for `B`,
+so `BA = 0` and the adapter is a no-op at the start. That is exactly right when the frozen
+base is the original checkpoint — and exactly wrong when it is a 4-bit approximation of it.
+
+**The quantized-base problem.** Under QLoRA the model you start from is `Q ~ W`, not `W`. With
+`B = 0` the adapter contributes nothing, so training opens from a model that is already
+degraded by the quantization residual `R = W - Q`, and the first stretch of the run is spent
+undoing damage rather than learning the task. The residual is *low-rank-approximable*, which
+is the opening the initialization methods exploit:
+
+| `init_lora_weights` | What it fits | Why you would use it |
+|---------------------|--------------|----------------------|
+| `True` (default) | `A` Kaiming, `B = 0` | Full-precision base; adapter starts as identity |
+| `"gaussian"` | `A` Gaussian scaled by rank, `B = 0` | Diffusers convention |
+| `"loftq"` | rank-r SVD of the quantization residual `W - Q`, alternated with re-quantization | Quantized base; makes `Q + BA ~ W` at step 0 |
+| `"pissa"` / `"pissa_niter_[N]"` | Principal singular components of `W` itself; residual stays frozen | Faster convergence; the leftover residual also quantizes more cleanly |
+| `"olora"` | QR decomposition of `W` | Stability and convergence |
+| `"eva"` | SVD of input *activations*, ranks allocated per layer by explained variance | Data-driven rank budgeting |
+| `"corda"` | Task-aware decomposition; knowledge-preserved mode | Mitigating forgetting |
+
+**Two operational traps.** First, LoftQ quantizes the model itself as part of its alternating
+procedure, so you must pass it an **unquantized** model — for a base that is already
+bitsandbytes-4bit, the post-hoc `replace_lora_weights_loftq()` helper is the supported path.
+Second, PiSSA and OLoRA **mutate the frozen base weights** (they move the principal components
+into the adapter and leave the residual behind), so the saved adapter is no longer a drop-in
+delta on the original checkpoint. Save the initial adapter first, then export with
+`save_pretrained(path, path_initial_model_for_weight_conversion="pissa_init")` to convert it
+back into a plain LoRA — and do not stack a mutating initializer with other adapters on the
+same base.
+
+This is the concrete content of the "PEFT methods can be combined" principle: LoftQ is not a
+new adapter architecture, it is LoRA plus a quantization-aware starting point, and it costs
+one config field rather than a new method.
+
 ---
 
 ## 4. Architecture Diagram
@@ -691,6 +729,9 @@ A: The standard production pattern is to train separate LoRA adapters per task a
 
 **Q: What is the cost of switching between PEFT methods mid-project, and when is it justified?**
 A: Switching PEFT methods (e.g., from LoRA to prefix tuning) costs primarily in data preparation and hyperparameter search, not in architectural code changes. The HuggingFace PEFT library abstracts the method differences — changing from LoRA to prefix tuning is a configuration change (swap LoraConfig for PrefixTuningConfig), not a code rewrite. The real switching costs: (1) hyperparameter re-search — LoRA hyperparameters (rank, alpha, target modules) do not transfer to prefix tuning (prefix length, reparameterization MLP hidden size); expect 5-10 training runs to find good prefix tuning hyperparameters; (2) data re-formatting — prefix tuning and LoRA use identical data formats, so no reformatting cost; (3) adapter re-training — prior adapters cannot be converted between PEFT methods; full retraining is required; (4) evaluation re-run — re-evaluate all benchmarks with the new method. Switching is justified when: the current PEFT method has hit a quality ceiling that cannot be overcome by hyperparameter tuning (e.g., LoRA r=64 still underperforms by >5% vs. full FT), or when production constraints change (e.g., merge capability becomes required and you're using adapters). In practice, most projects choose LoRA initially and tune rank rather than switching methods.
+
+**Q: Why is LoRA's default zero-initialization of B a liability on a quantized base, and what replaces it?**
+A: With `B = 0` the adapter is a no-op at step zero, so a QLoRA run starts from the quantized weights `Q`, not the original `W`, and the first part of training is spent undoing the quantization residual `W - Q` instead of learning the task. Quantization-aware initializers close that gap before the first step. LoftQ alternates quantization with a rank-r SVD of the residual so that `Q + BA` approximates `W` at initialization; PiSSA instead decomposes `W` itself, giving the adapter the principal singular components and leaving a residual that both trains faster and quantizes more cleanly. In PEFT both are one field — `init_lora_weights="loftq"` (with a `LoftQConfig`) or `init_lora_weights="pissa_niter_16"`, the iterated variant that initializes a 7B model in seconds instead of running a full SVD. Two gotchas decide whether it works in practice: LoftQ quantizes the model itself, so you must pass it an unquantized model and use `replace_lora_weights_loftq()` for a base that is already bitsandbytes-4bit; and PiSSA and OLoRA mutate the frozen base weights, so you must export with `save_pretrained(..., path_initial_model_for_weight_conversion=...)` to get an adapter that loads as a normal LoRA delta, and you should not stack them with other adapters.
 
 ---
 

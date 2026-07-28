@@ -195,6 +195,54 @@ Second, and worse: 87.6% of the gradient is now spent teaching the model to gene
 
 Note that the ratio depends on the mix: this example is half instruction, half response. A short instruction with a long response dilutes the damage; a long document in the instruction with a one-line answer makes it near-total. That is why the fix is verification, not intuition — print `labels` beside `input_ids` for the first few examples and confirm the `-100` boundary sits exactly where the response begins.
 
+### The Terminator Token — Why a Fine-Tuned Model Never Shuts Up
+
+The most-reported SFT bug after template mismatch is a model that answers correctly and then
+keeps going: it finishes the response, starts a new fake user turn, answers that one too, and
+runs until `max_new_tokens`. Nothing is wrong with the data or the rank. The model was never
+shown a single supervised example of *stopping*.
+
+Stopping is a prediction like any other. `P(terminator | response)` is learned only from
+positions where the terminator appears **inside the loss window**. Three ways it gets removed
+from that window, all of them silent:
+
+```
+  1. Hand-rolled template
+     f"### Instruction:\n{ins}\n\n### Response:\n{resp}"     <- no terminator at all
+     Fix: append the model's turn terminator, or build the string with
+     tokenizer.apply_chat_template(..., add_generation_prompt=False)
+
+  2. eos_token is not the template's turn terminator
+     Llama-3      turn ends with <|eot_id|>       (128009)
+                  tokenizer.eos_token is <|end_of_text|> (128001)
+     Qwen2.5 / ChatML  turn ends with <|im_end|>
+     Fix: TRL exposes SFTConfig(eos_token="<|im_end|>") for exactly this.
+
+  3. pad_token == eos_token
+     Pad positions get label -100. If pad and EOS are the same id and the
+     mask is built by matching on the id, the ONE real terminator is masked
+     out along with the padding.
+     Fix: a pad_token_id distinct from eos_token_id.
+```
+
+And a fourth failure that is not a training bug at all: at inference the terminator must be in
+`model.generation_config.eos_token_id`. Llama-3-Instruct ships a **list**, `[128001, 128009]`,
+precisely because the model emits `<|eot_id|>` rather than `<|end_of_text|>`; a serving stack
+that reads only `config.json`'s single `eos_token_id` will generate straight past a
+perfectly-trained stop token.
+
+**The 30-second check, before any run.** Take one collated example, drop the `-100` positions,
+decode what is left, and look at the last token:
+
+```python
+ids = [i for i, l in zip(batch["input_ids"][0], batch["labels"][0]) if l != -100]
+print(repr(tokenizer.decode(ids)))     # must END with the turn terminator
+print(tokenizer.pad_token_id, tokenizer.eos_token_id)   # must differ
+```
+
+If the decoded string ends on the last word of the response, the run is already broken and no
+amount of extra data or epochs will fix it.
+
 ### 3.3 Data Curation
 
 The quality and diversity of training data is the primary determinant of instruction-tuning success:
@@ -615,6 +663,9 @@ A: The Alpaca-Cleaned project catalogued ten recurring defect classes in the ori
 
 **Q: How should you evaluate an instruction-tuned model to ensure it generalizes to new instruction types?**
 A: Effective evaluation requires held-out instructions sampled from task categories not seen during training, LLM-as-judge scoring across multiple quality dimensions, and human preference evaluation. The held-out set should include instruction types deliberately excluded from training: if the model was trained on Q&A, summarization, and code, the eval set should include translation, comparison, and roleplay instructions to test generalization. LLM-as-judge (using GPT-4 as evaluator) scores each response on helpfulness (1-5), instruction compliance (did the model do what was asked?), and format accuracy. Human preference evaluation: present pairs of responses (from base model vs. fine-tuned model, or model A vs. model B) to human raters and collect preference votes. Aggregate win rate across 100-200 human-evaluated pairs is the most reliable quality signal. Never evaluate only on task types included in training — that measures memorization, not generalization.
+
+**Q: Your fine-tuned model answers correctly and then keeps generating a fake next turn. What went wrong?**
+A: The turn terminator was never inside the loss window, so the model has no supervised example of stopping and `P(terminator)` stays near zero. There are three ways it disappears, all silent. A hand-rolled f-string template simply omits it — building the string with `tokenizer.apply_chat_template(..., add_generation_prompt=False)` puts it back. The configured `eos_token` may not be the template's turn terminator: Llama-3 ends assistant turns with `<|eot_id|>` (128009) while `tokenizer.eos_token` is `<|end_of_text|>` (128001), and Qwen2.5/ChatML ends with `<|im_end|>` — TRL exposes `SFTConfig(eos_token="<|im_end|>")` for this case. Or `pad_token` equals `eos_token`, so a mask built by matching the pad id masks the one real terminator to -100 along with the padding; use a distinct `pad_token_id`. A fourth variant is not a training bug: at inference the terminator must be in `model.generation_config.eos_token_id`, which is why Llama-3-Instruct ships the list `[128001, 128009]` — a serving stack reading only a single id generates past a perfectly-trained stop token. Diagnose in 30 seconds by decoding one collated example with the -100 positions dropped and confirming the result ends on the terminator.
 
 ---
 
