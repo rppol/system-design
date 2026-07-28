@@ -48,6 +48,9 @@ This file builds that model quantitatively, walks the memory hierarchy and inter
 | B200 | ~2.25 PF | ~4.5 PF | 192 GB HBM3e | ~8 TB/s | ~280 | NVLink5 1.8 TB/s |
 | GB200 (Grace+2×B200) | 2× B200 + 480GB LPDDR via NVLink-C2C | — | per above | per above | — | NVL72 rack: 72 GPUs in one NVLink domain |
 | TPU v5p | 459 TF | — | 95 GB HBM | 2.76 TB/s | ~166 | ICI 3D torus, 8,960-chip pods |
+| TPU7x (Ironwood, v7) | 2,307 TF | 4,614 TF | 192 GiB HBM | 7.38 TB/s | ~313 | ICI 1.2 TB/s/chip, 3D torus to 9,216 chips |
+| AMD MI300X (CDNA3) | 1,305 TF | 2,610 TF | 192 GB HBM3 | 5.3 TB/s | ~246 | Infinity Fabric, 896 GB/s aggregate |
+| AMD MI355X (CDNA4) | ~2,500 TF | ~5,000 TF | 288 GB HBM3E | 8.0 TB/s | ~313 | Infinity Fabric, 1,075 GB/s |
 
 (Marketing sheets often quote sparse FLOPS — 2× the dense numbers — and Blackwell adds FP4 at ~2× FP8. Always check dense vs sparse and per-GPU vs per-superchip.)
 
@@ -55,6 +58,7 @@ Reading the table like an engineer:
 - **H100 → H200**: identical compute, +43% bandwidth, +76% capacity. Inference (decode-heavy, KV-hungry) is exactly what improves; training improves far less. This pair is the cleanest proof that LLM inference buys bandwidth and capacity, not FLOPS.
 - **Memory capacity sets the fleet size before speed matters.** Llama-3.1-70B at FP16 needs ~140 GB of weights alone → 2×H100 minimum, or 1×H200, before a single token is served. MoE models (DeepSeek-V3: 671B total, 37B active) are the extreme: bandwidth cost of the *active* 37B, capacity cost of all 671B resident.
 - **SRAM-first outliers**: Groq's LPU (230 MB of on-chip SRAM at ~80 TB/s per chip) and Cerebras's wafer-scale parts keep weights/activations in SRAM, achieving extreme single-stream decode speed at the cost of needing many chips to fit a model — the roofline tradeoff taken to the opposite corner.
+- **The second-source rows read the same way, and that is the point.** An MI300X's 192 GB at 5.3 TB/s means a 70B at FP16 (140 GB) fits on **one** GPU with no tensor parallelism at all — no per-layer all-reduce, no NVLink domain to respect — where the same model needs TP=2 on an 80 GB H100. MI355X and TPU7x land on essentially the same ridge as B200 (~313), so none of the three is the "memory-bound" or "compute-bound" chip; they differ in capacity per package and in fabric. What the table cannot show is the part that actually decides these bake-offs: kernel and framework maturity for your exact model and precision. Datasheet bandwidth is delivered by the vendor; MBU is delivered by the software stack, so the honest comparison is a measured tokens/s on your model, not a ratio of TB/s. CDNA4 adds MXFP6/MXFP4 (MI355X: ~10.1 PF dense FP4), so the precision ladder is no longer NVIDIA-only either.
 
 ---
 
@@ -298,6 +302,58 @@ Quantization therefore does two distinct things at once: it raises the decode ce
 per token) *and* it reaches the compute roof at a quarter of the batch size. What stops you before
 any of this is almost always KV capacity, not the ridge — Section 6.5's plan runs out of HBM at
 batch 64 on a 70B, well short of `B=296` (Pitfall 3, Q6).
+
+**The term batching does not amortize.** `I_decode(B)` is the intensity of the *weight* GEMMs and
+is honest only about them. A decode step moves two kinds of bytes, and batching does opposite
+things to each:
+
+```
+  bytes per decode step  =  weight_bytes  +  B × S × kv_bytes_per_token
+                            \__________/     \_____________________/
+                            paid ONCE for     paid PER SEQUENCE: every
+                            the whole batch   sequence owns its own cache
+```
+
+Attention has an arithmetic intensity of its own, and it is a constant:
+
+```
+  I_attn  =  attention FLOPs / KV bytes read
+          =  (layers × q_heads × 4 × head_dim × S)
+             ---------------------------------------------  =  2 × (q_heads / kv_heads) / b
+             (2 × layers × kv_heads × head_dim × S × b)
+
+  Llama-3-70B, FP16 KV:   2 × (64/8) / 2  =  8.0 FLOPs/byte     vs H100's ridge of 295.22
+
+  S cancels. B never appears. Decode attention is pinned at 8.0 FLOPs/byte -- 2.7% of
+  peak -- at every context length and every batch size there is.
+  Read that backwards for GQA: I_attn scales with q_heads/kv_heads, so MHA would sit at
+  1.0 and MQA at 64.0. GQA cuts KV bytes AND raises attention's intensity, both by 8x.
+```
+
+So the "batching is nearly free" sweep above is the best case, and it decays as soon as the KV
+term is real:
+
+```
+  70B, FP16 weights (140 GB), 320 KB/token KV, S = 4,096 -> 1.342 GB of KV per sequence
+
+     B    weight GB    KV GB    total GB    GB per token    vs B=1    (weights-only ideal)
+     1       140         1.3      141.3       141.3           1.0x            1x
+     8       140        10.7      150.7        18.8           7.5x            8x
+    32       140        43.0      183.0         5.72         24.7x           32x
+   128       140       171.8      311.8         2.44         58.0x          128x
+   256       140       343.6      483.6         1.89         74.8x          256x
+     ->                                         1.34        105.3x    <- hard ceiling
+
+  ceiling  =  1 + weight_bytes / (S × kv_bytes_per_token)
+      S =   4K:   1 + 140e9 / 1.342e9   =  105.3x
+      S =  32K:   1 + 140e9 / 10.74e9   =   14.0x
+      S = 128K:   1 + 140e9 / 42.95e9   =    4.3x
+```
+
+That is Principle 7 with numbers on it: at 4K context batching can buy up to 105x, at 128K no
+more than 4.3x, because past that point you are simply streaming KV and the weights have stopped
+mattering. It also prices KV precision correctly — FP8 KV halves `kv_bytes_per_token` and
+therefore *doubles* the ceiling, which makes it a throughput decision and not only a capacity one.
 
 ### 6.3 FlashAttention as an IO argument
 
@@ -580,6 +636,12 @@ Because activations/weights and gradients have different precision-vs-range need
 
 **Q17: What specific failure mode does "delayed scaling" introduce, and how do production FP8 training recipes mitigate it?**
 Delayed scaling predicts this step's FP8 scale factor from a window of *past* amax values (Transformer Engine: last 1024 steps) rather than the current tensor's exact amax — avoiding a synchronizing reduction before every cast (§6.7). The failure mode is a one-step lag: if a tensor's magnitude jumps sharply between steps (a loss spike, an MoE routing imbalance sending a disproportionate share of tokens to one expert), the predicted scale is too small for the new amax, `to_fp8` clamps the overflowing elements, and the corrupted GEMM output perturbs the loss for that step — intermittently and batch-dependently, which makes it hard to reproduce. Production mitigations: a scaling `margin` — this file's code uses a multiplicative `margin=0.9` (target only 90% of the format's range) to leave headroom for amax to grow one step before clamping; Transformer Engine expresses the same knob as an integer power of two, `new_scale = (FP8_MAX / amax) / 2^margin`, and defaults it to `margin=0`, i.e. **no** headroom, so this is a value teams raise deliberately after seeing clamping. Also per-block/microscaling for tensors prone to heavy-tailed magnitude distributions across blocks (MoE activations), and E5M2 specifically for gradients, whose distributions are the most prone to sudden multi-order-of-magnitude shifts. DeepSeek-V3's 128×128/1×128 fine-grained scaling is the production-scale instance of "go finer-grained where delayed scaling's lag is most likely to bite."
+
+**Q18: Batching amortizes the weight reads across sequences — why does it not amortize the KV cache reads, and what does that cost you?**
+Because every sequence owns its own KV cache: the weight bytes are shared across the whole batch, but KV bytes are added per sequence, so that term grows linearly with B. A decode step therefore moves `weight_bytes + B × S × kv_bytes_per_token`, and only the first term is amortized. Attention itself has a fixed arithmetic intensity of `2 × (q_heads / kv_heads) / bytes_per_element` — 8.0 FLOPs/byte for Llama-3-70B at FP16 KV, in which neither S nor B appears — so it is memory-bound at every batch size and every context length, and no amount of batching moves it toward the ridge. The consequence is a ceiling on what batching can ever buy: `1 + weight_bytes / (S × kv_bytes_per_token)`, which for a 70B is about 105× at 4K context but only ~14× at 32K and ~4× at 128K (§6.2). This is why the "batching is free until B≈296" result is a statement about the GEMMs alone, why long-context serving stays bandwidth-hungry no matter how well you batch, and why FP8 KV is a throughput lever rather than only a capacity one — halving KV bytes per token doubles that ceiling.
+
+**Q19: A vendor offers AMD MI300X/MI355X or Google TPU7x instead of H100s. How do you evaluate the swap?**
+Run the same three numbers you would for any chip — capacity, bandwidth, and dense FLOPS at the precision you actually serve — then discount hard for software maturity, which is where the real risk sits. Capacity first, because it changes the topology: an MI300X's 192 GB holds a 70B at FP16 on one GPU with no tensor parallelism, removing the per-layer all-reduce entirely, where the same model needs TP=2 across two 80 GB H100s. Then bandwidth, since decode throughput is bandwidth over model bytes: 5.3 TB/s (MI300X), 8.0 TB/s (MI355X) and 7.38 TB/s (TPU7x) against H100's 3.35. Then the ridge, to check you are not being sold FLOPS you cannot use — MI355X and TPU7x both land near 313 FLOPs/byte at BF16, essentially B200's ratio, so none of them changes the fundamental regime. The senior part of the answer is what the datasheet cannot tell you: the vendor delivers peak bandwidth, but MBU is delivered by the kernel and framework stack for your specific model, precision and attention variant, so the decision is made on a measured tokens/s and MBU from a canary on your own model — plus the operational tail of ROCm or XLA in your build, monitoring and incident tooling — never on a ratio of TB/s.
 
 ---
 

@@ -575,6 +575,64 @@ Net: ~2× memory reduction vs BF16 training, ~2× faster Tensor Core throughput,
      near-BF16 final model quality
 ```
 
+### 4.6 Activation Quantization (W8A8) and SmoothQuant
+
+Everything above quantizes **weights only**. The scheme name says so: `W4A16` is 4-bit weights, 16-bit activations, and the matmul still runs in FP16 — the INT4 weights are unpacked on the way into the Tensor Core. That buys bytes and only bytes. `W8A8` quantizes both operands, so the Tensor Core itself runs INT8 (or FP8) and you buy FLOPs as well. Core Principle 3 is about the second letter.
+
+Section 4.5's outlier scenario is why that letter is hard, and production answers it two ways at once. First, **granularity and timing**: activations are quantized **per token** and **dynamically** — the scale is computed at runtime from the tensor in flight, because unlike a weight you have never seen this activation before. SmoothQuant's efficiency levels name the ladder: O1 = per-token dynamic (best quality), O2 = per-tensor dynamic, O3 = per-tensor **static** from calibration (no runtime reduction at all, and the most fragile). `INT8_W8A8` and `FP8_DYNAMIC` in llm-compressor are the dynamic presets.
+
+Second, **SmoothQuant** attacks the distribution rather than the grid, using the same multiply-and-divide identity AWQ uses in 4.1 — run in the opposite direction:
+
+```
+  y = X · W  =  (X / s) · (s · W)
+                 \_____/   \_____/
+                 shrink     grow the weights by the
+                 the loud   same factor — weights are
+                 activations the easy side to quantize
+
+  per input channel j:   s_j = max(|X_j|)^α / max(|W_j|)^(1-α)     α = migration strength
+```
+
+**What it is doing.** "Activations are hard to quantize and weights are easy, so move some of the difficulty across the multiply — divide the loud activation channel down and multiply its weight channel up by exactly the same number, leaving the product untouched."
+
+At the paper's default `α = 0.5` both sides land on the geometric mean of the two maxima:
+
+```
+  One input channel:  max|X_j| = 400  (an outlier channel),  max|W_j| = 0.5
+
+      s_j = 400^0.5 / 0.5^0.5 = 20 / 0.7071 = 28.28
+
+      activation max after:  400 / 28.28  = 14.14
+      weight max after:      0.5 × 28.28  = 14.14      = sqrt(400 × 0.5)
+
+  An 800:1 difficulty gap becomes 1:1, and nothing was approximated — the
+  identity is exact. Only the ROUNDING that follows is cheaper on both sides.
+```
+
+`α` is a knob, not a constant: 0.5 balances most models, 0.75 is the paper's recommendation for heavier-tailed ones (GLM-130B), and the reference implementation tunes it per model in the 0.6-0.9 range. Like AWQ's `s`, the division is **folded into the preceding layer offline**, so it costs nothing at inference. Reported at W8A8: up to 1.56× faster, 2× less memory, OPT-175B served on 4 GPUs instead of 8, and a 530B model on a single node.
+
+**Choosing between them is a batch-size question**, and it is a roofline question underneath (see [gpu_architecture_and_roofline.md](gpu_architecture_and_roofline.md) §6.2). At low batch the GEMMs are memory-bound, so the scheme that moves the fewest bytes wins and `W4A16` is unbeatable. At high batch they are compute-bound, bytes stop being the constraint, and only a scheme that runs the *math* narrower helps — which weight-only quantization never does. llm-compressor's own guidance splits on exactly this: W4A16 for "latency-sensitive applications with limited memory, useful speedups in low-QPS regimes, recommended for any GPU"; W8A8-INT8 for "server, batch inference, and high-QPS or offline serving". The case study below is a low-QPS-shaped, memory-constrained deployment, which is why it lands on `W4A16_ASYM` and leaves activations at FP16.
+
+### 4.7 FP4 — NVFP4 and MXFP4 Block-Scaled 4-Bit
+
+Blackwell's fifth-generation Tensor Cores compute natively on 4-bit floating point, which turns 4-bit from a storage trick (unpack to FP16, then multiply) into a real compute precision. Two formats matter, and they differ only in how they carry the scale:
+
+```
+  Element, both formats: E2M1 -- 1 sign + 2 exponent + 1 mantissa, range about ±6.
+  Four bits alone are useless; the format IS the block scale.
+
+  format   block   scale type            effective bits/element   where the bits go
+  MXFP4      32    E8M0 (power of two)   4 + 8/32  = 4.25         OCP Microscaling spec
+  NVFP4      16    E4M3 (FP8)            4 + 8/16  = 4.50         + one FP32 per-tensor scale
+
+  That is Section 4.1's group-overhead arithmetic with g shrunk from 128 to 16-32
+  and the scale itself demoted from FP16 to 8 bits. Same formula, different knee.
+```
+
+The two choices trade against each other exactly as you would expect: NVFP4's 16-element block hugs the local distribution more tightly and its E4M3 scale has mantissa bits (E8M0 has none, so a MXFP4 scale can only be a power of two), and it pays 5.9% more metadata for that. NVIDIA reports NVFP4 within ~1% of FP8 on language tasks — on DeepSeek-R1-0528, MMLU-Pro 85% FP8 versus 84% NVFP4 and AIME 2024 89% FP8 versus 91% NVFP4 — at 3.5× less memory than FP16 and 1.8× less than FP8.
+
+The production caveat is hardware, not quality: llm-compressor's `NVFP4` and `MXFP4` schemes require Blackwell (SM100) or later, because the block grouping and dynamic scaling are done by the Tensor Core itself. On Hopper and Ampere the 4-bit answer is still AWQ/GPTQ INT4 from 4.1. MXFP4 is the more portable of the two — it is an open OCP spec rather than a vendor format — which is why OpenAI shipped gpt-oss natively in MXFP4 at 4.25 bits per parameter, quantizing the MoE weights that carry 90%+ of the parameter count, so that gpt-oss-120b fits one 80 GB GPU and gpt-oss-20b runs in 16 GB. Serving-side flag names for both live in [vLLM Deep Dive](../vllm_deep_dive/README.md).
+
 ---
 
 ## 5. Flash Attention & Mixture of Experts
@@ -1384,6 +1442,12 @@ A: MoE replaces the FFN in each transformer block with N expert FFNs and a route
 
 **Q: What is knowledge distillation and when would you use it over fine-tuning?**
 A: Knowledge distillation trains a small student model using a large teacher model's soft probability outputs (not just hard labels) as training signal. The soft probabilities carry richer information about the teacher's confidence and uncertainty across all classes. Use distillation when: (1) you want a smaller, permanently-deployed model with high quality; (2) you can generate teacher outputs at scale; (3) the target architecture is different from the teacher. Use fine-tuning when adapting an existing model's behavior for a new domain rather than creating a smaller permanent version. Use quantization when the bottleneck is memory and the architecture must remain the same.
+
+**Q: What does W8A8 buy that W4A16 does not, and how do you decide between them?**
+A: W8A8 quantizes the activations too, so the matmul itself executes on INT8 or FP8 Tensor Cores — it buys FLOPs, where W4A16 buys only memory bandwidth. In a W4A16 deployment the 4-bit weights are unpacked to FP16 before the GEMM, so the arithmetic is unchanged and the entire win is that fewer bytes crossed HBM. That makes the choice a batch-size question: at low batch and low QPS the GEMMs are memory-bound and the 4× smaller weights win outright, which is why llm-compressor recommends W4A16 for latency-sensitive, memory-limited, low-QPS serving on any GPU; at high batch the GEMMs become compute-bound, bytes stop being the constraint, and only narrower math helps, which is why it recommends W8A8 (INT8 or FP8) for server, batch and high-QPS inference. The reason W8A8 is the harder scheme is activation outliers: a few channels sit far above the rest, so activations are quantized per token and dynamically, and SmoothQuant additionally divides each activation channel by a factor while multiplying the corresponding weight channel by the same factor, migrating the difficulty onto the weights, which are the easy side.
+
+**Q: What is the difference between NVFP4 and MXFP4, and when can you actually use either?**
+A: Both encode weights as 4-bit E2M1 values with a shared block scale; MXFP4 uses 32-element blocks and an E8M0 scale, NVFP4 uses 16-element blocks, an FP8 E4M3 scale, and a second FP32 per-tensor scale. That makes them 4.25 and 4.50 effective bits per element respectively — the same group-overhead arithmetic as INT4 group-wise quantization, with the group shrunk to 16-32 and the scale itself demoted to 8 bits. NVFP4 is the more accurate of the two because a 16-element block tracks the local distribution more tightly and because E8M0 has no mantissa bits at all, so an MXFP4 block scale can only ever be a power of two; NVIDIA reports NVFP4 within about 1% of FP8 on language benchmarks at 1.8× less memory. The practical constraint is hardware: both schemes need Blackwell (SM100) or later, whose Tensor Cores do the block grouping and scaling natively, so on Hopper or Ampere the 4-bit answer remains AWQ or GPTQ INT4. MXFP4 is the portable option because it is an open OCP Microscaling format rather than a vendor one, which is why OpenAI shipped gpt-oss natively in MXFP4 and fit a 120B model on a single 80 GB GPU.
 
 ---
 
