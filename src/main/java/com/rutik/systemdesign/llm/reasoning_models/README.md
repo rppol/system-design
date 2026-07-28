@@ -624,6 +624,28 @@ This self-correction behavior was NOT explicitly trained —
   it emerged from RL on correctness rewards
 ```
 
+### Reasoning State Across Turns and Tool Calls
+
+Everything above treats thinking as *output* that gets billed. In any agent — including the incident responder in Section 14 — it is also **state**, and whether you carry it between requests changes both quality and cost. This is the single most common way a working reasoning agent quietly gets worse when it is ported between APIs.
+
+**OpenAI.** Chat Completions discards reasoning tokens after each turn: input and output tokens carry forward, the reasoning does not. The Responses API preserves them as *reasoning items*, which you pass back either with `previous_response_id` or by adding the item explicitly to `input`. OpenAI's cookbook reports that including reasoning items gave roughly a **3% improvement on SWE-bench** for the same prompt and setup, and that switching from Completions to Responses raised **cache utilization from 40% to 80%** — the reasoning item is part of the prefix, so preserving it also preserves the cache hit. Zero-data-retention organizations are forced to `store=false`; they set `reasoning.encrypted_content`, which the API decrypts in memory, uses, and discards without writing to disk.
+
+**Anthropic.** During a tool-use loop you must echo the assistant `content` array back **verbatim** — thinking blocks travelling with the `tool_use` block they preceded. Each thinking block carries a `signature`; rebuilding the message, editing the block, or filtering out a `redacted_thinking` block returns a 400. Interleaved thinking lets the model think *after* each tool result rather than only once at the start of the turn:
+
+```
+  without interleaving        with interleaving
+  --------------------        -----------------
+  [thinking][tool_use]        [thinking][tool_use]
+    -> tool result              -> tool result
+  [tool_use]   <- no think    [thinking][tool_use]   <- reasons about the result
+    -> tool result              -> tool result
+  [text]       <- no think    [thinking][text]
+```
+
+Whether prior *turns'* thinking survives is model-dependent: newer models keep earlier thinking blocks in context and bill them as input tokens, while several older ones strip them. Check the per-model table before you budget a long conversation, because "thinking is free after the turn ends" is true on one set of models and false on the other.
+
+**Both vendors punish an unstable prefix.** The thinking configuration is rendered into the prompt, so changing the budget or effort level mid-conversation invalidates cache breakpoints and re-pays the full write. Pick a level per conversation and hold it. The operational rule that follows from all of this: treat the reasoning state as an **opaque blob you carry**, never something you summarize, truncate or reconstruct — the summarizing you would do to save tokens is precisely what destroys the signature, the cache hit, and the 3%.
+
 ---
 
 ## 7. Real-World Examples
@@ -737,6 +759,9 @@ A: An ORM scores only the final answer — correct (+1) or wrong (0). A PRM scor
 
 **Q: How was DeepSeek-R1-Zero trained without supervised reasoning data?**
 A: DeepSeek-R1-Zero used GRPO with only two rule-based rewards: an accuracy reward for the final answer and a format reward for using `<think>...</think><answer>...</answer>` tags. No human annotation of reasoning chains was required. Note the distinction the paper draws and most summaries drop: R1-Zero is the pure-RL model; the shipped DeepSeek-R1 adds a cold-start SFT stage, a second SFT round from rejection-sampled data, and a final all-scenario RL stage — four stages, not pure RL. The model spontaneously developed extended chain-of-thought, self-correction, and reflection behaviors purely from the RL training signal. This demonstrated that reasoning behaviors are instrumentally useful for maximizing correctness — they emerge from incentivizing correct outcomes rather than from imitating human reasoning. A crucial insight: the RL training signal (correctness on math/code problems) is cheap and scalable because these domains have ground truth verifiers.
+
+**Q: In a tool-using agent, do you have to send a reasoning model's own thinking back to it on the next call?**
+A: Yes on both major APIs, and dropping it is a silent quality regression rather than an error. On OpenAI, Chat Completions discards reasoning tokens after each turn, while the Responses API preserves them as reasoning items you pass back via `previous_response_id` or explicitly in `input`; the cookbook measures roughly a 3% SWE-bench improvement from including them and a jump in cache utilization from 40% to 80%, since the reasoning item is part of the cached prefix. Zero-data-retention organizations run with `store=false` and carry `reasoning.encrypted_content` instead, which is decrypted in memory and never written to disk. On Anthropic, a tool-use loop is one assistant turn and the assistant `content` array must be echoed back verbatim — the thinking block travels with the `tool_use` block it preceded, carries a `signature`, and rebuilding the message, editing the block or filtering out `redacted_thinking` returns a 400. Interleaved thinking additionally lets the model think after each tool result rather than only at the start of the turn. Two operational consequences: whether prior turns' thinking is retained and billed as input is model-dependent, so check the per-model table before budgeting a long conversation; and because the thinking configuration is rendered into the prompt, changing the budget or effort level mid-conversation invalidates cache breakpoints.
 
 **Q: What failure modes do reasoning models exhibit and how do you mitigate them?**
 A: Four main failure modes: (1) Reward hacking — model finds shortcuts to maximize reward without correct reasoning, e.g., outputting the right format with empty thinking blocks. Mitigation: PRM, diverse reward signals, held-out test cases. (2) Overthinking — generating thousands of unnecessary tokens on simple problems. Mitigation: difficulty routing, budget forcing with max_thinking_tokens. (3) Premise errors — reasoning flawlessly from an incorrect assumption. Mitigation: RAG + reasoning (facts from retrieval, logic from reasoning model). (4) Domain transfer failure — RL on math/code improves math/code but may not generalize to other domains. Mitigation: domain-specific RL fine-tuning or standard SFT for non-math/code tasks.

@@ -261,6 +261,32 @@ Notice where the money is: output tokens are 65% of the bill (`5.00 + 0.50 = 5.5
 
 That 20x is the trade Graph RAG actually makes: `$8.50` paid once, so that thematic questions cost `$0.0625` instead of being impossible. It only pays back if global queries are frequent — at 1-2 LLM calls, a standard RAG query costs a fraction of a cent, so a corpus asked only pinpoint questions never recovers the indexing spend.
 
+### 3.4 Moving the Bill: Dynamic Community Selection and LazyGraphRAG
+
+Section 2's fifth principle — "pre-computation is the price" — is the assumption two Microsoft follow-ups attack, one on each side of the ledger. Both ship in the `graphrag` library, so the choice is a config decision rather than a rewrite.
+
+**Query side: dynamic community selection.** The map-reduce in 3.2 sends *every* community report at a chosen level through the map step, whether or not the report has anything to do with the question. Dynamic selection replaces the fixed level with a traversal: start at the graph root, have a cheap model rate each community report's relevance to the question, prune an irrelevant report together with its entire subtree, and recurse into the relevant ones. Only the surviving reports reach map-reduce, and because the traversal is not pinned to one level it can answer from whatever granularity actually holds the answer.
+
+```
+  AP News benchmark, 50 global questions (Microsoft Research)
+
+  static, level 1   : ~1,500 community reports -> map-reduce
+  dynamic selection :   ~470 reports on average -> map-reduce
+
+  average cost reduction 77%, with comparable comprehensiveness,
+  diversity and empowerment scores
+
+  the rating pass runs on the mini tier; the flagship is reserved for
+  map-reduce -- which is why pruning 2/3 of the reports is nearly free
+
+  allowed to descend to level 3, dynamic search reached 58-60% win rates
+  on comprehensiveness and empowerment, at ~34% higher total cost
+```
+
+**Index side: LazyGraphRAG.** It removes the LLM from indexing entirely — classical NLP noun-phrase extraction plus co-occurrence gives the graph, and every LLM call is deferred to query time, where a best-first plus breadth-first iterative-deepening search spends a **relevance test budget** (100, 500 and 1,500 tests are the evaluated settings) as its single cost-quality knob. Microsoft reports indexing cost identical to vector RAG and **0.1% of full GraphRAG's**, and for global-query quality comparable to GraphRAG global search, more than **700x lower query cost**; at 4% of GraphRAG global search's cost it outperformed every compared method on both local and global queries.
+
+Read those against 3.3's `$850` for 100M tokens. Full extraction buys a reusable asset and only pays back on a stable corpus that is queried heavily and thematically; on streaming data, one-off analysis or exploratory work, paying per query is strictly cheaper. The library's **DRIFT search** sits between the two paths — local search that folds community information in and generates follow-up questions — and is the built-in version of the hand-rolled hybrid described in Section 10.
+
 ---
 
 ## 4. Architecture Diagram
@@ -444,6 +470,9 @@ A: Entity deduplication determines graph quality. If "Microsoft," "Microsoft Cor
 
 **Q: How would you implement incremental indexing for a frequently-updated corpus?**
 A: Full graph rebuild is prohibitive for daily updates. Incremental approach: (1) Extract entities and relationships from new documents only and add them to the existing graph. (2) Identify affected graph neighborhoods: which communities contain entities from the new documents? (3) Re-run community detection only on the affected sub-graph (not the full graph). (4) Regenerate community summaries only for affected communities. The challenge is that new entities may reorganize existing communities, requiring broader re-summarization. For corpora updating more than daily, consider maintaining a separate "recent documents" standard RAG index that handles recency queries while Graph RAG handles the stable historical corpus.
+
+**Q: The indexing cost of Graph RAG is too high for your corpus. What are the options besides giving up?**
+A: Move the LLM spend from index time to query time — that is what LazyGraphRAG does, and it is a supported path, not a research idea. LazyGraphRAG builds the graph with classical NLP (noun-phrase extraction plus co-occurrence) and no LLM calls at all during indexing, then defers every LLM call to query time, where an iterative-deepening best-first search spends a configurable relevance-test budget (100/500/1,500 tests in the published evaluation). Microsoft reports indexing cost identical to vector RAG and 0.1% of full GraphRAG's, with more than 700x lower query cost at global-query quality comparable to GraphRAG global search. The complementary lever is on the query side: dynamic community selection replaces the fixed-level map-reduce with a root-down traversal that has a cheap model rate each community report and prunes irrelevant reports along with their whole subtree — on a 50-question AP News benchmark it cut ~1,500 level-1 reports down to ~470, a 77% average cost reduction at comparable comprehensiveness, diversity and empowerment. Choose by corpus behaviour: full extraction is an asset that amortizes over a stable, heavily queried corpus, while streaming data, one-off analysis and exploratory work are exactly the cases where paying per query wins.
 
 **Q: What query types benefit most and least from Graph RAG?**
 A: Most benefit: (1) Thematic queries ("What are the major regulatory themes in our legal corpus?"); (2) Relationship queries ("Who are the key connections between Company X and investors in our deal documents?"); (3) Trend queries ("How has the discussion of AI safety evolved across our research corpus?"). Least benefit / potential degradation: (1) Specific factual lookups ("What was OpenAI's revenue in Q3 2024?") — community summaries add noise, standard RAG is faster; (2) Very recent information — Graph RAG indexing may lag behind document updates; (3) Code documentation queries — entity-relationship structure doesn't map well to code concepts.

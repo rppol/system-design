@@ -942,6 +942,35 @@ def evaluate_structured(task: str, output: str, threshold: int = 8) -> Structure
     )
 ```
 
+### Prompt Caching — the Discount Every Pattern Is Eligible For
+
+Section 3 states that parallelization "multiplies token cost by N." That is the *uncached* bill. Every pattern in this module re-sends a large, byte-identical prefix: the same system prompt down each routed branch, the same source document across every section of a fan-out, the entire prior draft on every evaluator round. Cached, those tokens are billed at a fraction of the input rate.
+
+The rates are the whole calculation. Anthropic: cache **reads cost 0.1x** the base input rate, a cache **write costs 1.25x** at the default 5-minute TTL (2x for the 1-hour TTL), with up to 4 explicit `cache_control` breakpoints per request. OpenAI: automatic, no code change, on prompts of **1,024 tokens or more**, and only on an **exact prefix match**.
+
+```
+  Voting, N branches over a shared 20,000-token document, $5 per 1M input
+
+  uncached  :  N x 20,000 tokens                        N =  5 -> $0.500
+  cached    :  1 write (x1.25) + (N-1) reads (x0.1)     N =  5 -> $0.165  (3.0x)
+                                                        N = 10 -> $0.215  (4.7x)
+
+  effective multiplier :  1.25 + 0.1(N - 1)   instead of   N
+
+  the marginal branch costs 0.1x, so the ratio IMPROVES with N -- the
+  opposite of the linear intuition the pattern is usually costed with
+```
+
+The same rewrite applies to the evaluator-optimizer loop, where every round re-sends everything before it: caching turns that quadratic token growth into near-linear growth, and it is what makes a 5-round loop affordable at all.
+
+Three traps, in the order teams hit them:
+
+- **A concurrent fan-out races its own cache write.** Fire all `N` branches at once on a cold prefix and every one of them is a *write* at 1.25x — `1.25N` against an uncached `N`, a 25% loss for enabling caching. Warm the prefix first with one cheap call (Anthropic supports `max_tokens: 0` pre-warming), or let the router's own call establish it, then fan out.
+- **Anything volatile at the top of the prompt destroys every hit.** A timestamp, a request ID or a reshuffled few-shot block invalidates the prefix for all branches. Anthropic invalidates hierarchically — `tools` -> `system` -> `messages` — so editing one tool description drops the entire cache. Put stable content first, volatile content last.
+- **Router branches only share a cache if they share a prefix.** Shared instructions must come *before* the branch-specific ones, or each route pays its own write.
+
+Verify rather than assume: check `cache_creation_input_tokens` and `cache_read_input_tokens` on the response. Both zero means caching silently did not apply — usually a prompt under the model's minimum cacheable length.
+
 ---
 
 ## 7. Real-World Examples
@@ -1284,6 +1313,9 @@ On well-defined tasks with crisp evaluation criteria — code correctness, factu
 
 **Q: What is the cost multiplier for an evaluator-optimizer loop with 3 rounds?**
 Each round costs 1 generation call + 1 evaluation call = 2 calls. Three rounds = 6 calls total versus 1 call for a naive single-prompt approach. If generation and evaluation use similar models, the cost is approximately 6×. In practice, evaluation calls use shorter prompts (the output being evaluated plus criteria) and shorter responses (JSON with score and feedback), so the actual token cost is roughly 4-5× for a 3-round loop.
+
+**Q: Does parallelization really multiply token cost by N?**
+Only if you leave prompt caching off, which is the default assumption behind the "N× cost" rule and is usually wrong. Sectioning, voting, routing and evaluator-optimizer loops all re-send a large, byte-identical prefix — the same document, the same system prompt, the same prior draft. With Anthropic's rates, a cache read costs 0.1× the base input rate and a cache write 1.25× (2× on the 1-hour TTL), so N branches over a shared 20,000-token document cost `1.25 + 0.1(N-1)` prefix-units instead of `N`: at N=5 that is $0.165 versus $0.500 on a $5/1M tier, and at N=10 it is $0.215 versus $1.00. The ratio improves as N grows, because each marginal branch costs a tenth of a fresh one. Three caveats decide whether you actually get it. A cold concurrent fan-out races its own cache write — every branch becomes a 1.25× write, which is 25% *worse* than not caching — so warm the prefix with one call first. Any volatile content at the top of the prompt (timestamp, request ID, reshuffled few-shots) invalidates the prefix for all branches, and Anthropic invalidates hierarchically from `tools` to `system` to `messages`, so one edited tool description drops everything. And routed branches only share a cache if the shared instructions precede the branch-specific ones. Confirm with `cache_read_input_tokens` on the response rather than assuming.
 
 **Q: How do you handle orchestrator output that is not valid JSON?**
 Parse the orchestrator output with a try/except around json.loads(). On ParseError, retry the orchestration call once with an explicit instruction appended to the prompt ("respond with JSON only, no prose"). Log the raw string that failed to parse for debugging. If the retry also fails, either raise to the caller or fall back to a hardcoded default decomposition. Never pass invalid JSON downstream — it will silently corrupt every worker.

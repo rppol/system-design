@@ -221,6 +221,40 @@ response = llm.generate_with_tools(
 
 Tool-calling agentic RAG is cleaner than orchestrated loops: the LLM decides when to retrieve, what to retrieve, and from which source (knowledge base vs. web).
 
+### 3.5 Parallel Fan-Out for Independent Sub-Questions
+
+The loop in 3.1 is strictly sequential — iteration `i+1` cannot start until `i` finishes — and that is only *necessary* when the next retrieval query depends on the previous result. Multi-hop queries come in two shapes and the loop treats them identically:
+
+```
+  CHAINED (must serialize)
+    "Who is the CEO of the company that acquired X?"
+      hop 1: which company acquired X?  -> "Acme"
+      hop 2: who is Acme's CEO?              <- query needs hop 1's answer
+
+  JOINED (independent, wrongly serialized)
+    "Compare the gross margin of A and B over the last 3 quarters."
+      Q1: A margin   Q2: B margin   Q3: A commentary   Q4: B commentary
+      none of the four queries can be written any better after seeing another
+```
+
+Decompose the query into a DAG instead of a list: nodes are sub-questions, edges are "needs the answer of". Every node whose parents are resolved is dispatched concurrently, so **wall-clock latency tracks the DAG's depth, not its node count**. The Section 13 case study's four sub-questions form a depth-1 DAG with a second targeted hop after the sufficiency check — that is exactly why its "Parallel tool execution" decision moved average iteration time from 8s to 3s.
+
+```
+  4 sub-questions, ~3 s each, one dependent follow-up
+
+  sequential : Q1 -> Q2 -> Q3 -> Q4 -> Q5      = 15 s   (5 hops deep)
+  DAG        : {Q1,Q2,Q3,Q4} -> Q5             =  6 s   (2 levels deep)
+```
+
+[LLMCompiler](https://arxiv.org/abs/2312.04511) is the reference implementation of this idea: a Planner emits the task DAG, a Task Fetching Unit dispatches every task whose dependencies are met, and an Executor runs them in parallel — the paper reports up to 3.7x latency speedup, up to 6.7x cost savings and ~9% accuracy improvement against ReAct. The cost saving is not a rounding effect: serial ReAct-style loops re-send the growing scratchpad on every step, which is the same quadratic term computed in 3.2. Anthropic's multi-agent research system reports the same lever at agent granularity — a lead agent spinning up 3-5 subagents in parallel, each using 3+ tools in parallel, "cut research time by up to 90% for complex queries" — with the caveat that the win is specific to breadth-first queries with genuinely independent directions.
+
+Four things break when you parallelize the loop, and all four are silent:
+
+- **Sufficiency must be checked at the join, not per branch.** One check per branch reads the whole accumulated context `N` times, multiplying the quadratic term instead of reducing it.
+- **`seen_ids` deduplication stops working.** Concurrent branches cannot filter on each other's results, so Pitfall 4's `$nin` filter no longer prevents overlap; dedup after the join instead, and expect the token count to exceed `N x top_k x chunk_size` minus duplicates.
+- **The slowest branch sets the wall clock.** A per-branch timeout with partial-result handling is mandatory; without it, one slow tool erases the entire speedup.
+- **Peak context arrives all at once.** Serial accumulation gives the compressor a chance to run between hops; a fan-out delivers `N` branches' worth of chunks simultaneously, so the token-budget guard from 3.2 has to be enforced before dispatch, not after.
+
 ---
 
 ## 4. Architecture Diagram
@@ -434,6 +468,9 @@ A: A hybrid architecture uses standard RAG as the fast default and agentic RAG f
 
 **Q: How do you debug agentic RAG failures in production?**
 A: Debugging agentic failures requires full execution traces. Each agentic run must log: (1) the original query and all generated sub-queries in order; (2) the documents retrieved and their scores at each iteration; (3) the sufficiency check result and reasoning at each iteration; (4) the final answer and which context supported it. Without these traces, post-hoc debugging is impossible. Common failure patterns to look for: circular retrieval (same document IDs across iterations), premature termination (sufficiency check said "yes" with incomplete context), infinite loop detection (max_iterations hit every time). Tool-level tracing with LangSmith or Arize Phoenix is non-negotiable for production agentic systems.
+
+**Q: When can agentic RAG iterations run in parallel instead of sequentially?**
+A: Whenever a sub-question does not need a previous sub-question's answer to be written — which is most of them. Multi-hop queries split into two shapes: chained ("who is the CEO of the company that acquired X?" — hop 2's query is unknown until hop 1 returns) and joined ("compare the margins of A and B" — all four sub-queries are writable up front). The sequential loop serializes both. Decompose into a DAG where edges mean "needs the answer of," dispatch every node whose parents are resolved, and wall-clock latency then tracks the DAG's depth rather than its node count: four independent sub-questions plus one dependent follow-up drop from five hops to two levels. LLMCompiler (arXiv:2312.04511) formalizes this with a Planner, a Task Fetching Unit and a parallel Executor, reporting up to 3.7x lower latency, up to 6.7x lower cost and ~9% higher accuracy than ReAct; Anthropic's research system reports up to 90% less research time from parallel subagents on breadth-first queries. The traps are that the sufficiency check must run once at the join (running it per branch re-reads the whole context N times), that `seen_ids` filtering cannot deduplicate across concurrent branches, that one slow branch sets the wall clock unless each has its own timeout, and that peak context now arrives all at once so the token-budget guard must fire before dispatch.
 
 **Q: What metrics differentiate agentic RAG from single-shot RAG in evaluation?**
 A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration efficiency: average iterations to reach a correct answer (target 1.5-2.5; higher indicates sufficiency check problems). Multi-hop accuracy: accuracy on a held-out set of labeled multi-hop queries (the primary justification for agentic RAG). Unnecessary iteration rate: fraction of single-hop queries that trigger multiple iterations (should be near zero with a good query router). Context utilization: fraction of accumulated context actually cited in the final answer (low utilization means retrieval is noisy). Cost-per-correct-answer: total LLM token cost divided by number of correctly answered questions, compared between agentic and standard RAG to quantify the accuracy-cost tradeoff.
