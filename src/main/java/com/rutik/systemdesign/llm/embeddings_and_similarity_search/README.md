@@ -222,6 +222,12 @@ flowchart LR
 
 **Production pattern**: Bi-encoder for recall (fast ANN search), cross-encoder for reranking (top-K candidates)
 
+**Third point on the spectrum — late interaction**: ColBERT keeps one vector per token and scores a
+pair by summing each query token's best match against the document (MaxSim), so document
+representations are still precomputable but the interaction is finer-grained than a single dot
+product. Full treatment — MaxSim mechanics, PLAID, storage cost — lives in
+[Reranking](../rag_fundamentals/reranking.md) and [Retrieval Methods](../rag_fundamentals/retrieval_methods.md).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -566,6 +572,49 @@ Compresses vectors from ~3KB (768 × float32) to ~96 bytes (24 × uint8):
 
 PQ enables storing billions of vectors on a single server at the cost of ~5-10% recall drop.
 
+### Scalar (int8) and Binary Quantization
+
+PQ learns a codebook and needs training. The two compression schemes that dominate production
+vector databases need neither — they just narrow the type of each component:
+
+```
+  float32   ->  int8      round each component onto 256 levels        4x smaller
+  float32   ->  1 bit     keep the SIGN of each component only       32x smaller
+```
+
+**The idea behind it.** "You do not need to know a component's exact value to rank neighbours — you
+need to know roughly where it sits, or in the binary case merely whether it is positive. Throw away
+the rest of the bits and let a cheap second pass repair the ordering."
+
+| Symbol | What it is |
+|--------|------------|
+| int8 | Each dimension mapped onto 256 levels using a per-dimension min/max calibrated on a sample |
+| binary | `v_i > 0 -> 1`, else `0`. One bit per dimension, packed into `uint8` words |
+| Hamming distance | Count of differing bits. `popcount(a XOR b)` — a couple of CPU instructions per 64 dims |
+| rescore_multiplier | Oversampling factor. Retrieve `k x multiplier` cheaply, then re-rank those |
+| rescoring | Score the shortlist with the **full-precision query** against the stored quantized docs |
+
+**Walk the numbers.** `mxbai-embed-large-v1` (1024 dims) on the MTEB retrieval suite, as measured in
+Hugging Face's embedding-quantization study:
+
+```
+  scheme                bytes/vector          1M vectors   NDCG@10   vs float32   CPU speedup
+  -------------------   -------------------   ----------   -------   ----------   -----------
+  float32 (baseline)    1024 x 4 = 4,096       4.10 GB      54.39      100  %        1.0x
+  int8                  1024 x 1 = 1,024       1.02 GB      52.79       97.0%        3.66x
+  int8 + 4x rescore     1,024                  1.02 GB        --        99  %         --
+  binary                1024 / 8 =   128       0.13 GB        --        92.5%       24.76x
+  binary + 4x rescore     128                  0.13 GB      52.46      ~96  %         --
+```
+
+**The pattern to remember.** Binary alone loses 7.5 points of relative quality — too much for most
+products. Binary *plus* rescoring recovers to ~96% while keeping the 32x memory win, because the
+expensive part (scanning 1M vectors) still happens in Hamming space and only the 400-candidate
+shortlist is touched in float. That is the same two-stage shape as the Matryoshka pattern in Section
+4.3, applied to precision instead of dimension — and the two compose: a 512-dim binary index is 64x
+smaller than 1024-dim float32. Reach for int8 when you want a safe 4x with almost no tuning, binary
+when the index no longer fits in RAM, and PQ only when you need to go below one bit per dimension.
+
 ### Embedding Fine-Tuning for Domain Adaptation
 
 ```mermaid
@@ -750,6 +799,9 @@ Evaluate embeddings on retrieval metrics specific to your RAG use case, not gene
 
 **Q: How does metadata filtering interact with ANN search, and what is the pre-filter vs post-filter trap?**
 Post-filtering retrieves top-K by vector similarity first and then applies the metadata filter — with a selective filter (say 1% of the corpus matches), a top-100 retrieval can leave zero surviving results even though thousands of matching documents exist. Pre-filtering restricts the search to matching vectors, but naive pre-filtering breaks HNSW's graph connectivity: greedy traversal gets stranded when most of a node's neighbors are filtered out, and recall collapses. Production vector databases (Qdrant, Pinecone, Weaviate) implement filtered HNSW traversal that walks through filtered-out nodes without returning them, which preserves connectivity — but recall under your real filters still must be measured, not assumed. For highly selective filters (under ~1% selectivity), brute-force scanning the filtered subset is often better: exact search over 10K vectors takes about 1ms and returns 100% recall.
+
+**Q: When would you use binary or int8 embedding quantization instead of Product Quantization?**
+A: Use int8 or binary when you want compression with no codebook to train and no rebuild when the corpus changes; use PQ only when you must go below one bit per dimension. int8 maps each component onto 256 levels for exactly 4x smaller vectors, and binary keeps only each component's sign for exactly 32x smaller vectors scored by Hamming distance (`popcount(a XOR b)`), which is why binary search runs roughly 25x faster on CPU than float32. The quality story is what decides the design: on the MTEB retrieval suite with mxbai-embed-large-v1, int8 alone retains about 97% of float32 NDCG@10 while binary alone retains only about 92.5% — but binary with rescoring recovers to roughly 96%, because you retrieve `k x rescore_multiplier` candidates in Hamming space and then re-rank just that shortlist using the full-precision query vector. The cheap scan stays cheap and only a few hundred candidates are touched in float. Default to int8 for a safe 4x, move to binary plus 4x rescoring when the index no longer fits in RAM, and always measure recall on your own corpus because the retention figures are dataset- and model-dependent.
 
 ---
 

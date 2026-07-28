@@ -820,3 +820,5 @@ config = LoraConfig(
 - [Supervised Learning (ML)](../../ml/supervised_learning/README.md) — transfer learning theory, loss functions, regularization — foundational to understanding fine-tuning
 - [Alignment & RLHF](../alignment_and_rlhf/README.md) — what comes after SFT: reward models, PPO, DPO
 - [Optimization & Quantization](../optimization_and_quantization/README.md) — GPTQ/AWQ quantization of merged models, and the 4-bit formats QLoRA builds on
+- [Synthetic Data Generation](../synthetic_data_generation/README.md) — where the SFT pairs come from when you do not have them: Self-Instruct, Evol-Instruct, quality filtering
+- [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/README.md) — the two alternatives to fine-tuning a single adapter: train a smaller student, or merge several tuned checkpoints (SLERP/TIES/DARE)

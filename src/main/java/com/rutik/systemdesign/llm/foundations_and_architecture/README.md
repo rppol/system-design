@@ -881,6 +881,65 @@ GELU(x) = x x Phi(x)
 | **Jamba** (AI21) | Hybrid: interleaved Transformer + Mamba layers | Long context + strong quality | More complex training |
 | **RWKV** | RNN-style but trainable like Transformer | Fast inference; no KV cache | Weaker on tasks requiring arbitrary lookback |
 
+### Where the Parameter Count Comes From
+
+Every budget on this page — `C = 6ND`, KV cache per token, GPU count — is denominated in `N`. But
+`N` is not a number you look up; it is one you assemble from seven fields in `config.json`:
+
+```
+N = V x d_model                                  <- input embedding table
+  + L x [ 2 x d_model^2                          <- Wq and Wo, always full size
+          + 2 x d_model x (n_kv x head_dim)      <- Wk and Wv, shrunk by GQA
+          + 3 x d_model x d_ff                   <- SwiGLU: gate, up, down
+          + 2 x d_model ]                        <- two RMSNorm gain vectors
+  + V x d_model                                  <- output head, only if untied
+```
+
+**The idea behind it.** "A transformer is one embedding table, the same block repeated `L` times,
+and an output head. Count the matrices in one block, multiply by `L`, add the two vocabulary-sized
+tables at the ends."
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Number of transformer blocks. 32 in Llama 3 8B |
+| `d_model` | Residual-stream width. 4096 |
+| `d_ff` | FFN intermediate width. 14336 — set by the 8/3x SwiGLU rule, not 4x |
+| `n_q`, `n_kv` | Query heads and KV heads. 32 and 8 under GQA |
+| `head_dim` | `d_model / n_q` = 128, so `n_kv x head_dim` = 1024, a quarter of `d_model` |
+| `V` | Vocabulary rows. 128,256 |
+| tied / untied | Whether the output head reuses the embedding table. Llama 3 8B ships untied |
+
+**Walk one example.** Llama 3 8B, straight from its config (`tie_word_embeddings: false`):
+
+```
+  ONE BLOCK
+    Wq   4096 x 4096                                  =    16,777,216
+    Wk   4096 x 1024                                  =     4,194,304
+    Wv   4096 x 1024                                  =     4,194,304
+    Wo   4096 x 4096                                  =    16,777,216
+                                        attention     =    41,943,040   (19.2%)
+    gate 4096 x 14336                                 =    58,720,256
+    up   4096 x 14336                                 =    58,720,256
+    down 14336 x 4096                                 =    58,720,256
+                                        MLP           =   176,160,768   (80.8%)
+    2 RMSNorm gains  2 x 4096                         =         8,192
+                                        per block     =   218,112,000
+
+  WHOLE MODEL
+    32 blocks     32 x 218,112,000                    = 6,979,584,000
+    embedding     128,256 x 4,096                     =   525,336,576
+    output head   128,256 x 4,096  (untied)           =   525,336,576
+    final norm                                        =         4,096
+    -----------------------------------------------------------------
+    N                                                 = 8,030,261,248   = 8.03 B
+```
+
+**Two things this table settles.** First, **the MLP is the model** — 80.8% of every block, four times
+the attention parameters — which is why FFN weights dominate quantization and MoE work while attention
+dominates *memory-bandwidth* work at decode. Second, **GQA is a parameter saving as well as a KV-cache
+saving**: at `n_kv = 32` (MHA) `Wk` and `Wv` would each be 16,777,216, adding 25.2 M per block and
+805 M to `N` — a 10% larger model for the same `d_model`.
+
 ### Scaling Laws (Chinchilla)
 Hoffmann et al. (2022) showed optimal compute budget splits roughly equally between:
 - Model parameters (N)
@@ -1074,6 +1133,9 @@ A: SwiGLU — `FFN(x) = (SiLU(x·W_gate) ⊙ x·W_up)·W_down` — consistently 
 
 **Q: If Chinchilla says D ≈ 20 × N, why are models like LLaMA 3 trained on far more tokens than that?**
 A: Because Chinchilla optimizes *training* compute only, while production models also pay *inference* cost — so it is rational to "overtrain" a smaller model far past the compute-optimal point. LLaMA 3 8B was trained on ~15T tokens, nearly 100× more tokens per parameter than the Chinchilla-optimal ~20, because the extra pretraining buys quality that would otherwise require a larger model that costs more on every inference call, forever. Loss keeps improving past the optimum, just with diminishing returns, so the practical rule is: pick N from your serving budget (latency, GPU memory, cost per token), then train on as much high-quality data as you can afford.
+
+**Q: How do you compute a model's parameter count from its config, and which component dominates?**
+A: Sum the embedding table, the per-block attention and MLP matrices times the layer count, and the output head if it is untied. For Llama 3 8B (L=32, d_model=4096, d_ff=14336, 32 query heads, 8 KV heads, V=128,256, untied) that is 218,112,000 per block x 32 = 6.98B, plus 525.3M for the embedding table and another 525.3M for the output head, totalling exactly 8,030,261,248 parameters. The MLP dominates: gate, up and down together are 176.2M of each block's 218.1M (80.8%), while all four attention projections are only 41.9M (19.2%) — which is why FFN weights are the target of most quantization and MoE work. Note also that GQA saves parameters, not just KV cache: with 32 KV heads instead of 8, Wk and Wv would grow from 4.2M to 16.8M each, adding 805M parameters to the same architecture. Interviewers use this question to check whether you can reason about memory from a config file rather than quoting a marketing number.
 
 ---
 

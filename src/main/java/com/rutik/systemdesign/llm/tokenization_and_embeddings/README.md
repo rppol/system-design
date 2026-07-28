@@ -260,6 +260,51 @@ decoded = enc.decode(tokens)
 # "Hello, World! 你好"  -- lossless round-trip
 ```
 
+### Pre-Tokenization — The Regex That Runs Before BPE
+
+The pipeline diagram in Section 5 has a box labelled "Pre-tokenization". That box is a single regular
+expression, and it is the most load-bearing line in the whole tokenizer: **BPE merges are only ever
+applied inside a chunk the regex produced, never across a boundary between chunks.** `cl100k_base`
+ships this pattern (verbatim from `tiktoken`'s `openai_public.py`):
+
+```
+'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s
+```
+
+| Alternative | What it captures | Consequence |
+|-------------|------------------|-------------|
+| `'(?i:[sdmt]\|ll\|ve\|re)` | English contraction tails: `'s`, `'t`, `'ll`, `'ve`, `'re` | Contractions get their own tokens, in English only |
+| `[^\r\n\p{L}\p{N}]?+\p{L}++` | One optional non-letter, non-digit character, then a run of letters | This is the leading space. `" hello"` is one chunk, so it merges into one token |
+| `\p{N}{1,3}+` | At most three digits | A hard cap: no token can ever span more than 3 digits |
+| ` ?[^\s\p{L}\p{N}]++[\r\n]*+` | Runs of punctuation/symbols | Punctuation never merges into an adjacent word |
+| `\s++$`, `\s*[\r\n]`, `\s+(?!\S)`, `\s` | Whitespace and newline runs | Indentation becomes its own token — why code tokenizes the way it does |
+
+**Walk one example.** `"I'm paying $8675309 today"` under `cl100k_base`:
+
+```
+  regex chunks       which alternative matched          BPE then merges inside each chunk
+  -----------------  ---------------------------------  ---------------------------------
+  "I"                letter run                         one token
+  "'m"               contraction tail                   one token
+  " paying"          optional-space + letter run        one token (the space is inside it)
+  " $"               optional-space + symbol run        one token
+  "8675309"          digit run, capped at 3             SPLIT into "867" "530" "9" first
+  " today"           optional-space + letter run        one token
+```
+
+The digit row is the regex doing the splitting, not BPE: `\p{N}{1,3}` consumes greedily left to
+right, so the seven digits are cut into `867`, `530`, `9` before a single merge is consulted —
+exactly the segmentation Section 7 reports.
+
+**This one regex explains three facts stated elsewhere in this module.** The leading-space behaviour
+in Section 10 is not a BPE property — it is the `[^\r\n\p{L}\p{N}]?+` prefix pulling the space into
+the word chunk. The "fixed 1-3 digit chunks, left to right" rule in Section 7 is `\p{N}{1,3}` and
+nothing else; no amount of merge training could produce a 4-digit token against it. And the
+English-only contraction alternative is a small, concrete instance of the multilingual bias the
+fertility section quantifies — French `l'` and `d'` get no such rule. `o200k_base` rewrites the
+letter alternatives to handle capitalisation and non-Latin scripts better, but keeps `\p{N}{1,3}`
+unchanged.
+
 ### Fertility and Efficiency
 
 **Token density comparison** (illustrative tokens per word — the exact ratio depends on the
@@ -448,6 +493,7 @@ Solutions: Use tokenizers with consistent number splitting
 4. **Vocabulary truncation on fine-tuning**: Adding new tokens to a frozen embedding matrix — the new tokens have random embeddings and need extra training.
 5. **Non-printing characters**: Prompts with invisible Unicode characters can cause unexpected tokenization.
 6. **Byte fallback**: Unknown characters fall back to individual byte tokens (3-4 per UTF-8 character for CJK), dramatically increasing sequence length.
+7. **Under-trained ("glitch") tokens**: A token can exist in the vocabulary and be almost absent from the training corpus, because the tokenizer is trained on a different — often larger and dirtier — corpus than the model. Its embedding row is then barely updated from initialization, and prompting the model with it produces evasion, hallucination or nonsense instead of the string itself. This is the "rare token quality" cost listed against large vocabularies in the Section 6 table, made concrete. The classic example is `SolidGoldMagikarp`, a Reddit username that survived into GPT-2's merge table; Land & Bartolo ("Fishing for Magikarp", EMNLP 2024) showed the problem is not a GPT-2 curiosity but present across model families, and gave automatic detectors for it: scan for tokens whose unembedding row still looks like the initialization distribution, for tokens the tokenizer can never actually emit (unreachable under its own regex and merge rules), and confirm with a prompt that asks the model to repeat the string back. Run that sweep before shipping a custom tokenizer, and never pick a rare vocabulary entry as a delimiter or sentinel without checking it first.
 
 ---
 
@@ -523,6 +569,12 @@ A: Byte-level BPE runs BPE over the 256 raw UTF-8 bytes rather than over Unicode
 
 **Q: What is weight tying between the embedding and output layers, and why is it common?**
 A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embedding lookup (`[V × D]`) and the output projection that produces logits over the vocabulary (`[D × V]`), so the same learned vector represents a token both when it is read in and when it is scored for generation. It roughly halves the parameters spent on the vocabulary interface — for a 128K vocab at D=4096 that is ~0.5B parameters saved — and it usually improves quality because input and output representations of a word are forced to be consistent. Many decoder LLMs tie weights (GPT-2, Gemma, and small models like Llama 3.2 1B/3B, where the table would otherwise dominate the parameter budget), but it is not universal: Llama 1/2/3 at 7B and above ship `tie_word_embeddings: false` and train a separate output head. The main reason not to tie is when input and output should live in genuinely different spaces (e.g., some encoder-decoder setups) or when a factorized/large-vocab output head is used for efficiency.
+
+**Q: What does the pre-tokenization regex do, and why does it matter more than the merge table?**
+A: The regex splits raw text into chunks before BPE runs, and merges are never allowed to cross a chunk boundary — so it decides what BPE is even permitted to learn. In `cl100k_base` the alternative `[^\r\n\p{L}\p{N}]?+\p{L}++` lets one non-letter character precede a run of letters, which is exactly why a leading space is absorbed into the following word token and why `"hello"` and `" hello"` are different IDs. The alternative `\p{N}{1,3}` caps any digit run at three characters, so "8675309" is cut into "867", "530", "9" by the regex before a single merge is consulted — no amount of training could produce a four-digit token. Separate alternatives isolate punctuation runs and whitespace runs, which is why indentation becomes its own token in code. The practical consequence: when you train a custom tokenizer, changing the pre-tokenizer pattern changes the model's arithmetic and code behaviour far more than changing `vocab_size` does, and a mismatched pre-tokenizer between training and inference corrupts every downstream ID even if the merge table is identical.
+
+**Q: What are glitch tokens and how would you detect them before shipping a model?**
+A: Glitch tokens are entries that exist in the vocabulary but were almost never seen during model training, so their embeddings stay near initialization and prompting with them yields evasion or nonsense. They arise from the disconnect between the two corpora: the tokenizer is fit on one dataset (often larger, less filtered) while the model trains on another, so artifacts like the Reddit username `SolidGoldMagikarp` win merge slots they never earn training signal for. Land & Bartolo ("Fishing for Magikarp", EMNLP 2024) give three detectors that combine well: flag tokens whose unembedding rows remain statistically indistinguishable from the initialization distribution, flag tokens that are unreachable — the tokenizer's own regex and merge ranks can never emit them — and verify candidates by asking the model to repeat the string verbatim. Their result is that this is common across model families, not a GPT-2 curiosity. Practically: run the sweep whenever you train a tokenizer or expand a vocabulary, exclude the flagged IDs from sampling, and never reuse a rare vocabulary entry as a chat or tool-call delimiter without confirming the model has actually learned it.
 
 ---
 

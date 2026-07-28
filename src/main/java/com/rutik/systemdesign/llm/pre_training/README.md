@@ -729,6 +729,55 @@ too much `N` and the model is undertrained (the GPT-3 failure), too much `D` and
 re-teach a model that has run out of capacity to absorb it (the flattening curve from the power-law
 section above).
 
+### Staged Pre-Training: Main Run, Context Extension, Annealing
+
+Everything above describes one continuous run. Frontier pre-training is not one run — it is three
+stages with different sequence lengths and different data mixes, and the split exists for a purely
+economic reason: attention cost is quadratic in sequence length, so training the whole corpus at the
+final context length would be unaffordable.
+
+```
+  stage                    context     share of tokens    what it is buying
+  ----------------------   ---------   ---------------    -------------------------------
+  1. initial pre-training  4K -> 8K    ~95 %              knowledge, language, reasoning
+  2. context extension     8K -> 128K  ~5 %               the ability to use a long window
+  3. annealing / decay     128K        <<1 %              final quality on the hardest data
+```
+
+**Walk the real numbers — Llama 3 405B (Meta, paper §3.4).** 15.6T tokens total:
+
+```
+  1. INITIAL PRE-TRAINING
+       batch 4M tokens, sequences of 4,096
+       -> 8M tokens / 8,192 after the first     252 B tokens
+       -> 16M tokens after                    2,870 B tokens
+       The ramp is deliberate: short sequences and small batches while the loss
+       surface is still violent, then longer and larger once it is stable.
+
+  2. LONG-CONTEXT PRE-TRAINING              ~  800 B tokens   (~5 % of the run)
+       six stages, 8K -> 128K
+       advance to the next stage only when BOTH hold:
+         a. short-context evals have fully recovered
+         b. needle-in-a-haystack is solved perfectly at the current length
+
+  3. ANNEALING                                    40 M tokens  (0.00026 % of the run)
+       LR linearly -> 0, context held at 128K
+       data mix re-weighted to upsample the highest-quality sources
+       final weights = Polyak average of the checkpoints across this stage
+       measured effect on the 8B: +24.0 % GSM8k, +6.4 % MATH validation
+       measured effect on the 405B: negligible
+```
+
+**The three lessons an interviewer is probing for.** First, **long context is bought, not baked in** —
+the 128K window came from 5% of the tokens at the end, which is why "what is your context length"
+is a question about the last stage of pre-training, not the architecture alone. Second, **the
+extension is gated on not regressing**: a longer window that costs short-context quality is a
+failed stage, not a tradeoff to accept. Third, **annealing is disproportionate leverage** — 40M
+tokens, 0.00026% of the run, moved an 8B model 24% on GSM8k, which is the sharpest available
+statement of "data quality > quantity". Note the scale dependence in the last line: the same
+annealing did almost nothing for the 405B, so treat late-stage data tricks as a small-model
+amplifier, not a universal law.
+
 ---
 
 ## 7. Real-World Examples
@@ -866,6 +915,12 @@ FIM rearranges training examples into (prefix, suffix, middle) or (suffix, prefi
 
 **Q: What is MFU and what values should you expect at scale?**
 Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × tokens for a dense transformer) to the theoretical peak FLOPs of the GPUs over the same wall-clock time. Well-tuned large-scale runs achieve 40-55% MFU (the case studies in §14 assume 45-50%); the gap versus 100% goes to communication (all-reduces, pipeline bubbles), data loading, kernel inefficiency, and recomputation from gradient checkpointing. MFU is the honest metric for training-stack quality because it cannot be gamed the way raw tokens/sec can. Compute expected wall-clock as 6·N·D / (peak_FLOPs × MFU) before committing to a budget, and treat sustained MFU regressions as an infrastructure bug to be diagnosed, not noise.
+
+**Q: Why is long-context capability trained as a separate late stage rather than throughout pre-training?**
+A: Because attention cost is quadratic in sequence length, so paying 128K-context prices across the whole corpus would multiply the training bill for capability that only the final window needs. The standard recipe is three stages: an initial run at 4K-8K that consumes roughly 95% of the tokens and does all the knowledge learning, a context-extension stage, and a short annealing stage. Llama 3 405B spent about 800B of its 15.6T tokens extending 8K to 128K in six increments, advancing to the next increment only when short-context evaluations had fully recovered and needle-in-a-haystack was solved perfectly at the current length — extension that costs short-context quality is treated as a failed stage, not an acceptable tradeoff. The final 40M tokens are the annealing stage: learning rate decayed linearly to zero at 128K context, the mix re-weighted to upsample the highest-quality sources, and the shipped weights taken as a Polyak average of checkpoints across the stage. Meta measured that annealing alone moved Llama 3 8B by +24.0% on GSM8k and +6.4% on MATH validation while doing essentially nothing for the 405B, so budget the stage generously for small models and treat it as a rounding error for frontier ones.
+
+**Q: Are emergent abilities real, and how should that change how you plan a pre-training run?**
+A: Treat emergence as a real planning constraint but not as a magic threshold, because the sharp jumps are partly an artifact of how the metric is scored. Wei et al. (2022) catalogued tasks where performance sits at chance and then rises steeply, with thresholds clustering in the 10B-100B parameter range, and reported that chain-of-thought prompting only helps at roughly the 100B scale. Schaeffer et al. (2023, "Are Emergent Abilities a Mirage?") showed that discontinuous metrics — exact-match on a multi-step answer, where every intermediate step must be right — manufacture the cliff, and that swapping to a continuous metric such as token-level edit distance or per-step accuracy often turns the same data into a smooth curve. The practical consequences are concrete: instrument your evaluation suite with continuous metrics so you can see progress before the pass/fail metric moves, do not size a model from a published per-capability threshold because those thresholds are task- and metric-dependent, and never conclude from a flat exact-match line at an early checkpoint that a capability will never appear.
 
 ---
 
