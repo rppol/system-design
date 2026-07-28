@@ -90,6 +90,34 @@ Key insight: separating "what do we know about the task" (task ledger) from "wha
 | Nested agents | Manual recursion, fragile | A team can be a participant of another team (`SocietyOfMindAgent`, `Team` in `participants`) |
 | Token tracking | Manual | `models_usage: RequestUsage` on every message |
 
+### 4.5 Magentic-UI — Putting a Human Back in the Orchestrator Loop
+
+Magentic-One as described above runs to completion on its own: it browses, writes files and
+executes shell commands with no approval step anywhere in the loop. That is fine on a benchmark
+and unshippable against a real account, because the failure mode of a WebSurfer that misreads a
+page is not a wrong answer, it is a clicked button that cannot be unclicked. Microsoft Research
+released **Magentic-UI** (May 2025) as the answer: an open-source research prototype built on
+the same Magentic-One team (Orchestrator, WebSurfer, Coder, FileSurfer) and running on AutoGen,
+but designed around human control rather than autonomy. Four mechanisms are worth knowing by
+name, because each maps to a different point in the loop:
+
+| Mechanism | Where it sits | What the human does |
+|---|---|---|
+| **Co-planning** | Before execution | Edits the plan itself — add, delete, edit or regenerate steps before any of them run |
+| **Co-tasking** | During execution | Watches real-time progress and can take control of the browser mid-task, then hand it back |
+| **Action guards** | Before a single action | Approves **irreversible** actions — closing a tab, clicking a button with side effects — under a configurable policy, up to requiring consent for every action |
+| **Plan learning** | After completion | Saves the run's plan to a gallery for reuse and modification on similar tasks |
+
+The one to internalize is the **action guard**, because it is the design pattern rather than the
+product: the interesting axis is not "autonomous vs. supervised" but **which specific actions
+are irreversible**, with approval demanded only there. Approving every action makes the system
+slower than doing it yourself; approving none makes it unusable on anything that touches a real
+account. Note also how co-planning inverts the ledger design in §4.2 — instead of the
+Orchestrator writing `task_ledger.plan` and the human seeing it only in a trace afterwards, the
+plan becomes an editable artifact *before* step one, which is the cheapest possible place to
+correct a bad decomposition. Plan learning then turns an approved plan into a reusable asset,
+so the human cost is paid once per task shape rather than once per run.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -680,6 +708,48 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### 6.5 Surviving a Restart — `save_state` and `load_state`
+
+Everything above lives in memory. A Magentic-One run that reaches step 14 of a 30-step plan and
+then loses its process has lost both ledgers, and restarting means re-browsing and re-executing
+every step already paid for. AutoGen's answer is a pair of methods present on both agents and
+teams:
+
+```python
+# Agent level: AssistantAgent's state is its model_context
+state = await assistant.save_state()
+# -> {'type': 'AssistantAgentState', 'version': '1.0.0', 'llm_messages': [...]}
+
+# Team level: saves every participant's state in one object
+team_state = await team.save_state()
+# -> {'type': 'TeamState', 'version': '1.0.0', 'agent_states': {...}, 'team_id': '...'}
+
+with open("team_state.json", "w") as f:
+    json.dump(team_state, f)          # the state dict is JSON-serializable
+
+# After a restart: rebuild the same team topology, then rehydrate it
+new_team = RoundRobinGroupChat(participants=[...], termination_condition=...)
+with open("team_state.json") as f:
+    await new_team.load_state(json.load(f))
+```
+
+Two things to get right. First, **`save_state()` on a team saves all its participants** — you do
+not iterate the agents yourself, and you should not, because the team state also carries the
+`team_id` that ties the pieces together. Second, a **custom agent saves nothing by default**:
+the base implementations return and accept empty state, so a specialist that holds its own
+ledgers, counters or scratch files must override `save_state()` and `load_state()` or it will
+come back from a restart amnesiac while the rest of the team remembers everything — the worst
+of the two possible failures, because the run continues and produces wrong work rather than
+crashing.
+
+Persist at a step boundary, not mid-action: after the Orchestrator updates the progress ledger
+and before it dispatches the next instruction, so a resumed run re-issues at most one
+instruction it had already sent. That re-issue is exactly why the specialists must be
+idempotent. The broader durability design — checkpoint placement, exactly-once side effects,
+resumable long-horizon runs — is covered in
+[Durable Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md); the two
+methods above are the AutoGen-specific hook you attach it to.
+
 ---
 
 ## 7. Real-World Examples
@@ -1018,6 +1088,12 @@ The shipped default is `max_stalls=3` on `MagenticOneGroupChat` — three consec
 
 **Q: Can Magentic-One agents run in parallel, and if not, what is the architectural reason?**
 No. The Orchestrator activates exactly one agent per step and waits for its observation before deciding the next step. This is intentional: the Orchestrator's decision depends on the latest observation (it reads `progress_ledger.last_observation`), so parallel agent execution would produce race conditions on the progress ledger. Parallelism can be introduced by having the Orchestrator issue a "batch instruction" to a fan-out coordinator, but this is not part of the base Magentic-One architecture.
+
+**Q: Magentic-One browses and runs shell commands with no approval step. How do you make that shippable against a real account?**
+Gate on irreversibility, not on autonomy: require human approval for the specific actions that cannot be undone, and let everything else run unattended. This is what Magentic-UI (Microsoft Research, May 2025) formalizes as an **action guard** — the agent pauses for consent before an irreversible action such as closing a tab or clicking a button with side effects, under a policy you configure, up to demanding consent for every action. Approving everything is slower than doing the task yourself and approving nothing is unusable against a real account, so the design work is deciding which actions land in the guarded set. Magentic-UI adds three more hooks at different points in the loop: **co-planning** lets the human edit the plan (add, delete, edit, regenerate steps) before step one, which is the cheapest place to fix a bad decomposition; **co-tasking** lets them take over the browser mid-run and hand control back; and **plan learning** saves an approved plan for reuse, so the human cost is paid once per task shape rather than once per run. It runs the same Magentic-One team on AutoGen, so this is a supervision layer over the architecture, not a replacement for it.
+
+**Q: An orchestrator pod restarts at step 14 of a 30-step plan. What did you have to build for the run to resume?**
+State persistence via `save_state()` and `load_state()`, checkpointed at step boundaries — without it both ledgers were in memory and the whole run is re-executed from scratch. Calling `save_state()` on a team returns a JSON-serializable `TeamState` dict containing every participant's state plus the `team_id`, so you persist one object rather than iterating agents; on restart you rebuild the same team topology and call `load_state()` with it. The trap is custom agents: the base `save_state`/`load_state` implementations save and load empty state, so a specialist holding its own counters or scratch files must override both or it returns from the restart amnesiac while the rest of the team remembers everything — the run then continues and produces wrong work instead of failing loudly. Checkpoint after the progress ledger is updated and before the next instruction is dispatched, so a resumed run re-issues at most one already-sent instruction, which is precisely why the specialists must be idempotent. See [Durable Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md) for checkpoint placement and exactly-once side effects.
 
 ---
 

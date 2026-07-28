@@ -688,6 +688,39 @@ class AgentAuthValidator:
         return claims
 ```
 
+### 6.6 The Data Model: Messages, Parts, Artifacts, and contextId
+
+Everything above says "result" informally. The spec is more precise, and the distinction matters
+when you implement a server. A2A carries two different kinds of payload:
+
+- **`Message`** — one unit of conversation. Fields: `messageId`, `role` (`ROLE_USER` or
+  `ROLE_AGENT`), `parts`, and the optional `contextId`, `taskId`, `metadata`, `extensions`,
+  `referenceTaskIds`. This is what you send to *ask* and what the agent sends to *ask back*
+  (the `input-required` question in §5.2 is a `Message`).
+- **`Artifact`** — a task *output*. Fields: `artifactId`, `name`, `description`, `parts`,
+  `metadata`, `extensions`. A `Task` carries an `artifacts` array. Results are artifacts, not
+  messages: a report, a chart, a generated file is an `Artifact`, so the caller can fetch it
+  later by ID without replaying the whole conversation.
+
+Both are built from the same **`Part`** union, which is why a task can return text and a file
+through one code path: `text` (string), `raw` (bytes, base64 in the JSON binding), `url`
+(reference to external content — use this instead of `raw` for anything large), or `data`
+(structured JSON). Parts also carry optional `filename` and `mediaType`.
+
+**`contextId` is the piece people miss.** A `Task` has both an `id` and a `contextId`. The
+`id` is one unit of work; the `contextId` groups *many* tasks and messages into one
+conversation. Ask the analyst agent to profile a dataset, then ask it to chart the result:
+two tasks, one `contextId`, and the agent can carry state between them. The server generates
+`taskId`; either side may propose `contextId`, and if a request supplies both they must agree
+or the request is rejected. Cross-conversation references use `referenceTaskIds` on a
+`Message` rather than reusing the `contextId`.
+
+Streaming updates are typed accordingly: status changes arrive as task-status events, while
+output arrives as `TaskArtifactUpdateEvent`, whose `append` and `lastChunk` flags let a large
+artifact stream in pieces — `append: true` means "add to the artifact you already have," and
+`lastChunk: true` closes it. A consumer that ignores these two flags and overwrites on every
+event ends up with only the final fragment of a streamed report.
+
 ---
 
 ## 7. Real-World Examples
@@ -982,6 +1015,59 @@ async def delegate_to_specialist(task: dict):
     )
 ```
 
+### Pitfall 6: POSTing to any callback URL a caller supplies
+
+The push-notification flow in §5.3 has a security property that is easy to miss: the *caller*
+chooses a URL and *your* server makes the request. That is a server-side request forgery
+primitive handed to every client. A caller can register `http://169.254.169.254/...` and read
+your cloud metadata service through your error messages, or register a victim's endpoint and
+use your agent as a DDoS amplifier. The A2A spec is explicit that a server must not blindly
+trust and POST to any client-supplied URL.
+
+BROKEN — accept the URL, fire the callback:
+
+```python
+@app.post("/tasks")
+async def submit_task(body: TaskRequest, claims: dict = Depends(validate_jwt)):
+    task = await create_task(body)
+    # DANGEROUS: unvalidated caller-controlled URL, and the POST carries no
+    # proof it came from us — the receiver cannot tell a real callback from a forgery.
+    await register_callback(task.id, body.push_notification_config.url)
+```
+
+FIXED — validate the destination, then authenticate yourself to it:
+
+```python
+import ipaddress, socket
+from urllib.parse import urlparse
+
+ALLOWED_CALLBACK_HOSTS = {"orch.example.com", "cb.partner.example"}
+
+def validate_callback_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise HTTPException(400, "Callback URL must be HTTPS")
+    if parsed.hostname not in ALLOWED_CALLBACK_HOSTS:
+        raise HTTPException(400, "Callback host not allowlisted")
+    # Resolve and reject private/link-local/loopback targets (metadata service, RFC 1918)
+    for info in socket.getaddrinfo(parsed.hostname, 443):
+        addr = ipaddress.ip_address(info[4][0])
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            raise HTTPException(400, "Callback resolves to a non-public address")
+    return url
+```
+
+Allowlisting is the strong control; where an open ecosystem makes an allowlist impossible, the
+spec's alternative is ownership verification — a challenge-response against the URL before you
+will ever POST to it — plus egress firewall rules. Then close the other half of the hole: sign
+the callback. The server signs each notification as a JWT (claims `iss`, `aud`, `iat`, `exp`,
+`jti`, `taskId`; `kid` in the header) and publishes its public keys at a JWKS endpoint, so the
+receiving agent fetches the key by `kid`, verifies the signature and claims, and rejects
+duplicate or stale `jti` values as replays. `PushNotificationConfig` carries the fields for
+this: `url`, an optional `token` the client can check to confirm the callback belongs to a task
+it actually registered, and an `authentication` block describing the scheme. An unsigned
+callback endpoint is an unauthenticated write path into your orchestrator's task state.
+
 ---
 
 ## 11. Technologies & Tools
@@ -1048,6 +1134,12 @@ All incoming task payloads must be validated with strict schema enforcement (Pyd
 
 **Q: What is the minimum set of JWT claims required for secure agent-to-agent authentication?**
 Required claims: `iss` (issuer — calling agent's identity), `aud` (audience — target agent's URL), `exp` (expiry — must be short, no more than 15 minutes), `iat` (issued-at — for freshness validation), `jti` (JWT ID — unique per token to prevent replay), `scope` (permitted operations — minimum required capabilities). Optional but recommended: `sub` (specific resource being acted on), agent-specific claims identifying the task context.
+
+**Q: In A2A, what is the difference between a Message and an Artifact, and what is contextId for?**
+A Message is a unit of conversation (`messageId`, `role`, `parts`) while an Artifact is a task output (`artifactId`, `name`, `parts`) held in the Task's `artifacts` array. Both are built from the same `Part` union — `text`, `raw` bytes, a `url` reference, or structured `data` — so one code path returns prose and files alike; prefer `url` over `raw` for large payloads. `contextId` is the grouping key above `taskId`: a task ID is one unit of work, a context ID ties many tasks and messages into one conversation, so "profile this dataset" and "now chart it" are two tasks under one context and the agent can carry state between them. The server generates `taskId`; if a request supplies both a task ID and a context ID they must match. Streamed outputs arrive as `TaskArtifactUpdateEvent` with `append` and `lastChunk` flags — a consumer that overwrites instead of appending keeps only the last fragment.
+
+**Q: A caller registers a push-notification callback URL. What must your agent check before POSTing to it?**
+Treat the callback URL as untrusted input: it is a caller-controlled destination for a request your server makes, which is a textbook SSRF primitive. Require HTTPS, allowlist the host, and resolve it to reject private, loopback and link-local addresses — otherwise a caller registers the cloud metadata endpoint and reads credentials through your error responses, or points you at a third party and turns your agent into a DDoS amplifier. Where an open ecosystem rules out an allowlist, the spec's alternative is ownership verification by challenge-response plus egress firewall rules. Then authenticate the callback itself: sign each notification as a JWT with `iss`, `aud`, `iat`, `exp`, `jti` and `taskId`, publish keys at a JWKS endpoint, and have the receiver verify by `kid` and reject repeated `jti` values as replays. `PushNotificationConfig`'s optional `token` lets the receiver confirm the callback maps to a task it actually registered.
 
 **Q: How do you handle the case where a specialist agent is temporarily unavailable during A2A task submission?**
 Implement retry with exponential backoff on the caller side: attempt submission at 1s, 2s, 4s, 8s, capping at 30s, for a total maximum retry window of 90 seconds before surfacing the error to the orchestrator. Distinguish between retryable errors (HTTP 429, 503, 504) and non-retryable errors (400 bad request, 401 unauthorized). Use circuit breaker pattern: after 5 consecutive failures, open the circuit for 60 seconds and fail fast rather than queuing retries that will also fail. Fall back to an alternate specialist agent if the registry provides multiple candidates for the same skill.

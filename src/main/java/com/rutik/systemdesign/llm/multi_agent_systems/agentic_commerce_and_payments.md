@@ -171,6 +171,44 @@ agent-specific dispute-handling policies that doesn't yet have settled industry-
 | **Mastercard Agent Pay** | Mastercard, with Microsoft/Stripe partnerships | Mastercard network, "Agentic Tokens" | Card-network tokenization extended to agent-initiated transactions | Agentic Tokens — extension of existing Mastercard tokenization |
 | **Skyfire** | Skyfire (startup) | Agent wallets, often stablecoin | Agent identity (KYA) + agent-to-agent / agent-to-API payments | Identity credentials (KYA, §3.6) layered under payment authorization |
 
+### 4.1 Where AP2 Actually Stands Today (v0.2) — Open and Closed Mandates
+
+The Intent → Cart → Payment vocabulary above is AP2 as it launched (September 2025). The
+specification has since been restructured, and the published spec is now **v0.2**. Know both:
+the launch framing is what the ecosystem writes about, and the current one is what you would
+implement against.
+
+The current spec defines **two** mandate types, not three — a **Checkout Mandate** (proves the
+agent is authorized to buy *this* checkout) and a **Payment Mandate** (proves it is authorized
+to *pay* for that checkout) — and moves the three-way distinction into a **stage** axis instead:
+
+- **Open** mandate — carries *constraints*, signed by the user, not yet bound to any specific
+  transaction. This is what the Intent Mandate was. Because an open mandate is not
+  transaction-bound, it MUST carry the agent's public key in a `cnf` claim, so only that agent
+  can use it, and its `exp` SHOULD be the smallest value that lets the task finish.
+- **Closed** mandate — bound to one concrete checkout. In the **Direct (human-present)** mode
+  the user signs it on a Trusted Surface; in the **Autonomous (human-not-present)** mode the
+  agent signs it with its own key and presents *both* mandates, so the verifier can check the
+  closed one against the open one's constraints. Verifiers always receive a closed mandate;
+  only the verification path differs.
+
+Two details you will not guess. First, the spec names **five roles** — Shopping Agent,
+Credential Provider, Merchant, Merchant Payment Processor, and **Trusted Surface** — and defines
+a role as "agentic" when an LLM handles its communication. The Trusted Surface, the consent UI,
+**MUST be non-agentic**, and all validation MUST run in deterministic code regardless of role.
+That is §6.3's lesson written into a protocol as a normative requirement. Second, each mandate
+is paired with a **Receipt** (Checkout Receipt, Payment Receipt), and it is the
+mandate-plus-receipt set — not the mandate alone — that forms the non-repudiable dispute record
+§3.7 asks for, keyed by the Payment Mandate's `transaction_id`.
+
+The replay guard is worth memorizing because it is the closest thing AP2 has to revocation: a
+Shopping Agent **MUST NOT** present a further open mandate until it has received a rejection
+receipt for the previous one, which stops one open mandate from silently authorizing several
+checkouts. There is no revoke-before-expiry mechanism in the spec at all — a short `exp` is the
+control, which is exactly why the "smallest value that finishes the task" rule matters. Schema
+versions are pinned by an exact `vct` string with a numeric suffix (`mandate.checkout.open.1`),
+and implementations must match it exactly rather than prefix-matching.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -493,6 +531,46 @@ three-orders-of-magnitude errors that look completely ordinary in JSON. A struct
 rejects `$100,000 > $150` with exactly the same code path it uses to reject `$151 > $150`, which
 is the property that makes it trustworthy.
 
+### 6.4 x402 Settlement: verify-then-settle, and the retry that pays twice
+
+The §6.2 client stops at "attach the payment proof." What the server does next is where the
+operational hazards live, and **x402 v2** (announced 2025-12-11) changed the surface: it drops
+the deprecated `X-*` headers in favour of `PAYMENT-REQUIRED` (the requirements on the 402),
+`PAYMENT-SIGNATURE` (the client's signed payload) and `PAYMENT-RESPONSE` (the settlement
+result), and payloads now carry `"x402Version": 2`. v2 also adds wallet-controlled sessions so a
+client can skip the full negotiation on repeat access to a resource it already paid for.
+
+Settlement is **two calls to a facilitator, not one**. The resource server POSTs the payload and
+requirements to `/verify`, which checks that the signature recovers to `authorization.from`,
+that the payer holds the balance, that amount and validity window satisfy the requirements, that
+token and network match, and simulates the transfer. Only after the server has done the work
+does it POST to `/settle`, where the facilitator submits the transaction and waits for
+confirmation. Splitting the two is what lets a server refuse a bad request before any money
+moves, and avoid charging for a response it then failed to produce.
+
+Under the default `exact`-on-EVM method the facilitator pays gas while the client controls the
+flow of funds purely by signature — EIP-3009 `transferWithAuthorization`, with a Permit2
+fallback for tokens that lack it. The signed `authorization` is `from`, `to`, `value`,
+`validAfter`, `validBefore`, `nonce`.
+
+**The retry trap.** Those last two fields are the entire replay story, and they set a rule that
+catches agent authors out. The `nonce` is single-use — the token contract records it, so a
+second submission of the same authorization reverts — and the validity window is short (65
+seconds in the spec's own example). So when a request times out and the agent does not know
+whether settlement happened:
+
+- **Resend the identical `PAYMENT-SIGNATURE`.** Same nonce, so at worst the duplicate settlement
+  reverts on-chain. You pay once. This is the correct behaviour.
+- **Sign a fresh authorization.** New nonce, so both are independently valid and both can
+  settle. One logical request, two payments — and on-chain settlement is not reversible, which
+  is the §8 dispute-mechanism row biting in practice.
+
+Make the signed authorization part of the retryable unit of work, not something regenerated
+inside the retry — the same discipline as task idempotency in
+[Orchestrator-Worker](orchestrator_worker_pattern.md), with money attached. If the window
+expires before the retry succeeds, the authorization is dead rather than dangerous: sign a new
+one, because the old one can no longer settle.
+
 ---
 
 ## 7. Real-World Examples
@@ -779,6 +857,12 @@ The recurring agent's Intent Mandate should have a **longer expiry** (e.g., 90 d
 
 **Q16: What's a concrete way "context rot" or long-running-agent issues (from other modules) could manifest specifically as a financial risk in an agentic-commerce system?**
 A long-running procurement agent operating under a human-not-present Intent Mandate (§3.2) across many tool calls and a growing context could, late in a long session, lose track of *how much of its cumulative cap it has already used* if that tracking relies on the agent's own context rather than the external `SpendLimitGuard`'s state (§6.3) — the agent might "believe" (based on degraded recall of earlier context) that it has more remaining budget than it does, and attempt a transaction that should be rejected. This is precisely why §6.3's FIXED design keeps `spent_so_far_usd` in the **guard's own state**, external to the agent's context — the enforcement must not depend on the agent's own (potentially degraded) recall of its transaction history, the same architectural lesson as keeping authentication/authorization state external to an LLM's context window rather than trusting the model to "remember" what it's allowed to do.
+
+**Q17: An agent's x402-paid request times out and you don't know whether it settled. Do you retry with the same signed payment, or sign a new one?**
+Retry with the identical `PAYMENT-SIGNATURE` payload — reusing the same authorization is what makes the retry safe, and signing a fresh one is what makes you pay twice. The signed `authorization` carries a single-use `nonce` alongside `validAfter`/`validBefore`, and the token contract records the nonce, so a duplicate submission of the same authorization simply reverts on-chain: at most one payment happens no matter how many times you resend it. Sign a new authorization and you have created a second, independently valid payment for one logical request — and on-chain settlement is not reversible, so there is no chargeback to fall back on. Treat the signed authorization as part of the retryable unit of work rather than something regenerated inside the retry loop, exactly as [Orchestrator-Worker](orchestrator_worker_pattern.md) treats an idempotency key. The validity window is short (65 seconds in the spec's example), so if it lapses before you succeed, the old authorization is dead rather than dangerous and you may safely sign a fresh one.
+
+**Q18: In AP2's current spec, what is the difference between an open and a closed mandate, and which component is forbidden from being agentic?**
+An open mandate carries constraints and is not yet bound to any transaction; a closed mandate is bound to one specific checkout, and verifiers always receive a closed one. AP2 v0.2 defines two mandate types — Checkout Mandate and Payment Mandate — and puts the old Intent-versus-Cart distinction on this open/closed stage axis instead. In the direct (human-present) mode the user signs the closed mandate on a Trusted Surface; in the autonomous mode the user signs only the open mandate, which must pin the agent's public key in a `cnf` claim, and the agent then signs the closed mandate itself and presents both so the verifier can check one against the other. The **Trusted Surface** — the consent UI — MUST be non-agentic, meaning no LLM may sit in its communication path, and all validation must run in deterministic code whatever the role. There is no revoke-before-expiry mechanism in the spec, so a short `exp` plus the rule that an agent must not present a further open mandate before receiving a rejection receipt for the previous one is what bounds the damage.
 
 ---
 
