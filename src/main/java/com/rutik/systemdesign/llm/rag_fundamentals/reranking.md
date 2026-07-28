@@ -535,6 +535,7 @@ A: Pointwise reranking scores each document independently with a single relevanc
 5. **Measure NDCG@5 and MRR@5 before and after adding reranker** — quantify the improvement; if less than 10%, the retrieval is already good or the candidate pool is too small.
 6. **Monitor reranker latency separately** — cross-encoder latency should be tracked as a distinct component in your pipeline metrics; it's the second-most common latency bottleneck after LLM generation.
 7. **Choose BGE-reranker for self-hosted English workloads, Cohere for multilingual** — these are the right defaults for their respective use cases.
+8. **Decide how the reranked order is laid out in the prompt** — the reranker hands you a ranking, not a prompt; where those chunks sit in the context window is a separate decision governed by the "lost in the middle" effect, covered in [context engineering](../context_engineering/README.md). If the top-5 still contain near-duplicates, apply [MMR](retrieval_methods.md) over the reranked pool before the layout step.
 
 ---
 

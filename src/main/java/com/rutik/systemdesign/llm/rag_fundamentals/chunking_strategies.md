@@ -286,6 +286,35 @@ Rule of thumb: overlap = 10-15% of chunk size
 
 Halving the chunk instead changes the other side of the ledger: at chunk 250 with k = 5 the prompt carries `5 x 250 = 1250` tokens, half the context for the same number of retrieved units. Chunk size therefore sets two independent budgets at once — index size (through stride) and context spend (through `k x chunk_size`) — which is why the two are always tuned together.
 
+### 3.7 Header-Aware Chunking for Markdown and HTML
+
+Sections 3.1-3.4 split a flat string. Real corpora are rarely flat: Markdown docs, API references and scraped HTML carry an explicit heading hierarchy that already marks the boundaries the other strategies are trying to guess. `RecursiveCharacterTextSplitter` cannot see it — its separators are `["\n\n", "\n", " ", ""]`, so `##` is just two characters, and a pipe table is a run of newline-separated lines the splitter will happily cut between the header row and the data rows, leaving orphan rows whose columns no longer have names.
+
+Split on the structure first, then size the results:
+
+```python
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
+
+# Pass 1 — structural split. Each tuple maps a heading marker to a metadata key.
+header_splitter = MarkdownHeaderTextSplitter(
+    headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")],
+    strip_headers=False,        # default True drops the heading line from the text
+)
+sections = header_splitter.split_text(markdown_doc)
+# sections[i].metadata == {"h1": "Billing API", "h2": "Refunds", "h3": "Partial refunds"}
+
+# Pass 2 — size control INSIDE each section; the header metadata is carried through.
+sizer = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=200)
+chunks = sizer.split_documents(sections)     # split_documents, not split_text
+```
+
+Two things make the extra pass worth it. First, every chunk inherits its heading path as metadata for free — that is exactly the `section_title` that Pitfall 4 and the case study's metadata enrichment both demand, obtained without a parser of your own. Second, the path is a cheap embedding-time prefix: prepending `"Billing API > Refunds > Partial refunds: "` to the chunk text anchors an otherwise context-free paragraph ("This is not permitted after 90 days") to its topic, the same trick as the regulation-ID injection in Section 12.
+
+HTML has the matching pair. `HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "Header 1"), ("h2", "Header 2")])` is the direct analogue and reflects the tag hierarchy into metadata. `HTMLSemanticPreservingSplitter` goes further: its `elements_to_preserve` list (typically `["table", "ul", "ol"]`) keeps those elements whole and falls back to `RecursiveCharacterTextSplitter` only for oversized prose, so a chunk containing a large table may exceed the configured maximum on purpose — half a table, stripped of its header row, is worth less to a retriever than none.
+
 ---
 
 ## 4. Architecture Diagram
@@ -532,6 +561,9 @@ A: Legal and regulatory documents need 15-25% overlap (vs. 10% standard) because
 
 **Q: How do you evaluate chunking strategy quality independently from the rest of the RAG pipeline?**
 A: Measure chunk-level retrieval recall in isolation by holding the embedding model and retriever constant while varying only the chunking strategy. Build a labeled eval set of (question, gold_passage_text) pairs created by domain experts — 100-200 pairs is sufficient for statistical significance. For each chunking strategy, index the corpus with that strategy, then for each question check whether the gold passage text (or a chunk substantially overlapping it) appears in the top-K retrieved results. Compute recall@5 and recall@10 per strategy. Additionally, measure chunk self-containment qualitatively: for 20 representative retrieved chunks, answer the question "can a human answer the query from this chunk alone without additional context?" Poor self-containment (the chunk references information clearly present in an adjacent chunk) indicates that chunk size is too small or overlap is insufficient.
+
+**Q: Why does a plain recursive splitter mangle Markdown and HTML documents?**
+A: It cannot see structure: RecursiveCharacterTextSplitter treats Markdown headings and HTML tags as ordinary text and splits on blank lines and newlines. Its separator list is `["\n\n", "\n", " ", ""]`, so a `##` heading carries no more weight than a comma, and a pipe table — a block of newline-separated rows — is a prime split candidate, producing chunks of data rows detached from the header row that names their columns. The fix is a two-pass split: `MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"), ("##", "h2")])` (or `HTMLHeaderTextSplitter` for HTML) cuts on the heading hierarchy and writes each heading into the chunk's metadata, then `RecursiveCharacterTextSplitter.split_documents()` enforces the size limit within each section while carrying that metadata through. Two bonuses fall out: the heading path becomes the `section_title` metadata you need for filtering and citation anyway, and prepending it to the chunk text before embedding anchors context-free paragraphs to their topic. For HTML with structured elements, `HTMLSemanticPreservingSplitter` with `elements_to_preserve=["table", "ul", "ol"]` keeps tables and lists intact even when that pushes a chunk past the size limit.
 
 ---
 

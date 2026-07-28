@@ -486,6 +486,8 @@ MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-2,
   the trade almost every production system takes.
 ```
 
+Dimension is only one of the two levers on that `N x d x 4` product. The other is the `4` — the bytes per component — which scalar (int8) and binary quantization cut to 1 byte and 1 bit respectively, independently of `d` and stackable with MRL truncation. The mechanics, the recall cost, and the rescoring pass that recovers it live next door in [embeddings and similarity search](../embeddings_and_similarity_search/README.md).
+
 Distance computation shrinks by the same factor, because a dot product over `k` dimensions is `k` multiply-adds: at `k = 512` each comparison does 512 instead of 3072, so the ANN scan is roughly 6x cheaper in FLOPs as well as 6x smaller in bytes. This is the arithmetic behind the two-speed pattern above — scan at 512d, then rescore only the survivors at 3072d.
 
 The e-commerce case study in Section 12 is the same formula on a different corpus: 8M SKUs at 1024d is `1024 x 4 x 8e6 = 32.77 GB`, and truncating to 512d gives `512 x 4 x 8e6 = 16.38 GB` — the 32GB-to-16GB halving it reports, bought for 2.3% recall@10.

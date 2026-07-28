@@ -486,6 +486,40 @@ Three metrics, three different verdicts on the same pair of lists. Recall@10 cal
 
 For RAG the tie-break is structural: the LLM sees only the top-K chunks you paste into the prompt, and it sees them all at once — it does not care which was ranked first. That makes **Recall@5 the metric that predicts answer quality**, and it is why Section 10 tells you to fix retrieval before touching the generator when Recall@5 is under 80%. Use MRR when a human scans results top-down (search UI), and NDCG when graded relevance levels exist and ordering genuinely matters.
 
+### 3.7 Diversity-Aware Selection (MMR)
+
+Everything above ranks candidates independently, so nothing stops the top-5 from being five copies of one paragraph — the same passage duplicated by chunk overlap, boilerplate repeated across document versions, or one popular section that dominates its neighbourhood in embedding space. Recall@5 still reports five slots filled; the prompt actually carries one fact.
+
+Maximal Marginal Relevance (Carbonell and Goldstein, SIGIR 1998) fixes this by scoring each candidate against what has already been picked, not against the query alone. Selection is greedy: having chosen set `S`, take the remaining candidate `d` that maximizes
+
+```
+  MMR(d) = lambda x sim(q, d) - (1 - lambda) x max_{d' in S} sim(d, d')
+           \_____relevance_____/   \________redundancy penalty________/
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Relevance/diversity dial; `1` is pure relevance, `0` is pure diversity |
+| `sim(q, d)` | The retrieval score already computed — cosine against the query vector |
+| `max sim(d, d')` | Similarity to the most-similar chunk ALREADY selected; the penalty term |
+| `fetch_k` | Size of the candidate pool MMR chooses from |
+| `k` | How many it finally returns |
+
+**Walk one example.** `lambda = 0.5`; `d2` is a near-duplicate of `d1`, `d3` is not:
+
+```
+  candidate   sim(q, d)   sim(d, d1)     MMR after d1 is selected
+  ----------------------------------------------------------------
+  d1            0.82         -           selected first (top relevance)
+  d2            0.81        0.97         0.5(0.81) - 0.5(0.97) = -0.080
+  d3            0.75        0.30         0.5(0.75) - 0.5(0.30) = +0.225
+
+  d3 wins the second slot despite being 6 points less relevant, because
+  d2 adds almost nothing d1 did not already say.
+```
+
+In LangChain this is `vectorstore.max_marginal_relevance_search(query, k=4, fetch_k=20, lambda_mult=0.5)` — note that `lambda_mult` follows the formula's `lambda`, so `0` is maximum diversity and `1` is minimum. The cost is negligible next to the ANN query: the pairwise matrix for `fetch_k = 50` is 1,225 dot products of 768 dimensions, under a million multiply-adds against roughly 30 ms of graph traversal. MMR is a selection policy, not a relevance model — it never promotes a chunk the retriever scored badly, so it complements a [reranker](reranking.md) (run MMR over the reranked pool) rather than replacing one. The recommender-systems treatment of the same formula, where diversity is an end in itself rather than a redundancy guard, is in [retrieval and ranking](../../ml/recommender_systems/retrieval_and_ranking.md).
+
 ---
 
 ## 4. Architecture Diagram
@@ -680,6 +714,9 @@ A: SPLADE (Sparse Lexical and Expansion model) is a learned sparse retrieval mod
 
 **Q: How do you evaluate retrieval quality independently from generation?**
 A: Build a retrieval-only evaluation set: 200-500 (query, relevant_document_ids) pairs labeled by domain experts or derived from user click logs (clicked document = relevant). Run the retriever in isolation and measure: Recall@K (fraction of queries where a relevant document appears in top-K results), MRR (Mean Reciprocal Rank — the mean of 1/rank_of_first_relevant_document), and NDCG@K (Normalized Discounted Cumulative Gain — weights earlier positions more heavily). Recall@5 and Recall@10 are the most actionable metrics for RAG because they directly measure whether the LLM will have the right information to generate a correct answer. If retrieval Recall@5 is below 80%, no amount of LLM quality improvement will consistently compensate — invest in retrieval improvements first. Evaluate the retriever in isolation before optimizing the generator.
+
+**Q: Your top-5 retrieved chunks are near-duplicates of each other. How do you fix it?**
+A: Apply Maximal Marginal Relevance, which picks each next chunk by relevance minus its similarity to the chunks already selected. Ranking scores every candidate independently against the query, so nothing penalizes a chunk for repeating one already chosen — with 15% chunk overlap, boilerplate repeated across document versions, or one dense section that dominates its region of embedding space, the top-5 can be five renderings of a single fact while Recall@5 still reports five filled slots. MMR (Carbonell and Goldstein, SIGIR 1998) selects greedily by `lambda * sim(q, d) - (1 - lambda) * max sim(d, d_selected)`: at lambda=0.5, a candidate scoring 0.81 against the query but 0.97 against an already-selected chunk nets -0.08 and loses to one scoring 0.75 with 0.30 overlap, which nets +0.225. In LangChain it is `max_marginal_relevance_search(query, k=4, fetch_k=20, lambda_mult=0.5)`, where `lambda_mult=0` is maximum diversity and `1` is minimum. Two caveats: MMR cannot promote a chunk the retriever ranked badly, so it fixes redundancy and not recall; and exact duplicates are better removed by content hashing at index time than penalized at query time.
 
 ---
 

@@ -310,6 +310,23 @@ def generate_multimodal_answer(
     return response.choices[0].message.content
 ```
 
+### 3.5 Strategy 3: Page-Image Late Interaction (ColPali)
+
+Strategies 1 and 2 both keep Section 3.1's parsing stage: something has to find the figure, crop it, and hand it to a describer or an image encoder. ColPali (Faysse et al., ICLR 2025, arXiv:2407.01449) deletes that stage. It renders each PDF page as a single image, pushes it through a vision-language model, and indexes the resulting **patch** embeddings directly — no layout detection, no OCR, no captioning pass. The query is scored against those patches with ColBERT-style MaxSim (see [reranking.md](../rag_fundamentals/reranking.md) for the late-interaction mechanics), so a query token can match the one region of the page that answers it.
+
+```
+  parse-then-embed (3.1 -> 3.2/3.3)      page-image late interaction (3.5)
+  ------------------------------------   ------------------------------------
+  PDF -> layout model -> crops           PDF -> render page -> VLM
+      -> OCR / vision LLM caption            -> 1024 patch vectors x 128 dim
+      -> text embedding (1 vector)           -> MaxSim against query tokens
+  brittle stage: layout + OCR            brittle stage: none (image is truth)
+```
+
+The paper's own measurements on ViDoRe, its page-level retrieval benchmark, are what make this a real option rather than a curiosity: 81.3 average nDCG@5 against 65.5 for an Unstructured + BM25 pipeline and 67.0 for the best caption-based variant, with per-page indexing at 0.39 s versus 7.22 s for the parsing pipeline — roughly 18x faster to index because the expensive layout-and-OCR stage is gone. Online query latency is about 30 ms.
+
+The bill is storage, exactly as with ColBERT. A page is 1,024 patch vectors of 128 dimensions, 257.5 KB in float16 — against roughly 2 KB for one pooled 1024-dim text embedding of the same page. Token pooling at factor 3 cuts the vector count by two-thirds while retaining 97.8% of the score, which is the first lever to reach for. Choose this strategy when the corpus is visually dense and layout carries meaning (slide decks, financial filings, scanned forms, infographics) and when your parsing pipeline is the thing that keeps breaking; stay with Strategy 1 when documents are text-dominant, when you need the extracted text for anything other than retrieval (citation snippets, keyword filters, compliance export), or when a 100x index-size increase is not affordable.
+
 ---
 
 ## 4. Architecture Diagram
@@ -532,6 +549,9 @@ A: Cross-modal retrieval accuracy — a text query successfully retrieving a rel
 
 **Q: What chunking strategies work best for mixed-content documents containing both text and visual elements?**
 A: Standard token-based chunking destroys the semantic coherence of mixed-content documents by splitting text away from its associated figures and tables. Element-aware chunking is essential: (1) treat each extracted element (text block, table, figure) as a unit with its own chunk boundary — never split a table across two chunks; (2) preserve element-context linkage — each figure chunk carries metadata pointing to its source page, surrounding text (±200 tokens), and caption; (3) use layout-aware chunking that respects document structure (sections, subsections) as natural boundaries. For multi-column documents, parse columns independently before chunking to avoid cross-column text merging. The practical implementation: use Unstructured.io's hi_res mode to extract elements with layout coordinates, then apply element-type-aware chunking rules (text → token-based, tables → whole-table, figures → single chunk + description chunk pair).
+
+**Q: How would you build document RAG without a parsing pipeline at all?**
+A: Render each page as an image and index its patch embeddings directly with a visual retriever such as ColPali, skipping layout detection, OCR and captioning entirely. ColPali (Faysse et al., ICLR 2025, arXiv:2407.01449) pushes the page image through a vision-language model and stores 1,024 patch vectors of 128 dimensions per page, then scores queries with ColBERT-style MaxSim so a query token matches the specific region that answers it. This removes the stage that breaks most often in production — layout models and OCR on scanned, multi-column or infographic-heavy pages — and the paper measures both sides of the trade: 81.3 average nDCG@5 on the ViDoRe page-retrieval benchmark versus 65.5 for Unstructured + BM25 and 67.0 for the best caption-based pipeline, at 0.39 s per page to index against 7.22 s for the parsing pipeline, with roughly 30 ms query latency. The cost is index size: 257.5 KB per page in float16 against about 2 KB for a single pooled text vector, which token pooling at factor 3 cuts by two-thirds while retaining 97.8% of the score. Stay with parse-then-embed when documents are text-dominant or when you need the extracted text for anything besides retrieval — citation snippets, keyword filters, compliance export — because a visual index gives you a page, not a string.
 
 ---
 

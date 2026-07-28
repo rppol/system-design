@@ -239,6 +239,35 @@ computed and intersected.
 
 Decomposition is the foundation of agentic RAG (see [agentic_rag.md](agentic_rag.md)); when a decomposed leg retrieves low-quality evidence, corrective retrieval loops (see [corrective_rag.md](corrective_rag.md)) pick up from there.
 
+### 3.6 Conversational Query Rewriting (Multi-Turn)
+
+Section 3.1 promises to resolve pronouns, but its `rewrite_query(raw_query, llm)` signature cannot: "How much did it cost?" contains no information about what `it` is. In a chat product this is not an edge case — after turn one, most queries are elliptical, and embedding "How much did it cost?" retrieves whatever the corpus says about cost in general. The transformation therefore takes two inputs, not one: the conversation history and the latest turn, producing a **standalone question** that is meaningful with the history thrown away.
+
+```python
+from langchain.chains import create_history_aware_retriever
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+contextualize_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "Given a chat history and the latest user question which might reference "
+     "context in the chat history, formulate a standalone question which can be "
+     "understood without the chat history. Do NOT answer the question, just "
+     "reformulate it if needed and otherwise return it as is."),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+
+history_aware_retriever = create_history_aware_retriever(
+    llm, retriever, contextualize_prompt
+)
+# turn 1 (chat_history empty): input goes STRAIGHT to the retriever, no LLM call
+# turn N: prompt | llm | StrOutputParser() | retriever
+```
+
+Three details carry the design. First, the empty-history short circuit: LangChain's helper branches on `not x.get("chat_history")` and skips the rewrite entirely on turn one, so the extra LLM call is paid only where it can help. Second, `"otherwise return it as is"` is the instruction that stops the rewriter from dragging a stale entity into a genuinely new question — the classic multi-turn failure is a user switching topics ("Now, what is the refund policy?") and the rewriter helpfully appending the previous product's name, which sends retrieval to the wrong document set. Third, window the history to the last 2-4 turns; feeding twenty turns raises both the rewrite cost and the odds that a long-dead entity resurfaces.
+
+Note that this defeats the transformed-query cache in Pitfall 6: the cache key is now `(history, question)`, and history is unique per conversation, so the hit rate collapses. Cache the retrieval results keyed on the **rewritten** standalone question instead — that key repeats across users, while the raw turn does not.
+
 ---
 
 ## 4. Architecture Diagram
@@ -444,6 +473,9 @@ A: Query transformation costs one small LLM call per query — roughly 5-10 cent
 
 **Q: When does query transformation hurt retrieval performance, and what are the warning signs?**
 A: Query transformation degrades performance in four scenarios. First, over-transformation of precise queries: a well-formed technical query like "What is the difference between TCP and UDP?" paraphrased to "Compare network transport protocols" becomes less specific and retrieves less relevant documents. Second, HyDE on out-of-distribution topics: the LLM generates a confident but wrong hypothetical for topics it doesn't know well, steering retrieval in the wrong direction. Third, multi-query drift: LLM-generated variants may introduce tangential topics not in the original query, adding noise to the retrieved set. Fourth, decomposition mistakes: wrong decomposition of a complex query creates sub-questions that don't collectively cover the original intent. Warning signs in production: recall@10 drops after transformation is enabled (compare with an A/B test); answer relevance scores decrease; users provide more negative feedback after transformation rollout. If recall drops even by 2%, investigate which query types are being hurt.
+
+**Q: How does a RAG chatbot retrieve for a follow-up question like "how much did it cost?"**
+A: It rewrites the turn into a standalone question first, using the conversation history, and retrieves with that instead of the raw turn. Embedding "how much did it cost?" directly retrieves whatever the corpus says about cost in general, because the pronoun carries no signal — the resolution has to happen before the embedding, not inside it. The standard contract sends the LLM both the windowed chat history and the latest turn with an instruction of the form "formulate a standalone question which can be understood without the chat history; do NOT answer it, just reformulate it if needed and otherwise return it as is." LangChain packages this as `create_history_aware_retriever`, which branches on whether history exists: with an empty history the input goes straight to the retriever and no rewrite call is made, so turn one costs nothing extra. The "otherwise return it as is" clause is load-bearing — without it the rewriter drags the previous topic into a genuinely new question, the most common multi-turn retrieval failure. Two operational consequences: window the history to the last 2-4 turns so long-dead entities cannot resurface, and move your query cache off the raw turn (whose key now includes per-conversation history and never repeats) onto the rewritten standalone question, which does repeat across users.
 
 ---
 
