@@ -604,6 +604,13 @@ Per checkpoint: ~5-50KB (messages + state). For an agent running 50 iterations: 
 - Deploys during workflow execution: ~10/day, zero workflow losses
 - Attorney time saved per patent: 4-6 hours
 
+```
+trigger = 0.70 x W
+
+  reserve = (1 - 0.70) x W    <- headroom held back after the trigger fires
+  iterations to fill = W / f  <- f = tokens added per iteration
+```
+
 **What it means.** "Compaction at 140K is not a round number someone liked — it is 70% of a 200K window, and the 30% you hold back is exactly the room the next few iterations need to land in."
 
 Two of this architecture's constants are the same arithmetic seen from opposite ends, and Lesson 2 below quietly confirms it.

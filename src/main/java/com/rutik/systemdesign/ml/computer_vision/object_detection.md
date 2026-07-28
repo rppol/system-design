@@ -23,6 +23,10 @@ The key insight: detection is fundamentally a regression + classification proble
 
 **Anchor boxes**: pre-defined boxes of various aspect ratios and scales placed at each grid cell. The model predicts offsets relative to anchors rather than absolute coordinates, which stabilizes training. YOLOv3 uses 9 anchors (3 per scale); Faster R-CNN uses 9 per location.
 
+```
+anchors = cells x k
+```
+
 **Stated plainly.** "Anchor count is a multiplication, not a design mystery: every cell of every feature map gets one copy of every (scale × aspect-ratio) template, so the total is `cells × anchors_per_cell`."
 
 The number matters because it *is* the model's output width and the size of the label-assignment problem each training step. Anchors are cheap individually and enormous in aggregate.

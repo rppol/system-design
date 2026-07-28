@@ -405,6 +405,13 @@ Mitigation Loop:
   Anthropic, OpenAI publish red team reports for transparency
 ```
 
+```
+weighted_risk = Sum over s of (c_s x w_s)
+
+  w_s = s               <- linear weighting
+  w_s = 10^(s-1)         <- exponential weighting
+```
+
 **The idea behind it.** "The 1-to-5 score exists so that findings can be *summed* instead of merely counted. Forty mild findings and one catastrophic finding are not the same backlog, and a raw count says they are."
 
 Without the weighting, the mitigation loop optimizes for whatever is easiest to close, because closing a severity-1 finding moves the count by exactly as much as closing a severity-5 one.

@@ -631,6 +631,12 @@ GPU Memory Budget (A100 80GB serving LLaMA 3 8B in FP16):
   Headroom:                19-30 GB (comfortable)
 ```
 
+```
+utilization % = used / total
+
+  headroom = total - peak   <- what's left before OOM
+```
+
 **Read it like this.** "GPU memory is a fixed 80 GB drawer: weights take a fixed, known slice, and everything left over is KV cache — which is the only part that grows with traffic, and therefore the only part that can kill you."
 
 The budget matters because three of the four line items are constants you can compute before

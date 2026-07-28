@@ -24,6 +24,13 @@ Key insight: parameter sharing is the core efficiency gain. A 3x3 filter applied
 
 **Convolution operation**: a filter (kernel) of shape (K, K, C_in) slides over an input feature map. At each spatial position, it computes the dot product between the filter weights and the input patch, producing one scalar in the output feature map. Applying C_out different filters produces a feature map of shape (H_out, W_out, C_out).
 
+```
+  weights_per_filter  = K * K * C_in
+  total_conv_weights  = K * K * C_in * C_out
+
+  dense_weights       = (H*W*C_in) * (H*W*C_out)   <- same feature map, fully connected
+```
+
 **Put simply.** "A conv layer's weight count depends only on the filter shape and the channel counts — never on how big the image is."
 
 That independence from `H` and `W` is the whole reason CNNs fit in memory. A dense layer wiring the same feature map to the same output must store one weight per (input unit, output unit) pair, and that product explodes quadratically with resolution.

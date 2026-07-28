@@ -38,6 +38,14 @@ For binary treatment T in {0,1}:
 
 **CATE (Conditional ATE, Heterogeneous Treatment Effects):** tau(x) = E[Y(1) - Y(0) | X=x] — effect for a subpopulation characterized by covariates x. This is the target for uplift modeling.
 
+```
+  tau_i   = Y_i(1) - Y_i(0)                  <- individual effect, never observed
+
+  ATE     = E[Y(1) - Y(0)]                   <- average over everyone
+  ATT     = E[Y(1) - Y(0) | T=1]             <- average over the treated only
+  CATE(x) = E[Y(1) - Y(0) | X=x]             <- average over units with covariates x
+```
+
 **What the formula is telling you.** "All three estimands are the same subtraction — treated outcome minus untreated outcome for the same unit — and they differ only in *whose* differences you average over." ATE averages over everyone, ATT over the people who actually got treated, CATE over the people who look like `x`.
 
 | Symbol | What it is |

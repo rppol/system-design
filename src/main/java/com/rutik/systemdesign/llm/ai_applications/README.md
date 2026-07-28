@@ -766,6 +766,10 @@ Quality metrics:
   Critical issue capture rate:  99% (most important metric — no material issue missed)
 ```
 
+```
+cost per contract = attorney-hours x $500/hr
+```
+
 **Put simply.** "Cost per contract is attorney-hours times the hourly rate. The AI does not make
 attorneys cheaper — it removes hours from the numerator, and that is the entire mechanism."
 

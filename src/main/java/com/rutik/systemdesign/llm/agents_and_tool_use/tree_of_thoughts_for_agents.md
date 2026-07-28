@@ -60,6 +60,12 @@ Commit to the highest-scoring child at each step, recurse until terminal or dept
 
 BFS with a beam width B: at each level, expand all nodes in the current beam, generate k children per node, score all k*B candidates, keep only the top B for the next level. Cost: O(B * k * depth) candidate evaluations. Beam_width=3 with branching factor=3 and depth=3 yields 21 evaluations (the root level contributes only k=3) plus 7 generate calls — 28 LLM calls, tractable. This is the most common practical strategy.
 
+```
+BFS_frontier(d)    = b^d
+
+  Beam_candidates(d) = B x k x d      <- upper bound; root level contributes only k
+```
+
 **In plain terms.** "BFS pays a price that multiplies with every level you go down; beam search pays one that merely adds — because it throws away all but `B` nodes before descending."
 
 That single swap, from `b^d` to `B x k x d`, is the entire reason beam search is the default in production and BFS is a paper result.

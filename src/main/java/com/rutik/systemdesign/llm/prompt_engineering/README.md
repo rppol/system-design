@@ -71,6 +71,10 @@ Key insights:
 - Include edge cases and ambiguous examples
 - Balance examples across classes
 
+```
+daily cost = (k x t_ex) x R x ($/1M / 1,000,000)
+```
+
 **The idea behind it.** "Every example you paste into the prompt is a fixed tax you pay on *every single request*, forever — so the question is never 'do more examples help?' but 'do they help more than they cost?'"
 
 That framing matters because the cost is recurring and traffic-scaled while the accuracy gain is one-time and bounded. Few-shot tokens are the one part of the bill that never amortizes.

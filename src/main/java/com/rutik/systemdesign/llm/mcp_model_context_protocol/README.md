@@ -194,6 +194,12 @@ JSON-RPC Response (error):
 }
 ```
 
+```
+envelope_share = envelope_bytes / total_bytes
+
+base64_size = raw_size x 4/3
+```
+
 **The idea behind it.** "Every MCP message is a small JSON envelope wrapped around an even smaller payload — cheap in bulk, but the wrapper is nearly half the bytes, which is exactly why the protocol feels heavy on a single hot-path call."
 
 The envelope is fixed cost per message, not per byte of useful work. That ratio is harmless across a long session and terrible for one-shot use.
@@ -303,6 +309,12 @@ sequenceDiagram
 8. Client appends tool result to conversation context
 
 9. Model generates next response using tool result
+```
+
+```
+manifest_tokens = N x t_schema
+
+schema_share = manifest_tokens / W
 ```
 
 **Stated plainly.** "Step 2 is the expensive one: every tool a server registers becomes context the model must be shown on every single request of the session — which is what actually limits how many MCP servers you can connect at once."
@@ -481,6 +493,12 @@ Multiple internal LLM applications (a support bot, a contract reviewer, an onboa
 | Auth | Process isolation | HTTP headers (Bearer/OAuth) |
 | Proxy-friendly | N/A | Yes (with keep-alive tuning) |
 | Connection overhead | Process spawn (~50–200ms) | Single HTTP connection |
+
+```
+total_cost(C) = setup + (C x per_call)
+
+  amortized_setup = setup / C   <- what actually shrinks as call volume grows
+```
 
 **What the formula is telling you.** "Transport cost is a one-time setup charge plus a small per-call charge — so the right transport depends entirely on how many calls you spread the setup across."
 

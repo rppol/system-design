@@ -769,6 +769,10 @@ Thompson Sampling takes about 22% less regret than **fixed** epsilon-greedy here
 
 **Pitfall 1 — Not separating exploration traffic from training data**: A team used the same click logs for both bandit reward updates and offline model training. The bandit had explored bad arms frequently (by design) — the offline model was trained on those low-quality impressions and learned to score bad arms higher. Fix: tag exploration impressions with an "exploration" flag; exclude them from offline batch model training; use only exploitation impressions or apply IPW to reweight exploration impressions.
 
+```
+  V_hat = (1/N) * Sigma over t of  1[a_t = a] * r_t / p_t
+```
+
 **Put simply.** "Divide every logged reward by the chance the logging policy had of showing that item, so a rare exploration impression counts for as much as the common exploited ones it was drowned out by."
 
 | Symbol | What it is |

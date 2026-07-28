@@ -113,6 +113,12 @@ Final Answer: <CEO name> is the CEO of Apple, with a net worth of <figure>.
 
 ReAct was proposed as a prompting pattern (2022) and is now the default architecture for most agents.
 
+```
+p^n = p x p x p x ... (n factors)   <- probability every one of the n steps succeeds
+
+  p^(1/n) = the n-th root of p^n    <- inverts the relation: per-step reliability for a target rate
+```
+
 **The idea behind it.** "An agent is a chain, and a chain succeeds only if every link does — so per-step reliability gets multiplied by itself once per step, and a 95%-reliable agent is worse than a coin flip by step 14."
 
 This is the single most counterintuitive number in agent design. Engineers reason about steps additively ("each step is pretty good") when the math is multiplicative, and multiplication of numbers below 1 collapses fast.
@@ -195,6 +201,13 @@ Procedural memory:
   Skill programs / few-shot examples stored
   Retrieved when similar task encountered
   Example: successful code templates
+```
+
+```
+r = W_after / W_before
+
+  W_before = total turns x t_turn             <- every turn kept verbatim, unbounded growth
+  W_after  = summary + (tail window x t_turn) <- growth capped once the tail window is fixed
 ```
 
 **Stated plainly.** "Summarizing old turns does not just save tokens once — it converts working memory from something that grows with every step into something that stops growing at a fixed ceiling."

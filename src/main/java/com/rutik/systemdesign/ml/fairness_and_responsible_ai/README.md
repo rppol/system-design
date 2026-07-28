@@ -67,6 +67,15 @@ Three consequences follow from treating fairness as a first-class engineering co
 
 Read every condition above as "…given group = a", i.e. the equality holds after conditioning on group membership (and, for separation and sufficiency, on the true label or the prediction respectively).
 
+```
+rate = numerator / denominator
+
+  TPR            = TP / (TP + FN)     <- caught, over actually positive (a row)
+  FPR            = FP / (FP + TN)     <- wrongly flagged, over actually negative (the other row)
+  PPV            = TP / (TP + FP)     <- correct flags, over everything flagged (a column)
+  selection rate = (TP + FP) / n      <- flagged, over the whole group (the total)
+```
+
 **Stated plainly.** "Every one of these definitions is a rate read off a per-group confusion matrix — they differ only in *what they divide by*, and that denominator is the entire disagreement."
 
 Demographic parity divides by everyone in the group. Equalized odds divides by the truly-positive and the truly-negative rows separately. Predictive parity divides by the predicted-positive column. Three denominators, three incompatible notions of "equal treatment".

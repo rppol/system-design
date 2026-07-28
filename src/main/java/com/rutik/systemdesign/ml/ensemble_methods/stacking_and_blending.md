@@ -46,6 +46,11 @@ Meta-learner trains on these 1000 honest predictions
 
 The fold loop is the only thing separating an honest meta-feature from a memorised one. Each training row gets predicted exactly once, by the one fold-model that excluded it.
 
+```
+fold_size  = N / K
+train_size = N - fold_size
+```
+
 | Symbol | What it is |
 |--------|------------|
 | `N` | Training rows. `1000` in the block above |

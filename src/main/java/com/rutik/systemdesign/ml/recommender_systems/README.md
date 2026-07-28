@@ -63,6 +63,11 @@ Key insight: Collaborative filtering exploits the wisdom of crowds — users who
 
 **The Cold Start Problem**: New users have no history (user cold start). New items have no interactions (item cold start). Content-based and popularity fallbacks are standard mitigations.
 
+```
+  total    = n_users x n_items
+  sparsity = 1 - (observed cells / total)
+```
+
 **Stated plainly.** "The ratings table is almost entirely empty — and the emptiest rows belong to exactly the users you most need to serve." Sparsity and cold start are not two problems; cold start is what sparsity looks like from inside a single row.
 
 | Symbol | What it is |

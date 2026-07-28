@@ -1244,6 +1244,12 @@ Target State:
   Total target: ~$19,000/month
 ```
 
+```
+blended total = sum over f of (w_f x B x m_f)
+
+  reduction = 1 - (blended total / B)
+```
+
 **Read it like this.** "The blended bill is not an average of the levers you applied — it
 is each lever's multiplier applied to the slice of spend it actually touches, then summed. A 50%
 saving on 8% of the bill is a 4% saving."

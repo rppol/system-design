@@ -227,6 +227,10 @@ Implementation: Planner produces nested JSON structure;
 Orchestrator walks the tree, sending leaf tasks to executors.
 ```
 
+```
+b^d = b x b x ... (d factors)   <- leaf count: primitive tasks the executor actually runs
+```
+
 **Put simply.** "The number of things the executor actually has to do is the branching factor raised to the depth of the tree — so one extra level of decomposition multiplies the work, it does not add to it."
 
 An HTN with branching factor `b` and depth `d` has `b^d` leaves, and only leaves become executor calls. Non-leaf nodes are pure planner output and cost nothing to run.
@@ -278,6 +282,12 @@ When Plan-and-Execute wins:
   - Tasks with known structure (research → analyze → write)
   - Tasks needing parallel execution of independent sub-tasks
   - Compliance requirements (must show a plan for approval before execution)
+```
+
+```
+p^n = p x p x p x ... (n factors)   <- probability every step in the n-step plan succeeds
+
+  1 - p^n   <- probability at least one step fails, triggering a replan or a human hand-off
 ```
 
 **What this actually says.** "Reliability does not decay gently as tasks get longer — it collapses, because every step has to go right and the per-step success rates multiply."
@@ -445,6 +455,11 @@ LangGraph docs for "plan-and-execute"). It:
 | Implementation complexity | Low | High |
 | Initial latency | Low | High (planning call) |
 | Cost (same task) | Similar | Higher (planning LLM call) |
+
+```
+split total   = C_plan + N x C_exec   <- one expensive planning call, N cheap executor calls
+uniform total = N x C_plan            <- the large model runs every step
+```
 
 **Stated plainly.** "You pay once for a smart planner and `N` times for a dumb executor — which beats paying `N` times for a smart model, as long as `N` is bigger than one."
 

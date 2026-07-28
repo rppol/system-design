@@ -43,6 +43,10 @@ Key insight: Perplexity does not correlate with downstream task performance for 
 
 **n-gram precision clipping:** Raw n-gram precision can be gamed by repeating high-frequency words. BLEU clips each n-gram count to the maximum count in any reference: for "the the the the the" with reference "the cat sat on the mat," "the" is clipped to count 2 (max occurrences in any reference).
 
+```
+p_n = sum over n-grams g of min(count_cand(g), max_ref(g))  /  sum over n-grams g of count_cand(g)
+```
+
 **Read it like this.** "You only get credit for a word as many times as the reference actually used it. Say it a sixth time and the sixth one counts as a mistake."
 
 Clipping is the answer to the most obvious way to cheat a precision metric: precision is `matches / candidate_length`, so a candidate made entirely of one guaranteed-correct word would score 1.0.

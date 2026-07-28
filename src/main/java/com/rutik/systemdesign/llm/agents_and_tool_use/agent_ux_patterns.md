@@ -20,6 +20,13 @@ The eight core patterns covered here — streaming thoughts, interrupt/resume, a
 
 **Key insight**: The hardest UX problem in agents is not making the agent feel fast — it's making errors and corrections feel safe. Users will tolerate a 30-second wait if they can see progress and trust that nothing irreversible happens without their approval. They will not tolerate a 5-second wait that ends with a deleted file.
 
+```
+completion_lift = (1 - a) / (1 - 3a)
+
+  1 - a  = completion rate with streaming (baseline abandon rate a)
+  1 - 3a = completion rate without streaming (abandon rate triples to 3a)
+```
+
 **In plain terms.** "A 3x abandon rate is a multiplier on the people who leave, not on the people who stay — so what it costs you depends entirely on how big your baseline abandon rate already is."
 
 This is the one number in this section that compounds, and it is routinely misread. Tripling abandonment does not third your completions.

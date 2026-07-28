@@ -417,6 +417,13 @@ You mostly shouldn't — edge runtimes cap execution (Cloudflare Workers allows 
 - Maintainer time saved: ~15 min per PR (covers 80% of feedback)
 - Workers cold start with Mastra runtime: ~120ms
 
+```
+t_parallel   = c + max(t)
+t_sequential = n x t
+
+speedup = t_sequential / t_parallel
+```
+
 **Stated plainly.** "Four agents that do not need each other's answers cost the same wall time as one, so the review is as slow as its slowest reviewer rather than as slow as all four combined."
 
 | Symbol | What it is |

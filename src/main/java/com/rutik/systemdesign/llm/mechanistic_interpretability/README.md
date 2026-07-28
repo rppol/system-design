@@ -49,6 +49,10 @@ A model has `d_model` neurons per layer (e.g., 12,288 for a large model) but nee
 
 The observable consequence is **polysemanticity**: individual neurons respond to multiple, often unrelated concepts (a famous early example: a neuron in an image classifier that fired for both "cat faces" and "car fronts"). Polysemanticity is *why* looking at individual neurons is a dead end for interpretability at scale, and *why* SAEs (which find a different, larger basis where features are monosemantic) became central to the field.
 
+```
+overbooking_ratio = N / d
+```
+
 **In plain terms.** `N >> d` says: "you have `d` storage slots but `N` concepts to store, and `N` is many times larger than `d` — so you overlap them, and get away with it because only a handful are ever switched on at the same instant."
 
 That last clause is the whole load-bearing assumption. Superposition is not a clever encoding; it is an *overbooking* strategy, and sparsity is what keeps the overbooked flight from being oversold on any given day.
@@ -956,6 +960,12 @@ Attribution patching (§4.2) estimates a component's causal effect via `gradient
 ### 10.7 SAE Reconstruction Error Compounds Across Layers
 
 An SAE with even a 95% reconstruction fidelity (5% of the activation's variance unexplained) introduces a small error at every layer it's inserted into. When CLTs or stacked SAEs are used to build attribution graphs across 20+ layers, these per-layer errors compound — Anthropic's circuit-tracing work explicitly reports the fraction of model behavior an attribution graph fails to explain ("unexplained variance") as a first-class caveat, often **20-50%** of the behavior depending on the task. Treat attribution graphs as a *partial, best-effort* explanation, not a complete causal account — and always sanity-check a graph's predicted intervention (e.g., "ablate this feature to suppress this output") against the *actual* model, not just the graph.
+
+```
+survival = r^L
+
+unexplained = 1 - r^L
+```
 
 **The idea behind it.** "Fidelity compounds multiplicatively, not additively — 5% lost per layer is not 5% lost overall, it is 5% lost *again* at every layer, and the survivor is what is left after all of them."
 

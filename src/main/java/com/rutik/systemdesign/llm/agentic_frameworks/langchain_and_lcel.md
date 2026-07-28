@@ -457,6 +457,12 @@ for partial_dict in chain.stream("Extract review info: ..."):
 
 ### Decoding the "50-150ms per chain step" row
 
+```
+overhead = s x o
+
+  overhead / L = fraction of user-visible latency spent on framework tax
+```
+
 **Stated plainly.** "Framework overhead is charged per step, not per chain, so the tax you pay is the per-step cost multiplied by how many Runnables you piped together."
 
 | Symbol | What it is |

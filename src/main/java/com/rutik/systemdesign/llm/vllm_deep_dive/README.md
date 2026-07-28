@@ -278,6 +278,10 @@ Step 3:  [A: done → E: prefill] [D: decode] [C: decode]
 ```
 New requests join the batch the moment a slot opens. GPU utilization stays near 100%.
 
+```
+utilization = Sum(L_i) / (B x L_max)
+```
+
 **What the formula is telling you.** "A static batch bills every sequence for the runtime of the longest
 one in the group; continuous batching bills each sequence only for its own length."
 

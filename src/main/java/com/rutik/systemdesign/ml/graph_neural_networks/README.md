@@ -758,6 +758,12 @@ Road network as directed graph. Node = road segment, edge = connectivity. Diffus
 
 **Oversmoothing vs. depth:** adding more layers hurts after L=2–4 on most benchmarks. Deep GNNs push node representations toward the graph's dominant eigenvector, destroying discriminative information.
 
+```
+  H^(L) = A_norm^L X                    <- L-layer GCN, no weights/nonlinearity
+
+  A_norm^L  ->  v_1  as L -> infinity   <- collapses onto the dominant eigenvector
+```
+
 **Stated plainly.** "Repeated averaging is repeated averaging. Run it enough times and every node holds the same answer, so the layer that was supposed to add context has erased the node instead."
 
 | Symbol | What it is |

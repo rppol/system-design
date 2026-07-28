@@ -787,6 +787,11 @@ Plan for graceful degradation at every layer: if the feature store is slow (circ
 - Data: click logs (available immediately), watch time (available after video ends, median 4 minutes delay)
 - Infrastructure: Kubernetes on GCP, $40K/month GPU budget
 
+```
+requests_per_day = QPS x 86400
+per_user_per_day = requests_per_day / DAU
+```
+
 **In plain terms.** A scale line like "100M DAU, 10K QPS, 2B events/day, 1TB/day" is four numbers that must agree with each other. Read it as: "divide the daily totals by 86,400 seconds, and check that the per-second and per-day views describe the same system."
 
 | Symbol | What it is |
@@ -848,6 +853,11 @@ The last two lines are the cheap sanity check most candidates skip. 500 bytes pe
 - Ranking server: LightGBM on CPU, 32 cores; P99 < 18ms
 - Load balancer: round-robin with health checks
 - Total: ~40ms P50, ~80ms P99 — within 100ms budget with 20ms headroom
+
+```
+unaccounted = end_to_end_P99 - sum(stage P99s)
+headroom    = P99 budget - end_to_end_P99
+```
 
 **What it means.** The serving budget reads: "each stage owns a slice, the slices are P99s, and P99s do not add." The gap between the summed stage P99s and the reported total is where the uncomfortable truths of a distributed serving path live.
 

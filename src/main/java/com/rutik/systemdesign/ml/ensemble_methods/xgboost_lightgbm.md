@@ -840,6 +840,11 @@ num_leaves    Equivalent max_depth    Complexity    Use Case
 511+          9+                      Very High     Rarely needed; overfit risk
 ```
 
+```
+  equivalent_max_depth = log2(num_leaves)          <- rounded, balanced-tree depth
+  safety rule: num_leaves < 2^max_depth
+```
+
 **What it means.** "The 'equivalent max_depth' column is just `log2(num_leaves)` — the depth a *balanced* tree would need to hold that many leaves, which is the fairest way to compare a LightGBM setting to an XGBoost one."
 
 | Symbol | What it is |

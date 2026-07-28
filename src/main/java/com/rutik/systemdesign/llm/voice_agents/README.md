@@ -143,6 +143,12 @@ Pure silence threshold:
 Best practice: 700-900ms + prosody analysis
 ```
 
+```
+dead_air = T
+
+  false_cut_rate = P(pause >= T)   <- probability a natural pause is long enough to trip the timer
+```
+
 **Read it like this.** "The silence threshold is not a tuning knob with a right answer — it is a
 direct trade of *how often you cut people off* against *how much dead air you add to every single
 turn*."

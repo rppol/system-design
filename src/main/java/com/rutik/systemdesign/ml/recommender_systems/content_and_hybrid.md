@@ -42,6 +42,14 @@ Key insight for session-based recommendation: In many contexts (e-commerce, news
 
 **TF-IDF Similarity**: Represent items as TF-IDF vectors over their text content. Compute user profile as weighted mean of liked item TF-IDF vectors. Cosine similarity for recommendation scoring. Simple, fast, interpretable. Works well for news, job listings, legal documents.
 
+```
+w(t, d) = sublinear_tf(t, d) x idf(t)
+cos(u, v) = dot(u, v) / (norm(u) x norm(v))
+
+  sublinear_tf(t, d) = 1 + ln(tf(t, d))                 <- damps a term repeated many times
+  idf(t)             = ln((1 + N) / (1 + df(t))) + 1    <- rarity discount, smoothed
+```
+
 **Stated plainly.** "Weight each word by how much this item uses it, discounted by how many items in the catalog use it at all — then compare two items by the *angle* between those weighted vectors, never their length."
 
 The discount is the whole point. A word appearing in every description tells you nothing about which item to recommend, so its weight must collapse toward zero automatically, without a hand-maintained stop list.

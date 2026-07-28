@@ -32,6 +32,14 @@ Key insight: BERT's `[CLS]` token representation (after fine-tuning) encodes a s
 
 **Masked Language Modeling (MLM):** Randomly mask 15% of input tokens and train the model to predict the masked tokens from bidirectional context. The 15% are split: 80% replaced with `[MASK]`, 10% replaced with a random token, 10% left unchanged. The 10/10 split prevents the model from learning to only handle `[MASK]` tokens — it must always maintain good representations for all tokens.
 
+```
+  selected       = 0.15 * seq_len       <- positions that produce loss
+
+    mask_shown   = 0.80 * selected      <- input swapped for [MASK]
+    random_shown = 0.10 * selected      <- input swapped for a random token
+    unchanged    = 0.10 * selected      <- input left as the true token
+```
+
 **What this actually says.** "Hide one word in seven, then make the model guess it from everything around it — and hide it in three different disguises so it can never learn to only look for the blank."
 
 The 15% and the 80/10/10 are two independent knobs stacked on top of each other. The first picks *how many* positions get scored; the second picks *what the input looks like* at those positions. Confusing them is the classic interview slip.
@@ -116,6 +124,13 @@ That last line is the whole critique. Because negatives come from *random* docum
 |-------|--------|-------------|-----------------|------------|------|
 | BERT-base | 12 | 768 | 12 | 110M | 79.6 |
 | BERT-large | 24 | 1024 | 16 | 340M | 82.1 |
+
+```
+  I   = 4 * H                    <- FFN intermediate width is always 4x the hidden size
+  d_k = H / A                    <- per-head dimension
+
+  one_linear_layer = H*H + H     <- weight matrix plus bias vector
+```
 
 **Stated plainly.** "The 110M is not a magic number — it is the embedding table plus twelve identical copies of one encoder block, and you can derive it on a whiteboard in two minutes."
 

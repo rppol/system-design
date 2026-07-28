@@ -499,6 +499,10 @@ OpenRouter (managed service, no self-hosting), Cloudflare AI Gateway (free, basi
 - Semantic cache saved $4.2K/month (12% of total spend)
 - Average request added latency: 8ms
 
+```
+saved = h x S
+```
+
 **What it means.** "A semantic cache converts a hit rate into a discount at one-to-one — save 12% of the spend and you served 12% of the calls from Redis instead of a provider."
 
 | Symbol | What it is |

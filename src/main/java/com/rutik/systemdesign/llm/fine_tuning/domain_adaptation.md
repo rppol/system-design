@@ -423,6 +423,12 @@ Domain-specific tokenizer extension:
     - Adding vocab changes the tokenizer structure (complicates deployment)
 ```
 
+```
+fertility = tokens_emitted / words_source
+
+  embedding_cost = new_tokens x d x 2   <- input table + output table, each d-dimensional
+```
+
 **Put simply.** "If your domain's most common words each cost three tokens instead of one, you are renting a smaller context window than you paid for."
 
 The measurable quantity is fertility — tokens emitted per word. A tokenizer well-matched to the text sits near 1.0; the splits above are fertility 3 and 4 on exactly the terms that appear most often in domain text.

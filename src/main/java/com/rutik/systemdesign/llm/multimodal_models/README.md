@@ -130,6 +130,14 @@ Key models:
   Imagen (Google): large T5 text encoder; photorealistic
 ```
 
+```
+self_attention_pairs  = L x L
+cross_attention_pairs = L x T
+
+  L = (image_side / 8)^2   <- VAE encoder shrinks the image 8x before denoising
+  T = 77                    <- CLIP's text encoder token budget, fixed regardless of prompt length
+```
+
 **The idea behind it.** "Every denoising step lets each patch of the noisy latent image look at every word of the prompt — and because there are only ~77 words but thousands of patches, that lookup is nearly free compared to the patches looking at each other."
 
 Cross-attention is where the text actually steers the picture, yet it is the cheap part of the U-Net. The expensive part is spatial self-attention, which is why resolution — not prompt length — is what makes image generation slow.
@@ -480,6 +488,12 @@ Medical multimodal:
 3. **Not testing on domain images**: General VLMs may struggle with medical, industrial, or satellite imagery.
 4. **Ignoring image token cost**: 1 high-res image = 1000-4000 tokens. Cost and latency add up quickly.
 5. **Assuming spatial reasoning is reliable**: VLMs struggle with precise spatial/geometric reasoning. Verify on your specific task.
+
+```
+image_tokens = n_images x tokens_per_image
+
+  headroom = context_window - image_tokens - other_tokens   <- system prompt, question, history, answer
+```
 
 **What the formula is telling you.** "Budget images the way you budget text: `images x tokens per image` is a line item in your context window, and at high detail a handful of pages can eat most of it before the user has typed a word."
 

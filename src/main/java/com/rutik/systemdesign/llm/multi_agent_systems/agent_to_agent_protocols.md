@@ -733,6 +733,12 @@ class AgentAuthValidator:
 | DID resolution (ANP) | 500ms–2s (DNS + HTTPS) |
 | Registry query | 50–500ms |
 
+```
+time_to_first_signal = agent_card_fetch + task_submission + SSE_first_event + JWT_validation
+
+  registry_query is cacheable and omitted once cached; DID_resolution replaces it under ANP
+```
+
 **Put simply.** "None of these numbers is large on its own, but a single A2A delegation walks
 through three or four of them in sequence before any work starts — and it is the sum, not the
 worst line, that your latency budget has to absorb."

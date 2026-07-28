@@ -37,6 +37,10 @@ Key insight: dependency structure maps almost directly onto predicate-argument s
 
 2. **Probabilities break ties.** A probabilistic CFG (PCFG) attaches a probability to each rule so the parser can rank competing parses and return the single most likely tree, not just any legal one.
 
+```
+P(tree) = product over rules r used in the derivation of P(r)
+```
+
 3. **Dynamic programming makes parsing tractable.** The number of parse trees grows exponentially (Catalan numbers), but shared sub-parses can be computed once and reused. CKY fills a chart bottom-up in O(n³·|G|); Eisner's algorithm does the projective-dependency analogue.
 
 4. **Heads carry the syntax.** In dependency grammar, every phrase has a single head word; the head's relations to its dependents encode the grammatical function. This makes dependency trees compact (n words → n arcs) and directly usable by extraction code.

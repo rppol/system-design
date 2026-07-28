@@ -444,6 +444,12 @@ BROKEN: HiringScore v1.0 deployed to EU candidates with:
   (regulators can stack violations; GDPR and EU AI Act are separate regimes)
 ```
 
+```
+fine_ceiling = max(fixed_ceiling, percentage_ceiling)
+
+  percentage_ceiling = pct x turnover   <- 3% (EU AI Act) or 4% (GDPR) of global turnover
+```
+
 **Stated plainly.** "The fine is whichever is *bigger* — a fixed euro amount or a percentage of your
 worldwide revenue. Small companies get billed the flat number; large ones get billed the
 percentage."

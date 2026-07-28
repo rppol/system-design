@@ -796,6 +796,12 @@ def evaluate_retraining_triggers(
 
 ### Reading the Refresh-Cadence Arithmetic
 
+```
+  time_to_fresh   = wait + run + deploy
+
+  degraded_hours  = time_to_fresh                  <- while the business metric is already down
+```
+
 **What it means.** Time-to-fresh-model is a sum, not a duration: "wait for the next scheduled slot, then run, then deploy." Only the middle term is training — and it is usually the smallest one, which is why buying a faster GPU rarely fixes a slow response to drift.
 
 | Symbol | What it is |
@@ -968,6 +974,13 @@ Step 4 — Validation gate (automated): 15 minutes. AUC must exceed 0.802 (curre
 Step 5 — Shadow deployment: 45 minutes. Deploy to shadow replica; receive 100% traffic; log scores. Alert if P99 latency > 10ms or if NaN rate > 0.01%.
 
 Step 6 — Canary (5% traffic, 1 hour): monitor CTR in treatment vs control. Rollback if CTR drops > 0.5% for > 15 minutes.
+
+```
+  total_runtime = sum over stages of stage_time         <- must stay under the 24h interval
+
+  row_floor     = 0.75 x expected_daily_volume           <- validation gate on step 1
+  spark_budget  = nodes x minutes                        <- node-seconds bought for step 2
+```
 
 **The idea behind it.** The stage timings are not a schedule, they are a budget: "the whole loop must close inside one day, so each stage gets a slice, and any stage that outgrows its slice pushes the next run into the previous one."
 

@@ -831,6 +831,13 @@ Every doubling of context multiplies the attention matrix by 4. This single tabl
 | **GELU** | `x × Φ(x)` (smooth approximation) | Better for language; used in BERT, GPT-2 |
 | **SwiGLU** | `SiLU(xW₁) ⊙ xW₂` then `· W₃` (gated) | Best empirically; requires 3 weight matrices instead of 2, so the hidden expansion is cut to 2/3 of the standard 4× to keep parameter count comparable; used in LLaMA, PaLM |
 
+```
+GELU(x) = x x Phi(x)
+
+  Phi(x)  = P(Z <= x) for Z ~ N(0, 1)   <- standard Gaussian CDF
+  SiLU(x) = x x sigma(x)                 <- sigmoid stand-in for Phi, cheaper to compute
+```
+
 **Reading GELU in plain English.** "Instead of ReLU's hard cutoff — keep it or zero it — GELU asks 'what fraction of the time would a value this large survive a random gate?' and scales the input by that probability. Big positives pass almost fully, big negatives get almost fully suppressed, and values near zero get partially attenuated instead of chopped."
 
 | Symbol | What it is |
@@ -880,6 +887,12 @@ Hoffmann et al. (2022) showed optimal compute budget splits roughly equally betw
 - Training tokens (D)
 
 Optimal: `D ≈ 20 × N` (train 7B model on ~140B tokens for compute-optimal)
+
+```
+D ~ 20 x N
+
+  C ~ 6 x N x D   <- training compute in FLOPs; both N and D draw from this fixed budget
+```
 
 **What it means.** "For every one parameter you put in the model, feed it about twenty tokens of training data. Spend your fixed compute budget any other way — a huge model on thin data, or a small model on endless data — and you get a worse model for the same money."
 

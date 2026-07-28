@@ -82,6 +82,13 @@ these 2023 baselines; check the live leaderboard rather than quoting them
 as current.
 ```
 
+```
+overall score = sum over levels of (share x rate)
+
+  share = tasks at level / 466   <- weight that level carries in the overall score
+  rate  = per-level correct fraction
+```
+
 **Stated plainly.** "A single headline GAIA number is a weighted average, and the weights are not equal — half the benchmark is Level 2."
 
 Per-level scores are the honest reporting format; a one-number score is what leaderboards want. Converting between them requires the task counts, which is why they are published alongside.

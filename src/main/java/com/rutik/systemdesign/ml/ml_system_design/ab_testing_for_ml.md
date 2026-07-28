@@ -759,6 +759,13 @@ Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre c
 | Benjamini-Hochberg | False discovery rate | Moderate | Many hypotheses, exploratory |
 | No correction | Nothing | None (inflated Type I error) | Never appropriate for primary metrics |
 
+```
+FWER = 1 - (1 - alpha)^k
+
+  alpha / k       = Bonferroni per-test threshold
+  (i / k) * alpha = Benjamini-Hochberg threshold for the i-th smallest p-value
+```
+
 **Stated plainly.** "Every extra metric you check is another ticket in a lottery you do not want to win — and alpha = 0.05 is the per-ticket odds, not the odds for the whole handful."
 
 | Symbol | What it is |

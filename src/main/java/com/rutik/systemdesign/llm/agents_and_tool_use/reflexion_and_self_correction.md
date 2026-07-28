@@ -18,6 +18,15 @@ The key tension: language models can reason about their errors, but they are als
 
 **Why it matters**: Many tasks have verifiable correct answers (code passes tests, SQL returns expected rows, math result matches ground truth). In these domains, automatic grading enables autonomous improvement without human involvement. Reflexion improves HumanEval pass@1 from 80.1% to 91.0% on GPT-4 — a 55% cut in the residual error rate with zero additional training.
 
+```
+absolute gain    = after - before
+relative gain    = (after - before) / before
+error reduction  = (err_before - err_after) / err_before
+
+  err_before = 1 - before     <- residual error before the intervention
+  err_after  = 1 - after      <- residual error after
+```
+
 **Stated plainly.** "Do not read that as '11 more points'. Read it as 'over half of the problems it used to get wrong, it now gets right' — that is the number that actually predicts what happens to your bug queue."
 
 | Symbol | What it is |
@@ -364,6 +373,10 @@ Generates multiple code candidates, scores each against public test cases, filte
 - First-attempt pass rate is 60-85% — room for improvement, not so low that reflection helps.
 - Cost of incorrect output is high (production code, medical data extraction).
 - A budget of 2-4× LLM calls per task is acceptable.
+
+```
+pass@k = 1 - (1 - p)^k
+```
 
 **What the formula is telling you.** "If attempts were independent coin flips, `k` tries fail only when every one of them fails — so the naive ceiling is `1 - (1 - p)^k`, and any real system has to be measured against that free baseline, not against `p` alone."
 

@@ -160,6 +160,12 @@ Step 4: LLM generation from specific context
   No community summaries needed; answer from subgraph context
 ```
 
+```
+neighborhood(h) = Sum over i = 1..h of d^i
+
+  d^i  = nodes newly reached at exactly hop i   <- d^1, d^2, ..., d^h stack as hops go deeper
+```
+
 **Stated plainly.** "Traverse `h` hops from the query's entities" is exponential, not linear: with an average node degree `d`, hop `h` reaches `d^h` new nodes and the whole neighborhood is `d + d^2 + ... + d^h`. Depth is a knob that multiplies context size, so it must be chosen against the graph's density, not picked as a round number.
 
 | Symbol | What it is |

@@ -722,6 +722,14 @@ A team deployed a DistilBERT router on CPU with 80ms P50 latency. Their cheap mo
 
 A startup set an aggressive cost target (90% of queries to the cheapest model). The classifier was only 75% accurate. Net result: 15% of queries (1.5M/day) routed incorrectly to a weak model. User satisfaction scores dropped 12 points before the team noticed. The problem was caught only because they had a quality monitoring pipeline. Lesson: set the routing threshold conservatively (start with 50-60% to cheap models, expand gradually) and monitor quality per route segment.
 
+```
+error_rate = 1 - A
+
+downward_misroute_rate + upward_misroute_rate = error_rate
+
+daily_waste = upward_misroute_rate x queries_per_day x (C_exp - C_cheap)
+```
+
 **In plain terms.** "A single accuracy number tells you nothing useful, because the two
 ways a router can be wrong are not the same kind of wrong — one costs dollars and the other costs
 users, and only one of them is bounded."

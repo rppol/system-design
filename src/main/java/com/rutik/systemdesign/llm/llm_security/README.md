@@ -616,6 +616,12 @@ Phase 4: Reporting and Remediation (2-3 days)
   - Regression test suite from discovered attacks
 ```
 
+```
+ASR = successful attacks / attempted attacks
+
+  coverage = 1 - (1 - p)^n   <- probability n random probes hit at least one working attack
+```
+
 **What this actually says.** "Attack success rate is the one number the whole exercise produces: of every adversarial prompt you fired, what fraction got what it wanted. Everything else in the four phases exists to make that fraction trustworthy."
 
 The subtlety is that ASR is only meaningful relative to the suite that produced it. Halving your ASR by deleting the attacks that kept working is arithmetically identical to halving it by fixing the system, which is why the regression suite in Phase 4 is append-only.
@@ -831,6 +837,10 @@ A development team builds an LLM agent with database access for answering custom
 ### 4. Not Monitoring for Training Data Leakage in Outputs
 
 A healthcare company fine-tunes an LLM on patient records for a clinical decision support tool. The model occasionally includes fragments of real patient data in its responses — names, diagnoses, medication lists — when prompted about similar conditions. No output filtering catches this because the team only monitored for standard PII patterns (SSN, credit card) and not for clinical data patterns. HIPAA violation discovered during an audit 6 months later, with a seven-figure settlement. Defense: define application-specific sensitive data patterns beyond standard PII. Monitor outputs for training data memorization. Consider differential privacy during fine-tuning — but read the epsilon discussion below before treating DP-SGD at epsilon 3-8 as a strong guarantee, and expect a real accuracy cost whose size depends on your dataset and epsilon.
+
+```
+P(observation | patient IN) <= e^epsilon x P(observation | patient OUT)
+```
 
 **Reading epsilon in plain English.** "Epsilon caps how much any single patient's record is allowed to change the trained model. Formally: whatever an attacker observes, it must be at most `e^epsilon` times more likely to happen with that person's record in the training set than with it removed."
 

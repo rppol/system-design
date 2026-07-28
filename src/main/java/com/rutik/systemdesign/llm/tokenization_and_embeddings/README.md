@@ -58,6 +58,10 @@ The most widely used algorithm. Starts with individual bytes/characters, iterati
 3. Result: N+initial vocabulary of subword units
 ```
 
+```
+V_final = V_init + N + S
+```
+
 **The idea behind it.** "Start with an alphabet you know can spell anything — the 256 byte values — then buy one new vocabulary entry per merge. Vocabulary size is not a knob you set; it is a count of how many merges you paid for, plus the alphabet you started with."
 
 That framing kills a common confusion. `vocab_size` in a config file is not a target the trainer approximates — it is an exact arithmetic consequence of the merge budget, which is why merge tables and vocabularies are always in lockstep and why you cannot "trim" a vocabulary without invalidating the merge ranks.
@@ -332,6 +336,11 @@ Every model uses special tokens to delimit structure:
 | Large (100K-200K) | Better multilingual, better coding | Larger embedding matrix, rare token quality |
 
 Modern trend: 100K+ vocabulary for broader language coverage (OpenAI's `o200k_base`, used by GPT-4o and every later OpenAI model, is 200K; Llama 3 uses 128K).
+
+```
+attention cost ~ L^2 x D   <- quadratic in L, so shortening L pays off superlinearly
+logit cost     =  L x V    <- one score per vocabulary entry per position, linear in both
+```
 
 **What this actually says.** "A bigger vocabulary buys shorter sequences. You pay for it once in the embedding table, and again on every single token you generate, because the output softmax has to score all `V` candidates."
 

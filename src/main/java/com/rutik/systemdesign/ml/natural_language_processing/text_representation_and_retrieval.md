@@ -269,6 +269,14 @@ The general-purpose SBERT `all-*` checkpoints (`all-MiniLM-L6-v2`, based on `Min
 
 The two tables above are scored in `NDCG@10` and `MRR@10`, and Section 12 adds `Recall@K`. All three answer different questions, and all three are quoted constantly in interviews without being defined.
 
+```
+  DCG@K  = Sigma over i=1..K of (2^rel_i - 1) / log2(i + 1)
+  NDCG@K = DCG@K / IDCG@K                   <- IDCG@K is DCG@K on the ideal ordering
+
+  MRR@K    = mean over queries q of 1 / rank_q(first_relevant)
+  Recall@K = (relevant docs in top K) / (all relevant docs that exist)
+```
+
 **What this actually says.** "MRR asks how fast you found *the* answer, NDCG asks how well you ordered *all* the good answers, and Recall@K asks whether the good answers made it into the bucket at all." Pick MRR when one correct result ends the task, NDCG when the user scans a whole page, Recall@K when a reranker downstream will do the ordering for you.
 
 | Symbol | What it is |

@@ -33,6 +33,11 @@ Key insight: communication is the bottleneck in distributed training, not comput
 
 **Linear scaling rule**: when scaling from 1 GPU to N GPUs, the global batch size scales proportionally (local_batch × N), and the learning rate should scale by the same factor. For large scale-ups (> 32x), linear LR scaling diverges; use warmup (ramp LR over 5 epochs) to stabilize.
 
+```
+global_batch = local_batch x N
+scaled_lr    = base_lr x N
+```
+
 **What this actually says.** "Adding GPUs does not make each step better-informed for free — it silently makes your batch N times bigger, and a batch N times bigger deserves a step N times longer, or you are throwing away the extra information you just paid for."
 
 The rule is a statement about *keeping training equivalent*, not about going faster. Scale the GPUs and leave the LR alone, and you will train the same number of steps on N times more data per step while moving the same distance each step — you have bought N times the compute and converted it into nothing.

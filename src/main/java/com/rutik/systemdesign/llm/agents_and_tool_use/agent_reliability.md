@@ -14,6 +14,10 @@ Unlike reliability in conventional software (which means "the service responds w
 
 Agent reliability matters because production agents fail at high rates without explicit reliability engineering. Empirically: a 10-step agent with 10% per-step failure probability has only a (0.9)^10 = 35% end-to-end success rate without recovery logic. With retry and fallback, the same agent achieves >95%.
 
+```
+P(success) = p^n
+```
+
 **What this actually says.** "Every step is a coin flip the agent has to win, and win-probabilities multiply — so a long trajectory is a long unbroken run of coin flips."
 
 Reliability is not additive across steps, it is *multiplicative*. That single fact is why an agent built from tools that each look perfectly healthy in a dashboard can still fail most of the time end to end.

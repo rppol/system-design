@@ -72,6 +72,12 @@ Training with LLaMA-3 template + Inference with ChatML template:
   → Common cause of "the fine-tuned model is worse" reports
 ```
 
+```
+frame slots = special markers + role words
+
+overhead % = frame slots / (content tokens + frame slots)
+```
+
 **Read it like this.** "A template is a fixed frame of marker slots wrapped around your content — and the model learned to expect that exact frame, marker for marker."
 
 Templates differ in two ways that matter: how many slots the frame costs, and whether those slots are reserved special tokens or ordinary English. Both have consequences, and the second is the one that bites.

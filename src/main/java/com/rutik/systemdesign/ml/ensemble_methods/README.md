@@ -33,6 +33,12 @@ Mental model: suppose you have 100 classifiers, each with 70% accuracy, but whos
 
 The counting object is a binomial: with `n` models each right with probability `p`, the number that get a given example right is `Binomial(n, p)`, and the ensemble is correct whenever more than half of them are.
 
+```
+P(majority correct) = P(X > n/2),  where X ~ Binomial(n, p)
+
+  P(X = j) = C(n, j) x p^j x (1-p)^(n-j)   <- chance exactly j of n models are right
+```
+
 | Symbol | What it is |
 |--------|------------|
 | `n` | How many models vote. Odd `n` avoids ties |

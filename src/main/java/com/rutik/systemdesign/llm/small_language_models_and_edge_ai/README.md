@@ -93,6 +93,12 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 
 Q4_K_M is the practical sweet spot for most edge deployments: it reduces a 3.8B Phi-3 model from 7.6 GB to approximately 2.4 GB while preserving 97%+ of the original model's task performance on most benchmarks.
 
+```
+size_reduction = 16 / bits
+
+  bytes = params x bits / 8   <- 8 bits per byte
+```
+
 **Stated plainly.** "Weights are just a long row of numbers. Shrink each number from 16 bits to 4 and the file shrinks by the same factor — the Size Reduction column is nothing more than `16 / bits`."
 
 The whole table is one division repeated. The reason the measured ratios land slightly *under* the nominal ones is that no quantization format stores only the weights: each block also carries scale factors, and those are kept in FP16.
@@ -160,6 +166,12 @@ On-device inference performance depends heavily on which hardware accelerator is
 **Framework support mapping:** Core ML targets ANE on Apple devices. QNN SDK (Qualcomm Neural Network) targets Hexagon NPU. NNAPI provides a generic Android abstraction across NPU vendors. TensorFlow Lite delegates to hardware-specific backends automatically.
 
 **TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a 35 TOPS NPU theoretically achieves ~0.17 ms/token (nearly 6,000 tokens/second) — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
+
+```
+compute_ceiling   = FLOPs_per_token / TOPS
+
+  bandwidth_ceiling = memory_bandwidth / model_bytes   <- the ceiling that actually binds decode
+```
 
 **What the formula is telling you.** "`FLOPs / TOPS` tells you how fast the *arithmetic* could finish. It says nothing about how fast the weights can be *fetched* — and on a phone, fetching is the slow part."
 
@@ -599,6 +611,10 @@ Mitigation strategies:
   2. Batch requests, do inference offline (background)
   3. Progressive generation with early stopping
   4. Offload rare/complex queries to cloud, local for common tasks
+```
+
+```
+joules_per_token = watts / tokens_per_second
 ```
 
 **Put simply.** "A phone can only convert a fixed number of watts into tokens before it must slow down to stay cool — so the thermal envelope, not the silicon, sets sustained speed."

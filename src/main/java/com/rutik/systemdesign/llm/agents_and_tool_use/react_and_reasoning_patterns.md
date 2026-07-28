@@ -457,6 +457,10 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 - Tasks where the model is essentially certain (factual lookups by capable models)
 - Cost-sensitive batch processing (self-consistency's N× cost rarely justified)
 
+```
+T = N x L
+```
+
 **Stated plainly.** "A ReAct agent's wall-clock time is one model round-trip multiplied by however many steps it decides to take — and the step count is chosen by the model at runtime, not by you at design time."
 
 | Symbol | What it is |

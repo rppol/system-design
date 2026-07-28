@@ -600,6 +600,12 @@ LogisticRegression with the default max_iter=100 often fails to converge on real
 **Pitfall 4 — Not scaling before SVM or k-NN**
 SVM with RBF kernel computes Euclidean distances in feature space. A feature measured in dollars (range 0–100,000) dominates features measured as ratios (range 0–1). The SVM effectively ignores the ratio features. Fix: StandardScaler before every distance-based model.
 
+```
+  distance(x, y) = sqrt( Sigma over j of (x_j - y_j)^2 )
+
+  z = (x - mean) / std             <- StandardScaler, applied per feature before distance
+```
+
 **Stated plainly.** "Euclidean distance adds up squared per-feature gaps, so a feature with a big numeric range contributes big squared gaps and silently decides every neighbour by itself."
 
 This is the pitfall that most deserves numbers, because the failure is invisible: the model trains, predicts, and reports a plausible score while effectively using one feature out of twenty. Scaling does not tune the model — it changes which points are neighbours at all.

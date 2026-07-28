@@ -71,6 +71,11 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 
 SHA/ASHA/Hyperband decide **how much budget** each config gets; TPE decides **which config** to try. BOHB does both. This is the clean mental split.
 
+```
+survivors = n / eta
+next_r    = r x eta
+```
+
 **Stated plainly.** "Give everybody a tiny amount of compute, throw away the worst fraction, and give the survivors that same total amount of compute again — repeat until one is left."
 
 The whole family rests on one bet: a config that is bad after 1 epoch is probably still bad after 81, so paying for those 80 extra epochs is waste. That bet is usually right and occasionally wrong (slow-starting configs with warmup or low learning rates get killed unfairly), which is the single failure mode to remember.

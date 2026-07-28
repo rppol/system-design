@@ -453,6 +453,11 @@ Monitoring:
   Target: <0.1% of legitimate requests blocked
 ```
 
+```
+TPR = TP / (TP + FN)   <- recall: fraction of genuinely toxic messages caught
+FPR = FP / (FP + TN)   <- fraction of benign messages wrongly blocked
+```
+
 **What the formula is telling you.** "Sweep the threshold across every value it could take, plot what you catch against what you break, and pick the point where the damage you cause is smaller than the damage you prevent."
 
 The ROC curve is not a model quality report — it is the menu of policies a single fixed classifier can implement. Every point on it is the same weights with a different number in the `>` comparison.

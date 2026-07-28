@@ -399,6 +399,13 @@ Yes — AWS commitment, regular releases. As of 2025, considered stable for prod
 - ~$300/day total cost; saves ~150 engineer-hours/day across the team
 - Confidence calibration: 92% of "high confidence" suggestions accepted by engineers
 
+```
+value_saved = (m / 60) x w
+
+  ratio      = value_saved / c        <- how many times bigger the value is than the cost
+  break_even = c / (w / 60)           <- minutes saved needed to justify the cost
+```
+
 **What the formula is telling you.** "Per alarm, the agent spends four cents of Bedrock to avoid roughly ten minutes of an engineer's attention — the ratio, not the absolute cost, is the case for building it."
 
 | Symbol | What it is |

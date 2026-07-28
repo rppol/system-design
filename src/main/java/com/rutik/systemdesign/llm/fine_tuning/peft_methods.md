@@ -6,6 +6,14 @@ Parameter-Efficient Fine-Tuning (PEFT) is a family of techniques that fine-tune 
 
 The core problem PEFT solves: a 70B model has 70B × 2 bytes × 3 (weights + gradients + optimizer states) ≈ 420GB of training memory requirements — and that is the floor, since fp32 Adam moments alone cost 8 bytes per parameter. Full fine-tuning of a 70B model therefore needs at least 6-8× A100 80GB GPUs, and more once the optimizer runs in fp32. PEFT makes this same model trainable on 1-2 GPUs by training only 0.1-1% of parameters.
 
+```
+training_memory = params x bytes_per_param x multiplier
+
+  params           = total parameter count                 <- 70e9
+  bytes_per_param  = storage per weight (BF16/FP16)         <- 2
+  multiplier       = weights + gradients + optimizer state  <- 3 (optimistic; fp32 Adam is 8)
+```
+
 **What this actually says.** "Training a model costs about three copies of it, not one — so the model you can *load* is far bigger than the model you can *train*."
 
 That factor of 3 is the whole reason fine-tuning is a different hardware problem from inference. Freeze the base and two of the three copies shrink to almost nothing, because gradients and optimizer state are sized by the *trainable* parameter count, not the total one.
