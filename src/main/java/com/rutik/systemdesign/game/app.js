@@ -6050,7 +6050,13 @@ function mdRender(src) {
         /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes("-")) {
       const rows = [line]; i += 2;                 // header + separator consumed
       while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(lines[i]); i++; }
-      const cells = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+      // Split on cell separators only: `\|` is the CommonMark escape for a literal pipe
+      // INSIDE a cell (vector norms `\|\|q\|\|`, alternation, bitwise-or), and splitting on
+      // it shatters the row into phantom columns. Park the escapes, split, restore.
+      // (A \0 placeholder rather than a lookbehind — a lookbehind literal is a PARSE error
+      // on Safari < 16.4, which would take down the whole app, not just this table.)
+      const cells = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "")
+        .replace(/\\\|/g, "\u0000").split("|").map((c) => c.trim().replace(/\u0000/g, "|"));
       let t = "<table><thead><tr>" + cells(rows[0]).map((c) => `<th>${mdInline(c)}</th>`).join("") + "</tr></thead><tbody>";
       for (const r of rows.slice(1)) t += "<tr>" + cells(r).map((c) => `<td>${mdInline(c)}</td>`).join("") + "</tr>";
       out.push(t + "</tbody></table>");
