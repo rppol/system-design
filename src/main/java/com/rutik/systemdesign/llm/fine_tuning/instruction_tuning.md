@@ -8,7 +8,7 @@ The key insight from the Alpaca paper (Stanford, 2023): ~1,000-50,000 high-quali
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Instruction tuning teaches a language model to be a helpful assistant by showing it thousands of examples of good assistant behavior.
 
@@ -20,7 +20,7 @@ The key insight from the Alpaca paper (Stanford, 2023): ~1,000-50,000 high-quali
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Format alignment is critical**: Training template must match inference template exactly, including special tokens, whitespace, and section headers.
 - **Label masking on instruction tokens**: Compute loss only on the response portion; including instruction tokens in the loss teaches the model to recite prompts.
@@ -30,9 +30,103 @@ The key insight from the Alpaca paper (Stanford, 2023): ~1,000-50,000 high-quali
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Prompt Templates
+An instruction-tuning run is defined by four choices: which prompt template it speaks, where its data came from, how much of that data it uses and for how long, and how sequences are batched. Each is developed in Section 6; the taxonomy below is what you actually pick between.
+
+**Template families.** The training template must be byte-identical to the inference template, so this is not a style preference — it is a compatibility contract with the target model.
+
+| Template | Frame | System slot | Applies when |
+|----------|-------|-------------|--------------|
+| LLaMA-3 | Special-token role headers, `eot_id` turn terminator | Yes | Fine-tuning any LLaMA-3 family checkpoint |
+| ChatML | Special-token `im_start` / `im_end` turn markers | Yes | OpenAI-style, Qwen, and much of the open ecosystem |
+| Mistral | `[INST] ... [/INST]` inside `<s>...</s>` | No | Mistral family; the thinnest frame, no per-turn headers |
+| Alpaca | Plain-text `### Instruction:` / `### Response:` headers | No | Legacy; still seen in older datasets, now uncommon |
+
+The framing overhead differs by only ~13 tokens per example between the thinnest and thickest — real but small (about 125K tokens over a 4,800-example, 2-epoch run). The reason to care is correctness, not cost.
+
+**Data-source strategies.** These are the four ways production instruction datasets actually get built.
+
+| Strategy | Representative | Scale | Distinguishing property |
+|----------|----------------|-------|-------------------------|
+| Expert curation | LIMA-style filtering | 1K-5K | Highest per-example quality; quality dominates volume |
+| Distillation from a stronger model | Stanford Alpaca (self-instruct via GPT-3.5) | ~52K | Cheap (~$100) and fast; inherits the teacher's errors |
+| Community aggregation | OpenHermes 2.5 | 1M+ | Diversity across many task types beats repetitive domain data |
+| Multi-round production pipeline | LLaMA-3-Instruct | Undisclosed | SFT rounds interleaved with rejection sampling and DPO; explicit safety data |
+
+The LIMA finding is the one that reorders intuitions: a 4,800-example curated set scored 4.3 on physician rating where 50,000 unfiltered synthetic examples scored 3.8. Past the ~1-5K needed to teach the format, extra noisy examples add gradient noise, not skill.
+
+**Dataset-size and epoch tiers.**
+
+| Dataset size | Expected quality | Risk | Best for |
+|-------------|-----------------|------|---------|
+| 500-1,000 | Good for narrow tasks | Overfitting | A specific single task |
+| 5,000-10,000 | Good general following | Moderate | Domain-specific assistant |
+| 50,000-100,000 | Strong diverse following | Low | General assistant |
+| 1M+ | Excellent | Very low | Production-grade model |
+
+Epochs pair with this: 1 underfits small sets, 2-3 is the sweet spot for nearly everything, and 5+ buys memorization and format overfitting rather than better instruction following.
+
+**Batching strategy.**
+
+| Strategy | GPU utilization | Cost | Applies when |
+|----------|-----------------|------|--------------|
+| Padded (`packing=False`) | ~12-20% on short examples | Wasted compute on padding slots | Debugging; step-indexed settings already tuned |
+| Packed (`packing=True`, `bfd`) | ~98% | Step count drops by `max_length / avg example length` | Almost always — but recompute every step-indexed setting |
+
+Two invariants cut across all four axes and are non-negotiable regardless of which cells you pick: **label masking**, so loss is computed only on response tokens, and a correctly emitted **terminator token**, without which the tuned model never stops generating.
+
+---
+
+## 5. Architecture Diagrams
+
+### Instruction Tuning Data Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Raw(["Raw instruction-response pairs\n(instruction_1, response_1), …"]) --> Template
+    Template["Template Application\nWrap with model-specific chat template\ne.g., LLaMA-3: user…eot_id…assistant"] --> Tokenize
+    Tokenize["Tokenization\nConvert to token IDs\nRecord instruction vs. response boundaries"] --> Labels
+    Labels["Label Creation\nlabels = input_ids.copy()\nlabels(:instruction_end) = -100 (mask instruction)"] --> Train
+    Train["Training\nCross-entropy loss ONLY on response tokens\nGradient update via Adam"] --> Eval
+    Eval["Evaluation\nGenerate completions for held-out instructions\nMeasure: task accuracy, format compliance, refusal rate"]
+
+    class Raw io
+    class Template,Tokenize,Labels train
+    class Train,Eval frozen
+```
+
+Label masking (-100 in PyTorch) tells the loss function to skip instruction tokens — the model is trained only to generate the response given the instruction, not to predict the instruction itself.
+
+### Label Masking Illustration
+```
+Token sequence:
+  T1  T2  T3  T4  T5  T6  T7  T8  T9  T10
+  [       INSTRUCTION        ] [  RESPONSE  ]
+
+Input IDs:
+  42  87  33  91  15  77  23  68  44  55
+
+Labels (after masking):
+  -100 -100 -100 -100 -100  77  23  68  44  55
+   ^                   ^     ^
+   masked (no loss)          loss computed here
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Prompt Templates
 
 Different model families use different instruction templates. The training data must use the exact template for the target model:
 
@@ -104,11 +198,11 @@ Templates differ in two ways that matter: how many slots the frame costs, and wh
   Alpaca's ~26 = a 16-word preamble sentence + "### Instruction:" + "### Response:"
 ```
 
-Mistral's frame is the thinnest because it has no system slot and no per-turn headers; LLaMA-3 pays for structure it can reuse across many turns. Over the 4,800-example, 2-epoch run in the Section 12 case study, the gap between Alpaca and LLaMA-3 framing is `13 x 4,800 x 2 = 124,800` tokens — real, but small.
+Mistral's frame is the thinnest because it has no system slot and no per-turn headers; LLaMA-3 pays for structure it can reuse across many turns. Over the 4,800-example, 2-epoch run in the Section 14 case study, the gap between Alpaca and LLaMA-3 framing is `13 x 4,800 x 2 = 124,800` tokens — real, but small.
 
 **Why the special-token distinction matters far more than the count.** LLaMA-3, Mistral, and ChatML markers are *reserved* vocabulary entries the model can never emit by accident from user text. Alpaca's `### Response:` is ordinary text — a user whose input happens to contain `### Response:` injects a turn boundary the model will honour. That is a prompt-injection surface, and it is the structural reason the field moved to reserved-token templates. It is also why a template mismatch is so destructive: swap frames and every one of these slots becomes an unrecognized token sequence in a position where the model expected a hard boundary, which is exactly the incoherence described above.
 
-### 3.2 Label Masking (Instruction Masking)
+### 6.2 Label Masking (Instruction Masking)
 
 Compute cross-entropy loss only on the response tokens; mask the instruction tokens:
 
@@ -243,7 +337,7 @@ print(tokenizer.pad_token_id, tokenizer.eos_token_id)   # must differ
 If the decoded string ends on the last word of the response, the run is already broken and no
 amount of extra data or epochs will fix it.
 
-### 3.3 Data Curation
+### 6.3 Data Curation
 
 The quality and diversity of training data is the primary determinant of instruction-tuning success:
 
@@ -305,7 +399,7 @@ Dataset-level quality:
   ✓ Held-out eval set (10% not seen during training)
 ```
 
-### 3.4 Training Configuration
+### 6.4 Training Configuration
 
 ```python
 from trl import SFTTrainer, SFTConfig
@@ -370,7 +464,7 @@ Nearly every SFT config quantity derives from one chain: examples to tokens, tok
 | `num_train_epochs` | 2 — how many times the dataset is traversed |
 | `warmup_ratio` | 0.03 — fraction of total steps spent ramping the learning rate up |
 
-**Walk one example.** The Section 12 case study's dataset (4,800 examples after filtering) through this exact config, at two plausible average example lengths:
+**Walk one example.** The Section 14 case study's dataset (4,800 examples after filtering) through this exact config, at two plausible average example lengths:
 
 ```
   tokens per optimizer step  =  32 x 2048  =  65,536
@@ -390,7 +484,7 @@ The warmup row has the same problem in miniature: a 3% ratio on a 59-step run gi
 
 **Why the two batch knobs are separate.** `per_device_train_batch_size × gradient_accumulation_steps` is the number that affects learning — gradient noise, effective learning rate, convergence. The split between them is purely a memory accommodation: `4 × 8` and `8 × 4` and `32 × 1` all train identically, but only the first may fit on your GPU. Halve the device batch and double accumulation and nothing about the learning changes; the run just gets slower.
 
-### 3.5 Sequence Packing
+### 6.5 Sequence Packing
 
 Pack short examples into full-length sequences to maximize GPU utilization:
 
@@ -471,53 +565,7 @@ This is why the `eval_steps=200` above never fires: with packing off it would ha
 
 ---
 
-## 4. Architecture Diagram
-
-### Instruction Tuning Data Flow
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Raw(["Raw instruction-response pairs\n(instruction_1, response_1), …"]) --> Template
-    Template["Template Application\nWrap with model-specific chat template\ne.g., LLaMA-3: user…eot_id…assistant"] --> Tokenize
-    Tokenize["Tokenization\nConvert to token IDs\nRecord instruction vs. response boundaries"] --> Labels
-    Labels["Label Creation\nlabels = input_ids.copy()\nlabels(:instruction_end) = -100 (mask instruction)"] --> Train
-    Train["Training\nCross-entropy loss ONLY on response tokens\nGradient update via Adam"] --> Eval
-    Eval["Evaluation\nGenerate completions for held-out instructions\nMeasure: task accuracy, format compliance, refusal rate"]
-
-    class Raw io
-    class Template,Tokenize,Labels train
-    class Train,Eval frozen
-```
-
-Label masking (-100 in PyTorch) tells the loss function to skip instruction tokens — the model is trained only to generate the response given the instruction, not to predict the instruction itself.
-
-### Label Masking Illustration
-```
-Token sequence:
-  T1  T2  T3  T4  T5  T6  T7  T8  T9  T10
-  [       INSTRUCTION        ] [  RESPONSE  ]
-
-Input IDs:
-  42  87  33  91  15  77  23  68  44  55
-
-Labels (after masking):
-  -100 -100 -100 -100 -100  77  23  68  44  55
-   ^                   ^     ^
-   masked (no loss)          loss computed here
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### Stanford Alpaca (2023)
 - Fine-tuned LLaMA 7B on 52,000 instruction-following examples
@@ -541,7 +589,7 @@ Labels (after masking):
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dataset Size | Expected Quality | Risk | Best For |
 |-------------|-----------------|------|---------|
@@ -558,7 +606,7 @@ Labels (after masking):
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Instruction Tuning When:
 - Need consistent output format (JSON, markdown, specific response style)
@@ -574,7 +622,7 @@ Labels (after masking):
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Template mismatch between training and inference**
 The single most common and damaging mistake: training with Alpaca template but running inference with ChatML template, or vice versa.
@@ -602,7 +650,7 @@ Fix: Use `apply_chat_template` with `tokenize=False` to format multi-turn conver
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -617,7 +665,7 @@ Fix: Use `apply_chat_template` with `tokenize=False` to format multi-turn conver
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is instruction tuning and how does it differ from pre-training?**
 A: Instruction tuning is supervised fine-tuning on (instruction, response) pairs to teach a model to follow natural language instructions. Pre-training trains on vast unlabeled text corpora (hundreds of billions to trillions of tokens) with a next-token prediction objective — the model learns language and world knowledge but not conversational behavior. Instruction tuning uses a small, curated supervised dataset (thousands to millions of instruction-response pairs) to teach the conversational interface. Pre-training produces a "base model" (text completer); instruction tuning produces an "assistant model" (instruction follower). Scale: pre-training requires months on thousands of GPUs; instruction tuning requires hours on a few GPUs.
@@ -669,7 +717,7 @@ A: The turn terminator was never inside the loss window, so the model has no sup
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Verify template with actual token IDs** — don't assume a template is correct; print tokenized examples and verify special tokens appear at the right positions.
 2. **Validate label masking before training** — inspect the first 5 training examples' labels; confirm instruction tokens are -100 and response tokens have correct IDs.
@@ -681,7 +729,7 @@ A: The turn terminator was never inside the loss window, so the model has no sup
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Building an Instruction-Tuned Model for a Healthcare Q&A System
 

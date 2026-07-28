@@ -8,7 +8,7 @@ Two primary techniques: (1) continued pre-training (CPT) on a large domain corpu
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Domain adaptation is like sending an intelligent generalist to medical school — they already have reasoning and language skills; you're adding specialized knowledge on top.
 
@@ -20,7 +20,7 @@ Two primary techniques: (1) continued pre-training (CPT) on a large domain corpu
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Continued pre-training teaches knowledge; instruction tuning teaches behavior**: CPT learns domain vocabulary, facts, and structures. Instruction tuning learns domain-specific response style, format, and task handling.
 - **Catastrophic forgetting is the primary risk**: Fine-tuning on domain data can cause the model to lose general capabilities. Mitigation: low LR, PEFT, data mixing.
@@ -30,9 +30,109 @@ Two primary techniques: (1) continued pre-training (CPT) on a large domain corpu
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Continued Pre-Training (CPT)
+"Domain adaptation" names an outcome, not a method. There are six ways to reach it, and picking between them is the first and most expensive decision in the project — the gap between the cheapest and the dearest is several orders of magnitude in cost.
+
+**The five approaches.**
+
+| Approach | Domain knowledge | General capability | Cost | Applies when |
+|----------|-----------------|--------------------|------|--------------|
+| General model + prompting | Base level | Full | None | Domain is adjacent to general web text |
+| [RAG](../rag_fundamentals/README.md) | Retrieved at query time | Full | Low | Knowledge is lookupable and changes often |
+| Instruction tuning only | Base + task format | Good | Low (10-100x cheaper than CPT) | Behavior and format are needed, not knowledge |
+| CPT only | High | Moderate risk | High | Knowledge without a conversational surface |
+| CPT + instruction tuning ("domain-then-instruct") | Excellent | Good, with mixing | High | Production domain assistant |
+| Train from scratch | Optimal | Limited to training mix | Very high | Extreme specialization (BloombergGPT) |
+
+CPT and instruction tuning are complementary, not alternatives: CPT adds knowledge capacity, instruction tuning teaches the model to express it. Doing only one is materially weaker than the pipeline.
+
+**Within CPT, three sub-strategies then have to be chosen.**
+
+*Weight strategy — how much of the model may move.*
+
+| Strategy | Forgetting risk | Domain depth | Applies when |
+|----------|-----------------|--------------|--------------|
+| Full-weight CPT | High — needs active monitoring | Deepest representational change | Large vocabulary/structure shift; budget for eval infrastructure |
+| LoRA CPT at r=64-128 | Near zero — base is frozen | Shallower; measurably behind full CPT | Forgetting is the dominant concern, or GPU memory is the binding constraint |
+
+*Mix ratio — how much general data rides along with the domain corpus.* This is a Pareto dial, not a right answer: more general data buys less forgetting and less domain gain, monotonically. Conservative is 80% domain / 20% general; aggressive is 95% / 5%. Below ~5% the general gradient signal is overwhelmed entirely.
+
+*Learning-rate schedule — the shape, not just the peak.*
+
+| Schedule | Adaptation | Forgetting | Applies when |
+|----------|------------|------------|--------------|
+| Constant at the base run's final LR | Worst | Least | Never the right default — adaptation stalls |
+| Re-warm to 0.5x eta_max, re-decay | Good | Low | Forgetting-sensitive runs |
+| Re-warm to 1.0x eta_max, re-decay | Better | Moderate | The general-purpose choice |
+| Re-warm to 2.0x eta_max, re-decay | Best | Most | Strong distribution shift, forgetting budget available |
+
+Re-warm and re-decay are both load-bearing: skip the warm-up and steps are too small to move representations; skip the decay and the weights never settle.
+
+**Forgetting mitigations, ranked by what practitioners actually use.**
+
+| Mitigation | Effectiveness | Cost | Verdict |
+|------------|---------------|------|---------|
+| Data mixing (15-20% general) | Highest | ~10 lines of code | The default |
+| Eval during training (MMLU/GSM8K per checkpoint) | Detection, not prevention | Eval harness + GPU time | Mandatory alongside mixing |
+| Low learning rate (5e-5 vs 1e-4) | Moderate | Slower adaptation | Pair with the schedule choice above |
+| PEFT / LoRA for CPT | Total (forgetting is impossible) | Less domain depth | When depth can be traded away |
+| Replay buffer (5-10% original pre-training data) | Good | Original data often unavailable | Substitute C4 / The Pile |
+| EWC (Fisher-weighted anchoring) | Comparable to mixing | ~48GB extra resident memory on an 8B model | Theoretically sound, practically skipped |
+
+**Orthogonal: tokenizer adaptation.** Independent of every choice above, decide whether to extend the vocabulary. Measure fertility first — tokens emitted per source word — and extend only when it sits well above 1.1, because base tokenizers already cover most medical and legal vocabulary and a non-standard tokenizer costs deployment complexity for the rest of the model's life. When you do extend, initialize new embeddings from the average of their sub-token embeddings rather than randomly.
+
+---
+
+## 5. Architecture Diagrams
+
+### Domain-Then-Instruct Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Base(["General-Purpose Base Model\n(LLaMA-3-8B, Mistral-7B)"]) --> CPT
+    CPT["Phase 1: Continued Pre-Training\nDataset: 10B–100B domain tokens + 15% general\nObjective: next-token prediction (all tokens)\nLR: 5e-5 to 1e-4 | Duration: 1–5 days (8×A100, 13B)"] --> DomainBase
+    DomainBase["Domain Knowledgeable Base Model\n– Rich domain vocabulary representations\n– Domain entity co-occurrence patterns\n– Domain knowledge in weights"] --> SFT
+    SFT["Phase 2: Domain Instruction Tuning\nDataset: 10K–500K domain (instruction, response) pairs\nObjective: SFT with label masking\nLR: 1e-4 to 3e-4 (LoRA) or 1e-5 (full FT) | Duration: hours"] --> Assistant
+    Assistant(["Domain Assistant Model\n– Expresses domain knowledge helpfully\n– Follows domain task conventions\n– Maintains epistemic humility"])
+
+    class Base,DomainBase base
+    class CPT,SFT train
+    class Assistant io
+```
+
+Skipping Phase 1 (pure instruction tuning on a general base) risks the model hallucinating domain facts it never learned — Phase 1 first writes domain knowledge into weights, Phase 2 teaches the model how to express it helpfully.
+
+### Forgetting Risk by Training Approach
+```
+Risk Level:
+High   |  Pure domain full FT (no mixing)
+       |
+       |  Domain full FT with data mixing
+       |
+Medium |  Domain LoRA (r=64) without mixing
+       |
+       |  Domain LoRA (r=16) with mixing
+       |
+Low    |  Domain instruction tuning only (no CPT)
+         ──────────────────────────────────────────→
+                    Increasing Intervention
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Continued Pre-Training (CPT)
 
 Standard next-token prediction on large domain corpora:
 
@@ -158,7 +258,7 @@ an *infinite* LR schedule (warmup, then a long constant plateau across tasks, wi
 exponential decay whenever you decide to stop) sidesteps re-warming entirely and does not
 commit you to a fixed token budget up front.
 
-### 3.2 Data Mixing Strategy
+### 6.2 Data Mixing Strategy
 
 Pure domain corpus fine-tuning without mixing causes catastrophic forgetting:
 
@@ -218,7 +318,7 @@ Below 10%, forgetting is unacceptable.
 | LegalBench F1 gain | Absolute percentage-point domain improvement vs the base model |
 | `seed=42` | Fixes the interleaving order so the run is reproducible |
 
-**Walk one example.** The Section 12 case study's 500B-token budget, redistributed at each mix ratio:
+**Walk one example.** The Section 14 case study's 500B-token budget, redistributed at each mix ratio:
 
 ```
   corpus                                          tokens
@@ -255,7 +355,7 @@ The ratio stays comfortably above 1.0 for every step up to 20%, then collapses t
 
 **Why even 5% general data changes the outcome.** Gradient direction is set by what is in the batch. At 100% domain, every update points the same way and nothing ever pulls back toward general competence; drift compounds unopposed across tens of thousands of steps. At 5%, roughly one example in twenty pushes back — small, but it converts unopposed drift into an equilibrium. That is why the jump from 0% to 5% matters far more than the jump from 15% to 20%, and why the section calls mixing the single most effective mitigation.
 
-### 3.3 The Domain-Then-Instruct Pipeline
+### 6.3 The Domain-Then-Instruct Pipeline
 
 The most effective domain adaptation approach:
 
@@ -307,7 +407,7 @@ The `1B-100B tokens` range above spans a hundredfold difference in cost. Two sta
 | MFU | Model FLOPs utilization: fraction of peak the run actually achieves, typically 35-50% |
 | A100 peak | 312 TFLOPS BF16 with sparsity off |
 
-**Walk one example.** The Section 12 CPT ablation (50B, 100B, 200B, 500B tokens on an 8B model), scored on both ratios and against its own reported F1 gains:
+**Walk one example.** The Section 14 CPT ablation (50B, 100B, 200B, 500B tokens on an 8B model), scored on both ratios and against its own reported F1 gains:
 
 ```
   tokens D    D/N tok/param    6ND FLOPs     LegalBench F1 gain   marginal gain
@@ -340,7 +440,7 @@ The elbow lands at 200B, which is `25` tokens per parameter — essentially Chin
 
 To consume 500B tokens in 6,144 GPU-hours would require 348% of an A100's peak throughput, which is not a thing — so that plan was rejected and the run was rebudgeted at ~53,000 A100-hours (64 GPUs for ~35 days). The lesson is the method: `6ND ÷ (GPUs × peak × MFU)` gives your wall clock in one line, and running it *before* provisioning is the difference between a 4-day plan and a 35-day invoice. Assume 40% MFU unless you have measured your own.
 
-### 3.4 Catastrophic Forgetting Mitigation
+### 6.4 Catastrophic Forgetting Mitigation
 
 ```
 Forgetting symptoms:
@@ -437,7 +537,7 @@ Three things fall out of that table. **Forgetting is reversible while training c
 
 Data mixing achieves comparable protection for zero extra memory and roughly ten lines of code. That is the entire reason the section calls EWC "rarely used in practice" — not that it fails, but that a 48GB tax buys something you can get for free.
 
-### 3.5 Tokenizer Adaptation
+### 6.5 Tokenizer Adaptation
 
 For domains with high-frequency specialized vocabulary:
 
@@ -520,53 +620,7 @@ Half a percent of the model for a 30% larger effective window is a good trade *i
 
 ---
 
-## 4. Architecture Diagram
-
-### Domain-Then-Instruct Pipeline
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Base(["General-Purpose Base Model\n(LLaMA-3-8B, Mistral-7B)"]) --> CPT
-    CPT["Phase 1: Continued Pre-Training\nDataset: 10B–100B domain tokens + 15% general\nObjective: next-token prediction (all tokens)\nLR: 5e-5 to 1e-4 | Duration: 1–5 days (8×A100, 13B)"] --> DomainBase
-    DomainBase["Domain Knowledgeable Base Model\n– Rich domain vocabulary representations\n– Domain entity co-occurrence patterns\n– Domain knowledge in weights"] --> SFT
-    SFT["Phase 2: Domain Instruction Tuning\nDataset: 10K–500K domain (instruction, response) pairs\nObjective: SFT with label masking\nLR: 1e-4 to 3e-4 (LoRA) or 1e-5 (full FT) | Duration: hours"] --> Assistant
-    Assistant(["Domain Assistant Model\n– Expresses domain knowledge helpfully\n– Follows domain task conventions\n– Maintains epistemic humility"])
-
-    class Base,DomainBase base
-    class CPT,SFT train
-    class Assistant io
-```
-
-Skipping Phase 1 (pure instruction tuning on a general base) risks the model hallucinating domain facts it never learned — Phase 1 first writes domain knowledge into weights, Phase 2 teaches the model how to express it helpfully.
-
-### Forgetting Risk by Training Approach
-```
-Risk Level:
-High   |  Pure domain full FT (no mixing)
-       |
-       |  Domain full FT with data mixing
-       |
-Medium |  Domain LoRA (r=64) without mixing
-       |
-       |  Domain LoRA (r=16) with mixing
-       |
-Low    |  Domain instruction tuning only (no CPT)
-         ──────────────────────────────────────────→
-                    Increasing Intervention
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### BioMedLM (Stanford CRFM + MosaicML, 2022)
 - A **2.7B-parameter** GPT-style model trained **from scratch** on PubMed abstracts and
@@ -593,7 +647,7 @@ Low    |  Domain instruction tuning only (no CPT)
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Domain Knowledge | General Capability | Cost | When to Use |
 |----------|-----------------|-------------------|------|------------|
@@ -605,7 +659,7 @@ Low    |  Domain instruction tuning only (no CPT)
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Full Domain-Then-Instruct When:
 - Target domain has substantially different vocabulary from web text (medical, legal, code)
@@ -624,7 +678,7 @@ Low    |  Domain instruction tuning only (no CPT)
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. No data mixing during CPT**
 100% domain corpus causes severe catastrophic forgetting. After CPT, the model loses general instruction-following ability.
@@ -652,7 +706,7 @@ Fix: For CPT, use either full fine-tuning with data mixing, or high-rank LoRA (r
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -668,7 +722,7 @@ Fix: For CPT, use either full fine-tuning with data mixing, or high-rank LoRA (r
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is catastrophic forgetting and how do you prevent it?**
 A: Catastrophic forgetting occurs when fine-tuning on new data causes the model to lose previously learned capabilities — a model fine-tuned heavily on medical text may forget how to reason about code or answer general factual questions. Prevention: (1) Data mixing — include 15-20% general text during CPT; this is the most effective, simplest approach; (2) LoRA/PEFT — frozen base weights literally cannot be forgotten since they're never updated, though PEFT's protection is weaker for CPT than for SFT; (3) Low learning rate — 5e-5 to 1e-4 for CPT vs. 3e-4 for initial pre-training; smaller updates preserve existing representations; (4) EWC (Elastic Weight Consolidation) — penalizes changes to high-importance weights, though rarely used in practice due to compute cost; (5) Continuous evaluation — monitor general benchmarks throughout training and stop at first sign of >5-10% regression.
@@ -720,7 +774,7 @@ A: Re-warm the learning rate and then re-decay it with a cosine over the CPT tok
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Always mix domain + general data during CPT** — 15-20% general data mix is the single most important anti-forgetting measure; 100% domain training is almost always a mistake.
 2. **Use CPT only when the domain gap warrants it** — instruction tuning alone is sufficient for domains with good base coverage; CPT is for significant vocabulary and knowledge gaps.
@@ -732,7 +786,7 @@ A: Re-warm the learning rate and then re-decay it with a cosine over the CPT tok
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Adapting LLaMA 3 8B for Legal Contract Analysis
 
@@ -758,7 +812,7 @@ Phase 1: Continued Pre-Training
   Hardware: 64x A100 80GB
     6ND = 6 x 8e9 x 500e9 = 2.4e22 FLOPs; at 40% MFU on A100 BF16 (312 TFLOPS)
     that is ~53,000 A100-hours = ~35 days on 64 GPUs. The original ~4-day plan
-    was rejected by exactly this check (see 3.3).
+    was rejected by exactly this check (see 6.3).
 
            |
            v

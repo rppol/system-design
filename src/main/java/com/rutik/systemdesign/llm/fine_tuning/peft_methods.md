@@ -45,7 +45,7 @@ The gradient and optimizer rows collapse by 200× because they scale with 350M, 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: PEFT methods are like editing footnotes instead of rewriting the textbook — you add targeted changes that alter the behavior without touching the core content.
 
@@ -57,7 +57,7 @@ The gradient and optimizer rows collapse by 200× because they scale with 350M, 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Frozen base weights preserve general capabilities**: All PEFT methods keep the majority of parameters frozen, reducing catastrophic forgetting.
 - **Task-relevant updates are low-dimensional**: The empirical finding underlying PEFT — fine-tuning changes are concentrated in a low-dimensional subspace of the full parameter space.
@@ -67,9 +67,95 @@ The gradient and optimizer rows collapse by 200× because they scale with 350M, 
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Adapter Layers (Houlsby et al. 2019)
+The PEFT family is usually presented as a flat list of method names. It is more useful as a taxonomy along two questions: *what mechanism injects the trainable parameters*, and *what that mechanism costs at inference*. Everything below is developed in detail in Section 6; this is the map.
+
+**Five injection mechanisms.**
+
+| Family | Mechanism | Members | Merges into base? | Inference cost |
+|--------|-----------|---------|-------------------|----------------|
+| Reparameterization | Add a low-rank update to an existing weight matrix | LoRA, QLoRA, DoRA | Yes (QLoRA needs a dequantize first) | 0% once merged |
+| Additive module | Insert new bottleneck layers into the block | Adapter layers (Houlsby) | No | +5-10% forward pass, always on |
+| Additive context | Prepend learned vectors to the attention KVs or the input embeddings | Prefix tuning, prompt tuning | No | Consumes context window / extra KV cache |
+| Selective | Unfreeze a tiny existing subset of the real weights | BitFit | Yes (nothing to merge — they *are* base weights) | 0% |
+| Rescaling | Learn per-channel multiplicative vectors | IA3 | Yes | ~0% |
+
+**The same methods ranked by capacity, on one 7B model.**
+
+| Method | Absolute trainable | % of 7B | Distinguishing property |
+|--------|--------------------|---------|-------------------------|
+| Prompt tuning (k=100) | 409,600 | 0.0059% | The only method with no per-layer term — cheapest, and only works above ~10B params |
+| IA3 (k, v, ffn) | 614,400 | 0.0088% | A scaling vector costs `d`, versus `2dr` for rank-16 LoRA — 32x cheaper per attention site |
+| BitFit | 1,269,760 | 0.0181% | Zero on LLaMA-style models, which have `bias=False` everywhere |
+| Prefix (l=10) | 2,621,440 | 0.0374% | Conditions generation without touching any weight |
+| Adapter (r=8) | 4,194,304 | 0.0599% | Strong on classification; the always-on cost is the price |
+| DoRA (r=8) | 8,912,896 | 0.1273% | LoRA quality at lower rank by splitting magnitude from direction |
+| LoRA r=16 (q,k,v,o) | 16,777,216 | 0.2397% | The default; reliable across model sizes |
+| LoRA r=16 (attn+FFN) | 39,976,960 | 0.5711% | Maximum coverage for domain shift |
+
+The span is 97.6x, and the pattern worth carrying out of the table is that **every method above 0.1% is a mergeable one** — the families that buy the most capacity are also the ones that cost nothing at inference.
+
+**A third axis the method name does not capture: initialization.** Where the adapter *starts* is a configurable strategy in its own right (`init_lora_weights`), and it matters most exactly when the frozen base is an approximation rather than the original checkpoint.
+
+| Strategy | Fits | Applies when |
+|----------|------|--------------|
+| Default (`True`) / `"gaussian"` | `A` random, `B = 0`, so `BA = 0` | Full-precision base — the adapter starts as an identity |
+| `"loftq"` | Rank-r SVD of the quantization residual `W - Q` | Quantized base; makes `Q + BA ~ W` at step 0 |
+| `"pissa"` / `"olora"` | Principal components / QR of `W` itself | Faster convergence; mutates the frozen base, so export carefully |
+| `"eva"` / `"corda"` | SVD of input activations / task-aware decomposition | Data-driven rank budgeting; forgetting mitigation |
+
+This is the concrete meaning of the "PEFT methods can be combined" principle: LoftQ is not a new architecture, it is LoRA plus a quantization-aware starting point, bought with one config field.
+
+---
+
+## 5. Architecture Diagrams
+
+### PEFT Methods Architecture Overview
+```
+Transformer Layer
+
+Original:
+  Input → [Self-Attention (W_q, W_k, W_v, W_o)] → [LayerNorm] → [FFN] → [LayerNorm] → Output
+
+Adapter:
+  Input → [Self-Attention] → [LayerNorm] → [Adapter ↑↓] → [FFN] → [LayerNorm] → [Adapter ↑↓] → Output
+  (+ symbols = skip connection inside adapter)
+
+LoRA:
+  Input → [Self-Attention (W_q + B_q×A_q, W_k, W_v + B_v×A_v, W_o)] → [LayerNorm] → [FFN] → [LayerNorm] → Output
+  (LoRA matrices B×A added to specific weight matrices; no new layers)
+
+Prefix Tuning:
+  Prefix P_k, P_v ──────────────────────┐
+                                         ↓
+  Input → [Self-Attention (Q attends to [P_k|K] and [P_v|V])] → [LayerNorm] → [FFN] → [LayerNorm] → Output
+
+Prompt Tuning:
+  [Learned Prompt P | User Input X] → [Full Transformer (frozen)] → Output
+  (only input embeddings modified; all layers unchanged)
+```
+
+### Inference Overhead Comparison
+```
+LoRA (merged):
+  W_query ─────────────────────> output
+  (single matmul; same as original)
+
+Adapter:
+  x → W_main → + [down_proj × up_proj of residual] → output
+  (always 2 extra matmuls per adapter per forward pass)
+
+Prefix (at inference):
+  [P_k | K], [P_v | V]  ← extra KV cache allocation per layer
+  Same compute; more memory
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Adapter Layers (Houlsby et al. 2019)
 
 Insert small bottleneck modules after attention and FFN sublayers:
 
@@ -129,7 +215,7 @@ The full-width layer this sits beside is `4096 x 4096 = 16,777,216` parameters �
 
 **Why the bottleneck exists at all.** Without it — a full `d × d` correction matrix — you would be training 16.8M parameters per adapter and 1.07B across the model, which is 15% of the base and defeats the entire point. The narrow waist is what forces the update to be low-rank, and the low-rank constraint is the assumption every PEFT method rests on.
 
-### 3.2 Prefix Tuning (Li and Liang, 2021)
+### 6.2 Prefix Tuning (Li and Liang, 2021)
 
 Learn soft prefix tokens prepended to keys and values in each attention layer:
 
@@ -193,7 +279,7 @@ Compare the same `l=10` under prompt tuning, which learns one prefix at the inpu
 
 **What the depth buys, and what it costs.** Per-layer prefixes let the task conditioning re-assert itself at every depth instead of being diluted as the signal propagates, which is why prefix tuning outperforms prompt tuning on mid-sized models. The bill arrives as KV cache: 320 entries of permanently-resident cache per sequence, present on every request, that no amount of merging can remove.
 
-### 3.3 Prompt Tuning (Lester et al. 2021)
+### 6.3 Prompt Tuning (Lester et al. 2021)
 
 Learn soft prompt tokens prepended to the input embedding layer only (not all layers):
 
@@ -245,7 +331,7 @@ At `k=100` on a 7B model you are steering 7 billion frozen parameters with 409,6
 
 **Why that ratio is also the failure mode.** The whole method assumes the frozen model already contains the behaviour you want and merely needs to be pointed at it; the soft prompt is a pointer, not new capacity. Large models satisfy that assumption, which is why `k=100` matches full fine-tuning at GPT-3 scale. Small models do not — there is nothing to point at, and 7,680 parameters cannot supply it, which is exactly the T5-Small collapse the section describes.
 
-### 3.4 LoRA (Low-Rank Adaptation)
+### 6.4 LoRA (Low-Rank Adaptation)
 
 (See [lora.md](lora.md) for full details; the 4-bit training variant is covered in [qlora.md](qlora.md))
 
@@ -301,11 +387,11 @@ That bracket, 0.24% to 0.57%, is the `0.2-0.6%` the comparison table quotes — 
   Same effective update strength at half the rank -- the point of the ratio.
 ```
 
-Both configurations in the Section 12 case study use `alpha = 2r` for exactly this reason. Set `alpha = r` instead and the scale is `1.0`; the convention `alpha = 2r` is just a mildly aggressive default that survived experimentation.
+Both configurations in the Section 14 case study use `alpha = 2r` for exactly this reason. Set `alpha = r` instead and the scale is `1.0`; the convention `alpha = 2r` is just a mildly aggressive default that survived experimentation.
 
 **Why `B` starts at zero.** At step 0, `B × A = 0`, so `W_adapted = W_frozen` exactly — training begins from the pre-trained model, not from a randomly perturbed one. Initialize both `A` and `B` randomly and the first forward pass injects noise into every targeted layer, which is the same initialization-gap problem LoftQ solves for the quantized case.
 
-### 3.5 BitFit (Selective Parameter Fine-Tuning)
+### 6.5 BitFit (Selective Parameter Fine-Tuning)
 
 Fine-tune only the bias terms of the model:
 
@@ -365,7 +451,7 @@ That is the `~0.1M parameters (<0.1%)` the section quotes, assembled term by ter
 
 **The gotcha nobody sees coming.** BitFit needs biases to exist. LLaMA, Mistral, and most modern decoder-only models ship with `bias=False` on every projection and use RMSNorm, which has a scale but no shift — so a 7B LLaMA has essentially no bias parameters to train and BitFit degenerates into a no-op. This, more than the quality ceiling, is why the section calls it academic: the architectures it was designed for are the ones production stopped using.
 
-### 3.6 DoRA (Weight-Decomposed Low-Rank Adaptation)
+### 6.6 DoRA (Weight-Decomposed Low-Rank Adaptation)
 
 Decompose weight matrices into magnitude and direction components, apply LoRA to direction:
 
@@ -434,7 +520,7 @@ That 6.25% surcharge is what "negligible vs. LoRA" means numerically, and it is 
 
 **Why magnitude wanted its own parameter.** A rank-8 update can only move `W` inside an 8-dimensional subspace, so if the task mostly needs "make this column stronger," LoRA must burn rank approximating a rescaling it could never express cleanly. Giving magnitude a free, unconstrained `d`-vector removes that waste entirely — and since `m` and `V` recombine into a single matrix, DoRA still merges to zero inference overhead exactly like LoRA.
 
-### 3.7 Comparison Table
+### 6.7 Comparison Table
 
 ```
 Method           Trainable %  Merge   Inference  Best For
@@ -501,7 +587,7 @@ extreme-thin end; prompt tuning in particular only reaches full-fine-tuning qual
 very large model scales. LoRA's higher parameter budget is what buys its reliable
 quality across model sizes.
 
-### 3.8 Where the Adapter Starts — Initialization Is a PEFT Choice
+### 6.8 Where the Adapter Starts — Initialization Is a PEFT Choice
 
 Every method above has been costed by *how many* parameters it trains and *where* it injects
 them. There is a third axis the table does not show: what those parameters are set to at step
@@ -541,51 +627,7 @@ one config field rather than a new method.
 
 ---
 
-## 4. Architecture Diagram
-
-### PEFT Methods Architecture Overview
-```
-Transformer Layer
-
-Original:
-  Input → [Self-Attention (W_q, W_k, W_v, W_o)] → [LayerNorm] → [FFN] → [LayerNorm] → Output
-
-Adapter:
-  Input → [Self-Attention] → [LayerNorm] → [Adapter ↑↓] → [FFN] → [LayerNorm] → [Adapter ↑↓] → Output
-  (+ symbols = skip connection inside adapter)
-
-LoRA:
-  Input → [Self-Attention (W_q + B_q×A_q, W_k, W_v + B_v×A_v, W_o)] → [LayerNorm] → [FFN] → [LayerNorm] → Output
-  (LoRA matrices B×A added to specific weight matrices; no new layers)
-
-Prefix Tuning:
-  Prefix P_k, P_v ──────────────────────┐
-                                         ↓
-  Input → [Self-Attention (Q attends to [P_k|K] and [P_v|V])] → [LayerNorm] → [FFN] → [LayerNorm] → Output
-
-Prompt Tuning:
-  [Learned Prompt P | User Input X] → [Full Transformer (frozen)] → Output
-  (only input embeddings modified; all layers unchanged)
-```
-
-### Inference Overhead Comparison
-```
-LoRA (merged):
-  W_query ─────────────────────> output
-  (single matmul; same as original)
-
-Adapter:
-  x → W_main → + [down_proj × up_proj of residual] → output
-  (always 2 extra matmuls per adapter per forward pass)
-
-Prefix (at inference):
-  [P_k | K], [P_v | V]  ← extra KV cache allocation per layer
-  Same compute; more memory
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### LoRA in Production (HuggingFace Hub)
 - Thousands of LoRA adapters for LLaMA-3, Mistral, Qwen on HuggingFace Hub
@@ -605,7 +647,7 @@ Prefix (at inference):
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | Adapter | Prefix | Prompt | LoRA | BitFit | DoRA |
 |-----------|---------|--------|--------|------|--------|------|
@@ -618,7 +660,7 @@ Prefix (at inference):
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use LoRA When:
 - General fine-tuning task requiring good quality
@@ -647,7 +689,7 @@ Prefix (at inference):
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Adapter inference overhead in latency-sensitive production**
 Adapter layers add 5-10% latency on every inference call. At high QPS, this adds up.
@@ -671,7 +713,7 @@ Fix: Evaluate each adapter independently before stacking. Check that adapter com
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -683,7 +725,7 @@ Fix: Evaluate each adapter independently before stacking. Check that adapter com
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is PEFT and why is it used instead of full fine-tuning?**
 A: Parameter-Efficient Fine-Tuning (PEFT) trains only a small fraction of model parameters (0.001-1%) while freezing the rest. Full fine-tuning of a 70B model requires at least ~420GB of GPU memory (weights + gradients + optimizer states at 2 bytes each; fp32 Adam moments push it past 1TB) — six to eight A100 80GB GPUs at minimum. PEFT reduces this to under 40GB by training only adapter matrices or low-rank updates. The quality loss is typically 1-3% compared to full fine-tuning, which is acceptable for most applications. Additional benefits: frozen base weights prevent catastrophic forgetting; small adapter files (50-200MB) can be versioned and deployed separately from the 140GB base model; multiple task-specific adapters can be maintained without duplicating the base model.
@@ -735,7 +777,7 @@ A: With `B = 0` the adapter is a no-op at step zero, so a QLoRA run starts from 
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Default to LoRA** — the best balance of quality, memory efficiency, merge capability, and tooling support; only deviate with specific justification.
 2. **Avoid adapters in latency-sensitive production** — the 5-10% per-call overhead from adapter layers compounds at scale; use merged LoRA instead.
@@ -747,7 +789,7 @@ A: With `B = 0` the adapter is a no-op at step zero, so a QLoRA run starts from 
 
 ---
 
-## 12. Case Study: Multi-Task Customer Service Platform Using Adapter Composition
+## 14. Case Study: Multi-Task Customer Service Platform Using Adapter Composition
 
 *Illustrative worked example — the configs and parameter counts are real, but the company, accuracy figures and cost savings are a composite, not a published deployment.*
 

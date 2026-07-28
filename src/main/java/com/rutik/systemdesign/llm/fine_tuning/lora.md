@@ -8,7 +8,7 @@ For a 7B model where a typical attention weight matrix is 4096×4096, the full u
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: LoRA is like adding a thin correction layer over a painting — instead of repainting the whole canvas, you add a transparent overlay that adjusts specific parts.
 
@@ -20,7 +20,7 @@ For a 7B model where a typical attention weight matrix is 4096×4096, the full u
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Frozen base weights, trainable adapters**: W_original is never updated; only A and B matrices are trained.
 - **Low-rank decomposition captures task-relevant updates**: The hypothesis that ΔW ≈ B×A (low rank) holds empirically for most fine-tuning tasks.
@@ -30,9 +30,174 @@ For a 7B model where a typical attention weight matrix is 4096×4096, the full u
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Mathematical Foundation
+LoRA is one algorithm with four independent configuration axes. Choosing a LoRA setup means picking a point on each axis; almost every "LoRA didn't work" report is a bad choice on one of them rather than a limitation of the method.
+
+**Axis 1 — Rank tier (how much capacity the adapter gets).**
+
+| Tier | Trainable (7B, Q+V, 32 layers) | What it can learn | Typical use |
+|------|-------------------------------|-------------------|-------------|
+| r=4 | ~2M | Format and style only | "Always respond in JSON" |
+| r=8 | ~4M | Instruction following, chat alignment | Persona / chat-style adaptation |
+| r=16 | ~8M | Task learning and light domain adaptation | Production default — start here |
+| r=32 | ~17M | Significant behavior change | Step-by-step reasoning chains |
+| r=64 | ~33M | Approaching full fine-tune quality | Only when r=32 underfits |
+| r=128 | ~67M | Rarely justified | Prefer full fine-tuning instead |
+
+The ladder is a doubling sweep: start at r=16 with alpha=32, double r when quality is insufficient, and switch to full fine-tuning if r=64 still is not enough.
+
+**Axis 2 — Target-module coverage (where the adapter is injected).**
+
+| Configuration | Modules | Trainable (7B) | Applies when |
+|---------------|---------|----------------|--------------|
+| Minimal | `q_proj`, `v_proj` | ~8M | Format, style, simple instruction following |
+| Standard | `q_proj`, `k_proj`, `v_proj`, `o_proj` | ~17M | Task-specific behavior, Q&A style |
+| Attention + FFN | the four above plus `gate_proj`, `up_proj`, `down_proj` | ~40M | Significant domain shift, specialized knowledge |
+
+Coverage and rank trade against each other at a fixed parameter budget, and the LoRA paper's own ablation says to spend the budget on *more matrix types at lower rank* rather than one type at high rank — with `Wq+Wv` the best two-matrix pick.
+
+**Axis 3 — Scaling rule (how loud the adapter is at a given rank).**
+
+| Variant | Scale | Behavior across a rank sweep | Reach for it when |
+|---------|-------|------------------------------|-------------------|
+| Classic LoRA | `alpha / r` | Loudness constant, gradients divided down as r grows | r <= 16, where a tuned LR absorbs the difference |
+| rsLoRA (`use_rslora=True`) | `alpha / sqrt(r)` | Activations and gradients stable across ranks | r=64-256, where you spend rank deliberately to buy quality |
+
+Both fold into the merge identically, so the choice costs nothing at inference — it only changes how fast the adapter learns.
+
+**Axis 4 — Serving mode (what you ship).**
+
+| Mode | Artifact | Inference cost | Applies when |
+|------|----------|----------------|--------------|
+| Merged | One standard model file, `W + BA·(alpha/r)` | Zero overhead | One task per deployment; latency-critical serving |
+| Unmerged / dynamic | Frozen base plus a small adapter file per task | Extra matmul per targeted module | Many tasks share one base; hot-swap or multi-adapter serving (vLLM) |
+
+The two related families are covered in sibling files rather than here: [QLoRA](qlora.md) keeps this same design space but quantizes the frozen base to 4-bit, and the broader adapter/prefix/prompt/BitFit/DoRA landscape LoRA sits inside is surveyed in [peft_methods.md](peft_methods.md).
+
+---
+
+## 5. Architecture Diagrams
+
+### LoRA Applied to Transformer Attention
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph tr["During Training"]
+        x1([x]) --> W["W\nfrozen — no gradient"]
+        x1 --> A["A · r×k\ntrainable"]
+        A --> B["B · d×r\ntrainable"]
+        B -->|"× alpha/r"| plus((" + "))
+        W --> plus
+        plus --> h1([h])
+    end
+    subgraph inf["After Merge — zero inference overhead"]
+        x2([x]) --> Wm["W_merged = W + B×A·(alpha/r)\nsingle matrix, no branching"]
+        Wm --> h2([h])
+    end
+
+    class x1,x2,h1,h2 io
+    class W,Wm frozen
+    class A,B train
+    class plus mathOp
+```
+
+The left subgraph shows the adapter bypass: W·x and B·A·x·(alpha/r) are summed at
+every forward pass during training. The right subgraph shows that after merging, the
+addition disappears — the fused W_merged is a single weight matrix with no runtime
+overhead, which is why LoRA merged models run at full base-model speed.
+
+### LoRA Parameter Flow During Training
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x([x]) --> Wx["W·x\nfrozen"]
+    x --> A["A matrix\ntrainable"]
+    A --> B["B matrix\ntrainable"]
+    Wx --> plus((" + "))
+    B --> plus
+    plus --> h([h])
+    h --> loss([Loss])
+    loss -.->|"∂L/∂B → updates B"| B
+    loss -.->|"∂L/∂A → updates A"| A
+    loss -. "∂L/∂W = 0  frozen" .-> Wx
+
+    class x,h io
+    class Wx frozen
+    class A,B train
+    class plus mathOp
+    class loss lossN
+```
+
+Solid arrows are the forward pass; dotted arrows are the backward pass (gradient
+signals). The dotted edge to W carries zero gradient — the optimizer never touches W,
+so no gradient memory is allocated for the frozen weights, halving the per-weight
+memory cost relative to full fine-tuning.
+
+### Multi-Adapter Serving — One Base Model, Many Tasks
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 60}}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    r1["request  tag: sql"]
+    r2["request  tag: chat"]
+    r3["request  tag: legal"]
+    r4["request  tag: ..."]
+    base["Base Model\n14 GB · frozen\nloaded once on GPU"]
+    a1["sql_adapter\n~34 MB\nB, A only"]
+    a2["chat_adapter\n~34 MB\nB, A only"]
+    a3["legal_adapter\n~34 MB\nB, A only"]
+    a4["...more adapters\n~34 MB each"]
+    r1 --> base
+    r2 --> base
+    r3 --> base
+    r4 --> base
+    base -->|"route by adapter_id"| a1
+    base --> a2
+    base --> a3
+    base --> a4
+
+    class r1,r2,r3,r4 req
+    class base base
+    class a1,a2,a3,a4 train
+```
+
+The 14 GB base model loads once; each adapter is just its B and A matrices — 16,777,216
+bf16 parameters, i.e. ~34 MB, for r=16 on q/k/v/o of a 7B model.
+Swapping tasks is a matrix-add at request time (vLLM hot-swap), not a 14 GB model
+reload — the economic core of serving 50+ specialized models on one GPU.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Mathematical Foundation
 
 ```
 Standard linear layer:
@@ -92,7 +257,7 @@ Note the order: the adapter never forms `B × A` as a 4096×4096 matrix during t
 
 If instead you initialize *both* from `N(0, 0.02²)` at `r=16, alpha=32`, each entry of the scaled update has standard deviation `sqrt(16) × 0.02 × 0.02 × 2.0 = 0.0032` against a `W` whose entries have standard deviation `0.02` — a **16%** random perturbation injected into every adapted matrix before a single training step. Across 128 adapted projections in a 7B model that is a corrupted model at step 0, and the first hundred steps are spent undoing it.
 
-### 3.2 Parameter Count Comparison
+### 6.2 Parameter Count Comparison
 
 ```
 7B LLaMA-2-style model (multi-head attention, no GQA):
@@ -201,7 +366,7 @@ The two slivers only ever touch at rank r=16, so their product is forced to be
 rank ≤ 16 — that low-rank constraint is exactly what makes the parameter count
 collapse while still capturing the fine-tuning update.
 
-### 3.3 Rank Selection
+### 6.3 Rank Selection
 
 ```
 r=4:   ~2M params (Q+V, 32 layers); good for format/style changes
@@ -336,7 +501,7 @@ regime the ladder calls "rare in practice." With `use_rslora=True` a rank sweep 
 compute-for-quality trade; without it, the sweep moves capacity up and step size down at the
 same time and reports the sum as "rank didn't help."
 
-### 3.4 Target Module Selection
+### 6.4 Target Module Selection
 
 ```
 Typical transformer attention block:
@@ -372,7 +537,7 @@ conclusion is to spread a fixed budget over MORE matrix types at LOWER rank rath
 than concentrate it on one type — and that Wq+Wv is the best two-matrix pick.
 ```
 
-### 3.5 Merging LoRA Weights
+### 6.5 Merging LoRA Weights
 
 ```
 After training, merge LoRA into base model weights:
@@ -435,7 +600,7 @@ The `2` in `2 * d_out * d_in` is one multiply plus one add per weight. The overh
 
 **So why does anyone leave adapters unmerged?** Because that sub-1% arithmetic cost is not the real cost. Unmerged serving adds two extra kernel launches per adapted layer — 256 of them at `r=16` across 128 projections — and small skinny matmuls run far below peak GPU utilization, so measured latency overhead lands nearer 5-15% than 0.78%. What you buy for it is the multi-adapter economics from the diagram above: one 14 GB base model in memory and N adapters at ~34 MB each, versus N merged 14 GB checkpoints. At `N = 4` adapters that is 14.1 GB against 56 GB. Merge when you ship exactly one task; stay unmerged the moment there are two.
 
-### 3.6 PEFT Configuration Code
+### 6.6 PEFT Configuration Code
 
 ```python
 import torch
@@ -474,125 +639,7 @@ print(f"Trainable: {trainable_params:,} / {all_params:,} = {100*trainable_params
 
 ---
 
-## 4. Architecture Diagram
-
-### LoRA Applied to Transformer Attention
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    subgraph tr["During Training"]
-        x1([x]) --> W["W\nfrozen — no gradient"]
-        x1 --> A["A · r×k\ntrainable"]
-        A --> B["B · d×r\ntrainable"]
-        B -->|"× alpha/r"| plus((" + "))
-        W --> plus
-        plus --> h1([h])
-    end
-    subgraph inf["After Merge — zero inference overhead"]
-        x2([x]) --> Wm["W_merged = W + B×A·(alpha/r)\nsingle matrix, no branching"]
-        Wm --> h2([h])
-    end
-
-    class x1,x2,h1,h2 io
-    class W,Wm frozen
-    class A,B train
-    class plus mathOp
-```
-
-The left subgraph shows the adapter bypass: W·x and B·A·x·(alpha/r) are summed at
-every forward pass during training. The right subgraph shows that after merging, the
-addition disappears — the fused W_merged is a single weight matrix with no runtime
-overhead, which is why LoRA merged models run at full base-model speed.
-
-### LoRA Parameter Flow During Training
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    x([x]) --> Wx["W·x\nfrozen"]
-    x --> A["A matrix\ntrainable"]
-    A --> B["B matrix\ntrainable"]
-    Wx --> plus((" + "))
-    B --> plus
-    plus --> h([h])
-    h --> loss([Loss])
-    loss -.->|"∂L/∂B → updates B"| B
-    loss -.->|"∂L/∂A → updates A"| A
-    loss -. "∂L/∂W = 0  frozen" .-> Wx
-
-    class x,h io
-    class Wx frozen
-    class A,B train
-    class plus mathOp
-    class loss lossN
-```
-
-Solid arrows are the forward pass; dotted arrows are the backward pass (gradient
-signals). The dotted edge to W carries zero gradient — the optimizer never touches W,
-so no gradient memory is allocated for the frozen weights, halving the per-weight
-memory cost relative to full fine-tuning.
-
-### Multi-Adapter Serving — One Base Model, Many Tasks
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 60}}}%%
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    r1["request  tag: sql"]
-    r2["request  tag: chat"]
-    r3["request  tag: legal"]
-    r4["request  tag: ..."]
-    base["Base Model\n14 GB · frozen\nloaded once on GPU"]
-    a1["sql_adapter\n~34 MB\nB, A only"]
-    a2["chat_adapter\n~34 MB\nB, A only"]
-    a3["legal_adapter\n~34 MB\nB, A only"]
-    a4["...more adapters\n~34 MB each"]
-    r1 --> base
-    r2 --> base
-    r3 --> base
-    r4 --> base
-    base -->|"route by adapter_id"| a1
-    base --> a2
-    base --> a3
-    base --> a4
-
-    class r1,r2,r3,r4 req
-    class base base
-    class a1,a2,a3,a4 train
-```
-
-The 14 GB base model loads once; each adapter is just its B and A matrices — 16,777,216
-bf16 parameters, i.e. ~34 MB, for r=16 on q/k/v/o of a 7B model.
-Swapping tasks is a matrix-add at request time (vLLM hot-swap), not a 14 GB model
-reload — the economic core of serving 50+ specialized models on one GPU.
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### LLaMA → Alpaca (2023), and Alpaca-LoRA
 - Stanford's own Alpaca was a **full** fine-tune of LLaMA 7B on 52K self-instruct
@@ -618,7 +665,7 @@ reload — the economic core of serving 50+ specialized models on one GPU.
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 Trainable percentages below are for Llama-2-7B (6,738,415,616 parameters, no GQA):
 
@@ -632,7 +679,7 @@ Trainable percentages below are for Llama-2-7B (6,738,415,616 parameters, no GQA
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use LoRA When:
 - Single GPU or limited GPU memory (LoRA at r=16 fits in 16GB)
@@ -652,7 +699,7 @@ Trainable percentages below are for Llama-2-7B (6,738,415,616 parameters, no GQA
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Wrong alpha/rank ratio**
 Setting alpha = r (instead of the conventional alpha = 2×r) halves the effective learning rate of the adapter. This silently reduces training effectiveness.
@@ -676,7 +723,7 @@ Fix: Always record the exact base model checkpoint used for training. Store this
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -690,7 +737,7 @@ Fix: Always record the exact base model checkpoint used for training. Store this
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is LoRA and why is it efficient?**
 A: LoRA (Low-Rank Adaptation) adds trainable low-rank matrices ΔW = B×A to frozen pre-trained weights, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d,k). For a 4096×4096 weight matrix, full fine-tuning updates 16.7M parameters; LoRA at r=16 updates only 2 × (16×4096) = 131K parameters — 128× fewer. Efficiency comes from two sources: fewer parameters means much less gradient computation and memory for optimizer states; frozen base weights need no gradient accumulation, saving ~2× the weight memory. For a 7B model: full FT requires ~56GB; LoRA r=16 requires ~15-16GB.
@@ -742,7 +789,7 @@ A: rsLoRA replaces LoRA's `alpha/r` scaling with `alpha/sqrt(r)`, which stops th
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Start with r=16, alpha=32** — the most well-tested defaults; adjust only after measuring quality on your eval set.
 2. **Include all attention modules for task-specific fine-tuning** — Q, K, V, O projections; add FFN for domain adaptation.
@@ -754,7 +801,7 @@ A: rsLoRA replaces LoRA's `alpha/r` scaling with `alpha/sqrt(r)`, which stops th
 
 ---
 
-## 12. Case Study: Fine-Tuning LLaMA 3 8B with LoRA for Customer Support
+## 14. Case Study: Fine-Tuning LLaMA 3 8B with LoRA for Customer Support
 
 *Illustrative worked example — the configuration and parameter counts are real, but the company, dataset and accuracy figures are a composite, not a published deployment.*
 

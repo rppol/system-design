@@ -8,7 +8,7 @@ QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (paper rele
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: QLoRA is like storing your textbooks in compressed PDFs to save shelf space, then printing only the pages you need to annotate.
 
@@ -20,7 +20,7 @@ QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (paper rele
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Quantize frozen weights, not adapters**: The 4-bit compression applies only to the frozen base model weights; LoRA adapters are trained at full BF16 precision.
 - **NF4 is designed for LLM weights**: LLM weights are approximately normally distributed; NF4 assigns more quantization levels near zero (where most weights cluster) for minimal information loss.
@@ -30,382 +30,49 @@ QLoRA made fine-tuning accessible beyond research labs. Before QLoRA (paper rele
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 NF4 Quantization
+QLoRA is not a single fixed recipe — it is a stack of four independent choices layered under an ordinary [LoRA](lora.md) adapter. Each choice trades memory, quality or throughput, and three of the four have defaults that are wrong for QLoRA.
 
-Standard 4-bit integer quantization (INT4) uniformly divides the weight range into 16 levels. NF4 uses non-uniform levels optimized for normal distributions:
+**Axis 1 — The 4-bit storage format.** All three spend the same 4 bits per weight; they differ only in where the 16 representable levels sit on the number line.
 
-```
-Uniform INT4 quantization:
-  Weights range: [-1.0, +1.0]
-  4-bit → 16 levels: -1.0, -0.867, -0.733, ..., 0.0, ..., +0.733, +0.867, +1.0
-  Equal spacing; mismatched to weight distribution
+| Format | Level placement | Pile CC perplexity (QLoRA paper, Table 2) | Applies when |
+|--------|-----------------|-------------------------------------------|--------------|
+| INT4 | Uniform value spacing | 34.34 | Never for LLM weights — wastes levels on empty tails |
+| FP4 (E2M1) | Floating-point exponent/mantissa grid | 31.07 | Only as a fallback; it is the bitsandbytes **default** |
+| NF4 | Equal-probability quantiles of `N(0,1)` | 27.41 (with double quant) | Always — set `bnb_4bit_quant_type="nf4"` explicitly |
 
-NF4 (NormalFloat4):
-  16 levels chosen so each level captures equal probability mass
-  of a standard normal distribution N(0, 1)
-  Level values (bitsandbytes get_4bit_type("nf4"), rounded to 4 dp):
-    -1.0000, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0000,
-     0.0796,  0.1609,  0.2461,  0.3379,  0.4407,  0.5626,  0.7230,  1.0000
+**Axis 2 — Metadata compression.** NF4 needs one absmax scale per block of 64 weights, and that metadata is itself a tunable.
 
-  More levels near zero (where most LLM weights cluster)
-  Fewer levels at extremes (rare weight values)
+| Setting | Overhead | Applies when |
+|---------|----------|--------------|
+| `bnb_4bit_use_double_quant=False` (the default) | 0.5 bits/param = 12.5% on top of the payload | Never worth it — the saving is free |
+| `bnb_4bit_use_double_quant=True` | 0.127 bits/param = 3.2% | Always; ~326MB saved on a 7B model, ~3.26GB on 70B |
 
-Why NF4 works:
-  LLM pre-trained weights approximately follow N(0, 1) after per-block normalization
-  NF4's equal-probability-mass quantization minimizes quantization error
-    for normally distributed weights
+**Axis 3 — Optimizer strategy.** Optimizer state is sized by the *adapter*, not the base, so it is small — but it arrives in a burst at the worst moment.
 
-Memory: 4 bits = 0.5 bytes per weight
-  vs. BF16: 2 bytes per weight
-  Compression ratio: 4×
-  7B model: 14GB (BF16) → 3.5GB (NF4)
-```
+| Optimizer | State (8M-param adapter) | What it buys | Applies when |
+|-----------|--------------------------|--------------|--------------|
+| AdamW fp32 | 64 MB | Nothing extra | Plenty of headroom |
+| `adamw_8bit` | 16 MB | 4x smaller to hold and to move | Standard QLoRA runs |
+| `paged_adamw_8bit` | 16 MB, spillable to CPU RAM | Insurance: a ~1ms PCIe stall instead of a fatal OOM | Tight memory; long runs you cannot afford to lose |
 
-**In plain terms.** "Four bits buys you exactly sixteen distinct numbers per weight — so the only design question is *where on the number line you put those sixteen*, and NF4 puts them where the weights actually live."
+Paging never makes a run faster. Its value is that the alternative is not "slower" but "process dead, hours of training lost."
 
-| Symbol | What it is |
-|--------|------------|
-| 4 bits | The storage budget per weight. `2^4 = 16` — the entire vocabulary of values a weight may take |
-| the 16 levels | The lookup table. Every stored weight is an index `0..15` into it, not a number |
-| NF4 quantile spacing | Levels placed so each covers `1/16 = 6.25%` of the probability mass of `N(0,1)` |
-| INT4 uniform spacing | Levels placed at equal *value* intervals instead, ignoring where the mass is |
-| bytes/weight | `4 bits / 8 = 0.5 bytes`. Against BF16's `2 bytes`, exactly `4×` compression |
-| per-block absmax | The scale that maps a real block of weights onto the fixed `[-1, +1]` table range |
+**Axis 4 — Scale-out topology.** This is what decides whether a model fits at all.
 
-Note what is and is not stored: a 4-bit weight is an *index*, and the 16 float values it indexes are a constant shared by the whole model. That is why the compression is exactly 4× and not "4× minus a table" — the table costs 16 floats total, once.
+| Topology | Config | 70B base placement | Applies when |
+|----------|--------|--------------------|--------------|
+| Single GPU | Default `bnb_4bit_quant_storage` | 35 GB on one card | 7B-13B on consumer GPUs; 65-70B on one 48/80GB card |
+| FSDP-QLoRA | `bnb_4bit_quant_storage=torch.bfloat16`, matched by `torch_dtype` | 17.5 GB/GPU on 2-way shard | 70B on two 24GB consumer cards; base still too big for one GPU |
 
-**Walk one example.** Base-weight memory at each precision, computed as `params × bytes/param`:
+FSDP-QLoRA is the axis with a silent failure mode: FSDP shards float parameters, so the 4-bit payload must be *stored* in a float container, and if `torch_dtype` and `bnb_4bit_quant_storage` disagree nothing raises — each `Linear4bit` is simply wrapped alone and the memory win disappears.
 
-```
-  model     fp16 (2 B)      int8 (1 B)     NF4 (0.5 B)     NF4 saves vs fp16
-    7B        14.0 GB          7.0 GB         3.50 GB          10.5 GB
-   13B        26.0 GB         13.0 GB         6.50 GB          19.5 GB
-   65B       130.0 GB         65.0 GB        32.50 GB          97.5 GB
-   70B       140.0 GB         70.0 GB        35.00 GB         105.0 GB
-
-  (1 GB = 1e9 bytes; base weights only, before scales/adapters/activations)
-
-  The threshold that matters is a single 80 GB A100:
-    70B at fp16 = 140.0 GB  -> does not fit, not even close
-    70B at int8 =  70.0 GB  -> "fits", but 10 GB left for everything else -> OOM
-    70B at NF4  =  35.0 GB  -> 45 GB left for adapters, grads, activations -> works
-```
-
-That last block is the whole reason QLoRA exists as a named technique rather than a footnote. The compression ratio is a boring constant 4×; what is not boring is that 4× is precisely the factor that moves a 70B model across the one-GPU line. Halving again to int8 leaves no headroom, and the section's own case study confirms it — 70B at 8-bit is 70 GB against an 80 GB card, which the case study flags as still too large once scales, gradients and activations are stacked on top.
-
-**Why the level placement matters more than the bit count.** Both INT4 and NF4 spend the same 4 bits. Since roughly 68% of a standard normal's mass sits inside `±1σ`, uniform INT4 spacing spends a large share of its 16 levels on tail regions holding almost no weights, while the dense center gets coarse resolution. NF4's equal-probability construction guarantees every level is responsible for the same `6.25%` of weights, so no level is wasted and none is overloaded. Same storage, better-placed levels: the QLoRA paper (Table 2) measured mean Pile Common Crawl perplexity across 125M-13B OPT/BLOOM/LLaMA/Pythia models at `34.34` for Int4, `31.07` for FP4 (E2M1) and `27.41` for NF4 + double quantization. That gap is why Pitfall 2 says never to leave `bnb_4bit_quant_type` at its default.
-
-### NF4 vs INT4 — Match the Levels to the Weights
-```
-Why NF4 beats INT4: put the 16 quantization levels where the weights actually are.
-
-LLM weights ≈ N(0,1) — most mass piled near zero, thin tails:
-            ▁▂▃▅▇█████▇▅▃▂▁
-       -1.0        0.0        +1.0
-
-INT4 — 16 evenly spaced levels (wastes resolution on the near-empty tails):
-       |   |   |   |   |   |   |   |
-       -1.0        0.0        +1.0
-
-NF4 — 16 levels at equal-probability quantiles (packed near zero):
-             | || ||||||||| || |
-       -1.0        0.0        +1.0
-
-Each NF4 level carries equal probability mass, so resolution is finest exactly where
-weights cluster. QLoRA paper Table 2: mean Pile CC perplexity 34.34 (Int4) vs 27.41
-(NF4 + double quant) at the same 4 bits.
-```
-
-### 3.2 Double Quantization
-
-NF4 quantization stores a scaling factor per block of weights (64 weights per block in the QLoRA paper) to normalize to the NF4 range before quantizing. These scaling factors add overhead:
-
-```
-Without double quantization:
-  64 weights per block → 1 absmax scaling factor (FP32, 4 bytes = 32 bits)
-  Overhead: 32 bits / 64 weights = 0.5 bits/param
-            = 12.5% on top of the 4-bit payload
-
-Double quantization:
-  Group scaling factors (256 per super-block)
-  Quantize the scaling factors themselves to 8-bit
-  Second-level scaling factor (FP32): 1 per super-block
-  Overhead reduced to: 8/64 + 32/(64 × 256) = 0.127 bits/param
-            = 3.2% on top of the 4-bit payload
-
-  Memory savings: 0.373 bits per parameter (QLoRA paper, Sec. 3)
-  For a 7B model: ~326MB saved (small but meaningful)
-```
-
-**The idea behind it.** "You compressed the weights to 4 bits, but the scales you needed to do that are still full-precision — so compress the scales too, with exactly the same trick applied one level up."
-
-The right unit for this whole discussion is **bits per parameter**, not percentages. Percentages hide the fact that the scale overhead is a fixed additive cost, and additive costs are what you can actually convert to gigabytes.
-
-| Symbol | What it is |
-|--------|------------|
-| block size 64 | How many weights share one scale. Smaller blocks track local weight magnitude better but multiply the number of scales |
-| absmax scale | The largest absolute weight in the block. Divide by it and the block lands in `[-1, +1]`, the NF4 table's range |
-| 32 bits | Size of one FP32 absmax scale — the thing being paid for, once per 64 weights |
-| `32 / 64` | First-level scale cost amortized per parameter: `0.5` bits/param |
-| super-block 256 | How many *scales* share one second-level scale under double quantization |
-| `8 / 64` | Cost of the now-FP8 first-level scales: `0.125` bits/param |
-| `32 / (64 × 256)` | Cost of the FP32 second-level scale, amortized over `64 × 256 = 16,384` weights |
-
-**Walk one example.** Both overhead figures, computed exactly:
-
-```
-  SINGLE QUANTIZATION (FP32 absmax, block 64)
-
-    32 bits / 64 weights                    =  0.500000 bits/param
-
-  DOUBLE QUANTIZATION (FP8 absmax, block 64; FP32 super-scale, super-block 256)
-
-     8 bits / 64 weights                    =  0.125000 bits/param
-    32 bits / (64 x 256 = 16,384 weights)   =  0.001953 bits/param
-                                               --------
-    total                                   =  0.126953 bits/param
-
-  SAVED = 0.500000 - 0.126953              =  0.373047 bits/param
-```
-
-That `0.373` is exactly the "~0.37 bits per parameter" the block above quotes — now derived rather than asserted. Converting to memory:
-
-```
-  scale-metadata memory = params x bits/param / 8
-
-  model      single quant      double quant      saved
-    7B          437.5 MB          111.1 MB       326.4 MB
-   65B         4062.5 MB         1031.5 MB      3031.0 MB   (3.03 GB)
-   70B         4375.0 MB         1110.8 MB      3264.2 MB
-
-  Total footprint on the 65B model (payload + scales):
-    payload            4.000000 bits/param  ->  32.50 GB
-    + single quant     4.500000 bits/param  ->  36.56 GB
-    + double quant     4.126953 bits/param  ->  33.53 GB   <- 3.03 GB reclaimed
-```
-
-The 7B figure of `326.4 MB` reproduces the `~325MB` quoted in the Interview section, confirming the derivation. Note how the two levels differ in importance: the FP8 first-level scales cost `0.125` bits/param while the FP32 super-scales cost `0.001953` — **64× less**. The second level is essentially free, which is why nobody bothers with a third.
-
-**Why the effective bit-width is never 4.0.** Marketing says "4-bit"; the honest number is `4.127` bits/param with double quantization, or `4.5` without. On a 65B model that gap between `4.0` and `4.5` is `4.06 GB` of pure bookkeeping — larger than the entire LoRA adapter, gradients, and optimizer state combined. Turning double quantization off does not just cost `0.37` bits abstractly; on the case study's 70B run it costs `3.26 GB` of the A100's headroom, roughly the whole activation budget. This is also why the block above notes the scale overhead varies with block size: shrink the block from 64 to 32 for better fidelity and the single-quant overhead *doubles* to `1.0` bits/param.
-
-### 3.3 Paged Optimizer
-
-```
-Problem: Training with Adam optimizer requires two momentum state tensors
-  per parameter (m and v), each the same size as the parameter.
-  Even for LoRA (8M params), optimizer states = 2 × 8M × 4 bytes = 64MB
-  For larger LoRA: potentially 500MB-1GB of optimizer state
-
-  If GPU memory is tight, optimizer states can cause OOM during peak batch
-
-Paged optimizer solution:
-  Optimizer states stored in CUDA unified memory
-    → Initially allocated in GPU RAM
-    → When GPU runs low, CUDA automatically "pages" some optimizer states
-       to CPU RAM (16GB+ available)
-    → Paged-in back to GPU when needed for parameter update
-
-Implementation in BitsAndBytes:
-  optimizer = bnb.optim.PagedAdamW8bit(model.parameters(), lr=2e-4)
-  "Paged": uses CUDA unified memory for OOM prevention
-  "8bit": additional memory savings by quantizing optimizer states themselves
-
-Combined memory savings of paged 8-bit Adam vs. standard Adam:
-  Standard Adam: 2 × 8M params × 4 bytes = 64MB
-  PagedAdamW8bit: 2 × 8M params × 1 byte (8-bit) = 16MB
-```
-
-**What it means.** "Optimizer state is small but arrives all at once at the worst possible moment, so instead of reserving room for it permanently, let it spill to CPU RAM and pay a bus transfer only on the steps where it would otherwise have killed the run."
-
-| Symbol | What it is |
-|--------|------------|
-| `m`, `v` | Adam's two per-parameter momentum tensors. Both exist only for *trainable* params, so only for the adapter |
-| `2 × P × bytes` | Optimizer state size. The `2` is `m` and `v`; `bytes` is 4 for fp32, 1 for 8-bit |
-| unified memory | An allocation the GPU addresses normally but that CUDA may physically place in CPU RAM |
-| page event | One spill-or-restore round trip across PCIe. Cost is `size / bandwidth`, nothing more |
-| PCIe 3.0 x16 | The pipe, 15.75 GB/s per direction (rounded to 16 below). PCIe 4.0 x16 doubles it to 31.5 GB/s. The only term that turns megabytes into milliseconds |
-
-**Walk one example.** Optimizer state for the 8M-parameter adapter above, and the cost of moving it:
-
-```
-  OPTIMIZER STATE SIZE  (P = 8,000,000 trainable adapter params)
-
-    Adam fp32   2 x 8e6 x 4 B  =  64 MB
-    Adam bf16   2 x 8e6 x 2 B  =  32 MB
-    AdamW8bit   2 x 8e6 x 1 B  =  16 MB     <- 4x smaller than fp32
-
-  PAGE-EVENT COST at 16 GB/s (PCIe 3.0 x16; halve these on PCIe 4.0 x16)
-
-     16 MB  ->   1.00 ms
-     64 MB  ->   4.00 ms
-    160 MB  ->  10.00 ms
-    320 MB  ->  20.00 ms
-
-  8-bit states do double duty: they are 4x smaller to HOLD and 4x faster to MOVE.
-  A page event on 8-bit state costs 1 ms; the same state in fp32 costs 4 ms.
-```
-
-Paging is worth understanding as an *insurance policy*, not an optimization. It never makes a run faster. Its entire value is that the alternative outcome is not "slower" but "CUDA OOM, process dead, 14 hours of training lost." The case study's run paged 23 times across three epochs — a handful of millisecond-scale stalls bought a training run that would otherwise have crashed.
-
-**The gradient-checkpointing tradeoff, in the same units.** Activation memory is the term QLoRA does *not* shrink, and it is usually the one that actually OOMs you. Checkpointing keeps only one tensor per layer boundary and recomputes the interior during the backward pass:
-
-```
-  ACTIVATION MEMORY   7B model: 32 layers, hidden 4096, seq 2048, batch 1, bf16
-
-    one layer-boundary tensor  =  1 x 2048 x 4096 x 2 B   =   16.78 MB
-    x 32 layers stored         =                              537 MB    <- checkpointed
-    all intermediates kept     =                              3-4 GB    <- not checkpointed
-
-  COMPUTE PAID FOR IT   (units of one forward pass)
-
-    without checkpointing :  fwd 1  +  bwd 2            =  3 units
-    with checkpointing    :  fwd 1  +  bwd 2  +  refwd 1 =  4 units
-                                                            -> +33% compute
-```
-
-So the trade is roughly **6x less activation memory for 33% more compute**, and under QLoRA you take it every time. The reason is asymmetry: the 4-bit weights already bought the memory headroom, and if activations then blow past what is left, the run does not get slower — it dies. Compute overruns are survivable; memory overruns are not. That asymmetry is why Pitfall 3 makes checkpointing mandatory rather than optional, and it stacks with the `~15-30%` dequantization overhead from Pitfall 1 — a QLoRA step is meaningfully slower than a LoRA step on both counts, which is the real price of the memory savings.
-
-### 3.4 Full QLoRA Memory Layout
-
-```
-GPU Memory for 7B model fine-tuning with QLoRA
-(r=16, all-attn+FFN → ~40M trainable params: A 18.2M, B 21.8M):
-
-+----------------------------------------+
-| Base model weights (NF4 4-bit)         |  ~3.5GB (7B × 0.5 bytes)
-+----------------------------------------+
-| Quantization metadata (scaling factors)|  ~110MB (7B × 0.127 bits / 8)
-+----------------------------------------+
-| LoRA adapter A (BF16)                  |  ~36MB
-| LoRA adapter B (BF16)                  |  ~44MB
-+----------------------------------------+
-| Gradients (A, B only)                  |  ~80MB (same size as adapters)
-+----------------------------------------+
-| PagedAdamW8bit optimizer states        |  ~80MB (8-bit, 2 × 40M × 1 byte)
-+----------------------------------------+
-| Activations + input batch              |  ~1-2GB (depends on seq length)
-| (gradient checkpointing reduces this)  |
-+----------------------------------------+
-TOTAL: ~5-6GB for 7B model QLoRA
-
-Comparison:
-  QLoRA 7B:           ~5-6GB    → RTX 4080 (16GB) ✓, even RTX 3080 (10GB) with small batches
-  LoRA 7B (BF16):     ~15-16GB  → RTX 4090 (24GB) ✓
-  Full FT 7B (BF16 mixed precision, AdamW):
-    fp32 optimizer states (16 B/param):  ~112GB → 2× A100 80GB
-    8-bit optimizer states (8 B/param):  ~56GB  → single A100 80GB ✓
-```
-
-### 3.5 BitsAndBytes Configuration
-
-```python
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-import torch
-
-# QLoRA-specific quantization config
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,                      # enable 4-bit loading
-    bnb_4bit_quant_type="nf4",             # NF4; the default is "fp4" — must set this
-    bnb_4bit_compute_dtype=torch.bfloat16, # dequantize to BF16 for compute
-    bnb_4bit_use_double_quant=True,        # default is False — must set this too
-)
-
-# Load model in 4-bit
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Meta-Llama-3-8B-Instruct",
-    quantization_config=bnb_config,
-    device_map="auto"                       # automatic device placement
-)
-
-# Cast norms/head to fp32, make inputs require grad, and enable gradient
-# checkpointing. prepare_model_for_kbit_training defaults to
-# use_gradient_checkpointing=True and calls gradient_checkpointing_enable() itself.
-model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-
-# Add LoRA adapters (trained at BF16)
-lora_config = LoraConfig(
-    r=16, lora_alpha=32,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM"
-)
-model = get_peft_model(model, lora_config)
-
-# Paged optimizer for OOM prevention
-from transformers import TrainingArguments
-training_args = TrainingArguments(
-    output_dir="./qlora_output",
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=8,   # effective batch = 32
-    learning_rate=2e-4,
-    num_train_epochs=3,
-    optim="paged_adamw_8bit",        # paged optimizer
-    bf16=True,                       # BF16 compute
-    logging_steps=25,
-    warmup_ratio=0.03,
-    lr_scheduler_type="cosine"
-)
-```
-
-### 3.6 Scaling Past One GPU — FSDP-QLoRA
-
-Everything above is a single-card story, and the obvious next question is what happens when
-the 4-bit model still does not fit. Naively adding FSDP does not work, for a reason worth
-understanding: FSDP shards **float** parameters, and bitsandbytes packs two 4-bit weights per
-`uint8`. An integer-typed parameter is not something FSDP will shard, so the quantized base
-sits unsharded on every rank and you have gained nothing.
-
-The fix, shipped by Answer.AI with bitsandbytes and HuggingFace, is to let the 4-bit payload
-be *stored* in a float container. `Params4bit` reads and writes quantized weights
-independently of the storage dtype, so the same bits can live in a `bfloat16` tensor that FSDP
-is willing to shard:
-
-```python
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_storage=torch.bfloat16,   # the one line that enables FSDP
-)
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-2-70b",
-    quantization_config=bnb_config,
-    torch_dtype=torch.bfloat16,              # MUST equal bnb_4bit_quant_storage
-)
-peft_config = LoraConfig(r=64, lora_alpha=16, lora_dropout=0.1,
-                         bias="none", task_type="CAUSAL_LM",
-                         target_modules="all-linear")
-```
-
-**The silent failure mode is the dtype mismatch.** FSDP can only wrap modules that share one
-floating dtype. If `torch_dtype` and `bnb_4bit_quant_storage` disagree, nothing raises — every
-`Linear4bit` is simply wrapped *individually* instead of joining the surrounding block, which
-destroys the sharding granularity and the memory win with it. Set both, and set them equal.
-
-```
-  70B base, NF4:  70e9 x 0.5 B = 35 GB of weights to place
-
-    1 GPU, no sharding    35.0 GB  -> needs a 48GB or 80GB card
-    2-way FSDP shard      17.5 GB/GPU + adapters, grads, activations
-                                    -> fits 2 x 24GB with gradient
-                                       checkpointing and CPU offload
-```
-
-That is the Answer.AI result: a 70B fine-tune on two 24GB consumer cards. Launch it as a
-distributed job (`accelerate launch` or `torchrun`) with an FSDP config — PEFT ships
-`examples/sft/fsdp_config_qlora.yaml` and `run_peft_qlora_fsdp.sh` as working references.
-Note what this does to the Section 7 decision table: "multi-GPU cluster available" is no
-longer automatically an argument for full fine-tuning.
+Orthogonal to all four, gradient checkpointing is effectively mandatory rather than optional under QLoRA: activations are the one term quantization does not shrink, and trading ~33% more compute for ~6x less activation memory is always the right side of that asymmetry when the alternative is a dead run.
 
 ---
 
-## 4. Architecture Diagram
+## 5. Architecture Diagrams
 
 ### QLoRA Memory Layout During Training
 ```
@@ -494,7 +161,382 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 ---
 
-## 5. Real-World Examples
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 NF4 Quantization
+
+Standard 4-bit integer quantization (INT4) uniformly divides the weight range into 16 levels. NF4 uses non-uniform levels optimized for normal distributions:
+
+```
+Uniform INT4 quantization:
+  Weights range: [-1.0, +1.0]
+  4-bit → 16 levels: -1.0, -0.867, -0.733, ..., 0.0, ..., +0.733, +0.867, +1.0
+  Equal spacing; mismatched to weight distribution
+
+NF4 (NormalFloat4):
+  16 levels chosen so each level captures equal probability mass
+  of a standard normal distribution N(0, 1)
+  Level values (bitsandbytes get_4bit_type("nf4"), rounded to 4 dp):
+    -1.0000, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0000,
+     0.0796,  0.1609,  0.2461,  0.3379,  0.4407,  0.5626,  0.7230,  1.0000
+
+  More levels near zero (where most LLM weights cluster)
+  Fewer levels at extremes (rare weight values)
+
+Why NF4 works:
+  LLM pre-trained weights approximately follow N(0, 1) after per-block normalization
+  NF4's equal-probability-mass quantization minimizes quantization error
+    for normally distributed weights
+
+Memory: 4 bits = 0.5 bytes per weight
+  vs. BF16: 2 bytes per weight
+  Compression ratio: 4×
+  7B model: 14GB (BF16) → 3.5GB (NF4)
+```
+
+**In plain terms.** "Four bits buys you exactly sixteen distinct numbers per weight — so the only design question is *where on the number line you put those sixteen*, and NF4 puts them where the weights actually live."
+
+| Symbol | What it is |
+|--------|------------|
+| 4 bits | The storage budget per weight. `2^4 = 16` — the entire vocabulary of values a weight may take |
+| the 16 levels | The lookup table. Every stored weight is an index `0..15` into it, not a number |
+| NF4 quantile spacing | Levels placed so each covers `1/16 = 6.25%` of the probability mass of `N(0,1)` |
+| INT4 uniform spacing | Levels placed at equal *value* intervals instead, ignoring where the mass is |
+| bytes/weight | `4 bits / 8 = 0.5 bytes`. Against BF16's `2 bytes`, exactly `4×` compression |
+| per-block absmax | The scale that maps a real block of weights onto the fixed `[-1, +1]` table range |
+
+Note what is and is not stored: a 4-bit weight is an *index*, and the 16 float values it indexes are a constant shared by the whole model. That is why the compression is exactly 4× and not "4× minus a table" — the table costs 16 floats total, once.
+
+**Walk one example.** Base-weight memory at each precision, computed as `params × bytes/param`:
+
+```
+  model     fp16 (2 B)      int8 (1 B)     NF4 (0.5 B)     NF4 saves vs fp16
+    7B        14.0 GB          7.0 GB         3.50 GB          10.5 GB
+   13B        26.0 GB         13.0 GB         6.50 GB          19.5 GB
+   65B       130.0 GB         65.0 GB        32.50 GB          97.5 GB
+   70B       140.0 GB         70.0 GB        35.00 GB         105.0 GB
+
+  (1 GB = 1e9 bytes; base weights only, before scales/adapters/activations)
+
+  The threshold that matters is a single 80 GB A100:
+    70B at fp16 = 140.0 GB  -> does not fit, not even close
+    70B at int8 =  70.0 GB  -> "fits", but 10 GB left for everything else -> OOM
+    70B at NF4  =  35.0 GB  -> 45 GB left for adapters, grads, activations -> works
+```
+
+That last block is the whole reason QLoRA exists as a named technique rather than a footnote. The compression ratio is a boring constant 4×; what is not boring is that 4× is precisely the factor that moves a 70B model across the one-GPU line. Halving again to int8 leaves no headroom, and the section's own case study confirms it — 70B at 8-bit is 70 GB against an 80 GB card, which the case study flags as still too large once scales, gradients and activations are stacked on top.
+
+**Why the level placement matters more than the bit count.** Both INT4 and NF4 spend the same 4 bits. Since roughly 68% of a standard normal's mass sits inside `±1σ`, uniform INT4 spacing spends a large share of its 16 levels on tail regions holding almost no weights, while the dense center gets coarse resolution. NF4's equal-probability construction guarantees every level is responsible for the same `6.25%` of weights, so no level is wasted and none is overloaded. Same storage, better-placed levels: the QLoRA paper (Table 2) measured mean Pile Common Crawl perplexity across 125M-13B OPT/BLOOM/LLaMA/Pythia models at `34.34` for Int4, `31.07` for FP4 (E2M1) and `27.41` for NF4 + double quantization. That gap is why Pitfall 2 says never to leave `bnb_4bit_quant_type` at its default.
+
+### NF4 vs INT4 — Match the Levels to the Weights
+```
+Why NF4 beats INT4: put the 16 quantization levels where the weights actually are.
+
+LLM weights ≈ N(0,1) — most mass piled near zero, thin tails:
+            ▁▂▃▅▇█████▇▅▃▂▁
+       -1.0        0.0        +1.0
+
+INT4 — 16 evenly spaced levels (wastes resolution on the near-empty tails):
+       |   |   |   |   |   |   |   |
+       -1.0        0.0        +1.0
+
+NF4 — 16 levels at equal-probability quantiles (packed near zero):
+             | || ||||||||| || |
+       -1.0        0.0        +1.0
+
+Each NF4 level carries equal probability mass, so resolution is finest exactly where
+weights cluster. QLoRA paper Table 2: mean Pile CC perplexity 34.34 (Int4) vs 27.41
+(NF4 + double quant) at the same 4 bits.
+```
+
+### 6.2 Double Quantization
+
+NF4 quantization stores a scaling factor per block of weights (64 weights per block in the QLoRA paper) to normalize to the NF4 range before quantizing. These scaling factors add overhead:
+
+```
+Without double quantization:
+  64 weights per block → 1 absmax scaling factor (FP32, 4 bytes = 32 bits)
+  Overhead: 32 bits / 64 weights = 0.5 bits/param
+            = 12.5% on top of the 4-bit payload
+
+Double quantization:
+  Group scaling factors (256 per super-block)
+  Quantize the scaling factors themselves to 8-bit
+  Second-level scaling factor (FP32): 1 per super-block
+  Overhead reduced to: 8/64 + 32/(64 × 256) = 0.127 bits/param
+            = 3.2% on top of the 4-bit payload
+
+  Memory savings: 0.373 bits per parameter (QLoRA paper, Sec. 3)
+  For a 7B model: ~326MB saved (small but meaningful)
+```
+
+**The idea behind it.** "You compressed the weights to 4 bits, but the scales you needed to do that are still full-precision — so compress the scales too, with exactly the same trick applied one level up."
+
+The right unit for this whole discussion is **bits per parameter**, not percentages. Percentages hide the fact that the scale overhead is a fixed additive cost, and additive costs are what you can actually convert to gigabytes.
+
+| Symbol | What it is |
+|--------|------------|
+| block size 64 | How many weights share one scale. Smaller blocks track local weight magnitude better but multiply the number of scales |
+| absmax scale | The largest absolute weight in the block. Divide by it and the block lands in `[-1, +1]`, the NF4 table's range |
+| 32 bits | Size of one FP32 absmax scale — the thing being paid for, once per 64 weights |
+| `32 / 64` | First-level scale cost amortized per parameter: `0.5` bits/param |
+| super-block 256 | How many *scales* share one second-level scale under double quantization |
+| `8 / 64` | Cost of the now-FP8 first-level scales: `0.125` bits/param |
+| `32 / (64 × 256)` | Cost of the FP32 second-level scale, amortized over `64 × 256 = 16,384` weights |
+
+**Walk one example.** Both overhead figures, computed exactly:
+
+```
+  SINGLE QUANTIZATION (FP32 absmax, block 64)
+
+    32 bits / 64 weights                    =  0.500000 bits/param
+
+  DOUBLE QUANTIZATION (FP8 absmax, block 64; FP32 super-scale, super-block 256)
+
+     8 bits / 64 weights                    =  0.125000 bits/param
+    32 bits / (64 x 256 = 16,384 weights)   =  0.001953 bits/param
+                                               --------
+    total                                   =  0.126953 bits/param
+
+  SAVED = 0.500000 - 0.126953              =  0.373047 bits/param
+```
+
+That `0.373` is exactly the "~0.37 bits per parameter" the block above quotes — now derived rather than asserted. Converting to memory:
+
+```
+  scale-metadata memory = params x bits/param / 8
+
+  model      single quant      double quant      saved
+    7B          437.5 MB          111.1 MB       326.4 MB
+   65B         4062.5 MB         1031.5 MB      3031.0 MB   (3.03 GB)
+   70B         4375.0 MB         1110.8 MB      3264.2 MB
+
+  Total footprint on the 65B model (payload + scales):
+    payload            4.000000 bits/param  ->  32.50 GB
+    + single quant     4.500000 bits/param  ->  36.56 GB
+    + double quant     4.126953 bits/param  ->  33.53 GB   <- 3.03 GB reclaimed
+```
+
+The 7B figure of `326.4 MB` reproduces the `~325MB` quoted in the Interview section, confirming the derivation. Note how the two levels differ in importance: the FP8 first-level scales cost `0.125` bits/param while the FP32 super-scales cost `0.001953` — **64× less**. The second level is essentially free, which is why nobody bothers with a third.
+
+**Why the effective bit-width is never 4.0.** Marketing says "4-bit"; the honest number is `4.127` bits/param with double quantization, or `4.5` without. On a 65B model that gap between `4.0` and `4.5` is `4.06 GB` of pure bookkeeping — larger than the entire LoRA adapter, gradients, and optimizer state combined. Turning double quantization off does not just cost `0.37` bits abstractly; on the case study's 70B run it costs `3.26 GB` of the A100's headroom, roughly the whole activation budget. This is also why the block above notes the scale overhead varies with block size: shrink the block from 64 to 32 for better fidelity and the single-quant overhead *doubles* to `1.0` bits/param.
+
+### 6.3 Paged Optimizer
+
+```
+Problem: Training with Adam optimizer requires two momentum state tensors
+  per parameter (m and v), each the same size as the parameter.
+  Even for LoRA (8M params), optimizer states = 2 × 8M × 4 bytes = 64MB
+  For larger LoRA: potentially 500MB-1GB of optimizer state
+
+  If GPU memory is tight, optimizer states can cause OOM during peak batch
+
+Paged optimizer solution:
+  Optimizer states stored in CUDA unified memory
+    → Initially allocated in GPU RAM
+    → When GPU runs low, CUDA automatically "pages" some optimizer states
+       to CPU RAM (16GB+ available)
+    → Paged-in back to GPU when needed for parameter update
+
+Implementation in BitsAndBytes:
+  optimizer = bnb.optim.PagedAdamW8bit(model.parameters(), lr=2e-4)
+  "Paged": uses CUDA unified memory for OOM prevention
+  "8bit": additional memory savings by quantizing optimizer states themselves
+
+Combined memory savings of paged 8-bit Adam vs. standard Adam:
+  Standard Adam: 2 × 8M params × 4 bytes = 64MB
+  PagedAdamW8bit: 2 × 8M params × 1 byte (8-bit) = 16MB
+```
+
+**What it means.** "Optimizer state is small but arrives all at once at the worst possible moment, so instead of reserving room for it permanently, let it spill to CPU RAM and pay a bus transfer only on the steps where it would otherwise have killed the run."
+
+| Symbol | What it is |
+|--------|------------|
+| `m`, `v` | Adam's two per-parameter momentum tensors. Both exist only for *trainable* params, so only for the adapter |
+| `2 × P × bytes` | Optimizer state size. The `2` is `m` and `v`; `bytes` is 4 for fp32, 1 for 8-bit |
+| unified memory | An allocation the GPU addresses normally but that CUDA may physically place in CPU RAM |
+| page event | One spill-or-restore round trip across PCIe. Cost is `size / bandwidth`, nothing more |
+| PCIe 3.0 x16 | The pipe, 15.75 GB/s per direction (rounded to 16 below). PCIe 4.0 x16 doubles it to 31.5 GB/s. The only term that turns megabytes into milliseconds |
+
+**Walk one example.** Optimizer state for the 8M-parameter adapter above, and the cost of moving it:
+
+```
+  OPTIMIZER STATE SIZE  (P = 8,000,000 trainable adapter params)
+
+    Adam fp32   2 x 8e6 x 4 B  =  64 MB
+    Adam bf16   2 x 8e6 x 2 B  =  32 MB
+    AdamW8bit   2 x 8e6 x 1 B  =  16 MB     <- 4x smaller than fp32
+
+  PAGE-EVENT COST at 16 GB/s (PCIe 3.0 x16; halve these on PCIe 4.0 x16)
+
+     16 MB  ->   1.00 ms
+     64 MB  ->   4.00 ms
+    160 MB  ->  10.00 ms
+    320 MB  ->  20.00 ms
+
+  8-bit states do double duty: they are 4x smaller to HOLD and 4x faster to MOVE.
+  A page event on 8-bit state costs 1 ms; the same state in fp32 costs 4 ms.
+```
+
+Paging is worth understanding as an *insurance policy*, not an optimization. It never makes a run faster. Its entire value is that the alternative outcome is not "slower" but "CUDA OOM, process dead, 14 hours of training lost." The case study's run paged 23 times across three epochs — a handful of millisecond-scale stalls bought a training run that would otherwise have crashed.
+
+**The gradient-checkpointing tradeoff, in the same units.** Activation memory is the term QLoRA does *not* shrink, and it is usually the one that actually OOMs you. Checkpointing keeps only one tensor per layer boundary and recomputes the interior during the backward pass:
+
+```
+  ACTIVATION MEMORY   7B model: 32 layers, hidden 4096, seq 2048, batch 1, bf16
+
+    one layer-boundary tensor  =  1 x 2048 x 4096 x 2 B   =   16.78 MB
+    x 32 layers stored         =                              537 MB    <- checkpointed
+    all intermediates kept     =                              3-4 GB    <- not checkpointed
+
+  COMPUTE PAID FOR IT   (units of one forward pass)
+
+    without checkpointing :  fwd 1  +  bwd 2            =  3 units
+    with checkpointing    :  fwd 1  +  bwd 2  +  refwd 1 =  4 units
+                                                            -> +33% compute
+```
+
+So the trade is roughly **6x less activation memory for 33% more compute**, and under QLoRA you take it every time. The reason is asymmetry: the 4-bit weights already bought the memory headroom, and if activations then blow past what is left, the run does not get slower — it dies. Compute overruns are survivable; memory overruns are not. That asymmetry is why Pitfall 3 makes checkpointing mandatory rather than optional, and it stacks with the `~15-30%` dequantization overhead from Pitfall 1 — a QLoRA step is meaningfully slower than a LoRA step on both counts, which is the real price of the memory savings.
+
+### 6.4 Full QLoRA Memory Layout
+
+```
+GPU Memory for 7B model fine-tuning with QLoRA
+(r=16, all-attn+FFN → ~40M trainable params: A 18.2M, B 21.8M):
+
++----------------------------------------+
+| Base model weights (NF4 4-bit)         |  ~3.5GB (7B × 0.5 bytes)
++----------------------------------------+
+| Quantization metadata (scaling factors)|  ~110MB (7B × 0.127 bits / 8)
++----------------------------------------+
+| LoRA adapter A (BF16)                  |  ~36MB
+| LoRA adapter B (BF16)                  |  ~44MB
++----------------------------------------+
+| Gradients (A, B only)                  |  ~80MB (same size as adapters)
++----------------------------------------+
+| PagedAdamW8bit optimizer states        |  ~80MB (8-bit, 2 × 40M × 1 byte)
++----------------------------------------+
+| Activations + input batch              |  ~1-2GB (depends on seq length)
+| (gradient checkpointing reduces this)  |
++----------------------------------------+
+TOTAL: ~5-6GB for 7B model QLoRA
+
+Comparison:
+  QLoRA 7B:           ~5-6GB    → RTX 4080 (16GB) ✓, even RTX 3080 (10GB) with small batches
+  LoRA 7B (BF16):     ~15-16GB  → RTX 4090 (24GB) ✓
+  Full FT 7B (BF16 mixed precision, AdamW):
+    fp32 optimizer states (16 B/param):  ~112GB → 2× A100 80GB
+    8-bit optimizer states (8 B/param):  ~56GB  → single A100 80GB ✓
+```
+
+### 6.5 BitsAndBytes Configuration
+
+```python
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+import torch
+
+# QLoRA-specific quantization config
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,                      # enable 4-bit loading
+    bnb_4bit_quant_type="nf4",             # NF4; the default is "fp4" — must set this
+    bnb_4bit_compute_dtype=torch.bfloat16, # dequantize to BF16 for compute
+    bnb_4bit_use_double_quant=True,        # default is False — must set this too
+)
+
+# Load model in 4-bit
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    quantization_config=bnb_config,
+    device_map="auto"                       # automatic device placement
+)
+
+# Cast norms/head to fp32, make inputs require grad, and enable gradient
+# checkpointing. prepare_model_for_kbit_training defaults to
+# use_gradient_checkpointing=True and calls gradient_checkpointing_enable() itself.
+model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+
+# Add LoRA adapters (trained at BF16)
+lora_config = LoraConfig(
+    r=16, lora_alpha=32,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+model = get_peft_model(model, lora_config)
+
+# Paged optimizer for OOM prevention
+from transformers import TrainingArguments
+training_args = TrainingArguments(
+    output_dir="./qlora_output",
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=8,   # effective batch = 32
+    learning_rate=2e-4,
+    num_train_epochs=3,
+    optim="paged_adamw_8bit",        # paged optimizer
+    bf16=True,                       # BF16 compute
+    logging_steps=25,
+    warmup_ratio=0.03,
+    lr_scheduler_type="cosine"
+)
+```
+
+### 6.6 Scaling Past One GPU — FSDP-QLoRA
+
+Everything above is a single-card story, and the obvious next question is what happens when
+the 4-bit model still does not fit. Naively adding FSDP does not work, for a reason worth
+understanding: FSDP shards **float** parameters, and bitsandbytes packs two 4-bit weights per
+`uint8`. An integer-typed parameter is not something FSDP will shard, so the quantized base
+sits unsharded on every rank and you have gained nothing.
+
+The fix, shipped by Answer.AI with bitsandbytes and HuggingFace, is to let the 4-bit payload
+be *stored* in a float container. `Params4bit` reads and writes quantized weights
+independently of the storage dtype, so the same bits can live in a `bfloat16` tensor that FSDP
+is willing to shard:
+
+```python
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_storage=torch.bfloat16,   # the one line that enables FSDP
+)
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-2-70b",
+    quantization_config=bnb_config,
+    torch_dtype=torch.bfloat16,              # MUST equal bnb_4bit_quant_storage
+)
+peft_config = LoraConfig(r=64, lora_alpha=16, lora_dropout=0.1,
+                         bias="none", task_type="CAUSAL_LM",
+                         target_modules="all-linear")
+```
+
+**The silent failure mode is the dtype mismatch.** FSDP can only wrap modules that share one
+floating dtype. If `torch_dtype` and `bnb_4bit_quant_storage` disagree, nothing raises — every
+`Linear4bit` is simply wrapped *individually* instead of joining the surrounding block, which
+destroys the sharding granularity and the memory win with it. Set both, and set them equal.
+
+```
+  70B base, NF4:  70e9 x 0.5 B = 35 GB of weights to place
+
+    1 GPU, no sharding    35.0 GB  -> needs a 48GB or 80GB card
+    2-way FSDP shard      17.5 GB/GPU + adapters, grads, activations
+                                    -> fits 2 x 24GB with gradient
+                                       checkpointing and CPU offload
+```
+
+That is the Answer.AI result: a 70B fine-tune on two 24GB consumer cards. Launch it as a
+distributed job (`accelerate launch` or `torchrun`) with an FSDP config — PEFT ships
+`examples/sft/fsdp_config_qlora.yaml` and `run_peft_qlora_fsdp.sh` as working references.
+Note what this does to the Section 9 decision table: "multi-GPU cluster available" is no
+longer automatically an argument for full fine-tuning.
+
+---
+
+## 7. Real-World Examples
 
 ### Guanaco (QLoRA paper model, Dettmers et al. 2023)
 - QLoRA fine-tuned LLaMA 65B on a **single 48GB GPU**, 24 hours of fine-tuning (paper abstract)
@@ -513,7 +555,7 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | LoRA (BF16) | QLoRA (NF4 4-bit) |
 |-----------|-------------|-------------------|
@@ -528,7 +570,7 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use QLoRA When:
 - GPU VRAM is the primary constraint (16GB consumer GPU)
@@ -549,7 +591,7 @@ Which is exactly why the sign of the effect flips during training. Training runs
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Dequantization overhead underestimated**
 QLoRA requires dequantization from NF4 to BF16 on every forward pass. This adds ~15-30% training time compared to standard LoRA. At scale (multiple epochs, large datasets), this is meaningful.
@@ -573,7 +615,7 @@ Fix: Use gradient_accumulation_steps=8 or more to achieve an effective batch siz
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -587,7 +629,7 @@ Fix: Use gradient_accumulation_steps=8 or more to achieve an effective batch siz
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is QLoRA and how does it work?**
 A: QLoRA (Quantized LoRA) combines base model weight quantization with LoRA adapter training. The frozen base model is quantized to 4-bit NF4 precision — reducing a 7B model from 14GB (BF16) to ~3.5GB. LoRA adapters are then trained on top in standard BF16 precision. During the forward pass, 4-bit weights are dequantized to BF16 on-the-fly for matrix multiplication and immediately discarded — the GPU stores 4-bit but computes in 16-bit. Three additional innovations: double quantization (quantizes the quantization scaling factors themselves to save ~0.37 bits/param), paged optimizer (pages Adam states to CPU RAM to prevent OOM), and NF4 format optimized for normally-distributed LLM weights. Result: 7B model fine-tuning in ~6GB VRAM vs. 15GB for standard LoRA.
@@ -639,7 +681,7 @@ A: You set `bnb_4bit_quant_storage=torch.bfloat16` so the 4-bit weights are stor
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Set `bnb_4bit_quant_type="nf4"` explicitly** — the default is `"fp4"`, and NF4 measurably outperforms it (27.41 vs 31.07 mean PPL in the QLoRA paper); `"int4"` is not an accepted value.
 2. **Enable gradient checkpointing** — essential for fitting training in memory with QLoRA; `prepare_model_for_kbit_training` turns it on by default, so verify rather than double-call.
@@ -651,7 +693,7 @@ A: You set `bnb_4bit_quant_storage=torch.bfloat16` so the 4-bit weights are stor
 
 ---
 
-## 12. Case Study: Fine-Tuning LLaMA 3 70B on a Single A100 80GB with QLoRA
+## 14. Case Study: Fine-Tuning LLaMA 3 70B on a Single A100 80GB with QLoRA
 
 **Problem Statement**: A legal-tech company needs to fine-tune LLaMA 3 70B to perform contract clause classification and risk summarization. The 70B parameter scale is required because smaller models (7B, 13B) produce unacceptable hallucination rates on legal terminology. Standard LoRA on a 70B model requires ~140GB GPU memory (70B params × 2 bytes BF16), which means at least two A100 80GB GPUs. Budget and infrastructure constraints limit the training run to a single A100 80GB (80GB VRAM). The task: classify contract clauses into 47 categories and generate a one-paragraph risk summary for each clause.
 
