@@ -1502,6 +1502,10 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body pre {
   background: #0a0d13; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px;
   padding: 14px; overflow-x: auto; overflow-y: hidden; margin: 12px 0; position: relative;
+  /* Far more blocks scroll horizontally now that every untagged fence is `plain`, so
+     contain the x-chain: without this a swipe that runs off the end of a wide block
+     continues into the browser/WebView back gesture. Same reasoning as .md-tablewrap. */
+  overscroll-behavior-x: contain;
 }
 .md-body pre code {
   background: none; border: none; padding: 0; font-size: var(--fs-sm); line-height: 1.5;
@@ -1509,10 +1513,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 /* Wrap long code lines on BOTH web and app rather than trapping them behind a
    horizontal scroll — reading source one line-fragment at a time is painful, and
-   it keeps the page as the single scroll surface. ASCII diagrams (.diagram) are
-   EXEMPT: their monospace column alignment carries the meaning, so they keep
-   white-space: pre and their own horizontal scroll. */
-.md-body pre code:not(.diagram) {
+   it keeps the page as the single scroll surface. Two EXEMPTIONS, both because
+   monospace column alignment carries the meaning and wrapping destroys it:
+   .diagram (ASCII art the heuristic recognised) and .plain (any UNTAGGED fence —
+   worked examples, aligned numeric tables, terminal output). Those keep
+   white-space: pre and scroll horizontally inside their own pre. */
+.md-body pre code:not(.diagram):not(.plain) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

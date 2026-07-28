@@ -6042,7 +6042,13 @@ function mdRender(src) {
       let inner, cls;
       if (isHighlightable(lang)) { inner = highlightCode(raw, lang); cls = ` class="lang-${esc(langKey(lang))}"`; }
       else if (looksLikeDiagram(raw)) { inner = highlightDiagram(raw); cls = ` class="diagram"`; }
-      else { inner = esc(raw); cls = ""; }
+      // An UNTAGGED fence is never source code in this repo — the authoring contract
+      // reserves it for ASCII diagrams, worked examples and aligned tables, all of which
+      // carry meaning in their columns. Mark it `plain` so CSS scrolls it instead of
+      // wrapping it. looksLikeDiagram() is a heuristic on appearance and misses blocks
+      // with no arrows, box-drawing or leading `|` (a decoder "Walk one example" table is
+      // exactly that shape); "untagged" is the structural signal and does not miss.
+      else { inner = esc(raw); cls = lang ? "" : ` class="plain"`; }
       out.push(`<pre><code${cls}>${inner}</code></pre>`);
       qaPending = false; continue;
     }
