@@ -64,6 +64,43 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
+## Template conformance (owner-set 2026-07-28)
+
+Every module README and deep-dive sub-file follows the **14-section template** in root
+`CLAUDE.md`, with one recorded exception:
+
+- **`vllm_deep_dive/README.md` is EXEMPT** — it uses a bespoke 21-section layout and stays
+  that way (owner-ruled 2026-07-28). Do not normalize it. This exception was previously
+  undocumented, which is why an audit kept re-flagging it.
+
+Known divergences still to be adapted (survey 2026-07-28) — all share the SAME three
+deviations, so they are one job, not four:
+
+    fine_tuning/         lora, qlora, peft_methods, instruction_tuning, domain_adaptation
+    advanced_rag/        agentic_rag, corrective_rag, graph_rag, multimodal_rag,
+                         query_transformation, self_rag
+    agents_and_tool_use/ agent_memory, function_calling_and_tool_design, plan_and_execute,
+                         react_and_reasoning_patterns
+
+For each of those 15 files:
+1. `## Intuition` is **unnumbered** -> becomes `## 2. Intuition`.
+2. `## 4. Types / Architectures / Strategies` is **absent entirely** -> must be AUTHORED,
+   not renumbered into existence.
+3. `How It Works` and `Architecture Diagrams` are in the **opposite order** to the template
+   (files have How It Works at 3 and Diagrams at 4; the template is Diagrams 5, How It Works
+   6). Conforming means MOVING a block that runs 400+ lines in some files.
+
+`optimization_and_quantization/README.md` is a separate case: it numbers 1-14 but its
+middle sections are topic-named (`4. Quantization Methods`, `5. Flash Attention & Mixture of
+Experts`, `7. Other Optimization Techniques`), it has no `How It Works` section, and it is
+**missing Best Practices entirely** — Interview sits at 13 and Case Study at 14.
+
+**The `A: ` answer prefix is NOT a divergence — do not "fix" it.** Root `CLAUDE.md` says
+"bold the question, plain text the answer" and mandates no prefix. Measured across `llm`:
+**1,876 Q&As have no prefix, 634 do, and 21 files mix both.** The prefix-less files are the
+majority and the conforming ones; `extract.py` strips a leading `A:` either way, so this is
+cosmetic in the reader only.
+
 ## Learning Paths (Full + Interview-Specific)
 
 `README.md` documents two routes through the section: the **Full Path** (all 52 modules
