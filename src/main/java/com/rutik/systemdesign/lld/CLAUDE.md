@@ -97,8 +97,43 @@ LLD describes how individual components are implemented — class relationships,
 
 ## Content Rules (LLD-specific)
 
-- Diagrams must use ASCII class/sequence diagrams — no Mermaid, no image files
+- Diagrams follow the repo-wide **appeal-first** policy in root `CLAUDE.md` — prefer Mermaid
+  (`classDiagram` for class relationships, `sequenceDiagram` for interaction order,
+  `stateDiagram-v2` for FSM patterns like State and Memento), and keep ASCII only where
+  character alignment carries the meaning. No image files. This rule previously read "no
+  Mermaid", which contradicted both root policy and the section itself: 82 of 85 lld files
+  already carry Mermaid, 271 fences in total. Corrected 2026-07-28.
 - Code examples in Java (primary) — show the pattern then show violation then fix
+
+### Java fences are illustrative, not compilable units (owner-ruled 2026-07-28)
+
+A ```` ```java ```` fence in this section exists to **explain a concept in Java**, not to be
+pasted into a file and compiled. Two consequences follow, and **neither is a defect — do not
+"fix" them, and do not flag them in an audit:**
+
+1. **A fence may declare many public top-level types.** Java permits only one per `.java`
+   file, so these fences cannot compile as-is. That is fine and deliberate: 99 fences across
+   47 files show a whole design at once (`InterfaceSegregation.md` shows eight types — the
+   violation and its fix together), and splitting them into one-type-per-fence would destroy
+   the side-by-side comparison that makes the lesson land.
+
+2. **A fence may declare the same type twice** when it is a `// BROKEN:` / `// FIX:` pair.
+   Reusing the name IS the teaching device — it shows the *same* class before and after, which
+   is exactly the "show broken code, then the fix" standard root `CLAUDE.md` requires. 14
+   fences do this (DCL `Singleton` broken/volatile/holder; `EmailObserver` sync/`@Async`;
+   `GlyphData` with and without extrinsic state). Renaming them to `FooBroken`/`FooFixed`
+   would weaken every one.
+
+**What IS still a defect,** and what an audit should flag:
+
+- **Code that contradicts its own prose or diagram.** If the surrounding text or class diagram
+  names `BrokenStack`/`FixedStack`, the fence must use those identifiers. (This was the one
+  real defect among the 14 — `design_principles/README.md` declared `Stack` twice while its
+  Mermaid diagram and prose called them `BrokenStack` and `FixedStack`.)
+- Code that cannot work **as described** — a method that does not exist, a demo the compiler
+  optimizes away, an override that is unreachable, an inverted mechanism.
+- A duplicate type that is **not** a broken/fixed pair, i.e. two genuinely different classes
+  that happen to collide on a name.
 - Minimum 10 Q&As per pattern module
 - Always include: when to use vs when NOT to use, common misuse/anti-pattern of this pattern
 - Cross-reference to HLD when the pattern has a system-design analogue (e.g., Observer → Event-Driven Architecture)

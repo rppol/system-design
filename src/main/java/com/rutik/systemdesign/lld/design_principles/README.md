@@ -241,15 +241,15 @@ classDiagram
 BrokenStack inherits Vector's entire public surface (solid triangle), so callers can still call `add(0, item)` and bypass stack discipline. FixedStack instead composes a `List` (filled diamond) and exposes only the four stack-safe operations the code below implements.
 
 ```java
-// BROKEN: Stack inherits add(), set(), remove() from Vector
-public class Stack<T> extends Vector<T> {
+// BROKEN: BrokenStack inherits add(), set(), remove() from Vector
+public class BrokenStack<T> extends Vector<T> {
     public void push(T item) { add(item); }
     public T pop() { return remove(size() - 1); }
     // callers can still call stack.add(0, item) -- bypasses stack discipline
 }
 
-// FIXED: Stack has-a Vector; only exposes stack operations
-public class Stack<T> {
+// FIXED: FixedStack has-a List; only exposes stack operations
+public class FixedStack<T> {
     private final List<T> elements = new ArrayList<>();
 
     public void push(T item) { elements.add(item); }
