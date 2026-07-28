@@ -181,6 +181,48 @@ pattern (§6.3) is essentially a two-zone instantiation of this idea — a "quar
 untrusted zone and a "privileged" LLM in the reasoning/action zones, with a non-LLM controller
 mediating between them.
 
+### 3.9 Persistent Shared State as a Cross-Agent Vector
+
+Everything in §3.1-§3.3 describes injection travelling along a **message**, which bounds it to a
+run: the pipeline finishes, the transcript is discarded, the exposure ends. Multi-agent systems
+also share **state that outlives the run** — the blackboard of
+[Multi-Agent Systems §4.4](README.md), a shared
+[agent memory](../agents_and_tool_use/agent_memory.md) store, a team-wide RAG index that any agent
+may write findings into. An injection that reaches one of those does not propagate hop by hop; it
+**waits**. It is read by agents that never ran alongside the compromised one, in sessions that
+start days later, on behalf of users who were never near the original malicious source. The trust
+graph you drew in §3.1 was a graph over one execution; a shared store quietly makes it a graph
+over *every* execution that touches the same store.
+
+The economics are brutal because retrieval is a matching problem, not a majority vote. Chen,
+Xiang, Xiao, Song and Li, "AgentPoison" (arXiv 2407.12784) — described by its authors as the first
+backdoor attack targeting generic and RAG-based LLM agents by poisoning their long-term memory or
+RAG knowledge base — reports **over 80% average attack success across three real-world agent types**
+(a RAG-based autonomous-driving agent, a knowledge-intensive QA agent, and the healthcare
+EHRAgents) at a **poison rate under 0.1%**, with benign performance degrading **less than 1%**.
+Read those three numbers together: the attacker needs a vanishingly small share of the corpus,
+because a trigger only has to win the nearest-neighbour lookup for the queries it targets, and the
+system's aggregate quality metrics barely move — so the dashboard you would use to notice stays
+green.
+
+The OWASP Agentic Security Initiative's *Agentic AI — Threats and Mitigations* v1.0 (February 2025)
+lists it as its first threat, **T1 Memory Poisoning**, alongside **T12 Agent
+Communication Poisoning** (the §3.2/§3.3 message vector) and **T13 Rogue Agents in Multi-Agent
+Systems** (the §3.6 Byzantine case) — three distinct entries because the defenses genuinely differ.
+
+What changes in the defense, relative to the message-borne case:
+
+- **Trust zones (§3.8) must partition storage, not only message flow.** A zone boundary that an
+  untrusted-zone agent can cross by *writing a record the reasoning zone later reads* is not a
+  boundary. Give the untrusted zone its own store and a validated promotion step.
+- **Provenance must be persisted with the record, not just logged.** §10.2's code-versus-data
+  provenance distinction is only actionable at read time if the record itself carries which agent
+  wrote it and which external sources influenced that agent on that run.
+- **Validate on read, not only on write.** Write-time scanning (§6.3) is a one-time check against
+  the threat model you held that day; a long-lived store outlives it.
+- **Bound persistence.** TTLs and periodic re-derivation cap how long a planted record can sit
+  waiting. An unbounded memory store is an unbounded exposure window.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -194,6 +236,7 @@ mediating between them.
 | **Cross-agent confused deputy / privilege escalation** (§3.5) | Low-privilege agent's request manipulates high-privilege agent into acting with its own legitimate privileges | Capability scoping per request type (§3.7), not just per credential |
 | **Byzantine agents** (§3.6) | A compromised consensus-participant votes/argues to skew group outcome | Outlier detection across votes; bounded influence per participant |
 | **Sybil agents** (§3.6) | One attacker controls multiple apparent independent agent identities | Identity verification (KYA-style); diversity-of-source checks |
+| **Memory / shared-store poisoning** (§3.9) | Injection written into a blackboard, agent-memory store or shared RAG index, where it waits and is read by agents in later, unrelated runs | Trust zones extended to storage; provenance persisted on the record; validate on read; TTL-bounded persistence |
 
 ---
 
@@ -773,6 +816,9 @@ Automated jailbreak algorithms (GCG, AutoDAN, etc.) optimize adversarial inputs 
 
 **Q16: If you were auditing an existing multi-agent system for these vulnerabilities and could only ask THREE questions to the engineering team, what would they be and why?**
 (1) "For each agent, list every data source its output could possibly be influenced by, directly or transitively (§3.1) — does this include any external/untrusted source?" — establishes the actual trust graph, which is often undocumented and broader than assumed (§10.2). (2) "For each privileged action (sends data externally, spends money, modifies persistent state), what capability/permission check runs immediately before it, and what are that check's ACTUAL configured bounds (not just 'does a check exist')?" — surfaces over-scoped capabilities (§10.3, §Q14) that provide no real protection despite "having" a capability system. (3) "If agent X's output were entirely attacker-controlled, what's the WORST action any DOWNSTREAM agent could be made to take?" — this question forces tracing the full propagation graph (§5.2) for the worst case, which is the actual security-relevant question (versus "what's the LIKELY outcome," which is what most functional testing checks).
+
+**Q17: Why is poisoning a shared memory store (§3.9) a different threat from cross-agent message injection (§3.2), rather than just another hop?**
+Because a message-borne injection dies with the run, while a poisoned store waits and is read by agents that never ran alongside the compromised one, in later sessions, for other users. That converts §3.1's transitive-trust graph from a graph over one execution into a graph over every execution that touches the store, so the blast radius is no longer bounded by the pipeline you drew. It is also far cheaper to mount, because retrieval is a nearest-neighbour match rather than a vote: AgentPoison (arXiv 2407.12784) reports over 80% average attack success across three real-world agent types at a poison rate under 0.1% of the corpus, with benign performance dropping less than 1% — so the quality dashboards you would rely on to notice stay green. The defenses diverge accordingly: §6.3's output scanning happens at write time and is a snapshot of the threat model you held that day, so a long-lived store needs read-time validation, persisted provenance on each record (not just a log line), a TTL that bounds the waiting window, and — the structural one — §3.8's trust zones extended to *storage*, so an untrusted-zone agent cannot cross a boundary simply by writing a record the reasoning zone will later read. OWASP's Agentic Security Initiative separates these for the same reason, listing Memory Poisoning (T1) apart from Agent Communication Poisoning (T12).
 
 ---
 

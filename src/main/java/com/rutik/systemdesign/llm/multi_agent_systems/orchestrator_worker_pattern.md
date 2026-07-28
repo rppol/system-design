@@ -358,6 +358,43 @@ async def run_deterministic_pipeline(user_input: str) -> str:
     return accumulated["generate_response"]["response_text"]
 ```
 
+### Retry Safety — What "Idempotent Worker" Actually Buys You
+
+The task-idempotency principle in §3 asks for idempotent workers, and the loops above lean on it
+hard: the async
+orchestrator resets a timed-out task to `pending` and re-dispatches it, and §12's malformed-output
+answer retries twice before falling back. Both are only safe under a contract worth stating
+precisely, because the literal reading of "same input produces the same output" is false for an
+LLM — sampling is stochastic above temperature 0, and even at 0 you are not promised bit-identical
+text across batches or model revisions.
+
+The achievable contract is weaker and sufficient: **a retried worker must produce a result that is
+schema-valid and interchangeable for the orchestrator's purpose, and must not double-apply any
+side effect.** That splits cleanly in two:
+
+- **Output equivalence** is what §3's schema enforcement is *for*. Two runs of a summariser return
+  different prose; if both validate against `{summary: str, confidence: float, sources: [str]}`
+  and the integration step consumes only those fields, the difference does not propagate. This is
+  why schema enforcement and idempotency are one principle in practice, not two — the schema is
+  the equivalence relation.
+- **Side-effect safety** is not solved by schemas at all, and fan-out makes it worse. A 60-second
+  timeout does not tell you the worker failed; it tells you no response arrived. A worker that
+  filed a ticket at t=58s and timed out at t=60s files a second ticket on retry. In parallel
+  dispatch this compounds, because a batch-level failure tempts you to re-dispatch the whole
+  `asyncio.gather` set including the workers that already completed.
+
+The task ledger is already the right place to fix this: it holds a stable identity for every
+dispatch, so derive an idempotency key from `(run_id, task_id)` — attempt-invariant, so retry 2
+carries the same key as attempt 0 — and require every side-effecting tool to deduplicate on it.
+The mechanics (key derivation, cached results, TTL as a ceiling on workflow lifetime, Temporal
+activity semantics) are developed in
+[Durable & Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md); the case
+where an action has **no inverse** and must therefore sit behind an approval gate rather than a
+retry is developed in [Agent Reliability](../agents_and_tool_use/agent_reliability.md)'s treatment
+of compensating actions. The orchestrator-specific rule is the cheap one: keep write-capable
+workers out of the parallel fan-out where you can, and give read-only workers the aggressive
+retry policy instead.
+
 ### What Anthropic Actually Published
 
 Anthropic's engineering write-up on its multi-agent research system is the closest thing to a
@@ -678,6 +715,9 @@ A: Test each layer independently: (1) unit test each worker with fixed input dic
 
 **Q: What observability should every orchestrator-worker system have?**
 A: At minimum: (1) structured log entry for every task dispatch (task_id, worker_type, model, input_token_count, timestamp); (2) structured log entry for every worker completion or failure (task_id, output_token_count, latency_ms, status, error if applicable); (3) a trace that links all worker calls to the parent orchestration run (parent_run_id); (4) cost tracking per run (sum of all worker token costs); (5) alerting on high failure rates (more than 2 worker failures per orchestration run). Use LangSmith, Langfuse, or Arize Phoenix for LLM-specific tracing. Without this observability, debugging multi-agent failures in production is nearly impossible.
+
+**Q: An LLM worker is non-deterministic, so what does it actually mean to require that workers be idempotent?**
+It means the retry must be schema-equivalent and side-effect-safe, not textually identical — you are never promised the same tokens twice. Two halves. Output equivalence is what the JSON schema is for: a summariser that returns different prose on retry is harmless if both results validate against `{summary, confidence, sources}` and the integration step reads only those fields, which is why schema enforcement and idempotency are one principle in practice rather than two. Side-effect safety is the half schemas do not touch: a 60-second timeout does not mean the worker failed, only that no response arrived, so a worker that filed a ticket at t=58s files a second one on retry — and parallel dispatch compounds it, because a batch-level failure tempts you to re-dispatch the whole `asyncio.gather` set including workers that already succeeded. The fix uses machinery the pattern already has: derive an attempt-invariant idempotency key from `(run_id, task_id)` in the task ledger and make every side-effecting tool deduplicate on it (mechanics in [Durable & Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md); actions with no inverse belong behind an approval gate instead, per [Agent Reliability](../agents_and_tool_use/agent_reliability.md)). The orchestrator-level heuristic: keep write-capable workers out of the fan-out and reserve the aggressive retry policy for read-only workers.
 
 ---
 

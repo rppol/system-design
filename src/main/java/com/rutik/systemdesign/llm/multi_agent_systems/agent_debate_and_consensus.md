@@ -649,6 +649,36 @@ Classification (clear labels)     2–5%             rarely
 
 ---
 
+### The compute-matched baseline (the comparison the 2023 results do not make)
+
+Every gain figure above is quoted against a **single call**. That is the wrong denominator for a
+production decision, and it is the most common way a debate proposal gets approved. If you are
+willing to spend 9–18x on debate, the honest baseline is not one call — it is *the best thing you
+can buy with 9–18x*: self-consistency at N=9, a stronger model, or a reasoning model given a
+larger thinking budget. The replication literature evaluates exactly that framing, and the result
+is not flattering:
+
+| Study | Setup | Compute-matched finding |
+|---|---|---|
+| Smit et al., "Should we be going MAD? A Look at Multi-Agent Debate Strategies for LLMs" (arXiv 2311.17371) | Several debate protocols against other prompting strategies | Debate does **not reliably outperform** self-consistency and ensembling. The authors attribute this to debate being more sensitive to hyperparameters and harder to optimize rather than inherently worse — tuning how readily agents agree can push some protocols (Multi-Persona) past the non-debate baselines |
+| Zhang et al., "Stop Overvaluing Multi-Agent Debate — We Must Rethink Evaluation and Embrace Model Heterogeneity" (arXiv 2502.08788) | 5 debate methods x 4 foundation models x 9 benchmarks | Debate "often fail[s] to outperform simple single-agent baselines such as Chain-of-Thought and Self-Consistency, **even when consuming significantly more inference-time computation**". The authors argue **model heterogeneity** is the missing ingredient |
+
+Three consequences for how you read the rest of this file:
+
+- **The 3x column is the real competitor to the 9–18x column.** Majority voting (§4.3) is the
+  cheap, one-round, embarrassingly-parallel arm, and much of what debate gets credited with is
+  recoverable by voting alone. Run voting as an arm in every evaluation, at the same N.
+- **Homogeneity is the confound.** Both papers land on the point §4.3's independence assumption
+  and Principle 6 already flag: N clones of one checkpoint are not N opinions. Model
+  heterogeneity — different vendors or families, not merely different temperatures — is the
+  diversity lever with the most published support behind it.
+- **The 2023 headline numbers are on `gpt-3.5-turbo-0301`.** They measure how much a weak model
+  gains from peer critique. A reasoning model already spends test-time compute on self-critique
+  internally, so the headroom debate competes for is smaller than +7.2 points on MMLU suggests.
+  Re-measure on the model you will actually ship (§12).
+
+---
+
 ## 9. When to Use / When NOT to Use
 
 ### Use multi-agent debate when:
@@ -882,6 +912,12 @@ Role assignment increases diversity by prompting agents to apply different evalu
 
 **Q: How does the judge agent pattern handle cases where the debate does not converge?**
 The judge agent is specifically well-suited for non-convergence: it renders a verdict from the transcript rather than waiting for agreement. It reads the full debate transcript including the ongoing disagreement, identifies which agent's reasoning is strongest, and explains the choice. This is better than majority voting when agents are split (e.g., 2 vs 1 with the minority holding the correct position), because the judge can be persuaded by argument quality rather than argument count. The judge's response should include a confidence level so downstream systems can flag low-confidence verdicts for human review.
+
+**Q: Does multi-agent debate still win once you match the compute budget instead of comparing to a single call?**
+Frequently not — under compute-matched evaluation, debate often fails to beat plain self-consistency or chain-of-thought spending the same tokens. Two systematic studies report this: Smit et al. (arXiv 2311.17371) find debate does not reliably outperform self-consistency and ensembling, and Zhang et al. (arXiv 2502.08788), sweeping 5 debate methods across 4 foundation models and 9 benchmarks, find debate "often fail[s] to outperform simple single-agent baselines such as Chain-of-Thought and Self-Consistency, even when consuming significantly more inference-time computation." The mechanism is the one §4.3 already names: N clones of one checkpoint are correlated, so most of the vote's apparent independence is fictional and the extra rounds only re-litigate a shared prior. The practical consequence is that the correct control arm is self-consistency at the same N, never a single call — and if debate cannot clear that bar on your own labeled set, the 9–18x is buying you nothing. Smit et al. add the useful caveat that debate is *tunable* rather than doomed: it is more hyperparameter-sensitive than voting, and adjusting how readily agents concede can recover the gap.
+
+**Q: Why do Du et al.'s 2023 debate gains not transfer cleanly to a modern reasoning model?**
+Because the 2023 numbers were measured on `gpt-3.5-turbo-0301`, so they quantify how much a weak model gains from being shown a peer's contradicting argument. A reasoning model already spends test-time compute generating and critiquing its own alternative chains before emitting an answer, which absorbs a large part of the headroom debate was exploiting — the peer critique is partially redundant with what the model does internally. Zhang et al. (arXiv 2502.08788) point at the complementary fix: if the diversity has to come from somewhere, take it from **model heterogeneity** (different vendors or families) rather than from more instances of the same checkpoint at different temperatures. Practically: never quote the +7.2-point MMLU figure as an expected gain for your system; re-run the three-arm comparison (single call, self-consistency at N, debate at N) on the exact model you will deploy.
 
 ---
 

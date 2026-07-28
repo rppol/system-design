@@ -113,6 +113,53 @@ Instructions for Sales Agent:
 5. Attempt to close. If successful, call create_order().
 ```
 
+### 4.5 Agents as Tools (the Manager Pattern) — the alternative to handing off
+
+A handoff is a one-way door: control moves to the specialist and the specialist owns the rest of
+the conversation. That is wrong whenever a specialist should do a **bounded piece of work and give
+control back**. The Agents SDK's answer is `Agent.as_tool()`, which wraps an agent as an ordinary
+callable tool on another agent — the "Parallel (SDK only)" row of §4.3 and the only way to get
+fan-out on this SDK, because a run has exactly one active agent and therefore cannot hand off to
+two specialists at once.
+
+```python
+orchestrator_agent = Agent(
+    name="orchestrator_agent",
+    instructions="You are a translation agent. You use the tools given to you to translate.",
+    tools=[
+        spanish_agent.as_tool(
+            tool_name="translate_to_spanish",
+            tool_description="Translate the user's message to Spanish",
+        ),
+        french_agent.as_tool(
+            tool_name="translate_to_french",
+            tool_description="Translate the user's message to French",
+        ),
+    ],
+)
+```
+
+Each `as_tool` call starts a **nested run**. The manager stays the active agent throughout, so
+`RunResult.last_agent` is still the manager and `final_output` is the manager's synthesis, not the
+specialist's raw text. Two consequences people trip on: the nested agent sees only the argument
+the manager passed, not the conversation so far (history sharing is opt-in via the `session` /
+`conversation_id` / `previous_response_id` parameters), and its output arrives as a tool result
+string — use `custom_output_extractor` to pull structured fields out before the manager reasons
+over it. Other parameters worth knowing: `parameters` for a typed Pydantic input instead of a bare
+string, `is_enabled` to switch a specialist off at runtime, `needs_approval` to gate it behind
+human review, and `max_turns` / `run_config` / `hooks` to bound and instrument the nested run.
+When `as_tool` is not configurable enough, the escape hatch is a plain `@function_tool` that calls
+`await Runner.run(specialist, ...)` itself.
+
+Choosing between the two is a control question, not a capability question. Hand off when the
+specialist should **own the user-facing conversation** from here on — triage to billing, and
+billing answers the customer directly. Use agents-as-tools when the specialist should **help and
+return** — translate this string, score this résumé, summarise this PDF — and the manager must
+still merge several such results, enforce a house voice, or apply its own output guardrail to the
+combined answer. This is the same shape as the [orchestrator-worker
+pattern](orchestrator_worker_pattern.md), expressed in SDK primitives, so it inherits that
+pattern's cost profile: the manager pays for its own context plus every nested run.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -764,6 +811,12 @@ Every Runner.run call automatically creates a trace on the OpenAI platform, view
 
 **Q: What is the recommended model size split for triage vs specialist agents in production?**
 Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-5.4-nano at $0.20/1M input is a common choice; reserve a stronger model such as gpt-5.6-terra ($2.50/1M) for specialists that need reasoning, tool use, or domain knowledge. Never put a reasoning model on triage: hidden thinking tokens are billed as output and add seconds of latency to a call whose entire job is picking one of four labels. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
+
+**Q: When do you use `Agent.as_tool()` instead of a handoff in the Agents SDK?**
+Use `as_tool()` when a specialist should do a bounded piece of work and give control back; use a handoff when the specialist should own the user-facing conversation from that point on. `as_tool()` wraps an agent as an ordinary callable tool, so the manager stays the active agent — `RunResult.last_agent` is still the manager, and `final_output` is the manager's synthesis rather than the specialist's raw text. That is what makes it the only fan-out primitive on this SDK: a run has exactly one active agent, so you cannot hand off to three specialists at once, but you can expose three of them as tools and let the model call them in the same turn. Two behaviours differ from a handoff and cause most of the surprises: the nested agent does not inherit the conversation (history sharing is opt-in via `session` / `conversation_id` / `previous_response_id`), and its result comes back as a tool-result string, so use `custom_output_extractor` if the manager needs structured fields. Concrete test: "should the customer's next message go to this agent?" — yes means handoff, no means tool.
+
+**Q: What is the cost consequence of the manager pattern versus a chain of handoffs?**
+The manager pattern is strictly more expensive per unit of work, because the manager's context stays alive across every nested run instead of being replaced. In a handoff chain there is one active context at a time — the specialist inherits the history and the triage agent stops being billed. With `as_tool()` you pay the manager's prompt on every turn *plus* a full nested run per specialist call *plus* the manager re-reading each returned result, which is the [orchestrator-worker](orchestrator_worker_pattern.md) cost profile expressed in SDK primitives. You buy three things with that: parallel fan-out, a single enforcement point for output guardrails and house voice, and a `last_agent` that never drifts. Route on it accordingly — triage-to-specialist support flows should stay handoffs, and only genuinely fan-out work (translate to four languages, score one document on five rubrics) should pay for a manager.
 
 ---
 
