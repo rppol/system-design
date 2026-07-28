@@ -301,6 +301,60 @@ async def main():
 asyncio.run(main())
 ```
 
+### Client Callbacks and Cache Invalidation
+
+The manager above lists tools once and never hears about it again. Two wires are missing, and neither of them fails loudly. In the Python SDK both are constructor arguments on `ClientSession`.
+
+```python
+from datetime import timedelta
+from mcp.types import (CreateMessageResult, ElicitResult, ListRootsResult,
+                       Root, ServerNotification, TextContent)
+
+LIST_CHANGED = {"notifications/tools/list_changed",
+                "notifications/resources/list_changed",
+                "notifications/prompts/list_changed"}
+
+
+async def on_sampling(context, params) -> CreateMessageResult:
+    text = await my_llm(params.messages, max_tokens=params.maxTokens)
+    return CreateMessageResult(role="assistant", model=MODEL_ID,
+                               content=TextContent(type="text", text=text))
+
+
+async def on_elicit(context, params) -> ElicitResult:
+    if params.mode == "url":          # never auto-accept: show the full host first
+        if not await user_consents_to_open(params.url):
+            return ElicitResult(action="decline")
+        await open_out_of_band(params.url)
+        return ElicitResult(action="accept")          # no content in URL mode
+    answers = await ask_user(params.message, params.requestedSchema)
+    return ElicitResult(action="accept", content=answers)   # or decline / cancel
+
+
+async def on_list_roots(context) -> ListRootsResult:
+    return ListRootsResult(roots=[Root(uri="file:///home/me/proj", name="Project")])
+
+
+async def on_message(message) -> None:
+    """The ONLY place a server notification surfaces."""
+    if isinstance(message, ServerNotification) and message.root.method in LIST_CHANGED:
+        TOOL_CACHE.clear()          # next list_all_tools() re-fetches
+
+
+session = ClientSession(
+    read, write,
+    read_timeout_seconds=timedelta(seconds=30),   # SDK default is None
+    sampling_callback=on_sampling,
+    elicitation_callback=on_elicit,
+    list_roots_callback=on_list_roots,
+    message_handler=on_message,
+)
+```
+
+**The gotcha worth memorising.** The SDK derives your *declared capabilities* from which callbacks you passed. Omit `elicitation_callback` and `initialize()` sends no `elicitation` capability, so a well-behaved server never sends `elicitation/create` — your tool just returns "user did not respond" forever, with no error on either side. Same for `sampling_callback` and `list_roots_callback`. The server side of these three is in [MCP Server Building](mcp_server_building.md).
+
+**And the cache.** `message_handler` is the only place `notifications/*/list_changed` is delivered; there is no return value from `call_tool()` that tells you the catalogue moved. Skip it and a database server that adds a tool per new stored procedure stays invisible until the next restart — which is exactly the class of bug that looks like "the model refuses to use the new tool."
+
 ### HTTP (Streamable) Client
 
 ```python
@@ -419,6 +473,12 @@ Prefix each tool name with the server's logical name: `github_create_issue` from
 
 **Q: When should the client re-list tools?**
 Once at session start (cache the list). Refresh when the server sends `notifications/tools/list_changed`. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
+
+**Q: Where does a `list_changed` notification actually arrive in the client?**
+In the session's `message_handler` callback — no return value from `call_tool()` or `list_tools()` ever tells you the catalogue moved. That is why "refresh on `notifications/tools/list_changed`" is a wiring task and not a policy: if you never pass a `message_handler`, the notification is delivered to a no-op default and your cached tool list silently ages out. The visible symptom is a server that added a tool at runtime — a database server exposing one tool per stored procedure is the classic case — staying invisible to the model until the next client restart, which reads like "the model refuses to use the new tool." Practical guidance: clear the cached catalogue in the handler and re-list lazily on the next request, rather than re-listing inside the notification path.
+
+**Q: What happens if you omit `elicitation_callback` when constructing a `ClientSession`?**
+The client declares no `elicitation` capability at initialize, so a spec-compliant server never sends `elicitation/create` and nothing anywhere reports an error. The Python SDK infers the declared client capabilities from which callbacks you actually passed — `sampling_callback`, `elicitation_callback` and `list_roots_callback` each switch their capability on — so a missing callback is indistinguishable from a deliberate "we do not support this." The failure is silent on both sides: the server takes the capability-gated branch and returns something like "the user did not supply a value," and the client never sees a request to log. Practical guidance: register all three callbacks up front even if two of them return a decline, so a capability gap is a visible decline rather than an absence.
 
 **Q: What's sampling and how does the client handle it?**
 Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM; returns the result to the server. Useful when the server needs AI capability without bundling its own model access.

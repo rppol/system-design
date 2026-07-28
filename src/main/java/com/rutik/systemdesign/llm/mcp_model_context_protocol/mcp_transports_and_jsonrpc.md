@@ -376,6 +376,25 @@ the N responses upgrades to SSE?), and a collision with the per-message `202 Acc
 notifications. Concurrent single-message requests recover most of the same saving with none of
 that machinery, which is exactly why the wire contract stays at one message per POST.
 
+### What the 2026-07-28 Revision Changes
+
+Five separate notes above say "the release candidate removes X." They are one change, not five footnotes, and it lands squarely on this file's subject. The RC was locked 2026-05-21 and the final text publishes 2026-07-28 — the largest revision since launch, and it deletes the two things this chapter spends the most words on.
+
+| 2025-11-25 | 2026-07-28 |
+|------------|------------|
+| `initialize` + `notifications/initialized` handshake | Removed. Protocol version, client info and capabilities travel in `_meta` on **every** request (`io.modelcontextprotocol/clientInfo`), plus required `MCP-Protocol-Version` and `Mcp-Method` headers |
+| `Mcp-Session-Id` header and the protocol-level session | Removed. Every request is self-contained |
+| Server-initiated SSE stream for mid-request questions | Multi Round-Trip Requests (MRTR): the server returns an `InputRequiredResult` (`resultType: "input_required"`, an `inputRequests` object, a base64 `requestState`); the client gathers answers and **re-issues the original call** with `inputResponses` and the echoed `requestState` |
+| Roots, Sampling, Logging | Deprecated on 12-month windows — Roots gives way to tool parameters / resource URIs / server config, Sampling to calling your LLM provider directly, Logging to `stderr` on stdio and OpenTelemetry for structured observability |
+| Ad-hoc `experimental` capabilities | Extensions framework: reverse-DNS ids negotiated through an `extensions` map on both sides' capabilities, developed in their own `ext-*` repositories |
+| OAuth 2.1 + PKCE + RFC 8707 audience binding | Same, hardened: clients validate the `iss` parameter per RFC 9207 and declare an OpenID Connect `application_type` at registration |
+
+Read that as one sentence: **MCP stops being a session protocol.** The spec's own framing of the payoff — "a remote MCP server that previously needed sticky sessions, a shared session store, and deep packet inspection at the gateway can now run behind a plain round-robin load balancer." The `Mcp-Method` header is the other half of that: the method name is readable at the edge without parsing the JSON body, which is what makes per-method routing and rate limiting a gateway concern instead of an application one.
+
+MRTR is the subtler one. Under 2025-11-25 a server that needs to ask the user something mid-tool-call holds the request open and talks over SSE, so the pause is a *stream* the client must keep alive and resume with `Last-Event-ID`. Under MRTR the pause is a *return value* — the call ends, the client answers at its leisure, and the retry carries the server's own state blob back. Nothing has to stay connected, which is precisely why the session could be deleted.
+
+Migration is client-first: a client that speaks 2026-07-28 falls back to the `initialize` handshake when it reaches a server on 2025-11-25 or earlier, so servers are not forced to move on day one. Everything else in this file describes 2025-11-25 and remains accurate for that revision.
+
 ---
 
 ## 7. Real-World Examples
@@ -534,6 +553,9 @@ Either party sends a `ping` request and the other MUST reply promptly with an em
 
 **Q: What does the initialize handshake negotiate?**
 Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request. The 2026-07-28 release candidate removes this handshake entirely, carrying client info and version in per-request `_meta` and headers instead.
+
+**Q: What does the 2026-07-28 revision change about the connection lifecycle?**
+It deletes the lifecycle — the `initialize` handshake and the protocol-level session both go away and every request becomes self-contained. Protocol version, client info and capabilities move into `_meta` on each request (`io.modelcontextprotocol/clientInfo`) alongside required `MCP-Protocol-Version` and `Mcp-Method` headers, and `Mcp-Session-Id` disappears with the session it identified. The operational payoff is that a remote server that previously needed sticky sessions, a shared session store and body inspection at the gateway can sit behind an ordinary round-robin load balancer. Mid-request questions are handled by Multi Round-Trip Requests instead of a held-open SSE stream: the server returns an `InputRequiredResult` carrying `inputRequests` and an opaque `requestState`, and the client re-issues the original call with `inputResponses` and that state echoed back. Practical guidance: migrate clients first — a 2026-07-28 client falls back to the `initialize` handshake against a 2025-11-25 server, so servers are not forced to move on day one.
 
 **Q: What's the typical latency for each transport?**
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.

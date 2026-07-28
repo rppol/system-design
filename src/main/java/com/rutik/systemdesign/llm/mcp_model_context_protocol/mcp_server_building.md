@@ -296,6 +296,45 @@ if __name__ == "__main__":
     mcp.run()
 ```
 
+### Calling Back Into the Client — Roots and Elicitation
+
+Sampling gets a diagram in §5, but the other two client features a server may call are where servers actually go wrong. Both are **capability-gated**: a client that never declared `roots` answers `roots/list` with `-32601` Method not found, and a client that declared only form-mode elicitation answers a URL-mode request with `-32602` Invalid params. Check `ctx.session.check_client_capability(...)` or degrade gracefully — never assume.
+
+**Roots** are the client's answer to "which directories am I allowed to touch". Each root is `{uri, name}`, the `uri` MUST be a `file://` URI in the current revision, and `name` is display-only. A client that declared `roots.listChanged: true` MUST send `notifications/roots/list_changed` when the set changes, so cache the list and re-fetch on that notification rather than calling `roots/list` per tool invocation. Note the direction of travel before you build on it: the `2026-07-28` revision deprecates Roots (and Sampling) on a 12-month window in favour of ordinary tool parameters, resource URIs or server configuration — see [MCP Transports & JSON-RPC](mcp_transports_and_jsonrpc.md).
+
+**Elicitation** is a mid-tool question to the user. Form-mode schemas are deliberately crippled: a **flat object of primitives only** — string, number/integer, boolean, single- or multi-select enum, with string formats limited to `email`, `uri`, `date`, `date-time`. Nested models and arrays of objects are rejected (the Python SDK raises `TypeError` before the request leaves the process). And the response is a **three-way** action, not a boolean.
+
+```python
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+
+mcp = FastMCP("deploy-server")
+
+
+class Confirm(BaseModel):
+    environment: str = Field(json_schema_extra={"enum": ["staging", "prod"]})
+    ticket: str = Field(description="Change ticket id")
+    dry_run: bool = False
+
+
+@mcp.tool()
+async def deploy(service: str, ctx: Context) -> str:
+    """Deploy a service after confirming the target environment with the user."""
+    roots = await ctx.session.list_roots()          # -> ListRootsResult
+    allowed = [str(r.uri) for r in roots.roots]     # every uri is file://
+    if not any(u.endswith(f"/{service}") for u in allowed):
+        return f"Error: {service} is outside the client's roots: {allowed}"
+
+    result = await ctx.elicit(message=f"Confirm deployment of {service}", schema=Confirm)
+    if result.action == "decline":                  # explicit "no"
+        return "User declined the deployment."
+    if result.action == "cancel":                   # dialog dismissed, no choice made
+        return "Dismissed; nothing deployed. Offer to ask again."
+    return f"Deploying {service} to {result.data.environment} (ticket {result.data.ticket})"
+```
+
+The security rule is absolute and it is the part interviewers probe: a server **MUST NOT** request passwords, API keys, access tokens or payment credentials through form mode, because form data passes through the client and therefore through the LLM's context. Secrets go through **URL mode** (`ctx.elicit_url(message, url, elicitation_id)`), where the client only ever sees the URL, gets user consent, opens it out-of-band, and the server signals completion with `notifications/elicitation/complete`. URL mode carries its own trap: the server MUST verify that the user who opens the URL is the user the elicitation was created for, or an attacker binds their own third-party tokens to a victim's identity.
+
 ### Test with MCP Inspector
 
 ```bash
@@ -481,6 +520,12 @@ Per MCP spec, senders should set request timeouts and cancel with a `notificatio
 
 **Q: What's prompt sampling and when do servers use it?**
 Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server might ask the client's LLM to summarize a diff (using the client's model + auth). Lets servers use AI capabilities without bundling their own API keys.
+
+**Q: When may a server call `roots/list` or `elicitation/create`?**
+Only when the client declared that capability at initialize — otherwise `roots/list` returns `-32601` Method not found. The same gate is per-mode for elicitation: a client that declared only `form` answers a `mode: "url"` request with `-32602` Invalid params. Roots come back as `{uri, name}` records whose `uri` MUST be a `file://` URI, and if the client declared `roots.listChanged` you cache the list and refresh on `notifications/roots/list_changed` rather than re-listing on every tool call. Practical guidance: treat both as optional enrichment — a server that hard-depends on roots or elicitation simply does not work in Claude Desktop-class clients that have not shipped the capability.
+
+**Q: Why must a server never request an API key through form-mode elicitation?**
+Because form-mode data passes back through the MCP client and into the LLM's context, so the spec forbids secrets there and mandates URL mode instead. Form mode is for benign structured input — a target environment, a ticket id, a date — and its schema is restricted to a flat object of primitives precisely because clients must be able to render it as a simple form. URL mode sends the user out of band to a page the server controls; the client sees only the URL, shows the full host for consent, and must not pre-fetch it. Practical guidance: if the value would be damaging in a log line, it belongs in URL mode, and the server must verify the user who opens the URL is the same user the elicitation was created for.
 
 **Q: How do you version an MCP server?**
 Semantic versioning. Breaking changes to tool schemas or behavior require major version bumps. Communicate version in server metadata. Clients should pin versions for stability. Use additive changes (new optional fields) where possible.

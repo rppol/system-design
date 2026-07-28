@@ -90,6 +90,8 @@ Prompts are parameterized templates. They allow servers to encode domain knowled
 
 Sampling inverts the normal flow. A server can ask the client to run an LLM completion on its behalf, receiving the result back. This enables server-side agentic loops — for example, a code analysis server that iteratively asks the model to explain a symbol, then uses that explanation to search for related symbols. The client retains full control: it can refuse, modify, or gate sampling requests on user consent.
 
+Roots and Elicitation are the other two client features a server may call into. Their request shapes, the capability gating that makes an undeclared call fail with `-32601`, and the rule that secrets must go through URL-mode elicitation rather than a form are developed in [MCP Server Building](mcp_server_building.md); the matching client-side callback wiring is in [MCP Client Patterns](mcp_client_patterns.md).
+
 ### 4.5 Transport Strategies
 
 **Stdio transport:** The MCP client spawns the server as a subprocess and communicates over stdin/stdout. Ideal for local tools (filesystem, local database, CLI wrappers). Process isolation provides a natural security boundary. Latency is minimal. Does not work for remote servers.
