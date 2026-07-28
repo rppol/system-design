@@ -316,6 +316,40 @@ The comparison above claims ReAct "struggles with long-horizon tasks (goal drift
 
 That is the entire argument for the pattern. At `p = 0.85` a 5-step task is a coin flip you mostly win; a 20-step task succeeds 4% of the time. Plan-and-Execute does not raise `p` by magic — it raises the *effective* `p` by validating each step's output and replanning when one fails, so a bad step is caught and repaired instead of silently multiplying into the next fifteen. It also explains why the file's own "Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself" lands where it does: `0.85^8 = 0.273` is roughly where unassisted execution stops being usable.
 
+### Two Named Variants: ReWOO and LLMCompiler
+
+The two-phase loop above is the base case. Two variants change what the plan is
+made of, and both come up by name in interviews.
+
+**ReWOO — Reasoning WithOut Observation** (Xu et al., 2023) splits the system into
+Planner, Worker and Solver. The Planner writes the *entire* blueprint before any
+tool runs, using variable substitution to refer to results it has not seen —
+step 3 cites step 1's output as `#E1` rather than waiting for it. The Worker
+executes each step against its tool and collects evidence; the Solver reads the
+plan paired with that evidence and writes the answer. Because no observation is
+ever fed back into the reasoning prompt, the expensive reasoning context is paid
+for once instead of being re-sent with a growing transcript on every step. The
+paper reports 5x token efficiency and a 4-point accuracy gain over ReAct on
+HotpotQA, and a 64% average token reduction across six public NLP benchmarks.
+The trade is brittleness: a plan authored before any observation cannot adapt to
+one, so ReWOO depends on the replanning machinery above more heavily than plain
+Plan-and-Execute does, not less.
+
+**LLMCompiler** keeps observations but changes the plan's data structure from a
+list to a DAG. The Planner emits tasks carrying explicit dependency edges, a Task
+Fetching Unit dispatches every task whose dependencies are already satisfied, and
+an Executor runs those concurrently. This is the `[PARALLEL]` marker of the
+planner prompt above, formalised: instead of the planner hand-labelling pairs of
+steps — which is where the "dependency blindness" failure mode comes from —
+parallelism falls out of the graph, and wall-clock latency tracks the DAG's
+*depth* rather than its node count. The DAG formulation and its failure modes are
+worked through in [Agentic RAG](../advanced_rag/agentic_rag.md).
+
+Read against the arithmetic already on this page: ReWOO attacks the re-sent
+context term by removing observations from the reasoning prompt; LLMCompiler
+attacks serial latency by collapsing independent steps into one level. Neither
+raises per-step `p`, so both still need step validation.
+
 ---
 
 ## Architecture Diagrams
@@ -539,6 +573,9 @@ A: A plan becomes stale when execution reveals that an assumption the planner ma
 
 **Q: What is Hierarchical Task Network decomposition?**
 A: HTN decomposes a high-level goal into sub-goals recursively until every task is a "primitive task" — an atomic action executable by a single tool call. Structure: a tree where non-leaf nodes are goals/sub-goals and leaf nodes are executable actions. The planner works top-down (goal → sub-goals → tasks); the executor works bottom-up (leaf tasks → synthesize → sub-goal complete → goal complete). HTN is useful for complex multi-domain tasks (e.g., "build a marketing dashboard" decomposes into data pipeline, visualization, and reporting sub-trees). The challenge: the LLM planner must produce a valid HTN without cycles or dead ends; this requires careful prompting and validation.
+
+**Q: What is ReWOO and how does it differ from standard Plan-and-Execute?**
+A: ReWOO decouples reasoning from observation — the Planner writes the whole plan up front using variable placeholders for results it has not seen, so tool outputs never re-enter the reasoning prompt. Its three modules are Planner (writes the blueprint, referring to step 1's output as `#E1` inside step 3), Worker (executes each step against its tool and collects evidence) and Solver (reads plan plus evidence and produces the answer). Standard Plan-and-Execute still feeds each step's result back into the loop, so the reasoning context grows with every observation and is re-billed on each call; ReWOO pays for it once. The 2023 paper reports 5x token efficiency and a 4-point accuracy gain over ReAct on HotpotQA, and a 64% average token reduction across six public NLP benchmarks. The cost is adaptivity: a plan written before any tool has run cannot respond to what the tools return, so ReWOO leans harder on replanning and is a poor fit for exploratory tasks where the second step genuinely depends on what the first one discovers. Use it when the task decomposition is knowable up front — joined multi-hop lookups, fixed research templates — and use ReAct or classic Plan-and-Execute when it is not.
 
 **Q: How do you parallelize steps in a Plan-and-Execute system?**
 A: Steps marked as independent (no data dependency between them) can execute simultaneously. The planner identifies parallel opportunities and marks them: "Step 2 [PARALLEL with Step 3]: search competitor A" and "Step 3 [PARALLEL with Step 2]: search competitor B." The orchestrator groups parallel steps and executes them with `asyncio.gather()` or a thread pool. The executor receives its specific step with its specific context; results are collected and merged before Step 4 proceeds. Parallelism speedup: if 3 steps each take 10s and are independent, parallelism reduces wall time from 30s to 10s. Implementation note: each parallel executor needs isolated context — ensure they don't share mutable state.

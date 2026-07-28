@@ -336,6 +336,44 @@ memories = [m_["memory"] for m_ in result["results"]]
 context = f"Relevant user context: {'; '.join(memories)}\n\n{user_query}"
 ```
 
+### Provider-Native Memory: the Claude Memory Tool
+
+Everything above is memory you build. Anthropic ships memory as a first-class
+tool, which changes the build-versus-adopt decision for cross-session state.
+
+```python
+# One `tools` entry is the entire configuration -- no input schema, because it
+# is an Anthropic-defined tool. Generally available; no beta header.
+response = client.messages.create(
+    model="claude-opus-5",
+    max_tokens=2048,
+    messages=[{"role": "user", "content": "Help me with this support ticket."}],
+    tools=[{"type": "memory_20250818", "name": "memory"}],
+)
+```
+
+The tool is **client-side**: Claude only *requests* file operations — `view`,
+`create`, `str_replace`, `insert`, `delete`, `rename` — on paths under
+`/memories`, and your handler executes them against storage you control (a
+per-user directory, object-store keys, rows in Postgres). Nothing persists on the
+provider's side. When the tool is present the API prepends a memory protocol to
+the system prompt telling the model to read `/memories` before doing anything else
+and to record progress as it goes, on the stated assumption that its context may
+be reset at any moment.
+
+Two engineering consequences follow. First, this is **file-shaped semantic and
+procedural memory, not a vector store**: retrieval is the model listing a
+directory and opening the file it wants, so the similarity/recency/importance
+ranking problem above does not arise at all — the organisation problem replaces
+it, and keeping files coherent and pruning stale ones becomes the maintenance
+burden. Second, `/memories` is only a prefix your handler maps onto real storage,
+so **path validation is your job**: `/memories/../../secrets.env` escapes the
+memory root unless you canonicalise every path and reject anything that resolves
+outside it. Memory pairs with context editing, which clears old tool results once
+a token threshold is crossed and warns the model to save what matters to memory
+first; those clearing mechanics belong to
+[Agent Cost & Token Budget](agent_cost_and_token_budget.md).
+
 ### FIFO vs Importance-Based Eviction
 
 ```
@@ -508,6 +546,9 @@ A: Use a centralized memory service all agents can read from and write to. Archi
 
 **Q: What is Mem0 and how does it differ from building memory with raw vector databases?**
 A: Mem0 is a memory management library that handles the full lifecycle: extraction (LLM call to extract facts from conversations), storage (vector DB backend), retrieval (semantic search with user/session scoping), deduplication (merges new facts with existing ones rather than creating duplicates), and deletion. Using a raw vector database requires building all these yourself: writing extraction prompts, handling duplicates, implementing relevance scoring, managing metadata. Mem0's key advantage is automatic fact extraction — you pass a conversation and it identifies what's worth remembering without you specifying it. The trade-off: Mem0 adds an extraction LLM call per conversation turn, costing ~100-300 extra tokens per turn.
+
+**Q: What does a provider-native memory tool change compared with a vector-store memory layer?**
+A: It replaces similarity retrieval with the model reading and editing files, so ranking disappears as a problem and file organisation plus path validation take its place. Mechanically the memory tool is client-side: the model emits `view`, `create`, `str_replace`, `insert`, `delete` and `rename` requests against paths under `/memories`, and your handler executes them against storage you own, so nothing is persisted provider-side. What you stop building: the extraction prompt, the embedding pipeline, the top-K retrieval, and the combined recency/importance/similarity score — the model decides what to write and which file to open. What you start owning: (1) path traversal defence, since `/memories` is just a prefix and `/memories/../../secrets.env` escapes it unless you canonicalise and re-check every path; (2) size and expiry policy, because a file the model keeps appending to grows without bound; (3) organisation quality, since retrieval is now "did the model name and structure the file well enough to find it again". Choose the file model when memory is narrative and agent-authored (project state, lessons learned across sessions); keep a vector store when memory is many small independent facts across many users, where ranking genuinely is the problem.
 
 **Q: When is it better to not use external memory and just extend the context window?**
 A: For single-session, bounded tasks (coding a specific feature, answering a research question), extending the context window is simpler, lower latency (no retrieval), and higher fidelity (no information loss from summarization). External memory only provides value when: (a) the session spans multiple separate conversations; (b) the relevant history exceeds the context window; (c) the agent should personalize based on accumulated knowledge across many users or tasks. For tasks that complete in under 100K tokens in a single session, just use a large context window. External memory adds implementation complexity, latency, and potential for retrieval misses — worth it only for long-horizon or multi-session use cases.

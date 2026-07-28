@@ -319,6 +319,12 @@ Key framework references for agent patterns:
 - **LangChain LCEL and agents**: [langchain_and_lcel.md](../agentic_frameworks/langchain_and_lcel.md) — Runnable composition with `|`, the `create_agent` harness and its middleware hooks, prompt caching for long system prompts, streaming structured outputs.
 - **LangGraph stateful agents**: [langgraph.md](../agentic_frameworks/langgraph.md) — StateGraph, human-in-the-loop with `interrupt()`, multi-agent supervisor pattern, subgraph composition, custom reducers, checkpoint strategy by scale.
 
+### 4.10 Tool Interoperability — MCP
+
+Every tool spec in this module is written against one provider's schema. The Model Context Protocol (MCP) is the vendor-neutral layer underneath it: a server publishes tools, resources and prompts over JSON-RPC, and any MCP-aware client — the Claude API's MCP connector, the Responses API's `mcp` tool, or your own harness — lists them and re-exposes them to the model as ordinary tool definitions.
+
+Two consequences shape agent design. First, "add a tool" stops meaning "edit the agent" and starts meaning "point the agent at another server", so a single agent routinely ends up facing 200+ tools it never had to implement — which is why [Tool Selection at Scale](tool_selection_at_scale.md) is a load-bearing concern rather than an optimization. Second, it moves the trust boundary: a tool result is now attacker-influenceable text arriving from a third-party server, making indirect prompt injection a protocol-level problem rather than an application-level one. See [MCP — Model Context Protocol](../mcp_model_context_protocol/README.md) for the protocol itself, transports, server and client construction, and the security model.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -703,6 +709,9 @@ A: `create_agent` returns a compiled LangGraph `StateGraph` in one call; hand-bu
 
 **Q: How do you make side-effectful tools safe when the agent retries or the loop replays a step?**
 A: Make every mutating tool idempotent from the agent's perspective, because retries are guaranteed: the LLM re-issues calls after timeouts, malformed observations, or loop restarts, and "send_email" executed twice is a real incident, not a hypothetical. The standard mechanics: require an idempotency key per logical action (derived from the step ID or a hash of the tool arguments) so the tool backend deduplicates repeat executions; separate read tools from write tools and let only reads auto-retry; and gate irreversible writes (payments, deletions, external messages) behind a confirm step — either human-in-the-loop or a two-phase propose-then-commit tool pair, so the model must first return a plan artifact and only a validated commit call executes it. Log every tool execution with its key so replays are detectable in traces. The interview trap is answering with "lower the temperature so it retries less" — retry safety is a systems property of the tool layer, never a sampling setting.
+
+**Q: What does MCP change about how you build an agent's tool layer?**
+A: MCP turns tools into separately deployed servers rather than code inside the agent, so any MCP-aware client can list a server's tools and re-expose them to the model as ordinary tool definitions. Practically it decouples three things that used to move together: who writes the tool, who runs it, and who wires it into the loop. The agent-design consequences are what interviewers probe. (1) Catalogue size explodes — connecting five servers can put 200+ tools in front of the model, so per-turn tool filtering stops being an optimization and becomes mandatory. (2) The trust boundary moves outward: a tool result is text produced by a server you may not control, so indirect prompt injection is now a transport-level threat and tool output must be treated as untrusted data, never as instructions. (3) Namespacing becomes a correctness requirement rather than a style rule, because two servers will both ship a tool called `search`. (4) Versioning is no longer yours to schedule — a server can change a schema underneath you, so pin and fingerprint schemas and alert on drift. What MCP does *not* change: the model still selects tools by reading descriptions, so description quality remains the dominant lever on selection accuracy.
 
 In-depth coverage of specific agent topics. Each file follows the standard module format with 10+ interview Q&As.
 

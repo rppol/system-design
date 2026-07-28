@@ -247,6 +247,49 @@ tool_choice={"type": "function", "function": {"name": "extract_entities"}}
 # With strict: model generates {"date": "2025-05-20"} (valid ISO date)
 ```
 
+### Strict Mode and Tool Choice on the Claude API
+
+Both controls exist on Anthropic's side too, with different spellings — and the
+spelling differences are where ported code breaks.
+
+```python
+# strict is a TOP-LEVEL key beside input_schema (OpenAI nests it under "function").
+# Same mechanism: grammar-constrained sampling, so `input` always satisfies the schema.
+tool = {
+    "name": "search_flights",
+    "description": "...",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {"destination": {"type": "string"},
+                       "departure_date": {"type": "string", "format": "date"}},
+        "required": ["destination", "departure_date"],
+        "additionalProperties": False,
+    },
+}
+
+# tool_choice is an OBJECT, not a string, and "must call something" is `any`,
+# not `required`.
+{"type": "auto"}                     # model decides (default)
+{"type": "any"}                      # must call some tool
+{"type": "tool", "name": "extract"}  # must call this exact tool
+{"type": "none"}                     # must not call tools
+
+# Parallel calls are opt-OUT, via a flag on tool_choice rather than a
+# top-level parallel_tool_calls boolean.
+{"type": "auto", "disable_parallel_tool_use": True}
+```
+
+Two behaviours that do not port. **Schemas are compiled and cached separately from
+messages** — strict mode turns `input_schema` into a grammar and retains the
+compiled artifact for up to 24 hours, so regulated data must never appear in
+property names, `enum` values, `const` values or `pattern` regexes; only message
+content carries the message-content protections. And **forcing a tool call
+conflicts with manual extended thinking**: with `thinking: {"type": "enabled"}`
+only `auto` and `none` are accepted, so the `tool_choice="required"` + strict
+extraction recipe above has no direct equivalent on a manual-budget thinking
+request. Adaptive thinking on current models lifts the restriction.
+
 ### Tool Result Injection Format
 
 ```python
@@ -640,6 +683,9 @@ A: Parallelize when: the tool calls have no data dependency (neither call's argu
 
 **Q: How do you prevent infinite tool call loops in a production agent?**
 A: Three layers of defense: (1) hard step limit — hard-code a maximum number of tool call rounds (typically 20-50 depending on task complexity); inject "You have N steps remaining — prioritize completing the task" at each step to give the model self-awareness; (2) repetition detection — after each tool call, compare the (tool_name, arguments) pair to all previous calls; if an exact duplicate appears, inject "You have already called this tool with these arguments and received the following result: [result]. Do not repeat this call. Try a different approach or conclude the task." (3) progress scoring — every 5 steps, ask a lightweight LLM call: "Based on the trajectory so far, is the agent making meaningful progress? YES or NO." If NO, inject a refocus message or abort. The repetition detection is the most important layer — infinite loops almost always manifest as repeated identical tool calls.
+
+**Q: How do strict mode and tool_choice differ between the OpenAI and Anthropic APIs?**
+A: Both providers offer grammar-constrained tool arguments and forced tool calls, but the field shapes differ enough that a naive port fails at request-validation time. Strict mode: OpenAI puts `strict: true` inside the nested `"function"` object and requires every property to appear in `required` (optionality is a `null` type union); Anthropic puts `strict: true` at the top level of the tool beside `input_schema` and lets `required` list only the genuinely required keys. Tool choice: OpenAI's `tool_choice` is a string (`"auto"`, `"required"`, `"none"`) or a function object; Anthropic's is always an object, and the "call something" value is `{"type": "any"}` — there is no `"required"`. Parallel calls: OpenAI has a top-level `parallel_tool_calls` boolean that defaults to true; Anthropic makes it opt-out via `{"type": "auto", "disable_parallel_tool_use": true}` on `tool_choice`. Two Anthropic-specific gotchas are worth naming: compiled strict-mode grammars are cached separately from message content for up to 24 hours, so regulated data must stay out of property names, enums and regex patterns; and a forced `tool_choice` is rejected alongside manual extended thinking, which accepts only `auto` or `none`.
 
 **Q: How do you version tools and maintain backward compatibility in a live production system?**
 A: Version by appending `_v2`, `_v3` to the tool name when making breaking changes (parameter renames, removed required parameters, changed return schema). Non-breaking additions (new optional parameters with defaults, new optional return fields) do not require versioning — add them to the existing tool. Migration protocol: (1) add the new versioned tool to the spec alongside the old one; (2) add a deprecation notice to the old tool's description: "DEPRECATED: use `search_v2` which supports filtering. This tool will be removed 2026-09-01."; (3) monitor tool selection logs — the model will switch to the new tool if its description signals it is preferred; (4) after 30+ consecutive days of zero selection of the old tool, safely remove it. Never silently remove a tool the model might still select — the API will return an error for unrecognized tool call names.

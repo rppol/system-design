@@ -310,6 +310,46 @@ response = client.messages.create(
 # shows chain-of-thought before response
 ```
 
+### Interleaved Thinking Inside the Tool Loop
+
+Native thinking and the ReAct loop are not alternatives — they compose, and the
+composition carries one hard API rule. **A tool-use loop is a single assistant
+turn**, so the thinking blocks the model emitted before its tool call must come
+back verbatim alongside the `tool_use` block when you return the `tool_result`:
+
+```python
+response = client.messages.create(
+    model="claude-opus-5", max_tokens=16000,
+    thinking={"type": "adaptive"}, tools=[weather_tool],
+    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+)
+# response.content = [thinking(signature=...), text, tool_use]
+
+tool_use = next(b for b in response.content if b.type == "tool_use")
+messages = [
+    {"role": "user", "content": "What's the weather in Paris?"},
+    # Echo the assistant content EXACTLY as received. Rebuilding this list,
+    # dropping the thinking block, or filtering redacted_thinking -> 400.
+    {"role": "assistant", "content": response.content},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_use.id, "content": "88F"}]},
+]
+```
+
+Every thinking block carries a `signature` the API verifies, so a transcript your
+code helpfully normalized is rejected outright rather than silently degraded.
+
+**What interleaving buys.** Without it the model thinks once, at the top of the
+turn; every response after a tool result arrives with no thinking block, so the
+observation is reacted to rather than reasoned about. With it the model thinks
+again after each tool result — which is exactly ReAct's Thought field, relocated
+from your system prompt into the model. Adaptive thinking on current models
+interleaves automatically; the older manual-budget models required the
+`interleaved-thinking-2025-05-14` beta header. The design consequence is that a
+prompted `Thought:` field becomes largely redundant on these models: keep it only
+where you need the reasoning in human-readable, loggable, evaluable form, since
+thinking blocks are summarized and encrypted rather than plain text.
+
 ---
 
 ## Architecture Diagrams
@@ -541,6 +581,9 @@ A: Chain-of-thought prompting adds reasoning steps to the LLM's output before th
 
 **Q: How does Anthropic's native thinking feature relate to these patterns?**
 A: Anthropic's `thinking` parameter lets the model produce an extensive reasoning trace before the visible response. This is built-in CoT at the model level rather than prompted CoT — the model uses its native reasoning capacity in a separate scratch space, then produces a final answer. On the current frontier models (Fable 5, Opus 5, Sonnet 5) the mode is adaptive thinking — `{"type": "adaptive"}` plus `output_config.effort` — where the model decides whether and how much to think per request; Haiku 4.5 uses extended thinking with an explicit `thinking.budget_tokens` ceiling. Unlike ReAct's Thought field (which is prompted and visible to the application), thinking blocks are summarized and encrypted and are not constrained to a human-readable format. Native thinking improves performance on hard math, coding, and multi-step reasoning tasks — adding ToT-like depth without the multiple-call overhead.
+
+**Q: What breaks if you drop thinking blocks when returning a tool result to a reasoning model?**
+A: The request is rejected: each thinking block carries a signature the API verifies, so a rebuilt or filtered assistant message returns a 400 rather than degrading quietly. The rule follows from how the turn is defined — a tool-use loop is one assistant turn, not several, so the thinking that preceded the `tool_use` block belongs to the same turn as the `tool_result` you are about to send and has to travel with it. The practical failure modes are all forms of "helpful" client code: rebuilding the assistant message from just the text and tool-call fields, stripping `redacted_thinking` blocks because they look like noise, or normalizing the content array through a schema of your own. The correct handling is to echo `response.content` back unchanged and append the `tool_result` in the following user message. Related design point: because interleaved thinking lets the model produce a fresh thinking block after each tool result, this is the model-native form of ReAct's Thought field — which is why a prompted `Thought:` field is largely redundant on these models unless you specifically need the reasoning in plain, loggable text.
 
 **Q: Why does the order of reasoning matter — Thought before Action vs. Action before Thought?**
 A: Thought before Action (standard ReAct) forces the model to explicitly reason about what to do before committing to a tool call. This activates the model's planning capacity via chain-of-thought and reduces "reflex actions" — selecting the first plausible tool. Action before Thought would produce lower-quality decisions because the model generates the action token before articulating its reasoning, losing the benefit of explicit deliberation. Empirically, models that output a Thought field select the correct tool more often and use better search queries. The mechanism: each token the model generates attends to all previous tokens — writing a complete Thought first makes that reasoning available when generating the Action's arguments.
