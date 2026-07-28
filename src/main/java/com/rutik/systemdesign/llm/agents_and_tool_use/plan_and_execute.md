@@ -1,6 +1,6 @@
 # Plan and Execute
 
-## Concept Overview
+## 1. Concept Overview
 
 Plan-and-Execute is a two-phase agent architecture that separates task planning from task execution. Phase 1: a Planner LLM generates a complete, structured plan — a numbered sequence of steps to accomplish the goal. Phase 2: an Executor Agent works through the plan step-by-step, calling tools and completing each step in order. The phases use different prompts, different system roles, and often different models.
 
@@ -8,7 +8,7 @@ Unlike [ReAct](react_and_reasoning_patterns.md) where planning and acting are in
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Plan-and-Execute is like a general issuing battle orders before the engagement — broad strategy committed upfront, with staff officers (executors) handling moment-to-moment tactics.
 
@@ -20,7 +20,7 @@ Unlike [ReAct](react_and_reasoning_patterns.md) where planning and acting are in
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **Separation of concerns**: The Planner excels at strategic decomposition; the Executor excels at individual tool use. Using each for its strength produces better results than one LLM doing both.
 - **Upfront structure vs emergent structure**: Plan-and-Execute commits to structure early; ReAct discovers structure as it goes. Neither is universally better — the right choice depends on task predictability.
@@ -30,7 +30,157 @@ Unlike [ReAct](react_and_reasoning_patterns.md) where planning and acting are in
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+"Plan-and-Execute" names a family, not one algorithm. The members differ on two
+axes: what the plan is *made of* (a flat list, a tree, a dependency graph) and
+whether observations feed back into the reasoning that produced it.
+
+### Planning Architectures
+
+| Architecture | Plan structure | Observations feed back? | What it optimizes | Cost signature |
+|--------------|----------------|-------------------------|-------------------|----------------|
+| ReAct (the contrast case) | None — the next action is chosen one step at a time | Yes, every step | Adaptivity | `N` calls, all on one model |
+| Base Plan-and-Execute | A flat numbered list, produced once up front | Yes, via the replanner | Strategic anchoring on long tasks | `1 + 2N + 2R` — one plan, an executor and a validator per step, two more per replan |
+| HTN decomposition | A tree: goals to sub-goals to primitive tasks | Yes, per sub-goal boundary | Making a large goal tractable | Only leaves execute: `b^d` executor calls |
+| ReWOO | A flat blueprint with variable substitution (`#E1`) for results not yet seen | No — that is the point | Token cost; the reasoning context is paid for once | Reported 5x token efficiency and a 64% average token reduction over ReAct |
+| LLMCompiler | A DAG with explicit dependency edges | Yes | Wall-clock latency | Latency tracks the DAG's *depth*, not its node count |
+
+The base loop is the right default. Reach for HTN when the goal is too large to
+enumerate flatly; ReWOO when the re-sent observation transcript is what is
+costing you; LLMCompiler when independent steps are serialising for no reason and
+hand-labelled `[PARALLEL]` markers keep missing dependencies.
+
+None of the four raises the per-step success probability `p`. They redistribute
+cost and latency; step validation is what actually protects the compounding
+`p^n` curve, so every variant still needs it.
+
+### Where the Work Is Split
+
+| Split | Planner | Executor | Why it is done this way |
+|-------|---------|----------|-------------------------|
+| Uniform model | Frontier model | Same frontier model | Simplest; costs `N x C_plan` and is almost never right for `N >= 2` |
+| Split model | Frontier model, once | Small model, per step | `C_plan + N x C_exec` — roughly 9x cheaper on a 15-step plan |
+| Split model + human gate | Frontier model, plan surfaced for approval | Small model | Compliance requires a plan reviewed before execution |
+
+### Replanning Triggers
+
+| Trigger | Detection | Response |
+|---------|-----------|----------|
+| Step failed outright | `step_result["status"] == "failed"` | Replan the remaining steps from what has been completed |
+| Result contradicts a plan assumption | A validator call asking whether the remaining plan is still valid | Replan, citing the violated assumption |
+| Plan exhausted | Step index passes the plan length | Synthesize, do not replan |
+| Replan budget exhausted | `replan_count >= max_replan` (2-3) | Return the best partial answer or escalate to a human |
+
+`max_replan` is a cost control before it is a correctness control: each replan
+re-runs the *expensive* planner, so three replans can nearly triple the bill on a
+split-model deployment.
+
+### Plan Granularity
+
+Granularity is the knob that decides whether any of the above helps. Plans of 3
+vague mega-steps give executors nothing to act on; plans of 50 micro-steps
+destroy the strategic clarity that motivated planning and push the compounding
+success rate toward zero. 5-15 concrete, atomic steps is the working range, and
+depth — not breadth — is what pushes an HTN out of it.
+
+---
+
+## 5. Architecture Diagrams
+
+### Two-Phase Architecture
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TASK["Input: Task"]
+    PLAN["Phase 1 — Planner\nfrontier model (e.g. GPT-5.6 Sol / Claude Opus 5)\nstrategic planning\n→ Step 1…Step N"]
+    EXEC["Phase 2 — Executor\ncheap model per step (e.g. GPT-5.6 Luna)\nexecute with tools available"]
+    VAL{"Validate step output\nShould replan?"}
+    REPLAN["Replan\n(revise remaining steps)"]
+    SYNTH["Phase 3 — Synthesis\ncombine all step outputs\n→ final deliverable"]
+    OUT["Output: Final answer"]
+
+    TASK --> PLAN --> EXEC --> VAL
+    VAL -->|"NO"| EXEC
+    VAL -->|"YES"| REPLAN --> EXEC
+    EXEC -->|"all steps done"| SYNTH --> OUT
+
+    class TASK,OUT io
+    class PLAN,EXEC,SYNTH base
+    class VAL mathOp
+    class REPLAN lossN
+```
+
+### LangGraph Plan-and-Execute Pattern
+
+```python
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, List, Optional
+
+class PlanExecuteState(TypedDict):
+    task: str
+    plan: List[str]
+    current_step_index: int
+    completed_steps: List[dict]
+    replan_count: int
+    final_answer: Optional[str]
+
+def planner_node(state: PlanExecuteState) -> PlanExecuteState:
+    plan = plan_task(state["task"])
+    return {"plan": plan, "current_step_index": 0}
+
+def executor_node(state: PlanExecuteState) -> PlanExecuteState:
+    step = state["plan"][state["current_step_index"]]
+    result = execute_step(step, state["completed_steps"], tools)
+    return {
+        "completed_steps": state["completed_steps"] + [result],
+        "current_step_index": state["current_step_index"] + 1
+    }
+
+def replanner_node(state: PlanExecuteState) -> PlanExecuteState:
+    new_plan = replan(state["task"], state["completed_steps"],
+                      state["plan"][state["current_step_index"]:], "plan stale")
+    return {"plan": state["plan"][:state["current_step_index"]] + new_plan,
+            "replan_count": state["replan_count"] + 1}
+
+def route_after_step(state: PlanExecuteState) -> str:
+    if state["current_step_index"] >= len(state["plan"]):
+        return "synthesize"
+    if state["replan_count"] > 3:
+        return "synthesize"  # too many replans; stop
+    last_result = state["completed_steps"][-1]
+    if last_result["status"] == "failed":
+        return "replan"
+    return "execute"
+
+graph = StateGraph(PlanExecuteState)
+graph.add_node("plan", planner_node)
+graph.add_node("execute", executor_node)
+graph.add_node("replan", replanner_node)
+graph.add_node("synthesize", synthesizer_node)
+
+graph.set_entry_point("plan")
+graph.add_edge("plan", "execute")
+graph.add_conditional_edges("execute", route_after_step,
+    {"execute": "execute", "replan": "replan", "synthesize": "synthesize"})
+graph.add_edge("replan", "execute")
+graph.add_edge("synthesize", END)
+
+app = graph.compile()
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### Planner Prompt Structure
 
@@ -352,101 +502,7 @@ raises per-step `p`, so both still need step validation.
 
 ---
 
-## Architecture Diagrams
-
-### Two-Phase Architecture
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    TASK["Input: Task"]
-    PLAN["Phase 1 — Planner\nfrontier model (e.g. GPT-5.6 Sol / Claude Opus 5)\nstrategic planning\n→ Step 1…Step N"]
-    EXEC["Phase 2 — Executor\ncheap model per step (e.g. GPT-5.6 Luna)\nexecute with tools available"]
-    VAL{"Validate step output\nShould replan?"}
-    REPLAN["Replan\n(revise remaining steps)"]
-    SYNTH["Phase 3 — Synthesis\ncombine all step outputs\n→ final deliverable"]
-    OUT["Output: Final answer"]
-
-    TASK --> PLAN --> EXEC --> VAL
-    VAL -->|"NO"| EXEC
-    VAL -->|"YES"| REPLAN --> EXEC
-    EXEC -->|"all steps done"| SYNTH --> OUT
-
-    class TASK,OUT io
-    class PLAN,EXEC,SYNTH base
-    class VAL mathOp
-    class REPLAN lossN
-```
-
-### LangGraph Plan-and-Execute Pattern
-
-```python
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, List, Optional
-
-class PlanExecuteState(TypedDict):
-    task: str
-    plan: List[str]
-    current_step_index: int
-    completed_steps: List[dict]
-    replan_count: int
-    final_answer: Optional[str]
-
-def planner_node(state: PlanExecuteState) -> PlanExecuteState:
-    plan = plan_task(state["task"])
-    return {"plan": plan, "current_step_index": 0}
-
-def executor_node(state: PlanExecuteState) -> PlanExecuteState:
-    step = state["plan"][state["current_step_index"]]
-    result = execute_step(step, state["completed_steps"], tools)
-    return {
-        "completed_steps": state["completed_steps"] + [result],
-        "current_step_index": state["current_step_index"] + 1
-    }
-
-def replanner_node(state: PlanExecuteState) -> PlanExecuteState:
-    new_plan = replan(state["task"], state["completed_steps"],
-                      state["plan"][state["current_step_index"]:], "plan stale")
-    return {"plan": state["plan"][:state["current_step_index"]] + new_plan,
-            "replan_count": state["replan_count"] + 1}
-
-def route_after_step(state: PlanExecuteState) -> str:
-    if state["current_step_index"] >= len(state["plan"]):
-        return "synthesize"
-    if state["replan_count"] > 3:
-        return "synthesize"  # too many replans; stop
-    last_result = state["completed_steps"][-1]
-    if last_result["status"] == "failed":
-        return "replan"
-    return "execute"
-
-graph = StateGraph(PlanExecuteState)
-graph.add_node("plan", planner_node)
-graph.add_node("execute", executor_node)
-graph.add_node("replan", replanner_node)
-graph.add_node("synthesize", synthesizer_node)
-
-graph.set_entry_point("plan")
-graph.add_edge("plan", "execute")
-graph.add_conditional_edges("execute", route_after_step,
-    {"execute": "execute", "replan": "replan", "synthesize": "synthesize"})
-graph.add_edge("replan", "execute")
-graph.add_edge("synthesize", END)
-
-app = graph.compile()
-```
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Devin (Cognition AI)
 
@@ -476,7 +532,7 @@ LangGraph docs for "plan-and-execute"). It:
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | ReAct | Plan-and-Execute |
 |-----------|-------|-----------------|
@@ -520,7 +576,7 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Plan-and-Execute When:
 - Task has 10+ steps with known structure (research → analyze → write)
@@ -537,7 +593,7 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **No replanning mechanism**: Deploying Plan-and-Execute without a replanning trigger. If the first search returns no results, the agent blindly executes steps 2-10 of a now-invalid plan. Always implement `should_replan()` after each step.
 
@@ -551,7 +607,7 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -563,7 +619,7 @@ The break-even is immediate: the split arrangement wins for any `N >= 2`, and it
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is Plan-and-Execute and how does it differ from ReAct?**
 A: Plan-and-Execute separates task planning from task execution into two distinct phases. The Planner LLM generates a complete numbered plan before any action is taken. The Executor Agent then works through the plan step-by-step. In ReAct, planning and acting are interleaved — the agent decides its next action after each observation without a global plan. Plan-and-Execute provides a structural anchor for long tasks, enables parallel execution of independent steps, and gives stakeholders a plan to review before execution. ReAct is more adaptive and simpler to implement. Choose Plan-and-Execute for tasks with 10+ steps and known structure; ReAct for shorter tasks and unpredictable environments.
@@ -615,7 +671,7 @@ A: A planning call uses a large model (GPT-5.6 Sol, Claude Opus 5) and generates
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Always include expected output in each plan step**: "Expected output: [specific format/content]" — this drives validation and replanning.
 2. **Mark parallel steps in the plan**: explicit parallelism markers make the orchestrator's job straightforward and document intent.

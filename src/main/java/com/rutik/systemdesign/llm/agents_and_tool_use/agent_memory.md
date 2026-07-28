@@ -1,6 +1,6 @@
 # Agent Memory
 
-## Concept Overview
+## 1. Concept Overview
 
 Agent memory encompasses all mechanisms by which an LLM agent stores and retrieves information across the span of a task and across sessions. Without memory, every agent invocation starts blank — no knowledge of past user preferences, prior task outcomes, or accumulated domain knowledge. Memory is what makes an agent feel coherent and capable over time rather than amnesiac.
 
@@ -8,7 +8,7 @@ Memory for LLM agents has four distinct types, each with different storage mecha
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Agent memory is like a researcher's notebook system — sticky notes on the desk for the current task (working memory), a notebook for recent meetings (episodic), a reference library for domain facts (semantic), and personal shorthand for well-practiced procedures (procedural).
 
@@ -20,7 +20,7 @@ Memory for LLM agents has four distinct types, each with different storage mecha
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **Four memory types**: working (in-context), episodic (event records), semantic (factual knowledge), procedural (skill templates). Each has different access patterns and lifetimes.
 - **Memory is not infinite context**: even with 1M-token context windows, filling context with everything is wasteful and degrading to reasoning quality.
@@ -30,7 +30,96 @@ Memory for LLM agents has four distinct types, each with different storage mecha
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+Memory design decomposes into four independent choices: which *type* a piece of
+information is, which *store* backs that type, which *strategy* keeps the context
+window inside its budget, and which *policy* decides what leaves when space runs
+out. The rest of this file works through each in detail; this is the map.
+
+### Memory Types and Their Storage
+
+| Type | What it holds | Storage | Retrieval | Persistence | Choose when |
+|------|---------------|---------|-----------|-------------|-------------|
+| Working | System prompt, conversation history, tool results, scratch notes | The context window itself | None — already in context, 0ms | Session only | Always; it is the only type you cannot opt out of |
+| Episodic | Past conversations, task outcomes, observations, timestamped events | Vector DB, key-value store or relational DB | Semantic similarity or temporal filter, 10-100ms | Permanent | The agent must recall what happened before |
+| Semantic | Facts about the world, domain knowledge, the user profile | Vector DB, optionally a knowledge graph | Semantic similarity or graph traversal, 20-200ms | Permanent, updated on new facts | Personalization and stable domain facts |
+| Procedural | Successful tool-call patterns, solution templates, code snippets | Vector DB or a code/template library | Similarity to the current *task type*, 20-100ms | Permanent, grows with experience | The same class of task recurs and past approaches transfer |
+
+The dividing question is not "is this important" but "what does the lookup key
+look like". Episodic memory is keyed by *when and what happened*, semantic by
+*what is true*, procedural by *what kind of task this is*. Mixing them into one
+index is what the case study below measures as an 18-point precision loss, and
+some facts want no similarity search at all — the mastery map is retrieved by
+direct key lookup precisely because a short topic string ranks unreliably under
+cosine similarity.
+
+### Context-Management Strategies
+
+| Strategy | What it does | Quality | Added latency | Complexity |
+|----------|--------------|---------|---------------|------------|
+| Sliding window | Keep the last N tokens, drop the rest | Low — the early turns are simply gone | 0ms | Trivial |
+| Summarize-and-replace | Pin both ends, replace the middle with an LLM summary | Medium | 200-500ms (one extra call) | Low |
+| Hierarchical summary | Maintain step, task and session summaries; inject the granularity that matches the distance | High | 300-800ms | Medium |
+| MemGPT-style paging | The model itself archives and retrieves via tool calls | Highest | 50-200ms per search | High |
+
+All four buy context space with fidelity; they differ only in which tokens you
+agree to lose and how gracefully. The first three are mechanisms *you* run on a
+threshold; MemGPT's distinguishing move is handing the decision to the model.
+
+### Eviction Policies
+
+| Policy | Ranking signal | Cost | Failure mode |
+|--------|----------------|------|--------------|
+| FIFO | Age alone | O(1), no LLM call | Evicts the task description and constraints stated first — the most important content |
+| Importance-based | A per-item score assigned at write time | Needs an LLM call or heuristics | Scoring is the whole system; a bad scorer is worse than FIFO |
+| Recency-weighted | Importance decayed over time, spiking on re-reference | Moderate | Long-lived but rarely referenced constraints decay away |
+
+FIFO is only defensible when the conversation is uniformly important throughout.
+Recency-weighted is the OS LRU analogue and the practical default.
+
+### Build It or Adopt It
+
+| Axis | Vector-store memory you build | Provider-native memory tool |
+|------|------------------------------|-----------------------------|
+| Shape | Many small independent facts | Files the model authors and edits under `/memories` |
+| Retrieval | Top-K over a combined similarity/recency/importance score | The model lists a directory and opens what it wants |
+| You own | Extraction prompt, embeddings, ranking, dedup | Path validation, size and expiry policy, file organisation |
+| Best for | Many users, many small facts, ranking genuinely is the problem | Narrative agent-authored state — project context, lessons across sessions |
+
+---
+
+## 5. Architecture Diagrams
+
+### Agent Memory System
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ctx(["Context Window<br/>128K tokens = working memory<br/>System Prompt ~2K, History ~30K<br/>Retrieved ~5K, Tool Results ~10K<br/>Available for generation ~80K"])
+
+    epi[("Episodic Store<br/>vector DB<br/>Past events, outcomes,<br/>observations<br/>Retrieved by temporal query")]
+    sem[("Semantic Store<br/>vector DB + knowledge graph<br/>User prefs, domain facts,<br/>entity facts<br/>Retrieved by semantic similarity")]
+    proc[("Procedural Store<br/>vector DB<br/>Search patterns, code<br/>templates, debug sequences<br/>Retrieved by task similarity")]
+
+    ctx -->|archive / retrieve| epi
+    ctx -->|archive / retrieve| sem
+    ctx -->|archive / retrieve| proc
+
+    class ctx req
+    class epi,sem,proc base
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### The Four Memory Types
 
@@ -404,37 +493,7 @@ Recency-Weighted:
 
 ---
 
-## Architecture Diagrams
-
-### Agent Memory System
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    ctx(["Context Window<br/>128K tokens = working memory<br/>System Prompt ~2K, History ~30K<br/>Retrieved ~5K, Tool Results ~10K<br/>Available for generation ~80K"])
-
-    epi[("Episodic Store<br/>vector DB<br/>Past events, outcomes,<br/>observations<br/>Retrieved by temporal query")]
-    sem[("Semantic Store<br/>vector DB + knowledge graph<br/>User prefs, domain facts,<br/>entity facts<br/>Retrieved by semantic similarity")]
-    proc[("Procedural Store<br/>vector DB<br/>Search patterns, code<br/>templates, debug sequences<br/>Retrieved by task similarity")]
-
-    ctx -->|archive / retrieve| epi
-    ctx -->|archive / retrieve| sem
-    ctx -->|archive / retrieve| proc
-
-    class ctx req
-    class epi,sem,proc base
-```
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### ChatGPT Memory (OpenAI, 2024)
 
@@ -460,7 +519,7 @@ flowchart TD
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Memory Type | Latency | Storage Cost | Retrieval Quality | Best For |
 |-------------|---------|-------------|-------------------|---------|
@@ -478,7 +537,7 @@ flowchart TD
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Multi-Session Memory is Essential When:
 - User has persistent preferences that improve quality (coding style, domain expertise)
@@ -493,7 +552,7 @@ flowchart TD
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Memory injection without relevance filtering**: Injecting all memories regardless of relevance bloats context and degrades reasoning. Always retrieve top-K by semantic similarity, never inject everything.
 
@@ -507,7 +566,7 @@ flowchart TD
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -521,7 +580,7 @@ flowchart TD
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What are the four types of agent memory and what is each used for?**
 A: Working memory: the current context window — everything the agent can see right now; limited to the context window size (200K-1M tokens on current frontier models); cleared between sessions. Episodic memory: a record of past events and interactions stored in an external database; retrieved by semantic similarity or temporal query; enables the agent to remember what happened in past conversations. Semantic memory: factual knowledge about the world and the user stored in a knowledge base; includes user preferences, domain facts, entity information; retrieved by semantic similarity. Procedural memory: templates and patterns for successful task execution — successful code patterns, search strategies, debug sequences; retrieved when a similar task type is encountered.
@@ -573,7 +632,7 @@ A: Agent memory creates persistent profiles of user behavior, preferences, and s
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Classify memory by type before storing**: episodic (event), semantic (fact), procedural (pattern) — store in separate collections with appropriate metadata for targeted retrieval.
 2. **Always pin the system prompt and task description**: never evict the initial context that defines the agent's role and current goal, regardless of eviction policy.

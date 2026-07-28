@@ -1,6 +1,6 @@
 # ReAct & Reasoning Patterns
 
-## Concept Overview
+## 1. Concept Overview
 
 ReAct (Reasoning + Acting), Reflexion, Tree of Thoughts, and self-consistency are prompting patterns that guide LLMs through structured reasoning before and during action. They address a fundamental limitation: raw LLMs produce better outputs when their reasoning is made explicit and structured rather than implicit and one-shot.
 
@@ -8,7 +8,7 @@ ReAct interleaves thought and action in a Thought-Action-Observation loop. Refle
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: ReAct is like a detective who thinks aloud before acting — "I need to check the alibi first, then examine the evidence, then form a conclusion" — rather than guessing the answer immediately.
 
@@ -20,7 +20,7 @@ ReAct interleaves thought and action in a Thought-Action-Observation loop. Refle
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **Explicit reasoning improves accuracy**: Prompting for a Thought before each Action consistently outperforms direct action selection on multi-step tasks.
 - **Grounded actions prevent hallucination**: Acting on tool observations rather than memory alone reduces hallucinated facts.
@@ -30,7 +30,142 @@ ReAct interleaves thought and action in a Thought-Action-Observation loop. Refle
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+The patterns in this file are all the same trade — spend more compute to make
+reasoning explicit — but they spend it along different axes. Two questions
+separate them: does the pattern spend along *depth* (one chain, made longer or
+more visible), *breadth* (several chains, compared), or *time* (several attempts,
+each learning from the last)? And does the reasoning live in your prompt or
+inside the model?
+
+### The Reasoning-Pattern Family
+
+| Pattern | Axis of spend | Structure | Cost | Measured gain | Best for |
+|---------|---------------|-----------|------|---------------|----------|
+| Direct answer | None | Prompt to answer | 1 call | Baseline | Simple factual Q&A |
+| Chain-of-Thought | Depth | Reasoning written out before the answer | 1 call plus tokens | +10-20% on reasoning | Math, logic |
+| Scratchpad | Depth | Free-form draft space, false starts and corrections allowed | 1 call plus tokens | Same family as CoT | Pure reasoning where format would get in the way |
+| ReAct | Depth, interleaved with the world | Thought, Action, Observation, repeated | `N` calls for `N` steps | 71% vs 45% on ALFWorld, 40.0% vs 30.1% on WebShop against act-only | Agentic tasks with tools — the default |
+| Self-consistency | Breadth | `N` independent chains at temperature > 0, majority vote | `N x` calls | +3.9 to +17.9 points across ARC-c, StrategyQA, SVAMP, AQuA, GSM8K | High-stakes single questions |
+| Tree of Thoughts | Breadth, with search | Candidate thoughts scored and pruned, BFS/DFS/beam | `B x D` pruned, `B^D` unpruned | +20-40% on planning | Planning where early choices dominate the outcome |
+| Reflexion | Time | Attempt, evaluate, write a verbal lesson, retry with it in context | `K` attempts x `N` steps | +15-30% on retry | Tasks with verifiable feedback (tests, execution) |
+
+### Where the Reasoning Lives
+
+| Placement | Mechanism | What you get | What you give up |
+|-----------|-----------|--------------|------------------|
+| Prompted | A `Thought:` field or `<thinking>` tags in the system prompt | Plain text you can log, grep, evaluate and show a user | The model must be instructed to reason, and can ignore the instruction |
+| Native, once per turn | `thinking` enabled; the model reasons at the top of the turn | Reasoning quality without prompt scaffolding | Nothing after a tool result gets a thinking block — observations are reacted to, not reasoned about |
+| Native, interleaved | Adaptive thinking on current models; the model thinks again after each tool result | ReAct's Thought field relocated into the model | Blocks are summarized and encrypted, and must be echoed back verbatim with their `signature` or the API rejects the turn |
+
+On models that interleave automatically, a prompted `Thought:` field is largely
+redundant — keep it only where you need the reasoning human-readable.
+
+### Choosing Between Them
+
+The axes compose rather than compete: Reflexion wraps a ReAct loop, ToT can score
+CoT chains, self-consistency can vote over ReAct trajectories. Three rules
+narrow the choice fast. Breadth patterns assume chain errors are *independent* —
+on a fact the model does not know, every chain reproduces the same error and
+voting gains nothing. Search patterns are only as good as the evaluator that
+prunes them; without a trustworthy scorer, ToT is expensive sampling. And time
+patterns need a signal that a run failed, so Reflexion is worth its `K x N` cost
+only where success is verifiable.
+
+---
+
+## 5. Architecture Diagrams
+
+### ReAct Loop
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TASK(["Task input"])
+    THT["Thought\nLLM reasons about state and next action"]
+    ACT["Action\ntool call (search, code execution, API)"]
+    OBS["Observation\ntool result injected into context"]
+    DONE{"Task complete?"}
+    ANS(["Final answer"])
+    ABORT["Abort / partial answer\n(same action 2× or N steps exceeded)"]
+
+    TASK --> THT --> ACT --> OBS --> DONE
+    DONE -->|"YES"| ANS
+    DONE -->|"NO"| THT
+    DONE -->|"STUCK"| ABORT
+
+    class TASK,ANS io
+    class THT base
+    class ACT frozen
+    class OBS req
+    class DONE mathOp
+    class ABORT lossN
+```
+
+### Reflexion Architecture
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    EPN["Episode N\nReAct loop (uses memory)"]
+    FAILN["Outcome: FAIL"]
+    EVAL["Evaluator\n'What went wrong?'"]
+    REFL["Reflection\n'Next time try X'"]
+    MEM["Memory Buffer\nReflection 1: 'search broader'\nReflection 2: 'verify dates'\nReflection N-1: '...'"]
+    EPN1["Episode N+1\nReAct loop — improved strategy"]
+    PASS(["PASS"])
+
+    EPN --> FAILN --> EVAL --> REFL --> MEM
+    MEM -.->|"memory in context"| EPN
+    MEM -.->|"memory injected in context"| EPN1
+    EPN1 --> PASS
+
+    class EPN,EPN1 base
+    class FAILN lossN
+    class EVAL frozen
+    class REFL,MEM train
+    class PASS io
+```
+
+Each failed episode ends with a verbal reflection appended to the episodic memory buffer (typically the last 5-10 reflections); the buffer is injected into the next episode's context, which is how Episode N+1 turns the same task into a PASS.
+
+### Tree of Thoughts
+
+```
+Task
+ |
+ +── Thought A (score: 6)
+ |       |
+ |       +── A.1 (score: 8) ── A.1.1 → ANSWER 1
+ |       +── A.2 (score: 4) [PRUNED]
+ |
+ +── Thought B (score: 9) ★ best
+ |       |
+ |       +── B.1 (score: 9) ── B.1.1 → ANSWER 2 ★ selected
+ |       +── B.2 (score: 7)
+ |
+ +── Thought C (score: 3) [PRUNED]
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### ReAct: Thought-Action-Observation Loop
 
@@ -352,97 +487,7 @@ thinking blocks are summarized and encrypted rather than plain text.
 
 ---
 
-## Architecture Diagrams
-
-### ReAct Loop
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    TASK(["Task input"])
-    THT["Thought\nLLM reasons about state and next action"]
-    ACT["Action\ntool call (search, code execution, API)"]
-    OBS["Observation\ntool result injected into context"]
-    DONE{"Task complete?"}
-    ANS(["Final answer"])
-    ABORT["Abort / partial answer\n(same action 2× or N steps exceeded)"]
-
-    TASK --> THT --> ACT --> OBS --> DONE
-    DONE -->|"YES"| ANS
-    DONE -->|"NO"| THT
-    DONE -->|"STUCK"| ABORT
-
-    class TASK,ANS io
-    class THT base
-    class ACT frozen
-    class OBS req
-    class DONE mathOp
-    class ABORT lossN
-```
-
-### Reflexion Architecture
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    EPN["Episode N\nReAct loop (uses memory)"]
-    FAILN["Outcome: FAIL"]
-    EVAL["Evaluator\n'What went wrong?'"]
-    REFL["Reflection\n'Next time try X'"]
-    MEM["Memory Buffer\nReflection 1: 'search broader'\nReflection 2: 'verify dates'\nReflection N-1: '...'"]
-    EPN1["Episode N+1\nReAct loop — improved strategy"]
-    PASS(["PASS"])
-
-    EPN --> FAILN --> EVAL --> REFL --> MEM
-    MEM -.->|"memory in context"| EPN
-    MEM -.->|"memory injected in context"| EPN1
-    EPN1 --> PASS
-
-    class EPN,EPN1 base
-    class FAILN lossN
-    class EVAL frozen
-    class REFL,MEM train
-    class PASS io
-```
-
-Each failed episode ends with a verbal reflection appended to the episodic memory buffer (typically the last 5-10 reflections); the buffer is injected into the next episode's context, which is how Episode N+1 turns the same task into a PASS.
-
-### Tree of Thoughts
-
-```
-Task
- |
- +── Thought A (score: 6)
- |       |
- |       +── A.1 (score: 8) ── A.1.1 → ANSWER 1
- |       +── A.2 (score: 4) [PRUNED]
- |
- +── Thought B (score: 9) ★ best
- |       |
- |       +── B.1 (score: 9) ── B.1.1 → ANSWER 2 ★ selected
- |       +── B.2 (score: 7)
- |
- +── Thought C (score: 3) [PRUNED]
-```
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### ReAct in Production: Claude Code
 
@@ -470,7 +515,7 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Pattern | Cost | Quality Gain | Best For |
 |---------|------|-------------|---------|
@@ -483,7 +528,7 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Explicit Reasoning Patterns When:
 - Multi-step tasks where intermediate reasoning affects later steps
@@ -524,7 +569,7 @@ T = N x L
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Thought-Action mismatch**: Model writes "I should search for X" then searches for Y. Add validation in system prompt: "Your Action must directly follow from your Thought."
 
@@ -538,7 +583,7 @@ T = N x L
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -553,7 +598,7 @@ T = N x L
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the ReAct pattern and why does it outperform direct LLM calls for agentic tasks?**
 A: ReAct (Reasoning + Acting) prompts the LLM to alternate between a Thought (reasoning about what to do), an Action (tool call), and an Observation (tool result), repeating until the task is complete. It outperforms direct calls for three reasons: (1) explicit thinking causes the model to reason through the task before committing to an action, reducing impulsive wrong tool selections; (2) grounding in tool observations prevents the model from hallucinating intermediate facts; (3) the iterative loop allows the model to observe whether its hypothesis was correct and adjust. The 2022 ReAct paper (Yao et al.) reported absolute success-rate gains of 34 points on ALFWorld and 10 points on WebShop over imitation and RL baselines. Note what it did NOT show: on the knowledge-intensive benchmarks, ReAct alone slightly underperformed chain-of-thought (HotpotQA exact match 27.4 vs 29.4; Fever 60.9 vs 56.3 was the one win), and only the combined ReAct + CoT-SC variants beat both (35.1 on HotpotQA, 64.6 on Fever).
@@ -605,7 +650,7 @@ A: Faithfulness measures whether the stated Thought causally determines the Acti
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Use ReAct as the default**: for any agent with more than one tool, the structured Thought-Action-Observation loop consistently outperforms direct tool selection.
 2. **Add Reflexion for verifiable tasks**: when success is measurable (tests pass/fail, fact is correct/wrong), Reflexion's retry-with-reflection loop substantially improves completion rates.

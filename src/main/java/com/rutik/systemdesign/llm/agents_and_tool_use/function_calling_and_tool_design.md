@@ -1,6 +1,6 @@
 # Function Calling & Tool Design
 
-## Concept Overview
+## 1. Concept Overview
 
 Function calling (also called tool use) is the mechanism by which LLMs communicate their intent to invoke external code. The model outputs a structured call — a function name and arguments — rather than a prose answer. Your application code intercepts that call, executes the function, and injects the result back into the conversation. The model then produces a final response informed by the real-world result.
 
@@ -8,7 +8,7 @@ Every major provider implements this differently in detail, but the underlying p
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Function calling is like a manager sending a work order — the LLM writes the order (function name + arguments), a worker executes it, and the result comes back to the manager who writes the final memo.
 
@@ -20,7 +20,7 @@ Every major provider implements this differently in detail, but the underlying p
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **Description drives selection**: The model chooses which tool to call based on the tool's description field, not its name. Vague descriptions cause wrong selection or missed calls.
 - **Schema drives argument accuracy**: Well-typed JSON Schema (enums, required fields, descriptions on each property) dramatically reduces argument hallucination.
@@ -30,7 +30,155 @@ Every major provider implements this differently in detail, but the underlying p
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+Four choices define any tool integration: what *kind* of tool it is, which *spec
+shape* the provider expects, how the calls are *sequenced*, and how tightly the
+arguments are *constrained*. They are independent — a provider-hosted tool can be
+called in parallel, a custom function can be forced with strict decoding.
+
+### Kinds of Tool
+
+| Kind | Who executes it | Declared as | Best for |
+|------|-----------------|-------------|----------|
+| Custom function | Your application code | A name, description and JSON Schema you write | Anything specific to your system — internal APIs, database reads, writes to external systems |
+| Provider-hosted | The provider, on their infrastructure | A `type` and its config; you never implement it | Sandboxed Python (`code_interpreter`), RAG over uploaded files (`file_search`), live web lookup (`web_search`), computer use |
+| Extraction tool | Your code, but the result is the point | A schema for the object you want back, forced with `tool_choice` | Turning the model into a structured extraction engine rather than a caller |
+
+### Spec Shapes Across Providers
+
+| Surface | Schema key | Strict flag | "Must call a tool" | Parallel control |
+|---------|-----------|-------------|--------------------|------------------|
+| OpenAI Chat Completions | `parameters`, nested under a `"function"` key | `strict` inside `function` | `tool_choice="required"` | `parallel_tool_calls=True` |
+| OpenAI Responses | `parameters`, flat at the top level | `strict` at the top level | `tool_choice="required"` | `parallel_tool_calls=True` |
+| Anthropic Messages | `input_schema` | `strict` top-level, beside `input_schema` | `tool_choice={"type": "any"}` | Opt-*out*: `disable_parallel_tool_use` on `tool_choice` |
+
+The shapes are close enough that ported code appears to work and then fails on
+the spelling: `any` versus `required`, an object versus a string, a nested versus
+a flat `strict`. Two Anthropic behaviours have no OpenAI equivalent at all —
+schemas are compiled and cached separately from messages for up to 24 hours, and
+forcing a tool call is incompatible with manual-budget extended thinking.
+
+### Invocation Strategies
+
+| Strategy | Shape | Latency | Use when |
+|----------|-------|---------|----------|
+| Sequential | Call 2 consumes call 1's result | `T1 + T2 + ... + TN` | The calls are genuinely dependent — no arrangement avoids the sum |
+| Parallel | Several independent calls in one assistant response | `max(T1, ..., TN)` | Nothing in the batch reads another's output |
+| Chained | One call fans out into several, which converge into a synthesis step | Depth of the chain, not its width | A search step yields items that are then fetched independently |
+| No tool | Prose answer | One call | The model already knows the answer and a lookup would only add latency and cost |
+
+The advertised `N×` parallel speedup is the equal-duration best case. Skewed
+durations collapse it toward 1, because `max` is set entirely by the laggard.
+
+### Argument-Constraint Modes
+
+| Mode | Guarantee | Cost | Use when |
+|------|-----------|------|----------|
+| Description only | None; the model may invent enums, omit required fields, pass wrong types | Cheapest schema to write | Prototyping only |
+| `strict: true` | Constrained decoding — arguments always satisfy the declared schema | Every property must appear in `required`; optionality is a `null` type union; `additionalProperties: false` everywhere | Production, always |
+| Strict + forced `tool_choice` | The model must call this tool, and the arguments will validate | Removes the model's option to answer in prose | Structured extraction pipelines |
+
+Independent of the mode, the *result* format is its own decision: structured JSON
+with an explicit `status` field is what lets the model reason about recovery,
+which raw JSON and prose both make harder.
+
+---
+
+## 5. Architecture Diagrams
+
+### Function Calling Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q["User: 'What's the weather in Paris?'"]
+    LLM1["LLM with tool specs\nreasoning: I have get_weather; location=Paris,FR"]
+    CALL["Tool call output\n{name: get_weather, args: {location: Paris,FR}}"]
+    APP["Application code\nparses args → calls weather API → gets result"]
+    INJ["Tool result message\n{role: tool, content: {temp: 18, condition: cloudy}}"]
+    LLM2["LLM second call\nsees messages + tool call + result"]
+    RESP["'The current weather in Paris is 18°C and cloudy.'"]
+
+    Q --> LLM1 --> CALL --> APP --> INJ --> LLM2 --> RESP
+
+    class Q,RESP io
+    class LLM1,LLM2 base
+    class CALL,INJ req
+    class APP frozen
+```
+
+### Parallel Tool Call Flow
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q["User: 'Compare weather in Paris and Tokyo'"]
+    LLM1["LLM → two tool calls in ONE response"]
+    P1["call_001\nget_weather('Paris, FR')"]
+    P2["call_002\nget_weather('Tokyo, JP')"]
+    MERGE["Both results injected into messages"]
+    LLM2["LLM second call"]
+    RESP["'Paris 18°C cloudy. Tokyo 22°C sunny. Tokyo warmer by 4°C.'"]
+
+    Q --> LLM1
+    LLM1 --> P1 & P2
+    P1 & P2 --> MERGE --> LLM2 --> RESP
+
+    class Q,RESP io
+    class LLM1,LLM2 base
+    class P1,P2 req
+    class MERGE mathOp
+```
+
+### Tool Chaining
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TASK(["Task: search LLM scaling laws,<br/>then summarize the top 3"])
+    S1["Step 1: search('LLM scaling laws')<br/>returns 5 article URLs + snippets"]
+    F1["fetch_article(url_1)"]
+    F2["fetch_article(url_2)"]
+    F3["fetch_article(url_3)"]
+    S3(["Step 3: no tool call<br/>summarize from context"])
+
+    TASK --> S1
+    S1 --> F1 & F2 & F3
+    F1 & F2 & F3 --> S3
+
+    class TASK,S3 io
+    class S1 base
+    class F1,F2,F3 req
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### OpenAI Tool Spec Format
 
@@ -340,100 +488,7 @@ tools_v2 = [
 
 ---
 
-## Architecture Diagrams
-
-### Function Calling Flow
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q["User: 'What's the weather in Paris?'"]
-    LLM1["LLM with tool specs\nreasoning: I have get_weather; location=Paris,FR"]
-    CALL["Tool call output\n{name: get_weather, args: {location: Paris,FR}}"]
-    APP["Application code\nparses args → calls weather API → gets result"]
-    INJ["Tool result message\n{role: tool, content: {temp: 18, condition: cloudy}}"]
-    LLM2["LLM second call\nsees messages + tool call + result"]
-    RESP["'The current weather in Paris is 18°C and cloudy.'"]
-
-    Q --> LLM1 --> CALL --> APP --> INJ --> LLM2 --> RESP
-
-    class Q,RESP io
-    class LLM1,LLM2 base
-    class CALL,INJ req
-    class APP frozen
-```
-
-### Parallel Tool Call Flow
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q["User: 'Compare weather in Paris and Tokyo'"]
-    LLM1["LLM → two tool calls in ONE response"]
-    P1["call_001\nget_weather('Paris, FR')"]
-    P2["call_002\nget_weather('Tokyo, JP')"]
-    MERGE["Both results injected into messages"]
-    LLM2["LLM second call"]
-    RESP["'Paris 18°C cloudy. Tokyo 22°C sunny. Tokyo warmer by 4°C.'"]
-
-    Q --> LLM1
-    LLM1 --> P1 & P2
-    P1 & P2 --> MERGE --> LLM2 --> RESP
-
-    class Q,RESP io
-    class LLM1,LLM2 base
-    class P1,P2 req
-    class MERGE mathOp
-```
-
-### Tool Chaining
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    TASK(["Task: search LLM scaling laws,<br/>then summarize the top 3"])
-    S1["Step 1: search('LLM scaling laws')<br/>returns 5 article URLs + snippets"]
-    F1["fetch_article(url_1)"]
-    F2["fetch_article(url_2)"]
-    F3["fetch_article(url_3)"]
-    S3(["Step 3: no tool call<br/>summarize from context"])
-
-    TASK --> S1
-    S1 --> F1 & F2 & F3
-    F1 & F2 & F3 --> S3
-
-    class TASK,S3 io
-    class S1 base
-    class F1,F2,F3 req
-```
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI Responses API — Built-in Tools
 
@@ -496,7 +551,7 @@ extract_tool = {
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Latency | Reliability | Flexibility | Best For |
 |----------|---------|-------------|-------------|---------|
@@ -546,7 +601,7 @@ This is why "parallelize independent calls" is named the primary latency optimis
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Function Calling When:
 - Need real-time data (weather, prices, news)
@@ -563,7 +618,7 @@ This is why "parallelize independent calls" is named the primary latency optimis
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Vague tool descriptions**: "Tool to get data" — model doesn't know when to call it. Always specify: what the tool does, when to call it (trigger conditions), when NOT to call it.
 
@@ -622,7 +677,7 @@ The "$0.50+ per run" quoted in the pitfall only makes sense on the accumulating 
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -637,7 +692,7 @@ The "$0.50+ per run" quoted in the pitfall only makes sense on the accumulating 
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is function calling and how does it differ from a prompt that asks the model to output JSON?**
 A: Function calling is a native model capability where the model is trained to recognize tool invocation opportunities and output structured call specifications in a dedicated message field separate from the text response. A prompt-to-JSON approach puts the JSON output in the text field and requires your code to parse it, leading to frequent format violations. With function calling: the model outputs `tool_calls` in a structured field, the protocol guarantees parseable JSON, `strict: true` mode uses constrained decoding to eliminate malformed arguments entirely, and the tool result injection has a defined message format. The fundamental difference is reliability — function calling is designed for machine consumption; prompted JSON is designed for a model that was asked nicely.
@@ -692,7 +747,7 @@ A: Version by appending `_v2`, `_v3` to the tool name when making breaking chang
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Write tool descriptions as triggers**: "Call this when X" and "Do NOT call this when Y" — disambiguate between similar tools explicitly.
 2. **Use strict mode in production**: It eliminates argument hallucination at zero reliability cost; the constraints are `additionalProperties: false` on every object and every property listed in `required` (optional = null union).
