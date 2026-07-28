@@ -1763,6 +1763,47 @@ python -m vllm.entrypoints.openai.api_server \
   --enable-log-requests               # per-request logging is OFF by default
 ```
 
+### Compilation and CUDA Graph Capture
+
+The two `# Optimization` lines above are the least-explained flags on the list, and they name the
+"CUDA graphs" that keep reappearing in §5's `overhead_bytes` term. At boot vLLM traces the model
+with `torch.compile`, then *captures* the resulting kernel sequence into replayable CUDA graphs at
+a set of batch sizes, so a steady-state decode step becomes one graph replay instead of hundreds of
+kernel launches. The general case for CUDA graphs is in
+[Inference Engines](../inference_engines/README.md); what follows is vLLM's control surface.
+
+Two knobs that are routinely mistaken for one:
+
+| Knob | What it selects | Default |
+|---|---|---|
+| `CompilationConfig.mode` (`-cc.mode=N`) | how far `torch.compile` goes: `0` NONE, `1` STOCK_TORCH_COMPILE, `2` DYNAMO_TRACE_ONCE, `3` VLLM_COMPILE | `None`, resolving to `3` on V1 |
+| `CompilationConfig.cudagraph_mode` | what gets captured: `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, `FULL_AND_PIECEWISE` | `FULL_AND_PIECEWISE` when piecewise compilation is on |
+
+Layered on top, the optimization guide documents four levels: `-O0` (no optimization, fastest
+startup), `-O1` (PIECEWISE cudagraphs), `-O2` (**the default** — more fusions,
+FULL_AND_PIECEWISE) and `-O3` (currently identical to `-O2`).
+
+**Piecewise vs full.** Piecewise capture splits the traced graph at the attention ops and captures
+only the pieces between them, leaving attention eager — that is how graph replay survives the
+ragged shapes continuous batching produces (§3). Full capture swallows attention too, which needs
+backend support but removes the per-layer hand-off. `FULL_AND_PIECEWISE` dispatches between the two
+at runtime: full graphs for uniform decode batches, piecewise for the rest. vLLM's design doc is
+blunt about the price — it is "generally the most performant setting... but also requires the most
+memory and takes the longest to capture."
+
+**Where that price lands.** Capture time is boot latency and captured graphs are resident VRAM —
+they *are* the `overhead_bytes` of §5, and the reason `gpu_memory_utilization=0.98` in §21 fails
+during a capture-adjacent allocation rather than at steady state. `--enforce-eager` skips
+compilation *and* capture: the fastest possible startup and the worst steady-state decode, which
+makes it a debug-loop flag and never a production one — the §16 Deployment's
+`initialDelaySeconds: 60` readiness probe already assumes compile-and-capture has finished. Three
+ways to shorten a boot without giving up the graphs: persist the compile artifacts under
+`VLLM_CACHE_ROOT` (default `~/.cache/vllm`) and bake them into the image; set
+`VLLM_FORCE_AOT_LOAD=1` so a cache miss fails loudly instead of silently recompiling; and feed the
+KV size vLLM logged on the first boot back as `--kv-cache-memory-bytes` to skip the memory-profiling
+pass (that flag then ignores `gpu_memory_utilization`, so it is only valid on an identical GPU and
+free-memory state). `vllm bench startup` measures whether any of it helped.
+
 ### Flag Tuning Guide
 
 | Goal | Key flags |
@@ -1885,6 +1926,42 @@ distinctions are architectural:
 | llama.cpp | GGUF, CPU and consumer GPUs, single-user focus |
 | Ollama | Packaging and UX layer over llama.cpp |
 
+### Measuring Your Own Numbers: `vllm bench`
+
+This section, §8 and §10 all end in "measure it yourself," so here is the instrument. `vllm bench`
+carries six subcommands: `serve` (online serving against a running server), `throughput` (offline
+batch throughput), `latency` (one batch, end to end), `startup` (boot time — see §17), `sweep` (a
+parameter sweep) and `mm-processor` (multimodal preprocessing).
+
+```bash
+vllm bench serve \
+    --backend openai \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name random \
+    --num-prompts 1000 \
+    --request-rate 20 \
+    --max-concurrency 64 \
+    --save-result --result-dir ./bench
+```
+
+It reports TTFT, TPOT, inter-token latency and end-to-end latency, at percentiles you choose with
+`--metric-percentiles`.
+
+**The trap is the default.** `--request-rate` defaults to `inf`, which fires all `--num-prompts`
+requests at once. That measures *saturation throughput* — a real capacity number — but the
+latencies printed beside it are almost entirely queueing, so they are worthless as an SLO. A p99
+TTFT you can put in a runbook needs either a finite `--request-rate` (open loop: arrivals do not
+wait for the server) or a `--max-concurrency` bound (closed loop: a fixed number in flight), raised
+step by step until the SLO breaks. That breaking point is the load you provision for, and
+`vllm bench sweep` exists to automate the climb.
+
+Three rules that keep the result honest. `--dataset-name random` at a fixed length erases the
+output-length variance that makes continuous batching worth 12.5× (§3), so use `sharegpt` or your
+own replayed traffic when the question is throughput. Do not compare an offline `throughput` run
+with an online `serve` run — they answer different questions. And discard the first run after a
+cold boot: prefix caching (§6) and CUDA-graph capture (§17) both make run two faster than run one,
+for reasons that have nothing to do with the flag you just changed.
+
 ---
 
 ## 20. Interview Questions
@@ -1952,6 +2029,14 @@ Both solve the same core problem — keeping the GPU busy by mixing prefill and 
 **Q16: How does PD (prefill/decode) disaggregation differ from chunked prefill, and when would you choose one over the other?**
 
 Chunked prefill keeps prefill and decode on the SAME GPU pool; PD disaggregation puts them on SEPARATE pools. Chunked prefill (§7) interleaves the two at the scheduling level — `--max-num-batched-tokens` chunks a long prompt's prefill so it shares steps with ongoing decodes, smoothing TTFT for other requests without changing hardware allocation. PD disaggregation goes further: prefill and decode run on SEPARATE GPU pools, each independently sized for its own roofline profile (prefill is compute-bound, decode is memory-bound), connected by a KV-cache transfer (NVLink intra-node, RDMA/InfiniBand cross-node) once prefill finishes for a request. The win is decoupling TTFT (prefill pool sizing) from TPOT (decode pool sizing) — a burst of long prompts no longer steals decode-step time from in-flight generations — at the cost of the KV-transfer overhead and operating a second fleet. In practice: at LOW QPS or with short, uniform prompts, chunked prefill's single-pool simplicity wins, because the transfer fabric and second control plane are pure overhead; at HIGH QPS with a skewed mix of long and short prompts, disaggregation (as in DistServe, Mooncake, Splitwise, NVIDIA Dynamo) improves goodput because each pool can be scaled and tuned against its own SLO — the transfer cost amortizes across the larger traffic volume. vLLM supports both: `--enable-chunked-prefill` for the co-located case, and an experimental `--kv-transfer-config` KV-connector for disaggregated prefill/decode instances.
+
+**Q17: What does `--enforce-eager` actually turn off in vLLM, and when is it the right flag?**
+
+It turns off both `torch.compile` compilation and CUDA-graph capture, trading steady-state decode throughput for the fastest possible startup. vLLM normally captures the decode path into replayable CUDA graphs so a step costs one graph replay instead of hundreds of kernel launches; on V1 the default `cudagraph_mode` is `FULL_AND_PIECEWISE`, meaning full graphs for uniform decode batches and piecewise graphs elsewhere, with the attention ops left eager so the ragged shapes continuous batching produces still work. Those captured graphs are resident VRAM — they are a large part of the `overhead_bytes` term that makes `--gpu-memory-utilization 0.98` fail during allocation rather than at steady state — and capture is also most of the boot time, which is why `--enforce-eager` looks attractive under both memory pressure and slow-startup pressure. It is the wrong fix for either: for a slow boot, persist the compile cache under `VLLM_CACHE_ROOT`, set `VLLM_FORCE_AOT_LOAD=1` so a cache miss fails loudly, and skip re-profiling with `--kv-cache-memory-bytes`; for memory pressure, lower `--max-num-seqs`. Reach for `--enforce-eager` when you need an intelligible stack trace out of a kernel failure, when a custom operator refuses to capture, or when you want to measure how much of a boot is compile-and-capture.
+
+**Q18: Why is a `vllm bench serve` run at the default request rate the wrong number to quote as a latency SLO?**
+
+Because `--request-rate` defaults to `inf`, which fires every request at once, so the reported TTFT and TPOT are dominated by queueing and describe saturation rather than service under load. The `inf` run is still a legitimate measurement — it is your maximum throughput, the capacity ceiling — but a latency percentile is only meaningful at a load level you actually intend to serve. To get one, set a finite `--request-rate` (open loop: arrivals are independent of how fast the server drains them) or a `--max-concurrency` bound (closed loop: a fixed number of requests in flight), then raise it step by step until p99 breaks your SLO; that knee is the provisioning point, and `vllm bench sweep` automates the climb. Two related mistakes to avoid: benchmarking with `--dataset-name random` at a fixed length, which erases the output-length variance continuous batching profits from and understates the engine, and comparing an offline `vllm bench throughput` figure against an online `vllm bench serve` figure, which are different questions with different answers.
 
 ---
 
