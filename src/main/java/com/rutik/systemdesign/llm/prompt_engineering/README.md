@@ -300,6 +300,45 @@ Best practices for system prompts:
 - Include output length guidance
 - Define persona/role concisely (1-3 sentences is usually enough)
 
+### 4.8 Meta-Prompting
+
+Use the model to write and repair the prompt. Section 1 calls this out as one of the techniques
+that replaced the magic-word era, and it is the technique that makes the "Iterate" principle
+mechanical instead of a matter of taste: you hand a model a rough prompt plus the task
+description, and it returns a structured one.
+
+```
+Meta-prompt (the prompt that writes prompts):
+
+  You are a prompt engineer. Rewrite the DRAFT below into a production prompt.
+  Requirements:
+    - state the role and the task in the first two sentences
+    - enumerate the output schema explicitly
+    - wrap variable content in XML tags so it cannot be confused with instructions
+    - add 2 worked examples in the same format as the expected output
+    - list what the model must do when the input is empty or out of scope
+  Return ONLY the rewritten prompt.
+
+  <draft>{the engineer's first attempt}</draft>
+  <task>{one paragraph describing the real job}</task>
+```
+
+Both major vendors ship this as a product surface. Anthropic's Console prompt improver takes an
+existing prompt and rewrites it — adding a chain-of-thought section, normalizing examples into
+consistent XML, enriching those examples with reasoning that matches the new structure, and
+fixing structural and grammatical problems. Anthropic reports a 30% accuracy gain on a multilabel
+Wikipedia article-matching task with Claude 3 Haiku and 100% word-count adherence on a
+length-constrained summarization task. OpenAI's dashboard prompt optimizer is the same idea:
+a chat surface that rewrites your prompt against current best practices.
+
+**Where it stops.** A meta-prompt has no idea whether the rewrite is actually better on *your*
+inputs — it optimizes toward general prompting hygiene, not your metric, and a rewrite can raise
+average quality while regressing the specific cases you care about. Meta-prompting produces the
+candidate; an eval set decides. When you have a metric and a labelled dev set, the search-based
+tools in Section 12 (DSPy and its optimizers) close that loop automatically; meta-prompting is
+what you use before you have one, and to get a decent first draft in thirty seconds instead of
+an afternoon.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -621,6 +660,9 @@ A: Prompt engineering first — it is zero training cost and iterates in minutes
 
 **Q: What is automatic prompt optimization (e.g., DSPy) and when is it worth using?**
 A: Automatic prompt optimization treats the prompt as parameters to be searched rather than hand-written text. DSPy is the leading framework: you declare the task as typed input/output signatures and a metric, and an optimizer (e.g., MIPROv2, GEPA, BootstrapFewShot) searches over instructions and example selections against a small labeled set, often beating a hand-tuned prompt — though the size of the gain is task- and metric-specific and has to be measured on your own dev set rather than assumed. It is worth using when you have a measurable metric and a dev set, run a prompt at high volume (small gains compound), or maintain a pipeline of chained prompts that are painful to tune by hand. It is overkill for one-off prompts or tasks without a clear automatic metric, where manual iteration is faster.
+
+**Q: What is meta-prompting, and how is it different from automatic prompt optimization?**
+Meta-prompting is using an LLM to write or rewrite the prompt itself — one call, no metric, no dev set, and the output is a candidate prompt you still have to evaluate. Automatic prompt optimization (DSPy, MIPROv2, GEPA) is a search: it needs a scored metric and a labelled dev set, and it iterates over instructions and example selections keeping whatever measures better. The difference in practice is where the judgement lives. A meta-prompt encodes generic prompting hygiene — state the role, specify the schema, wrap variable content in delimiters, add worked examples, define out-of-scope behavior — so it improves a bad prompt reliably and improves an already-good prompt unpredictably, because nothing in the loop knows your task. Vendor tooling ships the pattern directly: Anthropic's Console prompt improver rewrites a prompt by adding a chain-of-thought section, normalizing examples into consistent XML and enriching them with matching reasoning, and Anthropic reports a 30% accuracy gain on a multilabel Wikipedia matching task with Claude 3 Haiku plus 100% word-count adherence on a length-constrained summarization task; OpenAI exposes an equivalent prompt optimizer in its dashboard. Use meta-prompting to get the first draft and to escape a prompt you have been staring at too long, then switch to optimization once you have an eval set — and never ship either output without measuring it, since both can raise the average while regressing the cases you actually care about.
 
 ---
 

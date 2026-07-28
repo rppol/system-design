@@ -551,6 +551,47 @@ Effect: precision of sentence-level retrieval + context of paragraph-level chunk
 Best for: long documents with diverse content (technical manuals, research papers)
 ```
 
+### Contextual Retrieval — Repairing Chunks at Index Time
+
+Sentence-window retrieval repairs missing context at *query* time. Contextual Retrieval (Anthropic,
+2024) repairs it at *index* time, and it attacks a different failure: a chunk that is
+uninterpretable on its own no matter how much of its neighbourhood you attach.
+
+```
+raw chunk 47 of an SEC filing:
+  "The company's revenue grew by 3% over the previous quarter."
+
+  Which company? Which quarter? The chunk answers neither, so it does not
+  match "ACME Q2 2023 revenue growth" in embedding space OR in BM25.
+```
+
+The fix is one cheap LLM call per chunk at ingestion, given the whole document plus that chunk,
+asking for a short situating preamble. The 50-100 token result is prepended to the chunk *before*
+embedding and before BM25 indexing:
+
+```
+contextualized chunk 47:
+  "This chunk is from an SEC filing on ACME corp's performance in Q2 2023;
+   the previous quarter's revenue was $314 million.  The company's revenue
+   grew by 3% over the previous quarter."
+```
+
+Now the entity and period are in the vector and in the term index, so both retrievers can find it.
+Anthropic's published results on top-20 retrieval failure rate, baseline 5.7%:
+
+| Configuration | Failure rate | Reduction vs baseline |
+|---|---|---|
+| Contextual embeddings alone | 3.7% | 35% |
+| Contextual embeddings + contextual BM25 | 2.9% | 49% |
+| Both, then rerank top-150 down to top-20 | 1.9% | 67% |
+
+The economics work only because the preamble call is prompt-cached against the document: the same
+document body is the prefix for every one of its chunks, which is what puts the one-time
+preprocessing cost at $1.02 per million document tokens. Without caching you pay full input price
+for the whole document once per chunk. This is an ingestion-time cost with zero query-time
+latency, which makes it the cheapest of the advanced techniques in this section to run in
+production — and it composes with, rather than replaces, reranking and hybrid search.
+
 ### Fusion Retrieval + FLARE
 
 FLARE (Forward-Looking Active REtrieval): predict future content to determine when to retrieve:
@@ -795,6 +836,9 @@ Sentence window retrieval indexes at sentence granularity for precise matching, 
 
 **Q: How do global and local query paths differ in Graph RAG?**
 Global queries ("what themes appear across these documents?") are answered from pre-computed community summaries — the LLM synthesizes over the hierarchical summary tree rather than raw chunks, because no single chunk contains a corpus-wide answer. Local queries ("who did Microsoft acquire in gaming?") route to entity-anchored search: find the entity node, extract its neighborhood subgraph, and answer from the specific documents attached to those nodes. A router classifies query type first; misrouting a global query to local search produces incomplete answers, while routing local queries through community summaries wastes tokens on irrelevant breadth. Microsoft's GraphRAG implements both paths explicitly, and the community-summary layer is precisely what flat vector RAG lacks.
+
+**Q: What is Contextual Retrieval and why does it beat simply making chunks bigger?**
+Contextual Retrieval prepends a short LLM-generated preamble to every chunk at index time so the chunk states its own document, entity and period before it is embedded. The problem it solves is not chunk size but chunk self-containment: "The company's revenue grew by 3% over the previous quarter" names no company and no quarter, so neither the embedding nor the BM25 terms carry what the query is asking for — and enlarging the chunk only dilutes the embedding with more unrelated text while still leaving the entity implicit. A 50-100 token preamble ("This chunk is from an SEC filing on ACME corp's performance in Q2 2023...") puts the missing identifiers into both the dense vector and the sparse term index at once. Anthropic reports top-20 retrieval failure dropping from a 5.7% baseline to 3.7% with contextual embeddings (a 35% reduction), 2.9% when contextual BM25 is added (49%), and 1.9% with reranking on top (67%). It is affordable only with prompt caching, since the document body is the shared prefix across all of its chunks — that puts the one-time preprocessing at $1.02 per million document tokens. Cost lands entirely at ingestion, so query latency is unchanged, which is what separates it from query-time techniques like HyDE or agentic retrieval.
 
 ---
 

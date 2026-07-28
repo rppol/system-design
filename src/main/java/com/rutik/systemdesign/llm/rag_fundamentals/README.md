@@ -449,6 +449,49 @@ flowchart TD
 
 ## 6. How It Works — Detailed Mechanics
 
+### Document Parsing: the Stage Before Chunking
+
+The indexing pipeline in Section 5 opens with a "Parsing & Extraction" box. Every downstream
+artifact — chunk boundaries, embeddings, BM25 terms, reranker input — is computed from whatever
+that box emitted, so a parse error is unrecoverable. No chunking strategy can re-separate two
+columns that were already interleaved into a single string.
+
+Three source classes, three distinct failure modes:
+
+| Source | What you actually get | The failure |
+|--------|----------------------|-------------|
+| Born-digital PDF (text layer) | Positioned glyph runs, no reading order | Multi-column pages interleave — line 1 of column A, line 1 of column B, line 2 of column A |
+| Scanned PDF / image | Pixels only, no text layer | Naive extraction returns an empty string and the chunker indexes nothing, silently |
+| HTML / Office / email | Markup plus boilerplate | Nav bars, cookie banners and footers become high-frequency chunks that match every query |
+
+Tables are the expensive case. Flatten a financial table by concatenating cell text and
+`Revenue 412 388` loses which number belongs to which year — the chunk still embeds, still
+retrieves, and the model answers confidently from the wrong column. Layout-aware parsers avoid
+this by running two models instead of one regex: an object detector that labels page regions
+(title, paragraph, table, figure, caption) and recovers reading order, then a table-structure
+model that reconstructs the cell grid before serializing it to Markdown or HTML.
+
+That is not free. IBM's Docling technical report (arXiv 2408.09869) publishes per-page and
+per-table timings for exactly those two stages:
+
+```
+                        L4 GPU      x86 CPU     M3 Max SoC
+  layout model           44 ms       633 ms       271 ms      (average per page)
+  TableFormer (fast)    400 ms      1.74 s        704 ms      (average per table)
+```
+
+At 633 ms/page on CPU a 100,000-page corpus is roughly 17.6 CPU-hours of layout analysis before a
+single embedding is computed. That is why parsing belongs in a batch job with its own cache keyed
+on document hash — you re-chunk and re-embed often, you re-parse almost never.
+
+**Pick the parser by document class, not by benchmark rank.** Text-heavy single-column PDFs are
+served fine by a fast text extractor; complex tables, forms and scans need a layout-aware pipeline
+(Docling and Unstructured self-hosted, LlamaParse and Azure Document Intelligence managed).
+Validate the choice on your own documents with OmniDocBench (981 annotated PDF pages across 9
+document types), which scores text, tables, formulas and reading order separately — reading order
+is the sub-score that predicts RAG quality, and it is the first one a plain text-extraction
+baseline fails.
+
 ### Chunking Strategies in Detail
 
 **Choosing chunk size:**
@@ -760,6 +803,9 @@ Use a multilingual embedding model (multilingual-e5-large, BGE-M3) so a query in
 
 **Q: How do you evaluate end-to-end RAG system quality?**
 End-to-end RAG evaluation requires measuring both retrieval quality and generation quality independently. Retrieval metrics: Recall@K (do retrieved chunks contain the answer?), MRR (how high is the first relevant chunk?), Precision@K (what fraction of retrieved chunks are relevant?). Generation metrics: Faithfulness (does the answer only use information from retrieved context?), Answer Relevancy (does the answer address the question?), Correctness (is the answer factually right?). Use the RAGAS framework which automates these metrics using LLM-as-judge. Build an evaluation dataset of 100-500 (question, ground_truth_answer, relevant_document_ids) triples. Test each pipeline component independently: if retrieval recall@5 is below 80%, improving the generator will not help. Track metrics over time as your corpus grows — retrieval quality often degrades as more documents create harder disambiguation. Weekly automated evaluation runs are a minimum for production systems.
+
+**Q: Your RAG recall is poor on PDF manuals. Why is the parser the first thing to check, not the chunker?**
+Chunking operates on whatever string the parser produced, so a parse error is unrecoverable downstream. A born-digital PDF exposes positioned glyph runs with no reading order: extract naively from a two-column page and you get line 1 of column A, then line 1 of column B, then line 2 of column A — sentences that never existed, embedded as if they were real. A scanned page with no text layer extracts to an empty string and indexes silently as nothing. A flattened table concatenates its cells, so `Revenue 412 388` no longer says which figure belongs to which year, and the chunk retrieves fine while the model answers from the wrong column. Diagnose by reading 20 raw parser outputs before touching chunk size — if the text is scrambled, no overlap setting, semantic splitter or reranker will recover it. The fix is a layout-aware pipeline (layout detection for regions and reading order, a table-structure model for the cell grid) rather than a text extractor, and it costs real time: Docling's own report measures 633 ms/page for layout on x86 CPU and 1.74 s/table for TableFormer, so parsing becomes a cached batch stage keyed on document hash rather than part of the re-chunk loop.
 
 ---
 

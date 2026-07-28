@@ -176,6 +176,34 @@ when RAG becomes not just cheaper but more accurate, and the matrix flips.
 - *Importance scoring* — score each message for relevance to the current query; keep top-k by
   score.
 
+**Offloading: the strategy that shrinks the budget instead of dividing it.** Every strategy above
+allocates a fixed window. Offloading changes the size of the thing being allocated by keeping
+state *outside* the window and carrying only a pointer to it. Three forms, all of which turn the
+"working memory / scratchpad" row of the zone table into an external artifact:
+
+- *Just-in-time context* — store lightweight identifiers (file paths, saved queries, record IDs,
+  URLs) instead of content, and give the agent tools to dereference them on demand. Claude Code is
+  the canonical hybrid: `CLAUDE.md` is loaded up front because it is small and always relevant,
+  while everything else is reached through `glob` and `grep` at the moment it is needed. The
+  tradeoff is explicit — runtime exploration costs a tool round trip per lookup, so you are buying
+  token efficiency with latency.
+- *Structured note-taking* — the agent writes durable notes to a file (a to-do list, a `NOTES.md`)
+  and reads them back later, so progress survives compaction instead of being summarized away.
+  Anthropic's Claude-plays-Pokemon demo is the extreme case: the agent maintains running tallies
+  across thousands of game steps ("for the last 1,234 steps I've been training my Pokemon in
+  Route 1, Pikachu has gained 8 levels toward the target of 10") that no summarizer would have
+  preserved.
+- *Tool-result clearing* — drop the raw bodies of old tool results while keeping the call and its
+  one-line outcome. This is the cheapest form and usually the largest win in an agent loop, where
+  a handful of 8k-token file reads or search results dominate the transcript. Ask of each result:
+  will the agent ever need to read these bytes again? If not, the summary is the artifact and the
+  body is garbage. Anthropic ships this as a platform feature on the Claude Developer Platform.
+
+Offloading and compaction are complements, not alternatives: compaction decides what to keep when
+you are already full, offloading decides what never needed to be in the window at all. Reach for
+offloading first — it is a design-time choice with no fidelity loss, whereas every compaction is
+lossy by construction.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -792,6 +820,21 @@ compaction that rewrites the session into a clean state summary (decisions made,
 open items) and drops raw history; truncating verbose tool outputs at write time; and hard
 eviction of superseded results rather than appending corrections after them. Schedule compaction
 proactively — every 20-30 turns or at 60-70% window fill — instead of waiting for overflow.
+
+**Q: What is context offloading, and when do you prefer it to compaction?**
+Offloading keeps state outside the context window and carries only a pointer to it — a file path,
+a saved query, a record ID — so the agent dereferences content on demand instead of holding it.
+Prefer it to compaction whenever the choice is available, because offloading is lossless by design
+while every compaction discards information permanently; compaction is what you do once the window
+is already full. Three forms cover most cases: just-in-time context, where the agent reaches for
+data with tools at the moment it needs it (Claude Code loads a small `CLAUDE.md` up front and finds
+everything else via `glob` and `grep`); structured note-taking, where the agent writes durable
+notes to a file so progress survives a later summarization; and tool-result clearing, where old
+tool-call bodies are dropped but the call and its one-line outcome are kept. Tool-result clearing
+is usually the biggest single win in an agent loop, since a few 8k-token file reads or search
+results dominate the transcript. The cost is real and it is latency: every dereference is a tool
+round trip, so content that is small, stable and needed on nearly every turn (system prompt, tool
+schemas, core instructions) should stay inline in the cached prefix rather than be offloaded.
 
 ---
 

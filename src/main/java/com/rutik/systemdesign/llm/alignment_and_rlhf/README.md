@@ -782,6 +782,26 @@ rewards; the paper does not publish the weighting):
 3. **Over-refusal**: Too much safety training makes model refuse benign requests. Balance safety and helpfulness in training data.
 4. **Distribution shift in reward model**: RM trained on SFT-model outputs may not generalize to policy's diverse outputs after PPO. Keep RL updates conservative (high β).
 5. **Forgetting with too many PPO steps**: PPO can degrade base language modeling quality. Monitor loss on held-out text; stop PPO early if LM degradation detected.
+6. **Treating alignment as durable**: the alignment produced by every method in Section 4 is thin and downstream fine-tuning removes it. Re-run safety evals after ANY fine-tune, including benign ones, and gate the resulting checkpoint on them.
+
+**Pitfall 6, expanded — alignment is shallow and it is not sticky.**
+
+Qi et al. (arXiv 2310.03693, ICLR 2024) fine-tuned GPT-3.5 Turbo on **10 manually written adversarial examples** through OpenAI's own fine-tuning API, for **under $0.20**, and got a model that would follow nearly any harmful instruction. The harder result in the same paper is that malice was not required: fine-tuning on ordinary, benign, widely-used instruction datasets also degraded safety, just less severely. Anyone who ships a fine-tuning feature is shipping an alignment-removal feature by accident.
+
+The follow-up work explains why so little is needed. Qi et al. (arXiv 2406.05946, ICLR 2025) call it **shallow safety alignment**: preference training adapts the model's output distribution over only its **very first few tokens**. A refusal is essentially a learned prefix — "I cannot help with that" — and once generation is past that prefix, the aligned and unaligned models behave almost identically. That single observation unifies four attack families that look unrelated:
+
+```
+  what the attack does                             why shallow alignment explains it
+  -----------------------------------------------  ------------------------------------------
+  adversarial suffix  (append optimized gibberish)  shifts the first-token distribution
+  prefilling attack   (force the reply to open      the refusal prefix never gets a chance
+                       with "Sure, here is")          to be generated
+  decoding attack     (raise temperature / top-k)   samples off the narrow refusal prefix
+  fine-tuning attack  (a few gradient steps)        only the first few token positions need
+                                                      to move, so a handful of examples suffice
+```
+
+Both mitigations follow directly from the diagnosis: deepen the alignment past the opening tokens by training on **safety recovery examples** — sequences that begin with a harmful prefix and then turn back into a refusal, so refusal is not conditional on having refused at token 1 — and constrain fine-tuning with a **token-wise objective** that penalizes updates to the earliest token positions far more than to later ones, which makes the alignment survive downstream training. Operationally, treat the pre-fine-tuning safety eval as a release gate you re-run on every derived checkpoint, not once on the base model.
 
 ---
 
@@ -847,6 +867,9 @@ Verifiable rewards use objective, execution-based signals as the reward in RL tr
 
 **Q: Why does RLHF include a KL penalty against the reference policy, and what happens when it is too weak or too strong?**
 A: The KL term anchors the policy to the SFT reference so the optimizer cannot wander into regions where the reward model is meaningless. The reward model was trained on outputs near the SFT distribution; once the policy drifts far from it, reward scores are extrapolations — this is exactly where reward hacking lives. Too weak a penalty (low beta) and you see the classic failure: reward climbs while actual quality collapses into repetitive, sycophantic, or gibberish-but-high-scoring text, often visible as KL exploding past a few dozen nats. Too strong (high beta) and the policy barely moves — reward plateaus early and alignment gains never materialize, an expensive way to reproduce the SFT model. Practically, teams monitor reward and KL together (some use an adaptive KL controller targeting a fixed KL budget) and treat "reward up, KL up sharply, evals flat" as the signature of hacking rather than progress. DPO inherits the same idea structurally: its beta plays the identical anchoring role against the frozen reference, which is why the reference model cannot be dropped casually — SimPO's reference-free trick works only with its length-normalized margin compensating.
+
+**Q: Why does fine-tuning on a handful of examples undo months of alignment work?**
+Safety alignment is shallow — preference training mostly reshapes the output distribution over the first few tokens, so only those positions have to move for refusal behavior to disappear. Qi et al. (arXiv 2310.03693, ICLR 2024) demonstrated the practical consequence — 10 hand-written adversarial examples through OpenAI's fine-tuning API, for under $0.20, produced a GPT-3.5 Turbo that complied with nearly any harmful instruction; the same paper showed that fine-tuning on benign, commonly used instruction datasets also degrades safety, without any adversarial intent. The follow-up (arXiv 2406.05946, ICLR 2025) named the mechanism "shallow safety alignment" and used it to explain adversarial-suffix, prefilling, decoding-parameter and fine-tuning attacks as one phenomenon: a refusal is effectively a learned opening prefix, and past that prefix the aligned and base models behave alike. Mitigations attack the depth directly — train on safety recovery examples that start with a harmful prefix and turn back into a refusal, so refusal is not conditional on having refused at token 1, and use a token-wise constrained fine-tuning objective that heavily penalizes updates to the earliest positions. The operational rule is that any fine-tuned derivative is an unaligned model until its own safety eval says otherwise, so make that eval a release gate on every checkpoint rather than a one-time check on the base.
 
 ---
 
