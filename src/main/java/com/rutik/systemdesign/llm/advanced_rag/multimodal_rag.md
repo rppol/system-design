@@ -8,7 +8,7 @@ Standard RAG loses all information in non-text content. Multimodal RAG preserves
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Multimodal RAG teaches the library catalog to index the pictures, diagrams, and tables in books, not just the text.
 
@@ -20,7 +20,7 @@ Standard RAG loses all information in non-text content. Multimodal RAG preserves
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Multiple modalities require modality-specific indexing**: Text, images, tables, and code each have different optimal indexing strategies.
 - **Cross-modal alignment**: A text query must be able to retrieve a relevant image — achieved either by embedding both in a shared space (CLIP) or by describing images as text.
@@ -30,9 +30,106 @@ Standard RAG loses all information in non-text content. Multimodal RAG preserves
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Document Parsing and Element Extraction
+Multimodal RAG has three indexing strategies, and the choice between them is the single most
+consequential decision on this page. They differ in **what actually gets embedded** — a
+generated text description, the image itself, or the rendered page — and therefore in which
+stage of the pipeline is fragile and how large the index becomes.
+
+| Strategy | What is embedded | Retrieval space | Fragile stage | Index size per page | Choose when |
+|----------|-----------------|-----------------|---------------|--------------------|-------------|
+| 1. Vision-LLM description (text-then-embed) | A rich text description generated from each cropped element | Ordinary text space, alongside the prose | Layout detection plus OCR, then description accuracy | ~2 KB, one pooled text vector | Documents are text-dominant, and the extracted text is needed for citation snippets, keyword filters or compliance export |
+| 2. Direct image embedding (CLIP/SigLIP) | The image itself, into a joint image-text space | A separate image index queried cross-modally | Domain shift — web-trained encoders under-represent specialist diagrams | One image vector per element | Photographs and generic imagery, where a text query must match visual content no caption would have mentioned |
+| 3. Page-image late interaction (ColPali) | Patch embeddings of the whole rendered page, scored by MaxSim | Late-interaction space over page patches | None on the index side; the image is the ground truth | ~257 KB, 1,024 patch vectors of 128 dims in float16 | The corpus is visually dense and layout carries meaning (slide decks, filings, scanned forms) and the parsing pipeline is what keeps breaking |
+
+Strategies 1 and 2 share the parsing stage and are usually run **together**, with the two
+result lists merged under fixed weights — the text path is trusted more, and the weight caps
+how much the less-trusted image path can influence the ranking. Strategy 3 deletes the
+parsing stage entirely and therefore does not compose with the other two; it replaces them.
+
+Two further axes cut across the choice:
+
+- **Per-element routing.** Not every image deserves the same treatment. Classifying elements
+  first and sending only the information-dense ones down the expensive high-detail path — with
+  photographs taking a cheap low-detail path — is what makes Strategy 1 affordable at corpus
+  scale. Note that the detail parameter, not the model tier, is the lever.
+- **Generation modality.** Indexing and generation are separate decisions: a retrieved element
+  can be handed to the generator as its text description, or as the original image passed to a
+  vision-capable model. Passing the image preserves detail the description dropped; passing the
+  description is cheaper and keeps the answer quotable.
+
+---
+
+## 5. Architecture Diagrams
+
+### Multimodal Indexing Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DOCS(["Source Documents\nPDF · PPTX · HTML"]) --> DP["Document Parser\nUnstructured.io · PyMuPDF · python-pptx"]
+    DP --> TB["Text blocks"]
+    DP --> TAB["Tables"]
+    DP --> FIG["Figures / Charts / Diagrams"]
+    TB --> TE["Text chunking\n→ Text embeddings"]
+    TAB --> MD["Markdown conversion\n→ Text embeddings"]
+    TE --> VDB[("Vector DB")]
+    MD --> VDB
+    FIG --> VLM["Vision LLM description\n→ Text embeddings"]
+    FIG --> CLIP["CLIP image embeddings"]
+    FIG --> BLOB[("Blob Storage\nS3 / GCS")]
+    VLM --> VDB
+    CLIP --> IDB[("Image Vector DB")]
+
+    class DOCS io
+    class DP,TE,MD mathOp
+    class TB,TAB,FIG req
+    class VLM,CLIP base
+    class VDB,IDB,BLOB frozen
+```
+
+### Multimodal Query Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> TE["Text embedding"]
+    Q --> CE["CLIP text embed"]
+    TE --> VDB[("Text Vector DB")] --> TK["top-K text + table chunks"]
+    CE --> IDB[("Image Vector DB")] --> IK["top-K relevant images"]
+    TK --> MRG["Merge + Rerank\ncross-encoder (text-only scorer)"]
+    IK --> MRG
+    MRG --> CA["Context Assembly\ntext chunks + images from blob"]
+    CA --> GEN["Vision-LLM Generation\nany vision-capable frontier model"]
+    GEN --> ANS(["Answer + source citations\n(doc, page, figure number)"])
+
+    class Q,ANS io
+    class TE,CE,MRG,CA mathOp
+    class TK,IK req
+    class VDB,IDB frozen
+    class GEN base
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Document Parsing and Element Extraction
 
 ```
 PDF processing pipeline:
@@ -54,7 +151,7 @@ PDF processing pipeline:
     Each slide → text + image, slide number, section
 ```
 
-### 3.2 Strategy 1: Vision LLM Description (Text-Then-Embed)
+### 6.2 Strategy 1: Vision LLM Description (Text-Then-Embed)
 
 Convert visual elements to rich text descriptions using a vision LLM, then embed as text:
 
@@ -122,7 +219,7 @@ def extract_tables(pdf_path: str) -> list[dict]:
     return tables
 ```
 
-### 3.3 Strategy 2: Direct Image Embedding (CLIP/SigLIP)
+### 6.3 Strategy 2: Direct Image Embedding (CLIP/SigLIP)
 
 Embed images directly using a multimodal embedding model; store image embeddings alongside text embeddings:
 
@@ -181,7 +278,7 @@ call per image; Strategy 2 buys throughput and low cost but inherits the alignme
 
 | Symbol | What it is |
 |--------|------------|
-| `pages x images_per_page` | Image count — 10,000 x 3 = 30,000 in Section 10's estimate |
+| `pages x images_per_page` | Image count — 10,000 x 3 = 30,000 in Section 12's estimate |
 | `detail="low"` | 85 tokens per image, regardless of resolution |
 | `detail="high"` | 85 base + 170 per 512px tile — 765 tokens for a 1024x1024 image, 1,105 for a 2048x4096 page |
 | price | `$2.50` per 1M input tokens for GPT-4o; image tokens bill as input tokens |
@@ -198,7 +295,7 @@ call per image; Strategy 2 buys throughput and low cost but inherits the alignme
   at 100,000 pages x 3 images: 300,000 x 1,105 x $2.50/1M = $829 one-time
 ```
 
-**Walk the routing saving.** Section 12 reports a 65% cut from classifying images before processing — GPT-4o high-detail at `~$0.003` each for schematics, a low-detail path at `~$0.0002` each for photos. Solve for what fraction that implies:
+**Walk the routing saving.** Section 14 reports a 65% cut from classifying images before processing — GPT-4o high-detail at `~$0.003` each for schematics, a low-detail path at `~$0.0002` each for photos. Solve for what fraction that implies:
 
 ```
   uniform high-detail : 30,000 x $0.0030                 = $90.00
@@ -269,9 +366,9 @@ per tile**:
   1.5x higher bar to move the ranking, which is what the asymmetry is for.
 ```
 
-That weighting is the practical answer to the alignment gap: rather than trying to make CLIP scores comparable to text scores, the system assumes they are not and caps how much influence the less-trusted modality can have. Combined with figure-reference linking, it is what lifts image recall from 52% (CLIP alone) to 87% in Section 12.
+That weighting is the practical answer to the alignment gap: rather than trying to make CLIP scores comparable to text scores, the system assumes they are not and caps how much influence the less-trusted modality can have. Combined with figure-reference linking, it is what lifts image recall from 52% (CLIP alone) to 87% in Section 14.
 
-### 3.4 Generation with Vision LLMs
+### 6.4 Generation with Vision LLMs
 
 Retrieved context must include both text and images; the generation LLM must be vision-capable (architecture details in [Multimodal Models](../multimodal_models/README.md)):
 
@@ -310,12 +407,12 @@ def generate_multimodal_answer(
     return response.choices[0].message.content
 ```
 
-### 3.5 Strategy 3: Page-Image Late Interaction (ColPali)
+### 6.5 Strategy 3: Page-Image Late Interaction (ColPali)
 
-Strategies 1 and 2 both keep Section 3.1's parsing stage: something has to find the figure, crop it, and hand it to a describer or an image encoder. ColPali (Faysse et al., ICLR 2025, arXiv:2407.01449) deletes that stage. It renders each PDF page as a single image, pushes it through a vision-language model, and indexes the resulting **patch** embeddings directly — no layout detection, no OCR, no captioning pass. The query is scored against those patches with ColBERT-style MaxSim (see [reranking.md](../rag_fundamentals/reranking.md) for the late-interaction mechanics), so a query token can match the one region of the page that answers it.
+Strategies 1 and 2 both keep Section 6.1's parsing stage: something has to find the figure, crop it, and hand it to a describer or an image encoder. ColPali (Faysse et al., ICLR 2025, arXiv:2407.01449) deletes that stage. It renders each PDF page as a single image, pushes it through a vision-language model, and indexes the resulting **patch** embeddings directly — no layout detection, no OCR, no captioning pass. The query is scored against those patches with ColBERT-style MaxSim (see [reranking.md](../rag_fundamentals/reranking.md) for the late-interaction mechanics), so a query token can match the one region of the page that answers it.
 
 ```
-  parse-then-embed (3.1 -> 3.2/3.3)      page-image late interaction (3.5)
+  parse-then-embed (6.1 -> 6.2/6.3)      page-image late interaction (6.5)
   ------------------------------------   ------------------------------------
   PDF -> layout model -> crops           PDF -> render page -> VLM
       -> OCR / vision LLM caption            -> 1024 patch vectors x 128 dim
@@ -329,73 +426,7 @@ The bill is storage, exactly as with ColBERT. A page is 1,024 patch vectors of 1
 
 ---
 
-## 4. Architecture Diagram
-
-### Multimodal Indexing Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    DOCS(["Source Documents\nPDF · PPTX · HTML"]) --> DP["Document Parser\nUnstructured.io · PyMuPDF · python-pptx"]
-    DP --> TB["Text blocks"]
-    DP --> TAB["Tables"]
-    DP --> FIG["Figures / Charts / Diagrams"]
-    TB --> TE["Text chunking\n→ Text embeddings"]
-    TAB --> MD["Markdown conversion\n→ Text embeddings"]
-    TE --> VDB[("Vector DB")]
-    MD --> VDB
-    FIG --> VLM["Vision LLM description\n→ Text embeddings"]
-    FIG --> CLIP["CLIP image embeddings"]
-    FIG --> BLOB[("Blob Storage\nS3 / GCS")]
-    VLM --> VDB
-    CLIP --> IDB[("Image Vector DB")]
-
-    class DOCS io
-    class DP,TE,MD mathOp
-    class TB,TAB,FIG req
-    class VLM,CLIP base
-    class VDB,IDB,BLOB frozen
-```
-
-### Multimodal Query Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> TE["Text embedding"]
-    Q --> CE["CLIP text embed"]
-    TE --> VDB[("Text Vector DB")] --> TK["top-K text + table chunks"]
-    CE --> IDB[("Image Vector DB")] --> IK["top-K relevant images"]
-    TK --> MRG["Merge + Rerank\ncross-encoder (text-only scorer)"]
-    IK --> MRG
-    MRG --> CA["Context Assembly\ntext chunks + images from blob"]
-    CA --> GEN["Vision-LLM Generation\nany vision-capable frontier model"]
-    GEN --> ANS(["Answer + source citations\n(doc, page, figure number)"])
-
-    class Q,ANS io
-    class TE,CE,MRG,CA mathOp
-    class TK,IK req
-    class VDB,IDB frozen
-    class GEN base
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### NotebookLM (Google)
 - Processes PDFs including figures and tables
@@ -414,7 +445,7 @@ flowchart TD
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Retrieval Accuracy | Index Cost | Visual Detail Preserved | Requires Vision LLM |
 |----------|-------------------|------------|------------------------|---------------------|
@@ -444,7 +475,7 @@ schedule. Re-derive the numbers against whichever model you actually deploy; do 
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Multimodal RAG When:
 - Documents contain significant visual information (charts, diagrams, tables, slides)
@@ -460,7 +491,7 @@ schedule. Re-derive the numbers against whichever model you actually deploy; do 
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Low-resolution image extraction**
 Images extracted at 72 DPI from PDFs are too blurry for vision LLM description or CLIP embedding.
@@ -488,7 +519,7 @@ Fix: Include image quality checks; fall back to OCR text for images where vision
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -503,7 +534,7 @@ Fix: Include image quality checks; fall back to OCR text for images where vision
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What are the two main strategies for indexing images in a RAG system?**
 A: The two strategies are vision-to-text conversion and direct image embedding. In vision-to-text: a vision-capable frontier LLM generates a detailed text description of each image, which is then embedded using a standard text embedding model and stored alongside text chunks. This leverages the full power of semantic text search and works with existing vector DBs. In direct image embedding: a multimodal embedding model (CLIP, SigLIP) encodes images directly into a vector space aligned with text embeddings, allowing cross-modal retrieval. Vision-to-text produces higher-quality descriptions for complex charts; CLIP is cheaper and faster. In production, combining both is most effective.
@@ -555,7 +586,7 @@ A: Render each page as an image and index its patch embeddings directly with a v
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Extract at high resolution** — minimum 150 DPI, 300 DPI for documents with dense tables or small text; poor resolution produces poor descriptions and embeddings.
 2. **Include surrounding context in vision LLM prompts** — ±200 tokens around each image dramatically improves description accuracy.
@@ -567,7 +598,7 @@ A: Render each page as an image and index its patch embeddings directly with a v
 
 ---
 
-## 13. Case Study: Multimodal RAG for Manufacturing Equipment Maintenance
+## 14. Case Study: Multimodal RAG for Manufacturing Equipment Maintenance
 
 **Problem Statement**: A heavy equipment manufacturer with 1,200 field technicians maintains a knowledge base of 4,500 technical manuals covering 380 equipment models. These manuals are 45% text, 30% engineering diagrams (exploded views, wiring schematics, hydraulic circuits), 15% annotated photographs of equipment assemblies, and 10% troubleshooting flowcharts. The company also has a library of 120K equipment failure photographs tagged by model and component, plus 800 video tutorials with transcripts. The existing text-only RAG system indexed prose sections only, losing all visual context. When a technician queried "hydraulic pump seal replacement procedure for Model HX-450," the system returned text steps but missed the critical exploded-view diagram showing seal orientation and the torque specification table embedded in Figure 12. Field surveys revealed that 40% of maintenance queries required visual context that text-only RAG could not provide, resulting in unnecessary escalations to senior technicians (averaging 2.5 hours per escalation) and extended mean-time-to-repair (MTTR) of 4.2 hours per incident.
 

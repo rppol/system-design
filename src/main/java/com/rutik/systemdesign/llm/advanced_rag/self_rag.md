@@ -8,7 +8,7 @@ The model learns to generate special tokens — [Retrieve], [Relevant], [Support
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Self-RAG trains the LLM to be its own fact-checker and librarian simultaneously — it knows when to look something up and immediately verifies that what it wrote matches what it found.
 
@@ -20,7 +20,7 @@ The model learns to generate special tokens — [Retrieve], [Relevant], [Support
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Adaptive retrieval**: Retrieve only when needed; skip retrieval for trivial or parametric-knowledge questions.
 - **Passage relevance evaluation**: Not all retrieved passages are useful; the model explicitly scores each.
@@ -30,182 +30,42 @@ The model learns to generate special tokens — [Retrieve], [Relevant], [Support
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Special Reflection Tokens
+Self-RAG has two taxonomies worth holding separately: the **reflection tokens** that make up
+its vocabulary of decisions, and the **deployment strategies** by which teams actually adopt
+it, since a full fine-tune is out of reach for most.
 
-Self-RAG introduces four types of reflection tokens. The paper (Asai et al. 2023, Table 1) names them `Retrieve`, `IsREL`, `IsSUP` and `IsUSE`; this page uses the readable bracket labels below for the same four categories:
+**The four reflection-token classes** — each is a decision point the model emits inline:
 
-```
-Retrieve  {yes, no, continue}
-[Retrieve]       — should the model retrieve external passages for this segment?
-[No Retrieve]    — no retrieval needed (parametric knowledge sufficient)
-[Continue]       — keep using the passages already retrieved; do not retrieve again
+| Class | Values | Emitted when | What it controls |
+|-------|--------|--------------|------------------|
+| `Retrieve` | yes, no, continue | Before a segment is generated | Whether retrieval happens at all — the adaptive-retrieval lever that lets parametric-knowledge questions skip the retriever entirely |
+| `IsREL` | relevant, irrelevant | Once per retrieved passage | Which passages survive into the generation context |
+| `IsSUP` | fully supported, partially supported, no support | Once per generated statement | Statement-level faithfulness — the hallucination check, applied per sentence rather than per answer |
+| `IsUSE` | 1 to 5 | On the completed response | Overall utility, used to rank candidate continuations |
 
-IsREL  {relevant, irrelevant}
-[Relevant]       — retrieved passage is relevant to the query and useful
-[Irrelevant]     — retrieved passage is not relevant; ignore it
+The first class governs *whether* to retrieve; the middle two govern *what to keep* and
+*whether the output is grounded*; the last ranks whole candidates. Because `IsSUP` and
+`IsUSE` are scores rather than gates, they combine into a weighted decode-time criterion,
+which is what lets one fine-tuned model serve a faithfulness-critical deployment and a
+fluency-first one from a single set of weights.
 
-IsSUP  {fully supported, partially supported, no support}
-[Supported]      — generated statement is fully supported by the retrieved context
-[Partially Supported] — generated statement is partially supported
-[No Support]     — generated statement is not supported by the retrieved context (potential hallucination)
+**Adoption strategies** — the same behaviours at three levels of investment:
 
-IsUSE  {5, 4, 3, 2, 1}
-[Utility]        — overall utility of the response (scale 1-5)
-```
+| Strategy | How the reflection happens | Requires | Tradeoff |
+|----------|---------------------------|----------|----------|
+| Full Self-RAG | Reflection tokens generated natively by a fine-tuned model | ~150K annotated examples, a multi-GPU fine-tune, ongoing maintenance when the base model changes | Highest fidelity and the only variant with true adaptive retrieval, but locks you to a model you can fine-tune |
+| Prompted approximation | The same four judgements requested as structured output from an off-the-shelf model | Prompt engineering only | Works with proprietary API models; costs an extra call per judgement and the verdicts are less calibrated |
+| External evaluator ([CRAG](corrective_rag.md)) | A separate lightweight relevance model judges retrieval, with no self-assessment of the output | A cross-encoder and a fallback path | Most of the retrieval-quality benefit at a fraction of the effort, but no statement-level faithfulness check |
 
-### 3.2 Generation Flow
-
-```
-Input: User query
-
-Step 1: Retrieval decision
-  Model generates first token:
-    [Retrieve] → trigger retrieval system → retrieve top-K passages
-    [No Retrieve] → generate directly from parametric knowledge
-
-Step 2 (if retrieved): Passage evaluation
-  For each retrieved passage d_i:
-    Model generates [Relevant] or [Irrelevant]
-    Keep only [Relevant] passages for context
-
-Step 3: Conditional generation
-  Model generates response given:
-    - Original query
-    - Relevant retrieved passages (only those marked [Relevant])
-    Generates one response segment per relevant passage
-
-Step 4: Support checking
-  For each generated sentence:
-    Model generates [Supported], [Partially Supported], or [No Support]
-    against the retrieved passage used
-
-Step 5: Output selection
-  Multiple candidate responses generated (one per relevant passage)
-  Select best response by:
-    - Maximizing [Supported] tokens
-    - Considering [Utility] score
-    - May re-rank or discard [No Support] statements
-```
-
-### 3.3 Training Data Generation
-
-Self-RAG requires a fine-tuned model. Training data is generated synthetically:
-
-```
-Step 1: Sample (input, output) pairs from existing datasets
-  (question, answer), (instruction, response), etc.
-
-Step 2: For each pair, a critic model inserts reflection tokens. In the paper, GPT-4
-  is prompted to produce reflection tokens and that knowledge is distilled into an
-  in-house critic (Llama 2-7B), which does the bulk annotation:
-  - Should retrieval be triggered here? → insert [Retrieve] or [No Retrieve]
-  - Given the actual retrieved passages: are they relevant?
-    → insert [Relevant] or [Irrelevant] before each passage
-  - Is each generated sentence supported?
-    → insert [Supported] / [Partially Supported] / [No Support] after each sentence
-
-Step 3: Fine-tune base LLM on this annotated corpus
-  Standard supervised fine-tuning on (input → annotated output) pairs
-  The model learns to generate reflection tokens as natural part of output
-
-Training scale: 150K instruction-output pairs for the generator; 4K-20K supervised
-                examples per reflection-token type for the critic (Asai et al. 2023)
-Base model: Llama 2 7B or 13B (generator); Llama 2 7B (critic)
-```
-
-### 3.4 Inference Algorithm
-
-```python
-def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
-    # Step 1: Check if retrieval needed
-    first_token = model.generate_next_token(query)
-
-    if first_token == "[No Retrieve]":
-        return model.generate(query)  # direct generation
-
-    # Step 2: Retrieve passages
-    passages = retriever.retrieve(query, top_k=5)
-
-    # Step 3: For each passage, generate response and check relevance/support
-    candidates = []
-    for passage in passages:
-        # Check if passage is relevant
-        relevance = model.generate_reflection_token(
-            query, passage, "[Relevant] or [Irrelevant]?"
-        )
-        if relevance == "[Irrelevant]":
-            continue
-
-        # Generate response using this passage
-        response = model.generate(query, context=passage)
-
-        # Check support for each statement
-        support_tokens = model.check_support(response, passage)
-        support_score = compute_support_score(support_tokens)
-        # [Supported] = 1.0, [Partially Supported] = 0.5, [No Support] = 0.0
-
-        # Get utility score
-        utility = model.generate_utility_score(query, response)
-
-        candidates.append({
-            "response": response,
-            "support_score": support_score,
-            "utility": utility,
-            "passage": passage
-        })
-
-    # Select best candidate: maximize support score * utility
-    if not candidates:
-        return "I don't have sufficient information to answer this question."
-
-    best = max(candidates, key=lambda x: x["support_score"] * x["utility"])
-    return best["response"]
-```
-
-**What this actually says.** The selection rule `max(support_score x utility)` says: "among the answers I drafted, prefer the one that is both grounded in its passage and actually useful — and if it is grounded in nothing, it cannot win at any level of usefulness." Multiplication, not addition, is the load-bearing choice.
-
-`support_score` itself is an average over the sentence-level reflection tokens, with the mapping the comment in the code states: `[Supported] = 1.0`, `[Partially Supported] = 0.5`, `[No Support] = 0.0`.
-
-| Symbol | What it is |
-|--------|------------|
-| `support_score` | Mean of the per-sentence token weights; `[0, 1]`, one value per candidate |
-| `[Supported]` / `[Partially]` / `[No Support]` | The three weights, 1.0 / 0.5 / 0.0 |
-| `utility` | The `[Utility]` reflection token, an integer 1-5 — is the answer any good as an answer |
-| `support x utility` | The ranking key; range `[0, 5]` because support is normalized and utility is not |
-| `beam_width` | How many candidate drafts are scored before the max is taken |
-| `0.85` | The confidence cut the Section 13 case study applies to `support_score` alone, after selection |
-
-**Walk one example.** Three candidate responses, each generated against a different relevant passage. `S` = `[Supported]`, `P` = `[Partially Supported]`, `N` = `[No Support]`:
-
-```
-  cand   sentence tokens        support_score                    utility   product
-  ---------------------------------------------------------------------------------
-  C1     S  S  P  N             (1.0+1.0+0.5+0.0)/4 = 0.6250        4       2.5000
-  C2     S  S  S                (1.0+1.0+1.0)/3     = 1.0000        3       3.0000
-  C3     S  S  S  P  S          (1.0+1.0+1.0+0.5+1.0)/5 = 0.9000    4       3.6000
-
-  ranked by support alone : C2 (1.00) > C3 (0.90) > C1 (0.62)
-  ranked by utility alone : C1 = C3 (4)          > C2 (3)
-  ranked by the PRODUCT   : C3 (3.60) > C2 (3.00) > C1 (2.50)   <- what ships
-
-  C3 wins although it is first on neither factor. C2 is perfectly grounded
-  but says less; C1 is useful but a quarter of its sentences are unsupported.
-
-  Section 13's confidence label reads support_score only, not the product:
-    C3 : 0.90 > 0.85 -> "high"     C2 : 1.00 -> "high"     C1 : 0.62 -> "medium"
-```
-
-**Why multiply instead of add.** Multiplication makes `support_score = 0` an absolute veto: a fluent, maximally useful hallucination scores `0.0 x 5 = 0.0` and can never be selected. Addition would let utility buy its way past ungroundedness. But multiplication is *not* a support-dominant rule either — a fully grounded but thin answer at `1.0 x 1 = 1.0` still loses to a half-grounded but substantive one at `0.5 x 3 = 1.5`. That asymmetry is deliberate: Self-RAG is trying to avoid unsupported claims, not to reward terseness.
-
-**Why `support_score` is a mean and not a count.** Dividing by sentence count normalizes for answer length, so a 5-sentence answer with one `[Partially Supported]` (0.9000) is not punished relative to a 3-sentence answer with none (1.0000) merely for saying more. Use a raw sum instead and the ranking collapses into "prefer the longest answer," since every additional `[Supported]` sentence would add another full point.
-
-**Where the reflection budget goes.** Each of these numbers costs a forward pass. Section 10 accounts for it: one `[Retrieve]` decision (~5-10 ms), one `[Relevant]` verdict per retrieved passage (5 passages = ~50-100 ms), and one support token per generated sentence (5 sentences = ~50-100 ms) — 150-250 ms of reflection on top of the generation itself, or 20-30% added latency. The passage evaluations are mutually independent, which is why Section 10 recommends batching them rather than looping as the code above does for clarity.
+Choose by what you are actually short of. If the problem is retrieval gaps, the external
+evaluator solves it without touching the model. If the problem is unsupported claims in the
+generated text, only the variants that emit `IsSUP` per statement address it.
 
 ---
 
-## 4. Architecture Diagram
+## 5. Architecture Diagrams
 
 ### Self-RAG Token Generation Flow
 ```mermaid
@@ -275,7 +135,182 @@ flowchart LR
 
 ---
 
-## 5. Real-World Examples
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Special Reflection Tokens
+
+Self-RAG introduces four types of reflection tokens. The paper (Asai et al. 2023, Table 1) names them `Retrieve`, `IsREL`, `IsSUP` and `IsUSE`; this page uses the readable bracket labels below for the same four categories:
+
+```
+Retrieve  {yes, no, continue}
+[Retrieve]       — should the model retrieve external passages for this segment?
+[No Retrieve]    — no retrieval needed (parametric knowledge sufficient)
+[Continue]       — keep using the passages already retrieved; do not retrieve again
+
+IsREL  {relevant, irrelevant}
+[Relevant]       — retrieved passage is relevant to the query and useful
+[Irrelevant]     — retrieved passage is not relevant; ignore it
+
+IsSUP  {fully supported, partially supported, no support}
+[Supported]      — generated statement is fully supported by the retrieved context
+[Partially Supported] — generated statement is partially supported
+[No Support]     — generated statement is not supported by the retrieved context (potential hallucination)
+
+IsUSE  {5, 4, 3, 2, 1}
+[Utility]        — overall utility of the response (scale 1-5)
+```
+
+### 6.2 Generation Flow
+
+```
+Input: User query
+
+Step 1: Retrieval decision
+  Model generates first token:
+    [Retrieve] → trigger retrieval system → retrieve top-K passages
+    [No Retrieve] → generate directly from parametric knowledge
+
+Step 2 (if retrieved): Passage evaluation
+  For each retrieved passage d_i:
+    Model generates [Relevant] or [Irrelevant]
+    Keep only [Relevant] passages for context
+
+Step 3: Conditional generation
+  Model generates response given:
+    - Original query
+    - Relevant retrieved passages (only those marked [Relevant])
+    Generates one response segment per relevant passage
+
+Step 4: Support checking
+  For each generated sentence:
+    Model generates [Supported], [Partially Supported], or [No Support]
+    against the retrieved passage used
+
+Step 5: Output selection
+  Multiple candidate responses generated (one per relevant passage)
+  Select best response by:
+    - Maximizing [Supported] tokens
+    - Considering [Utility] score
+    - May re-rank or discard [No Support] statements
+```
+
+### 6.3 Training Data Generation
+
+Self-RAG requires a fine-tuned model. Training data is generated synthetically:
+
+```
+Step 1: Sample (input, output) pairs from existing datasets
+  (question, answer), (instruction, response), etc.
+
+Step 2: For each pair, a critic model inserts reflection tokens. In the paper, GPT-4
+  is prompted to produce reflection tokens and that knowledge is distilled into an
+  in-house critic (Llama 2-7B), which does the bulk annotation:
+  - Should retrieval be triggered here? → insert [Retrieve] or [No Retrieve]
+  - Given the actual retrieved passages: are they relevant?
+    → insert [Relevant] or [Irrelevant] before each passage
+  - Is each generated sentence supported?
+    → insert [Supported] / [Partially Supported] / [No Support] after each sentence
+
+Step 3: Fine-tune base LLM on this annotated corpus
+  Standard supervised fine-tuning on (input → annotated output) pairs
+  The model learns to generate reflection tokens as natural part of output
+
+Training scale: 150K instruction-output pairs for the generator; 4K-20K supervised
+                examples per reflection-token type for the critic (Asai et al. 2023)
+Base model: Llama 2 7B or 13B (generator); Llama 2 7B (critic)
+```
+
+### 6.4 Inference Algorithm
+
+```python
+def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
+    # Step 1: Check if retrieval needed
+    first_token = model.generate_next_token(query)
+
+    if first_token == "[No Retrieve]":
+        return model.generate(query)  # direct generation
+
+    # Step 2: Retrieve passages
+    passages = retriever.retrieve(query, top_k=5)
+
+    # Step 3: For each passage, generate response and check relevance/support
+    candidates = []
+    for passage in passages:
+        # Check if passage is relevant
+        relevance = model.generate_reflection_token(
+            query, passage, "[Relevant] or [Irrelevant]?"
+        )
+        if relevance == "[Irrelevant]":
+            continue
+
+        # Generate response using this passage
+        response = model.generate(query, context=passage)
+
+        # Check support for each statement
+        support_tokens = model.check_support(response, passage)
+        support_score = compute_support_score(support_tokens)
+        # [Supported] = 1.0, [Partially Supported] = 0.5, [No Support] = 0.0
+
+        # Get utility score
+        utility = model.generate_utility_score(query, response)
+
+        candidates.append({
+            "response": response,
+            "support_score": support_score,
+            "utility": utility,
+            "passage": passage
+        })
+
+    # Select best candidate: maximize support score * utility
+    if not candidates:
+        return "I don't have sufficient information to answer this question."
+
+    best = max(candidates, key=lambda x: x["support_score"] * x["utility"])
+    return best["response"]
+```
+
+**What this actually says.** The selection rule `max(support_score x utility)` says: "among the answers I drafted, prefer the one that is both grounded in its passage and actually useful — and if it is grounded in nothing, it cannot win at any level of usefulness." Multiplication, not addition, is the load-bearing choice.
+
+`support_score` itself is an average over the sentence-level reflection tokens, with the mapping the comment in the code states: `[Supported] = 1.0`, `[Partially Supported] = 0.5`, `[No Support] = 0.0`.
+
+| Symbol | What it is |
+|--------|------------|
+| `support_score` | Mean of the per-sentence token weights; `[0, 1]`, one value per candidate |
+| `[Supported]` / `[Partially]` / `[No Support]` | The three weights, 1.0 / 0.5 / 0.0 |
+| `utility` | The `[Utility]` reflection token, an integer 1-5 — is the answer any good as an answer |
+| `support x utility` | The ranking key; range `[0, 5]` because support is normalized and utility is not |
+| `beam_width` | How many candidate drafts are scored before the max is taken |
+| `0.85` | The confidence cut the Section 14 case study applies to `support_score` alone, after selection |
+
+**Walk one example.** Three candidate responses, each generated against a different relevant passage. `S` = `[Supported]`, `P` = `[Partially Supported]`, `N` = `[No Support]`:
+
+```
+  cand   sentence tokens        support_score                    utility   product
+  ---------------------------------------------------------------------------------
+  C1     S  S  P  N             (1.0+1.0+0.5+0.0)/4 = 0.6250        4       2.5000
+  C2     S  S  S                (1.0+1.0+1.0)/3     = 1.0000        3       3.0000
+  C3     S  S  S  P  S          (1.0+1.0+1.0+0.5+1.0)/5 = 0.9000    4       3.6000
+
+  ranked by support alone : C2 (1.00) > C3 (0.90) > C1 (0.62)
+  ranked by utility alone : C1 = C3 (4)          > C2 (3)
+  ranked by the PRODUCT   : C3 (3.60) > C2 (3.00) > C1 (2.50)   <- what ships
+
+  C3 wins although it is first on neither factor. C2 is perfectly grounded
+  but says less; C1 is useful but a quarter of its sentences are unsupported.
+
+  Section 14's confidence label reads support_score only, not the product:
+    C3 : 0.90 > 0.85 -> "high"     C2 : 1.00 -> "high"     C1 : 0.62 -> "medium"
+```
+
+**Why multiply instead of add.** Multiplication makes `support_score = 0` an absolute veto: a fluent, maximally useful hallucination scores `0.0 x 5 = 0.0` and can never be selected. Addition would let utility buy its way past ungroundedness. But multiplication is *not* a support-dominant rule either — a fully grounded but thin answer at `1.0 x 1 = 1.0` still loses to a half-grounded but substantive one at `0.5 x 3 = 1.5`. That asymmetry is deliberate: Self-RAG is trying to avoid unsupported claims, not to reward terseness.
+
+**Why `support_score` is a mean and not a count.** Dividing by sentence count normalizes for answer length, so a 5-sentence answer with one `[Partially Supported]` (0.9000) is not punished relative to a 3-sentence answer with none (1.0000) merely for saying more. Use a raw sum instead and the ranking collapses into "prefer the longest answer," since every additional `[Supported]` sentence would add another full point.
+
+**Where the reflection budget goes.** Each of these numbers costs a forward pass. Section 12 accounts for it: one `[Retrieve]` decision (~5-10 ms), one `[Relevant]` verdict per retrieved passage (5 passages = ~50-100 ms), and one support token per generated sentence (5 sentences = ~50-100 ms) — 150-250 ms of reflection on top of the generation itself, or 20-30% added latency. The passage evaluations are mutually independent, which is why Section 12 recommends batching them rather than looping as the code above does for clarity.
+
+---
+
+## 7. Real-World Examples
 
 ### Original Self-RAG Paper Results (Asai et al. 2023, arXiv:2310.11511)
 - Self-RAG 7B and 13B outperformed ChatGPT and retrieval-augmented Llama2-chat on open-domain QA, reasoning and fact verification (paper abstract)
@@ -291,7 +326,7 @@ flowchart LR
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | Standard RAG | Self-RAG |
 |-----------|-------------|---------|
@@ -306,7 +341,7 @@ flowchart LR
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Self-RAG When:
 - Faithfulness and grounding are critical (medical, legal, financial Q&A)
@@ -327,7 +362,7 @@ flowchart LR
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Expecting Self-RAG behavior without fine-tuning**
 Prompting a standard LLM to emit [Retrieve] tokens or check [Supported] doesn't produce reliable Self-RAG behavior — the model hasn't learned these tokens as decision-making actions.
@@ -351,7 +386,7 @@ Fix: Evaluate fine-tuned model on general benchmarks (MMLU, HellaSwag) alongside
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -364,7 +399,7 @@ Fix: Evaluate fine-tuned model on general benchmarks (MMLU, HellaSwag) alongside
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What problem does Self-RAG solve that standard RAG doesn't?**
 A: Self-RAG solves two problems standard RAG ignores: (1) retrieval necessity — standard RAG always retrieves even when the LLM could answer from parametric knowledge (e.g., "What is 2+2?"), wasting latency and context window; Self-RAG decides per-query whether retrieval is needed. (2) Faithfulness verification — standard RAG generates an answer but doesn't check whether each statement is actually supported by the retrieved context; Self-RAG checks support at the statement level, enabling selective filtering of unsupported claims. The tradeoff is that Self-RAG requires fine-tuning a specific model variant; it's not applicable to API-only LLMs.
@@ -413,7 +448,7 @@ A: Several production-viable adaptations capture Self-RAG benefits without fine-
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Use LoRA for Self-RAG fine-tuning** — prevents catastrophic forgetting; preserves base model capabilities; reduces compute cost.
 2. **Generate high-quality training data** — use the strongest available model to produce the critic's reflection-token labels; validate 10% of annotations manually before training.
@@ -425,7 +460,7 @@ A: Several production-viable adaptations capture Self-RAG benefits without fine-
 
 ---
 
-## 13. Case Study: Self-RAG for a Legal Research Assistant
+## 14. Case Study: Self-RAG for a Legal Research Assistant
 
 > **Illustrative composite.** The firm, the metrics, the costs and the quoted model
 > output below are a worked teaching example, not a published or verifiable

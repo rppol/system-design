@@ -8,7 +8,7 @@ The critical problem Graph RAG solves: standard RAG completely fails at "global"
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Graph RAG builds a Wikipedia-style knowledge graph from your documents, then answers questions by navigating that graph rather than matching text chunks.
 
@@ -20,7 +20,7 @@ The critical problem Graph RAG solves: standard RAG completely fails at "global"
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Two-level indexing**: Entities and relationships are extracted at the document level; communities and summaries are built at the corpus level.
 - **Global vs. local query distinction**: Global queries (thematic, corpus-wide) use community summaries; local queries (specific entities, relationships) use graph traversal + vector search.
@@ -30,9 +30,101 @@ The critical problem Graph RAG solves: standard RAG completely fails at "global"
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Indexing Phase
+Graph RAG splits into two independent design decisions: **how the graph gets built** and
+**how a query walks it**. They are chosen separately, and the interesting recent work moves
+cost from one to the other rather than reducing it outright.
+
+**Index-side strategies** — what it costs to have a graph at all:
+
+| Strategy | How the graph is built | Index cost | Use when |
+|----------|-----------------------|------------|----------|
+| Full LLM extraction (GraphRAG) | An LLM extracts typed entities and relationships per chunk, entities are deduplicated, Leiden clusters them, and an LLM writes a summary per community | Highest — LLM calls proportional to corpus tokens | The corpus is stable and queried heavily and thematically, so a reusable asset amortizes |
+| LazyGraphRAG | Classical NLP noun-phrase extraction plus co-occurrence; every LLM call is deferred to query time under a relevance-test budget | Comparable to plain vector RAG | Streaming corpora, one-off analysis, exploratory work — anything where the index would be rebuilt or under-queried |
+
+Community detection is hierarchical either way: Leiden produces levels, level 0 being a few
+broad communities and deeper levels progressively finer ones. The level you summarize and
+search at is a first-class knob, not an implementation detail.
+
+**Query-side strategies** — what a question actually touches:
+
+| Mode | Mechanism | Answers | Cost driver |
+|------|-----------|---------|-------------|
+| Global search (static level) | Map-reduce over every community report at a fixed level | Thematic, corpus-wide questions with no single-chunk answer | Number of reports at that level; most of them are irrelevant to any given question |
+| Global search (dynamic community selection) | Traverse the community hierarchy from the root, have a cheap model rate each report, prune irrelevant subtrees, map-reduce only the survivors | The same questions, from whatever granularity actually holds the answer | The rating pass, which runs on a mini tier and is nearly free relative to what it prunes |
+| Local search | Anchor on the entities named in the query, traverse `H` hops, and merge the subgraph with ordinary vector search | Specific entities, their attributes and immediate relationships | Traversal fan-out, which grows with average degree raised to the hop depth |
+| DRIFT search | Local search that folds community information in and generates follow-up questions | Queries that are neither purely local nor purely global | Between the two; a config choice in the `graphrag` library |
+
+Two rules of thumb follow. First, **pick the query mode from the question, not the corpus** —
+running global search on an entity lookup burns the whole community layer for an answer one
+hop of traversal would have given. Second, **the index strategy follows the query volume**:
+full extraction only pays back when many thematic queries amortize it, which is exactly the
+condition LazyGraphRAG is designed to violate.
+
+---
+
+## 5. Architecture Diagrams
+
+### Graph RAG Indexing Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DOCS(["Documents"]) --> CHUNK["Text Chunking\n1000-token chunks with overlap"]
+    CHUNK --> ERX["Entity/Relation Extraction\n(LLM call per chunk)\nentities + relationships"]
+    ERX --> GC["Graph Construction\ndeduplicate entities, merge edges\nNetworkX / Neo4j"]
+    GC --> CD["Community Detection\nLeiden algorithm\nhierarchical C0, C1, C2"]
+    CD --> CS["Community Summarization\n(LLM call per community)\nstructured summary per cluster"]
+    CS --> ST[("Storage\nGraph DB: relationships\nVector DB: summaries + entity embeddings\nDocument DB: original chunks")]
+
+    class DOCS io
+    class CHUNK,GC,CD mathOp
+    class ERX,CS frozen
+    class ST base
+```
+
+### Graph RAG Query Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> QTC{"Query Type\nglobal or local?"}
+    QTC -->|"GLOBAL (thematic)"| CSR["Community Summary Retrieval"]
+    CSR --> MAP["Map: partial answer\nper community (parallel)"]
+    MAP --> RED["Reduce: LLM synthesizes\nall partial answers"]
+    RED --> GANS([Global Answer])
+    QTC -->|"LOCAL (entity-specific)"| EI["Entity Identification"]
+    EI --> SGE["Subgraph Extraction"]
+    SGE --> SCR["Source Chunk Retrieval"]
+    SCR --> LGEN["LLM Generation\nfrom subgraph context"]
+    LGEN --> LANS(["Local Answer + entity refs"])
+
+    class Q,GANS,LANS io
+    class QTC mathOp
+    class CSR,MAP,SGE,SCR,EI req
+    class RED,LGEN frozen
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Indexing Phase
 
 **Step 1: Entity and Relationship Extraction**
 ```
@@ -122,7 +214,7 @@ For each detected community, LLM generates a structured summary:
   }
 ```
 
-### 3.2 Query Phase
+### 6.2 Query Phase
 
 **Global Query (thematic/corpus-wide)**
 ```
@@ -174,7 +266,7 @@ neighborhood(h) = Sum over i = 1..h of d^i
 | `h` | Traversal depth; `depth = 3` in the case study's `multi_hop_retrieve` |
 | `d^h` | Nodes newly reached at exactly hop `h` |
 | `Σ d^i` for `i = 1..h` | Total neighborhood size — everything assembled into context |
-| `\|V\|` | Entity count in the graph; 41,000 after deduplication in Section 12 |
+| `\|V\|` | Entity count in the graph; 41,000 after deduplication in Section 14 |
 | tokens/node | Entity description length fed to the LLM, roughly 50 tokens |
 
 **Walk one example.** Three graph densities at `depth = 3`, against the case study's 41,000-entity graph:
@@ -193,7 +285,7 @@ neighborhood(h) = Sum over i = 1..h of d^i
 
 **Why depth is capped at 2-3 in practice.** The exponent is unforgiving: at `d = 15`, going from `h = 2` to `h = 3` adds 3,375 nodes to a neighborhood of 240 — a 15x jump from one extra hop. Beyond three hops nearly any real-world graph becomes fully connected through hub entities (a node like "Microsoft" or "digital transformation" links to thousands of others), so hop 4 returns "everything" and carries no signal. The practical control is not `h` alone but the pair `(h, edge-weight cutoff)`: pruning low-weight edges lowers the effective `d`, which is the only way to buy depth without paying `d^h`.
 
-### 3.3 Indexing Cost Estimation
+### 6.3 Indexing Cost Estimation
 
 ```
 For a corpus of 1M tokens (approximately 750 pages):
@@ -261,11 +353,11 @@ Notice where the money is: output tokens are 65% of the bill (`5.00 + 0.50 = 5.5
 
 That 20x is the trade Graph RAG actually makes: `$8.50` paid once, so that thematic questions cost `$0.0625` instead of being impossible. It only pays back if global queries are frequent — at 1-2 LLM calls, a standard RAG query costs a fraction of a cent, so a corpus asked only pinpoint questions never recovers the indexing spend.
 
-### 3.4 Moving the Bill: Dynamic Community Selection and LazyGraphRAG
+### 6.4 Moving the Bill: Dynamic Community Selection and LazyGraphRAG
 
-Section 2's fifth principle — "pre-computation is the price" — is the assumption two Microsoft follow-ups attack, one on each side of the ledger. Both ship in the `graphrag` library, so the choice is a config decision rather than a rewrite.
+Section 3's fifth principle — "pre-computation is the price" — is the assumption two Microsoft follow-ups attack, one on each side of the ledger. Both ship in the `graphrag` library, so the choice is a config decision rather than a rewrite.
 
-**Query side: dynamic community selection.** The map-reduce in 3.2 sends *every* community report at a chosen level through the map step, whether or not the report has anything to do with the question. Dynamic selection replaces the fixed level with a traversal: start at the graph root, have a cheap model rate each community report's relevance to the question, prune an irrelevant report together with its entire subtree, and recurse into the relevant ones. Only the surviving reports reach map-reduce, and because the traversal is not pinned to one level it can answer from whatever granularity actually holds the answer.
+**Query side: dynamic community selection.** The map-reduce in 6.2 sends *every* community report at a chosen level through the map step, whether or not the report has anything to do with the question. Dynamic selection replaces the fixed level with a traversal: start at the graph root, have a cheap model rate each community report's relevance to the question, prune an irrelevant report together with its entire subtree, and recurse into the relevant ones. Only the surviving reports reach map-reduce, and because the traversal is not pinned to one level it can answer from whatever granularity actually holds the answer.
 
 ```
   AP News benchmark, 50 global questions (Microsoft Research)
@@ -285,69 +377,11 @@ Section 2's fifth principle — "pre-computation is the price" — is the assump
 
 **Index side: LazyGraphRAG.** It removes the LLM from indexing entirely — classical NLP noun-phrase extraction plus co-occurrence gives the graph, and every LLM call is deferred to query time, where a best-first plus breadth-first iterative-deepening search spends a **relevance test budget** (100, 500 and 1,500 tests are the evaluated settings) as its single cost-quality knob. Microsoft reports indexing cost identical to vector RAG and **0.1% of full GraphRAG's**, and for global-query quality comparable to GraphRAG global search, more than **700x lower query cost**; at 4% of GraphRAG global search's cost it outperformed every compared method on both local and global queries.
 
-Read those against 3.3's `$850` for 100M tokens. Full extraction buys a reusable asset and only pays back on a stable corpus that is queried heavily and thematically; on streaming data, one-off analysis or exploratory work, paying per query is strictly cheaper. The library's **DRIFT search** sits between the two paths — local search that folds community information in and generates follow-up questions — and is the built-in version of the hand-rolled hybrid described in Section 10.
+Read those against 6.3's `$850` for 100M tokens. Full extraction buys a reusable asset and only pays back on a stable corpus that is queried heavily and thematically; on streaming data, one-off analysis or exploratory work, paying per query is strictly cheaper. The library's **DRIFT search** sits between the two paths — local search that folds community information in and generates follow-up questions — and is the built-in version of the hand-rolled hybrid described in Section 12.
 
 ---
 
-## 4. Architecture Diagram
-
-### Graph RAG Indexing Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    DOCS(["Documents"]) --> CHUNK["Text Chunking\n1000-token chunks with overlap"]
-    CHUNK --> ERX["Entity/Relation Extraction\n(LLM call per chunk)\nentities + relationships"]
-    ERX --> GC["Graph Construction\ndeduplicate entities, merge edges\nNetworkX / Neo4j"]
-    GC --> CD["Community Detection\nLeiden algorithm\nhierarchical C0, C1, C2"]
-    CD --> CS["Community Summarization\n(LLM call per community)\nstructured summary per cluster"]
-    CS --> ST[("Storage\nGraph DB: relationships\nVector DB: summaries + entity embeddings\nDocument DB: original chunks")]
-
-    class DOCS io
-    class CHUNK,GC,CD mathOp
-    class ERX,CS frozen
-    class ST base
-```
-
-### Graph RAG Query Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> QTC{"Query Type\nglobal or local?"}
-    QTC -->|"GLOBAL (thematic)"| CSR["Community Summary Retrieval"]
-    CSR --> MAP["Map: partial answer\nper community (parallel)"]
-    MAP --> RED["Reduce: LLM synthesizes\nall partial answers"]
-    RED --> GANS([Global Answer])
-    QTC -->|"LOCAL (entity-specific)"| EI["Entity Identification"]
-    EI --> SGE["Subgraph Extraction"]
-    SGE --> SCR["Source Chunk Retrieval"]
-    SCR --> LGEN["LLM Generation\nfrom subgraph context"]
-    LGEN --> LANS(["Local Answer + entity refs"])
-
-    class Q,GANS,LANS io
-    class QTC mathOp
-    class CSR,MAP,SGE,SCR,EI req
-    class RED,LGEN frozen
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### Microsoft GraphRAG Library
 - Open-sourced at github.com/microsoft/graphrag
@@ -367,7 +401,7 @@ flowchart TD
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | Standard RAG | Graph RAG |
 |-----------|-------------|-----------|
@@ -384,7 +418,7 @@ flowchart TD
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Graph RAG When:
 - Queries require synthesizing across many documents ("What are the major themes?")
@@ -408,7 +442,7 @@ flowchart TD
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Graph indexing cost underestimated**
 Entity extraction requires one LLM call per chunk. For a 1M-token corpus at a mid-tier frontier rate ($2.50/M in, $10/M out): $7-9 for extraction alone. At 100M tokens: $700-900 per full reindex.
@@ -436,7 +470,7 @@ Fix: For small corpora, skip Graph RAG entirely or use manual category hierarchi
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -451,7 +485,7 @@ Fix: For small corpora, skip Graph RAG entirely or use manual category hierarchi
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is Graph RAG and what problem does it solve?**
 A: Graph RAG builds a knowledge graph from documents with entities and relationships, clusters it into communities using the Leiden algorithm, and generates LLM summaries for each community. It solves the "global query" problem: standard vector RAG completely fails at questions like "What are the major themes across all documents?" or "What relationships does Company X have?" — these have no single-chunk answer. Graph RAG's community summaries capture themes and relationships across the entire corpus, enabling accurate answers to these synthesis queries. The tradeoff is expensive indexing (10-100× standard RAG) and high query latency (5-30 seconds for global queries).
@@ -506,7 +540,7 @@ A: Graph RAG becomes impractical when entity extraction yields too much noise to
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Estimate indexing cost before committing** — calculate entity extraction LLM cost for your full corpus size; ensure it's within budget.
 2. **Use cheaper models for entity extraction** — a mini tier is far cheaper than a flagship with minimal quality loss on this task. GPT-4o-mini vs GPT-4o is a clean 16.7x on both input ($0.15 vs $2.50 per 1M) and output ($0.60 vs $10.00); a Haiku-vs-Sonnet swap is a smaller ~3x. Price the specific pair you plan to use.
@@ -518,7 +552,7 @@ A: Graph RAG becomes impractical when entity extraction yields too much noise to
 
 ---
 
-## 13. Case Study: Graph RAG for Enterprise Knowledge Management at a Consulting Firm
+## 14. Case Study: Graph RAG for Enterprise Knowledge Management at a Consulting Firm
 
 **Problem Statement**: A global management consulting firm with 8,000 consultants has accumulated 50K+ client deliverables, research reports, and internal methodology documents over 12 years. These documents contain dense cross-references between industry trends, client organizations, regulatory frameworks, and strategic concepts. Consultants routinely ask multi-hop questions: "What engagement methodologies have we applied to digital transformation programs in financial services, and which led to measurable client outcomes?" Standard vector-only RAG returned fragmented chunks from individual documents — entity relationships were completely lost. A query about "relationships between our healthcare clients and regulatory compliance frameworks" returned scattered paragraphs with no synthesis across the corpus. The firm needed a system that could reason across documents, surface hidden entity connections, and answer thematic queries spanning thousands of deliverables.
 

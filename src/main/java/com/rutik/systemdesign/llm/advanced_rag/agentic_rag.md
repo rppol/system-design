@@ -8,7 +8,7 @@ This approach handles queries that are fundamentally multi-hop: "Compare the rev
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Agentic RAG is like a research analyst who reads one report, identifies what's still missing, pulls the next relevant source, and repeats until they have enough to write the brief.
 
@@ -20,7 +20,7 @@ This approach handles queries that are fundamentally multi-hop: "Compare the rev
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Retrieval is an action, not a lookup**: The LLM treats retrieval as a tool call it can invoke at any time with any query, rather than a fixed first step.
 - **Sufficiency evaluation is separate from generation**: Before generating a final answer, the LLM explicitly evaluates whether the retrieved context is sufficient to answer correctly.
@@ -30,9 +30,97 @@ This approach handles queries that are fundamentally multi-hop: "Compare the rev
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Basic Agentic Loop
+"Agentic RAG" names a family of control structures, not a single algorithm. The members
+differ on two axes: **where the retrieval decision lives** — in an orchestrator outside the
+model, or inside the decode loop itself — and **whether hops run one after another or all at
+once**. The five below are the ones this page implements; they compose rather than compete,
+and a production system typically runs a tool-calling agent whose planner emits a dependency
+graph and whose independent branches are fanned out.
+
+| Topology | Who decides to retrieve | Hop shape | Best for | Dominant cost |
+|----------|------------------------|-----------|----------|---------------|
+| Basic agentic loop | An explicit sufficiency check between iterations | Serial | Chained multi-hop questions where hop `i+1` depends on hop `i` | One extra LLM call per iteration; context grows quadratically |
+| State-machine loop (LangGraph) | The same check, expressed as typed state plus conditional edges | Serial, checkpointable | Production deployments that need resumability, retries and per-node observability | Framework surface and a state schema to maintain |
+| FLARE | The decoder itself, from token confidence mid-generation | Interleaved with generation | Long-form answers where the knowledge gap only surfaces once the model starts writing | Confidence thresholds are model-specific and need calibration |
+| Tool-calling agent | The model's native function calling, choosing among several retrievers | Serial, model-directed | Heterogeneous back ends: vector DB, SQL, web search, internal APIs | Tool-selection errors; unbounded unless you impose an iteration cap |
+| Parallel fan-out (DAG) | A planner that emits sub-questions plus "needs the answer of" edges | Concurrent within each DAG level | Joined questions ("compare A and B") whose sub-queries are all writable up front | Peak context arrives at once; deduplication across concurrent branches |
+
+Two structural choices cut across all five:
+
+- **Serial vs. concurrent** is a property of the *question*, not of the framework. Chained
+  questions force serialization; joined questions do not, and paying serial latency for them
+  is pure waste. Wall-clock latency tracks the DAG's depth, cost tracks its node count.
+- **Always-agentic vs. routed** is the cost decision. A router that sends only the queries
+  standard RAG actually fails on down the agentic path is what makes any of these topologies
+  affordable; an escalation variant runs standard RAG first and promotes the query only when
+  retrieval relevance or answer faithfulness scores low.
+
+Related-but-different: [Self-RAG](self_rag.md) moves the same decisions *inside* the model
+via fine-tuned reflection tokens rather than an external orchestrator, and
+[CRAG](corrective_rag.md) keeps a single retrieval pass and adds one corrective branch
+instead of a loop.
+
+---
+
+## 5. Architecture Diagrams
+
+### Agentic RAG Control Flow
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> QA["Initial Query Analysis\n'What sub-questions must I answer?'"]
+    QA --> RETN["Retrieval Step N\nLLM generates retrieval query\nDense + sparse → rerank → inject"]
+    RETN --> CHK{"Sufficiency Check"}
+    CHK -->|SUFFICIENT| FG["Final Generation"]
+    FG --> ANS([Answer])
+    CHK -->|INSUFFICIENT| GAP["Gap Analysis\n'What am I still missing?'"]
+    GAP --> NRQ["Next Retrieval Query"]
+    NRQ --> ITER{"N < max_iter?"}
+    ITER -->|YES| RETN
+    ITER -->|NO| BEG["Best-effort Generation\n'Based on available context...'"]
+    BEG --> ANS
+
+    class Q,ANS io
+    class QA,RETN,FG train
+    class CHK,ITER mathOp
+    class GAP,NRQ frozen
+    class BEG lossN
+```
+
+### FLARE Mid-Generation Retrieval
+```
+Context: [initial retrieved docs]
+
+LLM generates:
+  "In Q2 2023, Brazil's economy grew by [LOW CONFIDENCE PREDICTION: 3.2%]"
+                                              |
+                                              v
+                                    [FLARE triggers retrieval]
+                                    Query: "Brazil GDP growth Q2 2023"
+                                              |
+                                              v
+                                    [Retrieved: "Brazil GDP grew 1.9% in Q2 2023"]
+                                              |
+                                              v
+                                    [Regenerate with correct context]
+  "In Q2 2023, Brazil's economy grew by 1.9%..."
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Basic Agentic Loop
 
 ```
 Step 1: Query analysis
@@ -59,7 +147,7 @@ Step 7 (fallback): If max_iterations reached, generate best-effort answer
   with explicit acknowledgment of missing information
 ```
 
-### 3.2 LangGraph Implementation Pattern
+### 6.2 LangGraph Implementation Pattern
 
 The loop below is a minimal [LangGraph](../agentic_frameworks/langgraph.md) state machine: a retrieve node and a sufficiency-check node connected by a conditional edge that either loops back for another retrieval or exits to generation.
 
@@ -142,7 +230,7 @@ graph.add_edge("generate", END)
   scales with iterations squared.
 ```
 
-**Why the quadratic term exists.** The sufficiency check must see everything gathered so far or it cannot judge sufficiency — so iteration 5 re-reads what iterations 1-4 already paid to read. That is exactly what Section 10's context-compression strategies attack: summarizing the accumulated context after each pass replaces the growing `2500 x i` prefix with a flat few-hundred-token digest, collapsing the sum back toward linear.
+**Why the quadratic term exists.** The sufficiency check must see everything gathered so far or it cannot judge sufficiency — so iteration 5 re-reads what iterations 1-4 already paid to read. That is exactly what Section 12's context-compression strategies attack: summarizing the accumulated context after each pass replaces the growing `2500 x i` prefix with a flat few-hundred-token digest, collapsing the sum back toward linear.
 
 **Walk the context-window risk.** Pitfall 2 warns that iteration 3 can exhaust a 128K window. Whether that happens is entirely a function of `top_k x chunk_size`:
 
@@ -154,7 +242,7 @@ graph.add_edge("generate", END)
   cap is a poor context guard; a token-budget guard is the real control.
 ```
 
-**Walk the cost control.** At GPT-4o-mini input pricing (`$0.15` per 1M tokens), the sufficiency checks alone for a 5-iteration query read 37,500 tokens = `$0.0056`. Section 10's routing advice — send only 20-30% of traffic down the agentic path — is what makes that affordable:
+**Walk the cost control.** At GPT-4o-mini input pricing (`$0.15` per 1M tokens), the sufficiency checks alone for a 5-iteration query read 37,500 tokens = `$0.0056`. Section 12's routing advice — send only 20-30% of traffic down the agentic path — is what makes that affordable:
 
 ```
   always agentic        : $0.00562 per query
@@ -163,7 +251,7 @@ graph.add_edge("generate", END)
   a 3.3x reduction, achieved by a classifier and no change to the loop itself
 ```
 
-### 3.3 FLARE (Forward-Looking Active REtrieval)
+### 6.3 FLARE (Forward-Looking Active REtrieval)
 
 FLARE takes a different approach: instead of pre-emptive retrieval, it retrieves mid-generation when the LLM is about to generate uncertain tokens.
 
@@ -190,7 +278,7 @@ Limitation: requires token-level probability access, which not every hosted API 
     prompt or an external uncertainty estimator instead.
 ```
 
-### 3.4 Tool-Calling Agentic RAG
+### 6.4 Tool-Calling Agentic RAG
 
 Modern LLMs with function calling support agentic RAG natively:
 
@@ -221,9 +309,9 @@ response = llm.generate_with_tools(
 
 Tool-calling agentic RAG is cleaner than orchestrated loops: the LLM decides when to retrieve, what to retrieve, and from which source (knowledge base vs. web).
 
-### 3.5 Parallel Fan-Out for Independent Sub-Questions
+### 6.5 Parallel Fan-Out for Independent Sub-Questions
 
-The loop in 3.1 is strictly sequential — iteration `i+1` cannot start until `i` finishes — and that is only *necessary* when the next retrieval query depends on the previous result. Multi-hop queries come in two shapes and the loop treats them identically:
+The loop in 6.1 is strictly sequential — iteration `i+1` cannot start until `i` finishes — and that is only *necessary* when the next retrieval query depends on the previous result. Multi-hop queries come in two shapes and the loop treats them identically:
 
 ```
   CHAINED (must serialize)
@@ -237,7 +325,7 @@ The loop in 3.1 is strictly sequential — iteration `i+1` cannot start until `i
       none of the four queries can be written any better after seeing another
 ```
 
-Decompose the query into a DAG instead of a list: nodes are sub-questions, edges are "needs the answer of". Every node whose parents are resolved is dispatched concurrently, so **wall-clock latency tracks the DAG's depth, not its node count**. The Section 13 case study's four sub-questions form a depth-1 DAG with a second targeted hop after the sufficiency check — that is exactly why its "Parallel tool execution" decision moved average iteration time from 8s to 3s.
+Decompose the query into a DAG instead of a list: nodes are sub-questions, edges are "needs the answer of". Every node whose parents are resolved is dispatched concurrently, so **wall-clock latency tracks the DAG's depth, not its node count**. The Section 14 case study's four sub-questions form a depth-1 DAG with a second targeted hop after the sufficiency check — that is exactly why its "Parallel tool execution" decision moved average iteration time from 8s to 3s.
 
 ```
   4 sub-questions, ~3 s each, one dependent follow-up
@@ -246,72 +334,18 @@ Decompose the query into a DAG instead of a list: nodes are sub-questions, edges
   DAG        : {Q1,Q2,Q3,Q4} -> Q5             =  6 s   (2 levels deep)
 ```
 
-[LLMCompiler](https://arxiv.org/abs/2312.04511) is the reference implementation of this idea: a Planner emits the task DAG, a Task Fetching Unit dispatches every task whose dependencies are met, and an Executor runs them in parallel — the paper reports up to 3.7x latency speedup, up to 6.7x cost savings and ~9% accuracy improvement against ReAct. The cost saving is not a rounding effect: serial ReAct-style loops re-send the growing scratchpad on every step, which is the same quadratic term computed in 3.2. Anthropic's multi-agent research system reports the same lever at agent granularity — a lead agent spinning up 3-5 subagents in parallel, each using 3+ tools in parallel, "cut research time by up to 90% for complex queries" — with the caveat that the win is specific to breadth-first queries with genuinely independent directions.
+[LLMCompiler](https://arxiv.org/abs/2312.04511) is the reference implementation of this idea: a Planner emits the task DAG, a Task Fetching Unit dispatches every task whose dependencies are met, and an Executor runs them in parallel — the paper reports up to 3.7x latency speedup, up to 6.7x cost savings and ~9% accuracy improvement against ReAct. The cost saving is not a rounding effect: serial ReAct-style loops re-send the growing scratchpad on every step, which is the same quadratic term computed in 6.2. Anthropic's multi-agent research system reports the same lever at agent granularity — a lead agent spinning up 3-5 subagents in parallel, each using 3+ tools in parallel, "cut research time by up to 90% for complex queries" — with the caveat that the win is specific to breadth-first queries with genuinely independent directions.
 
 Four things break when you parallelize the loop, and all four are silent:
 
 - **Sufficiency must be checked at the join, not per branch.** One check per branch reads the whole accumulated context `N` times, multiplying the quadratic term instead of reducing it.
 - **`seen_ids` deduplication stops working.** Concurrent branches cannot filter on each other's results, so Pitfall 4's `$nin` filter no longer prevents overlap; dedup after the join instead, and expect the token count to exceed `N x top_k x chunk_size` minus duplicates.
 - **The slowest branch sets the wall clock.** A per-branch timeout with partial-result handling is mandatory; without it, one slow tool erases the entire speedup.
-- **Peak context arrives all at once.** Serial accumulation gives the compressor a chance to run between hops; a fan-out delivers `N` branches' worth of chunks simultaneously, so the token-budget guard from 3.2 has to be enforced before dispatch, not after.
+- **Peak context arrives all at once.** Serial accumulation gives the compressor a chance to run between hops; a fan-out delivers `N` branches' worth of chunks simultaneously, so the token-budget guard from 6.2 has to be enforced before dispatch, not after.
 
 ---
 
-## 4. Architecture Diagram
-
-### Agentic RAG Control Flow
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> QA["Initial Query Analysis\n'What sub-questions must I answer?'"]
-    QA --> RETN["Retrieval Step N\nLLM generates retrieval query\nDense + sparse → rerank → inject"]
-    RETN --> CHK{"Sufficiency Check"}
-    CHK -->|SUFFICIENT| FG["Final Generation"]
-    FG --> ANS([Answer])
-    CHK -->|INSUFFICIENT| GAP["Gap Analysis\n'What am I still missing?'"]
-    GAP --> NRQ["Next Retrieval Query"]
-    NRQ --> ITER{"N < max_iter?"}
-    ITER -->|YES| RETN
-    ITER -->|NO| BEG["Best-effort Generation\n'Based on available context...'"]
-    BEG --> ANS
-
-    class Q,ANS io
-    class QA,RETN,FG train
-    class CHK,ITER mathOp
-    class GAP,NRQ frozen
-    class BEG lossN
-```
-
-### FLARE Mid-Generation Retrieval
-```
-Context: [initial retrieved docs]
-
-LLM generates:
-  "In Q2 2023, Brazil's economy grew by [LOW CONFIDENCE PREDICTION: 3.2%]"
-                                              |
-                                              v
-                                    [FLARE triggers retrieval]
-                                    Query: "Brazil GDP growth Q2 2023"
-                                              |
-                                              v
-                                    [Retrieved: "Brazil GDP grew 1.9% in Q2 2023"]
-                                              |
-                                              v
-                                    [Regenerate with correct context]
-  "In Q2 2023, Brazil's economy grew by 1.9%..."
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### Perplexity Deep Research
 - 5-20 web searches per query, each building on previous findings
@@ -332,7 +366,7 @@ LLM generates:
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Aspect | Standard RAG | Agentic RAG (3 iterations) |
 |--------|-------------|---------------------------|
@@ -346,7 +380,7 @@ LLM generates:
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Agentic RAG When:
 - Queries require chaining multiple facts ("Who is the CEO of the company that acquired X?")
@@ -368,7 +402,7 @@ LLM generates:
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Infinite loops without max_iterations**
 An agentic loop that never achieves sufficiency will run indefinitely. The sufficiency check LLM call can itself fail or return inconsistent results.
@@ -408,7 +442,7 @@ Fix: Add a query classifier that routes simple queries to standard RAG and compl
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -422,7 +456,7 @@ Fix: Add a query classifier that routes simple queries to standard RAG and compl
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: When would you choose agentic RAG over standard RAG?**
 A: Agentic RAG is worth the added complexity when queries are multi-hop — where the next retrieval step depends on what was found in the previous one. Examples: "Who is the CEO of the company that acquired X?" requires first finding which company acquired X, then finding that company's CEO. Standard RAG fires one query and can't chain these retrievals. The cost is 5-10× latency and significant debugging complexity. Start with standard RAG and measure accuracy on your query distribution first; only add agentic retrieval when standard RAG fails on multi-hop questions that matter to your users.
@@ -477,7 +511,7 @@ A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration ef
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Always set max_iterations** — never let the loop run unbounded; 3-5 iterations handles 95% of multi-hop queries.
 2. **Log every iteration** — trace retrieval queries, document IDs, and sufficiency check results; debugging without this trace is impossible.
@@ -489,7 +523,7 @@ A: Beyond standard answer accuracy, track agentic-specific metrics. Iteration ef
 
 ---
 
-## 13. Case Study: Agentic RAG for a Financial Research Assistant
+## 14. Case Study: Agentic RAG for a Financial Research Assistant
 
 **Problem Statement**: A financial data firm serves 500 buy-side analysts who research investment opportunities. Analysts ask multi-hop questions across three distinct sources: SEC EDGAR filings (10-K, 10-Q, 8-K), earnings call transcripts, and real-time financial news. A typical question is: "Compare the gross margin trajectory of Company A and Company B over the last 3 quarters, and identify what each management team cited as the primary driver of margin changes." Standard RAG answered only one part of these questions; analysts were spending 2+ hours per research brief manually cross-referencing sources.
 

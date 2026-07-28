@@ -8,7 +8,7 @@ Techniques include: query rewriting (make the query explicit and retrieval-frien
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Query transformation is like a skilled reference librarian who rephrases your vague question into precise search terms before looking anything up.
 
@@ -20,7 +20,7 @@ Techniques include: query rewriting (make the query explicit and retrieval-frien
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Query-document vocabulary gap**: Users ask terse questions; documents contain declarative prose. Transformation closes this gap.
 - **Multiple perspectives improve recall**: Different phrasings of the same question retrieve different documents. Merging results covers the space better.
@@ -30,247 +30,38 @@ Techniques include: query rewriting (make the query explicit and retrieval-frien
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Query Rewriting
+The transformation techniques fall into three families by **what they do to the query's
+shape**. The family determines the failure mode; the individual technique determines the
+cost. Mechanics for each are in Section 6.
 
-An LLM rewrites the user's raw query to be more explicit, self-contained, and aligned with how documents phrase information.
+| Family | What it does to the query | Members | Shared failure mode |
+|--------|--------------------------|---------|--------------------|
+| Clarify in place | One query in, one query out — made explicit and self-contained | Query rewriting, conversational rewriting | Over-transformation: the rewrite drifts off the user's actual intent, or paraphrases away proper nouns and numbers |
+| Change the embedding space | One query in, one *differently shaped* text out, embedded in place of the query | HyDE, step-back prompting | The substitute text is wrong — a hallucinated hypothesis or an over-general abstraction — and retrieval confidently follows it |
+| Split and merge | One query in, `N` queries out, results merged | Multi-query expansion, query decomposition | Noise and duplication; reranking after the merge stops being optional |
 
-```
-System: "Rewrite the following user query to be more explicit and retrieval-friendly.
-         Remove pronouns, add context, use formal language."
+| Technique | Output | LLM calls | Retrievals | Strongest on |
+|-----------|--------|-----------|------------|--------------|
+| Query rewriting | One explicit query | 1 | 1 | Terse, colloquial or ambiguous single-turn queries |
+| Conversational rewriting | One standalone question, history folded in | 1 | 1 | Multi-turn chat, where turn 2 onward is elliptical ("how much did *it* cost?") |
+| HyDE | A hypothetical answer document, embedded instead of the query | 1 | 1 | Vocabulary gaps where the question and the answer share almost no words |
+| Step-back prompting | A more general question retrieved alongside the specific one | 1 | 2 | Queries needing background the narrow phrasing would never match |
+| Multi-query expansion | `N` alternative phrasings, merged and deduplicated | 1 | `N`, parallelizable | Broad queries with many valid phrasings; recall-limited retrieval |
+| Query decomposition | A dependency DAG of sub-questions | 1 planner + 1 synthesizer | One per node, concurrent per DAG level | Genuinely compound questions no single chunk answers |
 
-User query: "What did they decide about the budget last quarter?"
-
-Rewritten: "What budget decisions were made by the executive team in Q4 2024
-            regarding the company's annual operating plan?"
-```
-
-Implementation:
-```python
-def rewrite_query(raw_query: str, llm) -> str:
-    prompt = f"""Rewrite this search query to be more explicit and retrievable.
-    Remove ambiguous pronouns. Add domain context. Keep it a single sentence.
-
-    Original query: {raw_query}
-    Rewritten query:"""
-    return llm.generate(prompt).strip()
-```
-
-When to use: when users ask follow-up questions with pronouns, when the domain has jargon, when query phrasing differs sharply from document language.
-
-### 3.2 HyDE (Hypothetical Document Embeddings)
-
-Instead of embedding the query and comparing to document embeddings, generate a hypothetical document that would answer the query, then embed that:
-
-```
-Step 1: Query → LLM → Hypothetical Answer
-  Query: "What is the capital gains tax rate for long-term investments in 2024?"
-  Hypothetical: "Long-term capital gains in 2024 are taxed at 0%, 15%, or 20%
-                 depending on your taxable income bracket. For individuals earning
-                 under $44,625, the rate is 0%..."
-
-Step 2: Embed the hypothetical answer (not the original query)
-Step 3: ANN search: find documents similar to the hypothetical answer
-
-Why: The hypothetical answer is in "document space" — it resembles how a real
-     document would discuss this topic, bridging the query-document gap.
-```
-
-HyDE pseudocode:
-```python
-def hyde_retrieve(query: str, llm, embed, vector_db, top_k: int = 10):
-    # Generate hypothetical answer
-    hypothetical = llm.generate(
-        f"Write a detailed paragraph that would answer: {query}"
-    )
-    # Embed hypothetical (document-like text)
-    hyp_embedding = embed(hypothetical)
-    # Retrieve documents similar to hypothetical answer
-    return vector_db.search(hyp_embedding, top_k=top_k)
-```
-
-Quality vs. risk: If the LLM's hypothetical answer is factually wrong, retrieval will find documents that match the wrong hypothesis. Always test HyDE vs. direct embedding on your eval set.
-
-### 3.3 Multi-Query Expansion
-
-Generate multiple alternative phrasings of the query, retrieve for each, merge and deduplicate:
-
-```
-Original: "How does React handle state updates?"
-
-LLM generates 4 alternatives:
-  1. "React useState hook and state management mechanisms"
-  2. "How component re-renders are triggered in React"
-  3. "React state batching and asynchronous updates"
-  4. "setState behavior in React functional components"
-
-Retrieve top-20 for each → merge → deduplicate → re-rank top-10
-Result: materially higher recall than single-query retrieval — Section 6 uses
-        30-50% as an illustrative planning range for broad queries; measure it
-```
-
-```python
-def multi_query_retrieve(query: str, llm, retriever, n_queries: int = 4):
-    prompt = f"""Generate {n_queries} different phrasings of this query.
-    Return as a numbered list. Cover different angles and terminology.
-    Query: {query}"""
-
-    alternatives = llm.generate(prompt)
-    all_queries = [query] + parse_list(alternatives)
-
-    all_results = []
-    seen_ids = set()
-    for q in all_queries:
-        for doc in retriever.retrieve(q, top_k=20):
-            if doc.id not in seen_ids:
-                all_results.append(doc)
-                seen_ids.add(doc.id)
-
-    return all_results  # rerank before returning
-```
-
-Deduplication is critical: the same document retrieved by multiple query variants should appear only once in the final candidate set.
-
-**What the formula is telling you.** Fan-out multiplies cost linearly and recall sub-linearly. Gross candidates are exactly `N x top_k`, but *unique* candidates saturate — because every variant is fishing in the same small pool of genuinely relevant documents. Modelling each variant as drawing `k` documents from an effective relevant pool of size `P`, the expected unique count is `P x (1 - (1 - k/P)^N)`.
-
-| Symbol | What it is |
-|--------|------------|
-| `N` | Query variants retrieved for, including the original — 5 in the code above |
-| `k` | `top_k` per variant, 20 here |
-| `N x k` | Gross retrievals — the cost you pay in ANN searches every time |
-| `P` | Effective pool of documents any phrasing of this question can surface |
-| `(1 - k/P)^N` | Probability a given pool document is missed by all `N` variants |
-| dedup rate | `(gross - unique) / gross` — the fraction of your retrieval work thrown away |
-
-**Walk one example.** `k = 20`, `P = 80`:
-
-```
-  N    gross   unique   duplicates   dedup rate   new docs this variant added
-  ------------------------------------------------------------------------------
-   1      20    20.00       0.00        0.0%        20.00
-   2      40    35.00       5.00       12.5%        15.00
-   3      60    46.25      13.75       22.9%        11.25
-   5     100    61.02      38.98       39.0%         6.33
-  10     200    75.49     124.51       62.3%         1.50
-
-  Cost is a straight line: N = 10 runs 10x the ANN searches of N = 1.
-  Yield is a decaying curve: the 10th variant contributes 1.50 new documents
-  for the same price as the 1st, which contributed 20.
-```
-
-**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 6's "3-5 variants" guidance and under Pitfall 5's warning about 10+ variants: past five, you are buying duplicates at full price.
-
-**What dedup actually saves.** At `N = 5`, 38.98 of the 100 retrievals are repeats. Removing them before the reranker cuts 39 cross-encoder passes — roughly `38.98 x 0.8 ms = 31 ms` — but the real damage of skipping dedup (Pitfall 3) is not latency. A document surfaced by four of five variants appears four times in the reranker's input and four times in the final context, so it both distorts the ranking and consumes context slots that other evidence needed.
-
-**Walk the transformation bill.** The case study in Section 13 measures `$0.0004` per query for the transformation LLM call:
-
-```
-  10,000 queries/day  -> $  4.00/day
-  100,000 queries/day -> $ 40.00/day
-  1,000,000 queries/day -> $400.00/day
-
-  with the case study's 34% semantic-cache hit rate:
-    $0.0004 x 0.66 = $0.000264 effective -> $264.00/day at 1M queries
-
-  latency paid alongside it: 0.8 s -> 1.4 s end to end, +0.6 s = +75%
-  (cache hits return in 0.2 s, which is what makes the 34% worth having)
-```
-
-### 3.4 Step-Back Prompting
-
-Generate a more general "step-back" question to retrieve background context that helps answer the specific question:
-
-```
-Specific: "What was Brazil's GDP growth rate in Q2 2023?"
-Step-back: "What are the main economic indicators used to measure Brazil's growth?"
-
-Specific: "Why did the Lehman Brothers collapse?"
-Step-back: "How did the 2008 subprime mortgage crisis develop?"
-
-Retrieve both specific + step-back queries
-Provide both specific facts + background context to the LLM
-```
-
-Step-back is particularly effective for:
-- Technical questions requiring conceptual background
-- Historical questions requiring causal context
-- "Why" questions requiring understanding of mechanism
-
-### 3.5 Query Decomposition
-
-Break a complex multi-hop question into sub-questions, answer each independently, then synthesize:
-
-```
-Complex: "Which companies in our portfolio had revenue growth >20% AND
-          decreased headcount in 2024?"
-
-Decomposed:
-  Q1: "Which portfolio companies had >20% revenue growth in 2024?"
-  Q2: "Which portfolio companies decreased headcount in 2024?"
-  Q3: (after answering Q1, Q2) "Intersection of Q1 and Q2 results"
-```
-
-### Decomposition Is a Dependency DAG
-
-A multi-hop question becomes a small dependency graph of sub-questions. Independent legs
-(Q1, Q2) retrieve in parallel; the dependent step (Q3) must wait for both before it can run;
-a final step synthesizes. Seeing the DAG explains why decomposition is the seed of agentic
-RAG — it is literally a plan of retrieval steps with data dependencies.
-
-```
-   "Which companies had >20% revenue growth AND decreased headcount in 2024?"
-                              │ decompose
-              ┌───────────────┴───────────────┐
-              ▼                                ▼
-     Q1: >20% revenue growth         Q2: headcount decreased      (independent →
-         in 2024                         in 2024                    retrieve in parallel)
-              └───────────────┬───────────────┘
-                              ▼
-     Q3: intersection(Q1, Q2)                                      (dependent → needs
-                              │                                     Q1 and Q2 answers)
-                              ▼
-                  synthesize final answer
-```
-
-The join at Q3 is the part single-shot retrieval cannot do: no single embedding query
-expresses "growth AND shrinking headcount," so the answer only exists after the two legs are
-computed and intersected.
-
-Decomposition is the foundation of agentic RAG (see [agentic_rag.md](agentic_rag.md)); when a decomposed leg retrieves low-quality evidence, corrective retrieval loops (see [corrective_rag.md](corrective_rag.md)) pick up from there.
-
-### 3.6 Conversational Query Rewriting (Multi-Turn)
-
-Section 3.1 promises to resolve pronouns, but its `rewrite_query(raw_query, llm)` signature cannot: "How much did it cost?" contains no information about what `it` is. In a chat product this is not an edge case — after turn one, most queries are elliptical, and embedding "How much did it cost?" retrieves whatever the corpus says about cost in general. The transformation therefore takes two inputs, not one: the conversation history and the latest turn, producing a **standalone question** that is meaningful with the history thrown away.
-
-```python
-from langchain.chains import create_history_aware_retriever
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-contextualize_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "Given a chat history and the latest user question which might reference "
-     "context in the chat history, formulate a standalone question which can be "
-     "understood without the chat history. Do NOT answer the question, just "
-     "reformulate it if needed and otherwise return it as is."),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}"),
-])
-
-history_aware_retriever = create_history_aware_retriever(
-    llm, retriever, contextualize_prompt
-)
-# turn 1 (chat_history empty): input goes STRAIGHT to the retriever, no LLM call
-# turn N: prompt | llm | StrOutputParser() | retriever
-```
-
-Three details carry the design. First, the empty-history short circuit: LangChain's helper branches on `not x.get("chat_history")` and skips the rewrite entirely on turn one, so the extra LLM call is paid only where it can help. Second, `"otherwise return it as is"` is the instruction that stops the rewriter from dragging a stale entity into a genuinely new question — the classic multi-turn failure is a user switching topics ("Now, what is the refund policy?") and the rewriter helpfully appending the previous product's name, which sends retrieval to the wrong document set. Third, window the history to the last 2-4 turns; feeding twenty turns raises both the rewrite cost and the odds that a long-dead entity resurfaces.
-
-Note that this defeats the transformed-query cache in Pitfall 6: the cache key is now `(history, question)`, and history is unique per conversation, so the hit rate collapses. Cache the retrieval results keyed on the **rewritten** standalone question instead — that key repeats across users, while the raw turn does not.
+Two selection rules follow from the table. **Latency is a choice, cost is not**: the split
+and merge family multiplies retrieval cost by `N` no matter what, but the retrievals are
+independent, so wall-clock latency need not multiply. And **transformations compose** — a
+conversational rewrite that produces a standalone question, then decomposed into
+sub-questions, each expanded — but each stage multiplies both the bill and the chance that
+an early misreading of intent propagates through everything downstream. Add one at a time
+and measure recall on a labelled eval set before keeping it.
 
 ---
 
-## 4. Architecture Diagram
+## 5. Architecture Diagrams
 
 ### Query Transformation Pipeline
 ```mermaid
@@ -324,7 +115,247 @@ HyDE:      [User Query]  →  LLM  →  [Hypothetical Answer]
 
 ---
 
-## 5. Real-World Examples
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Query Rewriting
+
+An LLM rewrites the user's raw query to be more explicit, self-contained, and aligned with how documents phrase information.
+
+```
+System: "Rewrite the following user query to be more explicit and retrieval-friendly.
+         Remove pronouns, add context, use formal language."
+
+User query: "What did they decide about the budget last quarter?"
+
+Rewritten: "What budget decisions were made by the executive team in Q4 2024
+            regarding the company's annual operating plan?"
+```
+
+Implementation:
+```python
+def rewrite_query(raw_query: str, llm) -> str:
+    prompt = f"""Rewrite this search query to be more explicit and retrievable.
+    Remove ambiguous pronouns. Add domain context. Keep it a single sentence.
+
+    Original query: {raw_query}
+    Rewritten query:"""
+    return llm.generate(prompt).strip()
+```
+
+When to use: when users ask follow-up questions with pronouns, when the domain has jargon, when query phrasing differs sharply from document language.
+
+### 6.2 HyDE (Hypothetical Document Embeddings)
+
+Instead of embedding the query and comparing to document embeddings, generate a hypothetical document that would answer the query, then embed that:
+
+```
+Step 1: Query → LLM → Hypothetical Answer
+  Query: "What is the capital gains tax rate for long-term investments in 2024?"
+  Hypothetical: "Long-term capital gains in 2024 are taxed at 0%, 15%, or 20%
+                 depending on your taxable income bracket. For individuals earning
+                 under $44,625, the rate is 0%..."
+
+Step 2: Embed the hypothetical answer (not the original query)
+Step 3: ANN search: find documents similar to the hypothetical answer
+
+Why: The hypothetical answer is in "document space" — it resembles how a real
+     document would discuss this topic, bridging the query-document gap.
+```
+
+HyDE pseudocode:
+```python
+def hyde_retrieve(query: str, llm, embed, vector_db, top_k: int = 10):
+    # Generate hypothetical answer
+    hypothetical = llm.generate(
+        f"Write a detailed paragraph that would answer: {query}"
+    )
+    # Embed hypothetical (document-like text)
+    hyp_embedding = embed(hypothetical)
+    # Retrieve documents similar to hypothetical answer
+    return vector_db.search(hyp_embedding, top_k=top_k)
+```
+
+Quality vs. risk: If the LLM's hypothetical answer is factually wrong, retrieval will find documents that match the wrong hypothesis. Always test HyDE vs. direct embedding on your eval set.
+
+### 6.3 Multi-Query Expansion
+
+Generate multiple alternative phrasings of the query, retrieve for each, merge and deduplicate:
+
+```
+Original: "How does React handle state updates?"
+
+LLM generates 4 alternatives:
+  1. "React useState hook and state management mechanisms"
+  2. "How component re-renders are triggered in React"
+  3. "React state batching and asynchronous updates"
+  4. "setState behavior in React functional components"
+
+Retrieve top-20 for each → merge → deduplicate → re-rank top-10
+Result: materially higher recall than single-query retrieval — Section 8 uses
+        30-50% as an illustrative planning range for broad queries; measure it
+```
+
+```python
+def multi_query_retrieve(query: str, llm, retriever, n_queries: int = 4):
+    prompt = f"""Generate {n_queries} different phrasings of this query.
+    Return as a numbered list. Cover different angles and terminology.
+    Query: {query}"""
+
+    alternatives = llm.generate(prompt)
+    all_queries = [query] + parse_list(alternatives)
+
+    all_results = []
+    seen_ids = set()
+    for q in all_queries:
+        for doc in retriever.retrieve(q, top_k=20):
+            if doc.id not in seen_ids:
+                all_results.append(doc)
+                seen_ids.add(doc.id)
+
+    return all_results  # rerank before returning
+```
+
+Deduplication is critical: the same document retrieved by multiple query variants should appear only once in the final candidate set.
+
+**What the formula is telling you.** Fan-out multiplies cost linearly and recall sub-linearly. Gross candidates are exactly `N x top_k`, but *unique* candidates saturate — because every variant is fishing in the same small pool of genuinely relevant documents. Modelling each variant as drawing `k` documents from an effective relevant pool of size `P`, the expected unique count is `P x (1 - (1 - k/P)^N)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Query variants retrieved for, including the original — 5 in the code above |
+| `k` | `top_k` per variant, 20 here |
+| `N x k` | Gross retrievals — the cost you pay in ANN searches every time |
+| `P` | Effective pool of documents any phrasing of this question can surface |
+| `(1 - k/P)^N` | Probability a given pool document is missed by all `N` variants |
+| dedup rate | `(gross - unique) / gross` — the fraction of your retrieval work thrown away |
+
+**Walk one example.** `k = 20`, `P = 80`:
+
+```
+  N    gross   unique   duplicates   dedup rate   new docs this variant added
+  ------------------------------------------------------------------------------
+   1      20    20.00       0.00        0.0%        20.00
+   2      40    35.00       5.00       12.5%        15.00
+   3      60    46.25      13.75       22.9%        11.25
+   5     100    61.02      38.98       39.0%         6.33
+  10     200    75.49     124.51       62.3%         1.50
+
+  Cost is a straight line: N = 10 runs 10x the ANN searches of N = 1.
+  Yield is a decaying curve: the 10th variant contributes 1.50 new documents
+  for the same price as the 1st, which contributed 20.
+```
+
+**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 8's "3-5 variants" guidance and under Pitfall 5's warning about 10+ variants: past five, you are buying duplicates at full price.
+
+**What dedup actually saves.** At `N = 5`, 38.98 of the 100 retrievals are repeats. Removing them before the reranker cuts 39 cross-encoder passes — roughly `38.98 x 0.8 ms = 31 ms` — but the real damage of skipping dedup (Pitfall 3) is not latency. A document surfaced by four of five variants appears four times in the reranker's input and four times in the final context, so it both distorts the ranking and consumes context slots that other evidence needed.
+
+**Walk the transformation bill.** The case study in Section 14 measures `$0.0004` per query for the transformation LLM call:
+
+```
+  10,000 queries/day  -> $  4.00/day
+  100,000 queries/day -> $ 40.00/day
+  1,000,000 queries/day -> $400.00/day
+
+  with the case study's 34% semantic-cache hit rate:
+    $0.0004 x 0.66 = $0.000264 effective -> $264.00/day at 1M queries
+
+  latency paid alongside it: 0.8 s -> 1.4 s end to end, +0.6 s = +75%
+  (cache hits return in 0.2 s, which is what makes the 34% worth having)
+```
+
+### 6.4 Step-Back Prompting
+
+Generate a more general "step-back" question to retrieve background context that helps answer the specific question:
+
+```
+Specific: "What was Brazil's GDP growth rate in Q2 2023?"
+Step-back: "What are the main economic indicators used to measure Brazil's growth?"
+
+Specific: "Why did the Lehman Brothers collapse?"
+Step-back: "How did the 2008 subprime mortgage crisis develop?"
+
+Retrieve both specific + step-back queries
+Provide both specific facts + background context to the LLM
+```
+
+Step-back is particularly effective for:
+- Technical questions requiring conceptual background
+- Historical questions requiring causal context
+- "Why" questions requiring understanding of mechanism
+
+### 6.5 Query Decomposition
+
+Break a complex multi-hop question into sub-questions, answer each independently, then synthesize:
+
+```
+Complex: "Which companies in our portfolio had revenue growth >20% AND
+          decreased headcount in 2024?"
+
+Decomposed:
+  Q1: "Which portfolio companies had >20% revenue growth in 2024?"
+  Q2: "Which portfolio companies decreased headcount in 2024?"
+  Q3: (after answering Q1, Q2) "Intersection of Q1 and Q2 results"
+```
+
+### Decomposition Is a Dependency DAG
+
+A multi-hop question becomes a small dependency graph of sub-questions. Independent legs
+(Q1, Q2) retrieve in parallel; the dependent step (Q3) must wait for both before it can run;
+a final step synthesizes. Seeing the DAG explains why decomposition is the seed of agentic
+RAG — it is literally a plan of retrieval steps with data dependencies.
+
+```
+   "Which companies had >20% revenue growth AND decreased headcount in 2024?"
+                              │ decompose
+              ┌───────────────┴───────────────┐
+              ▼                                ▼
+     Q1: >20% revenue growth         Q2: headcount decreased      (independent →
+         in 2024                         in 2024                    retrieve in parallel)
+              └───────────────┬───────────────┘
+                              ▼
+     Q3: intersection(Q1, Q2)                                      (dependent → needs
+                              │                                     Q1 and Q2 answers)
+                              ▼
+                  synthesize final answer
+```
+
+The join at Q3 is the part single-shot retrieval cannot do: no single embedding query
+expresses "growth AND shrinking headcount," so the answer only exists after the two legs are
+computed and intersected.
+
+Decomposition is the foundation of agentic RAG (see [agentic_rag.md](agentic_rag.md)); when a decomposed leg retrieves low-quality evidence, corrective retrieval loops (see [corrective_rag.md](corrective_rag.md)) pick up from there.
+
+### 6.6 Conversational Query Rewriting (Multi-Turn)
+
+Section 6.1 promises to resolve pronouns, but its `rewrite_query(raw_query, llm)` signature cannot: "How much did it cost?" contains no information about what `it` is. In a chat product this is not an edge case — after turn one, most queries are elliptical, and embedding "How much did it cost?" retrieves whatever the corpus says about cost in general. The transformation therefore takes two inputs, not one: the conversation history and the latest turn, producing a **standalone question** that is meaningful with the history thrown away.
+
+```python
+from langchain.chains import create_history_aware_retriever
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+contextualize_prompt = ChatPromptTemplate.from_messages([
+    ("system",
+     "Given a chat history and the latest user question which might reference "
+     "context in the chat history, formulate a standalone question which can be "
+     "understood without the chat history. Do NOT answer the question, just "
+     "reformulate it if needed and otherwise return it as is."),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}"),
+])
+
+history_aware_retriever = create_history_aware_retriever(
+    llm, retriever, contextualize_prompt
+)
+# turn 1 (chat_history empty): input goes STRAIGHT to the retriever, no LLM call
+# turn N: prompt | llm | StrOutputParser() | retriever
+```
+
+Three details carry the design. First, the empty-history short circuit: LangChain's helper branches on `not x.get("chat_history")` and skips the rewrite entirely on turn one, so the extra LLM call is paid only where it can help. Second, `"otherwise return it as is"` is the instruction that stops the rewriter from dragging a stale entity into a genuinely new question — the classic multi-turn failure is a user switching topics ("Now, what is the refund policy?") and the rewriter helpfully appending the previous product's name, which sends retrieval to the wrong document set. Third, window the history to the last 2-4 turns; feeding twenty turns raises both the rewrite cost and the odds that a long-dead entity resurfaces.
+
+Note that this defeats the transformed-query cache in Pitfall 6: the cache key is now `(history, question)`, and history is unique per conversation, so the hit rate collapses. Cache the retrieval results keyed on the **rewritten** standalone question instead — that key repeats across users, while the raw turn does not.
+
+---
+
+## 7. Real-World Examples
 
 ### LlamaIndex Query Transformers
 - `HyDEQueryTransform`: generates hypothetical document, embeds it for retrieval
@@ -344,7 +375,7 @@ HyDE:      [User Query]  →  LLM  →  [Hypothetical Answer]
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Technique | Recall Improvement | Added Latency | Added Cost | Failure Mode |
 |-----------|-------------------|---------------|------------|--------------|
@@ -362,7 +393,7 @@ before committing to any of them.
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Query Transformation When:
 - Retrieval recall on your eval set is below 80%
@@ -383,7 +414,7 @@ before committing to any of them.
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Transforming away user intent**
 Query rewriting that over-generalizes loses the user's actual intent. "What's the AWS Lambda cold start time?" rewritten to "What are the performance characteristics of serverless computing?" retrieves irrelevant documents.
@@ -411,7 +442,7 @@ Fix: Cache (original_query → transformed_queries) with a short TTL (1-24 hours
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -424,7 +455,7 @@ Fix: Cache (original_query → transformed_queries) with a short TTL (1-24 hours
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is HyDE and when would you use it?**
 A: HyDE (Hypothetical Document Embeddings) generates a hypothetical answer to the query using an LLM, then embeds that hypothetical answer for retrieval instead of the query itself. It works because the hypothetical answer is in "document space" — it resembles how a real document discusses the topic, bridging the vocabulary gap between terse queries and verbose documents. Best suited for domains where query phrasing differs strongly from document phrasing (academic papers, legal text, technical documentation). Avoid when the LLM is likely to generate factually incorrect hypotheses (recent events, proprietary data, rare facts), as a wrong hypothesis will steer retrieval toward unrelated documents.
@@ -433,7 +464,7 @@ A: HyDE (Hypothetical Document Embeddings) generates a hypothetical answer to th
 A: Three primary failure modes. First, hallucinated hypotheses: if the LLM generates a factually wrong hypothetical answer, retrieval finds documents matching the wrong facts — the system confidently retrieves the wrong thing. Second, distributional mismatch: if the hypothetical answer is in a different style or register than the target documents (e.g., LLM writes in a casual tone but documents are formal legal text), the embedding space alignment breaks. Third, length mismatch: hypothetical answers that are much longer or shorter than typical document chunks sit in different regions of embedding space. Mitigation: always A/B test HyDE vs. direct retrieval on a labeled eval set before deploying.
 
 **Q: How does multi-query expansion improve recall, and what are its tradeoffs?**
-A: Multi-query expansion generates N alternative phrasings of the query (typically 3-5), retrieves candidates for each, then merges and deduplicates before reranking. It improves recall because different phrasings of the same question match different document phrasings — a document discussing "useState hook behavior" may not match "React state management" but does match "React useState hook." As a planning range, 3-5 variants are where the marginal-yield curve in Section 3.3 still pays for itself; the 30-50% recall@10 figure quoted in Section 6 is an illustrative estimate rather than a published benchmark, so verify it on your own eval set. Tradeoffs: N× retrieval cost, added LLM latency for generation, and the deduplication + reranking step becomes critical — without it you overwhelm the LLM with redundant context.
+A: Multi-query expansion generates N alternative phrasings of the query (typically 3-5), retrieves candidates for each, then merges and deduplicates before reranking. It improves recall because different phrasings of the same question match different document phrasings — a document discussing "useState hook behavior" may not match "React state management" but does match "React useState hook." As a planning range, 3-5 variants are where the marginal-yield curve in Section 6.3 still pays for itself; the 30-50% recall@10 figure quoted in Section 8 is an illustrative estimate rather than a published benchmark, so verify it on your own eval set. Tradeoffs: N× retrieval cost, added LLM latency for generation, and the deduplication + reranking step becomes critical — without it you overwhelm the LLM with redundant context.
 
 **Q: What is the difference between step-back prompting and query decomposition?**
 A: Step-back prompting generates a more general version of the query to retrieve background context alongside the specific answer. It widens the retrieval scope. Query decomposition breaks a complex multi-hop question into specific sub-questions, each answered independently before synthesis. Step-back is additive (retrieve specific + general); decomposition is sequential (answer each sub-question in order). Use step-back for "why" questions needing background context; use decomposition for multi-hop questions like "who runs the company that acquired X?"
@@ -479,7 +510,7 @@ A: It rewrites the turn into a standalone question first, using the conversation
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Measure first** — run retrieval with and without each transformation on a labeled eval set before deploying. A transformation that doesn't improve recall@10 won't help production.
 2. **Use a cheap model for transformation** — GPT-4o-mini or claude-haiku-4-5 is sufficient for query rewriting and multi-query expansion; save stronger models for generation.
@@ -491,7 +522,7 @@ A: It rewrites the turn into a standalone question first, using the conversation
 
 ---
 
-## 13. Case Study: Query Transformation for a Technical Support System
+## 14. Case Study: Query Transformation for a Technical Support System
 
 > **Illustrative composite.** The company, the metrics and the costs below are a
 > worked teaching example, not a published or verifiable deployment. Use the shape

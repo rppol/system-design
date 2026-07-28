@@ -8,7 +8,7 @@ CRAG addresses a critical gap in standard RAG: the retrieval step is treated as 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: CRAG is like a fact-checker who reviews sources before the journalist writes the story — if all sources are bad, they go find better ones before writing begins.
 
@@ -20,7 +20,7 @@ CRAG addresses a critical gap in standard RAG: the retrieval step is treated as 
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Retrieval quality is variable**: Even good retrieval systems return low-quality results for out-of-distribution queries.
 - **Quality evaluation should be fast and separate**: A lightweight relevance classifier is cheaper and faster than using the full generation LLM for this purpose.
@@ -30,9 +30,93 @@ CRAG addresses a critical gap in standard RAG: the retrieval step is treated as 
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Relevance Evaluation
+CRAG is a single retrieval pass plus a decision layer, so its variants are choices about
+**how confidence is measured** and **what each confidence band does**. The three bands are
+the architecture; everything else is a substitution inside one of them.
+
+| Confidence band | Score range (default) | Action | Rationale |
+|-----------------|----------------------|--------|-----------|
+| Correct | `score > 0.7` | Proceed to generation with the retrieved context unchanged | Retrieval succeeded; correction would only add latency |
+| Ambiguous | `0.3 < score <= 0.7` | Refine — keep the sentences that score above threshold, strip the rest | Partial relevance is salvageable; discarding it loses real signal |
+| Incorrect | `score <= 0.3` | Trigger the web search fallback and generate from external results | The knowledge base does not contain the answer at all |
+
+The bands are per-document; the *pipeline* action is decided by aggregating them — all
+Correct proceeds, a Correct/Ambiguous mix refines, and all-Incorrect (or an empty result
+set) is what fires the fallback. Because the fallback needs every one of the `K` documents
+to fail, its trigger rate is extremely sensitive to the lower cut.
+
+Three implementation choices sit inside that skeleton:
+
+| Choice | Options | Tradeoff |
+|--------|---------|----------|
+| Relevance evaluator | Cross-encoder reranker, or an LLM-based relevance classifier | The cross-encoder is cheaper and lower latency; the LLM generalizes better on unusual query types but costs a call per document |
+| Refinement granularity | Whole-document keep/drop, or sentence-level extractive selection | Sentence-level recovers usable content from partially relevant documents, at the cost of an extra scoring pass and the risk of near-empty context |
+| Correction source | Web search API, a second internal index, or no fallback at all | The web fallback answers out-of-corpus queries but imports untrusted content; a no-fallback variant degrades to "I don't know," which is correct behaviour in regulated domains |
+
+Rollout is itself a strategy choice: run the evaluator in **monitoring mode** first — log
+the scores and the would-have-triggered decisions without acting on them — calibrate the
+two cuts against that traffic, and only then enable the corrective branches.
+
+CRAG's neighbours differ in where the check lives: [Self-RAG](self_rag.md) trains the
+judgement into the model, and [Agentic RAG](agentic_rag.md) replaces the single corrective
+branch with an unbounded retrieval loop.
+
+---
+
+## 5. Architecture Diagrams
+
+### CRAG Decision Flow
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> KBR["Knowledge Base Retrieval"]
+    KBR --> RE{"Relevance Evaluator\nscore each doc (0.0–1.0)"}
+    RE -->|"All CORRECT\n(scores > 0.7)"| GEN1["Generation"]
+    RE -->|"MIXED\n(some ambiguous)"| CR["Context Refinement\nextract relevant sentences"]
+    CR --> GEN2["Generation\nwith refined context"]
+    RE -->|"All INCORRECT\n(scores < 0.3)"| WS["Web Search Fallback"]
+    WS --> PF["Parse + Filter web results"]
+    PF --> CB["Combine with relevant KB content"]
+    CB --> GEN3["Generation\nwith web citations"]
+    GEN1 --> ANS([Answer])
+    GEN2 --> ANS
+    GEN3 --> ANS
+
+    class Q,ANS io
+    class KBR,CR,PF,CB train
+    class RE mathOp
+    class GEN1,GEN2,GEN3 frozen
+    class WS req
+```
+
+### CRAG vs. Standard RAG
+```
+Standard RAG:
+  Query → Retrieve → [Always use context, even if bad] → Generate
+
+CRAG:
+  Query → Retrieve → [Evaluate quality] → {
+    Good:   Generate directly
+    Mixed:  Refine then Generate
+    Bad:    Web Search → Generate with web results
+  }
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Relevance Evaluation
 
 ```
 Step 1: Standard retrieval
@@ -88,7 +172,7 @@ web-search cost, and should be calibrated on a labeled eval set, not guessed.
 | `K` | Documents retrieved per query, 5 in the pipeline above |
 | trigger rate | Fraction of queries where **all** `K` documents land in `incorrect` |
 
-**Walk one example.** Five retrieved documents for one query, scored, under the default cuts and then under the medical case study's cuts from Section 12:
+**Walk one example.** Five retrieved documents for one query, scored, under the default cuts and then under the medical case study's cuts from Section 14:
 
 ```
   scores : 0.82   0.71   0.68   0.33   0.28
@@ -115,7 +199,7 @@ web-search cost, and should be calibrated on a labeled eval set, not guessed.
 
 **Why the ambiguous band exists at all.** With a single cut you get two choices: use a partly-relevant document whole (its irrelevant two-thirds becomes distractor tokens in the prompt) or throw it away (you lose the one paragraph that answered the question). The middle band buys a third option — refine — at the cost of a second evaluator pass at sentence granularity. Narrowing that band, as the medical deployment does, says "our evaluator is well-calibrated enough that I would rather commit than salvage."
 
-**Walk the trigger rate.** Section 10 gives a health range for web-search triggering: above 30% means the cuts are too strict, below 5% too lenient. Turning that into a per-document requirement, with `K = 5` and treating the per-document verdicts as independent:
+**Walk the trigger rate.** Section 12 gives a health range for web-search triggering: above 30% means the cuts are too strict, below 5% too lenient. Turning that into a per-document requirement, with `K = 5` and treating the per-document verdicts as independent:
 
 ```
   P(trigger) = P(one doc is incorrect)^K = p^5
@@ -131,9 +215,9 @@ web-search cost, and should be calibrated on a labeled eval set, not guessed.
     p = 0.60 -> trigger = 0.60^5 = 0.0778  (7.8%, healthy)
 ```
 
-The exponent is the important part. Because the fallback needs *all K* documents to fail, the trigger rate is a fifth power of the per-document failure rate — so it is extremely sensitive to `t_inc`. Nudging `t_inc` upward enough to push per-document failure from 0.60 to 0.79 barely changes any individual verdict, but multiplies web-search volume by `0.30/0.0778 = 3.9x`, with the latency and API bill that implies. This is why Section 8's first pitfall is threshold miscalibration and why Section 10 recommends shipping in monitoring mode before enabling correction.
+The exponent is the important part. Because the fallback needs *all K* documents to fail, the trigger rate is a fifth power of the per-document failure rate — so it is extremely sensitive to `t_inc`. Nudging `t_inc` upward enough to push per-document failure from 0.60 to 0.79 barely changes any individual verdict, but multiplies web-search volume by `0.30/0.0778 = 3.9x`, with the latency and API bill that implies. This is why Section 10's first pitfall is threshold miscalibration and why Section 12 recommends shipping in monitoring mode before enabling correction.
 
-### 3.2 Context Refinement
+### 6.2 Context Refinement
 
 When documents are partially relevant (Ambiguous), CRAG refines them rather than discarding:
 
@@ -151,7 +235,7 @@ Implementation:
   Combine selected sentences into refined context
 ```
 
-### 3.3 Web Search Fallback
+### 6.3 Web Search Fallback
 
 ```
 Trigger condition: all retrieved documents score below threshold
@@ -179,7 +263,7 @@ Web search:
      Merge and dedup before generation
 ```
 
-### 3.4 Full CRAG Pipeline
+### 6.4 Full CRAG Pipeline
 
 ```python
 def crag_pipeline(
@@ -240,56 +324,7 @@ def crag_pipeline(
 
 ---
 
-## 4. Architecture Diagram
-
-### CRAG Decision Flow
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> KBR["Knowledge Base Retrieval"]
-    KBR --> RE{"Relevance Evaluator\nscore each doc (0.0–1.0)"}
-    RE -->|"All CORRECT\n(scores > 0.7)"| GEN1["Generation"]
-    RE -->|"MIXED\n(some ambiguous)"| CR["Context Refinement\nextract relevant sentences"]
-    CR --> GEN2["Generation\nwith refined context"]
-    RE -->|"All INCORRECT\n(scores < 0.3)"| WS["Web Search Fallback"]
-    WS --> PF["Parse + Filter web results"]
-    PF --> CB["Combine with relevant KB content"]
-    CB --> GEN3["Generation\nwith web citations"]
-    GEN1 --> ANS([Answer])
-    GEN2 --> ANS
-    GEN3 --> ANS
-
-    class Q,ANS io
-    class KBR,CR,PF,CB train
-    class RE mathOp
-    class GEN1,GEN2,GEN3 frozen
-    class WS req
-```
-
-### CRAG vs. Standard RAG
-```
-Standard RAG:
-  Query → Retrieve → [Always use context, even if bad] → Generate
-
-CRAG:
-  Query → Retrieve → [Evaluate quality] → {
-    Good:   Generate directly
-    Mixed:  Refine then Generate
-    Bad:    Web Search → Generate with web results
-  }
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### CRAG with LangGraph (Community Implementation)
 - Widely implemented as a LangGraph workflow: retrieval → grading node → conditional web search → generation
@@ -310,7 +345,7 @@ CRAG:
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | Standard RAG | CRAG |
 |-----------|-------------|------|
@@ -325,7 +360,7 @@ CRAG:
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use CRAG When:
 - Knowledge base has known gaps or coverage limitations
@@ -346,7 +381,7 @@ CRAG:
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Miscalibrated relevance thresholds**
 If the threshold is too high, most documents are labeled "incorrect," triggering web search unnecessarily. If too low, genuinely irrelevant documents pass as "correct," defeating the purpose.
@@ -374,7 +409,7 @@ Fix: Tag each context chunk with its source (KB document ID, URL for web results
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -388,7 +423,7 @@ Fix: Tag each context chunk with its source (KB document ID, URL for web results
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What problem does Corrective RAG solve that standard RAG doesn't handle?**
 A: Corrective RAG solves the retrieval quality gap: standard RAG feeds all retrieved documents to the LLM regardless of relevance, treating retrieval as infallible. When queries fall outside the knowledge base coverage (recent events, niche topics, stale documents), the retriever returns marginally related documents. The LLM then generates a confident answer grounded in wrong context — a hallucination that's hard to detect because it appears well-cited. CRAG intercepts this by evaluating retrieved document relevance before generation. If quality is too low, CRAG triggers a web search fallback, ensuring the LLM always has relevant context before generating.
@@ -440,7 +475,7 @@ A: CRAG is designed as a drop-in quality gate between retrieval and generation. 
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. **Calibrate thresholds on representative data** — use a sample of actual production queries (not just the clean test set) to tune correct/incorrect thresholds.
 2. **Use a fast evaluator** — MiniLM-based cross-encoder or bi-encoder similarity; cross-encoder/ms-marco-MiniLM-L-6-v2 balances speed and accuracy well.
@@ -452,7 +487,7 @@ A: CRAG is designed as a drop-in quality gate between retrieval and generation. 
 
 ---
 
-## 13. Case Study: CRAG for a Medical Q&A System
+## 14. Case Study: CRAG for a Medical Q&A System
 
 **Problem Statement**: A clinical decision support platform serves 1,200 physicians at a hospital network. Physicians ask clinical questions and expect answers grounded in current clinical guidelines, drug interaction databases, and recent trial data. The internal knowledge base contains 45,000 curated clinical guideline documents from USPSTF, ACC/AHA, and specialty societies, updated quarterly. However, 30-40% of physician queries involve recent guideline updates, off-label drug use, or rare conditions not well-represented in the quarterly-updated index. Standard RAG was generating confidently wrong answers for these out-of-KB queries — a patient safety risk.
 
