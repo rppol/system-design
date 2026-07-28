@@ -40,7 +40,9 @@ These techniques are not mutually exclusive — production deployments often com
 
 ---
 
-## 4. Quantization Methods
+## 4. Types / Architectures / Strategies
+
+### Quantization Methods
 
 ### 4.1 Post-Training Quantization (PTQ)
 
@@ -447,7 +449,7 @@ Unlike weight memory, which is fixed the moment you load the model, **KV cache m
   ONE 128K FP16 request is 42.9 GB. The cache outweighs the model at ~107K tokens.
 ```
 
-That last line is the crossover the Section 13 Q&A refers to: `context_length > weight_bytes / (2 × layers × kv_heads × head_dim × bytes_per_element)`, which here is `35e9 / 327,680 ≈ 107K tokens`. Below it, quantize weights first. Above it, quantizing the KV cache is worth more than anything you can do to the weights — and note that GQA has *already* divided this by 8 (64 query heads down to 8 KV heads); without it the same request would need 343 GB.
+That last line is the crossover the Section 12 Q&A refers to: `context_length > weight_bytes / (2 × layers × kv_heads × head_dim × bytes_per_element)`, which here is `35e9 / 327,680 ≈ 107K tokens`. Below it, quantize weights first. Above it, quantizing the KV cache is worth more than anything you can do to the weights — and note that GQA has *already* divided this by 8 (64 query heads down to 8 KV heads); without it the same request would need 343 GB.
 
 **KIVI (2-bit KV cache):**
 - Asymmetric by tensor: the **key** cache has channel-wise outliers so it is quantized
@@ -635,7 +637,67 @@ The production caveat is hardware, not quality: llm-compressor's `NVFP4` and `MX
 
 ---
 
-## 5. Flash Attention & Mixture of Experts
+## 5. Architecture Diagrams
+
+### Quantization Quality/Memory Tradeoff
+
+```mermaid
+quadrantChart
+    title Quantization tradeoff space for a 70B model
+    x-axis Smaller footprint --> Larger footprint
+    y-axis Lower quality --> Higher quality
+    quadrant-1 Full-precision baseline
+    quadrant-2 Production sweet spot
+    quadrant-3 Quality collapse
+    quadrant-4 Wasted memory
+    BF16 140GB: [0.92, 0.90]
+    INT8 70GB: [0.60, 0.80]
+    AWQ INT4 35GB: [0.34, 0.68]
+    GPTQ INT4 35GB: [0.30, 0.60]
+    INT3 26GB: [0.22, 0.40]
+    INT2 17GB: [0.12, 0.15]
+```
+
+Quality degrades monotonically as bits shrink — BF16 (140GB) > INT8 (70GB) > AWQ INT4 > GPTQ INT4 (both 35GB, AWQ slightly ahead at 4-bit) > INT3 (26GB) > INT2 (17GB). Calibrated 4-bit sits in the production sweet spot: 4x smaller than BF16 for ~1-2% general benchmark loss, while INT3 and below fall into quality collapse.
+
+### MoE Architecture Per Layer
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["Input x\nseq_len × hidden_dim"]) --> R["Router: Linear\nd_model → N_experts"]
+    R --> TK{"Top-K selection\npick k=2 experts"}
+    TK -->|"Token 1"| E3["Expert 3\nW1_3, W2_3"]
+    TK -->|"Token 1"| E7["Expert 7\nW1_7, W2_7"]
+    TK -->|"Token 2"| E1["Expert 1\nW1_1, W2_1"]
+    TK -->|"Token 2"| E5["Expert 5\nW1_5, W2_5"]
+    TK -->|"Token 3"| E2["Expert 2\nW1_2, W2_2"]
+    TK -->|"Token 3"| E3
+    E1 --> WS["Weighted sum\ngate_score × expert_output"]
+    E2 --> WS
+    E3 --> WS
+    E5 --> WS
+    E7 --> WS
+    WS --> out(["Output\nseq_len × hidden_dim"])
+
+    class x,out io
+    class R,TK,WS mathOp
+    class E1,E2,E3,E5,E7 train
+```
+
+Each token routes independently to its top-2 of N expert FFNs (Token 1 and Token 3 both select Expert 3), so only 2 experts run per token — which is why Mixtral 8x7B computes only ~12.9B of its 46.7B total params per token.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Flash Attention & Mixture of Experts
 
 ### What It Solves
 
@@ -916,65 +978,7 @@ Advantages of fine-grained:
 
 ---
 
-## 6. Architecture Diagrams
-
-### Quantization Quality/Memory Tradeoff
-
-```mermaid
-quadrantChart
-    title Quantization tradeoff space for a 70B model
-    x-axis Smaller footprint --> Larger footprint
-    y-axis Lower quality --> Higher quality
-    quadrant-1 Full-precision baseline
-    quadrant-2 Production sweet spot
-    quadrant-3 Quality collapse
-    quadrant-4 Wasted memory
-    BF16 140GB: [0.92, 0.90]
-    INT8 70GB: [0.60, 0.80]
-    AWQ INT4 35GB: [0.34, 0.68]
-    GPTQ INT4 35GB: [0.30, 0.60]
-    INT3 26GB: [0.22, 0.40]
-    INT2 17GB: [0.12, 0.15]
-```
-
-Quality degrades monotonically as bits shrink — BF16 (140GB) > INT8 (70GB) > AWQ INT4 > GPTQ INT4 (both 35GB, AWQ slightly ahead at 4-bit) > INT3 (26GB) > INT2 (17GB). Calibrated 4-bit sits in the production sweet spot: 4x smaller than BF16 for ~1-2% general benchmark loss, while INT3 and below fall into quality collapse.
-
-### MoE Architecture Per Layer
-```mermaid
-flowchart LR
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    x(["Input x\nseq_len × hidden_dim"]) --> R["Router: Linear\nd_model → N_experts"]
-    R --> TK{"Top-K selection\npick k=2 experts"}
-    TK -->|"Token 1"| E3["Expert 3\nW1_3, W2_3"]
-    TK -->|"Token 1"| E7["Expert 7\nW1_7, W2_7"]
-    TK -->|"Token 2"| E1["Expert 1\nW1_1, W2_1"]
-    TK -->|"Token 2"| E5["Expert 5\nW1_5, W2_5"]
-    TK -->|"Token 3"| E2["Expert 2\nW1_2, W2_2"]
-    TK -->|"Token 3"| E3
-    E1 --> WS["Weighted sum\ngate_score × expert_output"]
-    E2 --> WS
-    E3 --> WS
-    E5 --> WS
-    E7 --> WS
-    WS --> out(["Output\nseq_len × hidden_dim"])
-
-    class x,out io
-    class R,TK,WS mathOp
-    class E1,E2,E3,E5,E7 train
-```
-
-Each token routes independently to its top-2 of N expert FFNs (Token 1 and Token 3 both select Expert 3), so only 2 experts run per token — which is why Mixtral 8x7B computes only ~12.9B of its 46.7B total params per token.
-
----
-
-## 7. Other Optimization Techniques
+### Other Optimization Techniques
 
 ### Pruning
 
@@ -1311,7 +1315,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 8. Real-World Examples
+## 7. Real-World Examples
 
 ### INT4 (AWQ/GPTQ) serving of 70B-class models
 - INT4 weight-only quantization is the standard way providers fit a 70B on 2×A100 instead of 4×A100
@@ -1333,7 +1337,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 9. Tradeoffs
+## 8. Tradeoffs
 
 | Optimization | Memory | Speed | Quality | Complexity |
 |-------------|--------|-------|---------|------------|
@@ -1347,7 +1351,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 10. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Quantization When:
 - GPU memory is the bottleneck (almost always)
@@ -1369,7 +1373,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 11. Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Evaluating only on general benchmarks**: INT4 may lose only 1% on MMLU but 10% on your domain task. Always evaluate on domain benchmarks.
 2. **Wrong calibration data**: GPTQ/AWQ quality is calibration-data-dependent. Calibrate on data similar to your use case.
@@ -1379,7 +1383,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 12. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -1396,7 +1400,7 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ---
 
-## 13. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is the difference between GPTQ and AWQ?**
 A: GPTQ uses second-order information (Hessian H = 2XX^T) to compensate for quantization error as it quantizes column by column — each column's error is redistributed to remaining unquantized columns, dramatically reducing layer-level reconstruction error. AWQ profiles activation magnitudes across a calibration dataset to identify important weight channels, then scales those channels up before quantization so they get more quantization precision. AWQ is faster to apply (no Hessian inversion) and gives better quality at 3-bit (its paper reports Llama-2-7B INT3 perplexity 6.24 vs GPTQ's 6.43); GPTQ is competitive at 4-bit. Both require ~128-512 calibration samples. In practice, AWQ is preferred for latency-sensitive deployment; GPTQ for maximum quality at INT4.
@@ -1451,6 +1455,26 @@ A: Both encode weights as 4-bit E2M1 values with a shared block scale; MXFP4 use
 
 ---
 
+
+## 13. Best Practices
+
+- **Start with PTQ; escalate to QAT only after PTQ has measurably failed.** GPTQ or AWQ on 128-512 calibration samples takes 30 minutes to a few hours and needs no training infrastructure; QAT costs 1-10% of the original training compute. Spend that only when domain-calibrated PTQ has been evaluated and found insufficient.
+- **Choose the scheme from your batch profile, not from a leaderboard.** W4A16 wins where the GEMMs are memory-bound (low QPS, latency-sensitive, memory-limited); W8A8 INT8/FP8 wins where they are compute-bound (server, batch, high-QPS), because once bytes stop being the constraint only narrower math helps.
+- **Check compute capability before committing to a format.** AWQ needs 7.5+, the Marlin fast path needs 8.0+ (Ampere/Ada), FP8 needs Hopper, and NVFP4/MXFP4 need Blackwell (SM100). An unsupported format is a failed load, not a slow one.
+- **Calibrate on in-distribution data.** Calibration domain matters as much as calibration size — 512 samples is enough, but general web text for a code model costs roughly 3-4% MBPP versus a domain-matched corpus.
+- **Keep `group_size=128`.** It is the production default and what the `W4A16_ASYM` preset gives you; 512 costs an extra ~2.1% MBPP, and 64 buys little for the extra scale overhead.
+- **Do not quantize the sensitive layers.** Leave `lm_head`, embeddings and layer norms in their original dtype — they are not compute bottlenecks (~0.5 GB on a 70B) but INT4 there costs 2-3% quality on its own.
+- **Quantize the base model first, then attach adapters.** Merging LoRA before quantization shifts the weight distribution AWQ calibrated against; QLoRA's shape — frozen 4-bit base, BF16 adapters on top — is the pattern to copy.
+- **Budget both memory terms, not just the weights.** Weight savings are fixed; KV cache grows with batch x context. Compute the crossover for your context length rather than assuming weights dominate, and add 10-20% on top of weight bytes for activation buffers and CUDA context.
+- **Set a quality SLA before quantizing and treat it as a hard gate.** INT3 on a 70B fits one A100 at 26 GB and looks attractive until the -6.5% MBPP lands at 3.25x a 2% budget. INT4 weights plus an FP8 KV cache is the production point that stays inside it.
+- **Measure on your own eval, not a published delta.** INT4 can cost 1% on MMLU and 10% on your domain task; re-run your own benchmark on every scheme, calibration set and serving-stack change.
+- **Turn Flash Attention on unconditionally.** It is exact attention with no quality cost: FA-2 is the portable Ampere+ baseline, FA-3 on Hopper, FA-4 on Hopper/Blackwell where available.
+- **Quantize activations per token and dynamically.** Activation outliers make W8A8 the harder scheme; per-token dynamic (O1) computes the scale from the tensor in flight, while per-tensor static (O3) from calibration is the most fragile setting.
+- **Prune structurally or in the 2:4 pattern, never randomly.** Unstructured sparsity produces no fewer multiply-accumulates on a GPU; only structured pruning or hardware-aligned 2:4 sparsity converts sparsity into speed.
+- **Train MoE with an explicit load-balancing signal.** Without an auxiliary loss — or DeepSeek-V3's auxiliary-loss-free bias updates — routing collapses onto a few experts and the rest of the parameter budget is wasted.
+- **Stack the orthogonal wins.** Quantized weights, FP8 KV cache, Flash Attention and speculative decoding target different bottlenecks and compose; production deployments normally run several at once.
+
+---
 
 ## 14. Case Study
 
