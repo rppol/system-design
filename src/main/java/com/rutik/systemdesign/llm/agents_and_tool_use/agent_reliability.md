@@ -505,6 +505,62 @@ async def search_with_fallback(query: str) -> str:
         return f"[DEGRADED: {degradation_note}]\n\nBased on training knowledge: ..."
 ```
 
+### Compensating Actions (the mechanics behind 4.4 Rollback)
+
+Restoring a checkpoint rolls back the *agent's* state — the message list, the step
+counter, the scratchpad. It does not roll back the Jira ticket the agent just created or
+the card it just charged. Anything outside the process needs a **compensating action**:
+a second, explicit tool call that semantically undoes the first. This is the saga pattern
+from distributed transactions, and it is why every mutating tool in a production agent
+needs a declared inverse alongside its schema.
+
+```python
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
+
+@dataclass
+class Saga:
+    """Accumulate compensations during the run; unwind LIFO on failure."""
+    compensations: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+
+    async def step(self, action, undo) -> Any:
+        result = await action()
+        self.compensations.append(undo)      # register only AFTER the action succeeded
+        return result
+
+    async def unwind(self) -> list[str]:
+        errors = []
+        for undo in reversed(self.compensations):   # LIFO: last write reverted first
+            try:
+                await retry_with_backoff(undo)      # compensations fail too
+            except Exception as e:
+                errors.append(repr(e))              # best effort — never abort the unwind
+        return errors                               # non-empty -> human handoff
+
+# Every write tool declares its inverse, or declares that it has none.
+TOOL_INVERSES = {
+    "create_ticket": lambda out: delete_ticket(out["ticket_id"]),
+    "charge_card":   lambda out: refund_charge(out["charge_id"]),
+    "send_email":    None,   # no inverse exists — gate it, you cannot roll it back
+}
+```
+
+Three rules the code encodes. **Register after, not before**: appending the compensation
+before the action means unwinding a write that never happened, which for a delete-style
+inverse is itself a destructive bug. **Unwind LIFO**: step 3 may depend on step 2's
+output, so reverting in creation order can hit a foreign-key or not-found error halfway
+through. **Compensations are ordinary tool calls** — they time out, they rate-limit, they
+need their own backoff, and a compensation that ultimately fails leaves a partially
+undone task, which is a human handoff (Section 6, "Human-in-Loop Handoff Trigger"), not a
+retry. Temporal's Python SDK is explicit about this shape: the workflow keeps its own list
+of compensating callables and runs them in reverse on failure — the platform gives you
+durable replay for free, but the inverse of each activity is yours to write.
+
+The `None` row is the important one. Sending an email, posting to a channel, or wiring
+money has no inverse at any price, so rollback is not the control — an approval gate is.
+Route those tools through the human-approval pattern in
+[Agent UX Patterns](agent_ux_patterns.md) instead of pretending a compensation exists.
+
 ---
 
 ## 7. Real-World Examples
@@ -716,6 +772,9 @@ Four testing strategies: (1) fault injection testing — mock tool layer to inje
 
 **Q: How does progress checkpointing interact with idempotency for agents that call external APIs?**
 When an agent checkpoints after a successful API mutation (e.g., sent an email, created a ticket), a crash-and-resume scenario will NOT re-execute that step (the state records it as done). But if the agent crashes DURING the API call (after the call succeeds but before the checkpoint is written), it will re-execute on resume — potentially sending two emails. Solutions: (1) idempotency keys — include a `step_uuid` in API calls; the downstream service deduplicates; (2) transactional checkpointing — write checkpoint atomically with the API call in a two-phase commit pattern; (3) at-most-once semantics — mark the action as "in-flight" before calling, checkpoint, call the API, mark "completed"; on resume, skip if marked "completed"; (4) use LangGraph's `interrupt_before` for irreversible actions — always require human confirmation before the API call, so the state is clean before the risky step.
+
+**Q: Why can't a checkpoint roll back an agent's tool call, and what do you use instead?**
+A checkpoint restores the agent's own state — messages, step counter, scratchpad — but never the external record the tool created, so external writes need a compensating action. A compensating action is a second explicit tool call that semantically undoes the first (`delete_ticket` for `create_ticket`, `refund_charge` for `charge_card`), which is the saga pattern applied to an agent loop. Three implementation rules: register the compensation only after the action succeeds (registering first means you can unwind a write that never happened, and for a delete-style inverse that is itself destructive); unwind LIFO, because step 3 often depends on step 2's output and reverting in creation order hits not-found errors halfway; and treat compensations as ordinary tool calls that need their own timeout and backoff, with a failed compensation escalating to human handoff rather than retrying forever. The decisive design question is which tools have no inverse at all — email, a channel post, a wire transfer — because those cannot be rolled back at any price and must sit behind an approval gate instead.
 
 ---
 

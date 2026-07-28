@@ -533,6 +533,48 @@ The formula is built as one minus the bad case because the bad case is the easy 
 
 **Why the pass@1-to-pass@5 gap is the number to watch.** `pass@1` is what a user experiences: one run, one shot. `pass@5` is what the agent is *capable* of when you can afford five attempts and have an oracle to pick the winner — which in production you usually do not. A gap of 0.400 says the capability is there but the reliability is not, and that is a scaffolding problem (better verification, retry-on-failure, self-checking) rather than a model problem. A small gap with a low `pass@1` says the opposite: the agent fails the same way every time, and no amount of retrying will help.
 
+### pass^k — the Reliability Metric, and τ-bench
+
+`pass@k` answers "can the agent do it at all, given k tries?" That is the right question
+for code generation, where a unit test picks the winner for free. It is the wrong question
+for a customer-service agent, which gets exactly one try per customer and must not
+occasionally refund the wrong order. τ-bench (Yao et al., Sierra, 2024) introduced the
+complement: **`pass^k` (pass hat k), the chance that ALL k i.i.d. trials of the same task
+succeed**, averaged over tasks. Same run data, one combinatorial term flipped:
+
+```
+  pass^k = E_task[ C(c, k) / C(n, k) ]      all k drawn runs are successes
+  pass@k = E_task[ 1 - C(n-c, k) / C(n, k) ]   at least one is
+
+  The same n = 5, c = 3 run from the block above:
+
+     k     pass@k                    pass^k
+     1     3/5   = 0.600             3/5   = 0.600     <- identical at k=1
+     2     1 - 1/10  = 0.900         C(3,2)/C(5,2) = 3/10 = 0.300
+     3     1 - 0/10  = 1.000         C(3,3)/C(5,3) = 1/10 = 0.100
+     4     1.000                     C(3,4) = 0    -> 0.000
+
+  pass@k climbs to 1; pass^k collapses to 0. They only ever agree at k = 1.
+```
+
+That divergence is the whole point: an agent can look strong on the metric everyone
+reports and still be unusable. τ-bench's headline finding is exactly this — the
+best gpt-4o function-calling agent scored roughly 61% `pass^1` on τ-retail (115 tasks) and
+roughly 35% on τ-airline (50 tasks), but its `pass^8` on retail fell below 25%. Two out of
+three customers get a correct resolution; run the same eight tickets eight times and you
+are near-certain to see at least one wrong outcome in most of them.
+
+τ-bench is also structurally different from GAIA or SWE-bench above: it puts an **LM user
+simulator** on the other side of the conversation, so the agent must extract requirements
+through dialogue while obeying a written domain policy, and it scores by comparing the
+final **database state** to the annotated goal state rather than by judging the transcript.
+τ²-bench (2025) extends it to a **dual-control** telecom domain where the simulated user
+also holds tools and mutates the shared environment — a Dec-POMDP rather than an agent
+acting alone — and reports significant drops when agents move from the no-user setting to
+guiding a user through actions they cannot perform themselves. If your agent talks to
+people, this family is the closest public proxy for your task distribution, and `pass^k`
+is the number to put on the dashboard next to `pass@1`.
+
 ---
 
 ## Architecture Diagrams
@@ -728,6 +770,9 @@ A: Contamination occurs when benchmark tasks appear in the model's training data
 
 **Q: How do you design custom benchmarks for a domain-specific agent deployment?**
 A: A domain-specific benchmark construction process: (1) Task sampling — collect 300-500 real user requests from production logs (or pilot users); anonymize, deduplicate, and remove PII; (2) Stratification — classify tasks as easy (1-3 steps to resolve), medium (4-8 steps), hard (9+ steps or ambiguous); target a 40%/40%/20% split to prevent the benchmark from being dominated by easy tasks; (3) Ground truth annotation — for each task, have a domain expert produce the correct answer and the ideal tool call sequence (golden trajectory); use 2-3 annotators and adjudicate disagreements; (4) Evaluation criteria definition — specify per-task-type what constitutes success: for customer service, define resolution categories (fully resolved, partially resolved, escalated correctly, wrong escalation, harmful action); (5) Baseline establishment — run a simple baseline (direct LLM call, no tools) and your current best agent; record both as reference points; (6) Quarterly refresh — replace 20% of tasks each quarter with new samples to track performance on evolving user behavior and prevent overfitting to benchmark distribution. Minimum viable benchmark: 100 tasks with expert annotations; production-quality: 500 tasks with dual annotation.
+
+**Q: What does pass^k measure that pass@k does not, and when do you report it?**
+A: pass^k is the probability that ALL k independent trials of the same task succeed, where pass@k is the probability that at least one does — so pass^k measures reliability and pass@k measures capability. Both are estimated from the same n runs with c successes: `pass^k = C(c,k)/C(n,k)` versus `pass@k = 1 - C(n-c,k)/C(n,k)`. They are identical at k=1 and diverge immediately afterwards; with n=5 and c=3, pass@2 is 0.900 while pass^2 is 0.300. Report pass@k when an oracle picks the winning run — code generation with a unit test, patch selection against a test suite — because retrying is genuinely free and the ceiling is what matters. Report pass^k when every run reaches a user and there is no selection step: customer service, booking, anything that writes to a database. τ-bench introduced the metric for exactly that case and its headline result shows why it matters — a gpt-4o function-calling agent at roughly 61% pass^1 on the retail domain dropped below 25% at pass^8, meaning an agent that resolves two-thirds of tickets is still near-certain to mishandle a given ticket at least once across eight attempts. Practical rule: a large pass@k-to-pass^k gap says the failures are stochastic and the fix is scaffolding (verification, self-check, deterministic tool paths), not a bigger model.
 
 ---
 

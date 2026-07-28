@@ -50,6 +50,8 @@ Parent breaks task into subtasks; some subagents may themselves spawn further su
 ### 4.4 Voting / Consensus
 Parent dispatches the same task to N subagents at different temperatures or with different models; aggregates via majority or judge LLM. Improves reliability on hard tasks.
 
+The aggregation half of this pattern — majority voting, the binomial arithmetic that says when N voters actually beat one sample, and the debate variants where agents see each other's answers before revising — is developed in [Multi-Agent Debate and Consensus](../multi_agent_systems/agent_debate_and_consensus.md). Read it before choosing an aggregation rule; the dispatch mechanics below apply unchanged, only the reduce step differs.
+
 ---
 
 ## 5. Architecture Diagrams

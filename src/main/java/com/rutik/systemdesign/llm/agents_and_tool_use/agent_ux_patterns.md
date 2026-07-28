@@ -275,6 +275,40 @@ Two constants in this snippet interact, and the interaction is where the bugs li
 
 **Why fail-closed is still right.** The default could have been `True`, which would keep the agent moving, and it would be wrong: an unattended agent would then execute `charge_card` and `delete_file` with nobody watching, which is the exact scenario approval gates exist to prevent. The correct fix is not to flip the default but to distinguish the two cases in the return value — a denial and a timeout should reach the agent as different tool results, so it can re-plan around a real "no" but retry or escalate on silence. As written, the agent cannot tell them apart, and the Approval Gate Flow diagram's "agent re-plans" branch fires on both.
 
+### Detached Runs: the Same Patterns With Nobody Watching
+
+Every pattern above assumes a user is looking at the screen. Production agents increasingly
+are not watched — the run is detached and lives for minutes to hours while the user does
+something else. The eight patterns do not disappear; they invert, and each inversion is a
+different piece of infrastructure.
+
+| Pattern | Attended | Detached |
+|---|---|---|
+| Streaming thoughts | SSE to a live pane | Persisted transcript you attach to later |
+| Interrupt / resume | Stop button on this stream | Attach or stop a named session, by ID |
+| Approval gates | Modal, user is right there | Out-of-band notification; run parks until answered |
+| Step visualization | One checklist | A queue view: N sessions, each with a state |
+| Error transparency | Error appears in the stream | Failure must be *pushed*, or nobody learns of it |
+
+Claude Code's shape is the clearest reference implementation. `/background` detaches the
+whole session so it keeps running with no terminal attached; `/tasks` lists what is running
+in the current session and lets you check on, attach to, or stop each item; and the agent
+view is a single screen showing every session, its state, and — the load-bearing column —
+which ones need your input. Notifications fire the `Notification` hook with an
+`agent_needs_input` or `agent_completed` type through the same channel as the rest of the
+tool, so "needs input" is a push, not something you discover by looking.
+
+That last point is the design rule, and the approval-gate arithmetic above is why. Attended,
+a 60-second gate timeout costs a distracted user five phantom refusals in an eight-gate run.
+Detached, there is no timeout that helps: a 60-second default denies everything, and an
+infinite one parks the run forever. **A `needs_input` state with no out-of-band signal is
+worse than a crash** — a crash is at least observable, while a silently parked agent burns
+wall-clock and the user's trust while appearing to work. So the detached contract is: the
+run must be able to park indefinitely without timing out, every park must emit a signal, and
+the signal must carry enough context to answer from the notification itself. The durable
+state that makes indefinite parking survivable is a separate problem, solved in
+[Durable Long-Running Agents](durable_long_running_agents.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -457,6 +491,9 @@ Voice agents: <300ms first audio byte for premium UX, <800ms acceptable. Chat ag
 
 **Q: Why is consent-before-scope-expansion important?**
 Surprise data access erodes trust. If the user said "summarize my emails", they expect the agent to read emails — but not also read calendar, files, contacts. Before expanding scope ("I'd like to also check your calendar to cross-reference"), the agent should ask. Builds trust that the agent stays within bounds. Critical in enterprise contexts with privacy regulations.
+
+**Q: How does agent UX change when the run is detached and nobody is watching?**
+Every pattern inverts from pull to push: streaming becomes a persisted transcript you attach to later, the stop button becomes attach-or-stop by session ID, and the approval modal becomes an out-of-band notification while the run parks. The pattern that breaks hardest is the approval gate, because neither timeout default works — a 60-second default silently denies everything the moment the user steps away, and an infinite one parks the run forever with no signal. The rule that falls out is that a `needs_input` state with no out-of-band notification is worse than a crash: a crash is observable, while a silently parked agent burns wall-clock and trust while appearing to work. Claude Code is the clearest reference shape — `/background` detaches a whole session, `/tasks` lists what is running so you can check on, attach to, or stop it, agent view shows every session's state including which ones need input, and notifications fire a hook with an `agent_needs_input` or `agent_completed` type. Design contract for a detached agent: the run parks indefinitely without timing out, every park emits a signal, and the signal carries enough context to answer straight from the notification rather than by re-opening the session.
 
 ---
 

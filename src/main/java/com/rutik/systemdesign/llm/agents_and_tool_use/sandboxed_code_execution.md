@@ -90,6 +90,55 @@ namespaces     → separate PID, mount, network, user namespaces
 cgroups        → CPU 1 core, memory 512MB, no network interface
 ```
 
+### 3.5 Provider-Hosted Sandboxes (no sandbox to provision)
+
+The four strategies above all assume you own the execution environment. The model
+providers now run one for you as a server-side tool, and for a large class of agents that
+removes the sandbox from your architecture entirely. Anthropic's **code execution tool**
+takes a tool type rather than an SDK: `code_execution_20250825` gives Claude Bash commands
+plus file operations and works on every current model; `code_execution_20260120` adds REPL
+state persistence and programmatic tool calling; `code_execution_20260521` is the same
+runtime with a tool description that warns Claude about the 90-second wall-clock limit on
+each Python cell. All three are generally available and need no beta header.
+
+```python
+resp = client.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=4096,
+    tools=[{"type": "code_execution_20250825", "name": "code_execution"}],
+    messages=[{"role": "user", "content": "Chart the revenue trend in this CSV."}],
+    # container="container_abc123",   # reuse a previous response's container
+)
+```
+
+The container is deliberately narrow: Python 3.11 on Linux x86_64, **1 CPU, 5 GiB RAM,
+5 GiB workspace**, and — the design decision that matters most — **internet access
+completely disabled, with no outbound requests permitted**. Claude therefore cannot
+`pip install` at runtime; only the pre-installed libraries exist (pandas, numpy, scipy,
+scikit-learn, statsmodels, matplotlib, seaborn, pyarrow, openpyxl, pillow, pypdf, sympy)
+alongside CLI tools such as ripgrep, fd, sqlite and 7zip. Data enters through the Files
+API (`anthropic-beta: files-api-2025-04-14`) as a `container_upload` content block, not
+over the network. Containers are scoped to the API key's workspace, are checkpointed after
+roughly five minutes of inactivity, and expire 30 days after creation; passing an earlier
+response's `container.id` back restores the same filesystem.
+
+Billing is by execution time, not tokens: a 5-minute minimum per invocation, **1,550 free
+hours per organization per month**, then **$0.05 per hour per container**. Attaching files
+bills execution time even if Claude never calls the tool, because the files are preloaded
+onto the container. Code execution is free when the request also includes the current web
+search or web fetch tool. Compare that to the E2B and Modal per-second pricing in 3.1-3.3:
+for bursty analysis workloads the free tier usually wins outright; for anything needing
+network access, GPUs, arbitrary `apt`/`pip` installs, or a session longer than a single
+task, you are back to a sandbox you provision.
+
+One integration trap. If you offer the hosted tool *and* your own Bash tool in the same
+request, Claude is in a multicomputer environment — two filesystems, no shared state — and
+will sometimes write a file in one and try to read it from the other. Anthropic's guidance
+is to say so explicitly in the system prompt: state that variables and files do not persist
+across execution environments, and that results must be passed between them in the tool
+calls themselves. This bites silently when you add web search, which enables code execution
+automatically alongside your existing shell tool.
+
 ---
 
 ## 4. Architecture Diagrams
@@ -556,6 +605,9 @@ Sandbox isolation prevents code from accessing the host filesystem, network, and
 
 **Q: How do you implement a per-user sandbox concurrency limit?**
 Use a semaphore per user (stored in Redis for distributed enforcement): `async with redis_semaphore(user_id, max_concurrent=3): execute_in_sandbox()`. Return HTTP 429 when the limit is exceeded. Set limits based on your cost model — a 2 vCPU / 1 GiB E2B sandbox costs about $0.117/hr, so 3 concurrent sandboxes per user is roughly $0.35/hr. Log semaphore wait time to detect user frustration and tune limits.
+
+**Q: When do you use a provider-hosted code execution tool instead of provisioning your own sandbox?**
+Use the hosted tool for self-contained data work such as analysis, charts and file conversion, and provision your own sandbox the moment you need network access, GPUs, or package installs. Reach for E2B, Modal or Daytona also when a session must outlive a single task. Anthropic's code execution tool (`code_execution_20250825`, generally available with no beta header) runs Claude's Bash commands and file operations in a container with 1 CPU, 5 GiB RAM, 5 GiB workspace and Python 3.11, and its defining constraint is that internet access is completely disabled — no outbound requests at all, so nothing can be `pip install`ed at runtime and only the pre-installed libraries are available. Data enters through the Files API as a `container_upload` block rather than over the network, and containers are workspace-scoped, checkpointed after about five minutes idle, and expire 30 days after creation. Economics favor it strongly at low volume: billing is per execution time with a 5-minute minimum, 1,550 free hours per organization per month, and $0.05 per container-hour after that, versus per-second compute billing on a self-provisioned microVM. The integration trap to name in an interview is the multicomputer problem — offering the hosted tool alongside your own Bash tool gives Claude two filesystems with no shared state, so the system prompt must say explicitly that files and variables do not carry across environments.
 
 ---
 

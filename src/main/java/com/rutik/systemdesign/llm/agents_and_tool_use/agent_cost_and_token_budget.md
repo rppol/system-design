@@ -472,6 +472,49 @@ def read_file_targeted(path: str, grep: str | None = None, lines: str | None = N
     return content[:50_000] + ("\n[Truncated]" if len(content) > 50_000 else "")
 ```
 
+### Server-Side Context Editing (the alternative to 4.4)
+
+Compaction as written above costs you an extra LLM call and destroys the cached prefix
+below the summarization point. Anthropic's **context editing** does the same job
+server-side, with no summarization call at all: you keep sending the full untouched
+conversation, and the API strips old tool results out of the prompt before the model sees
+it. Pass `context_management` alongside `tools`, with the
+`anthropic-beta: context-management-2025-06-27` header:
+
+```python
+resp = client.beta.messages.create(
+    model="claude-sonnet-5",
+    max_tokens=4096,
+    betas=["context-management-2025-06-27"],
+    tools=TOOLS,
+    messages=messages,                 # your client keeps the FULL history
+    context_management={"edits": [
+        {"type": "clear_tool_uses_20250919",
+         "trigger":       {"type": "input_tokens", "value": 100_000},  # when to fire
+         "keep":          {"type": "tool_uses",    "value": 3},        # recent pairs kept
+         "clear_at_least": {"type": "input_tokens", "value": 5_000},   # floor, see below
+         "exclude_tools": ["web_search"],     # never clear these results
+         "clear_tool_inputs": False},         # True also drops the tool ARGUMENTS
+    ]},
+)
+# resp.context_management["applied_edits"][0] -> cleared_tool_uses, cleared_input_tokens
+```
+
+Cleared results are replaced with a placeholder so the model knows content was removed
+rather than silently hallucinating over a gap. A second strategy,
+`clear_thinking_20251015`, drops old extended-thinking blocks and must be listed *first*
+in `edits` when you use both.
+
+`clear_at_least` is the field that earns its place in a cost file, and it exists because
+of the interaction the §4.6 caching arithmetic implies: **clearing tool results
+invalidates the cached prefix from the edit point onward.** Fire an edit that reclaims
+2K tokens and you have just thrown away a 100K-token cache read to save 2K of input — a
+net loss of roughly `100K x (1.0 - 0.1) x $3/M = $0.27` against a $0.006 saving. Setting
+`clear_at_least` to a value large enough to pay for the re-write is the whole trick, and
+it is the same reasoning as never putting a timestamp above your cached system prompt
+(Pitfall 3 below). Client-side compaction pays the same cache penalty *plus* the
+summarization call; context editing at least removes the second cost.
+
 ---
 
 ## 7. Real-World Examples
@@ -634,6 +677,9 @@ LiteLLM is a proxy that sits in front of LLM APIs. It provides: (a) per-team and
 
 **Q: What's the production cost difference between caching enabled vs disabled?**
 For typical agents with 2-3K-token system prompts and tools, caching saves 60-75% on input cost in active sessions. For agents called sparsely (one call per 30+ minutes), caching gives near-zero benefit because the 5-min TTL expires between calls. Use 1-hour cache TTL for sparse agents.
+
+**Q: Server-side context editing or client-side compaction — which do you reach for first?**
+Context editing, because it drops old tool results inside the API without the extra summarization call that compaction requires, and your client keeps the untouched history either way. Configure it with `context_management={"edits": [{"type": "clear_tool_uses_20250919", ...}]}` under the `context-management-2025-06-27` beta header: `trigger` sets the input-token or tool-use threshold that fires it, `keep` preserves the most recent N tool-use/result pairs, `exclude_tools` protects results you can never lose, and `clear_tool_inputs` decides whether the tool arguments go too. Cleared results are replaced by a placeholder so the model knows something was removed. The catch that decides the tradeoff is prompt caching: clearing invalidates the cached prefix from the edit point on, so an edit that reclaims 2K tokens while dumping a 100K-token cached prefix costs about $0.27 in re-billed input to save $0.006 at Sonnet rates — set `clear_at_least` high enough that each edit pays for its own cache re-write. Reach for compaction instead when you need the *content* of the old steps carried forward as a summary rather than deleted, which is the case for long research agents whose early findings still matter at the end.
 
 ---
 

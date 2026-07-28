@@ -500,6 +500,41 @@ The Temporal activity above caches with `ttl=86400`. That number has to be compa
 
 The failure this produces is subtle because it is invisible in testing: short runs pass, and only the long-tail workflow retries a step whose cache entry has since expired, re-sending an email that went out three weeks ago. The rule is `ttl > max expected T_wf`, with margin — for the 30-day onboarding agent that means a 60-day TTL or, better, durable persistence of the dedup record in the workflow's own state rather than an expiring cache. Note that the human-in-the-loop pause is what makes this bite: `T_wf` is dominated by waiting, not computing, so the workflow is cheap and long-lived at the same time.
 
+### Pitfall 3: The event history outgrows the workflow
+
+Event sourcing is what makes replay work, and it is also what kills an agent loop that
+runs long enough. Every activity scheduled, started and completed writes events, and for
+an agent the *payloads* are LLM messages and tool results — kilobytes each, not the tens
+of bytes a typical microservice workflow records. Temporal enforces two ceilings on a
+single Workflow Execution: **51,200 events and 50 MB of history**, with warnings emitted
+at **10,240 events and 10 MB**. Hit the hard limit and the Workflow Task fails and retries
+forever — the workflow does not crash cleanly, it wedges.
+
+```
+  agent loop, one LLM call + one tool call per step
+    ~5 history events per step
+    payload: 8 KB tool result + 4 KB assistant message = ~12 KB per step
+
+    event ceiling  : 51,200 / 5     = 10,240 steps
+    size ceiling   : 50 MB / 12 KB  =  4,266 steps   <- binds first
+    warning at 10MB:                =    853 steps
+
+  Size, not step count, is the real limit — and it arrives ~2.4x sooner.
+  A 30-day onboarding agent polling every 10 minutes crosses it in under a week.
+```
+
+The fix is **Continue-As-New**: the workflow voluntarily completes and atomically starts a
+fresh execution with the same workflow ID and a *summarized* input, so the history resets
+to zero while the logical run continues. For an agent this maps cleanly onto compaction —
+the boundary at which you summarize the conversation is exactly the boundary at which you
+call Continue-As-New, so the new run starts with a compacted message list instead of the
+full transcript. Two rules: pick the cut point at a step boundary where no activity is
+in flight, and carry forward only the compacted state plus the idempotency records from
+Pitfall 2, never the raw history you are trying to shed. The same discipline applies to
+LangGraph — an append-only checkpoint thread grows without bound too — but there the
+consequence is a slow `get_state` and a fat table rather than a stuck workflow, which is
+why the failure surfaces later and hurts less.
+
 **War story** (anonymized, illustrative — not a verified public record): A B2B onboarding agent built without checkpointing crashed during a routine deployment. 47 in-flight workflows lost their state. Customers received partially completed onboarding (some emails sent, some not). 11 hours of engineering to manually reconcile. Migrated to Temporal: zero re-occurrences in 8 months across hundreds of deployments.
 
 ---
@@ -564,6 +599,9 @@ Per checkpoint: ~5-50KB (messages + state). For an agent running 50 iterations: 
 
 **Q: How do you migrate from in-memory agents to durable agents?**
 (1) Pick a framework (LangGraph easiest if already on LangChain). (2) Refactor agent loop into discrete steps (each becomes a node or activity). (3) Add idempotency keys to all side-effecting tools. (4) Configure checkpointer/storage. (5) Run shadow mode (durable agent runs alongside, compare results). (6) Cut over feature flag. Typical migration: 1-3 sprints for a moderately complex agent.
+
+**Q: What breaks when a durable agent's event history grows too large, and how do you fix it?**
+The workflow wedges: Temporal caps a single Workflow Execution at 51,200 events and 50 MB of history, and at the hard limit the Workflow Task fails and retries forever rather than erroring cleanly. Warnings fire earlier, at 10,240 events and 10 MB. Agents hit the size ceiling long before the event ceiling because each step writes LLM messages and tool results as activity payloads — at roughly 12 KB and 5 events per step, 50 MB is about 4,266 steps while 51,200 events is about 10,240, so size binds first by a factor of about 2.4. The fix is Continue-As-New: the workflow completes and atomically starts a new execution under the same workflow ID with a summarized input, resetting history to zero while the logical run continues. For an agent this coincides with compaction — cut at a step boundary with no activity in flight, and carry forward only the compacted message state plus the idempotency records, never the raw transcript you are trying to shed. LangGraph has the same unbounded-growth problem in its checkpoint thread, but the symptom there is a slow `get_state` and a bloated table rather than a stuck execution.
 
 ---
 
