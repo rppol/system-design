@@ -849,6 +849,8 @@ print(inputs["input_ids"][0][:5])   # tensor([79, 108, 105, 104, 35]) -- 'L'+3,'
 ## 12. Interview Questions with Answers
 
 **Q1: If you remove the tokenizer, does the model end up with no vocabulary at all?**
+**Short:** Removing the tokenizer swaps a huge trained vocabulary for a fixed, untrained one — the 256 possible byte values, which need no training and never go out of sync with the model.
+
 No — it swaps a huge trained vocabulary for a tiny fixed one: the 256 possible byte values, which
 need no training and can never go out of date. A BPE/SentencePiece vocabulary (32K-200K entries)
 is learned from a specific training corpus and frozen afterward, so it can drift out of sync with
@@ -860,6 +862,8 @@ genuinely tokenizer-free models still need a patching strategy (Section 4) to ke
 under control.
 
 **Q2: Doesn't removing the tokenizer also remove the sequence-length problem it was solving?**
+**Short:** Removing the tokenizer makes sequences roughly 4x longer, and since attention is quadratic that costs about 16x more attention FLOPs unless the model also adds patching.
+
 No — it makes the sequence-length problem worse first: English text runs about 4 bytes per BPE
 token, so a byte sequence is roughly 4x longer than the token sequence. Because self-attention
 cost is quadratic in sequence length, a naive byte-level Transformer pays roughly `(4x)^2 = 16x`
@@ -871,6 +875,8 @@ answering "what is our patching strategy" — the vocabulary change and the comp
 separate decisions.
 
 **Q3: What is a "glitch token" like `SolidGoldMagikarp`, and why can't a genuinely tokenizer-free model have one?**
+**Short:** A glitch token is a vocabulary entry the tokenizer learned but the model barely trained on, leaving a near-random embedding — impossible in tokenizer-free models since there is no learned vocabulary to undertrain.
+
 A glitch token is a BPE vocabulary entry that was almost never seen during model training, leaving
 its embedding close to its random initialization and producing erratic completions when it appears.
 `SolidGoldMagikarp` entered GPT-2/GPT-3's tokenizer because the tokenizer's own training corpus
@@ -883,6 +889,8 @@ fixes this specific case without fixing the underlying risk. A genuinely tokeniz
 that could be undertrained, because there is no learned vocabulary at all.
 
 **Q4: GPT-4's byte-level BPE already guarantees zero out-of-vocabulary tokens — so what problem is left for BLT, MEGABYTE, and ByT5 to solve?**
+**Short:** Byte-level BPE fixes crashes on unknown input but keeps a corpus-trained merge table, so uneven multilingual fertility and glitch-token risk remain — problems genuinely tokenizer-free models remove entirely.
+
 Byte-level BPE fixes the crash-on-unknown-input problem but keeps the vocabulary itself, and with
 it every cost that vocabulary imposes. The 256-byte fallback guarantees any input is representable,
 but the learned merge table on top of it is still trained on one corpus (English-heavy, mostly
@@ -894,6 +902,8 @@ string be encoded," while BLT/MEGABYTE/ByT5 also attack "is this string encoded 
 fairly."
 
 **Q5: A paper claims "BLT matches Llama 3 quality with fewer FLOPs" — is that the actual public Llama 3 model?**
+**Short:** No — BLT is compared against a BPE baseline the paper's own authors trained at matched parameters and FLOPs, not the publicly released Llama 3 8B checkpoint trained on roughly 15T tokens.
+
 No — it is a BPE-tokenized Transformer that the BLT authors trained themselves at matched
 parameter counts and matched training FLOPs, not the publicly released Llama 3 checkpoint. BLT's
 paper is a controlled scaling study (400M to 8B parameters) that trains its own
@@ -908,6 +918,8 @@ architecture, our training run" versus "the actual shipped model" before repeati
 claim.
 
 **Q6: How does BLT's entropy model actually decide where one patch ends and the next begins?**
+**Short:** A small 100M-parameter entropy model predicts next-byte uncertainty and starts a new patch when entropy crosses an absolute threshold or jumps sharply versus the previous byte.
+
 A small byte-level language model predicts the probability distribution of the next byte, and BLT
 cuts a new patch wherever that prediction is highly uncertain. Concretely, BLT computes the entropy
 `H` of the model's predicted next-byte distribution at every position, then applies two rules: a
@@ -920,6 +932,8 @@ model's cost. The practical effect (Section 5.3's toy example) is that predictab
 get long patches while unpredictable transitions get their own short patch.
 
 **Q7: What are BLT's three main components, and which one carries most of the compute?**
+**Short:** BLT has a local encoder, a latent global transformer, and a local decoder, with almost all parameters and FLOPs concentrated in the global transformer that attends over patches, not raw bytes.
+
 BLT has a local encoder, a latent global transformer, and a local decoder, and the global
 transformer is deliberately where almost all the parameters and FLOPs live. The local encoder is a
 lightweight transformer that uses cross-attention to pool a variable-length group of raw bytes into
@@ -932,6 +946,8 @@ patch vector back into byte-level logits, so the model still reads and writes ra
 the expensive computation happening at patch granularity.
 
 **Q8: How does MEGABYTE's local/global split change the complexity class of self-attention, and what is it exactly?**
+**Short:** MEGABYTE's local/global split reduces total self-attention complexity from O(N^2) to O(N^(4/3)) by choosing patch size P proportional to N^(1/3) to balance the two attention costs.
+
 MEGABYTE reduces total self-attention complexity from `O(N^2)` to `O(N^(4/3))` by splitting one
 long sequence into a two-level hierarchy. A global model attends over `T/P` patch positions while a
 local model attends within each patch over only `P` byte positions, and choosing patch size `P`
@@ -943,6 +959,8 @@ experiments push this to genuinely long sequences — 1,228,800 bytes for ImageN
 generation — that would be impractical for a flat Transformer to attend over directly.
 
 **Q9: Why does MEGABYTE's feedforward-layer trick matter as much as its attention savings?**
+**Short:** Since over 98% of Transformer FLOPs go to feedforward layers, running MEGABYTE's larger global feedforward once per patch instead of per byte amortizes most of its actual compute savings.
+
 Because at GPT-3 scale, over 98% of a Transformer's FLOPs go to the position-wise feedforward
 layers, not to attention — so amortizing the FFN cost is where most of the win actually comes from.
 A standard Transformer runs its feedforward layer once per token, so a layer with `m` parameters
@@ -956,6 +974,8 @@ change alone would suggest. When explaining these architectures, lead with the F
 just the attention-complexity argument — it is the larger effect at realistic model scales.
 
 **Q10: How does SpaceByte's patching strategy differ from MEGABYTE's, and why does it close more of the quality gap to subword models?**
+**Short:** SpaceByte places expensive global-transformer blocks after space characters instead of at a fixed byte interval, concentrating compute where word-initial bytes are hardest to predict.
+
 SpaceByte places its expensive "global" transformer blocks at word boundaries (space characters)
 instead of at a fixed byte interval, matching where prediction is actually hardest. MEGABYTE spends
 its global-model compute uniformly every `P` bytes regardless of content, so a fixed 8-byte patch
@@ -970,6 +990,8 @@ performing worse than subword models on Chinese, which does not use spaces betwe
 (Section 10.3).
 
 **Q11: Why is ByT5's encoder built three times deeper than its decoder, and what does that trade away?**
+**Short:** ByT5's encoder is 12 layers versus the decoder's 4 because decoder cost is paid once per generated byte at roughly 4x the position count of subword models, trading decoder capacity for speed.
+
 Because ByT5 processes about four times as many positions as a subword model, and decoder cost is
 paid once per generated byte, so a shallower decoder recovers most of that overhead. The released
 `google/byt5-small` ships with 12 encoder layers and 4 decoder layers, exactly the paper's 3x
@@ -983,6 +1005,8 @@ tokens) regardless of model size — unlike mT5's SentencePiece vocabulary, it n
 when the target language mix changes.
 
 **Q12: What problem do BLT's "hash n-gram embeddings" solve, and how do they work without a learned vocabulary?**
+**Short:** BLT hashes preceding 3-to-8-byte n-grams into a fixed embedding table added to each byte's embedding, giving the local encoder cheap local context with no trained vocabulary needed.
+
 They give the local encoder cheap access to short local context before any attention runs, without
 needing a trained subword vocabulary to do it. For each byte position, BLT hashes the preceding
 n-gram (for several values of `n` from 3 to 8 bytes) using a rolling polynomial hash into a
@@ -996,6 +1020,8 @@ cheap local model punch above its weight, while the expensive reasoning still ha
 global transformer (Q7).
 
 **Q13: At the 8B-parameter, FLOP-matched scale, how does BLT actually compare to a BPE baseline on quality and inference cost?**
+**Short:** At matched 8B-parameter scale BLT scored MMLU 57.4 versus a BPE baseline's 58.1 but beat it on HumanEval (35.4 vs 31.1), while using up to 50% fewer FLOPs at inference.
+
 Roughly on par on general knowledge, ahead on code generation, and meaningfully cheaper at
 inference — BLT scored MMLU 57.4 versus the BPE baseline's 58.1, but HumanEval 35.4 versus 31.1.
 Those numbers come from the paper's own 8B-parameter, compute-matched comparison (BLT trained on
@@ -1009,6 +1035,8 @@ without the matched-quality context, or only "BLT matches quality" without the F
 tells half the story.
 
 **Q14: BLT reports large robustness gains over BPE on tasks like noisy HellaSwag and the CUTE benchmark — why would a byte-level model be so much better at these specifically?**
+**Short:** Character-manipulation tasks like CUTE probe information a subword tokenizer hides once characters merge into a token, so BLT's byte-level view roughly doubles CUTE accuracy (54.1 vs 27.5).
+
 Because those tasks probe character-level manipulation, and a subword tokenizer actively hides
 characters from the model whenever they get merged into a larger token. BLT's reported numbers are
 stark — 64.3 versus 56.9 on a noise-injected HellaSwag variant, and 54.1 versus 27.5 (roughly
@@ -1023,6 +1051,8 @@ character sequence, removing the tokenizer removes a layer of obfuscation betwee
 the answer.
 
 **Q15: Why does a single typo sometimes wreck a subword-tokenized model's understanding of an entire sentence, in a way a byte-level model handles gracefully?**
+**Short:** A single typo can make BPE's greedy merge process fragment a word into an entirely different, poorly-trained token sequence, while a byte-level model just sees one extra ordinary byte.
+
 Because BPE segmentation is a greedy, corpus-frequency-driven process, so one inserted or swapped
 character can cascade into a completely different token sequence for everything after it. "hello"
 might be one common token while "helllo" (one typo) no longer matches any learned merge and
@@ -1036,6 +1066,8 @@ text, OCR output, and mobile-keyboard typos are one of the strongest practical a
 byte-level front end (Section 9, Section 14's case study).
 
 **Q16: Does BLT's entropy-based patching generalize across languages better than SpaceByte's space-boundary heuristic?**
+**Short:** Entropy patching has no dependency on whitespace, so it should generalize to non-space-segmented scripts like Chinese better than SpaceByte's space-triggered rule, though this is unbenchmarked.
+
 Architecturally, yes — entropy patching has no dependency on whitespace at all, while SpaceByte's
 cut rule is defined in terms of the space character. SpaceByte explicitly cuts after spaces because
 word-initial bytes tend to be hardest to predict in space-segmented languages, but that rule has
@@ -1049,6 +1081,8 @@ generalization argument is a reasonable architectural prediction rather than a b
 verify entropy-patch quality on your own target languages before relying on it.
 
 **Q17: If BLT still has to generate one byte at a time, how can it possibly be faster at inference than a token-based model?**
+**Short:** BLT's byte-by-byte decode step count is largely unchanged; the speedup comes from running the expensive global transformer only once per patch (~4-8 bytes) instead of once per byte.
+
 The step count for local, byte-level decoding is largely unchanged — the savings come from making
 each step cheaper, not from taking fewer steps. The local decoder does still emit bytes
 sequentially within a patch using its small, cheap model, so wall-clock latency is not simply
@@ -1063,6 +1097,8 @@ autoregressive step count — because for BLT/MEGABYTE-style architectures it is
 former.
 
 **Q18: You are deciding whether to adopt a byte-level architecture for a new multilingual model — what should actually drive that decision?**
+**Short:** The decision should hinge on whether real failures trace to vocabulary issues like typos, rare scripts, or glitch tokens, since byte-level architectures fix that category and nothing else.
+
 Whether your real failures are about the vocabulary — typos, rare scripts, glitch tokens — or
 about something else; byte-level architectures fix the first category, not the second. Start from
 the incident data, not the architecture — if hallucination, refusal, or quality complaints cluster

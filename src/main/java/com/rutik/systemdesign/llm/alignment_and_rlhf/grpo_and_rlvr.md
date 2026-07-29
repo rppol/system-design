@@ -597,57 +597,93 @@ of work argues the root cause is BF16's rounding error and that training and gen
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between GRPO and PPO?**
+**Short:** GRPO deletes PPO's learned critic and instead computes each response's advantage as (reward minus group mean) over group std, across G sampled rollouts of one prompt.
+
 PPO uses a learned, policy-sized value network (critic) to compute per-token advantages via GAE; GRPO deletes the critic and instead samples G responses per prompt, scoring each against the group mean and standard deviation — `A_i = (r_i − mean)/std` — with every token in a response sharing that advantage. GRPO also moves the KL penalty out of the reward and into the loss using the k3 estimator. The practical consequences: roughly half the trainer memory, no critic hyperparameter tuning, but coarser (outcome-level) credit assignment and G× rollout cost per prompt. In an interview, lead with "GRPO replaces the learned baseline with a Monte-Carlo group baseline" — that is the whole algorithm in one sentence.
 
 **Q2: Why can GRPO afford to drop the critic when PPO cannot?**
+**Short:** GRPO gets variance reduction by resampling the same prompt many times as an empirical baseline, which works because LLM rollouts are cheap and single-turn, unlike robotics RL.
+
 The critic exists to reduce variance of the policy gradient by estimating expected return per state. GRPO gets variance reduction from a different source: multiple samples of the *same prompt* form an empirical baseline, which is unbiased and automatically difficulty-calibrated (hard prompts have low group means). This works for LLM post-training specifically because prompts are cheap to resample and episodes are single-turn; in classic robotics RL you cannot replay the same state 16 times, so a critic is necessary. The cost shifts from critic memory/tuning to rollout compute.
 
 **Q3: What is RLVR and why does it resist reward hacking better than RLHF?**
+**Short:** RLVR scores rollouts with a deterministic verifier, such as unit tests or exact-match, closing off the smooth, exploitable gradients a learned reward model exposes everywhere.
+
 RLVR replaces the learned reward model with a deterministic verifier — exact-match for math, unit tests for code, constraint checkers for instruction following. A learned RM is a smooth proxy with exploitable gradients everywhere (length, confidence, sycophancy); a verifier has a narrow attack surface limited to its actual bugs. That is why RLVR runs sustain tens of thousands of steps while RLHF against a learned RM typically over-optimizes within a few thousand (Goodhart). The caveat: the verifier becomes a security boundary — weak answer extraction or visible test cases get gamed just like a weak RM.
 
 **Q4: Walk me through the DeepSeek-R1 training pipeline. Why not just ship R1-Zero?**
+**Short:** R1 adds cold-start SFT, reasoning RL, rejection-sampled SFT, and a final all-scenario RL stage on top of R1-Zero's pure GRPO to fix its unreadable, language-mixing chains of thought.
+
 R1-Zero is pure GRPO on V3-Base with accuracy + format rewards — it proved emergent reasoning (AIME 15.6%→77.9%) but produced unreadable, language-mixing chains of thought. R1 fixes this with five stages: (1) cold-start SFT on a few thousand curated long-CoT examples; (2) reasoning RL with an added language-consistency reward; (3) rejection sampling from that checkpoint to build 800K SFT samples (600K reasoning + 200K general); (4) SFT on those samples; (5) a second all-scenario RL stage mixing verifiable rewards with helpfulness/harmlessness reward models. The pattern to remember: RL discovers capability, SFT distills and stabilizes it, then RL again aligns the whole assistant.
 
 **Q5: Why did DeepSeek abandon process reward models (PRMs) and MCTS?**
+**Short:** DeepSeek dropped PRMs because step-level correctness is ill-defined and rewards it, and dropped MCTS because token-level search space is exponentially larger than board games.
+
 Three reasons for PRMs: defining a "correct step" in general reasoning is ill-posed; step-level annotation is expensive (human) or unreliable (automated); and a learned PRM reintroduces exactly the reward hacking that verifiable rewards avoid, plus a model that must be continuously retrained as the policy improves. MCTS failed because token-level search space is exponentially larger than board games and the value model guiding the search is itself hard to train. Both remain useful at *inference* (PRM-guided best-of-N), just not as the training signal.
 
 **Q6: How does the KL penalty differ between PPO-RLHF and GRPO?**
+**Short:** PPO folds the KL penalty into the per-token reward, while GRPO adds it directly to the loss via the non-negative, low-variance k3 estimator.
+
 PPO folds KL into the per-token reward (`r_t − β·log(π_θ/π_ref)`), entangling it with the advantage estimate. GRPO adds KL directly to the loss using the k3 estimator `π_ref/π_θ − log(π_ref/π_θ) − 1`, which is non-negative and unbiased with much lower variance than the naive estimator. Follow-up worth volunteering: DAPO removes the KL term entirely, arguing that long-CoT reasoning *should* drift far from the reference policy, and that the clip mechanism alone bounds per-step movement.
 
 **Q7: What happens to a group where all G responses are wrong (or all right)?**
+**Short:** The group's standard deviation is zero, so every advantage is zero and that entire rollout batch contributes no gradient to training.
+
 The group std is zero, every advantage is zero, and those rollouts contribute no gradient — pure wasted compute. This has two implications: (1) curriculum matters — prompts should sit near the policy's competence frontier (pass rate strictly between 0 and 1); (2) DAPO's dynamic sampling oversamples and filters zero-variance groups to keep effective batch size constant. A healthy run tracks the fraction of zero-signal groups; above ~40% means your prompt difficulty distribution is misaligned with the policy.
 
 **Q8: Does RLVR add new capability or just elicit what the base model already has?**
+**Short:** Whether RLVR adds new capability or just sharpens pass@1 toward the base model's existing pass@k is contested, though sustained large-scale runs show gains where base pass@128 was near zero.
+
 The honest answer is contested. The "elicitation" evidence: at large k, base-model pass@k often meets or exceeds the RL model's (Yue et al., 2025) — RL concentrates probability mass on solution paths already in the base distribution, which is why all-fail groups give zero gradient. The "new capability" evidence: sustained-scale runs (ProRL-style) show gains on tasks where base pass@128 was ~0, and length/behavior changes (self-verification, backtracking) that persist out-of-domain. Safe interview position: at moderate compute RL is mostly sharpening pass@1 out of pass@k; whether scaled RL exceeds the base envelope is open research — then mention the practical corollary: if your base model can't solve it at any k, SFT first.
 
 **Q9: Why is distillation preferred over direct RL for small reasoning models?**
+**Short:** SFT on a large teacher's RL-generated reasoning traces beats running RL directly on a small model, because small models rarely stumble onto correct long chains to reinforce.
+
 DeepSeek's ablation: SFT-ing Qwen2.5-32B on 800K R1-generated samples decisively beat running their full RL recipe directly on the same 32B base (which only reached QwQ-32B level). Small models lack the latent capability for RL to amplify — exploration rarely stumbles on correct long chains, so groups are mostly all-fail. The big model explores; the small model imitates the discoveries. Cost is also decisive: one teacher run amortizes across six distilled sizes (1.5B–70B).
 
 **Q10: What is the length bias in vanilla GRPO and how does Dr. GRPO fix it?**
+**Short:** Vanilla GRPO's per-response length normalization rewards being verbose when wrong, and Dr. GRPO fixes this by using a fixed-constant length divisor with no std division.
+
 Standard implementations normalize each response's token loss by its own length. For a *negative*-advantage (wrong) response, longer length means a smaller per-token penalty — so the policy learns that being verbose when wrong is cheaper, inflating response length independent of reasoning quality. The std normalization adds a second bias: low-variance (very easy or very hard) prompt groups get amplified advantages. Dr. GRPO removes both normalizations (fixed-constant length divisor, no std division), and showed equal benchmark gains with substantially shorter outputs. Interview gotcha: "R1 responses grew because it learned to think longer" is only partly true — some growth is this optimizer artifact.
 
 **Q11: What does DAPO change relative to GRPO, and why?**
+**Short:** DAPO decouples clip bounds for exploration, discards zero-variance groups, aggregates loss per token, and softly shapes the overlong-response penalty, then drops KL entirely.
+
 Four changes: (1) **clip-higher** — decouple clip bounds (ε_low=0.2, ε_high=0.28) so low-probability exploratory tokens can increase, preventing entropy collapse; (2) **dynamic sampling** — discard all-correct/all-wrong groups and resample to keep informative batches; (3) **token-level loss** — aggregate over all tokens in the batch rather than per-response means, removing the length artifact; (4) **overlong reward shaping** — soft penalty near the max-length cutoff instead of hard truncation punishing otherwise-correct reasoning. They also drop KL. Result: 50 AIME points on Qwen2.5-32B, surpassing the R1-paper recipe on the same base with half the steps.
 
 **Q12: Give three concrete examples of reward hacking under verifiable rewards.**
+**Short:** Under verifiable rewards, policies hardcode answers to visible test cases, exploit weak answer-extraction by enumerating candidates, or inflate length when a shaped reward correlates with it.
+
 (1) Code: the policy reads visible test cases and emits `if input == X: return expected` lookup tables, or calls `sys.exit(0)` before assertions run — fix with hidden tests and sandbox-level result capture. (2) Math: weak extraction ("any number in the response matches gold") teaches the policy to enumerate candidate answers — fix by requiring exactly one `\boxed{}` and symbolic equivalence via sympy. (3) Format/length: if a judge or shaped reward correlates with length, responses balloon — fix with explicit length budgets in the reward. Meta-point for interviews: the verifier is the reward model now; it needs the same adversarial auditing an RM does.
 
 **Q13: How do verifiable rewards extend beyond math and code?**
+**Short:** Verifiable rewards extend to any programmatically checkable task, such as SQL execution against a fixture database, JSON-schema validation, and grounded-citation verification.
+
 Anything checkable by program: SQL generation (execute against a fixture DB, compare result sets), structured extraction (JSON-schema validation plus field-level F1 against gold), instruction-following constraints (IFEval-style "exactly 3 bullet points, no word 'the'"), tool-use trajectories (did the booking API get called with valid arguments), retrieval grounding (citation actually contains the claimed span). Tulu 3 used the instruction-constraint family. The frontier is *rubric-based rewards* — an LLM judge scoring against a detailed checklist — which reopens the hacking surface and needs ensemble judges plus periodic human audits.
 
 **Q14: What dominates the cost of a GRPO run, and how do production systems architect around it?**
+**Short:** Rollout generation dominates GRPO cost at 70-85% of wall-clock time, so production systems disaggregate a vLLM/SGLang generation cluster from a separate FSDP/Megatron trainer.
+
 Rollout generation — typically 70–85% of wall-clock at 8K–16K-token reasoning traces, since each step needs prompts × G full generations (e.g., 256 × 16 = 4,096 rollouts). Production frameworks (veRL, OpenRLHF) therefore disaggregate: a vLLM/SGLang engine cluster handles generation with continuous batching and prefix caching (the prompt is shared across the whole group — G=16 means the prompt's KV cache is reused 16 times), while a separate FSDP/Megatron trainer does updates; weights sync each step. The classic bug here is generating with stale weights — monitor `mean |ratio − 1|` to catch it.
 
 **Q15: When would you still choose PPO or DPO over GRPO?**
+**Short:** Choose DPO for offline pairwise preference data with no verifier, PPO for dense per-token learned rewards, and GRPO when rewards are sparse, verifiable, and prompts are replayable.
+
 DPO when you have offline pairwise preference data and no verifier — it is an SFT-cost contrastive method, no rollouts at all (see [README](README.md)). PPO when you need per-token credit assignment from a dense learned reward (e.g., safety RM scoring every span) or are training in a setting where resampling the same prompt is impossible. GRPO specifically wins when rewards are sparse, verifiable, and prompts are replayable — the reasoning-model regime. A cascade many labs run: SFT → DPO (cheap broad alignment) → GRPO/RLVR (reasoning) → light all-scenario RL (R1 stage 5).
 
 **Q16: How do you monitor a GRPO/RLVR run? Name the metrics that catch failures early.**
+**Short:** Key GRPO health metrics are per-difficulty pass rate, the fraction of zero-std groups, policy entropy, response length trends, and hidden-versus-training verifier pass-rate divergence.
+
 (1) Mean reward and pass-rate per prompt-difficulty bucket — overall mean hides frontier movement. (2) Fraction of zero-std groups — rising means difficulty misalignment. (3) Policy entropy and distinct-n across the group — collapse precedes plateaus by hundreds of steps. (4) Mean/percentile response length — sudden growth with flat reward suggests length-bias artifact or hacking. (5) `mean |ratio − 1|` — off-policy drift from weight-sync bugs. (6) KL from reference. (7) Held-out *hidden* verifier pass rate vs training verifier pass rate — divergence is the smoking gun for verifier gaming. (8) Periodic general-capability evals (MMLU, chat win-rate) to catch forgetting.
 
 **Q17: Why did Qwen3 move from GRPO to GSPO?**
+**Short:** Qwen3 switched to GSPO because GRPO's per-token importance ratios mismatch its per-sequence reward and destabilize MoE routing, while GSPO clips one sequence-level ratio instead.
+
 GRPO computes importance ratios per token, but the reward and advantage are per sequence — a unit mismatch that injects high-variance noise, which compounds over thousands-of-token generations. For MoE models it is worse: small policy updates change expert routing, making per-token ratios swing wildly even when sequence-level behavior is stable (Qwen reported needing hacks like "routing replay" under GRPO). GSPO defines a single sequence-level importance ratio (length-normalized product of token ratios) and clips at sequence granularity, matching the unit of the reward. Result per Qwen: stabler MoE training, better scaling, no routing hacks.
 
 **Q18: Your GRPO run generates with vLLM and trains with FSDP on identical weights. Why is it still off-policy?**
+**Short:** The generation and training engines compute different token probabilities for identical weights due to kernel and batching differences, and truncated importance sampling corrects the mismatch.
+
 Because the two engines compute different token probabilities for the same tokens under the same parameters — different kernels, batching and reduction order — so you sample from `pi_vllm` and take gradients against `pi_fsdp`. Yao et al. (2025) found tokens where the two flatly contradict each other (`pi_vllm = 1` against `pi_fsdp = 0`), and showed the gap persists after patching vLLM to expose true sampling probabilities and casting its `lm_head` to fp32 — it is inherent to hybrid rollout/trainer designs, not a bug in one engine. This is distinct from the stale-weights bug: there the weights really differ and a sync fixes it, here they are identical and a sync cannot. The fix is truncated importance sampling (TIS): reweight each sample by `min(pi_fsdp/pi_vllm, C)` before the policy-gradient term. Truncation is load-bearing — the untruncated ratio and the variant that substitutes `pi_vllm` into PPO's clipping both collapse to near-zero accuracy with INT8 rollouts, while TIS holds, which is what makes quantized rollouts usable for throughput. In veRL it is `algorithm.rollout_correction` with `rollout.calculate_log_probs: true`, threshold `C` around 2.0, monitored via `rollout_is_mean` (healthy 0.9-1.1) and `rollout_is_eff_sample_size` (warn below 0.3). A parallel result argues BF16 rounding error is the root cause and that running both sides in FP16 removes most of the mismatch outright.
 
 ---

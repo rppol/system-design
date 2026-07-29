@@ -871,54 +871,88 @@ moving target, not a permanent limitation, but it has been a real deployment blo
 ## 12. Interview Questions with Answers
 
 **Q1: Why don't SSMs need a KV cache, and what's the concrete memory savings at long context?**
+**Short:** SSMs compress history into a fixed-size state instead of caching every token, cutting a 7B model's memory at 100K tokens from ~52.4 GB to ~5.2 MB.
+
 A Transformer's KV cache exists because attention needs to look back at every past token's key and value vectors, so the cache grows linearly with sequence length. An SSM instead compresses everything seen so far into a fixed-size hidden state, updated via a linear recurrence (§3.1) — there's nothing to "cache" because there's no per-token history to retain explicitly. Concretely (§2): a 7B Transformer's KV cache at 100K tokens is ~52.4GB (no GQA), while a comparable Mamba model's entire recurrent state is ~5.2MB, independent of sequence length — roughly a 10,000x difference that only grows as context length increases further.
 
 **Q2: What is the "selection mechanism" in Mamba, and why does it matter compared to S4?**
+**Short:** Mamba makes delta, B, and C functions of the current token instead of fixed like S4, letting a fixed-size state compress content selectively.
+
 S4's state-transition parameters (`A, B, C`) are fixed, time-invariant — every token is compressed into the state the same way regardless of its content. Mamba makes `delta, B, C` *functions of the current input token* (§3.3): the model learns, per token, how aggressively to update the state and what to write/read. This is what lets a fixed-size state implement content-aware behavior — e.g., barely updating on filler words but strongly updating on a named entity — and it's the single change that took SSMs from uncompetitive on language modeling to matching Transformer perplexity at 1.4B-2.8B scale.
 
 **Q3: Walk through the recurrent vs. convolutional dual view of an SSM.**
+**Short:** The recurrent view runs the state update sequentially for inference, while S4's time-invariant convolutional view computes the whole sequence in parallel via FFT for training.
+
 The recurrent view computes `h_t = A_bar h_{t-1} + B_bar x_t` sequentially — O(1) memory per step, used at inference. The convolutional view (§3.2, valid only when `A,B,C` are time-invariant, i.e., S4) observes that the output sequence equals the input convolved with a fixed kernel `[CB, CAB, CA^2B, ...]` derived once from `(A,B,C)` — this convolution can be computed for the entire sequence in parallel via FFT, which is how S4 trains efficiently. Mamba breaks this duality (its `A,B,C` vary per token) and needs a third approach — the parallel scan (§3.4) — to regain training parallelism.
 
 **Q4: Why is naive sequential computation slow to train, and how does the parallel scan fix it?**
+**Short:** A naive per-token loop launches thousands of tiny GPU kernels, while the associative parallel scan folds the recurrence into O(log N) sequential depth.
+
 A naive `for t in range(seq_len)` loop (§6.1, §10.1) issues one tiny GPU kernel per timestep — at seq_len=8192, that's 8192 sequential kernel launches per layer per forward pass, with launch overhead dominating actual FLOPs, vs. a Transformer's single large batched matmul. The parallel scan exploits that the recurrence's update is an *associative* operation (§3.4): representing each step as `(A_t, B_t x_t)`, adjacent pairs combine via `(A2,b2) o (A1,b1) = (A2*A1, A2*b1+b2)`, so a tree reduction computes all states in O(log N) sequential depth. Mamba's `selective_scan_fn` implements this as a single fused CUDA kernel.
 
 **Q5: What is the recall / in-context-learning gap for SSMs, and why does it exist?**
+**Short:** SSMs underperform Transformers on exact far-back retrieval because their fixed-size state must lossily compress history rather than cache every token exactly.
+
 Pure SSMs and linear-attention models tend to underperform same-size Transformers on tasks requiring exact retrieval of specific far-back tokens (needle-in-haystack, copying, certain associative-recall benchmarks) — even though their *perplexity* can match. The reason is structural: attention's KV cache makes every past token exactly retrievable; an SSM's fixed-size state must lossily compress the entire history, and content that gets "overwritten" by the selection/gating mechanism (§3.3, §3.6) is genuinely gone. This isn't fixed by more training — it's why hybrid architectures (§8.3) exist.
 
 **Q6: Why do hybrid architectures like Jamba interleave attention and SSM layers, and in what ratio?**
+**Short:** A minority of full-attention layers, roughly 1-in-8 in Jamba, recovers most of the recall quality that pure SSM layers lack while keeping most of the memory savings.
+
 The motivation is directly Q5: a small number of full-attention layers can recover most of the recall quality that pure SSM layers lack, while the majority-SSM layers provide most of the memory/throughput savings. Jamba uses roughly 1-in-8 layers as full attention (the rest Mamba + MoE FFN, §5.4) — empirically, this ratio recovers near-Transformer recall while keeping the KV cache at roughly 1/8th the size (and thus 1/8th the memory cost) of an all-attention model at the same context length, which is what lets AI21 fit up to 140K of Jamba's 256K context window on a single 80GB GPU.
 
 **Q7: Explain the Mamba-2 "SSD" duality between linear attention and SSMs.**
+**Short:** Dropping softmax makes `(QK^T)V` associative, so it becomes a running-state recurrence identical in form to a selective SSM, enabling matmul-heavy training kernels.
+
 Standard attention is `softmax(QK^T)V`; removing softmax makes the computation associative, so `(QK^T)V = Q(K^T V)` — you can maintain a running state `S_t = S_{t-1} + k_t v_t^T` and compute `y_t = q_t^T S_t`, which is structurally identical to an SSM recurrence `h_t = A h_{t-1} + B x_t` with `A=I` (§3.5). Mamba-2's SSD result generalizes this: the *selective* SSM recurrence (with input-dependent `A_t`) is a structured (semiseparable) form of *masked* linear attention — meaning it can be computed with the same matmul-heavy kernels GPUs are built for, which is the source of Mamba-2's 2-8x training speedup over Mamba-1's scan kernel. Important caveat: this is duality with *linear* attention, not full softmax attention (Pitfall 10.5).
 
 **Q8: What is RetNet's retention mechanism, and how do its three forms relate?**
+**Short:** RetNet's retention is linear attention with fixed exponential decay, provably equivalent in its parallel, recurrent, and chunkwise computational forms.
+
 RetNet's "retention" is linear attention with a *fixed* exponential decay applied to the running state — older contributions to `S_t` decay geometrically. RetNet proves three computational forms are mathematically equivalent: a **parallel** form (good for training — looks like masked attention with a decay mask), a **recurrent** form (good for single-token inference — O(1) state update), and a **chunkwise** form (good for long sequences — combines intra-chunk parallel computation with inter-chunk recurrent state carry, §6.3). The ability to pick the form matching your workload (training vs. low-latency inference vs. very long sequences) without changing the model is RetNet's key practical contribution.
 
 **Q9: How do gating mechanisms in RWKV/GLA address the "what to forget" problem?**
+**Short:** A learned, data-dependent decay gate scales down the running state before each update, letting the model choose what old information to discard.
+
 A fixed-size state can't retain everything, so the model must actively decide what to overwrite — RWKV and GLA add a data-dependent decay gate `g_t in [0,1]` applied before accumulating new information: `S_t = g_t * S_{t-1} + k_t v_t^T` (§3.6). When `g_t` is near 0, old state is discarded to make room; near 1, old state is preserved. Because `g_t` is *learned and input-dependent* (per-head/per-channel in GLA, increasingly state-dependent in RWKV v6/v7), the model can implement different forget timescales for different information — this is a major source of the recall-quality improvement of gated linear attention over *ungated* linear attention.
 
 **Q10: Give the concrete KV-cache-vs-state-size comparison you'd use in an interview.**
+**Short:** At 100K tokens a 7B Transformer's KV cache is roughly 52.4 GB versus a comparable Mamba model's constant ~5.2 MB state, a gap that widens with longer context.
+
 For a 7B dense Transformer (32 layers, 32 KV heads, head_dim=128, FP16) at 100K tokens: KV cache = `2 (K and V) x 32 layers x 100,000 tokens x 32 heads x 128 head_dim x 2 bytes ≈ 52.4 GB`. For a comparable Mamba model (`d_model=2560, d_state=16`, 64 layers, FP16): state = `2560 x 16 x 2 bytes x 64 layers ≈ 5.2 MB`, **flat regardless of sequence length** (§2, §5.5). The ~10,000x gap at 100K tokens *widens* as context grows further — at 1M tokens the Transformer's cache would be ~524GB (infeasible on any single GPU) while the SSM's state is unchanged.
 
 **Q11: When would you choose pure SSM vs. hybrid vs. pure Transformer for a production system?**
+**Short:** Choose pure SSM for latency-critical streaming with little retrieval need, a hybrid for general long-context use, and pure Transformer when recall quality is paramount.
+
 Pure SSM/linear-attention for workloads dominated by long streaming generation with strict per-step latency and minimal retrieval needs — TTS/audio (Cartesia, §7), real-time transcription, edge deployment via `rwkv.cpp`. Hybrid (Jamba/Zamba) when you want a general-purpose long-context LLM that needs both memory efficiency *and* reasonable recall — most "long-context chat/RAG-adjacent" use cases as of 2026. Pure Transformer when retrieval/recall quality is paramount, context lengths are moderate (tens of thousands of tokens, where KV cache is manageable), or your serving stack's Mamba/Jamba support (Pitfall 10.6) isn't mature enough yet — verify this last point empirically, as it changes month to month.
 
 **Q12: What's Lightning Attention's tiling strategy, and why does it matter on GPU memory hierarchy?**
+**Short:** Lightning Attention tiles computation into small quadratic intra-block chunks in fast memory plus a linear inter-block running state, mirroring Flash Attention's memory-hierarchy insight.
+
 Lightning Attention (used in MiniMax-01) splits computation into small **intra-block** chunks computed via quadratic (but small, hence cheap) attention entirely within fast on-chip memory, plus an **inter-block** linear-attention running state carried in slower memory between chunks (§4, §6.3 is the same general pattern as RetNet's chunkwise form). This mirrors Flash Attention's core insight — minimize expensive reads/writes to slow GPU memory by keeping working sets in fast on-chip memory — but applied to linear rather than softmax attention, and is a major contributor to MiniMax-01's claimed 4M-token context support.
 
 **Q13: How does Cartesia leverage Mamba for TTS, and why is constant per-step memory the key advantage?**
+**Short:** Mamba's O(1) per-step state gives every generated audio token the same latency, unlike a Transformer whose KV cache makes later tokens progressively costlier.
+
 TTS is a long, continuous, streaming-generation task — synthesizing audio for a multi-sentence response means generating thousands of audio tokens sequentially. With a Transformer backbone, each subsequent token's KV cache read grows, so per-token latency *increases* over the course of generation — bad for a streaming user experience where consistent low latency matters more than peak throughput. Mamba's O(1) state means **every token costs the same**, regardless of how much audio has already been generated — Cartesia advertises sub-90ms time-to-first-audio for Sonic on the back of this property, and it's why several voice-agent companies (Bland AI, Retell AI, Vapi) build on it (see the [Voice Cloning case study](../case_studies/design_voice_cloning_tts_platform.md)).
 
 **Q14: What is the discretization step in SSMs, and why is it needed?**
+**Short:** Discretization converts the continuous-time SSM into a per-token recurrence via a timestep delta, which Mamba makes input-dependent as a learned clock speed.
+
 SSMs originate from continuous-time control theory (`dh/dt = Ah + Bx`), but language models operate on discrete tokens — discretization (§3.1) converts the continuous-time system into a discrete-time recurrence `h_t = A_bar h_{t-1} + B_bar x_t` via a timestep `delta` (zero-order hold: `A_bar = exp(delta*A)`). `delta` isn't just a numerical-methods detail — in Mamba it's *learned and input-dependent* (§3.3), effectively letting the model control its own "clock speed" per token: a large `delta` means "this token represents a big jump in the underlying continuous process, update aggressively," small `delta` means "barely anything changed, keep the state mostly as-is."
 
 **Q15: A hybrid model underperforms a pure-attention baseline on long-context retrieval. How do you debug it?**
+**Short:** Check the attention-layer ratio and placement, confirm evaluation stays within the trained context length, then isolate exact-copy failures from general long-document understanding.
+
 First, check the attention-layer ratio and placement (§5.4) — too few attention layers, or attention layers placed too early/late in the stack, can bottleneck recall even in a "hybrid." Second, verify the evaluation isn't exceeding the model's *trained* context length — SSM/hybrid models can have different extrapolation behavior than RoPE-based Transformers (see [Context Windows & Long Context](../context_windows_and_long_context/README.md)). Third, check whether the failure is specifically on *exact-copy/retrieval* tasks (expected to be the SSM layers' weak point, §8.1) vs. general long-document understanding (where hybrids often do fine) — these have different remediations: the former may need more/better-placed attention layers, the latter may be a training-data or context-extension issue unrelated to the architecture.
 
 **Q16: "Will SSMs/linear attention replace Transformer attention?" — how do you frame this for an interviewer?**
+**Short:** Attention is being supplemented for specific bottlenecks by hybrids and task-specific pure SSMs, not categorically replaced across all workloads.
+
 The honest framing is "probably not wholesale, but hybrids are increasingly standard for long-context models." Pure SSMs solve a real problem (KV-cache memory/throughput at long context, §2) but have a real, structural weakness (recall, §8.1) that hasn't been fully closed by gating improvements alone. The trend as of 2026 is **hybrids** (Jamba, Zamba, and others) that get most of the memory benefit while keeping enough attention to preserve recall — and **task-specific pure SSM adoption** where the recall weakness doesn't matter (streaming TTS/audio, §7). Framing it as "attention is being supplemented for specific bottlenecks, not categorically replaced" demonstrates nuanced understanding rather than either "SSMs are a fad" or "SSMs are the future" extremes.
 
 **Q17: What does the delta rule add over a decay gate, and where is it used in production?**
+**Short:** The delta rule overwrites the value stored under one specific key while leaving other directions untouched, unlike a decay gate that fades the entire state uniformly.
+
 A decay gate can only fade the whole state uniformly, while the delta rule overwrites the value stored under one specific key and leaves every other direction untouched. Concretely, DeltaNet's update is `S_t = (I - beta_t k_t k_t^T) S_{t-1} + beta_t k_t v_t^T`, which is exactly one Widrow-Hoff gradient step on `0.5*||S^T k_t - v_t||^2` with step size `beta_t` — at `beta_t = 1` the state's answer for `k_t` becomes `v_t` outright. That is the operation plain linear attention (§6.3) cannot do: `S += k_t v_t^T` accumulates the new value on top of the stale one, so a read averages "Paris" and "Lyon" instead of replacing one with the other, which is a direct contributor to the recall gap in §8.1. Gated DeltaNet (NVIDIA, 2024) keeps both knobs because they do different jobs — `alpha_t` for wholesale erasure at a document boundary, the rank-one delta term for targeted overwrite — and reports beating Mamba-2 and ungated DeltaNet on language modeling, in-context retrieval and long-context understanding. It is shipped, not research-only: Qwen3-Next uses Gated DeltaNet for three of every four layers with full gated attention in the fourth, after finding it stronger on in-context learning than sliding-window attention or Mamba-2 in their own ablations. The generalization to state: `A_t` need not be scalar or diagonal decay — a rank-one correction is still cheap enough to scan.
 
 ---

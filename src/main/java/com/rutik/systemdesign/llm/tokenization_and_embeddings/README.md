@@ -527,57 +527,93 @@ print(len(tokenizer))        # 128256 -- includes the 256 reserved special token
 ## 12. Interview Questions with Answers
 
 **Q: What is Byte Pair Encoding and how does it work?**
+**Short:** BPE repeatedly merges the most frequent adjacent token pair until the vocabulary hits its target size, then replays those merges in order to tokenize new text.
+
 A: BPE starts with a character/byte-level vocabulary and iteratively merges the most frequent adjacent pair of tokens until the target vocabulary size is reached. At inference, the same merge operations are applied in order to tokenize new text. This creates a vocabulary that efficiently represents common subwords as single tokens while handling rare words by splitting them into known pieces.
 
 **Q: Why use subword tokenization instead of word-level or character-level?**
+**Short:** Subword tokenization avoids word-level's vocabulary explosion and character-level's long sequences by keeping common words whole and splitting rare ones into recognizable pieces.
+
 A: Word-level creates huge vocabularies (every morphological variant is separate) with out-of-vocabulary issues. Character-level creates very long sequences (100 chars = 100 tokens) and forces the model to learn linguistic patterns from scratch. Subword is the sweet spot: common words are single tokens, rare words decompose into recognizable subwords, and the vocabulary stays manageable.
 
 **Q: What is tokenizer fertility and why does it matter?**
+**Short:** Fertility is the average tokens per word; higher fertility shrinks how many words fit a fixed context window, e.g. ~1,300 words at fertility 3 versus ~3,000 at fertility 1.3 in 4K tokens.
+
 A: Fertility is the average number of tokens per word. High fertility (e.g., Arabic at 3+ tokens/word) means the model processes fewer words within its context window, reducing effective "memory." A model with 4K context but fertility of 3 can only process ~1300 words effectively, versus ~3000 words for English with fertility ~1.3.
 
 **Q: Why does GPT-4 tokenize "hello" differently than "Hello"?**
+**Short:** BPE vocabularies are case-sensitive and absorb a leading space into the following word token, so casing and spacing changes produce entirely different token IDs.
+
 A: In BPE with case-sensitive vocabularies, " Hello" (with leading space) and "Hello" are different tokens. Additionally, casing changes the token. Leading spaces are merged into the following word token during BPE training, meaning the space is "absorbed" into the token. This is why tokenization is sensitive to capitalization and spacing.
 
 **Q: What happens when an LLM encounters a character it has never seen?**
+**Short:** An unrecognized character falls back to its raw UTF-8 bytes (3-4 tokens for CJK) instead of erroring, silently inflating sequence length rather than failing outright.
+
 A: Nothing fails — it degrades. A character with no learned merge falls back to its raw UTF-8 bytes, so an unseen CJK character or rare emoji becomes 3-4 individual byte tokens instead of an `[UNK]`. The cost is silent: sequence length inflates and the model reasons over low-signal byte fragments, which is why rare scripts underperform even though they are perfectly representable. (The byte-level BPE Q&A below covers why this fallback guarantees zero out-of-vocabulary.)
 
 **Q: Why do numbers and dates tokenize inconsistently, and how does that hurt arithmetic?**
+**Short:** Frequency-learned BPE splits numbers inconsistently across nearby values (`2019` as one token but `8675309` as `86,75,309`), while `cl100k_base`'s fixed 1-3 digit chunking is consistent but still non-positional.
+
 A: With frequency-learned number tokens, the same number splits differently across tokenizers and even across nearby values. In GPT-2's vocab "2019" is a single learned token but "8675309" fragments irregularly as ["86","75","309"]; cl100k_base instead forces fixed left-to-right chunks of at most 3 digits ("8675309" becomes ["867","530","9"], "12345" becomes ["123","45"]). This is harmful because the model must learn arithmetic over inconsistent, non-positional groupings — "327" as one token carries no signal that it is 3 hundreds + 2 tens + 7. Two mitigations exist: LLaMA 1/2's SentencePiece tokenizer splits every digit into its own token (fully exposing place value), while cl100k and LLaMA 3 use the consistent 1-3-digit chunking rule; if you fine-tune for numeric tasks, prefer a per-digit scheme and always verify how your tokenizer splits representative numbers before relying on the model to compute.
 
 **Q: What breaks when you add new tokens to a pretrained model's embedding matrix?**
+**Short:** New vocabulary rows start randomly initialized with no learned meaning, so `resize_token_embeddings` plus fine-tuning is required before the model can use them.
+
 A: The new token rows are randomly initialized, so the model has no learned meaning for them — outputs are garbage until those embeddings are trained. You must call `model.resize_token_embeddings(new_vocab_size)` and then fine-tune so the new rows (and the corresponding output-layer rows) learn useful values; skipping the resize causes an index-out-of-range crash, and skipping the training leaves random vectors. A cheap trick that helps convergence is to initialize each new row as the mean of the sub-tokens the term previously decomposed into (e.g., initialize a new "<company>" token from the average of its old subword embeddings). Never expand vocabulary and freeze the embedding layer — the new tokens will never learn.
 
 **Q: How can special or control tokens in user input be a security risk?**
+**Short:** User text containing literal delimiter strings like `<|im_start|>system` can spoof a chat role or end the prompt early if special-token parsing isn't disabled on user input.
+
 A: If your code lets raw user text be tokenized with `add_special_tokens` semantics that honor literal control strings, a user can inject sequence delimiters like `<|im_start|>system` or `</s>` to spoof a new role or terminate the prompt early — a form of prompt injection at the tokenizer layer. The defense is to encode user content with special-token parsing disabled (HuggingFace: pass the text through the tokenizer so `<|...|>` is treated as ordinary characters, not as a registered special token) and to build chat prompts only through the model's official chat template rather than string-concatenating role markers. Treat any user-supplied string that contains the model's reserved delimiter substrings as hostile.
 
 **Q: How do BPE merge rules work and what determines the final vocabulary?**
+**Short:** The final BPE vocabulary is fixed by the merge order learned from the training corpus plus the chosen target size, so an English-heavy corpus yields English-efficient merges at any size.
+
 BPE starts with individual characters and iteratively merges the most frequent adjacent pair into a new token until reaching the target vocabulary size. Each merge creates a new token — for example, if "t" and "h" appear adjacent most often, they merge into "th", then "th" and "e" might merge into "the". The final vocabulary is determined by the merge order and the target vocabulary size (e.g., 32K, 50K, 128K). GPT-2 used 50,257 tokens; LLaMA uses 32,000; GPT-4 uses ~100K. The training corpus determines which merges are learned — training on English-heavy data creates English-efficient tokenization but wastes tokens on other languages.
 
 **Q: What are the tradeoffs of vocabulary size (32K vs 64K vs 128K tokens)?**
+**Short:** Larger vocabularies shorten sequences but grow the embedding table and softmax cost; the right size depends on language coverage, domain, and whether the model is big enough to amortize it.
+
 Larger vocabularies reduce sequence length (fewer tokens per text) but increase embedding table size and softmax computation. A 32K vocabulary (LLaMA 2) tokenizes "unfortunately" as one token, while a smaller vocab might split it into 3. However, a 128K vocabulary (Llama 3; GPT-4's `cl100k_base` is ~100K) adds ~512 MB to the embedding layer (128K x 2048 dim x 2 bytes for FP16) and makes the softmax output layer 4x more expensive to compute. The optimal size depends on: languages supported (multilingual needs 64K+), domain (code benefits from larger vocab for common patterns), and model size (small models can't leverage huge vocabularies effectively). Mistral's Tekken tokenizer uses 131,072 entries for superior multilingual support.
 
 **Q: Why do LLMs show multilingual bias in tokenization and how can it be addressed?**
+**Short:** Multilingual fertility bias comes from BPE merges learned on an English-heavy corpus; fixes include balanced multilingual training data, larger vocabularies, or language-balanced sampling.
+
 Multilingual tokenization bias occurs because BPE merge rules are learned from the training corpus, which is typically English-heavy. English text requires ~1.3 tokens per word, while languages like Hindi, Arabic, or Thai may require 3-5x more tokens per word because their character sequences appear less frequently in the training data. This means non-English users pay more per API call and get shorter effective context windows. Solutions: (1) train tokenizer on balanced multilingual corpus; (2) use larger vocabulary (128K+) to include more non-English tokens; (3) SentencePiece with language-balanced sampling. GPT-4o's `o200k_base` significantly improved multilingual tokenization over the `cl100k_base` that GPT-3.5-turbo and GPT-4 share — those two tokenize identically, so there was no GPT-3.5-to-GPT-4 improvement at all.
 
 **Q: What is the difference between tiktoken and SentencePiece, and when would you choose each?**
+**Short:** tiktoken is OpenAI's fast Rust-backed BPE implementation for its own models, while SentencePiece is Google's more flexible library supporting both BPE and Unigram for training new tokenizers.
+
 tiktoken (OpenAI) is a fast BPE tokenizer optimized for speed (Rust backend), while SentencePiece (Google) is a more flexible framework supporting both BPE and Unigram models. tiktoken's own README benchmarks it at 3-6x faster than HuggingFace's `GPT2TokenizerFast` on 1 GB of text; there is no equivalent published head-to-head against SentencePiece, so treat "faster than SentencePiece" as unmeasured. Choose tiktoken when: building on OpenAI models, need maximum tokenization speed, English-primary workloads. Choose SentencePiece when: training a new model from scratch, need Unigram model support, multilingual focus, or need language-agnostic tokenization (SentencePiece treats text as raw Unicode, no pre-tokenization needed). LLaMA uses SentencePiece; GPT-4 uses tiktoken. For production tokenization of user input, speed often matters most.
 
 **Q: How does the tokenizer affect model performance on code and mathematical expressions?**
+**Short:** A generic tokenizer fragments code identifiers and decimal numbers into meaningless pieces, so code and math models need code-aware training data and dedicated digit-splitting strategies.
+
 Tokenizers can dramatically affect code and math performance because poor tokenization splits meaningful patterns into semantically meaningless pieces. A tokenizer trained primarily on English text might split "def fibonacci(n):" into 6+ tokens, while a code-aware tokenizer keeps "fibonacci" as one token. For mathematics, "3.14159" might be split into ["3", ".", "14", "159"] with a generic tokenizer, destroying the numerical representation. Solutions: (1) include code and math in tokenizer training data; (2) dedicated tokens for common programming constructs (indentation, brackets); (3) digit tokenization strategies — some models tokenize each digit separately for better arithmetic. CodeLLaMA and StarCoder use code-aware tokenizers that significantly improve code completion quality.
 
 **Q: How do WordPiece and Unigram LM differ from BPE in how they build the vocabulary?**
+**Short:** BPE greedily merges by frequency, WordPiece merges by likelihood gain and marks continuations with `##`, and Unigram LM starts large and prunes tokens that least reduce corpus likelihood.
+
 A: All three produce subword vocabularies but choose merges differently. BPE is greedy and frequency-based: it repeatedly merges the most frequent adjacent pair, so merge order matters and the segmentation is deterministic. WordPiece (BERT) is likelihood-based: instead of raw frequency it merges the pair that most increases the training-corpus likelihood under a unigram language model, and marks word-internal pieces with `##`. Unigram LM (SentencePiece) works top-down: it starts from a large candidate vocabulary and iteratively removes tokens whose deletion least reduces corpus likelihood, and it keeps a probabilistic model so a single string has multiple candidate segmentations with associated probabilities (enabling subword regularization / sampling during training). Practically: BPE is fastest and most common, WordPiece is BERT-family, Unigram is preferred for multilingual and where segmentation sampling helps robustness.
 
 **Q: What is byte-level BPE and why do GPT models use it?**
+**Short:** Byte-level BPE runs merges over the 256 raw UTF-8 byte values instead of characters, guaranteeing zero out-of-vocabulary at the cost of fragmenting multi-byte characters like CJK script.
+
 A: Byte-level BPE runs BPE over the 256 raw UTF-8 bytes rather than over Unicode characters, so the base alphabet is a fixed 256 symbols and every possible string is representable with zero out-of-vocabulary risk — no `[UNK]` token is ever needed. This is why GPT-2/GPT-4 tokenizers can encode any emoji, script, or binary-ish text losslessly. The cost is that a character requiring multiple UTF-8 bytes (most CJK characters are 3 bytes) can fragment into several byte tokens when it is not itself a learned merge, inflating sequence length for those languages. Byte-level BPE is the standard for general-purpose LLMs precisely because robustness to arbitrary input outweighs the fertility penalty on non-Latin scripts.
 
 **Q: What is weight tying between the embedding and output layers, and why is it common?**
+**Short:** Weight tying shares one matrix between the input embedding and output softmax projection, roughly halving vocabulary-interface parameters, though large models often train them untied.
+
 A: Weight tying (Press & Wolf, 2017) shares one matrix between the input embedding lookup (`[V × D]`) and the output projection that produces logits over the vocabulary (`[D × V]`), so the same learned vector represents a token both when it is read in and when it is scored for generation. It roughly halves the parameters spent on the vocabulary interface — for a 128K vocab at D=4096 that is ~0.5B parameters saved — and it usually improves quality because input and output representations of a word are forced to be consistent. Many decoder LLMs tie weights (GPT-2, Gemma, and small models like Llama 3.2 1B/3B, where the table would otherwise dominate the parameter budget), but it is not universal: Llama 1/2/3 at 7B and above ship `tie_word_embeddings: false` and train a separate output head. The main reason not to tie is when input and output should live in genuinely different spaces (e.g., some encoder-decoder setups) or when a factorized/large-vocab output head is used for efficiency.
 
 **Q: What does the pre-tokenization regex do, and why does it matter more than the merge table?**
+**Short:** The pre-tokenization regex splits text into chunks before BPE runs and merges never cross a chunk boundary, so it — not the merge table — decides leading-space absorption and the 3-digit number cap.
+
 A: The regex splits raw text into chunks before BPE runs, and merges are never allowed to cross a chunk boundary — so it decides what BPE is even permitted to learn. In `cl100k_base` the alternative `[^\r\n\p{L}\p{N}]?+\p{L}++` lets one non-letter character precede a run of letters, which is exactly why a leading space is absorbed into the following word token and why `"hello"` and `" hello"` are different IDs. The alternative `\p{N}{1,3}` caps any digit run at three characters, so "8675309" is cut into "867", "530", "9" by the regex before a single merge is consulted — no amount of training could produce a four-digit token. Separate alternatives isolate punctuation runs and whitespace runs, which is why indentation becomes its own token in code. The practical consequence: when you train a custom tokenizer, changing the pre-tokenizer pattern changes the model's arithmetic and code behaviour far more than changing `vocab_size` does, and a mismatched pre-tokenizer between training and inference corrupts every downstream ID even if the merge table is identical.
 
 **Q: What are glitch tokens and how would you detect them before shipping a model?**
+**Short:** Glitch tokens are vocabulary entries barely seen during model training that keep near-random embeddings; detect them by flagging unembedding rows near initialization or unreachable by the tokenizer's rules.
+
 A: Glitch tokens are entries that exist in the vocabulary but were almost never seen during model training, so their embeddings stay near initialization and prompting with them yields evasion or nonsense. They arise from the disconnect between the two corpora: the tokenizer is fit on one dataset (often larger, less filtered) while the model trains on another, so artifacts like the Reddit username `SolidGoldMagikarp` win merge slots they never earn training signal for. Land & Bartolo ("Fishing for Magikarp", EMNLP 2024) give three detectors that combine well: flag tokens whose unembedding rows remain statistically indistinguishable from the initialization distribution, flag tokens that are unreachable — the tokenizer's own regex and merge ranks can never emit them — and verify candidates by asking the model to repeat the string verbatim. Their result is that this is common across model families, not a GPT-2 curiosity. Practically: run the sweep whenever you train a tokenizer or expand a vocabulary, exclude the flagged IDs from sampling, and never reuse a rare vocabulary entry as a chat or tool-call delimiter without confirming the model has actually learned it.
 
 ---

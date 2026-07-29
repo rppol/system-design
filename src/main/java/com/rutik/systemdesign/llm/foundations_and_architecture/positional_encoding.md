@@ -1014,12 +1014,18 @@ def attention_with_yarn_factor(q, k, v, d_head: int, s: float):
 ## 12. Interview Questions with Answers
 
 **Q: Prove that a transformer without positional encoding is permutation-equivariant.**
+**Short:** Because softmax is row-wise, permuting the input rows of Q, K, V permutes attention's output rows identically, so Attention(PQ,PK,PV) = P·Attention(Q,K,V).
+
 Let P be a permutation matrix. Attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V. For permuted input X' = PX: Q' = PX·W_Q = PQ, K' = PK, V' = PV. Attention(Q',K',V') = softmax(PQ·(PK)^T/sqrt(d_k))·PV = softmax(PQK^TP^T/sqrt(d_k))·PV. For any row stochastic matrix A: P·softmax(A)·... The softmax is applied row-wise. softmax(PAP^T) = P·softmax(A)·P^T. Therefore Attention(Q',K',V') = P·softmax(QK^T/sqrt(d_k))·P^T·PV = P·softmax(QK^T/sqrt(d_k))·V = P·Attention(Q,K,V). So the output is identically permuted — permutation equivariant.
 
 **Q: Derive why RoPE satisfies the relative position property.**
+**Short:** Because rotation matrices are orthogonal, `R_m^T R_n` collapses to `R_{n-m}`, so the rotated q-k dot product depends only on the relative position n-m.
+
 RoPE applies rotation R_m to each d-dimensional query/key at position m. In 2D, R_m = [[cos(mθ), -sin(mθ)], [sin(mθ), cos(mθ)]]. For d-dimensional vectors, this is block-diagonal with d/2 such 2D rotation blocks (one per frequency θ_i). The inner product: (R_m·q)^T(R_n·k) = q^T·R_m^T·R_n·k. For orthogonal rotation matrices, R^T = R^{-1} = R_{-m}. So R_m^T·R_n = R_{-m}·R_n = R_{n-m}. Therefore (R_m·q)^T(R_n·k) = q^T·R_{n-m}·k — this depends only on (n-m), not on m or n individually. This is the relative position property: the attention score between token m (query) and token n (key) implicitly captures their relative distance n-m.
 
 **Q: Is RoPE applied to queries, keys, and values — and why not to values?**
+**Short:** RoPE rotates only queries and keys, since position should shape attention scores, not the value payload that gets mixed after weights are already decided.
+
 Only to queries and keys. Position must influence the attention *scores* — the QK dot product —
 not the content that gets mixed once attention weights are decided; rotating V would contaminate
 the value payload with positional signal and gain nothing, because V never participates in a dot
@@ -1030,6 +1036,8 @@ implementation rotates V, outputs degrade subtly rather than crashing — make t
 when debugging a custom RoPE kernel.
 
 **Q: Does RoPE add parameters or memory overhead, and what does it mean that cached keys are "position-baked"?**
+**Short:** RoPE adds zero learned parameters, but each cached key is rotated for its absolute position, so a KV cache cannot be cheaply reindexed to new slots.
+
 RoPE adds zero learned parameters and no per-layer bias matrices — unlike learned APE's
 O(max_pos × d) embedding table or ALiBi's O(H × seq²) bias — and the cos/sin tables are computed
 once and reused for every layer. The subtle cost: keys in the KV cache are stored *after*
@@ -1040,39 +1048,63 @@ tokens does not invalidate every remaining key. Corollary for serving: prefix ca
 for exact shared prefixes, because reuse requires identical positions.
 
 **Q: What is the difference between Position Interpolation and NTK-aware scaling?**
+**Short:** Position Interpolation compresses the position index and distorts fine-grained rotations, while NTK-aware scaling rescales the RoPE base frequency instead.
+
 Position Interpolation scales the position index: position m is mapped to m×(L/L') where L is training length and L' is target length. All positions are compressed to fit within [0, L]. Problem: high-frequency RoPE dimensions (large θ_i, small rotation angles) are most affected — they lose the ability to distinguish adjacent positions when the scale compresses their frequency too much. NTK-aware scaling instead modifies the base frequency: new_base = original_base × (L'/L)^(d/(d-2)). This scales all frequencies uniformly in log-space, avoiding the disproportionate compression of high-frequency components. The key difference: PI compresses the position axis (what goes into the rotation angle computation); NTK scales the frequency axis (how fast things rotate per position unit). NTK preserves the model's ability to distinguish adjacent tokens; PI does not. In practice, NTK requires little or no fine-tuning while PI requires ~1000 fine-tuning steps to adapt.
 
 **Q: What are the three components of YaRN and why is each necessary?**
+**Short:** YaRN combines per-dimension NTK-by-parts interpolation, untouched fast dimensions for local accuracy, and a temperature correction for the flattened softmax.
+
 YaRN (Peng et al., 2023) extends RoPE with: (1) "NTK-by-parts" interpolation — each dimension pair is ramped between untouched and fully position-interpolated according to `r_i = L / wavelength_i`, the number of complete turns it made inside the trained context. (2) Short-range integrity — this falls out of (1): high-frequency dimensions have large `r_i` and are left unchanged. These dimensions cycle rapidly and capture fine-grained local position differences; scaling them (as plain PI does) would destroy local position information. The band edges are `beta_fast = 32` and `beta_slow = 1`. (3) Temperature adjustment — spreading attention over `s` times more positions flattens the softmax, so YaRN multiplies the attention scale by `sqrt(1/t) = 0.1 * ln(s) + 1` (their fitted form for LLaMA; 1.208 at s=8). Together these give the best published quality for context extension at a few hundred fine-tuning steps.
 
 **Q: How does LongRoPE differ from YaRN, and why does a LongRoPE config carry two factor vectors?**
+**Short:** LongRoPE searches per-dimension rescale factors and leaves early tokens unscaled, then keeps separate short- and long-context factor vectors for serving.
+
 LongRoPE searches for a per-dimension RoPE rescale factor with an evolutionary algorithm instead of deriving it from a formula, and it additionally leaves the first `n_hat` token positions unscaled. Those are the two non-uniformities it exploits: across RoPE dimensions (YaRN's `beta_fast`/`beta_slow` ramp is the two-parameter approximation of what LongRoPE searches over `d/2` independent values) and across token positions (early tokens keep their original positions, since interpolating them blurs the local structure at the start of the prompt). Candidates are scored by perplexity on long-context text with no fine-tuning, which is why the same method serves both a training-free 8x extension and a cheap initialization for a fine-tuned one. The extension is staged: fine-tune to 256K, apply a second round of interpolation on the extended model, reach up to 2,048K on LLaMA-2 and Mistral in at most 1K fine-tuning steps without ever training past 256K, then **readjust on 8K to recover short-context quality** — a schedule tuned for 2M positions is wrong for a 2K prompt. That last step is why the config has two vectors: Phi-3-mini-128K ships `short_factor` and `long_factor`, and HuggingFace picks `long_factor` only when the sequence exceeds `original_max_position_embeddings`. The serving consequence is that a prefix cached under `short_factor` cannot be reused once a request crosses that threshold, because the cached keys were rotated at the other set of frequencies.
 
 **Q: Why does ALiBi extrapolate better than sinusoidal APE?**
+**Short:** ALiBi's linear distance penalty stays well-defined at any position, while a sinusoidal code past the trained length is an input the model never saw.
+
 Sinusoidal APE assigns each absolute position a fixed code via sin/cos frequencies. These codes are used as inputs to the attention computation. A model trained on positions 0..4095 has never seen position code 4096+; the attention weights were not calibrated for these codes. Extrapolation fails because the model encounters OOD inputs. ALiBi never modifies the token embeddings — positions are only reflected in the attention score bias: `m × (j - i)`. For positions beyond the training length, the model sees a larger negative bias for distant tokens. This is mathematically valid: the model was trained to understand that larger negative biases mean less relevant positions. Since the bias grows linearly (not discretely), positions 0..∞ all produce valid biases. The model generalizes: "this token is very far away → high penalty → attend to it less." This is semantically consistent extrapolation.
 
 **Q: How does LLaMA 3 achieve 128K context with RoPE?**
+**Short:** LLaMA 3 raises the RoPE base to 500,000 and pairs it with staged long-context pretraining and frequency-banded scaling, not the base change alone.
+
 LLaMA 3 uses RoPE base=500,000 (vs LLaMA 2's 10,000), then reaches 128K through staged long-context pre-training rather than training at 128K from the start. The higher base directly scales all frequencies: θ_i = base^(-2i/d) — higher base → smaller θ_i → slower rotation per position → effectively "zooms out" the frequency spectrum. At base=500,000 and d_head=128, the slowest pair (i=d/2-1) has wavelength 2π × 500,000^((d-2)/d) ≈ 2.56M positions — comfortably beyond 128K. On top of that, Llama 3.1 expands the window in six increments from the original 8K to 128K over roughly 800B tokens, and its config carries a `rope_type: "llama3"` scaling entry with factor 8. The staged approach avoids the attention-pattern disruption of jumping straight to full context length. The takeaway: a large base is necessary but not sufficient — Meta still paid for context-extension training and a scaling rule on top.
 
 **Q: What happens to model quality when you extend context 10x without any fine-tuning?**
+**Short:** Pure extrapolation collapses well before 10x, NTK scaling with no fine-tuning degrades gracefully, and YaRN with a few hundred steps holds up best.
+
 For pure position extrapolation (no extension method, no fine-tuning), quality collapses not far past the training length — perplexity blows up and generation becomes incoherent well before 10x. The ordering that holds consistently: pure extrapolation is unusable; NTK-aware scaling with no fine-tuning degrades gracefully and stays coherent at moderate extension ratios; YaRN with a few hundred fine-tuning steps comes closest to a natively trained long-context model. Exact perplexity deltas are model- and corpus-specific — the YaRN paper reports its own numbers on LLaMA 2 and PG-19, and yours will differ, so measure rather than quoting a figure. The practical recommendation: NTK scaling for zero-cost extension up to ~4x; YaRN with ~400 steps for larger ratios; train with a high base frequency and staged context extension when you control pre-training.
 
 **Q: Explain the "lost in the middle" phenomenon and how positional encoding relates to it.**
+**Short:** Models retrieve information best from the start and end of context because causal attention and positional bias give middle tokens fewer paths of influence.
+
 "Lost in the middle" (Liu et al., 2023) is the empirical finding that LLMs have difficulty retrieving information placed in the middle of long contexts — they perform well on information at the beginning and end. This is partly a positional encoding issue and partly an attention pattern issue. For RoPE, information at early positions has seen many subsequent positions "attend" to it across layers (because attention is causal and cumulative). Information in the middle has been processed by fewer subsequent attention layers' cross-positional interactions by the time the model generates a response. ALiBi's linear bias exacerbates this: tokens in the middle are far from both the beginning and the end (relative to a query at the end), receiving high penalties. Architecturally, addressing "lost in the middle": (1) bi-directional attention (BERT-style, but for generation) helps but contradicts causal training; (2) positional re-weighting (emphasize middle positions in attention); (3) training with more examples that specifically require middle-position retrieval (improves attention patterns).
 
 **Q: How would you extend a model from 4K to 32K context with minimal quality loss?**
+**Short:** Try zero-cost NTK or dynamic scaling first, then fine-tune with YaRN for several hundred steps if evaluation still falls short of the target quality.
+
 Decision tree: (1) Check if the model uses RoPE (LLaMA, Mistral, Qwen) or ALiBi (MPT, BLOOM, Falcon-RW). ALiBi extrapolates naturally — no action needed, test quality. (2) For RoPE: apply NTK-aware scaling first (no fine-tuning, fast to test). Set `rope_scaling={"rope_type": "dynamic", "factor": 8}` in HuggingFace config. Measure PPL on a long-context benchmark (PG-19 or SCROLLS). (3) If quality is insufficient and fine-tuning compute is available: apply YaRN with 400-1000 steps on long-context data. Use learning rate ~2e-5, sequence length 32K, batch such that ~1M tokens per step. (4) If compute is very limited: evaluate whether NTK quality meets requirements — often good enough for retrieval-augmented applications where high PPL doesn't matter (you're looking for specific content, not generating fluently). (5) After extension, run needle-in-a-haystack tests across multiple positions and depths to confirm quality throughout the extended range.
 
 **Q: What is dynamic NTK scaling and when does it help?**
+**Short:** Dynamic NTK recomputes the scaling factor from the actual sequence length at inference time, avoiding unnecessary distortion on shorter requests.
+
 Dynamic NTK scaling (proposed by /u/emozilla on r/LocalLLaMA in 2023, building on bloc97's NTK-aware scaling; kaiokendev's earlier "SuperHOT" work was linear position interpolation, a different method) applies NTK-aware scaling adaptively: the scale factor is computed from the actual sequence length at inference time, not from a fixed target length. At seq_len=4096 (training length): scale=1, no modification. At seq_len=8192: scale=2, apply NTK. At seq_len=32768: scale=8, apply NTK. This is useful for deployments where request lengths vary widely — a fixed NTK factor of 8 would distort position encodings even for short sequences (unnecessarily). Dynamic scaling applies the minimum necessary modification. Compared to static NTK: dynamic is slightly better for short sequences (no unnecessary distortion) but has the same quality at the target extension length. LLaMA 3.1 does something related but distinct — its config uses `rope_type: "llama3"`, a frequency-banded rule (factor 8, low_freq_factor 1.0, high_freq_factor 4.0) applied on top of base=500,000, which interpolates only the slow-rotating dimensions rather than rescaling by sequence length at runtime. Do not describe Llama 3.1 as using HuggingFace's `"dynamic"` NTK; they are different `rope_type` values.
 
 **Q: How does the sinusoidal encoding dot product encode relative position for nearby tokens?**
+**Short:** The dot product of two sinusoidal position codes reduces to a sum of cosines of their offset, giving a rough relative-position signal for nearby tokens.
+
 For sinusoidal APE, the dot product of two position encodings PE_m and PE_n is: `PE_m · PE_n = Σ_{i=0}^{d/2-1} [sin(m·θ_i)sin(n·θ_i) + cos(m·θ_i)cos(n·θ_i)] = Σ_i cos((m-n)·θ_i)`. This depends only on the difference (m-n) — geometrically, it is the sum of cosines at different frequencies evaluated at the relative offset. For nearby tokens (|m-n| small), the cosines are all near 1 (small argument) → high dot product. For distant tokens, high-frequency components oscillate rapidly, reducing the mean dot product. This gives a loose relative position signal. However, it is not as clean as RoPE: the relation holds for the dot product between position encodings, but position encodings are added to token embeddings — the attention score includes cross-terms between token content and position. These cross-terms contaminate the "relative position" information, making sinusoidal APE less clean than RoPE.
 
 **Q: What is the practical difference in quality between RoPE, ALiBi, and T5 relative bias?**
+**Short:** RoPE and ALiBi match near training length, but ALiBi's linear penalty hurts long-range reasoning while RoPE combined with YaRN preserves it better.
+
 On standard NLP benchmarks (MMLU, HellaSwag, BoolQ), models with RoPE and ALiBi show comparable quality at training context length (<1% difference). The divergence appears at: (1) long context (>training length): ALiBi extrapolates natively, RoPE requires NTK/YaRN; (2) tasks requiring precise long-range dependencies: ALiBi's linear penalty actively hurts on multi-hop reasoning spanning 2K+ tokens; RoPE preserves long-range information. T5 relative bias uses learned bucketed relative positions: there are ~32 buckets, and positions beyond the largest bucket share a bucket — providing some extrapolation within a fixed range. T5 relative bias is more expressive than ALiBi (learned, not fixed slope) but has higher memory cost (stored bias matrices per layer) and doesn't extrapolate beyond its bucket range. Modern consensus: RoPE + YaRN dominates for decoder-only LLMs; T5 relative bias remains viable for encoder-decoder models where bidirectionality matters; ALiBi is declining in use but still seen in compute-efficient deployments.
 
 **Q: What is partial rotary application (rotary_pct) and why do some models rotate only a fraction of head dimensions?**
+**Short:** Partial rotary application, like GPT-NeoX-20B's 25%, rotates only some head dimensions so the rest keep purely content-based, position-invariant features.
+
 Some models apply RoPE to only a fraction of each head's dimensions and leave the rest
 position-free — GPT-NeoX-20B used rotary_pct=0.25, rotating just 25% of head dims. The rotated
 dimensions carry positional information while the unrotated ones carry purely content-based
@@ -1083,6 +1115,8 @@ converting or loading a checkpoint, a rotary_pct mismatch against the training c
 silently corrupts attention — verify it in the model config before weight conversion.
 
 **Q: How does RingAttention extend context to 1M+ tokens?**
+**Short:** RingAttention shards a sequence's K/V blocks across devices arranged in a ring and accumulates exact attention with online softmax, needing only per-device memory.
+
 RingAttention (Liu et al., 2023) distributes the attention computation across multiple GPUs/TPUs arranged in a logical ring. Each device holds a chunk of the full sequence. In each communication round, one device's K/V chunk is passed to the next device in the ring (the "ring" of K/V blocks). Each device computes attention between its local Q chunk and the incoming K/V chunk, accumulating results using online softmax (same principle as Flash Attention). After N rounds (N = number of devices), each device has accumulated the full attention output for its Q chunk. Memory: O(seq_len / num_devices) per device. Communication: O(seq_len × d_model) total (each K/V block passes through the ring once). This enables context lengths limited only by total memory across the cluster. The positional-encoding side is separate and tractable: RoPE works at 1M positions provided the base frequency is high enough that the slowest dimension pair has not wrapped. Note that the attention mechanisms behind closed 1M-token models are not published — do not attribute RingAttention specifically to any vendor's product.
 
 ---

@@ -1087,54 +1087,88 @@ tokens, Sonnet 5 at $3/$15, Opus 5 at $5/$25, and Fable 5 at $10/$50.
 ## 12. Interview Questions with Answers
 
 **Q: What is self-attention and why is it better than RNNs?**
+**Short:** Self-attention computes all token-pair relationships in O(1) sequential steps and fully parallelizes, unlike RNNs' sequential O(n) processing that causes vanishing gradients.
+
 A: Self-attention computes relationships between all token pairs in O(n²) operations but O(1) sequential steps — fully parallelizable during training. RNNs process tokens sequentially (O(n) sequential steps), causing vanishing gradients for long-range dependencies. Self-attention captures any distance relationship in one step.
 
 **Q: What is the difference between GPT and BERT architectures?**
+**Short:** BERT is a bidirectional encoder trained with masked language modeling for understanding tasks; GPT is a unidirectional causal decoder trained for generation.
+
 A: BERT uses a bidirectional encoder — each token sees all other tokens (both left and right context) via masked language modeling. GPT uses a unidirectional decoder — each token only attends to previous tokens (causal mask) via next-token prediction. BERT excels at understanding tasks; GPT excels at generation.
 
 **Q: Why is the attention score divided by √d_k, and what goes wrong without it?**
+**Short:** Dividing by √d_k rescales dot-product score variance back to about 1, keeping softmax out of its saturated region where gradients vanish.
+
 A: The √d_k scaling keeps the variance of the dot-product scores near 1 regardless of head dimension. Q·Kᵀ sums d_k products of roughly unit-variance terms, so raw scores have standard deviation ≈ √d_k — at d_k=128 that is ~11.3, which pushes softmax deep into its saturated region where one position gets probability ≈1 and gradients through every other position vanish. Dividing by √d_k renormalizes scores to unit scale, keeping softmax in its sensitive range so gradients flow to all attended positions. If you ever implement attention by hand, forgetting this term still trains — just badly — making it a classic silent bug to check for in interviews and code reviews.
 
 **Q: Does temperature=0 make LLM output deterministic?**
+**Short:** No — greedy decoding removes sampling randomness but floating-point non-associativity and MoE routing still cause run-to-run divergence.
+
 A: No — T=0 (greedy argmax) removes sampling randomness but not systems-level nondeterminism. Floating-point addition is non-associative, so different batch sizes, kernel dispatch choices, or GPU hardware can perturb logits in the last decimal places; when two tokens are near-tied, the argmax flips, and from that token onward the entire continuation diverges. MoE models add a further source: expert routing can be batch-dependent (capacity overflow drops tokens to different experts), changing activations for the same prompt. Treat T=0 as "low variance," pin hardware/runtime versions for reproducibility-sensitive evals, and never write tests that assert byte-identical LLM output.
 
 **Q: What are scaling laws and why do they matter?**
+**Short:** Scaling laws show LLM loss follows predictable power laws in model size, data, and compute, letting Chinchilla derive the compute-optimal N/D balance.
+
 A: Scaling laws (Kaplan et al., Hoffmann et al.) show that LLM performance follows power laws with respect to model size (N), data (D), and compute (C). This means performance is predictable — you can estimate how much a model will improve before training. Chinchilla showed compute-optimal training requires balancing N and D equally.
 
 **Q: Why do modern LLMs use RoPE instead of absolute positional encoding?**
+**Short:** RoPE encodes position as a rotation so the dot product between two vectors depends only on their relative position, giving better length extrapolation than absolute encodings.
+
 A: RoPE (Rotary Position Embedding) encodes position as rotation in the complex plane. This naturally captures relative positions (the dot product of two rotated vectors depends only on their position difference, not absolute positions). It also extrapolates more gracefully to longer sequences than absolute encodings.
 
 **Q: What is Grouped Query Attention (GQA)?**
+**Short:** GQA has multiple query heads share a smaller set of key/value heads, shrinking the KV cache several-fold with minimal quality loss.
+
 A: GQA reduces the number of key/value heads while keeping query heads unchanged. Multiple query heads share the same K/V heads. This shrinks the KV cache size significantly (e.g., 8 query heads sharing 2 KV heads = 4x smaller KV cache) with minimal quality degradation.
 
 **Q: What is a Mixture of Experts (MoE) and what's the key tradeoff?**
+**Short:** MoE swaps each block's single FFN for many expert FFNs plus a router picking K per token, growing capacity via N experts while compute scales only with K.
+
 A: MoE replaces the single FFN in each transformer block with N expert FFNs plus a router that selects K experts per token. Total parameter count scales with N experts, but compute scales with K (active experts). You get large model capacity at smaller inference cost. Tradeoff: higher memory bandwidth (all experts must fit in memory even if not all are active), communication overhead in distributed settings.
 
 **Q: How do you calculate KV cache memory requirements for a transformer model?**
+**Short:** KV cache per token equals 2 x layers x KV heads x head_dim x bytes, which is why LLaMA 3 70B needs about 320KB per token and 43GB for 32 sequences at 4K context.
+
 KV cache memory per token = 2 (K and V) x num_layers x num_kv_heads x head_dim x bytes_per_param — note it is the KV head count, not hidden_dim, on any GQA model. For LLaMA 3 70B (80 layers, 8 KV heads, head_dim 128, FP16): 2 x 80 x 8 x 128 x 2 bytes = 327,680 bytes = 320KB per token per sequence. For a batch of 32 sequences at 4096 context length: 32 x 4096 x 320KB = 43GB — roughly a third of the 140GB FP16 weights, but unlike the weights it scales with every concurrent user. Had the model used MHA (64 KV heads), the same batch would need 344GB, more than the weights themselves — which is exactly why GQA exists. This is why KV cache management (PagedAttention, FP8 KV cache, GQA) is the critical bottleneck in LLM serving, not model computation.
 
 **Q: What is Grouped Query Attention (GQA) and what concrete memory savings does it provide?**
+**Short:** LLaMA 3 70B's 8:1 query-to-KV-head ratio cuts KV cache 8x versus standard multi-head attention, letting one GPU serve 8x more concurrent users.
+
 GQA shares key-value heads across multiple query heads, reducing KV cache size proportionally. Standard multi-head attention (MHA) uses equal numbers of Q, K, V heads (e.g., 64 each). GQA groups query heads to share fewer KV heads — LLaMA 3 70B uses 64 query heads but only 8 KV heads (8:1 ratio), reducing KV cache by 8x compared to MHA. Multi-Query Attention (MQA) is the extreme case with a single KV head shared across all query heads. GQA provides the best quality-efficiency tradeoff: near-MHA quality with near-MQA memory savings. Practically, GQA enables serving 8x more concurrent users on the same GPU memory.
 
 **Q: Why have decoder-only models dominated over encoder-decoder and encoder-only architectures?**
+**Short:** Decoder-only models use one stack for both understanding and generation, so every parameter contributes to every task and scaling laws favor them most predictably.
+
 Decoder-only models dominate because they are the most versatile architecture for generative AI. Encoder-only models (BERT) excel at classification and understanding but cannot generate text autoregressively. Encoder-decoder models (T5, BART) can generate but require separate encoder and decoder stacks, doubling parameters for a given compute budget. Decoder-only models (GPT) use a single stack for both understanding and generation, scale more efficiently (all parameters contribute to every task), and naturally support in-context learning through autoregressive prediction. The scaling laws research (Chinchilla, Kaplan et al.) demonstrated that decoder-only models benefit most predictably from increased compute and data.
 
 **Q: What is the "attention sink" phenomenon and why does it matter for long-context inference?**
+**Short:** Transformers assign outsized attention to the first few tokens regardless of relevance, so KV eviction and sliding-window schemes must always preserve that initial sink window.
+
 Attention sink refers to the observation that transformer models assign disproportionately high attention weight to the first few tokens in the sequence, regardless of their semantic relevance. StreamingLLM (Xiao et al., 2023) showed that the first 4 tokens act as "attention sinks" — removing them causes catastrophic quality degradation even when remaining tokens are relevant. This matters for long-context inference because: (1) KV cache eviction strategies must never evict the first few tokens; (2) sliding window attention must retain initial tokens; (3) it explains why naive context truncation from the beginning breaks model quality. Practical implication: always keep a small "sink" window at the start of the context when doing any KV cache optimization.
 
 **Q: How does sliding window attention achieve long-range information flow despite each layer only seeing a local window?**
+**Short:** Stacking L layers of window W lets information propagate L*W tokens total, so Mistral 7B's W=4096 over 32 layers reaches a 131,072-token effective span.
+
 Sliding window attention restricts each token to attend only to the W previous tokens within a single layer, reducing per-layer complexity from O(n^2) to O(n * W). Long-range information flows through layer stacking: at layer 1, token i sees positions [i-W, i]; at layer 2, it effectively sees [i-2W, i] because tokens at position i-W already incorporated information from i-2W in the previous layer. With L layers and window W, the effective attention span is L * W tokens. Mistral 7B uses W=4096 and 32 layers, giving an effective span of 131,072 tokens — far exceeding its 32K context window. The practical benefit extends to memory: a rolling KV cache stores only W entries per layer in a circular buffer instead of the full sequence length, saving ~87% KV cache memory at 32K context. This fixed-size cache means memory does not grow with sequence length, which is critical for streaming and long-document inference.
 
 **Q: What is the difference between Pre-LN and Post-LN, and why do nearly all modern LLMs use Pre-LN?**
+**Short:** Pre-LN keeps the residual path free of normalization so gradients reach early layers undistorted, making it far more stable to train at scale than Post-LN.
+
 Post-LN (original Transformer) applies LayerNorm after the residual addition: `output = LN(x + sublayer(x))`. Pre-LN applies LayerNorm before the sublayer: `output = x + sublayer(LN(x))`. The critical difference is gradient flow stability. In Post-LN, the residual path passes through LayerNorm, which can distort gradients — early layers receive unstable gradients that require careful learning rate warmup (often 10K+ steps) to avoid divergence. In Pre-LN, the residual path is "clean" (identity connection with no normalization), so gradients flow directly to early layers without distortion. This makes Pre-LN dramatically easier to train at scale. The tradeoff: some studies show Post-LN achieves marginally higher final quality when training succeeds, but the training instability makes it impractical for billion-parameter models. GPT-2+, LLaMA, Mistral, and Falcon all use Pre-LN. Most modern models further replace standard LayerNorm with RMSNorm (normalizing by root-mean-square only, skipping mean centering), which Zhang & Sennrich (2019) measured at 7-9% faster per training step on Transformers with no quality loss.
 
 **Q: Why do modern LLMs use SwiGLU in the FFN instead of ReLU or GELU?**
+**Short:** SwiGLU's multiplicative gating achieves lower loss than ReLU or GELU FFNs at equal compute, which is why PaLM and every LLaMA generation adopted it.
+
 A: SwiGLU — `FFN(x) = (SiLU(x·W_gate) ⊙ x·W_up)·W_down` — consistently achieves lower loss than ReLU/GELU FFNs at equal compute in ablations, which is why PaLM and every LLaMA generation adopted it. The gate lets the network modulate each hidden unit multiplicatively rather than merely thresholding it, and because SwiGLU needs three weight matrices instead of two, the hidden expansion is reduced from the classic 4× to roughly 8/3× (LLaMA 2 7B: 4096 → 11008) to keep parameter count comparable. Default to SwiGLU for any new pretraining; only keep GELU/ReLU when you must match an existing checkpoint's architecture.
 
 **Q: If Chinchilla says D ≈ 20 × N, why are models like LLaMA 3 trained on far more tokens than that?**
+**Short:** Chinchilla optimizes only training compute, but production models overtrain far past that point because cheaper inference forever outweighs the extra pretraining cost.
+
 A: Because Chinchilla optimizes *training* compute only, while production models also pay *inference* cost — so it is rational to "overtrain" a smaller model far past the compute-optimal point. LLaMA 3 8B was trained on ~15T tokens, nearly 100× more tokens per parameter than the Chinchilla-optimal ~20, because the extra pretraining buys quality that would otherwise require a larger model that costs more on every inference call, forever. Loss keeps improving past the optimum, just with diminishing returns, so the practical rule is: pick N from your serving budget (latency, GPU memory, cost per token), then train on as much high-quality data as you can afford.
 
 **Q: How do you compute a model's parameter count from its config, and which component dominates?**
+**Short:** Summing embedding, per-block attention/MLP, and output-head terms shows the MLP dominates a transformer block's parameters, at roughly 81% versus 19% for attention.
+
 A: Sum the embedding table, the per-block attention and MLP matrices times the layer count, and the output head if it is untied. For Llama 3 8B (L=32, d_model=4096, d_ff=14336, 32 query heads, 8 KV heads, V=128,256, untied) that is 218,112,000 per block x 32 = 6.98B, plus 525.3M for the embedding table and another 525.3M for the output head, totalling exactly 8,030,261,248 parameters. The MLP dominates: gate, up and down together are 176.2M of each block's 218.1M (80.8%), while all four attention projections are only 41.9M (19.2%) — which is why FFN weights are the target of most quantization and MoE work. Note also that GQA saves parameters, not just KV cache: with 32 KV heads instead of 8, Wk and Wv would grow from 4.2M to 16.8M each, adding 805M parameters to the same architecture. Interviewers use this question to check whether you can reason about memory from a config file rather than quoting a marketing number.
 
 ---
