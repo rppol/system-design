@@ -540,39 +540,63 @@ A developer "fixed" DCL by adding `synchronized` on the inner check but not maki
 ## 12. Interview Questions with Answers
 
 **Q1: What is a TLAB and why does it exist?**
+**Short:** A Thread-Local Allocation Buffer lets each thread allocate via lock-free pointer bump in its own Eden slice.
+
 Thread-Local Allocation Buffer: a private sub-region of Eden space allocated to each thread. Object allocation inside the TLAB is a simple pointer bump — O(1) with no synchronization. Without TLAB, every allocation would require synchronized access to the shared Eden pointer, creating contention under many threads. When a TLAB is exhausted, the thread requests a new TLAB from shared Eden (synchronized, but rare). TLAB size adapts based on allocation rate.
 
 **Q2: Describe G1 GC regions and how mixed GC works.**
+**Short:** G1 splits the heap into fixed-size regions, and mixed GC evacuates young regions plus the least-live old ones.
+
 G1 divides the heap into equal-sized regions (1-32MB each). Each region is dynamically assigned as Eden, Survivor, Old, or Humongous. A *young GC* evacuates Eden and Survivor regions to new Survivor/Old regions (STW pause). When the heap occupancy exceeds a threshold (default 45%), G1 starts a *concurrent marking cycle* to identify live objects in old regions. After marking, a *mixed GC* evacuates both young regions AND a subset of old regions with the lowest liveness (most garbage) — hence "mixed." This continues until old region occupancy drops below a threshold.
 
 **Q3: What is tri-color marking and why does it need write barriers?**
+**Short:** Write barriers stop a mutator from hiding a white object from a black one during concurrent marking.
+
 Tri-color marking classifies objects: white (unvisited), gray (visited but references unscanned), black (fully scanned). GC scans gray objects, marks their references gray, marks them black. When marking is concurrent, the mutator can create a reference from a black object to a white object — breaking the invariant (white objects would be collected even though reachable from black). Write barriers detect this: G1 uses SATB (snapshot-at-the-beginning) barriers to record pre-write values; ZGC uses load barriers on every reference read.
 
 **Q4: Why does ZGC achieve sub-millisecond pauses?**
+**Short:** ZGC uses colored pointers and load barriers so object relocation happens concurrently with the mutator.
+
 ZGC uses *colored pointers* (metadata bits in the 64-bit address) and *load barriers* (code executed on every object reference read). When ZGC relocates an object, it updates the color bits. When a thread reads a reference, the load barrier checks the color — if stale (pre-relocation), it transparently loads the new address. This means relocation can happen concurrently with the mutator. The only STW phases are initial mark and remark — both bounded by GC root count, not heap size, giving sub-1ms pauses even on TB heaps.
 
 **Q5: What happens during class initialization (`<clinit>`)?**
+**Short:** The JVM runs static initializers and field assignments exactly once, in textual order, on first use.
+
 The JVM executes static initializer blocks and static field assignments in textual order. It's guaranteed to run at most once (JVM serializes it). Triggered by: first instance creation, first static method call, first static field access (except constants). A class initialization cycle (A initializes B which initializes A) results in A seeing B partially initialized — a subtle ordering bug. Always prefer lazy-initialized holders or enum-based singletons to avoid class initialization ordering issues.
 
 **Q6: How does escape analysis enable stack allocation?**
+**Short:** Escape analysis lets the JIT stack-allocate or scalar-replace objects that never escape their method.
+
 Escape analysis determines whether an object's reference escapes the current method (assigned to a static field, passed to a method, returned, etc.). If an object doesn't escape, the JIT can: (1) allocate it on the stack instead of the heap (no GC overhead); (2) apply scalar replacement — decompose the object into its constituent fields, which may be kept in registers. Enabled by default in HotSpot. To verify: use `-Xlog:gc+heap+exit` allocation totals, JFR's `jdk.ObjectAllocationSample`, or async-profiler allocation profiling — the escape-analysis trace flags are develop-only and exist solely in debug JVM builds.
 
 **Q7: What is deoptimization and when does it happen?**
+**Short:** Deoptimization discards compiled code and falls back to interpretation when a JIT assumption is violated.
+
 Deoptimization is the JIT discarding compiled native code and falling back to interpretation (or lower-tier compilation) when assumptions embedded in the compiled code are violated. Common triggers: a method was compiled assuming only one concrete type was seen (monomorphic dispatch), then a second type appears (bimorphic/megamorphic); a speculated null check is violated; a final field was changed via reflection. Deoptimization causes a latency spike followed by recompilation. Detected via `-Xlog:deoptimization` or async-profiler.
 
 **Q8: Explain happens-before with a volatile example.**
+**Short:** A volatile write happens-before any subsequent volatile read of the same field that observes it.
+
 The JMM guarantees: a *volatile write* to a field happens-before any subsequent *volatile read* of the same field. "Subsequent" means observed to have read the write's value. So: Thread A writes `x = 42; volatile flag = true;` and Thread B reads `volatile flag; read x;` — if Thread B sees `flag == true`, it is guaranteed to see `x == 42`. The volatile write on `flag` establishes the happens-before edge across all preceding writes by Thread A. Without `volatile` on `flag`, Thread B might see `flag == true` but `x == 0` (stale cache line).
 
 **Q9: What is safe publication and what are the 4 ways to achieve it in Java?**
+**Short:** Safe publication is making a fully constructed object's state visible to every thread that observes it.
+
 Safe publication ensures all threads see the fully constructed state of an object. An object is *unsafely published* if a reference is made visible before construction is complete (partial initialization). The 4 safe publication mechanisms: (1) Static initializer: `static final Foo f = new Foo();` — JVM class initialization guarantees. (2) `final` field in constructor: constructors establish happens-before between writing final fields and any thread that observes the reference. (3) `volatile` field: storing reference to `volatile` field. (4) Thread-safe collection (AtomicReference, ConcurrentHashMap, etc.).
 
 **Q10: What is the difference between minor GC, major GC, and full GC?**
+**Short:** Minor GC collects only the young generation, major GC collects old, and full GC collects everything.
+
 Minor GC collects only the young generation (Eden + Survivors) — typically fast (< 100ms), STW. Major GC collects the old generation — can be concurrent (G1, ZGC) or STW (Parallel GC). Full GC collects everything (young + old + metaspace) — always STW, always slow. Full GC is triggered when: concurrent collection fails to keep up (G1 "concurrent mode failure"), explicit `System.gc()`, metaspace exhausted, or JVM cannot allocate in any region.
 
 **Q11: What causes OutOfMemoryError: Metaspace?**
+**Short:** It usually comes from runaway dynamic class generation or from a leaked classloader pinning classes.
+
 Metaspace stores class metadata. It grows unbounded by default (unlike PermGen which was fixed size). OOM:Metaspace occurs when: (1) a class generator (CGLIB, ASM, dynamic proxies) creates classes faster than old classloaders are GC'd; (2) ClassLoader leak — a classloader is referenced from a static field, preventing GC of all its loaded classes. Every class loaded by a leaked classloader occupies metaspace permanently. Fix: set `-XX:MaxMetaspaceSize` to cap it; hunt classloader leaks with `jmap -clstats`.
 
 **Q12: What GC flags would you set for a low-latency Java service?**
+**Short:** Use ZGC with a fixed, pre-touched heap and structured logging, tuning only what the logs prove necessary.
+
 Start with ZGC, a fixed pre-touched heap, and structured GC logging, then tune only what the logs prove is a problem.
 
 ```
@@ -591,24 +615,38 @@ For G1 (if ZGC not available):
 ```
 
 **Q13: How does the JVM class loader hierarchy work?**
+**Short:** Each classloader delegates to its parent first, so bootstrap and platform loaders resolve core classes.
+
 Bootstrap ClassLoader (JDK built-in, C++) loads core JDK classes. Platform ClassLoader loads Java SE APIs not in bootstrap. App ClassLoader loads application classpath. Parent delegation model: when asked to load a class, each classloader first delegates to its parent; only loads itself if parent returns null. This prevents user code from replacing `java.lang.String`. Custom classloaders for hot-deploy or isolation can override `loadClass()` to invert delegation (load own classes first).
 
 **Q14: What is a safepoint and why can it cause latency spikes?**
+**Short:** A safepoint pauses all JVM threads for GC or deopt, and a thread stuck in a tight loop can delay it.
+
 A safepoint is a program execution point where all JVM threads are paused for operations requiring a consistent heap state: GC, deoptimization, heap dumps, thread dumps. The JVM sets a safepoint request flag; threads poll this flag at safepoint poll points (method returns, loop back edges). Time-to-safepoint (TTSP) is the latency from request to all threads reaching safepoints. TTSP causes latency spikes because: a thread in a tight loop without poll points may not reach a safepoint for millions of instructions. On Java 8 with counted loops, a loop like `for (int i = 0; i < 1_000_000_000; i++)` might not have a poll point — the GC request waits until the loop completes. Diagnosis: `-Xlog:safepoint` (Java 9+). Mitigation: Java 10+ Thread-Local Handshakes allow targeting individual threads; Java 14+ improves polling in loops.
 
 **Q15: What is the `StoreLoad` memory barrier and what Java operation requires it?**
+**Short:** StoreLoad is the most expensive memory barrier, required by a volatile write and by synchronized exit.
+
 `StoreLoad` is the most expensive memory barrier: it ensures all stores before the barrier complete and are visible to all CPUs before any subsequent load executes. It requires flushing the store buffer and preventing speculative loads from executing before preceding stores are committed — requiring a full memory fence (`MFENCE` or locked instruction on x86). In Java, a volatile write requires `StoreLoad` (plus `StoreStore`): the volatile write must be visible to all threads before any subsequent load by the same thread can execute. `synchronized` exit also requires `StoreLoad`. This is why volatile writes are more expensive than volatile reads — reads only need `LoadLoad + LoadStore`, while writes need the full `StoreStore + StoreLoad` pair.
 
 **Q16: What is escape analysis and how can it eliminate heap allocation entirely?**
+**Short:** Escape analysis can let C2 scalar-replace a non-escaping object entirely, avoiding heap allocation.
+
 Escape analysis is a JIT (C2) optimization that determines whether an object "escapes" the method that created it — i.e. whether a reference to it can be seen by another thread or outlive the method. If an object provably does not escape, the JIT can apply scalar replacement: it decomposes the object into its individual fields and keeps them in registers/stack slots, so *no heap allocation happens at all* and there is no GC pressure for that object. A classic case is a short-lived `new Point(x,y)` used only locally inside a hot method. The gotchas: escape analysis only fires after JIT compilation (interpreted/cold code still allocates), it is fragile — storing the reference in a field, returning it, or passing it to a non-inlined method makes it escape — and it is why microbenchmarks must use a sink (e.g. JMH `Blackhole`) or the "allocation" they measure may have been optimized away. Inlining enables it: the more the JIT inlines, the more allocations it can prove non-escaping.
 
 **Q17: What is the difference between C1 and C2 compilers, and what is tiered compilation?**
+**Short:** C1 compiles fast and lightly, C2 compiles slowly but aggressively, and tiered compilation runs both.
+
 C1 compiles fast but optimizes lightly, C2 compiles slowly but optimizes aggressively, and tiered compilation runs both so you get quick startup and high peak throughput from the same code. C1 (client) produces moderately optimized code carrying profiling instrumentation; C2 (server) consumes that profile to drive aggressive inlining, escape analysis, loop unrolling, and speculative optimizations. Tiered compilation (default since Java 8) combines them across 5 levels: code starts interpreted (level 0), gets compiled by C1 with increasing profiling (levels 1–3), and once it is proven hot via invocation/back-edge counters it is recompiled by C2 (level 4). This gives fast startup (C1) *and* high peak throughput (C2). It also explains JVM "warmup": peak performance is only reached after enough executions trigger C2, which is exactly the throughput that GraalVM native image gives up by having no runtime JIT.
 
 **Q18: What is the JVM code cache, and what happens when it fills up?**
+**Short:** When the code cache fills, the JVM disables the compiler and silently falls back to interpretation.
+
 The code cache is the native memory region holding JIT-compiled methods, and when it fills the JVM logs `CodeCache is full. Compiler has been disabled.` and falls back to interpretation. It is separate from the heap, so exhaustion shows up as a throughput collapse with no GC or heap symptom at all — the classic misdiagnosis. On a 64-bit server VM `ReservedCodeCacheSize` defaults to 240MB and `SegmentedCodeCache` splits it into three heaps (non-nmethods ~5.6MB for stubs and adapters, profiled nmethods ~117MB for tier 2/3 C1 code, non-profiled nmethods ~117MB for tier 1 and C2 code); because the segments are sized independently, one can fill while the total still reports free space. `UseCodeCacheFlushing` is on by default and sweeps cold methods, so a genuine exhaustion means too much *live* compiled code — usually runtime class generation (proxies, scripting engines, heavy framework codegen). Diagnose with `jcmd <pid> Compiler.codecache`, watching `full_count` and the per-heap `free` figures rather than the aggregate.
 
 **Q19: What is deoptimization and why does the JIT speculatively optimize code it may have to throw away?**
+**Short:** The JIT optimizes for the observed common case, then deoptimizes back to the interpreter if that guess breaks.
+
 Deoptimization is the JVM discarding compiled (C2) code and falling back to the interpreter for a method, then potentially recompiling later. C2 makes *speculative* optimizations based on the profile it has observed — e.g. assuming a branch is never taken, a type is always the same (monomorphic call → inlined), or a class is never loaded. These assumptions are guarded by cheap checks (uncommon traps); if an assumption is later violated (the rare branch is taken, a new subclass is loaded), the guard fires, the optimized frame is deoptimized back to the interpreter at a safepoint, and execution continues correctly. This lets the JIT optimize aggressively for the common case while staying correct. The cost: a sudden deopt storm (e.g. a new implementation class loaded into a hot megamorphic call site) can cause a latency spike as hot code reverts to interpreted speed until recompiled — visible with `-XX:+PrintCompilation` / `-Xlog:deoptimization`.
 
 ---

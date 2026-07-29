@@ -581,6 +581,8 @@ a big-bang rewrite of anything business-critical — the failure surface is enor
 ## 12. Interview Questions with Answers
 
 **Q: How do you maintain data consistency across microservices without a distributed transaction?**
+**Short:** Use the Saga pattern: local transactions per step, with a compensating transaction on failure.
+
 Use the Saga pattern: model the operation as a sequence of local ACID transactions,
 each with a compensating transaction that semantically undoes it. On failure at step
 k, run compensations for steps k-1 down to 1 in reverse order. You trade strong
@@ -589,6 +591,8 @@ observable. The practical guidance: pick orchestration for complex/branching flo
 (one place to debug) and choreography for short, loosely coupled ones.
 
 **Q: What is the dual-write problem and how does the transactional outbox solve it?**
+**Short:** The outbox writes the event in the same local transaction as the state change, so they commit atomically.
+
 The dual-write problem is needing to update your database *and* publish an event,
 but those are two separate systems with no shared transaction — a crash between them
 leaves the DB updated and the event lost (or vice versa). The outbox solves it by
@@ -598,6 +602,8 @@ outbox and publishes, retrying until success. The key is that the only atomic un
 is the single DB commit.
 
 **Q: Why does the outbox give at-least-once and not exactly-once delivery?**
+**Short:** Publishing and marking the row sent are two separate, non-atomic steps, so a crash can cause a resend.
+
 Because the relay publishes the event and *then* marks the row as sent in two steps;
 if it crashes between them, the event is published again on restart. You cannot make
 "publish to broker" and "update outbox row" atomic — they are again two systems. So
@@ -605,6 +611,8 @@ you accept at-least-once and require the consumer to be idempotent. Marking sent
 *before* publishing would instead risk losing events (at-most-once), which is worse.
 
 **Q: How do you make a message consumer idempotent?**
+**Short:** Record each processed message's id in a dedup store, enforced by a database unique constraint.
+
 Record a unique identifier for each processed message (message id or business
 idempotency key) in a dedup store within the same transaction as the side effect,
 and skip messages whose id is already present. The atomic claim is best enforced by
@@ -613,6 +621,8 @@ concurrent retries would race a check-then-act. For external clients, expose an
 explicit idempotency key they supply and store key → response to replay results.
 
 **Q: Choreography vs orchestration — when do you choose each?**
+**Short:** Choreography decouples services via events; orchestration centralizes control in one coordinator.
+
 Choreography has no central coordinator; each service reacts to events and emits its
 own, giving maximum decoupling but making the overall flow implicit and hard to
 trace once it exceeds a few steps. Orchestration introduces a coordinator that
@@ -621,6 +631,8 @@ change) at the cost of a component every step depends on. Rule of thumb:
 choreography for 2–4 simple steps, orchestration for long or branching workflows.
 
 **Q: What makes a good compensating transaction, and what if compensation itself fails?**
+**Short:** A good compensation is idempotent and semantically undoes the forward action, retried with backoff on failure.
+
 A compensation must be idempotent (it may be retried), semantically undo the forward
 action (release the reservation, refund the charge — not necessarily a literal
 inverse), and be designed to essentially always succeed. If compensation fails, you
@@ -629,6 +641,8 @@ alert a human/operator on permanent failure. This is why money-moving compensati
 get dead-letter queues and on-call alerts rather than silent catch blocks.
 
 **Q: Why is 2PC/XA across microservices considered an anti-pattern?**
+**Short:** Two-phase commit holds locks across network hops, so one slow service can cascade into an outage.
+
 Two-phase commit holds locks from the prepare phase until the coordinator says
 commit, and across network services that window includes slow/failed remote hops. A
 coordinator crash leaves participants "in doubt," holding locks and blocking, which
@@ -637,6 +651,8 @@ couples services to a shared transaction manager. Sagas trade the strong guarant
 for availability, which is almost always the right call between services.
 
 **Q: How does trace context propagate across an async/thread-pool boundary in Java?**
+**Short:** ThreadLocal context must be captured on the submitting thread and restored manually on the worker thread.
+
 `ThreadLocal` is bound to the *current* thread, so when you submit work to an
 executor the worker thread sees nothing. You must capture the context value on the
 submitting thread, then restore it on the worker thread at the start of the task and
@@ -645,6 +661,8 @@ Java 21's `ScopedValue` is the modern fix — it is immutable and auto-unbound a
 end of its scope, removing the leak risk inherent in mutable `ThreadLocal`.
 
 **Q: Why must you clear a ThreadLocal in a finally block in pooled code?**
+**Short:** Pooled threads are reused, so an uncleared ThreadLocal leaks a stale value into the next task.
+
 Because pool threads are reused across unrelated requests. If you set a value and do
 not remove it, the next task that runs on that thread inherits a stale value —
 causing mis-attributed logs, wrong tenant context, or even data leakage between
@@ -652,6 +670,8 @@ users. The `finally` guarantees cleanup even when the task throws. This entire
 hazard class is why `ScopedValue` (which cannot outlive its bound scope) was added.
 
 **Q: What is a bulkhead and how is it different from a circuit breaker?**
+**Short:** A bulkhead isolates resources so one dependency can't saturate the process; a breaker stops calling a failing one.
+
 A bulkhead isolates resources so one dependency's saturation cannot consume the
 whole process — typically a dedicated bounded thread pool (or a semaphore permit
 count) per downstream. A circuit breaker instead *stops calling* a failing
@@ -660,6 +680,8 @@ They are complementary: the bulkhead contains the blast radius of slowness; the
 breaker stops you from hammering something already down.
 
 **Q: Thread-pool bulkhead vs semaphore bulkhead — tradeoffs?**
+**Short:** A thread-pool bulkhead can queue and isolate blocking calls; a semaphore is cheaper but rejects immediately.
+
 A thread-pool bulkhead runs each dependency on its own threads, which lets calls
 queue, supports timeouts on the queue, and isolates even blocking calls — at the
 cost of extra threads and context-switching. A semaphore bulkhead just caps
@@ -669,6 +691,8 @@ run out) and a blocking call still blocks the caller's thread. Use thread pools 
 slow/blocking downstreams, semaphores for fast in-process limits.
 
 **Q: Why must a bulkhead's queue be bounded?**
+**Short:** An unbounded bulkhead queue lets a slow dependency buffer without limit, defeating the isolation.
+
 An unbounded queue (e.g., `LinkedBlockingQueue` with no capacity) lets a slow
 dependency accumulate tasks without limit, so memory grows until OOM and there is no
 actual isolation — the "bulkhead" silently buffers the entire backlog. A bounded
@@ -677,6 +701,8 @@ queue provides backpressure: once full, new submissions are rejected fast
 are the whole point of the pattern.
 
 **Q: What is the strangler fig pattern and why prefer it over a rewrite?**
+**Short:** A routing facade incrementally redirects capabilities from a monolith to new services until it's removable.
+
 You put a routing facade (proxy/gateway) in front of the monolith and incrementally
 redirect individual capabilities to new services, leaving the rest in the monolith,
 until the monolith is "strangled" and removable. It is preferred over a big-bang
@@ -685,6 +711,8 @@ back to the monolith if the new service misbehaves), so the risk is bounded at e
 step instead of concentrated in one launch.
 
 **Q: How does `SELECT ... FOR UPDATE SKIP LOCKED` help an outbox relay scale?**
+**Short:** SKIP LOCKED lets multiple relay instances poll the same outbox table without double-processing rows.
+
 It lets multiple relay instances poll the same outbox table concurrently without
 processing the same row twice: each instance locks the rows it reads and `SKIP
 LOCKED` makes other instances skip already-locked rows instead of blocking on them.
@@ -693,6 +721,8 @@ distributed coordination. Without `SKIP LOCKED`, relays would either serialize
 (blocking on locks) or double-publish (no locks).
 
 **Q: How would you implement effectively-once processing end to end?**
+**Short:** Effectively-once combines a transactional outbox, at-least-once delivery, and an idempotent consumer.
+
 Combine three things: (1) a transactional outbox so the producer never loses an
 event despite crashes; (2) at-least-once delivery from the broker (the default); and
 (3) an idempotent consumer that records processed ids in a dedup store within the
@@ -701,6 +731,8 @@ makes the *effect* happen once. There is no exactly-once delivery; "effectively
 once" is at-least-once delivery plus idempotent processing.
 
 **Q: How do you test a saga's failure and compensation paths?**
+**Short:** Inject failures per step and assert only already-completed steps' compensations run, in reverse order.
+
 Inject failures at each forward step and assert that exactly the compensations for
 already-completed steps run, in reverse order, and that they are idempotent under
 repeated invocation. Use a fault-injecting test double for each service, verify the
@@ -709,6 +741,8 @@ retry/alert behavior rather than silent loss. Property-style tests that fail at 
 random step are effective at catching missing compensations.
 
 **Q: What consistency guarantees does a saga actually provide?**
+**Short:** A saga provides atomicity without isolation, so other transactions can observe intermediate state.
+
 Atomicity is replaced by "all forward steps complete, or all completed steps are
 compensated" — but *not* isolation: between steps, other transactions can observe
 intermediate state (a reserved-but-not-yet-paid order). This means you may need

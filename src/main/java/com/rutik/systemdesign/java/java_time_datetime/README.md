@@ -561,57 +561,93 @@ A batch job used `LocalDate.now()` (which uses `ZoneId.systemDefault()`) to pick
 ## 12. Interview Questions with Answers
 
 **Q: Why is `LocalDateTime` the wrong type to store an event timestamp?**
+**Short:** LocalDateTime carries no zone or offset, so it cannot identify a unique moment in time.
+
 Because `LocalDateTime` carries no time zone or offset, so it cannot identify a unique moment on the machine timeline. Two `LocalDateTime` values from different hosts cannot be ordered or diffed correctly, and on DST days a wall-clock value can be ambiguous (fall-back) or nonexistent (spring-forward). Store an `Instant` (UTC) for events, keep the user's `ZoneId` separately, and render local only at the edge.
 
 **Q: Is `SimpleDateFormat` thread-safe, and what replaces it?**
+**Short:** SimpleDateFormat is not thread-safe because it holds mutable Calendar state; DateTimeFormatter replaces it.
+
 No — `SimpleDateFormat` keeps mutable parsing state in a `Calendar` field, so sharing one instance across threads corrupts output or throws intermittently under load. The classic bug is a `static final SimpleDateFormat` in a high-throughput path. The fix is `DateTimeFormatter`, which is immutable and thread-safe, so a single static instance can safely serve every request thread.
 
 **Q: What is the difference between `Instant` and `LocalDateTime`?**
+**Short:** Instant identifies a unique zone-free UTC moment; LocalDateTime is a zone-less wall-clock reading.
+
 `Instant` is a point on the machine timeline — nanoseconds from the 1970 UTC epoch, with no zone — while `LocalDateTime` is a wall-clock reading with no zone at all. `Instant` identifies a unique moment; `LocalDateTime` does not until you attach a `ZoneId`. Use `Instant` for "when it happened," `LocalDateTime` only for zone-less human values like a form field or a recurrence rule.
 
 **Q: Why is `Period.ofDays(1)` not the same as `Duration.ofHours(24)`?**
+**Short:** Period is calendar-day arithmetic while Duration is exact elapsed time, which differ across DST.
+
 Because `Period` is calendar (human) arithmetic and `Duration` is elapsed real time (machine) arithmetic, and across a DST boundary a calendar day is 23 or 25 real hours, not 24. Adding `Period.ofDays(1)` to a `ZonedDateTime` keeps the same wall-clock time next day; adding `Duration.ofHours(24)` advances exactly 24 real hours, so the wall clock drifts by an hour. Use `Period` for "same time tomorrow," `Duration` for timeouts and TTLs.
 
 **Q: What is the difference between `ZonedDateTime` and `OffsetDateTime`?**
+**Short:** ZonedDateTime tracks a named zone's live DST rules; OffsetDateTime freezes a fixed offset.
+
 `ZonedDateTime` carries a named `ZoneId` (like `America/New_York`) plus its live DST rules, whereas `OffsetDateTime` carries only a fixed `ZoneOffset` (like `-05:00`) with no rules. `ZonedDateTime` can compute future DST transitions and adjust automatically; `OffsetDateTime` freezes the offset, which is ideal for wire formats and DB columns but wrong for a future local time whose DST offset is not yet known.
 
 **Q: What is the difference between `ZoneId` and `ZoneOffset`?**
+**Short:** A ZoneId is a region whose offset varies by DST rules; a ZoneOffset is a single fixed gap from UTC.
+
 A `ZoneId` is a named region whose UTC offset changes over the year according to tzdata rules; a `ZoneOffset` is a single fixed gap from UTC with no DST behavior. `ZoneOffset` is actually a subclass of `ZoneId`, but it represents only the current offset, not the rules that produced it. Use `ZoneId.of("Europe/London")` when DST matters and `ZoneOffset.ofHours(-5)` only when you truly mean a fixed offset.
 
 **Q: What happens if you construct a `ZonedDateTime` at a local time that falls in the spring-forward gap?**
+**Short:** Constructing a ZonedDateTime in the spring-forward gap silently shifts it forward, without an error.
+
 The local time does not exist, so java.time silently shifts it forward by the DST offset rather than throwing — `02:30` on a US spring-forward night becomes `03:30`. `ZonedDateTime.of(...)` and `atZone(...)` apply this rule automatically, which makes the bug silent. If exact local firing matters, work in UTC or validate the local time against `ZoneRules.getTransition(...)`.
 
 **Q: What happens at a fall-back overlap, and how do you disambiguate?**
+**Short:** At a fall-back overlap java.time defaults to the earlier offset unless told otherwise.
+
 The local time occurs twice (once at the earlier offset, once at the later), and by default java.time picks the earlier offset. For `01:30` on a US fall-back night it chooses EDT (`-04:00`); call `withLaterOffsetAtOverlap()` to select the EST (`-05:00`) occurrence, or `withEarlierOffsetAtOverlap()` to be explicit about the default. This matters for events like billing runs that must fire exactly once.
 
 **Q: Why was `java.util.Date`/`Calendar` replaced?**
+**Short:** java.util.Date and Calendar were replaced for being mutable, zone-confused, and error-prone to use.
+
 Because they are mutable (hence not thread-safe), have an error-prone API (0-indexed months, so December is `11`), and conflate the machine and human timelines with no clear zone model. `java.util.Date` is really a timestamp misleadingly named "Date," and `Calendar` mixes representation with mutation. `java.time` fixes all three: immutable values, 1-based months, and distinct types for each timeline.
 
 **Q: How do you convert a legacy `java.util.Date` to modern `java.time` and back?**
+**Short:** Convert via Date.toInstant() and Date.from(instant), then attach a zone to get a ZonedDateTime.
+
 Use `date.toInstant()` to go to an `Instant`, and `Date.from(instant)` to come back. From the `Instant` you attach a zone with `instant.atZone(zoneId)` to get a `ZonedDateTime`. For `Calendar`, `cal.toInstant()`; for `java.sql.Timestamp`, `ts.toInstant()` or `ts.toLocalDateTime()` — though with JDBC 4.2 you should prefer `getObject`/`setObject` with java.time types directly.
 
 **Q: What is `Clock` and why would you inject it?**
+**Short:** Clock abstracts reading now, letting tests inject a fixed time instead of the real system clock.
+
 `Clock` is the abstraction java.time uses to read "now," and injecting it makes time-dependent code deterministically testable. Instead of calling `Instant.now()` (untestable), you call `Instant.now(clock)` where `clock` is injected — production uses `Clock.systemUTC()` and tests use `Clock.fixed(instant, zone)` to freeze time. This turns flaky, sleep-based tests into reproducible ones.
 
 **Q: Are `java.time` types immutable and thread-safe?**
+**Short:** Every core java.time type is immutable and thread-safe, so operations return new objects.
+
 Yes — every core `java.time` value type is immutable and thread-safe, so methods like `plusDays(1)` return a new object and never mutate the receiver. This is the opposite of `Calendar`, which mutates in place. Immutability means you can freely share instances (including `static final` formatters and constants) across threads without synchronization.
 
 **Q: How should you store timestamps in a database: UTC or zoned, and which SQL type?**
+**Short:** Store event timestamps as UTC using timestamptz, never a zone-less TIMESTAMP column.
+
 Store the moment as UTC (an `Instant`/`OffsetDateTime` mapped to `TIMESTAMP WITH TIME ZONE`, i.e. `timestamptz`), and keep the user's zone separately only if you must reconstruct their local wall-clock intent. `TIMESTAMP WITHOUT TIME ZONE` maps to `LocalDateTime` and stores no offset, so it cannot identify a moment — avoid it for event times. Postgres `timestamptz` normalizes to UTC on write, mirroring the `Instant` pattern at the database layer.
 
 **Q: What are tzdata and `ZoneRules`, and why do updates matter?**
+**Short:** ZoneRules mirrors IANA tzdata, so keeping the JDK's tzdata current keeps DST arithmetic correct.
+
 `ZoneRules` is java.time's view of the IANA tzdata database — the rules that map each zone's wall-clock time to a UTC offset over history. When a government changes DST rules (e.g. abolishing DST or shifting a transition date), the JDK ships an updated tzdata file so `ZonedDateTime` arithmetic stays correct without code changes. Keep the JDK (or apply `tzupdater`) current, because a stale tzdata file produces wrong offsets for the changed region.
 
 **Q: What is the difference between `Instant.now()` and `LocalDateTime.now()`?**
+**Short:** Instant.now() returns a UTC machine moment; LocalDateTime.now() depends on the JVM's default zone.
+
 `Instant.now()` returns the current moment on the machine timeline in UTC, while `LocalDateTime.now()` returns the current wall-clock reading in the JVM's default zone with the zone then discarded. The `LocalDateTime` result depends on `ZoneId.systemDefault()`, which varies by host, making it unreliable in server code. Prefer `Instant.now()` for events and pass an explicit zone (`LocalDate.now(zoneId)`) when you need a local calendar value.
 
 **Q: Why does `LocalDate.of(2026, 1, 31).plusMonths(1)` return February 28 instead of throwing?**
+**Short:** java.time clamps an overflowing day-of-month to the target month's last valid day instead of throwing.
+
 Because java.time resolves an invalid day-of-month to the last valid day of the target month rather than overflowing or throwing. January 31 plus one month has no February 31, so it clamps to February 28 (or 29 in a leap year). If you actually mean "end of month," use `TemporalAdjusters.lastDayOfMonth()` to express that intent explicitly instead of relying on the clamp.
 
 **Q: What is a `TemporalAdjuster` and when would you use one?**
+**Short:** A TemporalAdjuster is a reusable strategy for computing a new date, like the next Monday.
+
 A `TemporalAdjuster` is a reusable strategy that computes a new temporal value from an existing one, such as first day of next month or next Monday. The `TemporalAdjusters` factory ships common ones (`firstDayOfMonth()`, `next(DayOfWeek.MONDAY)`, `lastInMonth(...)`), and you apply them with `date.with(adjuster)`. They replace ad-hoc loops for calendar navigation and are handy for business rules like "invoice on the last business day of the month."
 
 **Q: How do you compute the number of whole days or hours between two temporal values?**
+**Short:** Use ChronoUnit for a single-unit count, Period for calendar fields, and Duration for elapsed time.
+
 Use `ChronoUnit` for a single unit — `ChronoUnit.DAYS.between(start, end)` or `ChronoUnit.HOURS.between(a, b)` — which returns a `long` count. For a full breakdown into years/months/days use `Period.between(localDate1, localDate2)`, and for elapsed real time use `Duration.between(instant1, instant2)`. Match the tool to the question: `ChronoUnit` for one unit, `Period` for calendar fields, `Duration` for machine time.
 
 ---

@@ -569,45 +569,73 @@ A developer annotated a method `@SafeVarargs` that mutated the varargs array. Th
 ## 12. Interview Questions with Answers
 
 **Q1: Explain PECS with a real example.**
+**Short:** PECS means use extends for producers you read from and super for consumers you write into.
+
 PECS = Producer Extends, Consumer Super. When a collection *produces* values (you read from it), use `? extends T` — you can read as T or its supertype. When it *consumes* values (you write into it), use `? super T` — you can write T or any subtype. Real example: `void addAll(List<? super T> dest, List<? extends T> src)` — dest accepts T or supertype (consumer), src provides T or subtype (producer). Practical: `copy(List<? super Number> dest, List<? extends Number> src)` allows copying `List<Integer>` into `List<Number>`.
 
 **Q2: What is type erasure and what problems does it cause?**
+**Short:** Type erasure removes generic type parameters at compile time, causing instanceof, array-creation, and overload restrictions.
+
 Type erasure removes generic type parameters at compile time, replacing them with bounds (`Object` for unbounded). Problems: (1) Can't use `instanceof` with parameterized type: `if (obj instanceof List<String>)` is illegal. (2) Can't create generic arrays: `new T[10]` is illegal. (3) Overloading on different generic types is impossible: `void method(List<String>)` and `void method(List<Integer>)` have same erasure. (4) Runtime type info is unavailable without TypeToken workarounds. (5) Heap pollution possible through unchecked casts. The benefit: backward compatibility with pre-Java-5 code using raw types.
 
 **Q3: What is a bridge method? Show an example.**
+**Short:** A bridge method is a compiler-generated synthetic method that preserves polymorphism after type erasure.
+
 A bridge method is a compiler-generated synthetic method that preserves polymorphism after type erasure. When a subclass overrides a generic method with a more specific type, or uses covariant return types, the compiler generates a method with the erased signature that delegates to the actual override. Example: `class Box<T> { T get() {...} }` erases to `Object get()`. `class StringBox extends Box<String> { String get() {...} }` declares `String get()` (covariant). The compiler adds `synthetic Object get() { return this.get(); }` in StringBox — the bridge. This ensures `Box<String> b = new StringBox(); Object o = b.get()` works via dynamic dispatch.
 
 **Q4: Why can't you create a generic array (`new T[10]`)?**
+**Short:** Generic arrays are forbidden because erasure would let a wrong-typed store cause a ClassCastException later.
+
 Generic arrays would create heap pollution. After erasure, `new T[10]` becomes `new Object[10]`. Assigning this to a variable declared as `T[]` looks type-safe, but if exposed externally, another thread could get the `T[]` reference and store a wrong type into the `Object[]` — causing a `ClassCastException` when the array is actually used as `T[]`. The compiler prevents this by making generic array creation a compile error. Workaround: use `(T[]) new Object[10]` internally (never expose the raw array) or `Array.newInstance(clazz, size)` with a `Class<T>` parameter.
 
 **Q5: What is the difference between `getMethod()` and `getDeclaredMethod()`?**
+**Short:** getMethod() returns inherited public methods; getDeclaredMethod() returns all methods declared directly on the class.
+
 `getMethod(name, paramTypes)` returns a PUBLIC method visible on the class, including inherited public methods from superclasses and interfaces. `getDeclaredMethod(name, paramTypes)` returns any method (public/protected/package/private) declared *directly on this class*, excluding inherited methods. To access private methods, use `getDeclaredMethod()` + `setAccessible(true)`. To traverse the full inheritance chain, you must walk `getSuperclass()` iteratively.
 
 **Q6: What is heap pollution?**
+**Short:** Heap pollution happens when erasure lets a variable of one parameterized type secretly hold another's values.
+
 Heap pollution occurs when a variable of a parameterized type refers to an object of the wrong parameterized type — possible because of erasure. Example: `List<String> list = (List<String>) (List) new ArrayList<Integer>()` — the cast is legal (both are `List` after erasure), but `String s = list.get(0)` throws `ClassCastException`. The JVM inserts a checkcast instruction at the point of *use*, not the point of assignment. The compiler warns about unchecked casts to prevent this; `@SafeVarargs` suppresses warnings for varargs that don't introduce pollution.
 
 **Q7: How does a JDK dynamic proxy work internally?**
+**Short:** A JDK dynamic proxy generates an interface implementation at runtime that routes every call to an InvocationHandler.
+
 `Proxy.newProxyInstance` generates a new class at runtime that implements the given interfaces and routes every call to your `InvocationHandler`. Concretely, `Proxy.newProxyInstance(loader, interfaces, handler)` creates a class (via `ProxyClassFactory`) that: (1) implements all specified interfaces; (2) extends `java.lang.reflect.Proxy`; (3) for every method call, invokes `handler.invoke(proxy, method, args)`. The generated class is loaded and cached. When you call a method on the proxy, it calls `handler.invoke()` with the `Method` object and arguments — the handler can execute before/after logic, delegate to a real service, or return a mock value. Limitation: only works for interfaces (not concrete classes — use CGLIB/ByteBuddy for class proxying).
 
 **Q8: What is the TypeToken pattern and why is it needed?**
+**Short:** TypeToken exploits an anonymous class retaining its generic supertype so frameworks can recover erased type info.
+
 TypeToken exploits the fact that an anonymous class retains its superclass's type parameters in the bytecode as a `ParameterizedType`. `new TypeToken<List<String>>() {}` creates an anonymous subclass of `TypeToken<List<String>>`. Calling `getClass().getGenericSuperclass()` returns `TypeToken<List<String>>` as a `ParameterizedType`, from which `getActualTypeArguments()[0]` returns the `Type` for `List<String>`. Without TypeToken, `List<String>.class` is illegal and you'd get only `List.class` — erased. Libraries like Gson, Guice, and Jackson use TypeToken for proper generic type deserialization/injection.
 
 **Q9: What does `@SafeVarargs` promise?**
+**Short:** @SafeVarargs promises a method never writes unsafely into its varargs array, suppressing the heap-pollution warning.
+
 `@SafeVarargs` on a method promises: "this method does not perform unsafe operations on the varargs parameter" — specifically, it doesn't write to the varargs array in a way that could cause heap pollution. It suppresses the "possible heap pollution from parameterized vararg type" unchecked warning. The annotation is placed on `final`, `static`, or `private` methods (must not be overridable, as overrides might break the promise). You must manually verify the promise — the compiler doesn't check it. Incorrect use means callers get `ClassCastException` at unexpected points.
 
 **Q10: What is the difference between `Class.forName()` and `ClassLoader.loadClass()`?**
+**Short:** Class.forName() loads and initializes a class, running static initializers, while loadClass() only loads it.
+
 `Class.forName(name)` loads the class AND initializes it (runs `<clinit>` static initializers). `ClassLoader.loadClass(name)` loads the class but does NOT initialize it (deferred until first use). `Class.forName(name, initialize, loader)` gives full control. Practical implication: `Class.forName("com.mysql.cj.jdbc.Driver")` is the explicit JDBC driver registration mechanism — it works because initializing the class runs the `static {}` block that registers the driver with `DriverManager`. If you used `classLoader.loadClass()` instead, the driver would not be registered.
 
 **Q11: Why is array assignment covariant in Java but generic type assignment invariant? What runtime mechanism catches array covariance violations?**
+**Short:** Arrays are covariant with a runtime ArrayStoreException check, while generics are invariant and checked only at compile time.
+
 Arrays are covariant (`String[]` is an `Object[]`) for historical reasons: Java 1.0 had no generics and needed to write generic array-processing methods like `Arrays.sort(Object[])`. The runtime safety net is `ArrayStoreException` — on every array element write, the JVM checks that the stored type is compatible with the array's actual component type (stored in the array header). This is a runtime check. Generics are invariant (`List<String>` is NOT `List<Object>`) because type erasure means no runtime type information exists for the generic parameter — there's no mechanism to perform the equivalent of `ArrayStoreException` at runtime for generic containers. The compiler performs all checks statically at compile time. Summary: arrays: covariant + runtime `ArrayStoreException`; generics: invariant + compile-time error.
 
 **Q12: What is a `MethodHandle` and when is it preferable to `Method.invoke()`?**
+**Short:** MethodHandle with invokeExact() avoids the argument-boxing cost that Method.invoke() always pays.
+
 A `MethodHandle` (Java 7, `java.lang.invoke.MethodHandle`) is a typed, executable reference to a method, constructor, or field, obtained via `MethodHandles.Lookup`. The JIT can inline through a handle and, with `invokeExact()`, compile it down to essentially a direct call, because `invokeExact` demands an exact signature match and so needs no argument adaptation. `Method.invoke()` still pays for boxing every argument into an `Object[]` and boxing the return value, which `invokeExact` avoids entirely. The gap is smaller than the old folklore suggests: since JEP 416 (Java 18) core reflection is itself implemented on method handles, and the thing that decides performance is whether the JIT can constant-fold the reflective object — a `Method`, `Constructor`, `Field` or `MethodHandle` held in a `static final` field folds and runs fast (OpenJDK measured 43-57% faster than the pre-18 implementation), while the same object in a mutable field or an array element cannot fold and is slower than the old implementation. Prefer `MethodHandle` with `invokeExact()` for repeated calls in frameworks, serializers and DI containers, and store the handle in a `static final` field — that placement matters more than the API choice.
 
 **Q13: What is the difference between `getFields()` / `getMethods()` and their `getDeclared*()` counterparts, and which do framework code use?**
+**Short:** getFields()/getMethods() return inherited public members; the getDeclared* versions return only directly-declared ones.
+
 `getFields()` returns all **public** fields from the class and its entire superclass/interface hierarchy. `getDeclaredFields()` returns **all fields declared directly in that class** — any visibility — but nothing inherited. Same pattern applies to `getMethods()` vs `getDeclaredMethods()` and constructors. Framework code (serializers, ORMs, DI containers) typically uses `getDeclaredFields()` to access private fields, then calls `field.setAccessible(true)`. Traversal of the full hierarchy requires a loop up the `getSuperclass()` chain — stop at `Object.class`. With JPMS (Java 9+), `setAccessible(true)` on a field in another module requires the module to open the package (e.g., `opens com.example to com.fasterxml.jackson.databind`); failing to do so throws `InaccessibleObjectException` at runtime.
 
 **Q14: What is `@SuppressWarnings("unchecked")` and when is it safe vs. dangerous to use it?**
+**Short:** @SuppressWarnings("unchecked") is safe only when you can prove the underlying cast invariant can never actually fail.
+
 It suppresses the compiler's "unchecked cast" warning from generic type erasure. Safe to use when you have a provable invariant that the cast cannot fail: a private map you fully control, an explicit `instanceof` check before cast, or a well-typed internal API contract. Dangerous when external code can insert arbitrary types into the container, because erasure makes the cast invisible at runtime — the `ClassCastException` fires when the variable is *used*, not when it's cast, making the bug hard to trace:
 
 ```java
@@ -620,6 +648,8 @@ users.get("alice").getRoles(); // ClassCastException here, not at the cast above
 Rule: always add a comment documenting the invariant. If you cannot articulate the invariant, the suppression is not safe.
 
 **Q15: What is `TypeToken` / `ParameterizedType` and why is it needed to preserve generic type information at runtime?**
+**Short:** TypeToken captures a parameterized type at runtime via an anonymous class's retained generic supertype signature.
+
 Type erasure removes generic type parameters at runtime — `List<String>` and `List<Integer>` are both just `List.class`. When a framework (JSON deserializer, DI container) needs the full parameterised type at runtime, it uses `ParameterizedType` via an anonymous subclass trick:
 
 ```java
@@ -635,9 +665,13 @@ List<String> result = gson.fromJson(json, new TypeToken<List<String>>(){}.getTyp
 Jackson uses `TypeReference<T>` for the same purpose. This works because the byte code of an anonymous class stores its generic supertype in the `Signature` attribute, which `getGenericSuperclass()` reads at runtime — it's the one place erasure doesn't fully erase. Practical rule: whenever you write a method that must produce the right generic instance at runtime, accept `TypeToken<T>` as a parameter rather than `Class<T>`.
 
 **Q16: What does "reified" mean, and which Java types are reified vs erased at runtime?**
+**Short:** A reified type keeps its full type information at runtime, while an erased type loses it after compilation.
+
 A reified type is one whose full type information survives into the running bytecode; an erased type has that information stripped by the compiler. Primitives (`int`, `boolean`), raw types (`List`), `Class<?>` objects, and array component types (`String[]`) are reified — the JVM can check them at runtime, which is exactly why `arr instanceof String[]` compiles but `list instanceof List<String>` does not. Parameterized types (`List<String>`, `Map<K,V>`) are erased to their bound (`List`, `Map`) — the `<String>` part exists only in the `.class` file's `Signature` attribute for reflection, not as a runtime-checkable type. This distinction is why C#/.NET generics (reified) behave differently from Java generics (erased) despite similar syntax.
 
 **Q17: What is a recursive generic bound like `<T extends Comparable<T>>`, and why is it needed?**
+**Short:** A recursive generic bound like T extends Comparable<T> constrains T to be comparable only to its own type.
+
 A recursive (self-referential) bound constrains `T` to be comparable to *itself*, which is what lets a generic method sort or compare a list of any `Comparable` type safely. The bound `<T extends Comparable<T>>` reads as "T must implement Comparable of its own type" — so `T.compareTo(T)` is guaranteed to accept another `T`, not some unrelated type:
 ```java
 public static <T extends Comparable<T>> T max(List<T> list) {
@@ -651,6 +685,8 @@ public static <T extends Comparable<T>> T max(List<T> list) {
 This is the exact bound the JDK uses on `Collections.max()` and `Comparable<T>` itself — it is the standard idiom whenever a generic algorithm needs elements to compare against their own type.
 
 **Q18: What is "wildcard capture" and why does the compiler reject writing to a `List<?>` even inside your own method?**
+**Short:** Wildcard capture binds an unknown ? to one type variable only within a single expression, not across statements.
+
 Wildcard capture is the compiler binding an unknown `?` to one fresh type variable, but only within a single expression, not across separate statements. That narrow scope is why reading an element out of a `List<?>` and writing it straight back via `set()` still fails to compile, even though the operation is logically safe — the compiler cannot prove the two `?` occurrences denote the same underlying type, so any `add`/`set` call is rejected as unsafe. The fix is to extract a private generic helper method with a named type variable, which forces one capture for the whole method body:
 ```java
 // BROKEN: compiler can't prove list.get(0) matches the type list.set() expects
@@ -662,6 +698,8 @@ private static <T> void swapHelper(List<T> list) { list.set(0, list.get(1)); }
 ```
 
 **Q19: Why can't a class be both generic and a `Throwable`, and why can't you `catch` a type variable?**
+**Short:** A class can't extend Throwable while generic because erasure would make the JVM unable to dispatch the right catch handler.
+
 Because a `catch` clause is dispatched on the object's runtime type, and erasure has already deleted the type argument by then. `catch (MyEx<String> e)` and `catch (MyEx<Integer> e)` would both erase to `catch (MyEx e)`, so the JVM could not tell which handler to run — rather than allow an undecidable catch, the language rejects the class itself with "a generic class may not extend java.lang.Throwable" (JLS 8.1.2), and rejects a bare type variable in a catch parameter for the same reason. A type variable *is* allowed in a `throws` clause, which is what makes the "sneaky throw" trick possible: `static <T extends Throwable> void sneak(Throwable t) throws T { throw (T) t; }` inferred as `RuntimeException` lets a checked `IOException` escape a method that declares nothing, because the cast erases away and checked-exception enforcement is purely a compile-time rule. Lombok's `@SneakyThrows` is this idiom; keep it for rethrowing inside a functional interface whose signature you cannot change, and reach for Java 7's precise rethrow (`catch (Exception e) { throw e; }`, where the compiler infers the actual thrown types from the try block) for ordinary code.
 
 ---

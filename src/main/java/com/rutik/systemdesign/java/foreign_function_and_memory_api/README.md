@@ -541,27 +541,43 @@ You cannot obtain a stable `MemorySegment` address for a heap object because the
 ## 12. Interview Questions with Answers
 
 **Q1: What is the Foreign Function & Memory API and what problems does it solve compared to JNI?**
+**Short:** The Foreign Function & Memory API replaces JNI's hand-written glue code with pure-Java downcall handles and Arenas.
+
 The Foreign Function & Memory API (Project Panama, GA Java 22, JEP 454) lets Java code call native C functions and manage off-heap memory without writing C glue code. JNI requires: (1) writing a C file that maps `Java_MyClass_methodName()` symbols; (2) compiling a shared library per platform; (3) managing raw `jlong` pointers with no lifetime tracking. Panama replaces all three with: `Linker.downcallHandle()` for function calls, `Arena` for memory lifetime, and `MemorySegment` for bounds-checked memory access — all in pure Java. Beyond developer ergonomics, Panama's downcall handles can be JIT-compiled to near-zero overhead, while JNI crossings always incur a fixed ~20–50 ns cost per call.
 
 **Q2: What is an `Arena`, what types exist, and when would you choose each?**
+**Short:** Arena is a scoped memory allocator with confined, shared, auto, and global variants for different lifetime needs.
+
 An `Arena` is a scoped memory allocator: segments allocated within it share the arena's lifetime, and closing the arena frees all of them atomically. Three types: `Arena.ofConfined()` — single-thread ownership, fastest (no synchronisation), use for per-request or per-method allocations; `Arena.ofShared()` — multi-thread safe, use for buffers shared across threads (e.g., passed to a background I/O thread); `Arena.ofAuto()` — lifetime managed by GC finalisation, analogous to `ByteBuffer.allocateDirect()`, use when lifetime tracking is impractical but you can tolerate delayed deallocation. `Arena.global()` creates segments that live for the JVM's lifetime — use only for true global native state (e.g., a native library's global handle).
 
 **Q3: How does `MemoryLayout` and its associated `VarHandle` ensure safe struct field access?**
+**Short:** MemoryLayout plus VarHandle give bounds-checked, type-safe struct field access without manual offset arithmetic.
+
 `MemoryLayout` describes a C struct's field names, types, sizes, and alignment in pure Java — it is a schema. `MemoryLayout.varHandle(PathElement.groupElement("fieldName"))` produces a `VarHandle` pre-bound to the field's byte offset and type. When you call `varHandle.get(segment, 0L)`, the JVM: (1) computes `offset = baseOffset + fieldOffset` at link time; (2) checks that `offset + fieldSize <= segment.byteSize()` at runtime (bounds check); (3) emits a typed load instruction with the correct `ValueLayout` alignment. The result: no manual `segment.get(offset + paddingCalculation)` arithmetic, no misalignment, no buffer overflow. The JIT inlines the VarHandle access to a single load/store instruction with the same performance as Unsafe but with safety checks.
 
 **Q4: Explain the difference between a downcall handle and an upcall stub.**
+**Short:** A downcall handle calls a native C function from Java; an upcall stub lets C call back into a Java method.
+
 A downcall handle (`Linker.downcallHandle()`) is a `MethodHandle` that, when invoked, calls a C function at a native address. Java passes arguments; the Linker marshals Java types to C ABI conventions (register assignment, stack layout, calling convention) and returns the result. An upcall stub (`Linker.upcallStub()`) is the reverse: it creates a native function pointer backed by a Java `MethodHandle`. When C code calls the function pointer, the Linker marshals C arguments to Java types, invokes the Java method, and marshals the return value back to C. Upcall stubs are how Java provides callbacks to C libraries (e.g., `qsort` comparator, OpenGL error callback, event handler).
 
 **Q5: Why can't you obtain a stable `MemorySegment` address for a Java heap object?**
+**Short:** A Java heap object has no stable address because the GC can relocate it during compaction, invalidating any raw pointer.
+
 The GC (G1, ZGC, Shenandoah) moves live objects during garbage collection — compaction relocates objects to reduce fragmentation, updating all references. If Java passed a raw pointer to a heap object to a native function, the GC might move the object mid-call, invalidating the pointer and causing the native library to read/write arbitrary memory. For this reason, `MemorySegment.ofArray()` produces a segment whose address changes after each GC cycle. The JVM can pin a heap object during a native call (via `Linker.Option.critical()` for very short calls, or the GC's "pinned region" mechanism), but general-purpose pinning is avoided to preserve GC flexibility. The safe pattern: copy heap data into an off-heap `MemorySegment`, pass the off-heap address to native code.
 
 **Q6: How does `Arena.ofAuto()` differ from explicit arena management, and when is the difference significant?**
+**Short:** Arena.ofAuto() frees memory only when GC finalizes it, so its deallocation timing is non-deterministic.
+
 `Arena.ofAuto()` ties segment lifetime to GC finalisation: the memory is freed when the arena object becomes unreachable and the JVM's cleaner thread runs. This is analogous to `ByteBuffer.allocateDirect()` with `Cleaner`. The problem: finalisation timing is non-deterministic. Under memory pressure, you may allocate gigabytes of native memory faster than GC reclaims old arenas, causing native OOM or excessive RSS growth. Explicit `Arena.ofConfined()` / `ofShared()` with `try-with-resources` gives deterministic deallocation — the memory is freed exactly when the arena is closed. For any latency-sensitive or memory-intensive workload, explicit arenas are strongly preferred. `Arena.ofAuto()` is a convenience for exploratory code or cases where the arena is short-lived enough that timing does not matter.
 
 **Q7: What is `jextract` and how does it reduce Panama boilerplate?**
+**Short:** jextract generates MemoryLayout, VarHandle, and downcall-handle boilerplate automatically from a C header file.
+
 `jextract` is an official JDK tool (distributed separately) that reads a C header file (`.h`) and generates Java source code with: `MemoryLayout` constants for each struct, `VarHandle` accessors, `FunctionDescriptor` constants for each function, and a class with static methods wrapping downcall handles. For a header with 50 functions and 20 structs, `jextract` produces hundreds of lines of correct Panama boilerplate automatically. Without it, each function signature and struct layout would be hand-coded. `jextract` is particularly valuable when binding to large libraries like OpenSSL, SDL, or BLAS.
 
 **Q8: How would you replace `sun.misc.Unsafe.allocateMemory` usage in a library with Panama?**
+**Short:** Panama's Arena and MemorySegment replace Unsafe.allocateMemory with bounds-checked, deterministically-freed off-heap memory.
+
 ```java
 // Legacy Unsafe usage (BROKEN in new code — Unsafe may be restricted in future JDK)
 long address = UNSAFE.allocateMemory(8);
@@ -580,18 +596,28 @@ try (Arena arena = Arena.ofConfined()) {
 Migration strategy: (1) replace `allocateMemory(n)` with `arena.allocate(n)`; (2) replace `putXxx(addr, val)` with `seg.set(layout, offset, val)`; (3) replace `freeMemory(addr)` by closing the arena; (4) replace `getXxx(addr)` with `seg.get(layout, offset)`. Wrap multiple allocations in a single arena to free them together.
 
 **Q9: What is the significance of `ValueLayout.JAVA_INT_UNALIGNED` vs `ValueLayout.JAVA_INT`?**
+**Short:** JAVA_INT_UNALIGNED allows reading a 4-byte int at any offset, while JAVA_INT requires 4-byte alignment or throws.
+
 `ValueLayout.JAVA_INT` assumes 4-byte alignment — the JVM may use a `movdqa` or equivalent aligned load instruction, which is faster but throws `IllegalArgumentException` if the offset is not a multiple of 4. `ValueLayout.JAVA_INT_UNALIGNED` explicitly allows any offset, emitting a safe unaligned load. When scanning a binary file or network packet where integers are not guaranteed to be aligned (e.g., a protocol where a 4-byte int follows a 3-byte field), `JAVA_INT_UNALIGNED` is required. Using `JAVA_INT` on an unaligned offset causes an exception or hardware fault on RISC architectures. The tradeoff: unaligned access is 1–3 ns slower per load on modern x86 (negligible) but required for correctness on ARM.
 
 **Q10: How does Panama improve memory-mapped file handling beyond `ByteBuffer.map()`?**
+**Short:** FileChannel.map() with an Arena returns a long-addressed MemorySegment, removing ByteBuffer's 2GB mapping limit.
+
 `ByteBuffer.map()` (the legacy API) returns a `MappedByteBuffer` with a maximum size of `Integer.MAX_VALUE` (2 GB) — limited by `ByteBuffer`'s `int` position/limit fields. `FileChannel.map(mode, position, size, arena)` (Java 22+) returns a `MemorySegment` with `long` addressing — a 4 GB, 100 GB, or larger file can be mapped as one segment. Additionally, the mapped segment's lifetime is controlled by the arena: closing the arena unmaps the file (`munmap`) deterministically. With the legacy `MappedByteBuffer`, unmapping is triggered by `Cleaner` at GC time — you cannot force it synchronously, which is a problem for file locking and hot reload scenarios.
 
 **Q11: What are `Linker.Option.captureCallState()` and `Linker.Option.critical()` used for?**
+**Short:** captureCallState() safely reads errno after a native call, and critical() skips the GC safepoint for very short calls.
+
 `Linker.Option.captureCallState("errno")` captures the C errno value after a native call into a caller-provided `MemorySegment`, allowing Java to read errno safely in a thread-safe way (errno is thread-local in POSIX; reading it via `Errno.errno()` from another call might see a different value). `Linker.Option.critical()` hints to the JVM that the native call is very short (< 1 microsecond) and safe to call without transitioning the current thread to a "native" GC state. This allows the GC to skip adding a safepoint poll around the call, reducing overhead by ~10–20 ns per call. Use `critical()` only for truly short, pure-computation native calls; long or blocking calls tagged as critical can stall GC safepoints.
 
 **Q12: How do you handle struct padding to ensure Java MemoryLayout matches a C struct?**
+**Short:** C compilers insert alignment padding between struct fields, so Java's MemoryLayout must add matching paddingLayout entries.
+
 C compilers insert padding between struct fields to satisfy alignment requirements (each field must start at a multiple of its natural alignment). Rules: `char` (1-byte) needs 1-byte alignment, `short` (2-byte) needs 2-byte alignment, `int`/`float` (4-byte) needs 4-byte alignment, `double`/`long` (8-byte) needs 8-byte alignment on most platforms. Java's `MemoryLayout.structLayout()` does NOT automatically insert padding — you must add `MemoryLayout.paddingLayout(n)` entries to match the C compiler's layout. Best practice: run `offsetof(struct, field)` in a C test harness and verify it matches the Java layout's `byteOffset(PathElement.groupElement("field"))`. Alternatively, compile with `__attribute__((packed))` in C to eliminate all padding, then the Java layout needs no padding either.
 
 **Q13: How would you allocate and populate a C array of structs and pass it to a native sort function?**
+**Short:** A struct array is built by allocating a SequenceLayout and writing each element through a path-derived VarHandle.
+
 ```java
 // C struct: { int key; double value; }
 StructLayout ENTRY = MemoryLayout.structLayout(
@@ -621,9 +647,13 @@ try (Arena arena = Arena.ofConfined()) {
 ```
 
 **Q14: What is the relationship between Panama and Project Valhalla?**
+**Short:** Panama handles foreign memory and functions, while Valhalla eliminates object-header overhead for in-heap value types.
+
 Panama and Valhalla are complementary but orthogonal. Panama (`java.lang.foreign`) addresses foreign memory and foreign functions — calling native C code and managing off-heap data. Valhalla (value types / primitive classes, still in preview as of Java 24) addresses in-heap performance by eliminating object headers for small value types (`long`, `int`, and user-defined `value class Point { int x; int y; }`). The convergence point: a future Java may combine Valhalla value types with Panama `MemoryLayout` to store arrays of value types as contiguous native memory with zero GC overhead — today achievable with Panama + manual layout, future: automatically via the type system.
 
 **Q15: How would you benchmark whether Panama's overhead is acceptable compared to JNI for a function called 1 million times/second?**
+**Short:** Benchmarks show Panama downcalls run faster than JNI, and Linker.Option.critical() cuts the overhead further.
+
 ```java
 // JMH benchmark comparing JNI strlen vs Panama strlen (1M invocations/sec target)
 @Benchmark

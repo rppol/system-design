@@ -880,6 +880,8 @@ one side of the conflicting graph at all (§6.5, §14).
 ## 12. Interview Questions with Answers
 
 **Why did adding or upgrading one dependency silently break a completely unrelated part of the application?**
+**Short:** A shared transitive dependency resolved to a version binary-incompatible with what another library was compiled against.
+
 A transitive dependency two or more libraries share got resolved to a version
 that is not binary-compatible with what one of them was compiled against.
 Neither Maven's nor Gradle's conflict resolution checks API compatibility —
@@ -890,6 +892,8 @@ compile time. Run `mvn dependency:tree` or `gradle dependencies` immediately
 after any dependency bump, before shipping, not after an incident.
 
 **What does Maven's "nearest wins" dependency mediation actually mean?**
+**Short:** Maven picks the version declared at the shallowest depth in the dependency tree, not the newest version.
+
 It means the version declared at the shallowest depth in the dependency tree
 is selected, with ties at equal depth broken by whichever dependency was
 declared first in the POM. In the classic diamond, if two branches reach the
@@ -899,6 +903,8 @@ not assume "wins" means "newest" — it means "closest," which is exactly why
 an older transitive version can beat a newer one.
 
 **How does Gradle's default conflict resolution differ from Maven's nearest-wins rule?**
+**Short:** Gradle keeps the highest version found anywhere in the graph, ignoring declaration order and tree depth.
+
 Gradle compares every version of an artifact found anywhere in the graph and
 keeps the highest one by default, ignoring both declaration order and tree
 depth entirely. This can pick a different "winner" than Maven would for the
@@ -907,6 +913,8 @@ exact same dependency graph, as the diamond in §6.9 shows. Override it with
 version is not actually the compatible one.
 
 **What is the practical difference between Maven's `compile`, `provided`, `runtime`, and `test` scopes?**
+**Short:** Each scope controls which classpath a dependency appears on and whether it ships in the final artifact.
+
 They control which classpath — compile, test, or runtime — a dependency
 appears on, and whether it is packaged into the final artifact at all.
 `compile` is on every classpath and packaged; `provided` compiles and tests
@@ -917,6 +925,8 @@ Mismatching `provided` — forgetting the container actually supplies it in
 production — is the classic "works in the IDE, fails at deploy" bug.
 
 **What does the maven-shade-plugin's package relocation actually do, and why is merging alone not enough?**
+**Short:** Relocation rewrites a shaded dependency's package names and references so two versions can coexist in one jar.
+
 Relocation rewrites the package names of a shaded dependency's classes, and
 every bytecode reference to them, inside the merged jar, so two versions of
 the same library can coexist without colliding on the classpath. A naive
@@ -927,6 +937,8 @@ you embed a library whose transitive dependency version you cannot control or
 unify with your own.
 
 **Why should a `-SNAPSHOT` dependency never be depended on by a production build?**
+**Short:** A SNAPSHOT coordinate can resolve to different bytecode on every rebuild, breaking reproducibility.
+
 A SNAPSHOT version is explicitly mutable — the same coordinate can resolve to
 a different artifact every time it is rebuilt and republished, which breaks
 reproducibility. Maven and Gradle both re-check snapshot repositories for
@@ -936,6 +948,8 @@ release version before anything downstream, and especially production, ever
 depends on it.
 
 **What is a BOM, and what does `dependencyManagement` with `<scope>import</scope>` actually do?**
+**Short:** A BOM centralizes tested dependency versions, but dependencyManagement never adds a dependency by itself.
+
 A BOM (Bill of Materials) is a POM whose `dependencyManagement` block
 centralizes mutually-tested dependency versions, and `<scope>import</scope>`
 pulls that matrix into your own `dependencyManagement`. Crucially,
@@ -946,6 +960,8 @@ default for when you later declare the dependency, without a version, in
 project imports for exactly this reason.
 
 **How many built-in lifecycles does Maven have, and why does that matter?**
+**Short:** Maven has exactly three independent lifecycles - clean, default, and site - that never cross into each other.
+
 Maven has exactly 3 built-in lifecycles — `clean`, `default`, and `site` —
 and each is an independent, ordered sequence of phases that never crosses
 into another lifecycle. `mvn install` never runs `clean` first; the two must
@@ -954,6 +970,8 @@ cold — it is one of the most commonly asked Maven fundamentals, and the
 usual source of "why didn't my old build artifacts get removed" confusion.
 
 **What does invoking a single phase like `mvn package` actually execute?**
+**Short:** It runs every phase from validate through package in order, not just the package phase alone.
+
 It executes every phase in the default lifecycle from `validate` through
 `package`, in order, not just the `package` phase itself (the full 22-phase
 list is in §6.2). This is exactly why a failing unit test fails `mvn package`
@@ -962,6 +980,8 @@ lets execution reach the packaging step. Reason about "which phase am I
 invoking" as "which phase am I invoking *and everything before it*."
 
 **What's the difference between Gradle's configuration phase and execution phase?**
+**Short:** The configuration phase builds the task graph on every run; the execution phase runs only the requested tasks.
+
 The configuration phase evaluates every build script to construct the task
 graph, and it runs on every single Gradle invocation regardless of which task
 was requested. The execution phase then runs only the requested tasks, plus
@@ -971,6 +991,8 @@ taxes every command, even `gradle tasks` — use lazy task registration
 (`tasks.register`, not `tasks.create`) to defer real work into execution.
 
 **What is the practical difference between Gradle's `implementation` and `api` configurations?**
+**Short:** api exposes a dependency transitively to consumers, while implementation keeps it private to the declaring module.
+
 `api` exposes a dependency transitively on every consumer's compile
 classpath, while `implementation` keeps it private to the module that
 declared it. Changing an `implementation` dependency's version never forces
@@ -980,6 +1002,8 @@ Default to `implementation`; only promote a dependency to `api` when its
 types genuinely appear in your own module's public method signatures.
 
 **How does Gradle's incremental build (`UP-TO-DATE` checking) actually work?**
+**Short:** Gradle hashes a task's declared inputs and outputs and skips it as UP-TO-DATE when neither has changed.
+
 Gradle snapshots the hashes of a task's declared inputs and outputs, and if
 neither has changed since that task's last run in this workspace, it marks
 the task `UP-TO-DATE` and skips executing it entirely. This protection only
@@ -989,6 +1013,8 @@ while Gradle still reports `UP-TO-DATE`. Always declare a custom task's real
 inputs and outputs, or incremental build silently lies about correctness.
 
 **What is Gradle's build cache and how is it different from incremental build?**
+**Short:** The build cache reuses another run's output by input hash, helping even a fresh checkout or teammate's machine.
+
 The build cache stores a task's outputs keyed by a hash of its declared
 inputs, so even a fresh checkout on a different machine can reuse another
 run's output instead of recomputing it. Incremental/`UP-TO-DATE` checking
@@ -1000,6 +1026,8 @@ faster); a remote cache hit on a machine that never built it takes 3.4
 seconds (93% faster).
 
 **What problem does a Gradle version catalog (`libs.versions.toml`) solve?**
+**Short:** It centralizes dependency and plugin coordinates in one TOML file with typesafe, typo-proof accessors.
+
 It centralizes every dependency and plugin coordinate and version in one
 TOML file, generating typesafe accessors like `libs.guava` that every
 subproject references instead of repeating version strings. This is
@@ -1010,6 +1038,8 @@ accessors. Adopt it in any multi-module Gradle build past two or three
 modules.
 
 **What's the practical difference between Gradle's Groovy DSL and Kotlin DSL?**
+**Short:** Kotlin DSL is statically typed with IDE autocompletion, while Groovy DSL is dynamically typed and terser.
+
 Groovy DSL (`build.gradle`) is dynamically typed and terser; Kotlin DSL
 (`build.gradle.kts`) is statically typed against Gradle's API, giving IDE
 autocompletion and compile-time script errors. The tradeoff is a slightly
@@ -1019,6 +1049,8 @@ Gradle's recommended default for new builds; Groovy remains common in older
 or plugin-heavy codebases.
 
 **How does the Maven reactor decide the order to build modules in a multi-module project?**
+**Short:** It topologically sorts modules by their declared inter-module dependencies, not by listing order.
+
 It topologically sorts modules by their actual declared inter-module
 `<dependency>` relationships, not by the order they are listed in
 `<modules>`. A module only builds after every module it depends on has
@@ -1027,6 +1059,8 @@ finished, regardless of listing order in the parent POM. `mvn -pl service-b
 in the correct order, without building the entire reactor.
 
 **What does a line like `(common-utils:jar:2.4.0:compile - omitted for conflict with 1.0.0)` mean in `mvn dependency:tree` output?**
+**Short:** It shows a version Maven found but excluded because a different version won mediation elsewhere in the tree.
+
 It means Maven found this version of the artifact on this path of the graph
 but excluded it from the classpath because a different version of the same
 artifact won mediation elsewhere in the tree. That line is literally the
@@ -1036,6 +1070,8 @@ mediation surprise before it becomes a runtime `NoSuchMethodError`. Make
 post-incident diagnostic.
 
 **How does a "split package" (two modules exporting the same Java package) behave differently on the classpath vs. the module path?**
+**Short:** The classpath silently tolerates a split package, while the module path fails hard at startup with a ResolutionException.
+
 On the classpath, it is silently tolerated — the flat classpath just uses
 whichever copy of the package comes first, with no warning at all. On the
 JPMS module path, the identical situation is a hard startup failure
@@ -1046,6 +1082,8 @@ directive reference — this is exactly the class of bug JPMS's strong
 encapsulation catches that the classpath never would.
 
 **When would you choose shading over the Java Platform Module System to resolve a dependency version collision?**
+**Short:** Shading is the pragmatic per-artifact fix when you don't control the whole dependency graph's modularization.
+
 Shading is the pragmatic default whenever you do not control the whole
 dependency graph, since most third-party JARs still ship unmodularized on
 the classpath. Shading is a per-artifact, build-time patch (rewrite and
@@ -1056,6 +1094,8 @@ pragmatically today; treat full module-path adoption as a longer migration,
 not a quick fix for one collision.
 
 **Why can two machines with identical source code and dependency versions still produce a different JAR byte-for-byte?**
+**Short:** The JAR format embeds file timestamps and ordering by default, which commonly differ between build machines.
+
 Because the JAR/ZIP format embeds file timestamps and file ordering by
 default, and both commonly vary between build machines even when the actual
 class content is identical. Maven's reproducible-builds support
@@ -1066,6 +1106,8 @@ for any artifact that gets hashed or signed downstream, such as for
 supply-chain provenance checks.
 
 **Why might running `mvn install` on a single module of a multi-module reactor produce a different result than building the whole reactor?**
+**Short:** A single-module build resolves sibling dependencies from a possibly stale local repository instead of fresh reactor output.
+
 Because a single-module build resolves sibling dependencies from the local
 repository, which may hold a stale SNAPSHOT rather than today's code. A full
 reactor build always uses the freshly-built, in-memory artifacts of sibling

@@ -566,63 +566,103 @@ The multiplier is what turns a payload that "obviously fits" into an OOM. The he
 ## 12. Interview Questions with Answers
 
 **Is ObjectMapper thread-safe?**
+**Short:** Yes, once fully configured, but reconfiguring it after sharing across threads is unsafe.
+
 Yes, once fully configured — but reconfiguring it after sharing across threads is not safe. Jackson's own contract is that all `configure()`/`registerModule()`/`setXxx()` calls must complete before the instance is shared; the per-type (de)serializer caches are safe for concurrent reads after that point. Build one mapper at startup, treat it as effectively immutable, and use derived `ObjectReader`/`ObjectWriter` instances for any per-call variation instead of mutating the shared mapper.
 
 **Why is creating a new ObjectMapper for every request an anti-pattern?**
+**Short:** It repeats costly reflective setup on every call instead of reusing one warm, cached mapper.
+
 Because construction plus first-use reflection costs on the order of tens of milliseconds that a shared instance pays only once. Every new `ObjectMapper` starts with cold `BeanDeserializer`/`BeanSerializer` caches, so it repeats the expensive introspection step on every single call instead of hitting a warm cache — at meaningful request volume this is one to several CPU-seconds of pure waste per wall-clock second. Build the mapper once at startup (or as a Spring-managed singleton) and reuse it for the life of the process.
 
 **Q: What made `enableDefaultTyping()` dangerous, and how did Jackson respond?**
+**Short:** It let attacker-controlled JSON name the class to instantiate, enabling gadget-chain RCE.
+
 It let attacker-controlled JSON name the exact Java class to instantiate, enabling gadget-chain remote code execution. CVE-2017-7525 was the canonical origin (default typing plus Commons Collections on the classpath); Jackson's initial blacklist-based mitigation triggered years of whack-a-mole as new gadget classes were found in other libraries, CVE-2019-12384 among dozens that followed. Jackson 2.10 added the allowlist-based `PolymorphicTypeValidator` and the `activateDefaultTyping(validator, ...)` entry point — but be precise about what that did and did not change: the mapper's *default* validator is still `LaissezFaireSubTypeValidator`, which permits every subtype, so the protection only exists if you supply a real validator. The dependable fix is avoiding default typing entirely in favor of a closed `@JsonTypeInfo`/`@JsonSubTypes` set you control.
 
 **Why does `mapper.readValue(json, List.class)` silently lose the element type?**
+**Short:** Type erasure removes generics at compile time, so the call returns raw LinkedHashMaps instead.
+
 Type erasure removes generic parameters at compile time, so the JVM only ever sees a raw `List` of `Object`. The call compiles without warning and returns a list of generic `LinkedHashMap`s rather than your intended element type, producing a `ClassCastException` wherever the first element is finally cast. The fix is `mapper.readValue(json, new TypeReference<List<MyType>>() {})`, whose mandatory anonymous-subclass body is what lets Jackson recover the reified generic signature via `getGenericSuperclass()`.
 
 **Q: Why does deserializing a `LocalDateTime` field fail with a stock Jackson 2.x ObjectMapper?**
+**Short:** Jackson 2.x has no built-in java.time support until the JavaTimeModule is registered.
+
 Jackson 2.x has no built-in support for `java.time` types until the `JavaTimeModule` is registered. The fix is adding `jackson-datatype-jsr310` and calling `registerModule(new JavaTimeModule())` (Spring Boot does this automatically, which is why the failure is mostly seen in non-Spring code). Once registered, the next 2.x surprise is that dates serialize as numeric timestamps by default — a `LocalDateTime` as an array, an `Instant` as a decimal epoch value — so disable `SerializationFeature.WRITE_DATES_AS_TIMESTAMPS` to get ISO-8601 strings. Jackson 3.0 removes both papercuts: `java.time` support ships inside `jackson-databind` and the timestamp feature defaults to `false`.
 
 **Q: What does `FAIL_ON_UNKNOWN_PROPERTIES` do, and why does its default depend on your Jackson version?**
+**Short:** It throws on any unmapped JSON field, defaulting to true in 2.x and false in Jackson 3.0.
+
 It makes any JSON field without a matching POJO property throw `UnrecognizedPropertyException`, and its default flipped between major versions: `true` in Jackson 2.x, `false` in Jackson 3.0. On 2.x this is brittle across schema evolution — an upstream service adding a field you don't care about breaks every consumer that hasn't disabled the check — which is exactly why 3.0 reversed it. The migration hazard runs the other way: a service that relied on the strict default to catch typo'd field names loses that safety net silently on upgrade. Set the value explicitly rather than inheriting it: lenient for external, partner-controlled contracts; strict for internal contracts you fully own.
 
 **When do you choose streaming over tree over data binding?**
+**Short:** Choose streaming for huge or hot-path payloads, tree for unknown shapes, binding otherwise.
+
 Streaming for huge or hot-path payloads, tree for unknown or dynamic shapes, data binding for everything else. All three consume the same underlying token stream, so the choice is purely about how much memory and type information you need to keep around versus how much manual code you're willing to write — data binding is the default; only drop to tree or streaming when a specific constraint (unknown schema, payload size, latency) demands it.
 
 **What is the difference between ObjectReader/ObjectWriter and ObjectMapper?**
+**Short:** ObjectReader and ObjectWriter are immutable, thread-safe per-call views derived from a mapper.
+
 ObjectReader and ObjectWriter are immutable, thread-safe views derived from a mapper, cheap to create for each distinct call "shape" you need. Calling `.with(...)` on either returns a new instance rather than mutating anything, so they share the parent mapper's caches without ever needing to touch its configuration — build one per shape (a pretty-printing writer, a lenient reader) once at startup and store it as a constant.
 
 **How does Jackson bind JSON to a Java record?**
+**Short:** Since Jackson 2.12, a record's canonical constructor is treated as an implicit creator.
+
 Since Jackson 2.12, the canonical constructor is treated as an implicit creator with no annotations required. Record component names are always available via reflection (JEP 359), unlike ordinary classes which need `-parameters` or explicit `@ConstructorProperties`/`@JsonProperty` to recover constructor parameter names — you can still add `@JsonCreator`/`@JsonProperty` on a record's compact constructor for renaming or validation, but the simple case needs nothing extra.
 
 **What is `@JsonTypeInfo`/`@JsonSubTypes` and how is it safer than default typing?**
+**Short:** It declares a closed, application-controlled set of subtypes instead of trusting the JSON.
+
 It declares a closed, application-controlled set of subtypes instead of trusting the JSON to name any class on the classpath. Because the mapping from a discriminator value (like `"card"`) to a Java class is fixed in your own code, an attacker sending an unexpected discriminator value simply fails to match a known subtype — there is no path from attacker input to arbitrary class instantiation, which is the entire class of bug default typing introduced.
 
 **What does `@JsonInclude(NON_NULL)` do, and how does it differ from `NON_EMPTY`/`NON_DEFAULT`?**
+**Short:** NON_NULL omits only nulls, NON_EMPTY also omits empty values, NON_DEFAULT omits defaults.
+
 `NON_NULL` omits only null fields, `NON_EMPTY` also omits empty strings and collections, and `NON_DEFAULT` omits fields equal to their type's default value. The default value for `NON_DEFAULT` means 0, false, or an empty-constructed object, depending on the field's type. Use `NON_NULL` for the common "don't send nulls" API convention; reach for `NON_EMPTY` or `NON_DEFAULT` only when you specifically want to compact away zero-value noise, since they can also hide a legitimately meaningful zero or empty string.
 
 **What is `@JsonAnySetter` for?**
+**Short:** It collects unmatched JSON properties into a map instead of failing or dropping them.
+
 It collects any JSON properties that don't match a declared field into a map instead of failing or dropping them. This is useful for round-tripping payloads you don't fully model — for example forwarding a webhook body to another system while still binding the handful of fields you actually need to a typed class.
 
 **Why would serializing a class throw "no properties discovered to create BeanSerializer"?**
+**Short:** Jackson found zero detectable getters, fields, or annotations and refuses to serialize an empty object.
+
 Jackson found zero detectable getters, fields, or annotations on the class and refuses to silently serialize it as an empty object (`SerializationFeature.FAIL_ON_EMPTY_BEANS` defaults to `true`). Common causes are a marker/placeholder class, a class with only private fields and no getters or annotations at all, or a Kotlin data class before the Kotlin module is registered — the fix is almost always adding the missing accessor, annotation, or module rather than suppressing the check.
 
 **What is `PropertyNamingStrategies.SNAKE_CASE` used for?**
+**Short:** It rewrites Java camelCase names to JSON snake_case without per-field annotations.
+
 It rewrites all property names between Java camelCase and JSON snake_case without per-field annotations. Set once on the shared mapper (`.propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)`) when a service's Java conventions need to interoperate with an ecosystem — Python, Ruby, most public JSON APIs — that defaults to snake_case, instead of annotating every single field with `@JsonProperty`.
 
 **How does Jackson achieve high (de)serialization performance internally?**
+**Short:** It compiles and caches a reusable BeanDeserializer or BeanSerializer per class after first use.
+
 It compiles a reusable `BeanDeserializer`/`BeanSerializer` per class on first use and caches it for every later call, turning reflection into a one-time cost rather than a per-call one. Beyond that base caching, the Afterburner and Blackbird modules replace the generated accessors' reflective `Method.invoke()` calls with generated bytecode or `MethodHandle`s respectively, and Jackson recycles internal parser/generator buffers and symbol tables per `JsonFactory` rather than reallocating them on every call.
 
 **What happens when JSON contains an enum value your Java enum doesn't define?**
+**Short:** By default Jackson throws an InvalidFormatException on any enum value the Java enum lacks.
+
 By default Jackson throws an `InvalidFormatException`, which breaks consumers the moment a producer adds a new enum value the consumer doesn't yet know about. Enable `DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_AS_NULL` (or mark a constant with `@JsonEnumDefaultValue`) to degrade gracefully instead of failing the entire request over one unrecognized value.
 
 **What is the difference between `@JsonCreator` delegating mode and properties mode?**
+**Short:** Delegating mode binds the whole value to one argument; properties mode binds named fields.
+
 Delegating mode treats the single constructor argument as the entire value being deserialized; properties mode binds named JSON fields to individually named constructor parameters. A single-argument constructor annotated `@JsonCreator` without an explicit `mode` is genuinely ambiguous between the two, and Jackson's inference gets it wrong often enough in practice that explicitly specifying `mode = JsonCreator.Mode.PROPERTIES` (or `DELEGATING`) on single-argument creators is the safer habit.
 
 **How do you avoid infinite recursion when serializing bidirectional JPA relationships?**
+**Short:** Break the cycle with JsonManagedReference/JsonBackReference or JsonIdentityInfo by-ID references.
+
 Break the cycle with `@JsonManagedReference`/`@JsonBackReference` on the two sides of the relationship, or more robustly with `@JsonIdentityInfo` to serialize repeated references by ID after the first occurrence. The symptom without a fix is a `StackOverflowError` as parent and child entities serialize each other forever; the most robust production fix is usually to stop serializing entities directly at all and project to a dedicated DTO that has no back-reference to serialize in the first place.
 
 **What is the memory risk of using the tree model on very large payloads?**
+**Short:** JsonNode materializes a document as generic objects, often 3 to 5 times the raw payload size.
+
 `JsonNode` materializes the entire document as generic Java objects, commonly three to five times the raw payload's byte size. The overhead comes from boxed numbers, per-node object headers, and `HashMap`-backed `ObjectNode`s; for a payload in the hundreds of megabytes or larger, that multiplier is the difference between comfortably fitting in heap and an `OutOfMemoryError`, so switch to the streaming API or a `MappingIterator` once a single document's tree would occupy a meaningful fraction of available heap.
 
 **`JsonNode.get()` vs `JsonNode.path()` — what's the difference and why does it matter?**
+**Short:** get() returns null for a missing field while path() returns a safe, chainable MissingNode.
+
 `get()` returns Java `null` for a missing field while `path()` returns a safe `MissingNode` you can keep chaining on. `node.path("a").path("b").asText()` never throws a `NullPointerException` even if `"a"` or `"b"` is absent at any level, whereas the same chain written with `get()` throws as soon as one link in the chain is missing — prefer `path()` for defensive navigation through JSON of uncertain shape.
 
 ---

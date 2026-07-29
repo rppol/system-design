@@ -536,6 +536,8 @@ loud, early failure instead of an OOM under production load.
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between gRPC and Protocol Buffers?**
+**Short:** Protobuf is the serialization format and IDL; gRPC is the RPC framework built on top of it.
+
 Protocol Buffers is the serialization format and interface definition language — it
 defines how messages are described in `.proto` and encoded to compact binary;
 it is usable on its own for storage or messaging. gRPC is the RPC framework layered
@@ -544,6 +546,8 @@ error model, streaming modes, deadlines, and cancellation. Protobuf is the "what
 the message"; gRPC is the "how the call travels."
 
 **Q: Why are protobuf field numbers so important, and what are the rules around them?**
+**Short:** A protobuf field's number, not its name, is its wire identity, so numbers must never be reused.
+
 The field number, not the name, is the field's identity on the wire — the encoded
 bytes carry the number, never the name. So you can freely rename fields (wire-
 compatible), but you must never reuse or change a number, because old data encoded
@@ -552,6 +556,8 @@ its number `reserved` so the compiler prevents anyone from reusing it later. Thi
 rule underlies almost all of protobuf's schema-evolution guidance.
 
 **Q: What are the four gRPC RPC modes?**
+**Short:** gRPC's four RPC modes are unary, server streaming, client streaming, and bidirectional streaming.
+
 Unary (one request, one response — like a normal function call); server streaming
 (one request, a stream of responses — e.g. a search feed); client streaming (a
 stream of requests, one response — e.g. chunked upload with an aggregate); and
@@ -560,6 +566,8 @@ connection — e.g. chat). All four are HTTP/2 streams differing only in how man
 messages flow in each direction.
 
 **Q: How does gRPC use HTTP/2, and why does that matter?**
+**Short:** Each gRPC call is an HTTP/2 stream, letting many calls multiplex over one TCP connection without head-of-line blocking.
+
 Each gRPC call is an HTTP/2 stream, and many streams multiplex over a single TCP
 connection with independent flow-control windows and no head-of-line blocking
 between them. This is what makes streaming and high concurrency cheap — you do not
@@ -568,6 +576,8 @@ means gRPC requires end-to-end HTTP/2 support, which is why browsers (no raw HTT
 trailer access) need gRPC-Web via a proxy.
 
 **Q: What is the difference between a deadline and a timeout, and why does it matter?**
+**Short:** A deadline is an absolute time propagated through the whole call chain, unlike a per-call relative timeout.
+
 A timeout is a per-call relative duration; a deadline is an absolute point in time
 that gRPC sends with the request (in the `grpc-timeout` header) and propagates
 downstream, so the entire call tree shares one budget. If service A spends 50ms of a
@@ -576,6 +586,8 @@ client times out but downstream services keep working — the deadline cancels t
 whole chain. Always set deadlines; never call without one in production.
 
 **Q: How does cancellation work in gRPC?**
+**Short:** gRPC propagates cancellation down the call tree as a Context cancellation that server code should observe and honor.
+
 When a client cancels (explicitly, or by hitting its deadline, or by disconnecting),
 gRPC propagates the cancellation down the call tree as a `Context` cancellation.
 Server code should observe it — e.g. check `Context.current().isCancelled()` in a
@@ -584,6 +596,8 @@ cancellation, a server keeps computing results nobody will read, wasting CPU,
 threads, and DB connections.
 
 **Q: How are errors represented in gRPC?**
+**Short:** gRPC represents errors as a Status with a code from a fixed set of about 17 values plus an optional message.
+
 As a `Status`: a numeric code from a fixed set of ~17 (e.g. `NOT_FOUND`,
 `INVALID_ARGUMENT`, `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `UNAUTHENTICATED`), an
 optional message, and optional structured details. Servers signal errors by calling
@@ -593,6 +607,8 @@ fixed code set gives a portable, language-neutral error vocabulary — unlike th
 ended world of HTTP status + JSON bodies.
 
 **Q: What are the differences between the blocking, async, and future stubs?**
+**Short:** The blocking stub is synchronous, the async stub uses StreamObserver callbacks, and the future stub returns a ListenableFuture.
+
 The blocking stub is synchronous: unary returns the value directly and server-
 streaming returns a blocking `Iterator`, but it cannot do client or bidirectional
 streaming. The async stub is callback-based via `StreamObserver` and supports all
@@ -601,6 +617,8 @@ Guava `ListenableFuture` and supports unary only. Choose blocking for simple
 sequential code, async whenever you stream from the client side.
 
 **Q: In proto3, how do you tell an unset field from one set to its default value?**
+**Short:** In proto3 you can't distinguish an unset scalar field from its default value unless the field is marked optional.
+
 For plain scalar fields you cannot — an unset `int32` and one set to 0 both decode to
 0, because proto3 omits default-valued scalars from the wire. To distinguish, mark
 the field `optional` (which re-enables field presence/hasser methods in proto3) or
@@ -609,6 +627,8 @@ use a wrapper type like `google.protobuf.Int32Value`. This is a common bug: chec
 default-valued inputs.
 
 **Q: Why is reusing one `ManagedChannel` important?**
+**Short:** Reusing one ManagedChannel preserves HTTP/2 connection multiplexing instead of paying a new handshake per call.
+
 A channel owns the HTTP/2 connection(s) and their multiplexing; creating a new
 channel per call throws away connection reuse, forces a fresh TCP+TLS handshake each
 time, and can exhaust sockets — defeating the main performance benefit of HTTP/2.
@@ -616,6 +636,8 @@ Channels are designed to be long-lived, thread-safe, and shared across the
 application; create one per target service and reuse it.
 
 **Q: What are gRPC interceptors and what do you use them for?**
+**Short:** gRPC interceptors apply cross-cutting concerns like auth, logging, and tracing without touching service logic.
+
 Interceptors wrap calls to apply cross-cutting concerns without touching service
 logic — authentication, logging, metrics, tracing, retry. A `ServerInterceptor`
 inspects incoming `Metadata` (gRPC's headers) and can short-circuit (e.g. close with
@@ -623,12 +645,16 @@ inspects incoming `Metadata` (gRPC's headers) and can short-circuit (e.g. close 
 ids or auth tokens. They are the gRPC analogue of servlet filters / middleware.
 
 **Q: What is Metadata in gRPC?**
+**Short:** gRPC Metadata is the key-value header and trailer mechanism that travels alongside the message payload.
+
 Metadata is the key-value header/trailer mechanism that travels alongside the
 message payload — the place auth tokens, trace context (`traceparent`), and custom
 routing hints ride, analogous to HTTP headers. Keys ending in `-bin` carry binary
 values; others are ASCII. Interceptors are the usual place to read/write metadata.
 
 **Q: How would you safely evolve a protobuf schema?**
+**Short:** Safe protobuf evolution means only adding new field numbers and reserving retired ones, never reusing them.
+
 Only add new fields with brand-new numbers; never reuse, renumber, or change the type
 of existing fields. When removing a field, `reserved` its number (and optionally its
 name) so it can never be reused. Avoid changing wire types (int32→string breaks);
@@ -636,6 +662,8 @@ varint-to-varint changes (int32↔int64↔bool) are technically wire-compatible 
 value truncation. Tools like `buf breaking` mechanically enforce these rules in CI.
 
 **Q: Why can't a browser call a gRPC service directly, and what's the fix?**
+**Short:** Browsers can't call gRPC directly because fetch/XHR can't access raw HTTP/2 frames, so gRPC-Web via a proxy is used.
+
 Browsers cannot access raw HTTP/2 frames and trailers (where gRPC carries its status)
 through the fetch/XHR APIs, so they cannot speak native gRPC. The fix is gRPC-Web: a
 browser-compatible variant that a proxy (Envoy, or the Connect/buf stack) translates
@@ -643,6 +671,8 @@ to/from backend gRPC. Alternatively, expose a REST/JSON gateway (e.g. grpc-gatew
 in front of the gRPC services for public consumption.
 
 **Q: What is the default max message size and why does it matter?**
+**Short:** gRPC defaults to a 4 MB max inbound message size, and large results should be streamed instead of raised.
+
 gRPC defaults to a 4 MB max inbound message size to bound memory per call. Trying to
 return a very large result in a single unary message exceeds it and fails (or OOMs if
 raised carelessly). The right answer for large/unbounded results is server streaming
@@ -650,6 +680,8 @@ raised carelessly). The right answer for large/unbounded results is server strea
 is a deliberate backpressure/safety guard, not an obstacle to remove.
 
 **Q: How does protobuf encode an integer, and what is a varint?**
+**Short:** A varint encodes an integer using 7 value bits and 1 continuation bit per byte, so small numbers take fewer bytes.
+
 A varint is a variable-length encoding where each byte uses 7 bits for the value and
 1 continuation bit, so small numbers take one byte and large ones take more — making
 typical small integers very compact. Each field is encoded as a tag (the field number

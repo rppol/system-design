@@ -385,39 +385,62 @@ A lambda captured and modified an external `int[]` counter inside a `parallelStr
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `andThen` and `compose` in `Function`?**
+**Short:** andThen applies the first function then the second; compose applies the argument function first, then the receiver.
+
 Both compose two functions, but the order differs. `f.andThen(g)` applies `f` first, then `g`: equivalent to `x -> g(f(x))`. `f.compose(g)` applies `g` first, then `f`: equivalent to `x -> f(g(x))`. Memory aid: `andThen` means "apply f, then do g afterward"; `compose` matches mathematical function composition notation `f∘g` where g is applied first. For `Predicate`, the equivalents are `and()`, `or()`, `negate()`.
 
 **Q2: What is a Spliterator and why does it matter for parallel streams?**
+**Short:** A Spliterator describes how to split a stream's source into balanced sub-ranges for parallel processing.
+
 A `Spliterator` (splittable iterator) describes how a stream's source can be split into sub-ranges for parallel processing. It has `tryAdvance()` (process one element), `trySplit()` (split into two halves), `estimateSize()`, and `characteristics()` (SIZED, ORDERED, etc.). ArrayList has a `Spliterator` that supports balanced binary splitting (SIZED+SUBSIZED), making parallel streams very efficient. LinkedList cannot be efficiently split — `trySplit()` returns null early — so parallel streams over LinkedList fall back to nearly sequential execution.
 
 **Q3: How does a custom `Collector` work? Implement one.**
+**Short:** A custom Collector defines a supplier, accumulator, combiner, and finisher to control single-pass aggregation.
+
 A `Collector<T, A, R>` has four functions: `Supplier<A>` creates an empty accumulator; `BiConsumer<A,T>` folds each element into the accumulator; `BinaryOperator<A>` merges two partial accumulators (called in parallel mode); `Function<A,R>` finishes — converts accumulator to result. The `combiner` is critical for parallel correctness: if your accumulator isn't safely mergeable, mark the Collector without `CONCURRENT` and the framework handles parallel safely. `Collector.of(supplier, accumulator, combiner, finisher, characteristics)` is the factory.
 
 **Q4: When should you NOT use parallel streams?**
+**Short:** Parallel streams hurt performance on small collections, I/O-bound work, and non-associative or ordered operations.
+
 (1) I/O-bound operations — block ForkJoinPool.commonPool() carrier threads. (2) Small collections (<100 elements) — overhead of splitting and combining exceeds gains. (3) Non-associative reduce — `reduce((a,b) -> a-b)` is wrong in parallel (subtraction isn't associative). (4) Ordered operations with side effects — `forEach` ordering is non-deterministic in parallel. (5) When ordering matters — `findFirst()` in parallel may degrade to `findAny()` behavior. (6) When collection is not efficiently splittable (LinkedList, iterators).
 
 **Q5: What makes a stream operation stateful vs stateless, and why does it matter?**
+**Short:** Stateless stream operations process each element independently, while stateful ones must see multiple elements first.
+
 Stateless operations (`filter`, `map`, `flatMap`, `peek`) process each element independently — no memory of previous elements. Stateful operations (`sorted`, `distinct`, `limit`, `skip`) need to see multiple elements before producing output. In parallel streams, stateful operations are performance hazards: `sorted()` must materialize all elements; `distinct()` must track seen elements across threads (synchronized state). For correct parallel execution, prefer stateless pipelines; use stateful ops at the end of the pipeline.
 
 **Q6: How does `flatMap` differ from `map` conceptually?**
+**Short:** flatMap transforms and flattens one level of nesting, unlike map which only transforms each element.
+
 `map(f)` transforms each element: `Stream<T> → Stream<R>` where `f: T → R`. `flatMap(f)` transforms and flattens: `Stream<T> → Stream<R>` where `f: T → Stream<R>`. Conceptually, `flatMap` is monadic bind (>>=): it "flattens" one level of nesting. `Optional.flatMap` handles `Optional<Optional<T>> → Optional<T>`. This is the key primitive for monadic composition — chaining operations that each return a wrapped value.
 
 **Q7: What is "effectively final" and why does Java require it for lambda captures?**
+**Short:** Java requires captured lambda variables to be effectively final because a lambda can outlive its enclosing stack frame.
+
 A variable is effectively final if it's initialized once and never reassigned. Java requires it because lambdas can outlive the method scope (submitted to a thread pool, stored in a field). Local variables are on the stack; when the method returns, the stack frame is gone. Java copies the value into the lambda's closure. If the variable could change after capture, the lambda would hold a stale copy — misleading semantics. For mutable state, use `AtomicInteger`, `AtomicReference`, or arrays.
 
 **Q8: Explain the difference between `Function<A,B>` and `BiFunction<A,B,C>`.**
+**Short:** Function takes one argument and returns a result; BiFunction takes two arguments and returns a result.
+
 `Function<T,R>` takes one argument of type T, returns R. `BiFunction<T,U,R>` takes two arguments (T and U), returns R. Java has no `TriFunction` in the standard library — for 3+ arguments, use a custom functional interface or compose. `BiFunction` is commonly used with `Map.merge()`, `Map.replaceAll()`, and building binary operators. `UnaryOperator<T>` is `Function<T,T>`; `BinaryOperator<T>` is `BiFunction<T,T,T>` — useful for reduce operations.
 
 **Q9: How does Records' auto-generated `equals()` differ from a typical POJO's?**
+**Short:** A record's equals() compares every component field by field and is regenerated automatically at compile time.
+
 Record's auto-generated `equals()` is field-by-field comparison using `Objects.equals()` for each component — guaranteed correct by the spec. A typical POJO's `equals()` is whatever the developer wrote (or IDE generated, which may be correct or outdated if fields were added later). The critical difference: if you add a field to a POJO, `equals()` and `hashCode()` must be manually updated; for a Record, they're automatically regenerated at compile time — no risk of forgetting.
 
 **Q10: When would you choose an unmodifiable wrapper vs `List.of()`?**
+**Short:** Collections.unmodifiableList() is a live read-only view, while List.of() is an independent immutable snapshot.
+
 `Collections.unmodifiableList(list)` creates a view — changes to the underlying list are visible through the wrapper, but the wrapper itself rejects modifications. Use when you need to expose a list as read-only while still being able to mutate it internally. `List.of()` creates a truly immutable, independent list — no backing mutable list. Use for constant data, returning truly immutable results from API methods. Key tradeoff: `unmodifiableList` is a live view (changes propagate through); `List.of()` is a snapshot copy (no live relationship).
 
 **Q11: What is the difference between `reduce` and `collect`, and when is using `reduce` to build a `List` an anti-pattern?**
+**Short:** Using reduce to build a mutable List violates its associativity contract; collect() exists for mutable reduction.
+
 `reduce` is designed for immutable accumulation — each step combines two values into a new value (fold). The combiner must be associative and the identity must be correct so parallel splits can merge safely without reordering results. `collect` is designed for *mutable* reduction — a `Supplier` creates a fresh container per thread, an `accumulator` mutates it, and a `combiner` merges two containers at parallel boundaries. Using `reduce` to build a `List` — `stream.reduce(new ArrayList<>(), (acc, e) -> { acc.add(e); return acc; }, (a, b) -> { a.addAll(b); return a; })` — mutates the "identity" object, which the spec forbids, and creates O(n) intermediate list copies in sequential mode. Use `Collectors.toList()` or `toUnmodifiableList()` instead; `collect` was designed exactly for container accumulation.
 
 **Q12: How do you write thread-safe memoization using `ConcurrentHashMap.computeIfAbsent`, and what is the broken alternative?**
+**Short:** ConcurrentHashMap.computeIfAbsent() runs the mapping function at most once per key, avoiding a check-then-act race.
 
 ```java
 // BROKEN: HashMap + manual null-check has a race on concurrent first calls
@@ -439,12 +462,18 @@ public BigDecimal rate(String currency) {
 `ConcurrentHashMap.computeIfAbsent` holds a bin-level lock so the mapping function is called at most once per key (unless two keys hash to the same bin — use `putIfAbsent` for strict once-only semantics). Critical caveat: never call `computeIfAbsent` recursively on the same map inside the mapping function — it deadlocks because the bin lock is not reentrant.
 
 **Q13: What is the difference between `Supplier<T>` and `Callable<T>`, and when does the distinction matter?**
+**Short:** Callable declares throws Exception and integrates with ExecutorService, while Supplier is for pure lazy evaluation.
+
 Both represent deferred computation that produces a value, but `Callable<T>` declares `throws Exception` while `Supplier<T>` does not. This means `Supplier` cannot propagate checked exceptions without wrapping them in `RuntimeException`. `Callable` integrates with `ExecutorService.submit()` (returns a `Future<T>`) and is used wherever the computation may fail with a checked exception. `Supplier` is the functional-programming default for lazy initialization, factory methods, and `Optional.orElseGet()`. Practical rule: use `Callable` for I/O-bound deferred work submitted to a thread pool; use `Supplier` for pure lazy evaluation. Converting `Callable` to `Supplier` requires a try/catch wrapper — a sign the abstraction boundaries are mismatched.
 
 **Q14: Explain `Comparator.comparing()` chaining and its relationship to function composition.**
+**Short:** Comparator.thenComparing chains comparators left to right, delegating to the next one only when the current is a tie.
+
 `Comparator.comparing(Person::getLastName).thenComparing(Person::getFirstName).thenComparingInt(Person::getAge)` composes comparators left-to-right using `thenComparing`, which delegates to the next comparator only when the current one returns 0 (equal). Internally `thenComparing` wraps the composition: `(a, b) -> { int c = this.compare(a, b); return c != 0 ? c : other.compare(a, b); }`. This is conceptually `andThen` for comparators. Reverse a sub-key with `.thenComparing(Person::getAge, Comparator.reverseOrder())`. To sort null-safe: wrap the key extractor with `Comparator.nullsFirst()` or `nullsLast()`. Practical tip: always `thenComparing` by a unique field last (e.g., ID) to produce a stable, deterministic ordering for pagination.
 
 **Q15: What is referential transparency, and why does Java's functional interface design not enforce it?**
+**Short:** Referential transparency means a function's output depends only on its inputs, unenforced by Java's functional interfaces.
+
 Referential transparency means a function's output depends solely on its inputs with no observable side effects — calling `f(x)` twice always returns the same result and changes nothing external. Java's `Function`, `Predicate`, `Consumer` etc. do NOT enforce this — a lambda can close over mutable fields, write to a database, call `System.out.println`, or mutate a shared counter. The Stream API documentation says behavioral parameters "should be non-interfering and stateless" but nothing in the type system enforces it. Consequence: a parallel stream with a stateful lambda silently produces incorrect results (broken):
 
 ```java

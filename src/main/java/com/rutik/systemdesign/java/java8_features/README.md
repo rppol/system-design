@@ -499,54 +499,88 @@ A team wrapped a database-calling `map()` operation in `parallelStream()`, expec
 ## 12. Interview Questions with Answers
 
 **Q1: What is a functional interface? How does `@FunctionalInterface` help?**
+**Short:** A functional interface has exactly one abstract method, and @FunctionalInterface enforces that at compile time.
+
 A functional interface has exactly one abstract method (SAM — Single Abstract Method). It is the target type for a lambda or method reference. `@FunctionalInterface` is a compile-time annotation that causes a compiler error if the interface has more than one abstract method, preventing accidental interface evolution that would break all existing lambdas. Examples: `Runnable`, `Callable`, `Comparator`, `Predicate`, `Function`.
 
 **Q2: How do lambdas differ from anonymous inner classes?**
+**Short:** Lambdas differ from anonymous classes in this binding, compilation mechanism, potential reuse, and lack of state.
+
 Four key differences: (1) `this` — inside a lambda, `this` refers to the enclosing instance; inside an anonymous class, `this` refers to the anonymous class instance. (2) No separate `.class` file — lambdas use `invokedynamic` + `LambdaMetafactory`; anonymous classes compile to separate `$N.class` files. (3) Non-capturing lambdas can be instance-reused by the JVM, reducing allocation. (4) Lambdas cannot have state (no fields); anonymous classes can.
 
 **Q3: What is the difference between `map()` and `flatMap()` in Streams?**
+**Short:** map() transforms one-to-one, while flatMap() transforms one-to-many and flattens the resulting streams.
+
 `map()` applies a one-to-one function: `Stream<T> → Stream<R>` where each element maps to exactly one result. `flatMap()` applies a one-to-many function: `Stream<T> → Stream<R>` where each element maps to a `Stream<R>`, and all streams are concatenated (flattened) into one. Think of `flatMap` as "map then flatten." It's the monadic bind operation — it removes one level of nesting: `Optional<Optional<T>>` → `Optional<T>` via `flatMap`.
 
 **Q4: What is lazy evaluation in streams, and why does it matter?**
+**Short:** Stream intermediate operations are lazy, executing only when a terminal operation triggers the pipeline.
+
 Intermediate operations (filter, map, peek) are lazy — they don't execute until a terminal operation is called. The pipeline is a description of transformations, not the execution. This matters because: (1) Short-circuit operations (`findFirst`, `anyMatch`, `limit`) can stop processing early — e.g., `findFirst()` processes only enough elements to find one, not all. (2) Stateful operations (`sorted`, `distinct`) must materialize the stream but only when forced. (3) No unnecessary computation for elements filtered out early.
 
 **Q5: Why should Optional NOT be used as a method parameter?**
+**Short:** Optional shouldn't be a method parameter because it forces callers to wrap values and obscures intent.
+
 Using `Optional` as a parameter forces the caller to wrap their value in `Optional.of()` or `Optional.empty()` — awkward and verbose. It also obscures intent (does `null` mean "not provided" or is it a bug?). The correct patterns are: use method overloading (one method with the parameter, one without), or use a null check with `Objects.requireNonNull()`. `Optional` is designed purely as a return type to signal "this method may return nothing."
 
 **Q6: What are intermediate vs terminal operations? Give examples of each.**
+**Short:** Intermediate stream operations are lazy and return a Stream; terminal operations are eager and produce a result.
+
 Intermediate operations are lazy, return a new `Stream`, and don't trigger computation: `filter`, `map`, `flatMap`, `distinct`, `sorted`, `peek`, `limit`, `skip`. Terminal operations are eager, trigger the pipeline, and produce a non-stream result or side effect: `collect`, `forEach`, `reduce`, `count`, `min`, `max`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`, `toArray`. A pipeline must end with exactly one terminal operation.
 
 **Q7: How does `groupingBy()` work internally?**
+**Short:** groupingBy() iterates elements, classifies each into a key, and inserts them into value lists in a HashMap.
+
 `groupingBy(classifier)` is equivalent to: iterate elements, apply classifier to get a key, insert element into the value list for that key in a `HashMap`. Internally it uses `HashMap<K, List<T>>` with a downstream collector (default: `toList()`). The combiner function is used for parallel streams to merge partial maps. For `counting()` as downstream: instead of `List`, it tracks `Long` counts, making it `Map<K, Long>`.
 
 **Q8: When should you avoid streams and prefer a regular for-loop?**
+**Short:** Prefer a for-loop over streams for hot paths with tiny collections or complex control flow like break and continue.
+
 (1) Hot paths with very small collections — stream pipeline overhead (lambda dispatch, boxing for primitives) can dominate. (2) Complex control flow requiring `break`, `continue`, or checked exception propagation. (3) Multiple side effects or mutations needed per element. (4) Code that's clearer as imperative (sometimes a for-loop is simply more readable). Rule of thumb: for collections under ~50 elements in hot paths, measure with JMH — streams are often comparable but occasionally slower.
 
 **Q9: What is the difference between `orElse()` and `orElseGet()`?**
+**Short:** orElse() always evaluates its argument, while orElseGet() only invokes its supplier when the Optional is empty.
+
 `orElse(T value)` always evaluates the argument, even if the Optional is present — if computing the default is expensive (DB call, object creation), you pay the cost every time. `orElseGet(Supplier<T> supplier)` only invokes the supplier when the Optional is empty — lazy evaluation. Rule: use `orElseGet()` whenever the default is computationally expensive or has side effects.
 
 **Q10: How do method references compile, and what are their four types?**
+**Short:** Method references compile to the same invokedynamic mechanism as lambdas, in four distinct reference forms.
+
 Method references compile to the same `invokedynamic` mechanism as lambdas. The four types: (1) `ClassName::staticMethod` → `args -> ClassName.staticMethod(args)`. (2) `instance::instanceMethod` → `args -> instance.method(args)` (captures `instance`). (3) `ClassName::instanceMethod` → `(instance, args) -> instance.method(args)` (receiver is first argument). (4) `ClassName::new` → `args -> new ClassName(args)` (constructor reference). The compiler infers which functional interface type the method reference matches.
 
 **Q11: Explain the Date/Time API and why it replaced Calendar.**
+**Short:** java.time replaced Date and Calendar because those were mutable, thread-unsafe, and had a confusing API design.
+
 `java.util.Date` and `Calendar` had three critical flaws: mutable (not thread-safe), poor API design (month is 0-indexed, confusing methods), and no separation of concepts. `java.time.*` (JSR-310): `LocalDate` (no time, no timezone), `LocalTime` (no date, no timezone), `LocalDateTime`, `ZonedDateTime` (with timezone), `Instant` (a point on the UTC timeline, stored as epoch seconds plus a nanosecond-of-second field), `Duration` (time-based), `Period` (date-based). All immutable. Parseable with `DateTimeFormatter`. Operations like `plusDays()`, `minusMonths()` return new instances. Use `Instant` for timestamps, `LocalDate` for business dates, `ZonedDateTime` for user-facing times with timezone.
 
 **Q12: What is the effectively-final requirement for lambda captures, and why does Java require it?**
+**Short:** Java requires captured lambda variables to be effectively final because a lambda can outlive its enclosing method.
+
 A variable captured by a lambda must be effectively final — either explicitly `final` or never reassigned after initialization. Java requires this because lambdas can outlive the method that created them (e.g., submitted to a thread pool). If a local variable could be mutated after capture, the lambda might see a stale value (the lambda gets a copy of the primitive/reference, not a live view). Making captured variables final ensures the semantics are clear: the lambda sees the value at capture time, forever. For mutable state, use `AtomicInteger`, `AtomicReference`, or an array of size 1.
 
 **Q13: What is the difference between `Function.andThen()` and `Function.compose()`?**
+**Short:** andThen applies the current function first then the argument; compose applies the argument function first.
+
 `andThen(g)` returns a function that applies `this` first, then `g`: result is `g(f(x))` where `f` is `this`. `compose(g)` returns a function that applies `g` first, then `this`: result is `f(g(x))`. Mnemonic: `andThen` reads left-to-right — "do f, AND THEN do g." `compose` reads right-to-left — mathematical function composition `f ∘ g`. Example: `trim.andThen(toUpperCase)` → trim first, then uppercase. `toUpperCase.compose(trim)` → same result. They differ in which function is "outer": `andThen` makes the argument the outer function; `compose` makes `this` the outer function.
 
 **Q14: Why prefer `IntStream` over `Stream<Integer>` in performance-critical paths?**
+**Short:** IntStream avoids boxing every primitive into a heap-allocated Integer, unlike Stream<Integer>.
+
 `Stream<Integer>` requires boxing every primitive `int` into a heap-allocated `Integer` object. For 1M integers: 1M `Integer` allocations, GC pressure from short-lived objects, and CPU time for boxing/unboxing at every operation. `IntStream` stores elements as bare `int` primitives — no boxing, no heap allocation, cache-friendly. The measured gap varies with JDK version, hardware, and whether escape analysis manages to scalarise the boxes, so treat any single multiplier as a benchmark of that setup rather than a constant; the direction is reliable, the magnitude is not. The standard library provides `IntStream`, `LongStream`, and `DoubleStream` for this reason. Always use `mapToInt()`/`mapToLong()`/`mapToDouble()` to convert to primitive streams when processing numbers.
 
 **Q15: What is the difference between `Optional.of()`, `Optional.ofNullable()`, and `Optional.empty()`, and what are the anti-patterns for `Optional` usage?**
+**Short:** Optional.of() throws on null while ofNullable() wraps null as empty, and calling get() unchecked is the top anti-pattern.
+
 `Optional.of(value)` throws `NullPointerException` if `value` is null — use when you know the value is non-null and want to fail-fast. `Optional.ofNullable(value)` wraps null as `Optional.empty()` — use when the value may legitimately be null. `Optional.empty()` returns the canonical empty instance (a singleton). Common anti-patterns: (1) **Using `Optional.get()` without `isPresent()` check** — throws `NoSuchElementException`, defeating the purpose; use `orElse()`, `orElseGet()`, or `orElseThrow()` instead. (2) **`Optional` as a method parameter** — forces callers to wrap values; use overloading or nullable parameters. (3) **`Optional` as a field** — `Optional` is not `Serializable`, making the class non-serializable; use nullable field with a `getX()` returning `Optional`. (4) **Unnecessary `isPresent()` + `get()`** — use `map()`/`flatMap()` for transformations. The canonical use case for `Optional` is as a return type for a method that may have no result, explicitly communicating the absence to the caller.
 
 **Q16: What do "non-interfering" and "stateless" mean for stream behavioral parameters, and what breaks when you violate them?**
+**Short:** Violating stream non-interference throws ConcurrentModificationException; violating statelessness silently breaks parallel results.
+
 Non-interfering means the lambda must not modify the stream's data source while the pipeline is running; stateless means its result must not depend on state that can change during execution. Violating non-interference on a non-concurrent source is the loud failure: `list.stream().filter(...).forEach(list::remove)` throws `ConcurrentModificationException`, because the spliterator is fail-fast. Mutating the source *before* the terminal operation is legal, since spliterators are late-binding — add to the list after calling `.stream()` but before `.collect()` and the addition is included. Violating statelessness is the quiet failure: a lambda that consults a shared `Set` of already-seen elements returns different results run to run once the stream is parallel, and synchronizing the set does not fix it because the nondeterminism is in the *split order*, not in the data structure. The same family of rules covers `reduce`, whose accumulator must be associative — `(a, b) -> a - b` gives a different answer per run in parallel because the result depends on how the range was split. Practical guidance: never write back into the source, accumulate with a `Collector` rather than a captured mutable collection, and reserve side-effects for `forEach`/`forEachOrdered`, since every other operation is allowed to optimize its behavioral parameter away when the result would not change.
 
 **Q17: Why were default methods added in Java 8, and how does the compiler resolve a class that inherits two conflicting defaults?**
+**Short:** Default methods let an interface add a method without breaking implementors, resolved by three override-precedence rules.
+
 Default methods exist so an interface can gain a method without breaking every existing implementor — `Collection.stream()` could not have shipped otherwise. A `default` method carries a body on the interface; a `static` interface method is a namespaced helper and is not inherited at all, so an implementor must call `Greeter.of(...)`, not a bare `of(...)`. Neither counts toward the single-abstract-method rule, so an interface with defaults can still be a lambda target. When a type inherits the same signature from more than one place the compiler applies three rules in order: (1) a concrete method inherited from a **superclass wins** over any interface default, which is why adding a default to an interface is silently a no-op for classes that already extend something; (2) otherwise the **most specific interface wins** — a default on a sub-interface overrides the one on its super-interface; (3) if neither rule breaks the tie the class is rejected with "inherits unrelated defaults", and you must override the method, optionally delegating with the qualified form `A.super.name()`. Note that defaults give multiple inheritance of *behaviour* only — interfaces still cannot declare instance state, which is what keeps the diamond problem tractable.
 
 ---

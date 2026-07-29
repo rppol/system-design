@@ -628,45 +628,73 @@ stream.parallel().forEach(results::add);  // ArrayList is NOT thread-safe
 ## 12. Interview Questions with Answers
 
 **Q1: What is lazy evaluation in streams, and when does execution actually happen?**
+**Short:** Intermediate stream operations are lazy and only execute once a terminal operation is invoked.
+
 Intermediate operations (`filter`, `map`, `flatMap`, `sorted`, etc.) are lazy — they register a transformation in the pipeline but execute no work. Execution happens when a terminal operation (`collect`, `forEach`, `reduce`, `count`, `findFirst`, etc.) is invoked. At that point, the JVM fuses the registered operations into a traversal over the source — a single pass through the data, applying each operation in sequence per element. Short-circuit terminals (`findFirst`, `limit(n)`) stop the traversal early, so elements after the first match are never processed.
 
 **Q2: What is the difference between `findFirst()` and `findAny()`?**
+**Short:** findFirst always returns the encounter-order-first match; findAny returns whichever match is found first.
+
 Both return an `Optional` of some matching element. `findFirst()` always returns the first element in the stream's *encounter order* (the order determined by the source and any `sorted()`/`ORDERED` characteristic). `findAny()` returns any matching element — in a sequential stream it usually returns the first, but in a parallel stream it returns whichever element is found first by any thread. Use `findAny()` in parallel streams when you don't care which element you get — it avoids the coordination cost of enforcing order, giving better parallelism.
 
 **Q3: Why can't you throw checked exceptions from a lambda in a stream pipeline?**
+**Short:** Stream functional interfaces don't declare checked exceptions, so a lambda can't throw one either.
+
 The functional interfaces (`Predicate`, `Function`, `Consumer`, etc.) used by stream operations do not declare checked exceptions in their single abstract method. A lambda must match the functional interface's signature exactly — if the method doesn't declare the checked exception, neither can the lambda. Workarounds: (1) catch internally and wrap in `RuntimeException`; (2) use a utility method like `sneakyThrow` (Lombok); (3) write a wrapper functional interface that declares the checked exception; (4) prefer `forEach` with explicit try-catch for loops where exceptions propagate naturally.
 
 **Q4: What is the difference between `reduce(identity, BinaryOp)` and `reduce(BinaryOp)` returning `Optional`?**
+**Short:** reduce with an identity returns it on an empty stream; without one it returns an Optional instead.
+
 The two-argument form provides an *identity* value — an element that, combined with any other, returns that other (`0` for addition, `1` for multiplication, `""` for concatenation). If the stream is empty, the identity is returned directly. The one-argument form returns `Optional<T>` because with no identity and an empty stream, there is no meaningful result to return — returning a default (like `null`) would be unsafe. Rule: if you have a valid identity value for your operation, use the two-argument form for simpler code; otherwise use the Optional-returning form and handle the empty case.
 
 **Q5: Explain `Spliterator` and its role in parallel streams.**
+**Short:** A Spliterator splits a stream's source into sub-ranges via trySplit for parallel processing.
+
 `Spliterator` (splittable iterator) is the source contract for streams. It has two key methods: `tryAdvance(Consumer)` processes one element; `trySplit()` attempts to divide the source into two halves for parallel processing. The JVM recursively calls `trySplit()` until sub-ranges are small enough to assign to worker threads. Characteristics flags (`SIZED`, `ORDERED`, `DISTINCT`, etc.) let the stream engine optimize: a `SIZED` source allows balanced splitting; an `ORDERED` source requires `findFirst()` to respect order. ArrayList provides `SIZED + SUBSIZED + ORDERED` — ideal for parallel. `LinkedList`'s spliterator does split, but only by copying successive fixed-size batches of elements into arrays (1024 elements, then 2048, and so on), so the prefixes are unbalanced, it must still walk the chain node by node, and the splits are neither `SIZED` at the source nor `SUBSIZED` — "limited parallelism" in the JDK's own words, not none.
 
 **Q6: What does `collect()` do that `reduce()` cannot?**
+**Short:** collect() safely accumulates into a mutable container per thread; reduce() only folds immutably.
+
 `collect()` can accumulate into a *mutable* container safely in parallel, which `reduce()` cannot do at all. Each worker thread gets its own container (via `Collector.supplier()`), accumulates into it (`Collector.accumulator()`), and partial containers are merged (`Collector.combiner()`). This is correct for parallel streams because no container is shared. `reduce()` is for *immutable accumulation* — the "identity" value is reused across the parallel computation. If the identity is a mutable object (like `ArrayList`), parallel workers all mutate the same instance — a race condition. Use `collect()` for building collections, strings, maps; use `reduce()` for numeric aggregation with an identity value.
 
 **Q7: What happens when you call `.parallel()` on a stream backed by a `LinkedList`?**
+**Short:** Parallelizing a LinkedList stream produces badly balanced splits that are usually slower than sequential.
+
 You get parallelism, but such badly balanced parallelism that it is usually slower than running sequentially. `LinkedList`'s `Spliterator` splits rather than refusing to: `trySplit()` walks the chain copying a *fixed-size batch* of elements into an array (1024, then 2048, growing to a 33,554,432 cap) and hands that prefix off, keeping the unbounded remainder for itself. So the halves are never balanced, every split costs a pointer-chasing traversal plus an array copy, and the prefixes lose the source's size information. The result: work is spread unevenly, one task keeps most of the list, and you pay all the overhead of thread scheduling, task stealing, and result merging for it. Performance is typically worse than sequential. **Rule**: only use `parallelStream()` on collections with efficient splitters: `ArrayList`, arrays, `HashSet`, `TreeSet`, `ConcurrentHashMap`.
 
 **Q8: What is `mapMulti()` (Java 16) and when is it better than `flatMap()`?**
+**Short:** mapMulti pushes elements imperatively without allocating an intermediate Stream per element like flatMap.
+
 `mapMulti(BiConsumer<T, Consumer<R>> mapper)` is an imperative alternative to `flatMap`. For each element, you're given a consumer; call it 0 or more times to push elements downstream. Unlike `flatMap()`, it does not create an intermediate `Stream` per element — the JVM can fuse it more aggressively. Use `mapMulti` when: (1) each element expands to a large number of outputs; (2) the expansion logic is complex imperative code; (3) you want to conditionally emit 0 elements (replaces `flatMap` with `Stream.empty()` or `Stream.ofNullable()`). `flatMap` is still preferred for simple cases — it's more readable.
 
 **Q9: How does `sorted()` affect parallel stream performance?**
+**Short:** sorted() must see every element first, serializing that stage of an otherwise parallel pipeline.
+
 `sorted()` is a fully stateful, ordered operation — it must see *all* elements before emitting the first sorted element. In a parallel stream, this means: all worker threads finish processing, partial results are merged into a single collection, the sort runs on the merged collection, then the sorted result feeds downstream. This effectively serializes the sorted portion of the pipeline. The parallel speedup from upstream stages can be negated by the sort bottleneck. If you need the top-N elements, prefer `reduce(Comparators.min/max)` or collect-then-sort only the result, not the full stream.
 
 **Q10: What is the difference between `takeWhile()` and `filter()` for sorted streams?**
+**Short:** takeWhile short-circuits at the first non-matching element; filter scans the whole ordered stream.
+
 `filter()` tests every element — it scans the entire stream even after the predicate becomes false. `takeWhile()` (Java 9) stops as soon as the predicate returns `false` for the first time — it is short-circuit. For a sorted stream where you want elements satisfying a condition `x < threshold`, `takeWhile(x -> x < threshold)` stops at the first element that exceeds the threshold; `filter(x -> x < threshold)` continues scanning the rest. `takeWhile` is O(k) where k is the matching prefix; `filter` is always O(n). However, `takeWhile` on an unordered stream has nondeterministic behavior — only use it on ordered streams.
 
 **Q11: How do `anyMatch()`, `allMatch()`, and `noneMatch()` short-circuit?**
+**Short:** anyMatch, allMatch, and noneMatch all stop as soon as the result is logically determined.
+
 All three are short-circuit terminal operations. `anyMatch(p)`: returns `true` immediately when the first matching element is found; processes no more elements. `allMatch(p)`: returns `false` immediately when the first non-matching element is found. `noneMatch(p)`: returns `false` immediately when the first matching element is found. On an empty stream: `anyMatch` = `false`, `allMatch` = `true` (vacuously true), `noneMatch` = `true`. These are equivalent to short-circuit `||` / `&&` applied to a sequence — they only evaluate as many elements as needed to determine the answer.
 
 **Q12: What is `Collectors.teeing()` and give a use case?**
+**Short:** Collectors.teeing feeds each element to two collectors at once and merges their results in one pass.
+
 `Collectors.teeing(collector1, collector2, mergeFunction)` (Java 12) sends each element to two collectors simultaneously and combines their results with a merge function — all in a single pass. Use case: compute both count and average in one pass: `stream.collect(Collectors.teeing(Collectors.counting(), Collectors.averagingDouble(v -> v), (count, avg) -> new Stats(count, avg)))`. Without `teeing`, you'd need two separate stream passes or a custom `Collector`. Also useful for split-and-combine: partition into two groups and compute something different for each.
 
 **Q13: How does `Stream.iterate(seed, hasNext, next)` (Java 9) differ from the two-argument form and from `Stream.generate()`?**
+**Short:** The three-argument Stream.iterate is finite and predicate-bounded, unlike the infinite two-argument form.
+
 `Stream.iterate(seed, hasNext, next)` (Java 9) is a **finite** stream equivalent to `for (T t = seed; hasNext.test(t); t = next.apply(t))` — generates values while the predicate returns `true`. `Stream.iterate(0, n -> n < 10, n -> n + 1)` yields 0–9 and terminates. The two-argument form `Stream.iterate(seed, next)` is **infinite** — use `limit()` or `takeWhile()` to bound it. `Stream.generate(Supplier)` is also always **infinite** with no "previous value" concept — each call to the supplier is independent, making it naturally suited for random sequences or polling. Key difference: `iterate` is deterministic and ordered (each value derived from the previous, suitable for sequential integers or walks); `generate` has no inter-call ordering, so parallel `generate` is safe without coordination. Practical rule: `iterate` for mathematical recurrences and index ranges; `generate` for `UUID.randomUUID()`, sampling, or constant factories.
 
 **Q14: What is `Collectors.collectingAndThen()` and what are its two most common production uses?**
+**Short:** collectingAndThen wraps a collector's result with a finisher function inside one collect() call.
+
 `Collectors.collectingAndThen(downstream, finisher)` applies a `downstream` collector then transforms its result with a `finisher` — all in a single `collect()` call. Common use 1 — produce an unmodifiable list (pre-Java 16 pattern):
 
 ```java
@@ -686,12 +714,18 @@ int size = stream.collect(Collectors.collectingAndThen(Collectors.counting(), Lo
 Also useful for converting a collected `Map` to an `ImmutableMap`, or building a value object from aggregated fields in a single pass. In Java 16+, prefer `Stream.toList()` for the immutable-list case.
 
 **Q15: What is `Stream.gather()` and what could you not do before it existed?**
+**Short:** gather() lets you write custom intermediate stream operations, which was impossible before Java 24.
+
 `gather(Gatherer)` (Java 24, JEP 485) is the extension point for writing your own *intermediate* operations, which the Stream API had no way to express before. `Collector` had always let you plug in a custom terminal operation, but the intermediate set was closed — anything the built-ins could not say, such as fixed or sliding windows, a running prefix scan, or an order-preserving concurrent map, forced you out of the pipeline into a loop. A `Gatherer` has the same four-part shape as a `Collector` (initializer, integrator, combiner, finisher), with two differences that matter: the integrator is handed a downstream sink it can push zero, one, or many elements into, and it can return `false` to short-circuit the pipeline, which is what lets a gatherer work on an infinite stream. `java.util.stream.Gatherers` ships `windowFixed`, `windowSliding`, `fold`, `scan`, and `mapConcurrent`.
 
 **Q16: How does `Gatherers.mapConcurrent()` differ from `parallelStream()` for I/O-bound work?**
+**Short:** mapConcurrent runs mappers on bounded virtual threads and preserves order, unlike parallelStream's shared pool.
+
 `mapConcurrent(maxConcurrency, mapper)` runs the mapper on virtual threads with a bounded concurrency limit and preserves encounter order, so blocking inside it is correct rather than a bug. `parallelStream()` submits to the shared `ForkJoinPool.commonPool()`, whose parallelism is sized to CPU count for compute-bound work, so a blocking call inside it parks a carrier thread and starves every other user of that pool. `mapConcurrent` touches the common pool not at all, the `maxConcurrency` argument is an explicit ceiling on in-flight calls (which `parallel()` gives you no way to state), and results are emitted in the original order rather than nondeterministically. Practical rule: `parallel()` for CPU-bound work on a splittable source, `gather(Gatherers.mapConcurrent(n, ...))` for I/O-bound fan-out.
 
 **Q17: Under what four conditions does a parallel stream perform *worse* than sequential?**
+**Short:** Parallel streams underperform on small data, non-splittable sources, stateful ops, or blocking lambdas.
+
 Parallel streams split work across the common `ForkJoinPool` (parallelism = CPU count − 1). They degrade when:
 1. **Small data** (< ~10,000 simple elements) — fork/join overhead (~microseconds per split/merge) dominates the work.
 2. **Non-splittable sources** — `LinkedList`, `Iterator`-backed streams, `BufferedReader.lines()` — the `Spliterator` cannot divide the source efficiently; the work stays on one thread anyway.

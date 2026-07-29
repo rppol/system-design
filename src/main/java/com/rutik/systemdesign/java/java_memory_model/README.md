@@ -500,42 +500,68 @@ A financial system running on a 32-bit legacy JVM had a shared `long balance` fi
 ## 12. Interview Questions with Answers
 
 **Q1: List all the happens-before edges in the JMM.**
+**Short:** The JMM's happens-before edges include program order, monitor unlock/lock, and volatile write/read.
+
 (1) Program order: each action in a thread hb every subsequent action in that thread. (2) Monitor unlock hb subsequent lock of same monitor. (3) Volatile write hb subsequent volatile read of same field. (4) `Thread.start()` hb any action in started thread. (5) Any action in thread hb `Thread.join()` returning. (6) Final field freeze: write to final field in constructor hb constructor completing (freeze action). (7) `Thread.interrupt()` hb interrupted thread detecting interrupt. (8) `LockSupport.unpark(t)` hb park returning in thread t. (9) Default initialization hb constructor. (10) Class `<clinit>` completion hb any thread accessing static fields. (11) Transitivity.
 
 **Q2: Why are `final` fields safe without synchronization after the constructor completes?**
+**Short:** The freeze action publishes a constructor's final field writes to every thread without synchronization.
+
 The JMM defines a "freeze action" for `final` fields: when a constructor completes (without this-escape), all writes to `final` fields in that constructor are frozen and published. Any thread that reads the reference of the fully constructed object is guaranteed to see all final fields at their initialized values — even without any synchronization. This is why immutable objects are thread-safe: all their state is in `final` fields, established before any thread can read them. The guarantee breaks if the constructor publishes `this` before completing — the freeze action hasn't happened yet.
 
 **Q3: What is a data race vs a race condition?**
+**Short:** A data race is an unordered concurrent access to the same variable; a race condition is a logic bug.
+
 A data race is a specific JMM-level violation: two concurrent accesses to the same variable where at least one is a write, and there is no happens-before ordering between them. Data races put the program in undefined behavior territory — the JMM makes no guarantees. A race condition is a logical concurrency bug: the program produces incorrect results due to timing dependencies, even though operations may individually be atomic. Example: two threads both check `if (balance > 0)` and both decrement — each decrement is atomic, but the check-then-act as a whole is not. Race conditions can exist even in perfectly synchronized code (though they're harder to create).
 
 **Q4: What does "sequentially consistent" mean and when does the JMM guarantee it?**
+**Short:** The JMM guarantees sequential consistency only for programs that are free of data races.
+
 Sequential consistency means all threads observe every operation in one single global order that respects each thread's own program order. Concretely: there exists a total ordering of all operations across all threads such that (a) each thread's operations appear in their program order, and (b) each read sees the most recent write in that total order. It's the simplest model to reason about — the program behaves as if all operations happened one at a time in some global order. The JMM guarantees sequential consistency for all programs that are data-race-free (DRF). If a program has data races, the JMM does NOT guarantee sequential consistency — it may produce results that no sequential execution could produce.
 
 **Q5: Why is `volatile long` needed on 32-bit JVMs?**
+**Short:** On 32-bit JVMs a non-volatile long write can tear into two racing 32-bit halves.
+
 The JMM explicitly states that non-volatile reads and writes of `long` and `double` fields on 32-bit platforms can be treated as two separate 32-bit operations. This means a 64-bit write from Thread A could be split: Thread B reads the high 32 bits from the new value and the low 32 bits from the old value — producing a completely incorrect 64-bit result ("word tear"). `volatile long` is required to guarantee atomicity of 64-bit operations. On 64-bit x86, non-volatile long is atomically written by hardware (single 64-bit MOV), but this is not a JMM guarantee and should not be relied upon for portability.
 
 **Q6: Can `final` fields be observed in inconsistent state? Explain the `this`-escape caveat.**
+**Short:** Publishing this before the constructor finishes lets other threads see zeroed final fields.
+
 Yes — if the constructor publishes `this` before completing. The freeze action for `final` fields occurs when the constructor exits normally. If the constructor calls a method on another object (or registers `this` with an observer) before setting all `final` fields, that other object can see `final` fields at their default values (0 or null). This is called "this-escape from constructor." Example: `EventListener(EventBus bus) { bus.register(this); this.id = 42; }` — any listener receiving this reference before the constructor finishes sees `id == 0`. Fix: use a static factory method that constructs the object completely before publishing.
 
 **Q7: What is the freeze action?**
+**Short:** The freeze action creates a happens-before edge from a constructor's final field writes to later reads.
+
 The freeze action is the JMM mechanism for final field safety. It occurs at the end of the constructor (or just before it exits, assuming no this-escape). The freeze action creates a happens-before edge from all writes to `final` fields in the constructor to any subsequent read of those fields by any thread. This is what makes final fields safe without synchronization: after the freeze action, the initialized values of final fields are visible to all threads. Normal (non-final) fields in the same constructor are NOT covered by the freeze action.
 
 **Q8: What is the difference between memory visibility and instruction ordering?**
+**Short:** Visibility governs whether a write reaches another thread; ordering governs instruction reordering.
+
 Memory visibility: whether a write by one thread is visible to a read by another thread. Caused by CPU caches — a write may be buffered in the writer's cache and not flushed to shared memory. Instruction ordering: the order in which a thread executes its own instructions — the JIT compiler and CPU can reorder instructions for optimization. Both problems are addressed by happens-before. A happens-before edge provides both: it ensures (1) all writes up to the edge point are flushed to shared memory (visibility), and (2) all those writes appear in order relative to the synchronized read (ordering). `volatile` provides both; the x86 TSO memory model provides strong ordering but weak visibility guarantees without barriers.
 
 **Q9: What does `synchronized` guarantee beyond mutual exclusion?**
+**Short:** synchronized guarantees mutual exclusion, visibility on unlock/lock, and acquire/release ordering.
+
 `synchronized` guarantees three things: (1) Mutual exclusion — only one thread holds the monitor at a time. (2) Visibility — all writes performed before releasing the lock are visible to any thread that subsequently acquires the same lock. This is the monitor unlock → subsequent lock hb edge. (3) Ordering — actions before the monitor exit are not reordered to appear after it, and actions after monitor entry are not reordered to appear before it (acquire/release semantics). So `synchronized` also acts as a memory barrier: reading a synchronized field is guaranteed to see the most recent synchronized write, even on weakly-ordered architectures.
 
 **Q10: What is `VarHandle` and how does it provide finer-grained memory ordering than `volatile`?**
+**Short:** VarHandle exposes plain, opaque, acquire/release, and volatile modes for pay-as-you-go ordering.
+
 `VarHandle` (Java 9, `java.lang.invoke.VarHandle`) provides field access with explicit memory ordering modes, so you pay only for the barrier you need. You obtain one from `MethodHandles.lookup().findVarHandle(Owner.class, "field", Type.class)`. The modes: (1) Plain — no ordering guarantees, same as non-volatile access. (2) Opaque — no cross-variable ordering but each individual access is atomic. (3) Acquire/Release — one-way barriers: acquire (read) sees all writes by the release (write), but without the full StoreLoad barrier of volatile. (4) Volatile — full volatile semantics (most expensive). This lets lock-free algorithms pay only for the barriers they actually need — acquire/release is sufficient for a producer-consumer handoff but much cheaper than full volatile StoreLoad on most architectures.
 
 **Q11: What are the safe publication idioms in order of preference?**
+**Short:** Safe publication ranks static final fields, then final fields, then volatile, then locking, then atomics.
+
 (1) Static field initialized in declaration (`static final Foo f = new Foo()`) — class `<clinit>` provides hb for all threads, zero runtime overhead. (2) `final` fields in constructor — freeze action guarantees visibility; works for immutable objects. (3) `volatile` field — volatile write hb subsequent read; suitable for mutable references. (4) Properly locked field — monitor unlock hb subsequent lock; necessary when multiple related fields must be consistent. (5) `AtomicReference` — CAS-based, `volatile` semantics on the reference. Order reflects preference: most restrictive (static final) provides strongest guarantees and is hardest to misuse.
 
 **Q12: What is the StoreLoad barrier and why is volatile write the most expensive operation?**
+**Short:** A volatile write needs a StoreLoad barrier, the only one that blocks store-load reordering.
+
 The `StoreLoad` barrier ensures that all stores before the barrier complete and become visible to all processors before any subsequent load executes. It is the only barrier that prevents store-load reordering — the most significant optimization a processor can do. On x86, `StoreLoad` requires an `MFENCE` or a locked instruction, which forces a full memory serialization point — all store buffers are flushed. This is why volatile write is expensive: it requires `StoreStore` (flush preceding stores) + `StoreLoad` (flush this store and prevent subsequent loads from reordering before it). Volatile read requires only `LoadLoad` + `LoadStore`, which are effectively free on x86.
 
 **Q13: What is double-checked locking (DCL), what was the original bug, and how does `volatile` fix it?**
+**Short:** Without volatile, double-checked locking can publish a reference before its object finishes construction.
+
 DCL is a lazy-initialization pattern that checks a null condition twice, to avoid synchronization overhead on every access after initialization. It checks once without locking (fast path) and once with a lock held (slow path for initialization), as shown below:
 
 ```java
@@ -559,18 +585,28 @@ private static volatile Singleton instance;
 Without `volatile`, the JIT/CPU can reorder `instance = new Singleton()` so the reference is written before the constructor finishes. Another thread sees a non-null reference to a partially constructed object and uses it. With `volatile`, the write to `instance` has a StoreLoad barrier — the constructor must fully complete before the reference is published. Modern alternative: use `static final` holder idiom or `enum` singleton — both provide correct lazy initialization without `volatile`.
 
 **Q14: How does `final` field freezing provide visibility guarantees, and how does it differ from `volatile`?**
+**Short:** Final-field freezing publishes constructor writes for free; volatile adds a runtime barrier on every access.
+
 The JMM's "freeze action" for `final` fields: when an object's constructor completes normally, a JMM freeze action fires for every `final` field written in that constructor. Any thread that obtains a reference to the fully-constructed object is guaranteed to see the `final` field values as written — this is a strong publication guarantee with **zero runtime barrier cost** after construction. Contrast with `volatile`: `volatile` guarantees visibility on every read and write (runtime barrier), suitable for fields that change after construction. `final` provides stronger guarantees but only for fields set once in the constructor. Caveat: the guarantee only holds if `this` does not escape the constructor — if the constructor passes `this` to another thread, the freeze action has not yet fired when that thread accesses the `final` fields.
 
 **Q15: What is `jcstress` and what category of JMM violations does it catch that JUnit tests cannot?**
+**Short:** jcstress stress-tests concurrent code across interleavings to catch JMM violations JUnit can't reach.
+
 `jcstress` (Java Concurrency Stress Test) is an OpenJDK harness for testing memory model outcomes. It runs tests in tight concurrent loops on many CPU cores with various thread interleavings to probe for JMM violations. Unlike JUnit tests, which run sequentially or with controlled `Thread.join()` synchronization, `jcstress` instruments the runtime to observe all possible outcomes of racy concurrent accesses — including outcomes that only manifest on weakly ordered architectures (ARM, Power) but not on x86 (which enforces strong ordering beyond what the JMM requires). It categorises outcomes as: `ACCEPTABLE` (always valid), `FORBIDDEN` (never valid under JMM), `INTERESTING` (valid but surprising). Key uses: (1) Verify that a lock-free data structure is correct under all possible execution orders. (2) Prove that a specific use of `volatile` or `VarHandle` establishes the required happens-before edge. (3) Detect torn reads of `long`/`double` on 32-bit platforms.
 
 **Q16: Why doesn't `volatile` make `count++` thread-safe, and what fixes it?**
+**Short:** volatile only guarantees visibility, not atomicity, so a racing count++ can still lose an increment.
+
 `volatile` only guarantees visibility and ordering for individual reads and writes — it does not make a compound read-modify-write operation atomic. `count++` is actually three separate steps: read `count`, add 1, write the result back; two threads can both read the same value before either writes, so one increment is silently lost even though every individual read and write of `count` was immediately visible to both threads. This is exactly why `volatile` is correct for a single-writer flag or reference but wrong for a shared counter or any check-then-act sequence. Fix: use `AtomicInteger`/`AtomicLong` (CAS-based atomicity), `LongAdder` for high-contention counters, or wrap the increment in `synchronized`.
 
 **Q17: What does "no out-of-thin-air values" mean in the JMM, and why does it matter even for racy code?**
+**Short:** The JMM bans out-of-thin-air values, so a read can only ever see a value some thread actually wrote.
+
 The JMM guarantees a read can never observe a value that no thread ever wrote — no value can be conjured from nowhere, even under a data race. This matters because without it, an aggressively optimizing JIT or CPU could justify almost any reordering or speculative result as "technically allowed" once a race exists; the out-of-thin-air rule draws a hard boundary so racy, undefined-looking executions still remain traceable to real writes somewhere in the program. A classic example: two threads race to write different constants into the same `int` field — the JMM permits the reader to see either constant, but never a third value neither thread ever assigned, and never a mix of their bits, because reads and writes of `int` (and every type narrower than 64 bits, plus references) are specified as atomic even without `volatile`. The one exception the JMM carves out is `long` and `double`, whose non-volatile accesses may be split into two 32-bit halves — which is exactly the word-tear hazard covered in Section 6. This guarantee doesn't make data races safe to write — it only stops the runtime from making the bug arbitrarily worse — so still eliminate the race with `volatile`, locks, or atomics rather than relying on this bound.
 
 **Q18: Why can code with an unsynchronized read/write "work fine" on x86 but fail on ARM?**
+**Short:** x86's strong memory model can mask data races that a weaker model like ARM's exposes.
+
 x86 uses a strong memory model (Total Store Order) that preserves most store/load ordering, so many JMM-violating data races still happen to produce the expected result on that hardware. ARM and POWER use weaker memory models that aggressively reorder independent loads and stores unless an explicit memory barrier forbids it, so the same unsynchronized code can expose stale reads or reordered writes that x86 was silently hiding. This is why concurrency bugs are notorious for passing code review, passing tests on a developer's x86 laptop, and then failing intermittently on ARM-based cloud instances or Android phones. Practical guidance: never rely on "it works on my machine" for concurrent code — write to the JMM specification (`volatile`/`synchronized`/atomics) rather than to one architecture's observed behavior, and use `jcstress` or test on ARM hardware to catch model-dependent bugs before production.
 
 ---

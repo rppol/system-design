@@ -626,45 +626,73 @@ After adding a field to a serialized class without updating `serialVersionUID`, 
 ## 12. Interview Questions with Answers
 
 **Q1: When should you use checked vs unchecked exceptions?**
+**Short:** Checked exceptions suit recoverable conditions; unchecked ones suit programming errors and unrecoverable failures.
+
 Use a checked exception when the caller can reasonably be expected to recover, and an unchecked one for programming errors and failures nobody can recover from. Checked exceptions signal *expected, recoverable* conditions where the caller can react differently: `FileNotFoundException` (caller may create the file), `IOException` (caller may retry), `ParseException` (caller may use a default). Unchecked exceptions signal programming errors or unrecoverable failures: `NullPointerException` (caller passed null where not allowed), `IllegalArgumentException` (bad input), `IllegalStateException` (wrong lifecycle). The controversy: many modern frameworks (Spring) prefer unchecked because checked exceptions pollute APIs and callers often just re-throw. Effective Java: "use checked exceptions for conditions from which the caller can reasonably be expected to recover."
 
 **Q2: What is exception chaining and why is it important?**
+**Short:** Exception chaining wraps a new exception around the original cause so the root-cause stack trace is preserved.
+
 Exception chaining preserves the original cause when wrapping exceptions: `new ServiceException("DB failed", originalCause)`. This is critical because: (1) the catch block at a higher level sees a meaningful high-level exception; (2) the stack trace includes both the wrapper's context AND the root cause, making diagnosis possible. Without chaining, catching a low-level `SQLException` and rethrowing `new ServiceException("failed")` loses the original stack trace — you only see where the wrapping occurred, not the actual DB error.
 
 **Q3: What happens if a `finally` block throws an exception?**
+**Short:** An exception thrown in a finally block replaces the try block's exception, which is silently discarded.
+
 The exception thrown in `finally` *replaces* the original exception from the `try` block. The original exception is silently lost — it's not added as suppressed (unlike `try-with-resources`). This is a classic bug in pre-Java 7 code that used try-finally for resource cleanup. `try-with-resources` solves this correctly: the exception from the `try` body is primary, and exceptions from `close()` are added as suppressed exceptions via `Throwable.addSuppressed()`.
 
 **Q4: How does `try-with-resources` handle multiple resources and their exceptions?**
+**Short:** try-with-resources closes resources in LIFO order, keeping the try body's exception primary and closing exceptions suppressed.
+
 Resources are closed in LIFO (reverse declaration) order. If the `try` body throws exception E1, resources are closed. If closing a resource throws exception E2, E1 is the primary exception and E2 is added as a suppressed exception (`E1.getSuppressed()` returns `[E2]`). If multiple resources' `close()` methods throw, each close exception is added as suppressed in close order. The `try` body exception always takes priority — this preserves the meaningful original error.
 
 **Q5: What is a suppressed exception?**
+**Short:** A suppressed exception is one thrown during cleanup while another exception was already propagating from the try block.
+
 A suppressed exception is one that was thrown during the cleanup phase (e.g., `close()` in `try-with-resources`) when another exception was already in flight from the `try` body. Java 7 added `Throwable.addSuppressed(Throwable)` and `Throwable.getSuppressed()`. The primary exception propagates; suppressed exceptions are attached to it. Accessing them: `catch (IOException e) { Throwable[] suppressed = e.getSuppressed(); }`. Logging frameworks should log suppressed exceptions too.
 
 **Q6: Why is Java serialization a security risk?**
+**Short:** Java deserialization can execute arbitrary code because readObject() runs attacker-controlled gadget chains.
+
 Deserialization invokes `readObject()` on each object being deserialized, which can execute arbitrary Java code. Attackers craft "gadget chains" — sequences of classes in common libraries (Apache Commons Collections, Spring, etc.) whose `readObject()` methods, when chained together, execute shell commands. This has affected WebLogic, Jenkins, JBoss, Apache Camel. The attack doesn't require any special privileges — just the ability to send bytes to `ObjectInputStream.readObject()`. Fix: use JSON/protobuf; if Java serialization is required, use `ObjectInputFilter` allowlisting.
 
 **Q7: What does `transient` do?**
+**Short:** The transient keyword excludes a field from serialization, so it gets its default value on deserialization.
+
 `transient` marks a field that should be excluded from serialization. When the object is serialized, transient fields are not written; when deserialized, they get their default value (null for objects, 0 for primitives, false for boolean). Use for: sensitive data (passwords), derived values (cache fields), non-serializable objects (threads, streams). You can provide `readObject(ObjectInputStream ois)` to reinitialize transient fields after deserialization.
 
 **Q8: How does `readResolve()` work for singleton deserialization?**
+**Short:** readResolve() lets a deserialized object be replaced with an existing instance, preserving singleton identity.
+
 After an object is deserialized, if it defines a `readResolve()` method, the JVM calls it and uses the returned object instead of the deserialized one. For singletons, `readResolve()` returns the existing singleton instance — the deserialized copy is discarded by GC. This prevents deserialization from breaking the singleton invariant. The method signature must be `private Object readResolve()`. Better approach: use enum-based singleton (Effective Java Item 3) — the JVM handles enum serialization correctly by design, using the name to look up the existing constant.
 
 **Q9: What is the Decorator pattern in Java I/O, and give an example?**
+**Short:** Java I/O implements the Decorator pattern, wrapping streams like BufferedInputStream to add behavior at runtime.
+
 The Decorator pattern adds behavior to objects by wrapping them in objects with the same interface. Java I/O is built on it: `InputStream` is the component; `FileInputStream` is the concrete component; `BufferedInputStream`, `DataInputStream`, `CipherInputStream` are decorators that each wrap an `InputStream` and add a capability (buffering, primitive reading, encryption). Example: `new BufferedReader(new InputStreamReader(new FileInputStream("file.txt"), "UTF-8"))` — 3 decorators stacked to give buffered, charset-decoded, file-backed character reading.
 
 **Q10: When would you use NIO.2 `WatchService`?**
+**Short:** WatchService gives OS-level filesystem change notifications, avoiding the overhead of polling for changes.
+
 `WatchService` provides OS-level filesystem change notifications (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) — more efficient than polling. Use it for: hot-reloading configuration files without restart; monitoring upload directories for new files; log rotation detection; build tool file watchers (IDE hot reload). Example: `path.register(watcher, ENTRY_CREATE, ENTRY_MODIFY)` then `watcher.take()` blocks until a change, processes events, resets the key, and loops.
 
 **Q11: What is the difference between `Files.copy()` and manually copying with streams?**
+**Short:** Files.copy() uses a kernel-space copy on Linux, avoiding the user-space buffering of manual stream copying.
+
 `Files.copy(src, dst, REPLACE_EXISTING)` is the idiomatic NIO.2 copy. On Linux the JDK implements it with a native kernel-space copy that prefers `copy_file_range(2)` and falls back to `sendfile(2)`, so the bytes never enter the JVM's address space at all. Manual stream copy: `while ((n = in.read(buf)) != -1) out.write(buf, 0, n)` — data goes through user-space buffer (typically 8KB). `Files.copy()` is also correct with respect to attributes, exceptions, and resource cleanup. Always prefer `Files.copy()` unless you need to transform data during the copy.
 
 **Q12: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
+**Short:** Exceptions thrown inside a submit()ed task are captured in the Future and stay invisible unless get() is called.
+
 A task submitted with `submit()` never lets its exception escape: `FutureTask.run()` catches the throwable and stores it in the `Future`, so if nobody calls `Future.get()` the failure is invisible. The fix depends on which entry point you used. With `submit()` there are two options: call `Future.get()` and handle the `ExecutionException` (its `getCause()` is the original), or subclass `ThreadPoolExecutor` and override `afterExecute(Runnable, Throwable)`, unwrapping the `Future` there — `afterExecute` receives a `null` throwable for submitted tasks precisely because the exception is inside the future. With `execute(Runnable)` the throwable does escape the worker thread, so `Thread.UncaughtExceptionHandler` (installed per-pool via a custom `ThreadFactory`, or globally via `Thread.setDefaultUncaughtExceptionHandler`) fires normally. The trap worth remembering for interviews: an `UncaughtExceptionHandler` on a pool whose tasks are all `submit()`ed will never fire once, and the team concludes the pool is healthy.
 
 **Q13: What is a memory-mapped file and when would you use `FileChannel.map()`?**
+**Short:** A memory-mapped file maps file bytes into the process's address space via FileChannel.map(), enabling zero-copy access.
+
 A memory-mapped file maps a region of a file into the process's virtual address space via `FileChannel.map()`, returning a `MappedByteBuffer`. The OS manages paging: reading a byte triggers a page fault that loads the 4KB OS page from disk into memory. No explicit `read()` calls needed — the buffer is accessed like a byte array. Benefits: (1) Zero-copy read — no user-space buffer, data goes from OS page cache to application directly. (2) Random access: seeking to position N is O(1) — no stream seeking needed. (3) Shared across processes — multiple JVMs mapping the same file share the OS page cache. Use when: parsing large binary files (log files, database files), implementing file-backed caches, random access to large data sets. Two limitations: the `size` argument must fit in an `int` (`Integer.MAX_VALUE`), because `ByteBuffer` indexes with an int, so a file over 2GB needs several mappings at successive offsets; and a `MappedByteBuffer` cannot be explicitly unmapped, so the mapping (and on Windows, the file lock) survives until GC collects the buffer. Java 22 added the fix for both: `channel.map(mode, offset, size, arena)` returns a `MemorySegment` whose mapping is torn down deterministically when the `Arena` closes, and it is not limited to `Integer.MAX_VALUE`.
 
 **Q14: What happens when `try`, `catch`, and `finally` all throw exceptions, and which one propagates?**
+**Short:** A finally block's exception silently discards exceptions from both the try and catch blocks unless explicitly suppressed.
+
 When `finally` throws an exception, it **suppresses** any exception from `try` or `catch` — the `finally` exception propagates and the others are silently discarded. This is a particularly dangerous failure mode: the original exception that caused the `catch` block to execute is lost:
 
 ```java
@@ -691,9 +719,13 @@ try {
 `try-with-resources` (Java 7) handles this correctly: if both the body and `close()` throw, the close exception is added as a suppressed exception via `Throwable.addSuppressed()` — the primary exception propagates and nothing is lost.
 
 **Q15: What is serialization `serialVersionUID` and what happens when it is absent or mismatched?**
+**Short:** serialVersionUID identifies a serializable class's version; a mismatch on deserialization throws InvalidClassException.
+
 `serialVersionUID` is a 64-bit long stored in the serialized byte stream that identifies the version of the class used to serialize the object. On deserialization, the JVM compares the stream's UID with the class's UID; a mismatch throws `InvalidClassException`. When `serialVersionUID` is absent, the JVM computes a default UID from the class's structure (fields, methods, access modifiers) via a SHA-1-based algorithm. Any structural change (adding a field, renaming a method) changes the computed UID, breaking deserialization of previously serialized data. Two failure modes: (1) **Unintentional break** — adding a field to a class without declaring `serialVersionUID` silently breaks deserialization across deploys. (2) **Declared UID mismatch** — deliberately changing it signals an incompatible version change. Best practice: always declare `private static final long serialVersionUID = 1L;` in all `Serializable` classes, increment it manually only for truly incompatible structural changes.
 
 **Q16: What is the default charset on a modern JDK, and where does it still not apply?**
+**Short:** Since Java 18 (JEP 400), Charset.defaultCharset() is UTF-8 everywhere, but System.out still uses the console's charset.
+
 Since Java 18 (JEP 400) `Charset.defaultCharset()` is UTF-8 on every platform, independent of the OS locale. Before that it was derived from the locale, which is why the same code read a file correctly on a developer laptop and produced mojibake in a `LANG=C` container. The locale-derived charset is still readable via the `native.encoding` property (Java 17+), and `-Dfile.encoding=COMPAT` restores the old behaviour as a migration escape hatch. The change reaches every API that takes the default charset implicitly: `FileReader`, `FileWriter`, `InputStreamReader`, `PrintStream`, `Scanner`, `Formatter`. It does **not** reach `Files.readString`/`Files.newBufferedReader`/`Files.lines`, which always specified UTF-8 anyway. The one place it still does not apply is the console: `System.out` and `System.err` encode with the terminal's charset (`stdout.encoding`/`stderr.encoding`), so a program can write valid UTF-8 to disk and still print question marks to a Windows console — which is why you diagnose encoding bugs from the bytes on disk, never from console output. The durable habit is to name `StandardCharsets.UTF_8` explicitly at every boundary you control.
 
 ---

@@ -583,39 +583,63 @@ A team set `maximumPoolSize=100`, reasoning from their *application* server's co
 ## 12. Interview Questions with Answers
 
 **Q1: Why use `PreparedStatement` over `Statement`?**
+**Short:** PreparedStatement prevents SQL injection, enables plan caching, and handles type conversion safely.
+
 Three reasons: (1) SQL injection prevention — parameters are bound separately and never interpreted as SQL, so `' OR 1=1 --` is treated as a literal string value. (2) Server-side query plan caching — the DB parses and optimizes the parameterized query once and reuses the plan for all subsequent executions with different parameter values. For a query executed 1000 times/second, this saves 1000 parse cycles/second. (3) Type safety — `setString()`, `setInt()`, `setBigDecimal()` handle proper type conversion and escaping; string concatenation in `Statement` is error-prone.
 
 **Q2: Does using `PreparedStatement` automatically give you a server-side cached query plan?**
+**Short:** No, server-side plan caching is a driver-specific setting, not a guarantee of PreparedStatement itself.
+
 No — a `PreparedStatement` is a client-side API object, and whether it ever becomes a server-side prepared statement is a driver setting. PostgreSQL's pgjdbc defaults `prepareThreshold` to 5, so the identical SQL text must execute five times on the *same physical connection* before the driver issues a `PREPARE`; below that it sends the query with inline parameters each time (still injection-safe, but re-planned). MySQL's Connector/J does not use server-side prepares at all unless `useServerPrepStmts=true`, and its client-side statement cache needs `cachePrepStmts=true` with `prepStmtCacheSize`. HikariCP does no statement caching of its own by design, so these are driver properties you pass through the `DataSource`. Two things silently defeat the cache: a short `maxLifetime` that recycles connections before they warm up, and dynamically built SQL such as an `IN (?,?,?)` list whose placeholder count varies per call, which is a distinct statement text every time. The injection-safety benefit of `PreparedStatement` is unconditional; the performance benefit is not.
 
 **Q3: What is connection pool exhaustion and how do you detect it?**
+**Short:** Pool exhaustion happens when every connection is checked out, so new borrowers block until timeout.
+
 Pool exhaustion is the state where every pooled connection is checked out, so new borrowers block at `getConnection()` and eventually fail rather than run. They block until `connectionTimeout` is exceeded, then get a `java.sql.SQLTransientConnectionException` ("Connection is not available, request timed out after Nms"). Detection: (1) HikariCP `leakDetectionThreshold` logs a warning if a connection is held longer than the threshold. (2) Monitor `HikariPoolMXBean.getThreadsAwaitingConnection()` — should always be 0. (3) Application latency spikes to exactly `connectionTimeout` duration. Root causes: unclosed connections (`try-with-resources` prevents this), long-running transactions holding connections, pool sized too small for load.
 
 **Q4: Describe the 4 transaction isolation levels and their anomalies.**
+**Short:** Each isolation level from READ_UNCOMMITTED to SERIALIZABLE prevents one more read anomaly than the last.
+
 READ_UNCOMMITTED: allows dirty reads (seeing uncommitted data), non-repeatable reads, and phantom reads. Almost never used. READ_COMMITTED (PostgreSQL, Oracle default): prevents dirty reads; allows non-repeatable reads and phantom reads. Reads only see committed data. REPEATABLE_READ (MySQL InnoDB default): prevents dirty reads and non-repeatable reads; allows phantom reads in standard SQL (MySQL's InnoDB prevents them too with gap locks). A snapshot is taken at transaction start. SERIALIZABLE: prevents all anomalies; transactions appear to execute serially. Uses range locks/predicate locks; lowest throughput; highest deadlock risk.
 
 **Q5: What is the HikariCP recommended pool size formula?**
+**Short:** HikariCP recommends sizing the pool at (core count times 2) plus effective spindle count.
+
 `connections = (core_count * 2) + effective_spindle_count`, where `core_count` and the spindle count describe the **database** server, not the application server. For a 4-core database host on SSD storage (1 spindle equivalent): 4×2 + 1 = 9 connections. This is much smaller than most teams assume, and the fact that no term references application threads is the point. The reasoning: more connections than the database has cores creates contention on the DB server — each connection competes for DB CPU time, and the overhead of managing many connections outweighs the parallelism benefit. Start with this formula and tune based on `pg_stat_activity` or equivalent monitoring. Two consequences teams miss: the answer is a budget for every client of that database put together, so with N application instances each pool gets roughly `formula / N`; and it must also stay under `max_connections` minus the reserved superuser slots, which is a separate and harder ceiling.
 
 **Q6: How do you stream large result sets without OOM?**
+**Short:** Streaming large result sets requires disabling auto-commit and setting a bounded server-side fetch size.
+
 MySQL: create `Statement` with `TYPE_FORWARD_ONLY + CONCUR_READ_ONLY`, then `stmt.setFetchSize(Integer.MIN_VALUE)` — this magic value enables streaming mode where rows are delivered one at a time from the server. PostgreSQL: disable autoCommit (`conn.setAutoCommit(false)`) then `ps.setFetchSize(1000)` — PostgreSQL uses a server-side cursor, delivering results in 1000-row batches. Both approaches keep memory at O(fetchSize) rows rather than O(total rows). Trade-off: the transaction/connection must stay open for the duration of iteration; don't stream inside a short-lived connection from a pool without ensuring the connection outlives the iteration.
 
 **Q7: What happens if you forget to close a `Connection`?**
+**Short:** An unclosed Connection never returns to the pool, eventually exhausting it and timing out new requests.
+
 If not using `try-with-resources`: the `Connection` is never returned to the pool (if using HikariCP) or the TCP socket to the DB is never closed. Pool consequence: the connection is "leaked" — counted as active, never recycled. After enough leaks, the pool is exhausted and all new requests time out. TCP socket consequence: the OS eventually closes the socket via TCP keepalive (hours), but the pool doesn't know — it still counts the connection as in-use. `HikariCP.setLeakDetectionThreshold(2000)` logs a stack trace if a connection is held > 2 seconds, pointing to the offending code.
 
 **Q8: What are distributed transactions (XA) and when do you need them?**
+**Short:** XA transactions use two-phase commit to atomically commit or roll back across multiple resources.
+
 XA transactions coordinate a commit/rollback across multiple transactional resources (two databases, a database and a JMS queue) atomically. They use a two-phase commit (2PC) protocol: (1) Prepare phase — coordinator asks all resources if they can commit; (2) Commit phase — if all say yes, coordinator tells all to commit. In Java, implemented via `javax.transaction.xa.XAResource` (a Java SE package, in the `java.transaction.xa` module), `javax.sql.XADataSource`, and a JTA transaction manager such as Narayana or Atomikos. When needed: orders must be both saved to DB AND published to MQ atomically (both or neither). Cost: 2PC adds latency (two round trips) and complexity; blocked coordinator causes all resources to wait (heuristic failure). Modern alternatives: saga pattern (compensating transactions), outbox pattern (event stored in same DB as data, then forwarded by CDC).
 
 **Q9: How does `executeBatch()` differ from individual `executeUpdate()` calls in terms of performance?**
+**Short:** executeBatch sends many statements in one round trip, while individual calls pay a round trip each.
+
 `executeBatch()` sends all accumulated statements in one or a few network round trips to the DB server, which processes them in bulk. Individual `executeUpdate()` sends one statement per round trip — N inserts = N round trips. Network latency dominates: at 1ms round-trip time, 1000 individual inserts take 1000ms minimum; 1000 inserts in one batch take ~1ms + DB processing time. Additionally, the DB may optimize the batch internally (single WAL write for the batch instead of N separate WAL writes). The `BatchUpdateException` complicates error handling — `getUpdateCounts()` shows which rows in the batch succeeded before failure, enabling selective retry.
 
 **Q10: What is `Savepoint` and how does it differ from a regular rollback?**
+**Short:** A Savepoint lets you roll back only the work done after it, keeping earlier work in the transaction.
+
 A `Savepoint` marks a point within a transaction to which you can partially roll back. `conn.rollback()` undoes ALL work since `setAutoCommit(false)`. `conn.rollback(savepoint)` undoes work done AFTER the savepoint but keeps work done before it. Use savepoints when a transaction has a main critical path plus optional enrichment steps — if enrichment fails, roll back only the enrichment and commit the main path. Example: save an order (critical), try to add loyalty points (optional). If loyalty service fails, rollback to the savepoint (undo the loyalty points insert), then commit the order. Savepoints are part of the same database transaction and do not release any locks.
 
 **Q11: What `ResultSet` type should you use for a standard OLTP query?**
+**Short:** A standard OLTP query should use the default TYPE_FORWARD_ONLY, CONCUR_READ_ONLY result set.
+
 `TYPE_FORWARD_ONLY` (default) with `CONCUR_READ_ONLY` — it is the fastest and most efficient. Forward-only means you can only call `next()` — no `previous()`, `absolute()`, or `relative()`. Read-only means no `updateRow()` or `insertRow()`. The JDBC driver can use a server-side cursor or buffer efficiently without supporting bidirectional navigation. `TYPE_SCROLL_INSENSITIVE` is needed only if you need random access within the result set (rare for OLTP). `CONCUR_UPDATABLE` is needed for `ResultSet`-based updates (almost never used in modern code — use separate UPDATE statements).
 
 **Q12: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
+**Short:** Each stricter isolation level trades more locking overhead for preventing one more concurrency anomaly.
+
 Each level prevents one more anomaly than the one below it, and pays for that with more locking and lower concurrency.
 
 | Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Locking overhead |
@@ -628,6 +652,8 @@ Each level prevents one more anomaly than the one below it, and pays for that wi
 *InnoDB's MVCC prevents most phantom reads in `REPEATABLE_READ` via gap locks. Practical rule: start with `READ_COMMITTED` for OLTP; escalate to `REPEATABLE_READ` if your service reads a value and writes a decision based on it in the same transaction (non-repeatable-read anomaly). Only use `SERIALIZABLE` for financial audit or reporting queries where phantom rows would produce incorrect totals.
 
 **Q13: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
+**Short:** HikariCP prevents dirty connections by rolling back and resetting autoCommit before reuse.
+
 A dirty connection is one returned to the pool with uncommitted transaction state — `autoCommit=false` and an open transaction. The next borrower inherits that transaction context and may see or commit data it did not intend to. HikariCP prevents this in two ways: (1) on connection return it calls `rollback()` if `autoCommit=false`, discarding any uncommitted work; (2) it resets `autoCommit` to the configured pool default before making the connection available. The broken pattern:
 
 ```java
@@ -653,6 +679,8 @@ try {
 ```
 
 **Q14: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
+**Short:** SKIP LOCKED turns a table into a queue by letting workers claim only unlocked rows without blocking.
+
 It turns a table into a competing-consumer queue by letting each worker lock a disjoint batch of rows without ever waiting on another worker. A plain `FOR UPDATE` acquires exclusive row locks and blocks; `SKIP LOCKED` (PostgreSQL, MySQL 8+) extends this: instead of blocking on locked rows, the statement skips them and returns only unlocked rows. Multiple competing consumers can run the same query concurrently — each gets a disjoint set of rows. Pattern:
 
 ```sql
@@ -672,6 +700,8 @@ COMMIT;
 This gives at-least-once delivery semantics (a failed/crashed consumer never commits, so the rows become visible to the next consumer). Throughput scales linearly with concurrent consumers up to the database connection limit.
 
 **Q15: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
+**Short:** RETURN_GENERATED_KEYS fetches the new primary key in the same round trip as the insert itself.
+
 It returns the generated primary key in the same network round trip as the `INSERT`, where a follow-up SELECT costs a second one. The driver implements it by adding a `RETURNING` clause or using a protocol-level mechanism, depending on the database. A follow-up `SELECT LAST_INSERT_ID()` (MySQL) or `SELECT currval()` (PostgreSQL) is a second round trip and has a TOCTOU hazard in some configurations (scoped per-session in MySQL, but worth avoiding). Usage:
 
 ```java
@@ -692,6 +722,8 @@ try (PreparedStatement ps = conn.prepareStatement(
 The `getGeneratedKeys()` `ResultSet` is a resource that must be closed explicitly or the underlying cursor leaks.
 
 **Q16: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
+**Short:** setFetchSize pages a large result set instead of buffering the whole thing in the client's heap.
+
 By default, most JDBC drivers buffer the entire `ResultSet` in the client JVM heap. For a query returning 1M rows, this can OOM the process. `stmt.setFetchSize(1000)` instructs the driver to fetch rows in pages of 1,000. PostgreSQL (`org.postgresql.Driver`) requires `autoCommit=false` for server-side cursors to be honoured; MySQL uses the special value `Integer.MIN_VALUE` to switch to row-by-row streaming. Broken:
 
 ```java

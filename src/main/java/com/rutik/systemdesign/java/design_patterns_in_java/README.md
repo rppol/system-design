@@ -599,42 +599,68 @@ A `Builder` was validated in each setter. A client set valid values individually
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between JDK dynamic proxy and CGLIB?**
+**Short:** JDK dynamic proxy only proxies interfaces, while CGLIB subclasses concrete classes but cannot proxy final ones.
+
 JDK dynamic proxy works only for interfaces: it generates a class at runtime that implements the target interface and routes all calls to an `InvocationHandler`. CGLIB (Code Generation Library) works for concrete classes: it generates a subclass at runtime and overrides methods to route calls to an interceptor. Spring uses JDK proxy when the bean implements at least one interface; it falls back to CGLIB otherwise. Key limitation of CGLIB: cannot proxy `final` classes or `final` methods. ByteBuddy is the modern alternative, used by Mockito.
 
 **Q2: How does the Decorator pattern map to Java I/O streams?**
+**Short:** FilterInputStream is the abstract decorator that lets BufferedInputStream, DataInputStream, and GZIPInputStream stack freely.
+
 `InputStream` is the abstract component. `FileInputStream` and `ByteArrayInputStream` are concrete components (sources). `FilterInputStream` is the abstract decorator — it holds a reference to a wrapped `InputStream` and delegates all methods to it. Concrete decorators like `BufferedInputStream` (adds 8KB buffer), `DataInputStream` (adds `readInt()`/`readLong()`), and `GZIPInputStream` each extend `FilterInputStream` and add one capability. The pattern enables arbitrary combination: `new DataInputStream(new GZIPInputStream(new BufferedInputStream(new FileInputStream("f.gz"))))`.
 
 **Q3: What is the difference between Strategy and Template Method?**
+**Short:** Template Method varies algorithm steps through inheritance, while Strategy injects an entire algorithm through composition.
+
 Template Method uses inheritance: the base class defines the algorithm skeleton as a `final` method that calls abstract/overridable "steps." Subclasses override steps, not the algorithm. Strategy uses composition: the algorithm is encapsulated in a separate interface and injected. Template Method is simpler when the algorithm structure is fixed and you just want to vary specific steps. Strategy is more flexible: algorithms can change per-instance at runtime; strategies can be tested independently; classes using strategies can have multiple strategies. Effective Java prefers composition (Strategy) over inheritance (Template Method).
 
 **Q4: What is the difference between Factory Method and Abstract Factory?**
+**Short:** Factory Method defers one product's class to subclasses, while Abstract Factory creates a whole family of related products.
+
 Factory Method: a single factory method (usually abstract) that subclasses override to return different concrete products. "Which class to instantiate" is deferred to subclasses. Example: `Calendar.getInstance()` returns `GregorianCalendar` or Japanese calendar depending on locale. Abstract Factory: a factory interface/class that creates a *family* of related objects, ensuring they are compatible. Example: a `UIComponentFactory` with `createButton()`, `createTextField()`, `createDialog()` — one implementation for macOS, another for Windows. Use Factory Method when you need one product type with variant implementations; Abstract Factory when you need consistent families of multiple product types.
 
 **Q5: How does the Flyweight pattern appear in Java's String interning?**
+**Short:** Interned string literals and Integer.valueOf's cached range are both the Flyweight pattern saving memory on shared instances.
+
 The String pool is a canonical registry of `String` objects. String literals are automatically interned — `"hello" == "hello"` is true because both refer to the same pooled instance. `String.intern()` manually adds a string to the pool. `Integer.valueOf()` implements Flyweight for integers in `[-128, 127]`: values in this range always return the same cached `Integer` object. The Flyweight pattern saves memory when many clients use identical fine-grained objects, at the cost of immutability (shared objects cannot be mutated per-client).
 
 **Q6: Why is the enum singleton considered the safest singleton implementation?**
+**Short:** Enum singletons resist reflection, serialization, and cloning attacks that a synchronized-and-volatile DCL singleton cannot.
+
 Enum singleton is safe from three singleton-breaking attacks: (1) Reflection — `Constructor.newInstance()` refuses to construct an enum and throws `IllegalArgumentException("Cannot reflectively create enum objects")`. (2) Serialization — enums serialize by name and deserialize by looking up the existing constant, so no new instance appears; `readResolve` is unnecessary. (3) Cloning — `Enum.clone()` is `final` and throws `CloneNotSupportedException`. None of these protections hold for the `synchronized + volatile` DCL singleton, which can be broken by reflection (`setAccessible(true)`) and by serialization unless you add `readResolve()`. What enum does NOT protect against is loading the class twice: two different class loaders produce two distinct `Class` objects and therefore two distinct sets of constants — a "singleton" per class loader. That is a property of the JVM's class-loading model, not of the pattern, and it bites any singleton equally (the classic symptom is a web container redeploy leaving two live copies).
 
 **Q7: How does the Command pattern relate to `Runnable` and `Callable`?**
+**Short:** Runnable's run() method is literally the Command pattern's execute(), with ExecutorService acting as the invoker.
+
 `Runnable` IS the Command pattern's command interface: `execute()` is `run()`. The concrete command is the lambda or anonymous class you create. The invoker is `ExecutorService` which calls `run()` at some future time, decoupling task creation from execution. `Callable<V>` extends this by making the command return a value (and declare checked exceptions). Command's "history/undo" capability is not in `Runnable` but can be added by wrapping commands in a custom class that also implements an `undo()` method.
 
 **Q8: Which GoF patterns appear prominently in the JDK?**
+**Short:** The JDK uses Decorator in its I/O streams, Strategy in Comparator, and Iterator throughout java.util.Iterable.
+
 Creational: Singleton (`Runtime.getRuntime()`, enums), Factory Method (`Calendar.getInstance()`, `Iterator` from `Iterable`), Builder (`StringBuilder`, `Stream.Builder`, `ProcessBuilder`). Structural: Decorator (`InputStream`/`OutputStream`/`Reader`/`Writer` chains), Proxy (JDK `Proxy`, JDBC connection wrappers), Adapter (`Arrays.asList()`, `InputStreamReader`), Flyweight (`String` pool, `Integer.valueOf()` cache), Facade (`Files`, `Executors`). Behavioral: Iterator (`java.util.Iterator`), Strategy (`Comparator`, `ThreadFactory`, `RejectedExecutionHandler`), Command (`Runnable`, `Callable`), Observer (`EventListener` hierarchy), Template Method (`AbstractList`, `HttpServlet.service()`).
 
 **Q9: What is the Producer-Consumer pattern and how does `BlockingQueue` implement it?**
+**Short:** BlockingQueue implements Producer-Consumer directly, blocking put() when full and take() when empty for automatic backpressure.
+
 Producer-Consumer decouples the rate of production from the rate of consumption via a shared bounded buffer. `BlockingQueue` is the buffer: `put(item)` blocks when full; `take()` blocks when empty. This creates natural backpressure — producers slow down automatically when consumers can't keep up. Implementation: one or more producer threads call `queue.put(item)`, one or more consumer threads call `queue.take()`. No explicit `wait()`/`notify()` needed — `BlockingQueue` handles all synchronization. Use `ArrayBlockingQueue(capacity)` for bounded buffers, `LinkedTransferQueue` for high-throughput handoff.
 
 **Q10: When would you use Observer (event bus) vs reactive streams?**
+**Short:** Simple Observer suits synchronous in-process listeners, while reactive streams add backpressure for async, composable pipelines.
+
 Observer (simple event bus): synchronous dispatch, simple listener interface, suitable for in-process events where listeners complete quickly. Works well for GUI events, domain events in a monolith. Reactive streams (`Flow`, RxJava, Project Reactor): asynchronous, backpressure-aware, composable operators (`map`, `filter`, `flatMap`). Use when: consumers can fall behind producers (need backpressure), operations are async (HTTP calls per event), or you need complex event transformations. Rule: if your observer callbacks are simple method calls and you don't need backpressure, stick with simple Observer; reactive is heavier machinery.
 
 **Q11: Why is the Visitor pattern rarely used in Java compared to Haskell/Scala pattern matching?**
+**Short:** Sealed classes with exhaustive pattern-matching switches now replace most of what the Visitor pattern used to provide.
+
 Visitor solves "add an operation to a type hierarchy without modifying each type." In Java, it requires an `accept(Visitor)` method on every node class and a concrete `Visitor` implementation for every type. Java 21's pattern matching for switch (`switch (shape) { case Circle c -> ...; case Rectangle r -> ...; }`) makes Visitor mostly obsolete for closed hierarchies: sealed classes + exhaustive switch expressions provide the same exhaustiveness guarantee with 80% less code. Visitor still has a place for open hierarchies (where you can't add `accept()` to library classes) and when operations are many and frequently added.
 
 **Q12: What is the Immutable Object concurrency pattern and why does it eliminate synchronization?**
+**Short:** An immutable object needs no synchronization because it can never change once every field is set before construction ends.
+
 An immutable object has no mutable state after construction: all fields are `final`, no setters, all methods are pure functions that return new objects rather than modifying state. Because the object can never change, threads can share it freely without synchronization — there is no write that could conflict with a read, so the happens-before rules are irrelevant. Examples: `String`, `BigDecimal`, Java `record`s. Construction must be done carefully: all fields must be set before the reference escapes the constructor (`this` must not be passed to other threads inside the constructor).
 
 **Q13: How does the Decorator pattern differ from inheritance, and how does Java I/O use it in practice?**
+**Short:** Decorator wraps a component at runtime to add behavior, unlike inheritance's static, compile-time is-a relationship.
+
 Inheritance is compile-time, static, and "is-a" — a subclass permanently adds behaviour. Decorator is runtime, dynamic, and "wraps-a" — a Decorator holds a reference to the decorated component and delegates, adding behaviour before/after the delegation. The critical advantage: behaviours can be stacked in any combination without a class explosion. Java I/O is the canonical Decorator example:
 
 ```mermaid
@@ -665,6 +691,8 @@ InputStream in = new GZIPInputStream(new BufferedInputStream(new FileInputStream
 Pitfall: `instanceof` checks on a decorated object fail (a `BufferedInputStream` is not a `FileInputStream`) — avoid coupling code to concrete types in a Decorator chain.
 
 **Q14: What is the Command pattern and how do you add undo/redo functionality to it?**
+**Short:** Undo/redo pairs each Command's execute() with an undo() method, tracked on separate history and redo stacks.
+
 Command encapsulates a request as an object, separating the invoker (who triggers the action) from the receiver (who executes it). For undo/redo, each `Command` exposes both `execute()` and `undo()`, and the invoker maintains an `executeStack` and an `undoStack`:
 
 ```java
@@ -701,9 +729,13 @@ class TextEditor {
 Lambda expressions can implement single-method `Command` for simple actions. For undo, pair two lambdas: `new LambdaCommand(() -> doSomething(), () -> undoSomething())`.
 
 **Q15: What is the Flyweight pattern, and where does the JDK use it concretely?**
+**Short:** The JDK's String pool, Integer cache, and Boolean.TRUE/FALSE constants are all concrete Flyweight implementations.
+
 Flyweight shares one instance of an object among many contexts that need the same value, saving memory. The shared state (intrinsic) is stored in the flyweight; the per-context state (extrinsic) is passed on each call. JDK examples: (1) **String pool** — `String.intern()` returns the canonical instance; all string literals are interned automatically. (2) **Integer/Long/Short/Byte/Character cache** — `Integer.valueOf(n)` returns a cached instance for n ∈ [−128, 127]. (3) **`Boolean.TRUE` / `Boolean.FALSE`** — two singletons; `Boolean.valueOf(true)` never allocates. (4) **`Font` in AWT** — glyph bitmaps are shared flyweights; x/y position is extrinsic. Interview angle: the Integer cache is Flyweight in disguise — describe it in those terms and it reads much better than "it's just a cache." Limitation: Flyweights cannot have mutable intrinsic state; any mutation would affect all users simultaneously.
 
 **Q16: What are the Read-Write Lock, Thread-Per-Message and Active Object concurrency patterns, and which JDK type implements each?**
+**Short:** ReentrantReadWriteLock, a thread-per-task executor, and a single-thread executor implement these three concurrency patterns.
+
 Each is a different answer to the question "who is allowed to touch this mutable state", and each reduces to one JDK type. Read-Write Lock allows many readers or one writer (`ReentrantReadWriteLock`); Thread-Per-Message gives every request its own thread so nothing is shared (`Executors.newVirtualThreadPerTaskExecutor()`); Active Object confines the state to one owning thread that executes queued requests (`Executors.newSingleThreadExecutor()`, handing a `Future` back to the caller). Two practical notes. A `ReadWriteLock` only pays for itself when reads genuinely dominate and the critical section is long; for a short read of one immutable object, a `volatile` reference swap or `StampedLock`'s optimistic read is faster, and note that downgrading write-to-read is legal while upgrading read-to-write deadlocks. Thread-Per-Message was an anti-pattern with platform threads at roughly 1MB of stack apiece — that constraint is what created thread pools — and virtual threads (Java 21+) make the naive one-thread-per-task form correct again, because a virtual thread that blocks costs nothing but heap.
 
 ---

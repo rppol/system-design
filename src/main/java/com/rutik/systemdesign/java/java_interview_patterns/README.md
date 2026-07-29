@@ -468,42 +468,68 @@ A developer forgot to call `.host()` on a server builder. The build created a se
 ## 12. Interview Questions with Answers
 
 **Q1: How do you write a proper immutable class in Java?**
+**Short:** Make the class final, fields private final, no setters, and defensively copy mutable state.
+
 Five rules: (1) Declare the class `final` — prevents subclasses from adding mutable state. (2) All fields `private final` — reference cannot be reassigned after construction. (3) No setter methods. (4) Defensive copy of mutable inputs in the constructor: `new Date(date.getTime())` or `List.copyOf(list)`. (5) Defensive copy or unmodifiable view on accessor methods that return mutable objects. Bonus: don't let `this` escape the constructor (don't pass `this` to external code during initialization).
 
 **Q2: What is the Builder pattern and when do you use it over constructors?**
+**Short:** Builder replaces telescoping constructors by letting callers set optional fields fluently.
+
 Builder solves the "telescoping constructor" problem: when a class has many optional parameters, providing all combinations of constructor signatures is impractical. Builder: client calls a fluent API on the inner `Builder` class to set desired parameters, then calls `build()` which validates invariants and constructs the immutable object. Use Builder when: 4+ parameters exist, many are optional, or multiple parameters have the same type (easy to transpose). Static factory methods are an alternative for simpler cases. Builder is preferred for complex objects that must be immutable.
 
 **Q3: Why is enum the best singleton implementation? (Effective Java Item 3)**
+**Short:** Enum singletons are serialization-safe, reflection-proof, and thread-safe by JVM guarantee.
+
 Three reasons: (1) Serialization-safe — Java's enum serialization mechanism guarantees that each constant is only deserialized to the existing instance (using the name, not constructor); no need for `readResolve()`. (2) Reflection-safe — `Constructor.newInstance()` on an enum type throws `IllegalArgumentException`; the JVM prevents reflection-based instantiation. (3) Thread-safe — class initialization is guaranteed single-execution by the JVM. On laziness, correct the common myth: the enum type is *initialized on first active use*, exactly like the holder idiom, so `INSTANCE` is not built until something reads it — loading the class is not enough. What you give up is per-constant control: every constant of the enum is constructed together in `<clinit>`, and you cannot defer one of them past the first touch of the type.
 
 **Q4: What is the Integer cache and what bugs can it cause?**
+**Short:** Integer caches values -128 to 127, so == comparisons silently fail outside that range.
+
 `Integer.valueOf(n)` caches `Integer` objects for values in [-128, 127]. Values outside this range always create new objects. Bug: comparing cached Integer with `==` works (same instance), but comparing larger values with `==` returns `false` even when values are equal. The fix: always use `.equals()` for `Integer` (and all boxed types). The cache exists as a performance optimization — these small integers are used very frequently (loop counters, small IDs, boolean flags).
 
 **Q5: How do you correctly implement `equals()` — what is the full contract?**
+**Short:** equals() must be reflexive, symmetric, transitive, consistent, and false for null.
+
 The contract has five properties: reflexive, symmetric, transitive, consistent, and null-safe. Spelled out: reflexive (`x.equals(x)` = true), symmetric (`x.equals(y)` = `y.equals(x)`), transitive (`x.equals(y)` && `y.equals(z)` implies `x.equals(z)`), consistent (repeated calls return the same result if the objects are unchanged), null-safe (`x.equals(null)` = false always). Implementation: check `this == o` first (shortcut), then `!(o instanceof MyClass)` for type check (also handles null), cast, compare fields with `==` for primitives and `Objects.equals()` for objects. Always override `hashCode()` consistently.
 
 **Q6: What is the Comparable subtraction trap?**
+**Short:** Subtracting values in compareTo can overflow and invert the sort order silently.
+
 Using `return this.value - other.value` in `compareTo()` can overflow. If `this.value = Integer.MAX_VALUE` (2,147,483,647) and `other.value = -1`, then `MAX_VALUE - (-1) = MAX_VALUE + 1` which overflows to `Integer.MIN_VALUE` — a large negative number. The sort now places `MAX_VALUE` before `-1`, which is backwards. Fix: always use `Integer.compare(this.value, other.value)` — no arithmetic, no overflow. Same principle applies to `Long.compare`, `Double.compare`.
 
 **Q7: What is the difference between hiding (static methods) and overriding (instance methods)?**
+**Short:** Instance methods override via dynamic dispatch; static methods hide via the declared type.
+
 Overriding: when a subclass defines an instance method with the same signature as the superclass. The JVM uses the *runtime type* to dispatch — dynamic dispatch via vtable. Hiding: when a subclass defines a *static* method with the same signature as the superclass's static method. The JVM uses the *declared type* at the call site — static dispatch. Calling the method through a supertype reference always calls the supertype's static method, regardless of the runtime type. This is why static methods should not be "overridden" — the behavior is confusing.
 
 **Q8: What is a covariant return type?**
+**Short:** A covariant return type lets an overriding method return a subtype of the original.
+
 A subclass can override a method and declare a more specific return type. Example: `class Animal { Animal create() {...} }` and `class Dog extends Animal { Dog create() {...} }`. `Dog.create()` returns `Dog` (more specific) — this is covariant because `Dog` is a subtype of `Animal`. This is valid in Java and does not require an explicit cast at the call site when using the `Dog` reference. The compiler generates a bridge method for the erased signature.
 
 **Q9: How do you prevent a singleton from being broken by serialization and reflection?**
+**Short:** Guard with readResolve() and a reflection check, or simply use an enum singleton instead.
+
 Serialization: implement `readResolve()` returning the singleton instance — the JVM calls this after deserialization and uses the returned object instead. Reflection: check in the constructor: `if (instance != null) throw new IllegalStateException("Use getInstance()")`. Best solution: use enum — the JVM handles both threats automatically (enum's `readResolve` is built-in; reflection is blocked by JVM enforcement). There is no need for these tricks with enum singletons.
 
 **Q10: What is the static factory method pattern and its advantages over constructors? (Effective Java Item 1)**
+**Short:** Static factories offer descriptive names, cached instances, and subtype return flexibility.
+
 A static factory method is a static method that returns an instance of the class. Advantages: (1) Named — `OptionalInt.empty()` is clearer than `new OptionalInt(false, 0)`. (2) Can return cached instances — `Boolean.valueOf(true)` always returns the same object. (3) Can return a subtype — `List.of()` can return different internal implementations based on size. (4) Can reduce the verbosity of parameterized type creation (pre-diamond `<>`). Disadvantages: harder to discover (not in the Javadoc constructor section), can't be extended.
 
 **Q11: What does effectively final mean and why does Java require it?**
+**Short:** A variable is effectively final when assigned once, letting lambdas safely capture it.
+
 A variable is effectively final if it's initialized once and never reassigned — it *behaves* like a final variable even without the keyword. Lambda expressions and anonymous classes can only capture effectively-final local variables. Reason: captured variables are copied (by value for primitives; by reference for objects) into the closure. If the original could change after capture, the lambda would hold a stale copy — confusing semantics. For mutable state in lambdas, use `AtomicReference`, `AtomicInteger`, or a single-element array as a container.
 
 **Q12: What is null handling best practice in Java?**
+**Short:** Fail fast with requireNonNull, return Optional for absence, and never use null as a sentinel.
+
 Three approaches: (1) `Objects.requireNonNull(param, "name")` in constructor/method — fails fast with a clear NPE message. (2) Return `Optional<T>` from methods that may have no result — forces callers to handle the absence case. (3) Use `@NonNull`/`@Nullable` annotations (Lombok, IntelliJ, JetBrains) for static analysis documentation. Avoid: passing `null` as a sentinel value — use `Optional` or overloading instead. Never swallow `NullPointerException` — it indicates a programming error that should be fixed.
 
 **Q13: What is the Integer cache, what is its exact range, and what common bug does it cause?**
+**Short:** The JDK caches Integer objects from -128 to 127, causing == to fail above that range.
+
 The JDK caches `Integer` objects for values −128 to 127 (inclusive) — a fixed pool of 256 instances, allocated once when the private `Integer.IntegerCache` class is initialized on first boxing. `Integer.valueOf(127) == Integer.valueOf(127)` is `true` (same cached object). `Integer.valueOf(128) == Integer.valueOf(128)` is `false` (two distinct heap objects). This causes real bugs when developers compare autoboxed `Integer` values with `==` instead of `.equals()`:
 
 ```java
@@ -519,6 +545,8 @@ if (a.equals(b)) { ... }
 The same cache applies to `Long` (same range), `Short` (−128 to 127), `Byte` (entire range −128 to 127), and `Character` (0 to 127). The upper bound for `Integer` can be raised with `-XX:AutoBoxCacheMax=N` but this is rarely advisable. Practical rule: never use `==` for `Integer`, `Long`, `Double`, `Boolean` — always `.equals()`.
 
 **Q14: What is defensive copying and when is it required to maintain class immutability?**
+**Short:** Defensive copying clones mutable inputs and outputs so callers can't mutate internal state.
+
 Defensive copying means creating a copy of a mutable input or output so the caller cannot affect the class's internal state through a shared reference. Required in two places: (1) **constructor** — if a mutable object is passed in (e.g., `Date`, `byte[]`, `List`), copy it before storing; (2) **getter** — if you return a mutable field, return a copy so callers cannot mutate your state:
 
 ```java
@@ -538,9 +566,13 @@ public Date getSignedOn() { return new Date(signedOn.getTime()); }   // copy on 
 In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`. For collections: use `List.copyOf()` (Java 10) or `Collections.unmodifiableList()`. Effective Java Item 50: *Make defensive copies when needed*.
 
 **Q15: When should a class implement `Comparable<T>` vs. using an external `Comparator<T>`?**
+**Short:** Implement Comparable for a class's single natural ordering; use Comparator for alternate ones.
+
 `Comparable<T>` expresses the **natural ordering** — the single most obvious ordering for the class (e.g., `String` lexicographically, `Integer` numerically, `LocalDate` chronologically). Classes that have a natural ordering should implement `Comparable`. When the ordering is contextual, situational, or you need multiple orderings (e.g., sort people by name OR by age OR by salary), use external `Comparator` instances. Key rule from Effective Java Item 14: *The natural ordering should be consistent with `equals()`* — `a.compareTo(b) == 0` should imply `a.equals(b)`. Violating this causes subtle bugs in `TreeSet`, `TreeMap`, and `SortedSet` (which use `compareTo` for equality, not `equals`). Example violation: `BigDecimal("1.0").compareTo(BigDecimal("1.00")) == 0` but `BigDecimal("1.0").equals(BigDecimal("1.00"))` is `false` — a `TreeSet` treats them as the same element; a `HashSet` treats them as different.
 
 **Q16: Where does auto-unboxing throw a `NullPointerException`, and why does a ternary operator trigger it even when you are assigning to a wrapper type?**
+**Short:** A ternary mixing a primitive branch unboxes both operands, NPEing on a null Integer branch.
+
 Auto-unboxing throws whenever a `null` wrapper reaches a context that needs a primitive, because the compiler inserts an invisible `intValue()` call. The common shape is `Integer x = map.get(k); if (x > 0)` — `get` returns `null` for an absent key and the comparison dereferences it, so the stack trace points at a line containing no explicit method call. The conditional operator is the version that catches experienced developers: in `Integer v = flag ? maybeNull : 0`, the `0` is an `int`, so binary numeric promotion unboxes **both** branches before the result is re-boxed into `v` — the null branch is dereferenced even though the target type is `Integer` and even though the value would have been assignable as null. Writing `Integer.valueOf(0)` in the other branch keeps both operands reference-typed, no unboxing happens, and `v` is simply `null`. Fixes that remove the class rather than the instance: use primitives for anything you do arithmetic on, use `Map.getOrDefault(k, 0)` instead of `get` plus a null check, use `Objects.requireNonNullElse` when the wrapper type must survive, and keep both ternary branches at the same boxedness.
 
 ---

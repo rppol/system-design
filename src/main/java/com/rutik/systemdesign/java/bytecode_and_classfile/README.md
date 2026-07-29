@@ -565,60 +565,98 @@ Eight indices, seven entries. The off-by-one is not in the loop bound but in the
 ## 12. Interview Questions with Answers
 
 **Q1: You edited a method's bytecode with ASM and now the class throws `VerifyError` at load. What happened and how do you fix it?**
+**Short:** A control-flow edit invalidated the StackMapTable, so the verifier rejects the class; regenerate frames with COMPUTE_FRAMES.
+
 You changed the control flow (added a branch) without updating the `StackMapTable`, so the verifier's recorded frames no longer match the actual stack/local types at branch targets. Since Java 7 (major 51) the verifier uses type-checking driven by `StackMapTable`, and any mismatch is a hard `VerifyError` at link time. The fix is to let ASM regenerate frames: construct the writer with `ClassWriter.COMPUTE_FRAMES` and read with `ClassReader.EXPAND_FRAMES`. Byte Buddy computes frames automatically, which is why it's preferred for non-trivial transforms.
 
 **Q2: What is the magic number and what does the major version tell you?**
+**Short:** 0xCAFEBABE marks a class file, and its major_version byte reveals which Java release compiled it.
+
 The first four bytes of every `.class` file are `0xCAFEBABE`, identifying it as a class file; bytes 6-7 are the `major_version`. Major 52 = Java 8, 61 = Java 17, 65 = Java 21 (major = Java feature version + 44). If a class's major version exceeds what the running JVM supports, you get `UnsupportedClassVersionError` at load. This is the concrete cause of "class compiled by a newer version" errors — check the target `--release`.
 
 **Q3: Is the constant pool 0-indexed or 1-indexed, and why does that trip people up?**
+**Short:** The constant pool is 1-indexed, and long/double constants each occupy two consecutive slots.
+
 The constant pool is 1-indexed: valid indices run from 1 to `constant_pool_count - 1`, and index 0 is reserved as a "no entry" sentinel. The trap is that `CONSTANT_Long` and `CONSTANT_Double` each occupy **two** consecutive slots, so the entry after a `long` is at index+2, not index+1. A naive parser loop that increments by 1 corrupts on the first wide constant — the single most common class-file parsing bug.
 
 **Q4: How does a Java lambda compile — is it an anonymous inner class?**
+**Short:** A lambda compiles to an invokedynamic call site, not an anonymous inner class file.
+
 No — a lambda compiles to an `invokedynamic` instruction plus a synthetic private method holding the body, not an anonymous class file. At first execution, the bootstrap method `LambdaMetafactory.metafactory` generates a hidden class implementing the functional interface and returns a `CallSite`; later calls reuse the cached target. This means no extra `Foo$1.class` is emitted, a stateless lambda is instantiated once, and linkage is deferred to runtime rather than fixed at compile time.
 
 **Q5: What are the five `invoke*` opcodes and how does each dispatch?**
+**Short:** invokestatic, invokespecial, invokevirtual, invokeinterface, and invokedynamic each dispatch differently.
+
 The five are `invokestatic`, `invokespecial`, `invokevirtual`, `invokeinterface`, and `invokedynamic`, each with different dispatch semantics. `invokestatic` calls static methods with no receiver; `invokespecial` is non-virtual dispatch for constructors, `super.m()`, and private methods, hitting the exact declared method; `invokevirtual` handles normal instance methods via vtable lookup on the receiver's runtime type; `invokeinterface` calls through an interface reference via itable lookup; and `invokedynamic` has its target chosen by a bootstrap method at first call, then cached. The key distinction is virtual (`invokevirtual`/`invokeinterface` do runtime type lookup) versus non-virtual (`invokestatic`/`invokespecial` resolve to a fixed method).
 
 **Q6: How does string concatenation compile in modern Java, and how did it change?**
+**Short:** Since Java 9, string concatenation compiles to a single invokedynamic call bootstrapped by StringConcatFactory.
+
 Since Java 9 (JEP 280), `a + b + c` compiles to a single `invokedynamic makeConcatWithConstants` bootstrapped by `StringConcatFactory`, which builds the optimal concat strategy at runtime. Before Java 9, `javac` emitted an explicit `new StringBuilder().append(...).append(...).toString()` chain. The indy form lets the JDK change concatenation internals without recompiling your code and often produces less garbage. The gotcha: `+` inside a hot loop still allocates per iteration — use an explicit `StringBuilder` there.
 
 **Q7: What is the difference between the operand stack and the local variable array?**
+**Short:** The local variable array holds parameters and locals by slot, while the operand stack scratches expression values.
+
 The local variable array holds a method's parameters and locals, addressed by slot index. The operand stack is a scratchpad where instructions push and pop operands to compute expressions; slot 0 of the local array is `this` for instance methods. `iload_1` copies local 1 onto the operand stack; `iadd` pops two stack operands and pushes the sum; `istore_2` pops the stack into local 2. Each `Code` attribute declares `max_locals` and `max_stack` so the verifier and JVM can size the frame.
 
 **Q8: What is `invokedynamic` and what problem does it solve?**
+**Short:** invokedynamic lets a bootstrap method choose and cache a call site's target at runtime instead of compile time.
+
 `invokedynamic` is a call site whose target method is chosen at runtime by a user-specified bootstrap method that returns a `CallSite`, rather than being fixed at compile time. It lets the JDK and JVM languages defer and customize method linkage — the first call runs the bootstrap and caches the resulting `MethodHandle`; later calls are direct and fast. It was added in Java 7 for dynamic languages and is now the backbone of lambdas (`LambdaMetafactory`), string concat (`StringConcatFactory`), and record `equals`/`hashCode` (`ObjectMethods`).
 
 **Q9: What's the difference between `premain` and `agentmain` for a Java agent?**
+**Short:** premain attaches statically before main() runs, while agentmain attaches dynamically to an already-running JVM.
+
 `premain` is the static-attach entry point, invoked before `main()` via `-javaagent:agent.jar`. `agentmain` is the dynamic-attach entry point, invoked when an agent attaches to an already-running JVM via the Attach API. `premain(String, Instrumentation)` sees classes as they first load (cleanest instrumentation); `agentmain(String, Instrumentation)` must call `Instrumentation.retransformClasses` to re-instrument classes that already loaded. Manifest keys `Premain-Class`/`Agent-Class` and `Can-Retransform-Classes: true` declare these.
 
 **Q10: What can `retransformClasses` NOT change about a loaded class?**
+**Short:** retransformClasses can only change method bodies, never add or remove methods, fields, or hierarchy.
+
 It cannot add or remove methods or fields, change method signatures or modifiers, or alter the class hierarchy/interfaces — only method bodies (and constant pool as needed) may change. This "schema-preserving" constraint exists because live instances, JIT-compiled frames, and vtables assume the old shape. If you need extra per-invocation state, keep it on the operand stack or in a thread-local inside your advice, never by adding a field via retransform (which throws `UnsupportedOperationException`).
 
 **Q11: When would you pick ASM over Byte Buddy, or vice versa?**
+**Short:** Byte Buddy's type-safe DSL and automatic frame computation make it the default over hand-written ASM.
+
 Use Byte Buddy for almost everything — agents, mocks, proxies — because its fluent DSL is type-safe and frames are computed for you. Drop to ASM only when you need opcode-level control or minimal overhead in a library hot path. ASM is the thin substrate (Byte Buddy, CGLIB, and Jacoco all use it internally) but forces you to manage frames and understand the JVMS. Javassist's source-string API is convenient for quick edits but is slower and weaker with generics. Rule of thumb: Byte Buddy by default, ASM when you must.
 
 **Q12: What is bytecode verification and what role does the `StackMapTable` play?**
+**Short:** Verification proves bytecode is type-safe before execution, driven by the StackMapTable attribute since Java 7.
+
 Verification is the JVM proving, before execution, that bytecode is type-safe and the operand stack is consistent at every instruction (JVMS §4.10). Since Java 7 it uses type-checking rather than the old data-flow inference, driven by the `StackMapTable` attribute that `javac` emits recording the stack/local types at each branch target. This turns verification into a fast linear pass — but it means any tool that changes control flow must regenerate the frames or the class fails to load with `VerifyError`.
 
 **Q13: How does generics erasure show up in the class file?**
+**Short:** Erasure strips generic types from descriptors, so the compiler adds a synthetic bridge method to preserve polymorphism.
+
 Erasure removes generic type parameters from executable descriptors, so `Comparable<Box>.compareTo` erases to `compareTo(Object)`. The compiler adds a synthetic **bridge method** (`ACC_BRIDGE | ACC_SYNTHETIC`) that matches the erased signature and forwards, after a `checkcast`, to your typed `compareTo(Box)`. The generic information survives only in the `Signature` attribute for reflection, not in the bytecode the JVM executes. Seeing two `compareTo` methods in `javap` where you wrote one is erasure's bridge fixup in action.
 
 **Q14: Compile-time codegen versus bytecode-time manipulation — what's the tradeoff?**
+**Short:** Compile-time codegen is early and visible; bytecode manipulation is late, universal, and invisible in stack traces.
+
 Compile-time codegen (annotation processing) generates real source/classes during `javac`, so output is IDE-visible, debuggable, and fails at compile time. Bytecode manipulation instead rewrites classes at load or attach time, so it can touch code you can't recompile (JDK, third-party libs) but fails late with `VerifyError` and is invisible in stack traces. Choose compile-time when you own the source (MapStruct, Dagger, Lombok); choose bytecode-time for cross-cutting instrumentation of code you don't own (APM, coverage). The axis is early-and-visible versus late-and-universal.
 
 **Q15: How does Mockito create a mock, and why can't it (by default) mock a `final` class?**
+**Short:** Mockito subclasses the target via Byte Buddy, so it cannot mock final classes without the inline mock maker.
+
 Mockito's default mock-maker uses Byte Buddy to generate a runtime **subclass** of the target type whose methods are overridden to call Mockito's stubbing interceptor. Because it relies on subclassing/overriding, a `final` class or `final` method can't be intercepted this way — there's nothing to override. The workaround is the **inline mock maker** (`mockito-inline`), which uses a Java agent + `retransformClasses` to rewrite the *original* class's method bodies in place, enabling mocking of finals and statics at the cost of agent overhead.
 
 **Q16: What is `invokespecial` used for besides constructors?**
+**Short:** invokespecial performs non-virtual dispatch for constructors, explicit super calls, and private instance methods.
+
 `invokespecial` performs non-virtual dispatch to an exactly-named method: constructors (`<init>`), explicit `super.method()` calls, and `private` instance methods. The point is to bypass override lookup — `super.toString()` must call the parent's version, not re-dispatch to the current object's override. (Historically private-method calls used `invokespecial`; on interfaces with private methods and in some Java 11+ cases nestmate access refined this, but the non-virtual semantics remain.)
 
 **Q17: What is a `MethodHandle` and how does it differ from reflection?**
+**Short:** A MethodHandle resolves access once and executes at near-native speed, unlike per-call-checked reflection.
+
 A `MethodHandle` is a typed, directly-executable reference to a method/field/constructor from `java.lang.invoke`, resolved once and then invoked at near-native speed via `invokeExact`. Unlike `java.lang.reflect.Method`, access checks happen at lookup time (not every call), it's JIT-friendly (the JIT can inline through it), and it composes (bind arguments, adapt types, combine handles). It's the runtime plumbing behind `invokedynamic` — `LambdaMetafactory` hands back a `CallSite` wrapping a `MethodHandle` to the lambda body.
 
 **Q18: How can you read a class file's bytecode without any third-party library?**
+**Short:** javap -c -v -p disassembles a class file's bytecode, constant pool, and attributes without any external library.
+
 Run `javap -c -v -p ClassName` from the JDK — `-c` disassembles the bytecode, `-v` dumps the constant pool, versions, and attributes (`StackMapTable`, `BootstrapMethods`), and `-p` includes private members. For programmatic access without external deps you can parse the format by hand against JVMS chapter 4, or (Java 22+ preview) use the `java.lang.classfile` API (`ClassFile.parse`). `javap` is the fastest way to answer "what did the compiler actually emit?" for lambdas, records, and switch expressions.
 
 **Q19: Why does `String` concatenation in a loop still cause allocation even with the JEP 280 `invokedynamic` form?**
+**Short:** Each invokedynamic concatenation call still allocates a new String per execution, so loops need an explicit StringBuilder.
+
 Each `+` expression compiles to an independent `invokedynamic makeConcatWithConstants` call that allocates a brand-new `String` every time it runs. Running that inside a loop therefore allocates one new `String` (and intermediate buffers) every iteration. JEP 280 optimizes a *single* concatenation expression, not repeated ones across loop iterations. The fix is unchanged from the pre-Java-9 advice: hoist an explicit `StringBuilder` outside the loop and `append` inside it, turning N allocations into amortized growth.
 
 ---

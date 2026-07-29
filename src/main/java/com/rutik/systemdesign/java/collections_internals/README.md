@@ -601,63 +601,103 @@ Map<String, Person> byDept = people.stream()
 ## 12. Interview Questions with Answers
 
 **Q1: How does HashMap handle collisions internally?**
+**Short:** HashMap chains colliding keys in a bucket as a linked list, treeifying it into a red-black tree past 8 entries.
+
 When two keys hash to the same bucket, HashMap stores them as a linked list (chain) within that bucket. Each node has `(key, value, hash, next)`. On `get(key)`, it computes the bucket index, then traverses the chain comparing `hash` and `key.equals()`. In Java 8+, when a bucket's linked list exceeds 8 entries, it converts to a red-black tree (treeification), reducing worst-case lookup from O(n) to O(log n).
 
 **Q2: What is treeification and when does it happen?**
+**Short:** Treeification converts a bucket's linked list into a red-black tree once its chain exceeds 8 entries at capacity 64+.
+
 Treeification converts a HashMap bucket's linked list into a red-black tree. Triggered when a single bucket's chain length exceeds `TREEIFY_THRESHOLD = 8` AND the table capacity is at least `MIN_TREEIFY_CAPACITY = 64` (otherwise resize instead). The tree reverts to a linked list when size drops below `UNTREEIFY_THRESHOLD = 6`. TreeNodes are larger than regular Nodes (more fields for tree pointers), so only high-collision buckets pay the overhead.
 
 **Q3: How does HashMap resize without losing entries?**
+**Short:** Java 8 resize splits each bucket by checking one bit, (hash & oldCapacity), with no re-hashing needed.
+
 When `size > capacity * loadFactor` (default: 0.75), the table doubles in size. Java 8 uses a clever bit-split: for each entry, check `(hash & oldCapacity)`. If 0, the entry stays in the same bucket index. If 1, the entry moves to `oldIndex + oldCapacity`. This requires only a bit check per entry (no re-hashing) and naturally splits the chain into two groups placed in the two new buckets.
 
 **Q4: What is the load factor and how does it affect HashMap performance?**
+**Short:** The load factor sets when HashMap resizes, trading memory for collision rate at its default of 0.75.
+
 Load factor determines when resize triggers: resize when `size / capacity > loadFactor`. Default 0.75 balances space vs time: too low (e.g., 0.5) wastes memory (frequent resize, sparse table); too high (e.g., 0.9) increases collision probability, degrading O(1) to O(n) in worst case. Increasing load factor reduces memory but increases average chain length. For known-size maps where no resize is desired, use `new HashMap<>(initialCapacity, 1.1f)` after computing the right capacity.
 
 **Q5: Why is HashMap not thread-safe and what can happen under concurrent access?**
+**Short:** Concurrent HashMap puts can lose updates or, pre-Java 8, loop forever on a resize-corrupted bucket cycle.
+
 HashMap has no synchronization. Two concurrent `put()` calls can cause: (1) Lost update: both threads read `size`, both increment to same value, one increment is lost. (2) In Java 6/7: concurrent resize creates a cycle in a bucket's linked list → infinite loop in `get()`. (3) Visibility: one thread's write is not visible to another without happens-before. Use `ConcurrentHashMap` for any shared HashMap; it uses CAS for empty buckets and per-bucket synchronization for collisions.
 
 **Q6: How does LinkedHashMap implement an LRU cache?**
+**Short:** LinkedHashMap implements LRU by moving accessed entries to the list tail and evicting the head via removeEldestEntry.
+
 In `accessOrder=true` mode, every `get()` moves the accessed entry to the tail of a doubly-linked list overlay (in addition to its bucket). The head is always the least-recently-used entry. Override `removeEldestEntry(Map.Entry eldest)` to return `true` when `size() > maxSize` — `LinkedHashMap` will automatically remove the head entry (LRU) on each new `put()`. This gives an O(1) LRU cache with minimal code.
 
 **Q7: What is the difference between TreeMap and HashMap?**
+**Short:** HashMap gives O(1) unordered access, while TreeMap gives O(log n) access with keys kept in sorted order.
+
 HashMap: O(1) average get/put/remove via hash table; unordered. TreeMap: O(log n) get/put/remove via red-black tree; keys maintained in sorted order (natural or by Comparator). TreeMap implements `NavigableMap` with `floorKey`, `ceilingKey`, `headMap`, `tailMap`, `subMap` — essential for range queries. Use HashMap for raw performance; TreeMap for sorted traversal or range lookups.
 
 **Q8: Why is ArrayList preferred over LinkedList in most cases?**
+**Short:** ArrayList wins on random access, cache locality, and per-element memory over LinkedList in nearly every case.
+
 (1) Random access: ArrayList O(1), LinkedList O(n). (2) Cache locality: ArrayList stores elements contiguously in memory — CPU cache prefetch works well; LinkedList nodes scattered in heap — cache misses on traversal. (3) Memory: LinkedList nodes have 24B overhead each (object header + 2 pointers + value pointer) vs ArrayList's 4B per element reference. Only use LinkedList when you need O(1) insertions at both ends AND never need random access — and even then, `ArrayDeque` is usually better.
 
 **Q9: What is fail-fast iteration and what causes ConcurrentModificationException?**
+**Short:** A collection's modCount changes on structural modification, and a mismatched iterator throws ConcurrentModificationException.
+
 Collections track structural modifications with `modCount`. The iterator captures `modCount` at creation (`expectedModCount`). Before each `next()`, it checks `modCount == expectedModCount`. If the collection was structurally modified outside the iterator (add/remove), `modCount` changed, and `ConcurrentModificationException` is thrown. Fix: use `Iterator.remove()` to remove during iteration; use `removeIf()` (Java 8); or copy the collection before iterating.
 
 **Q10: How does HashSet work internally?**
+**Short:** HashSet is a thin wrapper over a HashMap whose values are all one shared dummy PRESENT object.
+
 `HashSet<E>` is backed by a `HashMap<E, Object>` where all values are a single shared dummy object (`PRESENT = new Object()`). `add(e)` calls `map.put(e, PRESENT)`. `contains(e)` calls `map.containsKey(e)`. `remove(e)` calls `map.remove(e)`. All O(1) average complexity. `LinkedHashSet` is backed by `LinkedHashMap`; `TreeSet` is backed by `TreeMap`. They are thin wrappers — all behavior (null handling, load factor, treeification) follows the backing map.
 
 **Q11: What is the difference between `List.of()` and `new ArrayList()`?**
+**Short:** List.of() creates a null-hostile immutable list, while new ArrayList() creates a mutable, null-tolerant one.
+
 `List.of()` (Java 9): creates an immutable list backed by a compact internal structure (array for small sizes, no `ArrayList` overhead). Cannot add/set/remove — throws `UnsupportedOperationException`. Does not allow null elements. `new ArrayList<>()` creates a mutable list. Use `List.of()` for constant lists, API return values you don't want modified; use `ArrayList` when mutation is needed.
 
 **Q12: When would you use EnumMap and EnumSet?**
+**Short:** EnumMap indexes by ordinal in a plain array, and EnumSet packs enum membership into a single long bitmask.
+
 `EnumMap<K extends Enum, V>`: all keys are enum constants → backed by a plain array indexed by ordinal. O(1) all operations with virtually zero overhead; iteration in declaration order. Use whenever the key type is an enum — it's 5–10× faster than `HashMap` for this use case. `EnumSet`: bit-vector backed — an `EnumSet` with up to 64 enums fits in a single `long` bitmask. `contains`, `add`, `remove` are `&`, `|`, `& ~` bitmask operations. Fastest possible set for enums; use for permission/flag sets.
 
 **Q13: What is the initial capacity of HashMap and why does it matter for performance?**
+**Short:** Setting the right initial capacity for a known entry count avoids the O(n) cost of repeated resizes.
+
 Default initial capacity is 16. If you know the expected number of entries N, set initial capacity to `N / loadFactor + 1` (e.g., 100 entries: `100 / 0.75 + 1 ≈ 134`, round up to power of 2 = 256). Providing correct initial capacity avoids multiple expensive resize operations. Each resize is O(n): allocate new array, rehash/redistribute all entries. In tight loops inserting many entries, this matters — a HashMap loaded to 10,000 entries from default 16 resizes ~10 times.
 
 **Q14: Why is 0.75 the default load factor for `HashMap`?**
+**Short:** 0.75 balances Poisson-distributed bucket occupancy so lookups average about one comparison per bucket.
+
 The JDK javadoc calls 0.75 "a good tradeoff between time and space costs", and the source backs it with a Poisson analysis of bucket occupancy. Under a good hash the number of entries per bucket is Poisson-distributed with mean α, so at α = 0.75 the mean is 0.75 entries per bucket and about 1.4 per *non-empty* bucket — one comparison per successful lookup, the O(1) claim quantified. The HashMap source comment uses α ≈ 0.5 (the time-average occupancy, since a table sits between half-full and 0.75-full across a resize cycle) and publishes P(bucket holds 8) = 0.00000006; evaluated at the threshold α = 0.75 it is ~1.2×10⁻⁶. Either way treeification is a hostile-input safety net, not a path a healthy hash takes. Too low (e.g. 0.5): more memory wasted, more frequent resizes. Too high (e.g. 0.9): more collisions, longer chains, O(n) degradation.
 
 **Q15: What Spliterator characteristics does `ArrayList` have, and why do they matter for parallel streams?**
+**Short:** ArrayList's SIZED, SUBSIZED, and ORDERED Spliterator traits let parallel streams split work in O(1).
+
 `ArrayList`'s `Spliterator` has three characteristics: `SIZED` (knows exact size via `size()` in O(1)), `SUBSIZED` (sub-spliterators after `trySplit()` also have exact known sizes), and `ORDERED` (encounter order = insertion order). These matter for parallel streams because: (1) `SIZED + SUBSIZED` allow the stream framework to split into exactly equal halves at O(1) cost — each half has known size without traversal. This enables efficient work-stealing in `ForkJoinPool`. (2) Without `SIZED`, splitting would require traversal to count elements. (3) `ORDERED` means the final result must preserve encounter order, which adds merge overhead in parallel — sometimes removing ordering (via `.unordered()`) improves parallel performance.
 
 **Q16: How does `ConcurrentHashMap` achieve thread safety in Java 8+, and how does it differ from the old segment design?**
+**Short:** Java 8's ConcurrentHashMap locks per-bucket via CAS and synchronized bin heads, replacing Java 7's fixed segment locks.
+
 Java 7's `ConcurrentHashMap` used segment-level locking: the map was divided into ~16 segments, each a separately-locked sub-map, so concurrency was capped at the segment count. Java 8 rewrote it to lock at the *bucket (bin) level*: writes use a CAS to install the first node in an empty bin (lock-free for the common case) and `synchronized` on the *bin's head node* only when a bin already has entries, so threads contend only when they hit the same bin. Reads are fully lock-free because nodes' `val` and `next` fields are `volatile`. `size()` is maintained via a striped counter (`baseCount` + a `CounterCell[]` array, the same idea as `LongAdder`) to avoid a single hot field. The practical upshot: concurrency now scales with the number of buckets, not a fixed 16, and reads never block — but `size()`/`isEmpty()` are approximate under concurrent mutation, and there is no map-wide lock you can hold.
 
 **Q17: Why must `compareTo`/`Comparator` be consistent with `equals` for `TreeMap`/`TreeSet`, and what breaks if it isn't?**
+**Short:** TreeMap and TreeSet identify elements solely by comparator, so an equals-inconsistent comparator silently drops entries.
+
 `TreeMap` and `TreeSet` locate elements *solely* by the comparator/`compareTo`, never by `equals` — two keys are "the same" iff `compare` returns 0. If the ordering is inconsistent with `equals` (e.g. a `Comparator` that compares only by one field while `equals` compares more), the collection still works but *violates the `Set`/`Map` contract*: it may treat two `equals`-distinct objects as duplicates (dropping one), or `contains`/`get` may fail to find an element that is `equals` to a stored one because the comparator routes the search down a different branch. The classic bug is a `TreeSet` with a comparator on, say, length only — adding two different strings of the same length silently keeps just one. Guidance: make natural ordering consistent with `equals` (as `String`, `Integer` etc. do), and only deliberately diverge when you understand you are redefining "equal" for that sorted structure.
 
 **Q18: What is a fail-fast iterator and how does it differ from a fail-safe (weakly consistent) iterator?**
+**Short:** A fail-fast iterator throws on a changed modCount, while a fail-safe iterator tolerates concurrent modification silently.
+
 A fail-fast iterator throws `ConcurrentModificationException` as soon as it notices the collection was structurally modified behind its back. The mechanism is a `modCount` field on the collection that increments on every structural modification; the iterator captures it at creation and each `next()`/`remove()` compares its expected count against the live one, throwing immediately if they differ — including in single-threaded code where you modified the collection directly rather than through the iterator. It is a best-effort *bug detector*, not a thread-safety guarantee (the check is unsynchronized). A fail-safe / weakly consistent iterator (on `ConcurrentHashMap`, `CopyOnWriteArrayList`, etc.) never throws CME: it iterates over a snapshot or the live structure with no modCount check, so it may or may not reflect concurrent modifications but tolerates them. The common trap is removing from a list inside a for-each loop and getting a CME — the fix is `Iterator.remove()`, `removeIf`, or a concurrent collection.
 
 **Q19: Which collections allow null keys and null values, and why does `ConcurrentHashMap` forbid both?**
+**Short:** ConcurrentHashMap bans null because a returned null value would be indistinguishable from a missing key under concurrency.
+
 `HashMap` allows exactly one null key plus any number of null values; `ConcurrentHashMap` and `Hashtable` reject null for both and throw `NullPointerException`. In `HashMap` the null key hashes to 0 and always lives in bucket 0. `TreeMap` accepts a null key only if its `Comparator` tolerates one — natural ordering calls `compareTo` and throws. `List.of`/`Map.of` are null-hostile entirely. The reason `ConcurrentHashMap` bans null is ambiguity: `get()` returns `null` for an absent key, so a stored null value would be indistinguishable from "not present", and the usual `containsKey()` disambiguation is unsound under concurrency because the mapping can change between the two calls. Practical consequence: swapping `HashMap` for `ConcurrentHashMap` in code that stored null values converts a silent lookup into an NPE at the `put` site — use a sentinel value instead.
 
 **Q20: What did Sequenced Collections (Java 21, JEP 431) add, and is `reversed()` a view or a copy?**
+**Short:** Java 21's SequencedCollection adds uniform first/last/reversed methods, and reversed() returns a live view, not a copy.
+
 Java 21 added `SequencedCollection`, `SequencedSet` and `SequencedMap`, giving every ordered collection one uniform first/last/reversed API. `SequencedCollection` declares `addFirst`/`addLast`, `getFirst`/`getLast`, `removeFirst`/`removeLast` and `reversed()`; `SequencedMap` adds `putFirst`/`putLast`, `firstEntry`/`lastEntry` and `pollFirstEntry`/`pollLastEntry`. `List` and `Deque` were retrofitted onto `SequencedCollection`, `LinkedHashSet` and `SortedSet` onto `SequencedSet`, `LinkedHashMap` and `SortedMap` onto `SequencedMap`; `HashMap`/`HashSet` are excluded because they have no encounter order. `reversed()` returns a live **view**, not a copy — mutating the source is visible through it and writes through it reach the source, so take `List.copyOf(list.reversed())` when you need a snapshot. The mutators are `default` methods that throw `UnsupportedOperationException` where they make no sense: on an immutable `List.of(...)` and on a `SortedSet`, whose position is dictated by the comparator.
 
 ---

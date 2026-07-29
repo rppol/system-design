@@ -490,48 +490,78 @@ Calling `clone()` on an object that doesn't implement `Cloneable` throws `CloneN
 ## 12. Interview Questions with Answers
 
 **Q1: What happens when you override equals() but not hashCode() in a class used as a HashMap key?**
+**Short:** Overriding equals without hashCode puts logically equal objects in different HashMap buckets, so get() silently returns null.
+
 Two logically equal objects compute different hash codes (since `Object.hashCode()` is identity-based), so `HashMap` places them in different buckets. A `get()` call with a logically-equal key will hash to a different bucket and return `null` — silent data loss. The fix is to always override both: if `a.equals(b)` then `a.hashCode() == b.hashCode()` must hold.
 
 **Q2: What is the difference between an abstract class and an interface in Java 8+?**
+**Short:** An abstract class can hold instance state and one superclass slot, while an interface adds only default and static methods.
+
 An abstract class can have instance state (fields), constructors, and any mix of abstract/concrete methods. An interface can have only `static final` constants, abstract methods, `default` methods (with body), and `static` methods. The key practical difference: a class can implement many interfaces but extend only one abstract class. Use abstract class for shared state + partial implementation; use interface for capability contracts on unrelated types.
 
 **Q3: Why prefer composition over inheritance (Effective Java Item 18)?**
+**Short:** Inheritance exposes unspecified superclass internals that can silently break a subclass, which composition avoids entirely.
+
 Inheritance exposes implementation details — subclasses break when superclasses change internal behavior. Bloch's own example is `InstrumentedHashSet extends HashSet`, which overrides `add()` and `addAll()` to count insertions: because `HashSet.addAll()` is itself implemented by calling `add()`, adding three elements through `addAll` counts six. The subclass is broken by an *unspecified* internal detail of the superclass, and a future JDK could change that detail either way — that is the fragile base class problem. Composition avoids it: a wrapper (`InstrumentedSet implements Set`, forwarding to a held `Set`) delegates only through the published API, so superclass internals cannot leak into it.
 
 **Q4: Explain static dispatch vs dynamic dispatch with a concrete example.**
+**Short:** Overload resolution is fixed at compile time by declared type, while override resolution happens at runtime by actual type.
+
 Static dispatch: overloaded method resolution at compile time based on the *declared* parameter type. Dynamic dispatch: overridden method resolution at runtime based on the *actual* receiver type via vtable. Example: `Animal a = new Dog(); a.speak()` → JVM looks up `Dog.speak()` at runtime (dynamic). But `void process(Animal a)` vs `void process(Dog d)` — if you call `process(a)` where `a` is declared `Animal`, the first overload is chosen at compile time regardless of the runtime type.
 
 **Q5: What are the four types of inner classes, and what are their memory implications?**
+**Short:** Non-static inner and anonymous classes hold an implicit outer reference that can leak memory if they outlive it.
+
 (1) Static nested class: no outer reference, behaves like a top-level class. (2) Non-static inner class: holds implicit `this$0` reference to outer instance — can cause memory leaks if inner outlives outer. (3) Anonymous class: implicit outer reference + captures effectively-final locals. (4) Local class: same as anonymous but named. For long-lived callbacks/listeners, always prefer static nested or standalone classes to avoid retaining the outer object.
 
 **Q6: What does `final` mean on a class, method, and field?**
+**Short:** final blocks subclassing on a class, overriding on a method, and reassignment on a field's reference.
+
 On a **class**: cannot be subclassed (e.g., `String`, `Integer`); enables JIT devirtualization. On a **method**: cannot be overridden; JIT can inline the call directly. On a **field**: reference cannot be reassigned after initialization (but the referenced object can still be mutated unless it's also immutable). Note: `final` field + immutable object = true immutability.
 
 **Q7: What is the Liskov Substitution Principle and how can violating it manifest in Java?**
+**Short:** LSP is violated when a subtype cannot replace its supertype without breaking code, as in Square extending Rectangle.
+
 LSP says: if `S` is a subtype of `T`, objects of type `S` must be substitutable for objects of type `T` without altering program correctness. Classic violation: `Square extends Rectangle` where `setWidth()` also sets height. Code that calls `setWidth(5); setHeight(3); assert area() == 15` fails for a `Square`. In Java, this manifests as code that works for the declared supertype but breaks when a subtype is substituted — often discovered only in production.
 
 **Q8: What is the full contract for equals()?**
+**Short:** equals() must be reflexive, symmetric, transitive, consistent, and false against null, or collections break.
+
 Reflexive: `x.equals(x)` is true. Symmetric: `x.equals(y)` iff `y.equals(x)`. Transitive: if `x.equals(y)` and `y.equals(z)` then `x.equals(z)`. Consistent: multiple calls return the same result if objects unchanged. Non-null: `x.equals(null)` is always false. Violating any of these breaks collection contracts.
 
 **Q9: When would you use each inner class type?**
+**Short:** Static nested classes need no outer state, while non-static inner classes exist to access the outer instance directly.
+
 Static nested: helper classes that don't need outer state (e.g., `Map.Entry`, `Builder`). Non-static inner: iterator that needs access to the outer collection's internal state (e.g., `ArrayList.Itr`). Anonymous: short one-off implementation of an interface, especially pre-Java 8 (now replaced by lambdas). Local: complex temporary implementation that needs to access local variables from the enclosing method.
 
 **Q10: What are all the methods defined on java.lang.Object?**
+**Short:** Every Java object inherits equals, hashCode, toString, clone, getClass, wait, notify, and notifyAll from Object.
+
 `equals()`, `hashCode()`, `toString()`, `clone()` (protected), `finalize()` (deprecated), `getClass()`, `wait()` (3 overloads), `notify()`, `notifyAll()`. Every Java object inherits these. The most important are `equals`/`hashCode` (collection contracts), `toString` (debugging), and `wait`/`notify` (low-level concurrency — prefer `java.util.concurrent` instead).
 
 **Q11: What is a bridge method and when does the compiler generate one?**
+**Short:** A bridge method is a synthetic compiler-generated method that preserves polymorphism after generic type erasure.
+
 A bridge method is a synthetic compiler-generated method that maintains polymorphism after type erasure. When a subclass overrides a generic method with a more specific type, or uses covariant return types, the compiler generates an extra method with the erased signature that delegates to the actual override. Example: `class Dog extends Animal { @Override Dog create() {...} }` generates `synthetic Animal create() { return this.create(); }`. You can see them with `javap -verbose`.
 
 **Q12: What is the difference between hiding and overriding in Java?**
+**Short:** Instance methods are overridden with dynamic dispatch, while static methods are only hidden and resolved statically.
+
 Overriding applies to *instance methods*: the runtime type determines which version is called (dynamic dispatch). Hiding applies to *static methods*: the *declared* type at the call site determines which version is called (static dispatch). A subclass can *hide* a static method from a superclass by defining a static method with the same signature — but this is not overriding and does not participate in polymorphism. Calling the method through a supertype reference always invokes the supertype's static method.
 
 **Q13: What is the class initialization order when a subclass is instantiated?**
+**Short:** Parent static initializers run once before Child's, then each instance runs parent instance init before child instance init.
+
 The JVM initializes classes lazily on first active use. When `new Child()` is called: (1) If `Parent` class is not yet initialized: run `Parent`'s static field initializers and static blocks in textual order. (2) Run `Child`'s static field initializers and static blocks. (3) For the instance: call `super()` (implicit or explicit) which runs Parent's instance field initializers + instance blocks + Parent constructor body. (4) Run Child's instance field initializers + instance blocks + Child constructor body. Static initialization is once per class load; instance initialization runs for every `new`.
 
 **Q14: Can a subclass in a different package call a `protected` method defined in a superclass?**
+**Short:** A protected inherited method can be called on a subclass reference from another package, never on a plain superclass reference.
+
 Yes, but only through a reference of the subclass type (or a more derived type), not through a reference of the superclass type. In a class `Child extends Parent` (different packages), inside `Child` you can call `this.hook()` or `new Child().hook()` — both compile. But `new Parent().hook()` from inside `Child` is a compile error — the protected access through a superclass reference from a different package is not permitted. The rationale: the protected method is inherited by `Child` and belongs to `Child`'s accessible members, but calling it on an arbitrary `Parent` reference would expose access that `Child` doesn't control.
 
 **Q15: What is the contract between `equals()` and `hashCode()`, and what breaks when you violate it?**
+**Short:** Overriding equals without hashCode breaks HashMap and HashSet because equal objects must share the same hash code.
+
 The contract (from `Object` Javadoc): (1) **Reflexivity**: `x.equals(x)` is always `true`. (2) **Symmetry**: `x.equals(y)` iff `y.equals(x)`. (3) **Transitivity**: if `x.equals(y)` and `y.equals(z)`, then `x.equals(z)`. (4) **Consistency**: multiple calls with unchanged objects return the same result. (5) **Null-safety**: `x.equals(null)` is always `false`. The `hashCode` contract: **objects that are `equals()` must have the same `hashCode()`** — violating this breaks `HashMap`, `HashSet`, `Hashtable`. Classic violation: override `equals()` without overriding `hashCode()`:
 
 ```java
@@ -554,9 +584,13 @@ set.contains(new Point(1, 2)); // false! Different hash buckets
 Also: never include mutable fields in `hashCode()` if the object will be stored in a `HashMap` or `HashSet` — mutating the key after insertion makes it permanently unreachable in the map.
 
 **Q16: Can you extend an instantiable class, add a value component, and still honour the `equals` contract?**
+**Short:** Adding a value component to a subclass while keeping equals symmetric and transitive is provably impossible; use composition instead.
+
 No — there is no way to do it, which is Effective Java Item 10's central result. If `ColorPoint extends Point` and its `equals` requires the colour to match, then `point.equals(colorPoint)` is `true` while `colorPoint.equals(point)` is `false`: symmetry is violated, and a `List.contains` result starts depending on which of the two objects the list happens to hold. Relaxing `ColorPoint.equals` to ignore colour when the argument is a plain `Point` restores symmetry but breaks transitivity instead — two differently coloured points each equal the same uncoloured point but not each other. The two fixes are composition (`ColorPoint` *has* a `Point` and exposes `asPoint()`, rather than extending it) and making the type `final` or a `record` so the situation cannot arise. `getClass()`-based equality is symmetric but violates Liskov, since it rejects a value-preserving subclass that adds no component at all.
 
 **Q17: When would you reach for a `record` or a `sealed` type instead of a plain class or interface?**
+**Short:** Use a record for a pure value carrier and sealed types to make a closed hierarchy exhaustively switchable.
+
 Use a `record` when the type exists only to carry values, and `sealed` when you want a hierarchy whose complete set of subtypes is known and enforced by the compiler. A record derives `equals`, `hashCode` and `toString` from its component list, so it removes exactly the boilerplate that the equals/hashCode contract keeps getting wrong; it is implicitly final, which also sidesteps the subclass-symmetry problem entirely. A `sealed` class or interface lists its subtypes with `permits`, and each subtype must declare itself `final`, `sealed` or `non-sealed` — closing the hierarchy is what lets a `switch` over the subtypes be exhaustive without a `default` arm, so adding a subtype becomes a compile error at every switch instead of a silent runtime fallthrough. Read the three modifiers as a scale of extension intent: `final` (nobody), `sealed` (only these), plain (anybody). Full mechanics live in [Java 9 to 21 Features](../java9_to_21_features/README.md).
 
 ---

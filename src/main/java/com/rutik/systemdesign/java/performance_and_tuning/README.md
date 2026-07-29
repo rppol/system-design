@@ -599,27 +599,43 @@ A team added an object pool for their DTO objects, believing they'd reduce GC pr
 ## 12. Interview Questions with Answers
 
 **Q1: How do you size a thread pool for CPU-bound vs I/O-bound work?**
+**Short:** Size CPU-bound pools at core count plus one; size I/O-bound pools by the wait-to-compute ratio.
+
 CPU-bound: `# CPU cores + 1` — one extra thread covers rare scheduling gaps; more than this causes context switch overhead with no CPU-time benefit. I/O-bound: `# CPU cores × (1 + W/C)` where W = average wait time and C = average compute time per task. If tasks spend 90% waiting (DB calls, HTTP): `cores × 10`. Practical cap: bounded by the DB connection pool size or downstream service limits. On Java 21, use virtual threads for I/O-bound work — the JVM schedules them on carrier threads automatically, eliminating manual sizing.
 
 **Q2: What is false sharing and how do you detect and fix it?**
+**Short:** False sharing happens when two threads write independent variables on the same 64-byte cache line.
+
 False sharing: two independently-written variables share a 64-byte CPU cache line. When Thread 1 writes variable A and Thread 2 writes variable B simultaneously, they both invalidate the entire shared cache line — each write forces the other core to reload 64 bytes from L3/memory. Effect: 10-100× slower than non-shared counters. Detect: async-profiler hardware counter mode shows high cache-miss rate on specific fields; or JMH with `@Contended` on/off. Fix: `@jdk.internal.vm.annotation.Contended` (enables padding to separate cache lines) or manual padding with unused `long` fields.
 
 **Q3: How would you diagnose a memory leak in production?**
+**Short:** Diagnose a leak by capturing a heap dump on OOM and tracing the suspect object's path to GC roots.
+
 (1) Observe: heap grows steadily on dashboards (JVM metrics); major GC frequency increases; OOM eventually. (2) Capture heap dump before OOM: configure `-XX:+HeapDumpOnOutOfMemoryError` or trigger with `jmap -dump:live,format=b,file=heap.hprof <pid>`. (3) Open in Eclipse MAT: run Leak Suspects Report; examine dominator tree for objects with unexpected retained heap. (4) Find GC root path: "Path to GC Roots" for the suspect object — reveals which field chains keep it alive. (5) Fix the holding reference (remove from static collection, call `threadLocal.remove()`, cancel event listener).
 
 **Q4: What is JMH and why is it needed for microbenchmarks?**
+**Short:** JMH prevents dead-code elimination, JIT warmup skew, and cross-benchmark JIT contamination via forking.
+
 JMH (Java Microbenchmark Harness, from OpenJDK) handles three problems that make naive benchmarks unreliable: (1) Dead code elimination — JIT may remove your benchmark computation if results are unused; JMH uses Blackhole to consume results. (2) JIT warmup — code changes tiered compilation state; JMH runs warmup iterations before measuring. (3) Benchmark forking — JMH runs each benchmark in a separate JVM fork, preventing JIT contamination between tests. Without these, your benchmark can be 10-1000× wrong.
 
 **Q5: Why is String concatenation in a loop slow and what is the exact bytecode difference?**
+**Short:** `result += s` in a loop rebuilds a new StringBuilder and String every iteration, an O(n squared) cost.
+
 `result += s` inside a loop compiles to: `result = new StringBuilder(result).append(s).toString()`. Each iteration creates a `StringBuilder`, copies the existing string into it, appends the new string, and calls `toString()` which creates a new `String`. Total for n iterations: n `StringBuilder` objects + n `String` objects, each copying the accumulated string — O(n²) total bytes copied. The fix: one `StringBuilder` outside the loop, `append()` inside, `toString()` once — O(n) total. Java 9+ with `StringConcatFactory` optimizes simple non-loop cases but loop `+=` still has this cost.
 
 **Q6: How does compact strings (Java 9) save memory?**
+**Short:** Compact Strings store LATIN-1-only text as byte[] instead of char[], roughly halving String heap use.
+
 Before Java 9, every `String` was backed by a `char[]` (UTF-16: 2 bytes per character). Java 9 introduced compact strings: if all characters fit in LATIN-1 (ISO-8859-1, single-byte), the string is stored as `byte[]` (1 byte per char) with a `coder` field set to 0. For ASCII-heavy applications (typical server-side Java processing English text, JSON keys, URLs), this reduces String heap usage by ~50%. Controlled by `-XX:+CompactStrings` (on by default). Mixed-language strings that need UTF-16 fall back to 2-byte storage automatically.
 
 **Q7: When is a parallel stream slower than sequential?**
+**Short:** A parallel stream loses to sequential on small collections, blocking I/O work, or non-splittable sources.
+
 (1) Small collections: the ForkJoinPool overhead (task splitting, merging, thread scheduling) exceeds the computation time. Rule of thumb: < 10,000 elements often not worth it for cheap operations. (2) I/O-bound operations: blocking threads in `ForkJoinPool.commonPool()` — pool starved, sequential would be faster. (3) Non-splittable sources: `LinkedList`, custom iterables that can't split — parallel degrades to sequential with extra overhead. (4) Stateful/ordered operations: `distinct()`, `sorted()` need synchronization in parallel — may be slower than sequential. (5) Computations where the combiner is expensive.
 
 **Q8: What JVM flags would you set for a low-latency service?**
+**Short:** Use ZGC with a pre-sized, pre-touched heap and structured GC logging for a low-latency service.
+
 ```
 -server
 -XX:+UseZGC                               # Sub-millisecond pauses
@@ -635,21 +651,33 @@ Before Java 9, every `String` was backed by a `char[]` (UTF-16: 2 bytes per char
 For Java 21 with virtual threads, add: `-Djdk.tracePinnedThreads=full` during initial rollout to detect pinning issues.
 
 **Q9: How do you read a GC log and identify a problematic pause?**
+**Short:** Read a GC log by separating routine young pauses from problematic full GCs and to-space-exhausted events.
+
 With `-Xlog:gc*`, look for: (1) "Pause Young" (minor GC): normal, should be <50ms; (2) "Pause Full" (full GC): always problematic — long STW, investigate heap sizing and old gen growth; (3) "GC(N) To-space Exhausted": G1 couldn't fit survivors → fallback full GC; (4) pause duration vs `MaxGCPauseMillis` goal: if consistently 10× over, tune `InitiatingHeapOccupancyPercent` lower. Key metrics: GC frequency (how often), pause duration (how long), heap before/after (how much freed).
 
 **Q10: What is the difference between retained heap and shallow heap in a heap dump?**
+**Short:** Shallow heap is an object's own fields; retained heap is everything freed if that object were collected.
+
 Shallow heap: memory consumed by the object itself — its fields' total size (excluding referenced objects). `ArrayList` shallow heap = ~40 bytes (header + length + elementData reference), not counting the array. Retained heap: the total memory that would be freed if this object were GC'd — the object plus all objects exclusively reachable through it. `ArrayList` with 1000 String elements: retained heap = 40B (ArrayList) + array size + 1000 × String sizes. In Eclipse MAT, retained heap is the key metric for identifying leak culprits: high retained heap = deleting this object frees a lot.
 
 **Q11: How does CPU cache architecture explain why `ArrayList` is faster than `LinkedList` for sequential iteration?**
+**Short:** ArrayList's contiguous array loads cache-friendly lines, while LinkedList's scattered nodes miss cache constantly.
+
 `ArrayList` stores elements in a contiguous `Object[]` array. Reading sequentially loads 64-byte cache lines, each containing ~16 object references (4B each with compressed oops). Subsequent reads hit L1 cache (~4 cycles). `LinkedList` stores each element in a `Node` object (object header + value + prev/next pointers = ~24 bytes + header). Each `node.next` pointer points to a heap-allocated `Node` at an arbitrary address — a different cache line in a different memory location. Accessing it requires: L1 miss → L2 miss → L3 miss → RAM (~200 cycles). For 1M elements: `ArrayList` traversal ≈ 4M cycles; `LinkedList` traversal ≈ 200M cycles (50x slower). This is why O(n) complexity is the same but real-world performance differs by orders of magnitude.
 
 **Q12: What is the JIT inline threshold and how does a megamorphic call site prevent optimization?**
+**Short:** The JIT can't inline a megamorphic call site because it would need every possible receiver implementation.
+
 The default JIT inline threshold is approximately 35 bytecodes (`-XX:MaxInlineSize=35`). Methods within this size are candidates for inlining — the JIT replaces the call instruction with the method body, enabling further optimizations like constant folding, escape analysis, and dead code elimination. A megamorphic call site has 3 or more concrete receiver types. The JIT cannot inline megamorphic virtual calls because it would need to enumerate all possible implementations (unlike monomorphic sites where one type is inlined, or bimorphic where two are if-else'd). Megamorphic sites fall back to vtable dispatch (~10-15% slower than inlined monomorphic). Diagnostic: `-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining` shows "not inlineable" for megamorphic sites. Fix: reduce type diversity at hot call sites, or use `final` methods where possible.
 
 **Q13: What is JVM escape analysis and how can it eliminate heap allocations entirely?**
+**Short:** Escape analysis lets the JIT stack-allocate or scalar-replace an object that never escapes its method.
+
 Escape analysis (enabled by default since Java 6, `-XX:+DoEscapeAnalysis`) determines whether an object reference "escapes" its creating method/thread — stored in a field accessible to other threads, returned to the caller, or passed to a non-inlinable method. If the object does not escape: (1) **Stack allocation** — object lives on the thread stack, freed at method return, zero GC pressure. (2) **Scalar replacement** — the object is decomposed into its individual fields, which are kept in CPU registers or on the stack; the object allocation itself is eliminated entirely. Example: `new Point(x, y)` used only within one method for a calculation is scalar-replaced. Verification: run `java -XX:+PrintEscapeAnalysis` (requires debug JVM) or observe with JMH `@Benchmark` using a GC profiler (`-prof gc`) — allocation rate should be 0 B/op for a properly escaped-analysed result.
 
 **Q14: What is false sharing and how does `@Contended` prevent it?**
+**Short:** @Contended pads a field to its own cache line, stopping independent writes from invalidating each other's cache.
+
 False sharing occurs when two threads write to distinct variables that reside on the same CPU cache line (~64 bytes on x86). Each write by one thread invalidates the other thread's cached copy, even though the data is logically independent — the CPU cannot invalidate at sub-cache-line granularity. Symptom: linear throughput degradation as core count increases for a supposedly independent concurrent write workload. Fix — pad fields so each occupies a full cache line:
 
 ```java
@@ -668,6 +696,8 @@ class PaddedCounter { volatile long value; long p1,p2,p3,p4,p5,p6,p7; }
 `LongAdder` uses internal `Cell` padding to avoid false sharing between its striped accumulators. Detection tool: `async-profiler -e cache-misses` or `perf stat -e cache-misses`.
 
 **Q15: What is the "time to safepoint" (TTSP) problem and how does a long-running counted loop trigger it?**
+**Short:** A thread stuck in a long counted loop delays the global safepoint because it only polls at loop exit.
+
 A JVM safepoint is a global stop where all threads pause at "safe" positions (method calls, backward branches in byte code) — required for GC, class redefinition, deoptimization. The "time to safepoint" is the interval from when the JVM requests a safepoint to when all threads actually stop. A thread inside a counted integer loop (`for (int i = 0; i < N; i++)`) only reaches a safepoint at the loop's exit — not at each iteration. If `N` is large (e.g., 10M iterations of a tight loop), that thread blocks the global safepoint for the duration of the loop, halting all other threads — GC pauses, thread-dump requests, and profiling samples all wait. Diagnose with `-XX:+PrintSafepointStatistics -XX:PrintSafepointStatisticsCount=1`; look for high "spin" values. Fix: use `LongStream` (checks safepoints more frequently than `int` loops), or split the loop into bounded chunks.
 
 ---

@@ -545,42 +545,55 @@ A team tested a concurrent queue by creating threads in `@Test`, having them `ad
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `@Mock` and `@Spy` in Mockito?**
+**Short:** @Mock creates a fully fake object with default return values, while @Spy wraps a real object and calls its real methods unless stubbed.
 `@Mock` creates a complete mock — all methods return defaults (null, 0, false, empty) unless explicitly stubbed. The real class is never called. `@Spy` wraps a real object — all methods execute their real implementation unless stubbed with `doReturn()`. Use `@Mock` when you want to fully control a collaborator and don't need its real behavior. Use `@Spy` when you want to call the real implementation but override specific methods or verify interactions. Rule: if you find yourself stubbing most methods of a spy, use a mock instead.
 
 **Q2: How does `@InjectMocks` choose an injection strategy?**
+**Short:** @InjectMocks tries constructor injection first, then setter injection, then field injection, in that order.
 Mockito tries three strategies in order: (1) Constructor injection — finds the largest constructor whose parameters can be satisfied by available mocks and spies; injects them. (2) Setter injection — calls setters that match mock types and names. (3) Field injection — sets fields directly via reflection that match mock types and names. If constructor injection succeeds, setters and fields are skipped. If none succeeds, an instance is created with the no-arg constructor and injection silently fails (fields remain null). This is a common source of NPEs — prefer constructor injection in production code so `@InjectMocks` always uses the explicit constructor.
 
 **Q3: When should you NOT use mocks?**
+**Short:** Mocks should never replace value objects, the class under test, simple JDK types, or third-party APIs you don't own.
 Do not mock: (1) Value objects and simple data classes — use real instances, they have no side effects. (2) The class you're testing (don't mock the subject under test). (3) Standard JDK classes like `String`, `List`, `Optional` — they're simple and safe to use directly. (4) Collaborators where you'd end up mocking the majority of their behavior — that's a sign the design is too tightly coupled; use a fake instead. (5) Third-party APIs you don't own — you might mock them incorrectly; use integration tests or a test server.
 
 **Q4: What does the test pyramid recommend?**
+**Short:** The test pyramid recommends mostly fast unit tests with progressively fewer integration and end-to-end tests above them.
 The test pyramid says most of your tests should be fast, isolated unit tests, with progressively fewer integration and end-to-end tests above them. A common shape is roughly 70% unit, 20% integration testing interactions between components, and 10% slow end-to-end tests — the ratio is a heuristic, not a rule, and teams routinely run 80/15/5. The shape was named by Mike Cohn in *Succeeding with Agile* (2009) and popularised by Martin Fowler. Unit tests are cheap to write, fast to run, and pinpoint failures. Integration tests verify wiring. E2E tests verify user journeys. The anti-pattern "ice cream cone" (mostly E2E) means slow CI, flaky tests, and poor feedback. The anti-pattern "testing trophy" adds a larger layer of integration tests vs unit tests — valid for highly integrated code.
 
 **Q5: How do you test concurrent code without races in the tests themselves?**
+**Short:** A CountDownLatch synchronizes worker thread start and completion so concurrent-code tests maximize contention without racing themselves.
 Use `CountDownLatch` to synchronize thread start and completion: (1) Create a start latch initialized to 1; all worker threads call `start.await()` before doing work. (2) Create a done latch initialized to N (number of threads); each calls `done.countDown()` when finished. (3) Test thread calls `start.countDown()` to release all workers simultaneously, then `done.await(timeout)` to wait for completion. This maximizes contention (all threads start at the same time) and ensures assertions run only after all threads complete. Also assert with timeout to avoid hanging on deadlocks.
 
 **Q6: What is the difference between a Stub and a Mock (Meszaros taxonomy)?**
+**Short:** A stub returns canned answers with no expectations, while a mock is verified to have received specific expected calls.
 Stub: an object that provides canned answers to calls made during the test. The test makes no assertions about how the stub was used. Example: `when(repo.findById(1L)).thenReturn(user)` — you only care that when asked, it returns the right thing. Mock: a pre-programmed object with expectations about which calls it will receive. The test fails if the mock wasn't called as expected. Example: `verify(emailService).send(...)` — you're asserting the mock was called. In Mockito, every mock can act as both stub and mock: stub with `when()`, verify with `verify()`. Best practice: stub for state verification (check the return value), verify for behavior verification (check interactions).
 
 **Q7: How do you test time-dependent code?**
+**Short:** Time-dependent code should inject a java.time.Clock dependency, using Clock.fixed() in tests instead of calling now() directly.
 The key is to never call `Instant.now()`, `LocalDate.now()`, or `System.currentTimeMillis()` directly in production code. Instead, inject a `java.time.Clock` dependency. In production, pass `Clock.systemUTC()`. In tests, pass `Clock.fixed(someInstant, someZone)`. This makes tests fully deterministic and removes any real-time dependency. `Clock.tick(baseClock, tickDuration)` truncates the base clock's instant down to whole units — `Clock.tick(fixedAt("12:34:56.789Z"), Duration.ofMinutes(1))` reads `12:34:00Z` — which is how you test code that must not depend on sub-minute precision. To move time forward across a test, keep a mutable holder and hand out a new `Clock.fixed` for each step; `Clock` itself is immutable. Alternative for legacy code: extract to a thin wrapper interface and mock that wrapper.
 
 **Q8: What does `ArgumentCaptor` provide that `verify()` doesn't?**
+**Short:** ArgumentCaptor records the actual argument passed during a real call, letting you assert on its fields instead of matching a known value.
 `verify(mock).method(arg)` checks that a method was called with a specific argument — but `arg` must be a known value or an `ArgumentMatcher`. `ArgumentCaptor<T>.capture()` records the actual argument passed during the real call and makes it available after verification via `.getValue()` (or `.getAllValues()` for multiple calls). Use `ArgumentCaptor` when: the argument is a complex object created inside the method under test (you can't predict its exact instance), and you need to assert multiple fields of that object. Example: capturing an `EmailMessage` built inside `service.sendWelcome(userId)` to assert its subject, recipients, and attachments.
 
 **Q9: What is `assertAll()` and when should you use it?**
+**Short:** assertAll() runs every provided assertion even after one fails and reports all failures together, unlike assertEquals().
 `assertAll(heading, Executable... executables)` runs all the provided assertions even if some fail, then reports ALL failures at once. Regular `assertEquals()` stops at the first failure. Use `assertAll()` when a single test logically validates multiple aspects of one result — e.g., asserting multiple fields of a returned object. Without `assertAll()`, you'd need one test per field or accept that only the first failure is reported. Do not overuse: if the assertions are logically independent, they belong in separate tests. `assertAll()` is for "this single result must satisfy ALL these conditions simultaneously."
 
 **Q10: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
+**Short:** submit() swallows a task's exception into its Future until get() is called, while execute() lets it reach the UncaughtExceptionHandler.
 It depends entirely on whether the task was handed to `submit()` or to `execute()`, and mixing them up is why these exceptions go missing. With `submit()` the exception is captured into the `Future` and nothing is printed; the task's `UncaughtExceptionHandler` is never invoked, because `FutureTask.run()` catches the `Throwable` itself. Nobody sees it until someone calls `Future.get()`, which rethrows it as an `ExecutionException` with the original as its cause — so a fire-and-forget `submit()` whose `Future` is discarded loses the exception permanently. With `execute()` there is no `Future`, so the `Throwable` propagates out of the worker thread and does reach the thread's `UncaughtExceptionHandler`, which is where a `ThreadFactory`-installed handler earns its keep. `CompletableFuture.runAsync()` behaves like `submit()`: the stage completes exceptionally and you must chain `.exceptionally()` or `.handle()` to observe it. Practical rule: always consume the `Future` from `submit()`, install an `UncaughtExceptionHandler` via the `ThreadFactory` for `execute()`, and in tests assert on the captured exception rather than on log output.
 
 **Q11: What is `@Nested` and when is it useful?**
+**Short:** @Nested defines an inner test class with its own lifecycle, letting tests be grouped hierarchically by method or precondition.
 `@Nested` defines an inner class inside a test class, with its own lifecycle and grouping. It's useful for expressing hierarchical test structure: group tests by method being tested, or by pre-condition. Example: `UserServiceTest` has `@Nested class FindById` with `@Nested class WhenUserExists` and `@Nested class WhenUserDoesNotExist`. Each nested class can have its own `@BeforeEach` setup. The outer class's `@BeforeEach` runs first, then the nested class's — providing additive setup layers. This makes tests more readable and reflects the structure of the domain.
 
 **Q12: What is `@RepeatedTest` useful for and how does it differ from `@ParameterizedTest`?**
+**Short:** @RepeatedTest reruns the same test method with no argument variation, while @ParameterizedTest supplies a distinct input each time.
 `@RepeatedTest(n)` runs the same test method n times with no argument variation. Use it for: (1) Tests with random inputs (property-based testing style) where you want to exercise many random values. (2) Tests for eventually consistent behavior where you want to verify it passes consistently. (3) Performance tests or flakiness detection runs. `@ParameterizedTest` is for explicit different inputs — each invocation gets a distinct argument combination. `@RepeatedTest` is for running the same test repeatedly. Each repetition has a `RepetitionInfo` parameter you can inject to track which repetition is running.
 
 **Q13: What is the difference between `@Mock` and `@Spy` in Mockito, and when should you use each?**
+**Short:** @Mock fully fakes a collaborator's methods, while @Spy calls the real implementation except for methods explicitly stubbed.
 `@Mock` creates a completely fake object — all methods return default values (null, 0, false) unless stubbed. No real code from the original class is ever called. `@Spy` wraps a real instance — unstubbed methods invoke the real implementation; only explicitly stubbed methods are intercepted. Use `@Mock` by default for collaborators you want to fully control. Use `@Spy` when you need the real implementation for most methods but want to intercept specific ones — typically for partial mocking of legacy code or when you need to verify real side effects while controlling one method:
 
 ```java
@@ -593,6 +606,7 @@ doNothing().when(spyEmail).sendAlert(any()); // use doNothing/doReturn with Spy,
 ```
 
 **Q14: How do you capture and assert on method arguments using `ArgumentCaptor`?**
+**Short:** ArgumentCaptor.capture() inside verify() retrieves the real argument via getValue() so you can assert on its individual fields.
 Declare a captor, pass `captor.capture()` inside `verify()`, then read the recorded argument back with `getValue()` and assert on its fields. This beats an `eq()` matcher whenever the argument is a complex object constructed inside the code under test, because you never have to reconstruct an equal instance:
 
 ```java
@@ -612,6 +626,7 @@ assertThat(savedOrder.getStatus()).isEqualTo(Status.PENDING);
 For multiple invocations, use `orderCaptor.getAllValues()` to get a `List<Order>`. Prefer `ArgumentCaptor` over over-specified `eq()` matchers for value objects that lack a custom `equals()` — it lets you assert on individual fields rather than needing exact equality.
 
 **Q15: What are the five test double types and when is each appropriate?**
+**Short:** The five test doubles are Dummy, Stub, Fake, Spy, and Mock, each isolating the system under test in a different way.
 Dummy, Stub, Fake, Spy and Mock — the taxonomy Gerard Meszaros defined in *xUnit Test Patterns* and Martin Fowler popularised in "Mocks Aren't Stubs". Taken in order:
 1. **Dummy** — passed as a placeholder, never called. Use for required method parameters that are irrelevant to the test.
 2. **Stub** — returns canned values. Use to isolate the SUT from slow/external collaborators (DB, HTTP). `when(repo.findById(1L)).thenReturn(Optional.of(user))`.
@@ -620,9 +635,11 @@ Dummy, Stub, Fake, Spy and Mock — the taxonomy Gerard Meszaros defined in *xUn
 5. **Mock** — a pre-programmed object with strict expectations; fails if unexpected calls happen or expected calls don't occur. Mockito's `@Mock` is a stub by default; add `verify()` to make it a mock. **Practical rule**: prefer stubs for "tell-don't-ask" APIs; use mocks (with `verify`) only for side effects you must assert on (emails sent, events published, DB writes). Over-mocking — asserting on every method call — makes tests brittle to refactoring.
 
 **Q16: What is strict stubbing, and what do you do when it fails your build?**
+**Short:** Strict stubbing throws UnnecessaryStubbingException at teardown for any stub that no test in the class ever calls.
 Strict stubbing is `MockitoExtension`'s default (`Strictness.STRICT_STUBS`): a stub that no test ever calls throws `UnnecessaryStubbingException` at teardown. It also reports an argument mismatch — calling `repo.find(2L)` when only `repo.find(1L)` was stubbed — as a `PotentialStubbingProblem` naming both arguments, instead of quietly returning `null` and surfacing as an NPE ten frames later. When it fires, the first move is to delete the stub, because dead setup left behind by a refactor is exactly what the check is for. When the stub genuinely belongs to a shared `@BeforeEach` that only some tests exercise, narrow the exemption to that one line with `lenient().when(...)`. Relaxing the whole class with `@MockitoSettings(strictness = Strictness.LENIENT)` is a last resort — it turns off the mechanism that tells you your test has drifted from the code it exercises.
 
 **Q17: How do you mock a `final` class, a static method, or an object the code constructs itself?**
+**Short:** Mockito 5's inline mock maker lets mock(), mockStatic(), and mockConstruction() mock final classes, statics, and constructed objects directly.
 All three work with plain `mockito-core` 5.x, because the inline mock maker became the default in Mockito 5.0. `mock(FinalGateway.class)` needs no extra artifact and no `MockMaker` resource file; the separate `mockito-subclass` artifact now exists for the cases the inline maker cannot serve, chiefly GraalVM native image. Statics use `mockStatic(Util.class)` and constructors use `mockConstruction(Foo.class)`; both return a `Closeable` scope that must sit in a try-with-resources, because the mock is registered per thread and leaking it corrupts every later test in that JVM. Treat all three as escape hatches for code you cannot change — a `final` collaborator you own is better injected as an interface, and a static call is better wrapped behind one. One build concern: the inline maker needs a Java agent, and Mockito currently self-attaches one while warning that dynamic attach will be disallowed in a future JDK, so wire `mockito-core` in as a `-javaagent` in Surefire before that lands.
 
 ---

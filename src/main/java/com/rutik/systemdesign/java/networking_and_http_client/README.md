@@ -511,39 +511,63 @@ A service made 20 parallel `HttpClient.sendAsync()` calls but response times did
 ## 12. Interview Questions with Answers
 
 **Q1: How does `HttpClient.sendAsync()` work internally?**
+**Short:** HttpClient.sendAsync() returns a CompletableFuture immediately, doing I/O via async NIO underneath.
+
 `HttpClient.sendAsync()` returns a `CompletableFuture<HttpResponse<T>>` immediately. Internally, the `HttpClient` uses an `Executor` (configurable; defaults to `ForkJoinPool.commonPool()` if not set) for completion callbacks. The actual I/O is handled via the JDK's internal async HTTP implementation which uses NIO (selectors) for HTTP/1.1 and a separate multiplexed connection pool for HTTP/2. When the response arrives, the completion callbacks (`.thenApply()` etc.) run on the executor. Best practice: provide a custom executor (`Executors.newVirtualThreadPerTaskExecutor()`) to control thread usage.
 
 **Q2: What is the difference between NIO `Selector` and NIO2 asynchronous channels?**
+**Short:** NIO Selector is a synchronous polling model; NIO2 async channels use OS-driven completion callbacks.
+
 NIO `Selector` (Java 4): non-blocking polling model. A thread calls `selector.select()`, which returns when any registered channel has pending I/O. The thread then handles the I/O itself. Still synchronous from the application's perspective — the event-loop thread does the work. NIO2 async channels (Java 7): true async model — the application registers a `CompletionHandler` callback. The OS notifies the JVM when I/O completes, and the JVM invokes the callback on a system-managed thread pool. NIO2 is conceptually simpler for some patterns but the callback model leads to "callback hell." Most production code uses NIO (via Netty) rather than NIO2 directly.
 
 **Q3: What is the Reactor pattern and how does Java NIO map to it?**
+**Short:** Java NIO's Selector, SelectionKey, and SocketChannel map directly onto the classic Reactor pattern's roles.
+
 The Reactor pattern: one or more `Reactor` threads run event loops, demultiplexing I/O events and dispatching them to registered handlers. Java NIO maps directly: `Selector` is the Reactor, `SelectionKey` is the event, handler code in the `isReadable()`/`isWritable()` branches is the handler, and `SocketChannel` is the channel abstraction. Netty extends this with `NioEventLoop` (Reactor thread) and `ChannelHandler` pipeline for handler composition. The key invariant: handlers must never block — they must complete quickly and return control to the event loop.
 
 **Q4: What are the limitations of one-thread-per-connection blocking I/O?**
+**Short:** Thread-per-connection I/O is limited by heavy stack memory, context switches, and file descriptor caps.
+
 (1) Memory: each platform thread requires ~512KB-1MB stack. 10,000 connections = 5-10GB stack memory alone. (2) Context switches: OS scheduling 10,000 threads causes significant overhead (~microseconds per switch × millions of switches per second). (3) Scheduler thrashing: OS spends more time deciding which thread to run than actually running them. (4) File descriptor limits: OS limits open FDs (default ~1024 on Linux, configurable to ~65536). With Java 21 virtual threads: virtual thread stacks start at ~few KB, scheduler is JVM (not OS), carrier threads = CPU count. Virtual threads restore the simplicity of blocking code at NIO-level concurrency.
 
 **Q5: How would you implement a basic NIO server?**
+**Short:** A basic NIO server drives accept, read, and write through one Selector loop on non-blocking channels.
+
 (1) Open `ServerSocketChannel`, configure non-blocking, bind to port. (2) Open `Selector`. (3) Register `ServerSocketChannel` with selector for `OP_ACCEPT`. (4) Event loop: call `selector.select()`, iterate `selectedKeys()`. (5) On `OP_ACCEPT`: call `serverChannel.accept()`, configure new channel non-blocking, register for `OP_READ`. (6) On `OP_READ`: read into `ByteBuffer`, flip, process data, write response, register for `OP_WRITE` if write buffer full. (7) On `OP_WRITE`: write remaining data, deregister `OP_WRITE` when done. (8) Always remove keys from `selectedKeys()` iterator. See Section 6 for complete implementation.
 
 **Q6: What is HTTP/2 multiplexing and how does `HttpClient` expose it?**
+**Short:** HTTP/2 multiplexing interleaves many request and response streams over a single TCP connection.
+
 HTTP/2 multiplexing sends multiple request/response pairs concurrently over a single TCP connection via numbered "streams." HTTP/1.1 requires a separate TCP connection per concurrent request (or uses pipelining with head-of-line blocking). HTTP/2 frames carry a stream ID: frames for stream 1 (GET /users), stream 3 (GET /orders), stream 5 (POST /events) interleave on one TCP connection. `HttpClient` with `HTTP_2` version and TLS negotiates HTTP/2 automatically; the client maintains a connection pool. Multiple `sendAsync()` calls to the same host reuse the same connection with multiplexed streams. No application code change is required — `HttpClient` abstracts the streams.
 
 **Q7: How does `HttpClient` handle TLS/SSL?**
+**Short:** HttpClient uses the JVM's default SSLContext unless given a custom one, negotiating HTTP/2 via ALPN.
+
 `HttpClient` uses the JVM's default `SSLContext` (configured via `javax.net.ssl.*` system properties) unless you provide a custom one via `HttpClient.newBuilder().sslContext(customSSLContext)`. For testing, you can create a `SSLContext` that trusts all certificates — never in production. Certificate pinning requires a custom `TrustManager`. HTTP/2 over HTTPS uses TLS ALPN (Application Layer Protocol Negotiation) extension — the client and server negotiate "h2" during TLS handshake. HTTP/2 over plain text (h2c) is technically possible but rarely used.
 
 **Q8: How does virtual thread I/O differ from NIO at the implementation level?**
+**Short:** Virtual threads reimplement blocking socket calls on NIO selectors, parking the thread until I/O completes.
+
 With virtual threads (Java 21), blocking I/O calls like `socket.read()` are reimplemented internally using NIO selectors. When a virtual thread calls `read()` on a socket, the JVM registers the channel with an internal selector and parks (unmounts) the virtual thread. When data arrives, the selector wakes up, the virtual thread is rescheduled, and resumes at the `read()` call as if it returned normally. The application writes simple blocking code; the JVM uses NIO internally. This is the "loom" project vision: blocking API, NIO scalability, no callback complexity.
 
 **Q9: What are `BodyHandlers.ofInputStream()` and when do you use it?**
+**Short:** BodyHandlers.ofInputStream() streams the response body lazily instead of buffering it all in memory.
+
 `BodyHandlers.ofInputStream()` returns a `HttpResponse<InputStream>` where the body is lazily consumed. Unlike `ofString()` (buffers entire response in memory) or `ofBytes()` (same), `ofInputStream()` lets you process the response body as a stream without loading it all into memory. Use it for: large file downloads, streaming JSON (combined with a streaming JSON parser like Jackson's `StreamingParser`), large CSV processing. Remember to close the `InputStream` when done — `try-with-resources` on the response handles this if you call `response.body().close()` or use the `response` in a try block.
 
 **Q10: What happens to in-flight `HttpClient` requests when the application shuts down?**
+**Short:** HttpClient.close() (Java 21) waits for in-flight requests to finish before closing the connection pool.
+
 `HttpClient` implements `AutoCloseable` (Java 21). If not explicitly closed, the client's internal connection pool and executor survive until GC. For clean shutdown: call `client.close()` (Java 21) which waits for in-flight requests to complete then closes connections, or `client.shutdown()` (Java 21) which initiates graceful shutdown and returns a `CompletableFuture<Void>` completing when done. In Java 11-20, there is no `close()` method — shutdown is handled by the provided executor's shutdown. Best practice: use a custom executor so you control its lifecycle independently of the `HttpClient`.
 
 **Q11: How does `Selector`-based NIO differ from a thread-per-connection model, and what did Java 21 virtual threads change?**
+**Short:** Virtual threads give thread-per-connection's simple code with NIO's scalability to 100,000-plus connections.
+
 Thread-per-connection: one OS platform thread per socket (~1 MB stack, ~2,000 practical limit per JVM). `Selector`-based NIO: one or a few threads call `select()`, which returns only channels with pending I/O — each thread handles thousands of connections via a state machine per channel. NIO scales to 100k+ connections with fixed threads but requires explicit non-blocking state machines (complex code). Java 21 virtual threads change the calculus: they are lightweight (~few KB stack, millions possible) and automatically yield when blocked on I/O — giving you thread-per-connection's simple programming model with NIO's scalability. New server code should use virtual threads; NIO remains essential for understanding existing high-performance libraries (Netty, gRPC) and situations where sub-millisecond event-loop latency is required.
 
 **Q12: What is the `SelectionKey.OP_WRITE` pitfall and how does it cause a 100 % CPU spin?**
+**Short:** Leaving OP_WRITE registered after a write completes makes select() return immediately, spinning the CPU.
+
 `OP_WRITE` fires whenever the socket's outbound buffer has space — which is almost always true for a healthy connection. If you register `OP_WRITE` and forget to deregister it after the write completes, `Selector.select()` returns immediately every iteration, burning 100 % CPU in a tight loop. The correct pattern:
 
 ```java
@@ -562,6 +586,7 @@ if (buffer.remaining() == 0) {
 Practical guidance: always profile selector-loop CPU usage in load tests; a 100 % core indicates an always-ready `OP_WRITE` registration.
 
 **Q13: How do you implement retry with exponential backoff for `HttpClient.sendAsync()` without blocking executor threads?**
+**Short:** Use CompletableFuture.delayedExecutor for the backoff so no executor thread sleeps or blocks.
 
 ```java
 // BROKEN: sleeping inside thenCompose blocks the executor thread
@@ -593,9 +618,13 @@ static CompletableFuture<HttpResponse<String>> sendWithRetry(
 `CompletableFuture.delayedExecutor` (Java 9) defers execution without blocking — no thread sits idle during the backoff delay.
 
 **Q14: What is HTTP/2 server push and why did most browsers and `HttpClient` abandon it?**
+**Short:** Server push was abandoned because it often pushed already-cached resources, wasting bandwidth.
+
 HTTP/2 server push allows the server to proactively send resources to the client before the client requests them (e.g., pushing `style.css` when it sees `GET /index.html`). Java `HttpClient` supported it via `PushPromiseHandler`. In practice, server push proved harmful: the server often pushes resources the client already has cached, wasting bandwidth and causing cache collisions. Chrome removed server push support in 2022. `HttpClient`'s push API still exists but should not be used for new systems. The more useful HTTP/2 feature is multiplexed request pipelining — many concurrent requests over one connection — which `HttpClient` uses automatically when negotiated via ALPN.
 
 **Q15: How do you diagnose and fix connection pool exhaustion in `HttpClient` under high concurrency?**
+**Short:** HttpClient exposes no built-in pool metrics, so diagnose via logging and bound concurrency with a semaphore.
+
 `HttpClient` uses an internal connection pool with no built-in metrics exposed via JMX or Micrometer. Symptoms of exhaustion: requests queue up, p99 latency spikes, `HttpTimeoutException` at `request.timeout()`. Diagnosis steps: (1) enable JDK HTTP client logging with `-Djdk.httpclient.HttpClient.level=ALL`; (2) check if target server closes connections early (look for `GOAWAY` in HTTP/2 or `Connection: close`); (3) measure actual concurrency — if `sendAsync()` is called with 1,000 unbounded `CompletableFuture`s, all 1,000 requests compete for pool slots. Fix: use a `Semaphore` to bound concurrent in-flight requests to a sensible limit (e.g., 50 per host); drain results before issuing more. For HTTP/2, confirm the server advertises `MAX_CONCURRENT_STREAMS` and that the client respects it — Java's `HttpClient` does respect the server's `MAX_CONCURRENT_STREAMS` setting automatically.
 
 ---

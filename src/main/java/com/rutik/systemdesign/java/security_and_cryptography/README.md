@@ -773,63 +773,83 @@ if (MessageDigest.isEqual(computedTag, providedTag)) { ... }  // FIX: constant-t
 ## 12. Interview Questions with Answers
 
 **Q1: Why is `Cipher.getInstance("AES")` dangerous, and what does it actually give you?**
+**Short:** Cipher.getInstance("AES") silently resolves to AES/ECB/PKCS5Padding, which leaks repeated plaintext patterns.
 It silently resolves to `AES/ECB/PKCS5Padding` — ECB mode with no IV. ECB encrypts each 16-byte block independently, so identical plaintext blocks produce identical ciphertext blocks, leaking structure and repeats to anyone watching (the "ECB penguin"). Adobe's 2013 breach and Zoom's 2020 media encryption both fell to exactly this. Always name the full transformation and prefer authenticated `AES/GCM/NoPadding`.
 
 **Q2: What happens if you reuse a nonce with AES-GCM, and why is it worse than reusing a CBC IV?**
+**Short:** Reusing an AES-GCM nonce leaks the plaintext XOR and the authentication subkey, breaking both confidentiality and authenticity.
 Reusing a 96-bit GCM nonce under the same key is catastrophic — it leaks the XOR of the two plaintexts *and* the GCM authentication subkey H, which lets an attacker forge valid tags for arbitrary ciphertext. A repeated CBC IV only weakens confidentiality for identical prefixes; a repeated GCM nonce breaks both confidentiality and authenticity completely. Generate a fresh random nonce (or a guaranteed-unique counter) per message, and rotate the key well before 2^32 messages.
 
 **Q3: Why must you never use `new Random()` (or `Math.random()`) to generate a key or IV?**
+**Short:** java.util.Random is a predictable 48-bit LCG seeded from the clock, so it must never generate keys or IVs.
 `java.util.Random` is a 48-bit linear congruential generator seeded from the clock, so its entire output stream is predictable from a handful of samples. An attacker who sees a few values can reconstruct the state and derive every key/IV you produce. Always use `SecureRandom` (DRBG); use `SecureRandom.getInstanceStrong()` for long-lived key material.
 
 **Q4: Why store a password in `char[]` instead of `String`?**
+**Short:** A String password can't be erased from the heap since it is immutable, while a char[] can be zeroed out immediately.
 Because a `String` is immutable and possibly interned, so you cannot erase it — the secret lingers in the heap (and in any heap dump) until GC eventually collects it, uncontrollably. A `char[]` can be overwritten with `Arrays.fill(pw, '\0')` the instant you're done. This is why every JCA password API — `PBEKeySpec`, `KeyStore.load`, `PasswordProtection` — takes `char[]`, not `String`.
 
 **Q5: When would you choose AES-GCM over AES-CBC, and when is CBC still acceptable?**
+**Short:** AES-GCM should be the default since it gives confidentiality and integrity in one primitive with no padding-oracle surface.
 Choose AES-GCM by default — it provides confidentiality and integrity in one primitive at AES-NI speed with no padding (so no padding-oracle surface). CBC is acceptable only for legacy interop and only as encrypt-then-MAC: a random IV, a separate HMAC key, MAC the IV+ciphertext, and verify the MAC before decrypting. Unauthenticated CBC is the classic padding-oracle setup and should never ship.
 
 **Q6: Why can't you use plain SHA-256 to hash passwords, and what should you use?**
+**Short:** Plain SHA-256 hashes too fast for password storage, so use a slow, salted, memory-hard algorithm like Argon2id instead.
 SHA-256 is a fast, unsalted, single-pass digest — a GPU can try ~10 billion candidates per second, so any human password falls quickly. Password hashing needs to be *deliberately slow, salted, and ideally memory-hard*: use Argon2id (best, via BouncyCastle), scrypt, or bcrypt; use PBKDF2-HMAC-SHA256 at 600k+ iterations when you can't add a dependency. The salt defeats rainbow tables; the work factor defeats brute force.
 
 **Q7: What is a padding-oracle attack and how do you prevent it in Java?**
+**Short:** A padding-oracle attack decrypts CBC ciphertext byte-by-byte by observing whether padding validation succeeded or failed.
 It's an attack on unauthenticated CBC where the server reveals whether decryption produced valid PKCS#7 padding, letting an attacker decrypt ciphertext byte-by-byte without the key. The oracle leaks through an error message, status code, or response timing. Prevent it by using authenticated encryption (AES-GCM has no padding at all) or encrypt-then-MAC where you verify the HMAC in constant time *before* attempting to decrypt, so malformed ciphertext is rejected before the unpadding step runs.
 
 **Q8: RSA vs elliptic curve — which do you pick and why?**
+**Short:** Elliptic curve (P-256) should be picked over RSA for new systems since it gives equivalent security with far smaller keys.
 Pick EC (ECDSA/ECDH on P-256) for new systems: a 256-bit EC key gives ~128-bit security equivalent to a 3072-bit RSA key, with far smaller keys/signatures and faster keygen and signing. RSA's one edge is faster *verification*, and it's unavoidable when interoperating with RSA-only peers. For key exchange prefer ephemeral ECDH (forward secrecy); for encryption-of-a-key use RSA-OAEP only when the recipient mandates RSA.
 
 **Q9: How does the JCA provider architecture resolve `getInstance("AES/GCM/NoPadding")`?**
+**Short:** The JCA provider framework walks registered providers in priority order and returns the first one implementing that algorithm.
 The engine class (`Cipher`) asks the provider framework, which walks `Security.getProviders()` in priority order and returns the first provider whose SPI supplies that algorithm. This indirection makes algorithms swappable — adding BouncyCastle at position 1 changes which implementation you get without touching call sites. It's also why the transformation string is security-critical: the string, not a type, selects the exact behavior.
 
 **Q10: What's the difference between a MAC (HMAC) and a digital signature?**
+**Short:** An HMAC proves integrity with a shared secret key, while a digital signature adds non-repudiation via an asymmetric key pair.
 A MAC uses a single shared secret key — both parties can compute and verify it, giving integrity and authenticity but *not* non-repudiation (either party could have made it). A signature is asymmetric — only the private-key holder can produce it, and anyone with the public key can verify — giving non-repudiation. Use HMAC when both sides share a key (fast, symmetric); use `Signature` (ECDSA/RSA-PSS) when a third party must verify authorship or the signer must be held accountable.
 
 **Q11: Why is HMAC-SHA256 preferred over `SHA256(key || message)`?**
+**Short:** HMAC-SHA256 avoids the length-extension vulnerability that a naive SHA256(key||message) construction is exposed to.
 Because the naive `SHA256(key || message)` is vulnerable to length-extension attacks that let an attacker forge a digest for an extended message. Knowing only the digest and message length, they can append data and compute a valid digest without the key. HMAC's nested construction, `H((k⊕opad) || H((k⊕ipad) || m))`, closes that hole. Always use the `Mac` engine class with `HmacSHA256`, never a hand-rolled hash of key and message.
 
 **Q12: What is envelope encryption (KEK/DEK) and why use it?**
+**Short:** Envelope encryption wraps a per-record DEK with a long-lived KEK, letting you rotate the KEK without re-encrypting all data.
 Envelope encryption encrypts each data record with a fresh Data Encryption Key (DEK), then wraps (encrypts) that DEK with a long-lived Key Encryption Key (KEK) held in a KeyStore, KMS, or HSM. You store the wrapped DEK next to the ciphertext. It limits the blast radius of any single DEK, keeps the KEK off the data path, and — crucially — lets you rotate the KEK by re-wrapping DEKs cheaply instead of re-encrypting terabytes of data.
 
 **Q13: Does `SecureRandom.getInstanceStrong()` block, and how does it differ from `new SecureRandom()`?**
+**Short:** SecureRandom.getInstanceStrong() can block on entropy-starved systems, unlike the non-blocking default SecureRandom.
 It can block — on Linux it may map to a blocking entropy source, so on entropy-starved boxes like fresh VMs or containers key generation can stall at startup. The strong source is selected by the `securerandom.strongAlgorithms` security property. `new SecureRandom()` uses the configured default (NativePRNG/DRBG), which is non-blocking and cryptographically strong for most uses. Use `getInstanceStrong()` for long-lived keys where you want the strongest source; use the default for per-request nonces/IVs.
 
 **Q14: How does TLS certificate validation work in Java, and what's the difference between the TrustManager and hostname verification?**
+**Short:** TrustManager validates the certificate chain up to a trusted root, while hostname verification is a separate check a raw SSLSocket skips.
 The `TrustManager` builds and validates the server's certificate chain up to a trusted CA root in the truststore (checking signatures, validity dates, and revocation if configured). Hostname verification is a *separate* step that checks the certificate's SAN matches the host you dialed — and a raw `SSLSocket` skips it unless you set `SSLParameters.setEndpointIdentificationAlgorithm("HTTPS")`. `HttpClient` and `HttpsURLConnection` do both automatically; forget the hostname step on a raw socket and you've left a MITM hole even with a valid chain.
 
 **Q15: What is mTLS and how do you configure it in Java?**
+**Short:** Mutual TLS has both the client and server present certificates that each side validates against its own truststore.
 Mutual TLS has both sides present certificates: the server authenticates to the client as usual, and the client also presents a certificate the server validates against its truststore. In Java you configure the client's `SSLContext` with a `KeyManager` (from a KeyStore holding the client's private key + cert) in addition to a `TrustManager`, and configure the server to require client auth (`SSLParameters.setNeedClientAuth(true)`). It's the standard for service-to-service auth where both endpoints must prove identity.
 
 **Q16: Why is RSA-OAEP preferred over RSA PKCS#1 v1.5 padding?**
+**Short:** RSA-OAEP uses randomized hash-based padding that resists the Bleichenbacher attack PKCS#1 v1.5 padding is vulnerable to.
 PKCS#1 v1.5 encryption padding is vulnerable to Bleichenbacher's adaptive chosen-ciphertext attack — a padding oracle over many queries can recover the plaintext without the private key. OAEP (Optimal Asymmetric Encryption Padding) uses a randomized, hash-based construction that is provably secure against that attack. In Java, request `RSA/ECB/OAEPWithSHA-256AndMGF1Padding` rather than `RSA/ECB/PKCS1Padding` for any new encryption.
 
 **Q17: Why prefer PKCS12 over JKS for keystores?**
+**Short:** PKCS12 is a standardized, interoperable keystore format that can hold secret keys, unlike the proprietary Java-only JKS.
 PKCS12 is a standardized, interoperable format (RFC 7292) that can store secret keys and is the JDK default since Java 9, unlike the proprietary Java-only JKS. JKS has weaker integrity protection and cannot store `SecretKey` entries at all. PKCS12 files interoperate with OpenSSL and other tooling, whereas JKS is Java-only. Migrate legacy JKS stores with `keytool -importkeystore -srcstoretype JKS -deststoretype PKCS12`.
 
 **Q18: What does the GCM authentication tag protect, and what's `updateAAD` for?**
+**Short:** The GCM authentication tag detects any tampering with the ciphertext, while updateAAD authenticates unencrypted context data.
 The tag (128-bit here) authenticates the ciphertext — decryption throws `AEADBadTagException` if a single bit was flipped, so you get tamper detection for free. `updateAAD` adds Additional Authenticated Data — bytes that are authenticated but *not* encrypted (e.g., a record ID, header, or key version) — so the same ciphertext can't be replayed in a different context. If the AAD on decrypt doesn't match the AAD on encrypt, the tag check fails just as if the ciphertext were tampered.
 
 **Q19: You need to encrypt 10 MB of data with a recipient's RSA public key. What's wrong with that, and what's the right approach?**
+**Short:** RSA can only encrypt a payload smaller than its modulus, so bulk data needs hybrid encryption with an RSA-wrapped AES key.
 RSA can only encrypt a payload smaller than its modulus (a 3072-bit key handles ~318 bytes with OAEP), so you can't encrypt 10 MB directly. The right approach is hybrid/envelope encryption: generate a random AES-256 DEK, encrypt the 10 MB with AES-GCM, then RSA-OAEP-wrap only the small DEK with the recipient's public key and ship both. This is exactly how TLS and PGP work — asymmetric crypto moves the symmetric key, symmetric crypto moves the bulk data.
 
 **Q20: How do you rotate a KEK without re-encrypting all your data?**
+**Short:** Rotating a KEK only requires re-wrapping the small DEKs with the new key, leaving the bulk ciphertext completely untouched.
 With envelope encryption you only re-wrap the DEKs, never the ciphertext: unwrap each stored DEK with the old KEK and re-wrap it with the new KEK, updating the wrapped-DEK column and a key-version tag. The bulk ciphertext is untouched because it was encrypted under the per-record DEK, which didn't change. Keep the old KEK available (marked decrypt-only) until every row is re-wrapped, then retire it — this makes rotation an O(number of keys) operation instead of O(bytes of data).
 
 ---
