@@ -191,7 +191,12 @@ full answer while adding one; if the answer's first sentence was doing the job, 
 before, so a section can be migrated in any order. `extract.py` reports migration progress
 ("authored **Short:** summaries: N of M parsed Q&As"). Until a Q&A has one, the existing
 rule still binds for it: the first sentence must be a self-contained direct answer of
-15–220 characters.
+15–220 characters — not because a longer one is dropped (it is not; see the extraction
+rules below) but because it is trimmed at a clause boundary and ships as the option.
+
+**Measure migration coverage per parsed Q&A, never per file.** A file-level count read
+llm as complete at 125 of 127 files while `vllm_deep_dive/README.md`'s 18 Q&As had no
+summaries at all — the per-Q&A count (2054 of 2072) was the one that saw it.
 
 **In the reader** the line is hidden by default and revealed by the Summaries row in the
 typography popover (`sd_reader_short`). It is never part of `answerFull` and never
@@ -443,10 +448,17 @@ silently dropped from the game or renders wrong. These rules are derived from
   (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
   wraps across lines. This is why the "bold the question" rule is load-bearing,
   not cosmetic.
-- **The first sentence of the answer must be a self-contained direct answer of
-  15–220 characters.** Shorter or longer → the Q&A is silently dropped (it becomes
-  the MCQ's correct option). This is why the Q&A rule mandates "first sentence =
-  direct answer."
+- **The first sentence of the answer should be a self-contained direct answer of
+  15–220 characters**, because for a Q&A with no authored `**Short:**` line it
+  becomes the MCQ's correct option. **It is NOT a drop rule** — `make_short()`
+  returns a short first sentence as-is and trims an over-long one at a clause
+  boundary, returning `""` only for empty input, so **no question is ever excluded
+  from the bank on length alone** (this has been true since 18e2328). What a bad
+  first sentence costs is a mangled *option*: a 442-char opener ships as a truncated
+  fragment, and one opening with a code fence ships as gibberish. Worth fixing on
+  its own merits — but do not report it as lost questions, and do not prioritise it
+  over a heading that really does delete Q&As from the bank (see above). The
+  permanent fix for any such Q&A is to author a `**Short:**` line.
 - A topic needs enough sibling Q&As to build 3 distractors; the **15-Q&A floor**
   guarantees this. Distractors are drawn from other answers' first sentences
   (same module first, widening to the section), IDF-ranked — so keep first
