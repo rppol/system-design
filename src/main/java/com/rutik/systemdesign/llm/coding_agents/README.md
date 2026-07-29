@@ -386,51 +386,67 @@ if any(re.search(p, command) for p in DESTRUCTIVE_GIT):
 ## 12. Interview Questions with Answers
 
 **Q: What is the Agent-Computer Interface (ACI) and why does it matter?**
+**Short:** The Agent-Computer Interface is the set of purpose-built commands an agent uses on a codebase, and a good ACI can lift SWE-bench scores over 10 points.
 ACI is the set of commands/tools the agent uses to interact with a codebase. SWE-agent's contribution was showing that purpose-designed commands (find_file, goto, edit ranges) outperform raw bash because they reduce mistakes (clearer semantics, scoped operations) and match LLM strengths. A good ACI lifts SWE-bench scores by 10+ percentage points.
 
 **Q: Why is targeted file reading better than whole-file reading for coding agents?**
+**Short:** Targeted grep or symbol reads cut per-call cost 10-50x versus loading whole files, which is why production coding agents avoid full-file reads.
 Whole-file reading bloats context (a 100KB file = ~25K tokens). With grep/symbol search, agent reads ~2KB relevant chunks. Cost per call drops 10-50×; context limits don't get hit; model focuses on relevant code. Industry production agents universally use this pattern.
 
 **Q: How does Claude Code's subagent dispatch help with large codebases?**
+**Short:** Claude Code's subagent dispatch splits explore, implement, and review into isolated-context subagents, running 2-3x faster on multi-file tasks.
 Parent CLI agent spawns subagents with focused tools and isolated context. Explore subagent does navigation (read-only); Implementation subagent does edits (write tools); Review subagent verifies. Each subagent's context stays lean (doesn't see other subagents' work); parent synthesizes results. Wall-clock 2-3× faster than monolithic agent on multi-file tasks.
 
 **Q: What is SWE-bench and why is it the standard benchmark?**
+**Short:** SWE-bench's real GitHub issues scored by passing tests became the standard because it uses real-world distribution and ground-truth tests, not judges.
 SWE-bench (Princeton, 2024): 2294 real GitHub issues from 12 popular Python repos; agent must produce a patch that passes the issue's test cases. SWE-bench Verified: 500-issue human-validated subset. It became standard because of real-world distribution (not synthetic), tests as ground truth (no LLM judges), and coverage across repos and patterns. It is now near-saturated at the frontier, so pair it with SWE-bench Pro — 1,865 tasks across 41 repos in Python, Go, TypeScript and JavaScript, copyleft-licensed and partly private specifically to resist contamination.
 
 **Q: What's the difference between IDE-integrated agents (Cursor) and autonomous agents (Devin)?**
+**Short:** IDE agents like Cursor keep the developer reviewing each suggestion, while autonomous agents like Devin run for hours before delivering a PR.
 IDE-integrated agents work within a developer's flow — engineer reviews and accepts each suggestion. Autonomous agents run end-to-end tasks (hours), then deliver a PR for review. IDE agents: faster iteration, easier course-correction. Autonomous: less developer time, harder to course-correct mid-task. Convergence: Cursor Background Agents add autonomy to IDE; Devin adds clarification dialog to autonomy.
 
 **Q: Why is test-driven looping the dominant pattern for coding agents?**
+**Short:** Test-driven looping dominates because tests are the only oracle available, giving the agent proof of progress instead of a hallucinated "fixed".
 Tests are the only available oracle — without them, the agent can't verify its work. Test-driven loops: write/find test → implement → run → on failure, fix → repeat. This is mechanical and well-suited to agentic loops. Bonus: when the agent fixes the test failure, you have proof of progress. Without tests, the agent can hallucinate "fixed" without verification.
 
 **Q: How do agents handle multi-file refactors?**
+**Short:** Multi-file refactors identify affected files via symbol search, edit each in parallel, then validate by compiling and running the full test suite.
 (1) Identify all affected files via symbol search / grep. (2) Generate edits per file (parallel via subagents in Claude Code-style). (3) Validate: compile/typecheck the project; run tests. (4) On failure, fix and re-validate. The hard part is invariant preservation across files — modern agents use language servers (LSP) for cross-file symbol awareness.
 
 **Q: What is the role of Language Server Protocol (LSP) in coding agents?**
+**Short:** LSP gives agents find-references, go-to-definition, and diagnostics, letting them resolve cross-file symbols without reading full files.
 LSP provides: find references, go to definition, completions, diagnostics — exactly what agents need to navigate large codebases. SWE-agent integrates LSP for accurate cross-file symbol resolution. Avoids the "what does this function do?" needing a full file read.
 
 **Q: How do coding agents handle the case where an edit breaks unrelated code?**
+**Short:** When an edit breaks unrelated tests, the agent must trace why via the failing test rather than checking only tests for the files it changed.
 After edits, run the full test suite (not just tests for changed files). If unrelated tests fail, the agent must: (1) read the failing test, (2) trace why the edit affected it, (3) either undo + try different approach OR also fix the broken area. This is where multi-file coherence matters most.
 
 **Q: What's the cost difference between Cursor and Devin per task?**
+**Short:** Cursor costs about $0.05-$0.50 per multi-file edit from a short burst call, while Devin costs $1-$20 per autonomous session spanning hours.
 Cursor: $0.05-$0.50 per multi-file edit (single Claude/GPT call burst). Devin: $1-$20 per autonomous session (hours of compute, many LLM calls). Cursor's lower cost reflects shorter loops; Devin's higher cost reflects more autonomous exploration and longer task scope.
 
 **Q: How do you measure coding agent quality beyond SWE-bench?**
+**Short:** Production quality is measured by PR acceptance rate, review feedback rate, and cost per merged PR rather than by benchmark score alone.
 Track production outcomes, not benchmark scores. The metrics that matter: PR acceptance rate (% of agent-generated PRs merged without major revisions), code review feedback rate (how often human reviewers request changes), test pass rate at PR submission time, time-to-PR vs human baseline, and cost per merged PR. SWE-bench measures capability; production metrics measure usefulness.
 
 **Q: Why is Aider's git-per-change pattern useful?**
+**Short:** Aider commits each edit separately, making individual changes revertable and the resulting history bisect-friendly for reviewers.
 Each agent edit becomes a separate git commit with a meaningful message. Benefits: easy to revert individual changes (git revert), clean PR review (reviewer sees each logical step), bisect-friendly history. Counter: noisy history if agent does many small edits.
 
 **Q: How do you keep an agent from "going off the rails" on a complex task?**
+**Short:** Plan-first approval, frequent checkpointing, bounded iteration counts, and destructive-operation gates keep a coding agent from going off the rails.
 (1) Plan-first architecture (agent produces explicit plan, user approves before execution). (2) Frequent checkpointing (test or compile after every change). (3) Bounded autonomy (max iterations, cost cap). (4) Approval gates on destructive operations. (5) Human-in-the-loop signals (user can interject mid-task).
 
 **Q: What's the right tool granularity for a coding agent?**
+**Short:** The sweet spot is 8-12 well-designed commands covering search, read, edit, run, and git, rather than raw bash or 20-plus narrow tools.
 Coarse-grained: bash (powerful but error-prone, leaks context). Fine-grained: 20+ specialized commands (precise but more for model to learn). Sweet spot: 8-12 well-designed commands covering: search, read, edit, run, git, test. SWE-agent's ACI hits this sweet spot.
 
 **Q: How do coding agents handle ambiguous requirements?**
+**Short:** Best coding agents ask clarifying questions before writing code instead of guessing and shipping a solution to the wrong problem.
 Best-in-class agents ask clarifying questions before coding. Devin posts questions in Slack; Cursor Composer prompts in IDE; Claude Code uses CLI prompts. Worst pattern: agent guesses, ships code that solves the wrong problem. Always design for "agent can ask".
 
 **Q: What's the security model for coding agents?**
+**Short:** Coding agents are treated as untrusted code with no production credentials, sandboxed execution, and audit logs on every tool call.
 Treat the agent as untrusted code with no production access. Concretely: [sandboxed bash](../agents_and_tool_use/sandboxed_code_execution.md) (E2B, Docker), no production credentials, approval gates on destructive ops, separate dev/prod environments (agent runs in dev), and audit logs of all tool calls. Treat agent like an intern with potentially poor judgment — they're well-meaning but can make costly mistakes without guardrails.
 
 ---
