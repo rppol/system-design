@@ -278,18 +278,18 @@ Two parallel paths per projection: the frozen base weight (no gradient) plus the
 ### QLoRA Memory Layout
 ```
 GPU Memory:
-  +---------------------------------+
+  +--------------------------------+
   | Base Model Weights (NF4 4-bit) |  3.5GB for 7B model
-  +---------------------------------+
+  +--------------------------------+
   | LoRA Adapter A (BF16)          |  ~50MB per layer set
   | LoRA Adapter B (BF16)          |  ~50MB per layer set
-  +---------------------------------+
+  +--------------------------------+
   | Gradients (only LoRA)          |  ~100MB total
-  +---------------------------------+
+  +--------------------------------+
   | Optimizer States (LoRA only)   |  ~400MB total
-  +---------------------------------+
+  +--------------------------------+
   | Activations + batch            |  1-2GB (gradient checkpointing)
-  +---------------------------------+
+  +--------------------------------+
   Total: ~5-6GB for 7B model QLoRA
 ```
 

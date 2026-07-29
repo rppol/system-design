@@ -179,24 +179,24 @@ The bytecode-VM-plus-JIT row is the only one that pays translation cost *twice* 
 
 ```
   high address
-  +------------------------------------------+
+  +-------------------------------------------+
   |  kernel space (not visible to user code)  |
-  +------------------------------------------+
+  +-------------------------------------------+
   |  stack              (grows downward)      |  <- argv, envp, auxv land here first
-  +------------------------------------------+
+  +-------------------------------------------+
   |  mmap region         shared libraries,    |  <- ld.so maps each needed .so here
   |                       anonymous mappings  |
-  +------------------------------------------+
+  +-------------------------------------------+
   |  heap               (grows upward)        |  <- malloc/new; empty until first use
-  +------------------------------------------+
+  +-------------------------------------------+
   |  .bss    zero-filled by the loader        |  <- size known from the ELF, no bytes to copy
-  +------------------------------------------+
+  +-------------------------------------------+
   |  .data   bytes copied from the file       |
-  +------------------------------------------+
+  +-------------------------------------------+
   |  .rodata mapped read-only                 |
-  +------------------------------------------+
+  +-------------------------------------------+
   |  .text   mapped read + execute            |  <- this is what "running the code" means
-  +------------------------------------------+
+  +-------------------------------------------+
   low address
 
 The loader learns WHERE and with WHAT permissions to map each of these from the

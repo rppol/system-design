@@ -76,7 +76,7 @@ A 70/30 spot/on-demand split is the common production target. Spot handles basel
 Each H100: 80 GB HBM3
 8 GPUs total: 640 GB available
 
-+---------------------------------------------------+
++--------------------------------------------------+
 |                  GPU 0 (80 GB)                   |
 |                                                  |
 |  Model weights (tensor parallel shard): 17.5 GB  |
@@ -93,7 +93,7 @@ Each H100: 80 GB HBM3
 |  Reserved for OOM headroom:            ~3-5 GB   |
 |                                                  |
 |  Usable for additional KV cache:      ~50-54 GB  |
-+---------------------------------------------------+
++--------------------------------------------------+
 
 Memory budget summary (per GPU, 70B FP16, TP=8):
   Weights    :  17.5 GB  (fixed)

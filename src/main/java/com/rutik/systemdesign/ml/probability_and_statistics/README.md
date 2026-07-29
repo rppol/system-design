@@ -962,13 +962,13 @@ The exponential family is a class of distributions writable as exp(eta^T T(x) - 
 **Architecture:**
 ```
 Experiment Framework
-  +-----------------------+-------------------------+
+  +------------------------+--------------------------+
   |  Pre-experiment        |  During experiment       |
   |  Power analysis        |  Sequential testing      |
   |  Sample size calc      |  mSPRT statistic         |
   |  MDE specification     |  Always-valid p-value    |
   |  Randomisation unit    |  No fixed stopping rule  |
-  +-----------------------+-------------------------+
+  +------------------------+--------------------------+
                    |
                    v
 Experiment Database (PostgreSQL)

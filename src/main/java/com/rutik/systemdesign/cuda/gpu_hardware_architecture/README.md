@@ -189,20 +189,20 @@ Streaming Multiprocessor (SM) -- H100-class, 4 processing partitions
 +------------------------------------------------------------------+
 | L1 Instruction Cache / Instruction Buffer (shared across the SM) |
 +------------------------------------------------------------------+
-| Partition 0                                                       |
-|   Warp Scheduler + Dispatch Unit    (1 warp instruction / cycle)  |
-|   Register File slice: 16,384 x 32-bit  (64 KB)                   |
-|   32x FP32 CUDA cores | 16x FP64 | 16x INT32 | 4x SFU | 8x LD/ST  |
-|   1x Tensor Core (4th-gen)                                        |
+| Partition 0                                                      |
+|   Warp Scheduler + Dispatch Unit    (1 warp instruction / cycle) |
+|   Register File slice: 16,384 x 32-bit  (64 KB)                  |
+|   32x FP32 CUDA cores | 16x FP64 | 16x INT32 | 4x SFU | 8x LD/ST |
+|   1x Tensor Core (4th-gen)                                       |
 +------------------------------------------------------------------+
-| Partition 1   (identical layout to Partition 0)                   |
+| Partition 1   (identical layout to Partition 0)                  |
 +------------------------------------------------------------------+
-| Partition 2   (identical layout to Partition 0)                   |
+| Partition 2   (identical layout to Partition 0)                  |
 +------------------------------------------------------------------+
-| Partition 3   (identical layout to Partition 0)                   |
+| Partition 3   (identical layout to Partition 0)                  |
 +------------------------------------------------------------------+
-| Shared Memory / L1 Data Cache -- up to 228 KB unified pool/SM,    |
-| split configurably (e.g. more shared mem, less L1, or vice versa) |
+| Shared Memory / L1 Data Cache -- up to 228 KB unified pool/SM,   |
+| split configurably (e.g. more shared mem, less L1, or vice versa)|
 +------------------------------------------------------------------+
                                |
                                v
