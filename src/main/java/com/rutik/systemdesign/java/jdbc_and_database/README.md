@@ -23,7 +23,7 @@ This module covers raw JDBC (no ORM), which is the foundation that every framewo
 ## 3. Core Principles
 
 - **`DataSource` over `DriverManager`**: `DriverManager.getConnection()` opens a new TCP connection every call. `DataSource` from a connection pool returns a pooled connection — orders of magnitude faster.
-- **`PreparedStatement` always**: Prevents SQL injection; enables server-side query plan caching; cleaner parameter binding.
+- **`PreparedStatement` always**: Prevents SQL injection unconditionally; *enables* server-side query plan caching once the driver's own threshold is met; cleaner parameter binding.
 - **Transactions as units of work**: `setAutoCommit(false)` groups operations; either all commit or all roll back.
 - **Isolation levels control trade-offs**: Higher isolation → fewer anomalies → more locking → lower throughput.
 - **Close resources in `finally` or `try-with-resources`**: Unclosed `Connection` causes pool exhaustion; unclosed `ResultSet` leaks server-side cursor.
@@ -38,7 +38,7 @@ This module covers raw JDBC (no ORM), which is the foundation that every framewo
 | Type | Use Case | SQL Injection | Plan Caching |
 |------|----------|---------------|-------------|
 | `Statement` | Ad-hoc DDL, no parameters | Vulnerable | No |
-| `PreparedStatement` | DML with parameters | Safe (parameterized) | Yes (server-side) |
+| `PreparedStatement` | DML with parameters | Safe (parameterized) | Yes, once the driver's threshold is met |
 | `CallableStatement` | Stored procedure calls | Safe | Stored in DB |
 
 ### 4.2 Transaction Isolation Levels and Anomalies
@@ -117,14 +117,14 @@ flowchart LR
     T2 -->|"getConnection() → execute → return to pool"| C2
     T10 -->|"getConnection() → execute → return to pool"| C10
     T11["Thread 11"] -->|"getConnection()"| Wait{"pool full: WAIT"}
-    Wait -->|"connectionTimeout exceeded"| TO["PoolTimeoutException"]
+    Wait -->|"connectionTimeout exceeded"| TO["SQLTransientConnectionException"]
 
     class T1,T2,T10,T11 req
     class C1,C2,C10 train
     class Wait mathOp
     class TO lossN
 ```
-Ten threads borrow, use, and return pooled connections in microseconds; an eleventh thread beyond `maximumPoolSize` blocks until `connectionTimeout` fires a `PoolTimeoutException` — the concrete anatomy of pool exhaustion. HikariCP keeps `minimumIdle` connections warm (pre-created, ready to use) so the first ten never pay a connection-creation cost.
+Ten threads borrow, use, and return pooled connections in microseconds; an eleventh thread beyond `maximumPoolSize` blocks until `connectionTimeout` fires a `SQLTransientConnectionException` — the concrete anatomy of pool exhaustion. HikariCP keeps `minimumIdle` connections warm (pre-created, ready to use) so the first ten never pay a connection-creation cost.
 
 ### Transaction Flow
 ```mermaid
@@ -199,11 +199,22 @@ PreparedStatement ps = conn.prepareStatement(
 ps.setLong(1, Long.parseLong(userId));    // type-safe; can't inject SQL
 ResultSet rs = ps.executeQuery();
 
-// Additional benefit: server-side plan caching
-// First call: DB parses "SELECT * FROM users WHERE id = ?"
-//             creates query plan, stores it
-// All subsequent calls: DB skips parsing, reuses plan
-// For 1000 calls/second: saves 1000 parse cycles/second
+// Additional benefit: server-side plan caching -- but you have to earn it.
+// A PreparedStatement is NOT automatically a server-side prepared statement:
+//   PostgreSQL (pgjdbc): prepareThreshold defaults to 5, so the SAME
+//     PreparedStatement text must execute 5 times on the SAME physical
+//     connection before the driver issues PREPARE; the per-connection cache
+//     holds preparedStatementCacheQueries=256 entries / 5 MiB by default.
+//   MySQL (Connector/J): server-side prepares are OFF unless you set
+//     useServerPrepStmts=true, and client-side caching needs cachePrepStmts=true
+//     plus prepStmtCacheSize / prepStmtCacheSqlLimit.
+// HikariCP deliberately does no statement caching of its own -- it is a
+// driver-level concern, so these are DataSource properties you pass through.
+// Once warm, 1000 calls/second reuse one parsed plan instead of paying 1000
+// parse cycles. Two gotchas: a pool that recycles connections aggressively
+// (short maxLifetime) keeps resetting the per-connection cache, and an IN-list
+// whose placeholder count varies per call is a different statement text every
+// time, so it never reaches the threshold at all.
 
 // Full PreparedStatement CRUD:
 try (Connection conn = dataSource.getConnection();
@@ -402,9 +413,10 @@ PostgreSQL it also blocks vacuum from reclaiming rows the report is still readin
 ```java
 // Symptoms of pool exhaustion:
 // - All threads hang waiting for getConnection()
-// - Timeout: com.zaxxer.hikari.pool.HikariPool$PoolTimeoutException:
-//   Timeout waiting for connection from pool after 3000ms
-// - Response times spike to connectionTimeout (3s default) for ALL requests
+// - Timeout: java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is
+//   not available, request timed out after 3000ms.
+// - Response times spike to connectionTimeout (30s out of the box; 3s as configured
+//   above) for ALL requests
 
 // HikariCP config to help detect issues:
 config.setLeakDetectionThreshold(2000);  // warn if connection not returned in 2s
@@ -412,7 +424,8 @@ config.setConnectionTimeout(3000);       // fail fast after 3s (don't hang forev
 
 // Pool sizing formula (from HikariCP's own docs):
 // connections = (core_count * 2) + effective_spindle_count
-// For 4-core machine, SSD (spindle=1): 4*2 + 1 = 9 connections
+// core_count and spindles are the DATABASE server's, not the app server's.
+// For a 4-core DB host on SSD (spindle=1): 4*2 + 1 = 9 connections
 // This seems small but is correct: more connections cause contention on the DB side
 
 // Monitoring pool health:
@@ -427,8 +440,9 @@ int total   = poolBean.getTotalConnections();
 **Put simply.** "A connection is only useful while the database is actively executing its query, and the database can only execute as many queries at once as it has cores and disks — so the right pool size is the DB's parallelism, not your thread count."
 
 This is the single most counter-intuitive number in JDBC tuning. The formula sizes the pool
-to the *server's* capacity, which is why the answer is 9 and not 100, and why the formula
-contains no term for how many application threads you run.
+to the *database server's* capacity, which is why the formula contains no term for how many
+application threads or application instances you run — and why its answer is a budget for
+the whole fleet that you then divide, not a per-instance number you multiply.
 
 | Symbol | What it is |
 |--------|------------|
@@ -436,19 +450,28 @@ contains no term for how many application threads you run.
 | `x 2` | Two connections per core, so one can run while the other waits on I/O |
 | `effective_spindle_count` | Independent disks that can seek in parallel; SSD counts as ~1 |
 | `maximumPoolSize` | The hard ceiling; the 11th borrower blocks instead of connecting |
-| `connectionTimeout` | How long a blocked borrower waits before `PoolTimeoutException` |
+| `connectionTimeout` | How long a blocked borrower waits before `SQLTransientConnectionException` |
 
-**Walk one example.** The formula on a 4-core SSD box, then the fleet-level clamp from the case study.
+**Walk one example.** Two different ceilings on the same fleet — what the database can
+*usefully* run, and what it will *physically accept*.
 
 ```
-  per-instance formula
-    core_count = 4, spindles (SSD) = 1
-    connections = (4 x 2) + 1                        = 9
+  ceiling 1 - useful concurrency (the HikariCP formula, database-wide)
+    32-core PostgreSQL primary, SSD (spindles = 1)
+    connections = (32 x 2) + 1                       = 65   across the WHOLE fleet
+    per instance, 20 instances = 65 / 20             = 3.25 -> 3
 
-  fleet clamp: 20 instances against PostgreSQL max_connections = 200
-    ceiling per instance = 200 / 20                  = 10        <- what they used
-    the naive plan       = 20 x 50                   = 1,000     <- 5x over the limit
-    overshoot            = 1,000 - 200               = 800 connections refused
+  ceiling 2 - hard limit (max_connections, database-wide)
+    max_connections = 200, less superuser_reserved_connections = 3
+    usable                                           = 197
+    per instance = 197 / 20                          = 9.85 -> 9
+    the naive plan       = 20 x 50                   = 1,000  <- 5x over the limit
+    overshoot            = 1,000 - 197               = 803 connections refused
+
+  which one binds
+    3 is the performance answer; 9 is the "never exceed" answer; you take the smaller.
+    The service shipped 10 -- at the hard ceiling and well above the useful one, which
+    is why raising it further bought nothing and lowering it cost nothing.
 
   what a blocked borrower costs
     pool full, connectionTimeout = 3,000 ms
@@ -456,10 +479,11 @@ contains no term for how many application threads you run.
     -> p99 pins to exactly the timeout, which is the pool-exhaustion signature
 ```
 
-The two numbers agree by coincidence here — 9 from the formula, 10 from the fleet ceiling —
-and when they disagree you take the smaller. Setting 100 as in War Story 4 does not buy
-parallelism the database does not have; it just relocates the queue from HikariCP (where
-you can see it via `getThreadsAwaitingConnection()`) to the DB scheduler (where you cannot).
+The two ceilings answer different questions and only coincidentally land near each other:
+one is about throughput, the other about whether the connection is accepted at all. Setting
+100 as in War Story 4 clears neither — it does not buy parallelism the database does not
+have, it just relocates the queue from HikariCP (where you can see it via
+`getThreadsAwaitingConnection()`) to the DB scheduler (where you cannot).
 
 ### The 4 Isolation Levels with Concrete Scenarios
 
@@ -493,8 +517,8 @@ conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 
 ## 7. Real-World Examples
 
-- **HikariCP configuration at Netflix**: Pool size of 10-15 connections per service instance × hundreds of instances = well within PostgreSQL's max_connections. Each instance tuned with `maxLifetime=30m` to rotate connections around DB proxy restarts.
-- **Batch insert performance**: A data pipeline inserting 1M rows per hour switched from single-row inserts (3600 inserts/second, ~400ms each) to batch inserts (500/batch → 2000 batches/hour, each taking 5ms). Throughput improved 40x.
+- **Fleet-wide pool budgeting** (illustrative of the pattern, not a specific company's published figures): a service running hundreds of instances against one primary sizes each pool in the low tens of connections so the fleet total stays under `max_connections`, and sets `maxLifetime` below the shortest proxy/firewall idle timeout so connections rotate before something upstream silently kills them.
+- **Batch insert performance**: A data pipeline writing 1M rows per hour needs a sustained 278 rows/sec. Single-row inserts at a 1ms round trip cap one connection at ~1,000 rows/sec, so the job only just kept up and any latency blip pushed it behind. Batching at 500 rows collapsed 1M round trips into 2,000 `executeBatch()` calls; at ~5ms per batch the write phase went from ~1,000 s/hour of pure network latency to ~10 s, and the job finished in minutes instead of running continuously.
 - **ResultSet streaming for monthly reports**: A finance service queried 5M transaction rows for a monthly report. Without streaming, the service OOM'd within 30 seconds. With `setFetchSize(1000)` and server-side cursor, memory usage stayed at 50MB flat.
 
 ---
@@ -533,11 +557,11 @@ A service using `try { Connection conn = ds.getConnection(); ... }` without clos
 ### War Story 2: `ResultSet` OOM on large table scan
 An analytics endpoint queried a 20M row table without `setFetchSize`. The JDBC driver (MySQL default) loaded ALL rows into the client-side result set in memory. The JVM heap was exhausted at 4GB and the service OOM'd. The query itself was only used by 1 admin user per day. **Fix**: MySQL streaming: `TYPE_FORWARD_ONLY + CONCUR_READ_ONLY + setFetchSize(Integer.MIN_VALUE)`.
 
-### War Story 3: Transaction isolation caused phantom reads
-An inventory reservation system used `READ_COMMITTED`. Two concurrent requests both checked available inventory (read 1 unit available), both succeeded in "reserving" it, and the inventory went negative. The non-repeatable reads allowed both to see the same available stock before either committed. **Fix**: Use `SERIALIZABLE` for the reservation transaction, or use optimistic locking with a version column (`UPDATE inventory SET qty = qty - 1, version = version + 1 WHERE item = ? AND version = ? AND qty >= 1` and check `rowsUpdated == 1`).
+### War Story 3: Read-then-write race (write skew) under READ_COMMITTED
+An inventory reservation system used `READ_COMMITTED`. Two concurrent requests both read "1 unit available", both decided the reservation was legal, and both wrote — inventory went negative. Note what this is *not*: no transaction read uncommitted data (not a dirty read), neither re-read the row (not a non-repeatable read), and no new rows appeared in a range (not a phantom). It is **write skew** — two transactions each read a consistent snapshot, then each write based on a premise the other invalidates. Snapshot isolation alone does not prevent it, which is why raising PostgreSQL to `REPEATABLE READ` does not fix it either. **Fix**: `SERIALIZABLE` (PostgreSQL's SSI detects the dependency cycle and aborts one transaction, so the caller must be prepared to retry on SQLSTATE 40001), or take the decision out of the read entirely with optimistic locking on a version column (`UPDATE inventory SET qty = qty - 1, version = version + 1 WHERE item = ? AND version = ? AND qty >= 1` and check `rowsUpdated == 1`).
 
 ### War Story 4: HikariCP pool set too large
-A team set `maximumPoolSize=100` on a service with 4 CPU cores, thinking more connections = more throughput. Performance degraded compared to `maximumPoolSize=10`. Root cause: the database server (PostgreSQL) handled 100 active connections by time-slicing on its ~8 cores — each connection got less CPU time. Context switch overhead per query increased. The connection overhead outweighed the parallelism benefit. **Fix**: Use HikariCP's recommended formula: `(core_count * 2) + spindles`. For 4-core + SSD: 9 connections per service instance.
+A team set `maximumPoolSize=100`, reasoning from their *application* server's core count and thinking more connections = more throughput. Performance degraded compared to `maximumPoolSize=10`. Root cause: the database server (PostgreSQL) has 8 cores and handled 100 active connections by time-slicing across them — each connection got less CPU time, and context-switch overhead per query rose. The connection overhead outweighed the parallelism benefit. **Fix**: Use HikariCP's recommended formula against the *database* host: `(core_count * 2) + spindles`. For that 8-core DB on SSD: 8×2 + 1 = 17 connections, shared across every application instance that talks to it — so with 2 instances the per-instance `maximumPoolSize` is 8, not 17 and certainly not 100.
 
 ---
 
@@ -561,34 +585,38 @@ A team set `maximumPoolSize=100` on a service with 4 CPU cores, thinking more co
 **Q1: Why use `PreparedStatement` over `Statement`?**
 Three reasons: (1) SQL injection prevention — parameters are bound separately and never interpreted as SQL, so `' OR 1=1 --` is treated as a literal string value. (2) Server-side query plan caching — the DB parses and optimizes the parameterized query once and reuses the plan for all subsequent executions with different parameter values. For a query executed 1000 times/second, this saves 1000 parse cycles/second. (3) Type safety — `setString()`, `setInt()`, `setBigDecimal()` handle proper type conversion and escaping; string concatenation in `Statement` is error-prone.
 
-**Q2: What is connection pool exhaustion and how do you detect it?**
-Pool exhaustion: all connections in the pool are in use (not returned); new requests block waiting for `getConnection()` until `connectionTimeout` is exceeded, then fail with `PoolTimeoutException`. Detection: (1) HikariCP `leakDetectionThreshold` logs a warning if a connection is held longer than the threshold. (2) Monitor `HikariPoolMXBean.getThreadsAwaitingConnection()` — should always be 0. (3) Application latency spikes to exactly `connectionTimeout` duration. Root causes: unclosed connections (`try-with-resources` prevents this), long-running transactions holding connections, pool sized too small for load.
+**Q2: Does using `PreparedStatement` automatically give you a server-side cached query plan?**
+No — a `PreparedStatement` is a client-side API object, and whether it ever becomes a server-side prepared statement is a driver setting. PostgreSQL's pgjdbc defaults `prepareThreshold` to 5, so the identical SQL text must execute five times on the *same physical connection* before the driver issues a `PREPARE`; below that it sends the query with inline parameters each time (still injection-safe, but re-planned). MySQL's Connector/J does not use server-side prepares at all unless `useServerPrepStmts=true`, and its client-side statement cache needs `cachePrepStmts=true` with `prepStmtCacheSize`. HikariCP does no statement caching of its own by design, so these are driver properties you pass through the `DataSource`. Two things silently defeat the cache: a short `maxLifetime` that recycles connections before they warm up, and dynamically built SQL such as an `IN (?,?,?)` list whose placeholder count varies per call, which is a distinct statement text every time. The injection-safety benefit of `PreparedStatement` is unconditional; the performance benefit is not.
 
-**Q3: Describe the 4 transaction isolation levels and their anomalies.**
+**Q3: What is connection pool exhaustion and how do you detect it?**
+Pool exhaustion is the state where every pooled connection is checked out, so new borrowers block at `getConnection()` and eventually fail rather than run. They block until `connectionTimeout` is exceeded, then get a `java.sql.SQLTransientConnectionException` ("Connection is not available, request timed out after Nms"). Detection: (1) HikariCP `leakDetectionThreshold` logs a warning if a connection is held longer than the threshold. (2) Monitor `HikariPoolMXBean.getThreadsAwaitingConnection()` — should always be 0. (3) Application latency spikes to exactly `connectionTimeout` duration. Root causes: unclosed connections (`try-with-resources` prevents this), long-running transactions holding connections, pool sized too small for load.
+
+**Q4: Describe the 4 transaction isolation levels and their anomalies.**
 READ_UNCOMMITTED: allows dirty reads (seeing uncommitted data), non-repeatable reads, and phantom reads. Almost never used. READ_COMMITTED (PostgreSQL, Oracle default): prevents dirty reads; allows non-repeatable reads and phantom reads. Reads only see committed data. REPEATABLE_READ (MySQL InnoDB default): prevents dirty reads and non-repeatable reads; allows phantom reads in standard SQL (MySQL's InnoDB prevents them too with gap locks). A snapshot is taken at transaction start. SERIALIZABLE: prevents all anomalies; transactions appear to execute serially. Uses range locks/predicate locks; lowest throughput; highest deadlock risk.
 
-**Q4: What is the HikariCP recommended pool size formula?**
-`connections = (core_count * 2) + effective_spindle_count`. For a 4-core application server with SSD storage (1 spindle equivalent): 4×2 + 1 = 9 connections. This is much smaller than most teams assume. The reasoning: more connections than CPU cores creates contention on the DB server — each connection competes for DB CPU time, and the overhead of managing many connections outweighs the parallelism benefit. Start with this formula and tune based on `pg_stat_activity` or equivalent monitoring. Beyond ~15 connections per service instance, most relational DBs see degraded throughput.
+**Q5: What is the HikariCP recommended pool size formula?**
+`connections = (core_count * 2) + effective_spindle_count`, where `core_count` and the spindle count describe the **database** server, not the application server. For a 4-core database host on SSD storage (1 spindle equivalent): 4×2 + 1 = 9 connections. This is much smaller than most teams assume, and the fact that no term references application threads is the point. The reasoning: more connections than the database has cores creates contention on the DB server — each connection competes for DB CPU time, and the overhead of managing many connections outweighs the parallelism benefit. Start with this formula and tune based on `pg_stat_activity` or equivalent monitoring. Two consequences teams miss: the answer is a budget for every client of that database put together, so with N application instances each pool gets roughly `formula / N`; and it must also stay under `max_connections` minus the reserved superuser slots, which is a separate and harder ceiling.
 
-**Q5: How do you stream large result sets without OOM?**
+**Q6: How do you stream large result sets without OOM?**
 MySQL: create `Statement` with `TYPE_FORWARD_ONLY + CONCUR_READ_ONLY`, then `stmt.setFetchSize(Integer.MIN_VALUE)` — this magic value enables streaming mode where rows are delivered one at a time from the server. PostgreSQL: disable autoCommit (`conn.setAutoCommit(false)`) then `ps.setFetchSize(1000)` — PostgreSQL uses a server-side cursor, delivering results in 1000-row batches. Both approaches keep memory at O(fetchSize) rows rather than O(total rows). Trade-off: the transaction/connection must stay open for the duration of iteration; don't stream inside a short-lived connection from a pool without ensuring the connection outlives the iteration.
 
-**Q6: What happens if you forget to close a `Connection`?**
+**Q7: What happens if you forget to close a `Connection`?**
 If not using `try-with-resources`: the `Connection` is never returned to the pool (if using HikariCP) or the TCP socket to the DB is never closed. Pool consequence: the connection is "leaked" — counted as active, never recycled. After enough leaks, the pool is exhausted and all new requests time out. TCP socket consequence: the OS eventually closes the socket via TCP keepalive (hours), but the pool doesn't know — it still counts the connection as in-use. `HikariCP.setLeakDetectionThreshold(2000)` logs a stack trace if a connection is held > 2 seconds, pointing to the offending code.
 
-**Q7: What are distributed transactions (XA) and when do you need them?**
-XA transactions coordinate a commit/rollback across multiple transactional resources (two databases, a database and a JMS queue) atomically. They use a two-phase commit (2PC) protocol: (1) Prepare phase — coordinator asks all resources if they can commit; (2) Commit phase — if all say yes, coordinator tells all to commit. In Java, implemented via `javax.transaction.XAResource`, `XADataSource`, and a JTA transaction manager (Atomikos, Bitronix). When needed: orders must be both saved to DB AND published to MQ atomically (both or neither). Cost: 2PC adds latency (two round trips) and complexity; blocked coordinator causes all resources to wait (heuristic failure). Modern alternatives: saga pattern (compensating transactions), outbox pattern (event stored in same DB as data, then forwarded by CDC).
+**Q8: What are distributed transactions (XA) and when do you need them?**
+XA transactions coordinate a commit/rollback across multiple transactional resources (two databases, a database and a JMS queue) atomically. They use a two-phase commit (2PC) protocol: (1) Prepare phase — coordinator asks all resources if they can commit; (2) Commit phase — if all say yes, coordinator tells all to commit. In Java, implemented via `javax.transaction.xa.XAResource` (a Java SE package, in the `java.transaction.xa` module), `javax.sql.XADataSource`, and a JTA transaction manager such as Narayana or Atomikos. When needed: orders must be both saved to DB AND published to MQ atomically (both or neither). Cost: 2PC adds latency (two round trips) and complexity; blocked coordinator causes all resources to wait (heuristic failure). Modern alternatives: saga pattern (compensating transactions), outbox pattern (event stored in same DB as data, then forwarded by CDC).
 
-**Q8: How does `executeBatch()` differ from individual `executeUpdate()` calls in terms of performance?**
+**Q9: How does `executeBatch()` differ from individual `executeUpdate()` calls in terms of performance?**
 `executeBatch()` sends all accumulated statements in one or a few network round trips to the DB server, which processes them in bulk. Individual `executeUpdate()` sends one statement per round trip — N inserts = N round trips. Network latency dominates: at 1ms round-trip time, 1000 individual inserts take 1000ms minimum; 1000 inserts in one batch take ~1ms + DB processing time. Additionally, the DB may optimize the batch internally (single WAL write for the batch instead of N separate WAL writes). The `BatchUpdateException` complicates error handling — `getUpdateCounts()` shows which rows in the batch succeeded before failure, enabling selective retry.
 
-**Q9: What is `Savepoint` and how does it differ from a regular rollback?**
+**Q10: What is `Savepoint` and how does it differ from a regular rollback?**
 A `Savepoint` marks a point within a transaction to which you can partially roll back. `conn.rollback()` undoes ALL work since `setAutoCommit(false)`. `conn.rollback(savepoint)` undoes work done AFTER the savepoint but keeps work done before it. Use savepoints when a transaction has a main critical path plus optional enrichment steps — if enrichment fails, roll back only the enrichment and commit the main path. Example: save an order (critical), try to add loyalty points (optional). If loyalty service fails, rollback to the savepoint (undo the loyalty points insert), then commit the order. Savepoints are part of the same database transaction and do not release any locks.
 
-**Q10: What `ResultSet` type should you use for a standard OLTP query?**
+**Q11: What `ResultSet` type should you use for a standard OLTP query?**
 `TYPE_FORWARD_ONLY` (default) with `CONCUR_READ_ONLY` — it is the fastest and most efficient. Forward-only means you can only call `next()` — no `previous()`, `absolute()`, or `relative()`. Read-only means no `updateRow()` or `insertRow()`. The JDBC driver can use a server-side cursor or buffer efficiently without supporting bidirectional navigation. `TYPE_SCROLL_INSENSITIVE` is needed only if you need random access within the result set (rare for OLTP). `CONCUR_UPDATABLE` is needed for `ResultSet`-based updates (almost never used in modern code — use separate UPDATE statements).
 
-**Q11: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
+**Q12: What are the four transaction isolation levels in SQL, which anomalies does each prevent, and what is the performance implication?**
+Each level prevents one more anomaly than the one below it, and pays for that with more locking and lower concurrency.
 
 | Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Locking overhead |
 |-----------------|-----------|---------------------|--------------|------------------|
@@ -599,7 +627,7 @@ A `Savepoint` marks a point within a transaction to which you can partially roll
 
 *InnoDB's MVCC prevents most phantom reads in `REPEATABLE_READ` via gap locks. Practical rule: start with `READ_COMMITTED` for OLTP; escalate to `REPEATABLE_READ` if your service reads a value and writes a decision based on it in the same transaction (non-repeatable-read anomaly). Only use `SERIALIZABLE` for financial audit or reporting queries where phantom rows would produce incorrect totals.
 
-**Q12: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
+**Q13: What is a JDBC "dirty connection" from the pool and how does HikariCP prevent it?**
 A dirty connection is one returned to the pool with uncommitted transaction state — `autoCommit=false` and an open transaction. The next borrower inherits that transaction context and may see or commit data it did not intend to. HikariCP prevents this in two ways: (1) on connection return it calls `rollback()` if `autoCommit=false`, discarding any uncommitted work; (2) it resets `autoCommit` to the configured pool default before making the connection available. The broken pattern:
 
 ```java
@@ -624,8 +652,8 @@ try {
 }
 ```
 
-**Q13: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
-`SELECT ... FOR UPDATE` acquires exclusive row locks. `SKIP LOCKED` (PostgreSQL, MySQL 8+) extends this: instead of blocking on locked rows, the statement skips them and returns only unlocked rows. Multiple competing consumers can run the same query concurrently — each gets a disjoint set of rows. Pattern:
+**Q14: How does `SELECT ... FOR UPDATE SKIP LOCKED` implement a work queue on top of a relational database?**
+It turns a table into a competing-consumer queue by letting each worker lock a disjoint batch of rows without ever waiting on another worker. A plain `FOR UPDATE` acquires exclusive row locks and blocks; `SKIP LOCKED` (PostgreSQL, MySQL 8+) extends this: instead of blocking on locked rows, the statement skips them and returns only unlocked rows. Multiple competing consumers can run the same query concurrently — each gets a disjoint set of rows. Pattern:
 
 ```sql
 -- consumer loop
@@ -643,8 +671,8 @@ COMMIT;
 
 This gives at-least-once delivery semantics (a failed/crashed consumer never commits, so the rows become visible to the next consumer). Throughput scales linearly with concurrent consumers up to the database connection limit.
 
-**Q14: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
-After an `INSERT` with an auto-generated PK, `Statement.RETURN_GENERATED_KEYS` retrieves the new key in the same network round trip as the insert — the driver includes a `RETURNING` clause or uses a protocol-level mechanism depending on the DB. A follow-up `SELECT LAST_INSERT_ID()` (MySQL) or `SELECT currval()` (PostgreSQL) is a second round trip and has a TOCTOU hazard in some configurations (scoped per-session in MySQL, but worth avoiding). Usage:
+**Q15: What is `Statement.RETURN_GENERATED_KEYS` and how does it differ from a subsequent `SELECT LAST_INSERT_ID()`?**
+It returns the generated primary key in the same network round trip as the `INSERT`, where a follow-up SELECT costs a second one. The driver implements it by adding a `RETURNING` clause or using a protocol-level mechanism, depending on the database. A follow-up `SELECT LAST_INSERT_ID()` (MySQL) or `SELECT currval()` (PostgreSQL) is a second round trip and has a TOCTOU hazard in some configurations (scoped per-session in MySQL, but worth avoiding). Usage:
 
 ```java
 try (PreparedStatement ps = conn.prepareStatement(
@@ -663,7 +691,7 @@ try (PreparedStatement ps = conn.prepareStatement(
 
 The `getGeneratedKeys()` `ResultSet` is a resource that must be closed explicitly or the underlying cursor leaks.
 
-**Q15: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
+**Q16: How does `setFetchSize()` affect memory use and database cursors for large result sets?**
 By default, most JDBC drivers buffer the entire `ResultSet` in the client JVM heap. For a query returning 1M rows, this can OOM the process. `stmt.setFetchSize(1000)` instructs the driver to fetch rows in pages of 1,000. PostgreSQL (`org.postgresql.Driver`) requires `autoCommit=false` for server-side cursors to be honoured; MySQL uses the special value `Integer.MIN_VALUE` to switch to row-by-row streaming. Broken:
 
 ```java
@@ -702,11 +730,12 @@ Rule of thumb: always set `fetchSize` for any query where the result could excee
 
 ### Sizing HikariCP and Killing N+1 in a Payment Service
 
-**Scenario.** A payment service runs **20 application instances** behind a load balancer, all talking to one PostgreSQL primary with `max_connections = 200`. Naive sizing (each instance opening 50 connections) would demand 1,000 connections against a 200 limit, so the database rejects connections under load. The correct math is **200 / 20 = 10 connections per instance**, which happens to be HikariCP's default pool size. The incident that triggered the review: an order-history endpoint with an **N+1 query pattern** — one query for 1,000 orders, then a separate query per order to fetch its payment — issued **1,001 queries in a single HTTP request**, draining the 10-connection pool, queuing waiters, and spiking **p99 from 80ms to 30s** (the connection-acquire timeout).
+**Scenario.** A payment service runs **20 application instances** behind a load balancer, all talking to one PostgreSQL primary with `max_connections = 200` (of which `superuser_reserved_connections = 3` are not available to the application, leaving 197). Naive sizing (each instance opening 50 connections) would demand 1,000 connections against that limit, so the database rejects connections under load. The hard ceiling is **197 / 20 = 9 connections per instance**; the service shipped 10, HikariCP's default, which is already fractionally over and leaves no room for a rolling deploy running 21 pods at once. The incident that triggered the review: an order-history endpoint with an **N+1 query pattern** — one query for 1,000 orders, then a separate query per order to fetch its payment — issued **1,001 queries in a single HTTP request**, draining the 10-connection pool, queuing waiters, and spiking **p99 from 80ms to 30s** (the connection-acquire timeout).
 
 ```
-   20 instances x pool=10 = 200 conns  <= PostgreSQL max_connections=200  OK
-        (50/instance would be 1000 -> rejected)
+   20 instances x pool=10 = 200 conns  vs max_connections=200 less 3 reserved = 197
+        -> no headroom at all; 21 pods during a deploy => refused connections
+        (50/instance would be 1000 -> rejected outright)
 
    N+1 inside ONE request:
      SELECT * FROM orders WHERE user_id=?      -> 1000 rows
@@ -828,7 +857,10 @@ Under `READ_COMMITTED`, two concurrent "charge if not already charged" transacti
 // BROKEN at READ_COMMITTED: check-then-insert races -> two charges
 // SELECT count(*) FROM payments WHERE order_id=? AND status='CAPTURED'  -> 0 in BOTH txns
 // INSERT ... -> BOTH succeed
-// FIX option A: raise to REPEATABLE_READ / SERIALIZABLE for this txn
+// FIX option A: SERIALIZABLE for this txn. REPEATABLE_READ is NOT enough on
+// PostgreSQL -- both snapshots still see 0 and the two INSERTs touch different
+// rows, so there is no write-write conflict to detect. Only SSI catches it, and
+// the loser aborts with SQLSTATE 40001, so this option obliges you to retry.
 conn.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
 // FIX option B (preferred): a unique constraint makes the second insert fail-fast
 //   ALTER TABLE payments ADD CONSTRAINT uq_capture UNIQUE (order_id, status)

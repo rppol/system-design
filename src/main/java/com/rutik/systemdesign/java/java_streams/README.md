@@ -51,6 +51,27 @@ This module goes deeper than the `java8_features` overview — it covers the ful
 | `takeWhile(Predicate)` | Short-circuit stateful | Java 9+; take while predicate holds, stop on first false |
 | `dropWhile(Predicate)` | Stateful | Java 9+; drop while predicate holds, pass rest |
 | `mapMulti(BiConsumer)` | Stateless | Java 16+; imperative flatMap (push elements into consumer) |
+| `gather(Gatherer)` | Depends on the `Gatherer` | Java 24+; the extension point for *custom* intermediate ops |
+
+**`gather()` — the missing half of the API (Java 24, JEP 485).** For a decade `Collector` let you write custom *terminal* operations while intermediate operations stayed a closed set: if `filter`/`map`/`flatMap`/`mapMulti` did not express your step, you left the pipeline. `Gatherer` closes that gap with the same four-part shape as `Collector` — initializer, integrator, combiner, finisher — except the integrator receives a downstream sink it can push zero, one, or many elements into, and it can return `false` to short-circuit the whole pipeline. `java.util.stream.Gatherers` ships five built-ins:
+
+| Built-in | Signature | What it does |
+|---|---|---|
+| `windowFixed(int)` | `Gatherer<T,?,List<T>>` | Non-overlapping batches of n elements |
+| `windowSliding(int)` | `Gatherer<T,?,List<T>>` | Overlapping windows; each drops the oldest and adds the newest |
+| `fold(Supplier, BiFunction)` | `Gatherer<T,?,R>` | Ordered, one-result reduction where the accumulator type differs from the element type |
+| `scan(Supplier, BiFunction)` | `Gatherer<T,?,R>` | Prefix scan — emits the running accumulation at every step, not just the final one |
+| `mapConcurrent(int, Function)` | `Gatherer<T,?,R>` | Runs the mapper on **virtual threads**, at most `maxConcurrency` at once, **preserving encounter order** |
+
+```java
+// Batch 1,000 rows at a time for a bulk insert — previously required leaving the stream.
+rows.stream().gather(Gatherers.windowFixed(1_000)).forEach(dao::insertBatch);
+
+// Running balance: scan emits every intermediate value, reduce would emit only the last.
+Stream.of(10, -3, 25).gather(Gatherers.scan(() -> 0, Integer::sum)).toList();  // [10, 7, 32]
+```
+
+`mapConcurrent` is the one to remember in an interview, because it is the answer to the "don't block inside `parallelStream()`" rule in Section 9: it gives bounded, order-preserving, virtual-thread-backed fan-out for I/O-bound mapping without touching `ForkJoinPool.commonPool()` at all.
 
 ### 4.2 Complete Terminal Operations
 
@@ -469,8 +490,8 @@ Stream.of("hello world", "foo bar")
 | `collect(toList())` vs `toList()` (Java 16) | |
 |---|---|
 | `Collectors.toList()` | Returns modifiable `ArrayList` |
-| `Stream.toList()` | Returns unmodifiable list; potentially more memory-efficient internal impl |
-| `Collectors.toUnmodifiableList()` | Unmodifiable, copies into `ArrayList` then wraps |
+| `Stream.toList()` | Returns an unmodifiable list that **permits null elements** |
+| `Collectors.toUnmodifiableList()` | Collects to an `ArrayList`, then copies into a `List.of` immutable list — **throws `NullPointerException` on a null element** |
 
 ---
 
@@ -579,8 +600,13 @@ stream.parallel().forEach(results::add);  // ArrayList is NOT thread-safe
 ```
 **Fix**: Use `collect(toList())` — its parallel combiner is correct. Or use `ConcurrentLinkedQueue` if `forEach` is truly needed.
 
-### War Story 6: `distinct()` on a stream with a broken `hashCode()`
-`distinct()` uses `LinkedHashSet` internally (uses `equals()`/`hashCode()`). If `hashCode()` always returns the same value (a common lazy implementation), `distinct()` degrades to O(n²) and produces incorrect results. **Fix**: Ensure correct `hashCode()` on elements before using `distinct()`.
+### War Story 6: `distinct()` on a stream with a broken `equals()`/`hashCode()`
+`distinct()` is defined by `equals()` — a sequential stream accumulates into a `HashSet`, an ordered parallel stream reduces into a `LinkedHashSet`. Two separate failure modes follow, and they are commonly confused:
+
+- **A constant `hashCode()` costs performance only.** Every element lands in one bucket, so each `add()` degenerates from O(1) to a linear scan (or an O(log n) tree walk once the bin treeifies at 8 entries and the elements are `Comparable`). The *answer stays correct*, because `equals()` is what decides membership.
+- **An `equals()` inconsistent with `hashCode()` produces wrong answers.** If two objects are `equals()` but have different hash codes, they land in different buckets and both survive `distinct()`; the duplicate silently passes through.
+
+**Fix**: obey the `equals`/`hashCode` contract on any element type you call `distinct()` on — a record or an IDE-generated pair is the cheap way to guarantee it. If you cannot change the type, deduplicate explicitly with `collect(toMap(keyFn, identity(), (a, b) -> a))` on a key you trust.
 
 ---
 
@@ -614,13 +640,13 @@ The functional interfaces (`Predicate`, `Function`, `Consumer`, etc.) used by st
 The two-argument form provides an *identity* value — an element that, combined with any other, returns that other (`0` for addition, `1` for multiplication, `""` for concatenation). If the stream is empty, the identity is returned directly. The one-argument form returns `Optional<T>` because with no identity and an empty stream, there is no meaningful result to return — returning a default (like `null`) would be unsafe. Rule: if you have a valid identity value for your operation, use the two-argument form for simpler code; otherwise use the Optional-returning form and handle the empty case.
 
 **Q5: Explain `Spliterator` and its role in parallel streams.**
-`Spliterator` (splittable iterator) is the source contract for streams. It has two key methods: `tryAdvance(Consumer)` processes one element; `trySplit()` attempts to divide the source into two halves for parallel processing. The JVM recursively calls `trySplit()` until sub-ranges are small enough to assign to worker threads. Characteristics flags (`SIZED`, `ORDERED`, `DISTINCT`, etc.) let the stream engine optimize: a `SIZED` source allows balanced splitting; an `ORDERED` source requires `findFirst()` to respect order. ArrayList provides `SIZED + SUBSIZED + ORDERED` — ideal for parallel. LinkedList returns `null` from `trySplit()` — degrades to sequential.
+`Spliterator` (splittable iterator) is the source contract for streams. It has two key methods: `tryAdvance(Consumer)` processes one element; `trySplit()` attempts to divide the source into two halves for parallel processing. The JVM recursively calls `trySplit()` until sub-ranges are small enough to assign to worker threads. Characteristics flags (`SIZED`, `ORDERED`, `DISTINCT`, etc.) let the stream engine optimize: a `SIZED` source allows balanced splitting; an `ORDERED` source requires `findFirst()` to respect order. ArrayList provides `SIZED + SUBSIZED + ORDERED` — ideal for parallel. `LinkedList`'s spliterator does split, but only by copying successive fixed-size batches of elements into arrays (1024 elements, then 2048, and so on), so the prefixes are unbalanced, it must still walk the chain node by node, and the splits are neither `SIZED` at the source nor `SUBSIZED` — "limited parallelism" in the JDK's own words, not none.
 
 **Q6: What does `collect()` do that `reduce()` cannot?**
-`collect()` is designed for *mutable accumulation* — each worker thread gets its own container (via `Collector.supplier()`), accumulates into it (`Collector.accumulator()`), and partial containers are merged (`Collector.combiner()`). This is correct for parallel streams because no container is shared. `reduce()` is for *immutable accumulation* — the "identity" value is reused across the parallel computation. If the identity is a mutable object (like `ArrayList`), parallel workers all mutate the same instance — a race condition. Use `collect()` for building collections, strings, maps; use `reduce()` for numeric aggregation with an identity value.
+`collect()` can accumulate into a *mutable* container safely in parallel, which `reduce()` cannot do at all. Each worker thread gets its own container (via `Collector.supplier()`), accumulates into it (`Collector.accumulator()`), and partial containers are merged (`Collector.combiner()`). This is correct for parallel streams because no container is shared. `reduce()` is for *immutable accumulation* — the "identity" value is reused across the parallel computation. If the identity is a mutable object (like `ArrayList`), parallel workers all mutate the same instance — a race condition. Use `collect()` for building collections, strings, maps; use `reduce()` for numeric aggregation with an identity value.
 
 **Q7: What happens when you call `.parallel()` on a stream backed by a `LinkedList`?**
-`LinkedList`'s `Spliterator` cannot split efficiently — `trySplit()` traverses to the midpoint (O(n)) and returns null-ish splits for short lists. The parallel framework tries to split but produces poorly balanced or degenerate sub-tasks. The result: most work happens on one thread (essentially sequential) but with all the overhead of thread scheduling, task stealing, and result merging. Performance is worse than sequential. **Rule**: only use `parallelStream()` on collections with efficient splitters: `ArrayList`, arrays, `HashSet`, `TreeSet`, `ConcurrentHashMap`.
+You get parallelism, but such badly balanced parallelism that it is usually slower than running sequentially. `LinkedList`'s `Spliterator` splits rather than refusing to: `trySplit()` walks the chain copying a *fixed-size batch* of elements into an array (1024, then 2048, growing to a 33,554,432 cap) and hands that prefix off, keeping the unbounded remainder for itself. So the halves are never balanced, every split costs a pointer-chasing traversal plus an array copy, and the prefixes lose the source's size information. The result: work is spread unevenly, one task keeps most of the list, and you pay all the overhead of thread scheduling, task stealing, and result merging for it. Performance is typically worse than sequential. **Rule**: only use `parallelStream()` on collections with efficient splitters: `ArrayList`, arrays, `HashSet`, `TreeSet`, `ConcurrentHashMap`.
 
 **Q8: What is `mapMulti()` (Java 16) and when is it better than `flatMap()`?**
 `mapMulti(BiConsumer<T, Consumer<R>> mapper)` is an imperative alternative to `flatMap`. For each element, you're given a consumer; call it 0 or more times to push elements downstream. Unlike `flatMap()`, it does not create an intermediate `Stream` per element — the JVM can fuse it more aggressively. Use `mapMulti` when: (1) each element expands to a large number of outputs; (2) the expansion logic is complex imperative code; (3) you want to conditionally emit 0 elements (replaces `flatMap` with `Stream.empty()` or `Stream.ofNullable()`). `flatMap` is still preferred for simple cases — it's more readable.
@@ -659,7 +685,13 @@ int size = stream.collect(Collectors.collectingAndThen(Collectors.counting(), Lo
 
 Also useful for converting a collected `Map` to an `ImmutableMap`, or building a value object from aggregated fields in a single pass. In Java 16+, prefer `Stream.toList()` for the immutable-list case.
 
-**Q15: Under what four conditions does a parallel stream perform *worse* than sequential?**
+**Q15: What is `Stream.gather()` and what could you not do before it existed?**
+`gather(Gatherer)` (Java 24, JEP 485) is the extension point for writing your own *intermediate* operations, which the Stream API had no way to express before. `Collector` had always let you plug in a custom terminal operation, but the intermediate set was closed — anything the built-ins could not say, such as fixed or sliding windows, a running prefix scan, or an order-preserving concurrent map, forced you out of the pipeline into a loop. A `Gatherer` has the same four-part shape as a `Collector` (initializer, integrator, combiner, finisher), with two differences that matter: the integrator is handed a downstream sink it can push zero, one, or many elements into, and it can return `false` to short-circuit the pipeline, which is what lets a gatherer work on an infinite stream. `java.util.stream.Gatherers` ships `windowFixed`, `windowSliding`, `fold`, `scan`, and `mapConcurrent`.
+
+**Q16: How does `Gatherers.mapConcurrent()` differ from `parallelStream()` for I/O-bound work?**
+`mapConcurrent(maxConcurrency, mapper)` runs the mapper on virtual threads with a bounded concurrency limit and preserves encounter order, so blocking inside it is correct rather than a bug. `parallelStream()` submits to the shared `ForkJoinPool.commonPool()`, whose parallelism is sized to CPU count for compute-bound work, so a blocking call inside it parks a carrier thread and starves every other user of that pool. `mapConcurrent` touches the common pool not at all, the `maxConcurrency` argument is an explicit ceiling on in-flight calls (which `parallel()` gives you no way to state), and results are emitted in the original order rather than nondeterministically. Practical rule: `parallel()` for CPU-bound work on a splittable source, `gather(Gatherers.mapConcurrent(n, ...))` for I/O-bound fan-out.
+
+**Q17: Under what four conditions does a parallel stream perform *worse* than sequential?**
 Parallel streams split work across the common `ForkJoinPool` (parallelism = CPU count − 1). They degrade when:
 1. **Small data** (< ~10,000 simple elements) — fork/join overhead (~microseconds per split/merge) dominates the work.
 2. **Non-splittable sources** — `LinkedList`, `Iterator`-backed streams, `BufferedReader.lines()` — the `Spliterator` cannot divide the source efficiently; the work stays on one thread anyway.
@@ -689,7 +721,7 @@ Practical rule: benchmark with JMH under realistic data sizes before shipping `p
 
 ### A 100GB/day Log-Analytics Pipeline with Custom Spliterator + Collector
 
-**Scenario.** An edge fleet emits **100GB of access logs/day** (~100M log lines). A nightly analytics job must compute a response-code histogram, p99 latency per endpoint, and bytes-served per host. The job runs on an 8-core machine with a 6GB heap. Loading 100GB into a `List` is impossible, so the pipeline streams lazily from disk via a custom `Spliterator`, aggregates with a custom `Collector`, and parallelizes onto a dedicated 8-thread `ForkJoinPool` (never the shared common pool). Measured throughput: ~500MB/sec, finishing 100M lines in ~45 minutes.
+**Scenario.** An edge fleet emits **100GB of access logs/day** (~100M log lines). A nightly analytics job must compute a response-code histogram, p99 latency per endpoint, and bytes-served per host. The job runs on an 8-core machine with a 6GB heap. Loading 100GB into a `List` is impossible, so the pipeline streams lazily from disk via a custom `Spliterator`, aggregates with a custom `Collector`, and parallelizes onto a dedicated 8-thread `ForkJoinPool` (never the shared common pool). Measured throughput: ~37MB/sec of decompressed log text — about 37,000 lines/sec — finishing 100M lines in ~45 minutes. Parsing, not I/O, is the ceiling: the same disk streams bytes an order of magnitude faster than `LogLine::parse` can consume them.
 
 ```mermaid
 flowchart TD
@@ -809,11 +841,11 @@ Submitting the parallel pipeline through `pool.submit(...)` makes the ForkJoinTa
 
 **2. Stateful lambda in `filter()` broke parallel correctness.** Someone deduplicated with `Set<String> seen = ...; .filter(seen::add)`. Under `parallel()` the unsynchronized `HashSet` corrupted and the line count was non-deterministic across runs. Stream operations must be stateless; dedup belongs in `distinct()` or a concurrent set.
 
-**3. `findFirst()` on a parallel stream silently serialized.** A query used `parallel().filter(...).findFirst()` expecting speed-up. `findFirst` must honor encounter order, so it forces coordination and is effectively sequential. Use `findAny()` when any match is acceptable.
+**3. `findFirst()` on a parallel stream gave almost no speed-up.** A query used `parallel().filter(...).findFirst()` expecting one. The sub-tasks still run in parallel, but `findFirst` must return the *leftmost* match, so a task that finds a hit cannot cancel the tasks to its left — they must all finish before the result is known. When the first match sits near the start of the input, that is nearly all the work the sequential version would have done anyway. `findAny()` has no leftmost obligation, so the first hit cancels every other task.
 
 ```java
-parallel().filter(p).findFirst();    // BROKEN: order constraint kills parallelism
-parallel().filter(p).findAny();      // FIX: any match, fully parallel
+parallel().filter(p).findFirst();    // SLOW: leftmost obligation blocks early cancellation
+parallel().filter(p).findAny();      // FIX: any match, cancels the remaining tasks
 ```
 
 **4. Stream over a file not closed.** `Files.lines(path)` was used without try-with-resources; each invocation leaked a file descriptor, and after ~1,000 runs the process hit `Too many open files`. `Stream` is `AutoCloseable` when backed by I/O — close it.

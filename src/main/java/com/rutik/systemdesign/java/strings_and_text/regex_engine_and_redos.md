@@ -9,7 +9,9 @@ expressions and their security-relevant failure mode.
 
 The one sentence to remember: **Java's regex engine can take exponential time on
 pathological patterns, so an attacker who controls the input (or the pattern)
-can hang a thread with a 30-character string.**
+can hang a thread with a 30-character string** — and HotSpot's partial mitigation
+(Section 7) covers the textbook example while leaving the shapes real validators
+actually use fully exposed.
 
 ---
 
@@ -17,9 +19,10 @@ can hang a thread with a 30-character string.**
 
 `java.util.regex` compiles a pattern string into an in-memory graph of `Node`
 objects (`Pattern.compile`) and walks that graph against input using a
-*backtracking* matcher (`Matcher`). This is a Thompson-style **NFA
-(nondeterministic finite automaton)** executed by recursive descent — not a
-**DFA** like Go's RE2, `grep -E`, or `ripgrep`.
+*backtracking* matcher (`Matcher`). This is a **backtracking NFA** in the Spencer
+tradition, executed by recursive descent — not the linear NFA *simulation*
+(Thompson construction) used by Go's RE2, `grep -E`, or `ripgrep`, which never
+backtracks because it tracks all live states at once.
 
 The tradeoff is deliberate: backtracking buys you features a DFA cannot offer —
 **backreferences** (`\1`), **lookahead/lookbehind** (`(?=...)`, `(?<=...)`), and
@@ -32,6 +35,7 @@ Key capabilities and gotchas covered here:
 - Backtracking NFA execution and where it blows up
 - Greedy vs lazy vs **possessive** quantifiers (`a++`, `a*+`, `a?+`) and **atomic groups** `(?>...)`
 - Catastrophic backtracking / ReDoS — nested quantifiers `(a+)+`, overlapping alternation `(a|a)*`
+- HotSpot's `Loop` memoization: which shapes it already protects, and the two conditions that switch it off
 - `matches()` vs `find()` vs `lookingAt()`, and `region()`
 - Capture groups, named groups `(?<name>...)`, backreferences, lookaround
 - Unicode: `\p{...}` property classes and `UNICODE_CHARACTER_CLASS`
@@ -61,7 +65,8 @@ denial-of-service class bug (CWE-1333); see [Backend Security / OWASP](../../bac
 
 **Key insight**: The danger is not "regex is slow." It is that runtime is a
 function of the *pattern shape*, not just input length. `^[a-z]+$` is always
-linear; `^(a+)+$` is exponential. The two look equally innocent in code review.
+linear; `^(([a-z]+)+\.)+[a-z]{2,}$` is exponential. The two look equally innocent
+in code review, and the second one looks like a perfectly ordinary validator.
 
 ---
 
@@ -181,7 +186,7 @@ flowchart TD
     X3 --> B
     X4 --> B
     X5 --> B
-    B --> R["n a's produce 2^(n-1) splits\n30 a's is ~536M attempts is seconds\n40 a's is ~10 minutes"]
+    B --> R["n a's produce 2^(n-1) splits\nbut see Section 7: HotSpot memoizes\nTHIS shape; nest it deeper and 2^n is real"]
 
     class S io
     class W1,W2,W3,W4,W5 mathOp
@@ -228,13 +233,21 @@ ways to draw the group boundaries* that explodes.
 ```
 
 Four characters cost 8 attempts, which is invisible. But the exponent is the run
-length, so the same pattern at n = 24 costs 2^23 = 8,388,608 attempts and at
-n = 32 costs 2^31 = 2,147,483,648 — from adding eight characters to the input.
+length, so a pattern that really explores every split costs 2^23 = 8,388,608
+attempts at n = 24 and 2^31 = 2,147,483,648 at n = 32 — from adding eight
+characters to the input.
 
 The trailing `X` is the load-bearing term. Without it the very first split
 (`(aaaa)`) matches, the engine returns immediately, and the pattern looks
 perfectly fast in every test you write with valid input. ReDoS is a
 *failing*-match cost, which is exactly why it survives code review.
+
+**One caveat before you go and reproduce this.** The count above is the true
+combinatorics, but modern HotSpot does not *pay* it for this exact pattern —
+`^(a+)+$` returns in microseconds on a current JDK. Section 7 explains why, which
+shapes the optimization does not cover, and which realistic validators still blow
+up. Do not skip it: the reason `^(a+)+$` is fast is also the rule for predicting
+which of your own patterns are not.
 
 ---
 
@@ -309,7 +322,7 @@ Matcher m = p.matcher("2026-07-03");
 if (m.matches()) {
     m.group(0);          // "2026-07-03" — group 0 is the whole match
     m.group(1);          // "2026" — by index
-    m.group("year");     // "2026" — by name (JEP: named groups, Java 7+)
+    m.group("year");     // "2026" — by name (named groups, Java 7+)
     m.group("month");    // "07"
 }
 
@@ -372,12 +385,52 @@ Pattern p = Pattern.compile("^error:.*$", Pattern.MULTILINE | Pattern.CASE_INSEN
 
 ## 7. Catastrophic Backtracking and ReDoS
 
-### The blowup, measured
+### First, the optimization that makes the textbook example lie
+
+The pattern every article uses, `^(a+)+$`, **does not blow up on a current JDK.**
+Measured on JDK 23, it returns in well under a millisecond at any n, and counting
+`charAt` calls through a wrapping `CharSequence` shows the growth is *quadratic*,
+not exponential: 114 calls at n = 12, 372 at n = 24, where 2ⁿ⁻¹ would be 8.4
+million.
+
+The reason is a memoization built into `java.util.regex.Pattern`. Greedy
+unbounded closures compiled to a `Loop` node are collected into a list the
+compiler calls `topClosureNodes`, and each is given a set of input positions at
+which it has already failed. `Loop.match` consults it first:
+
+```java
+// java.util.regex.Pattern.Loop.match, abridged — the JDK's own comment:
+// "Let's check if we have already tried and failed at this starting position
+//  'i' in the past. If yes, then just return false without trying again,
+//  to stop the exponential backtracking."
+if (posIndex != -1 && matcher.localsPos[posIndex].contains(i)) {
+    return next.match(matcher, i, seq);
+}
+```
+
+**Two conditions switch it off, and they are the whole of your risk model:**
+
+1. **The pattern contains a backreference.** The memo is installed only
+   `if (!hasGroupRef)` — a `\1` anywhere in the pattern disables it for every
+   loop in that pattern, because a repeated group's captured text can differ
+   between attempts, so "failed here before" is no longer a safe conclusion.
+2. **The ambiguous loop sits inside a quantified group.** When `group0()` finishes
+   a group that carries a closure, it clears every inner closure from the list —
+   the source comment reads "no backtracking stopper optimization for inner".
+   So `^(a+)+$` is protected but `^((a+)+)+$` is not.
+
+That second rule is the one that matters in practice, because real validators
+nest: the outer `(...)+ ` repeats a *segment* and the inner quantifier repeats
+characters within it.
+
+### The blowup, measured on a realistic validator
 
 ```java
 public static void main(String[] args) {
-    Pattern evil = Pattern.compile("^(a+)+$");
-    for (int n = 20; n <= 34; n += 2) {
+    // A hostname/domain validator. The inner ([a-z0-9]+)+ is ambiguous AND it
+    // sits inside the quantified (...)+ group, so the memoization does not apply.
+    Pattern evil = Pattern.compile("^(([a-z0-9]+)+\\.)+[a-z]{2,}$");
+    for (int n = 22; n <= 28; n += 2) {
         String input = "a".repeat(n) + "!";     // n a's + one non-matching char
         long t0 = System.nanoTime();
         boolean matched = evil.matcher(input).matches();   // always false; explores 2^(n-1) paths
@@ -387,16 +440,14 @@ public static void main(String[] args) {
 }
 ```
 
-Representative output on a modern laptop (each extra pair of `a`s roughly
-quadruples the time — the classic exponential signature):
+Measured on JDK 23, Apple Silicon, after JIT warmup (each extra pair of
+characters roughly quadruples the time — the classic exponential signature):
 
 ```
-n=20  matched=false     2 ms
-n=24  matched=false    35 ms
-n=28  matched=false   560 ms
-n=30  matched=false  2200 ms
-n=32  matched=false  8900 ms
-n=34  matched=false 36000 ms   <- 36 seconds from a 35-byte string
+n=22  matched=false     56 ms
+n=24  matched=false    224 ms
+n=26  matched=false    983 ms
+n=28  matched=false   3878 ms   <- 3.9 seconds from a 29-byte string
 ```
 
 **What the formula is telling you.** "Runtime doubles for every single character
@@ -419,64 +470,72 @@ the program, which is how you decide whether a length cap is a real fix.
 
 ```
     n     time      2^(n-1)          measured ratio      predicted ratio
-   20      2 ms       524,288             -                   -
-   24     35 ms     8,388,608        35/2    = 17.5        2^4 = 16
-   28    560 ms   134,217,728       560/35   = 16.0        2^4 = 16
-   30   2200 ms   536,870,912      2200/560  =  3.93       2^2 =  4
-   32   8900 ms 2,147,483,648      8900/2200 =  4.05       2^2 =  4
-   34  36000 ms 8,589,934,592     36000/8900 =  4.04       2^2 =  4
+   22     56 ms     2,097,152            -                   -
+   24    224 ms     8,388,608       224/56   = 4.00        2^2 = 4
+   26    983 ms    33,554,432       983/224  = 4.39        2^2 = 4
+   28   3878 ms   134,217,728      3878/983  = 3.95        2^2 = 4
 
    step rate from the last row:
-       8,589,934,592 attempts / 36.0 s = 2.39e8 attempts per second
+       134,217,728 attempts / 3.878 s = 3.46e7 attempts per second
 
-   sanity-check n = 32 against that rate:
-       2,147,483,648 / 2.39e8 = 9.0 s     (measured 8.9 s)
+   sanity-check n = 24 against that rate:
+       8,388,608 / 3.46e7 = 0.24 s      (measured 0.224 s)
 ```
 
 Measured and predicted agree to within a few percent, which is the proof that
-this is genuinely 2ⁿ and not merely "slow." The +2 rows quadruple and the +4 rows
-sixteen-fold because the base is 2 and only the exponent moves.
+this is genuinely 2ⁿ and not merely "slow." Every +2 rows quadruples, because
+the base is 2 and only the exponent moves.
 
-Extrapolating with the same 2.39e8 attempts/second rate is what makes the threat
-concrete: n = 40 needs 2^39 = 549,755,813,888 attempts, which is 2,304 seconds —
-just over 38 minutes of one pinned core, bought with a 41-byte HTTP field.
+Extrapolating with the same 3.5e7 attempts/second rate is what makes the threat
+concrete: n = 40 needs 2^39 = 549,755,813,888 attempts, which is about 15,700
+seconds — roughly 4.4 hours of one pinned core, bought with a 41-byte HTTP field.
 
-The three classic ReDoS shapes:
+The three classic ReDoS shapes — each dangerous **when the ambiguous loop is not a
+top-level closure**, i.e. when it lives inside a quantified group or the pattern
+carries a backreference:
 - **Nested quantifiers**: `(a+)+`, `(a*)*`, `(.+)+` — inner and outer both flexible.
 - **Overlapping alternation under a quantifier**: `(a|a)*`, `(a|ab)*` — multiple ways to match the same text.
 - **Quantifier followed by an optional overlap**: `\d+\d+`, `.*.*$`, `(\w+\s?)*` — the split point is ambiguous.
 
+Making the inner quantifier **lazy changes nothing**: `^((a+?)+)+$` measured 48.8 s
+at n = 30 against `^((a+)+)+$`'s 52.5 s. Laziness reverses the order in which the
+splits are tried, not how many there are.
+
 ### BROKEN → FIX: a real-world validator
 
 ```java
-// BROKEN: a plausible "trim then validate" email/username regex with nested quantifiers.
-// The (([\w]+)*) sub-pattern is the trap: [\w]+ inside (...)* gives overlapping splits.
-private static final Pattern EMAIL_BAD =
-    Pattern.compile("^(([a-zA-Z0-9])+([._-])?)+@([a-zA-Z0-9]+\\.)+[a-zA-Z]{2,}$");
+// BROKEN: a plausible hostname validator. ([a-z0-9]+)+ is ambiguous, and because it
+// sits inside the quantified (...)+ group it is exempt from HotSpot's Loop memoization.
+private static final Pattern HOST_BAD =
+    Pattern.compile("^(([a-z0-9]+)+\\.)+[a-z]{2,}$");
 
-boolean ok = EMAIL_BAD.matcher("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!").matches();
-// The local part "aaaa...!" has no '@'; the engine backtracks through every way to
-// partition the a-run across the nested (...)+ groups before failing. Seconds of CPU.
+boolean ok = HOST_BAD.matcher("aaaaaaaaaaaaaaaaaaaaaaaaaaaa!").matches();
+// No '.' anywhere; the engine backtracks through every way to partition the a-run
+// across the nested groups before failing. Measured 3.9 s for those 29 bytes.
 ```
 
 ```java
-// FIX 1 — possessive quantifiers: the inner groups refuse to give characters back,
+// FIX 1 — possessive quantifiers: the groups refuse to give characters back,
 // so there is exactly ONE way to consume the a-run and failure is immediate.
-private static final Pattern EMAIL_POSS =
-    Pattern.compile("^[a-zA-Z0-9]++([._-][a-zA-Z0-9]++)*+@([a-zA-Z0-9]++\\.)++[a-zA-Z]{2,}+$");
+// Measured: 117 microseconds at n = 40, and it still accepts "mail.example.com".
+private static final Pattern HOST_POSS =
+    Pattern.compile("^([a-z0-9]++\\.)++[a-z]{2,}+$");
 
-// FIX 2 — atomic group: (?>...) locks in the local part once matched.
-private static final Pattern EMAIL_ATOMIC =
-    Pattern.compile("^(?>[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*)@([a-zA-Z0-9]+\\.)+[a-zA-Z]{2,}$");
+// FIX 2 — atomic group: (?>...) locks in each label once matched.
+private static final Pattern HOST_ATOMIC =
+    Pattern.compile("^(?>[a-z0-9]+\\.)+[a-z]{2,}$");
 
-// FIX 3 — do not over-engineer: a flat, non-nested pattern is linear by construction.
-private static final Pattern EMAIL_FLAT =
-    Pattern.compile("^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
+// FIX 3 — do not over-engineer: de-nesting removes the ambiguity outright.
+// ([a-z0-9]+)+ and [a-z0-9]+ accept exactly the same language; the extra
+// group buys nothing and costs the exponent.
+private static final Pattern HOST_FLAT =
+    Pattern.compile("^[a-z0-9]+(\\.[a-z0-9]+)*\\.[a-z]{2,}$");
 ```
 
-Rewriting `(a+)+$` as `(a++)+$`, `(?>a+)+$`, or simply `a+$` all collapse the 2ⁿ
-search to O(n). The general recipe: eliminate nesting, or make the inner
-quantifier possessive so a failed tail cannot force a re-split.
+The general recipe: eliminate the nesting, or make the inner quantifier possessive
+so a failed tail cannot force a re-split. Note that FIX 3 is usually available for
+free — a nested `(X+)+` almost always matches the identical language as `X+`, so
+the nesting is an accident of authorship rather than a requirement.
 
 ### Mitigations beyond rewriting the pattern
 
@@ -496,23 +555,26 @@ reasonable field length."
 |--------|------------|
 | cap | The maximum input length you accept before the regex ever runs |
 | `2^(cap-1)` | Worst-case attempts a truly exponential pattern can still make under that cap |
-| step rate | Attempts per second, measured above as 2.39e8 on the reference machine |
+| step rate | Attempts per second, measured above as 3.5e7 on the reference machine |
 | budget | The stall you are willing to tolerate on a request thread, e.g. 100 ms |
 
-**Walk one example.** Push several candidate caps through `2^(cap-1) / 2.39e8`:
+**Walk one example.** Push several candidate caps through `2^(cap-1) / 3.5e7`:
 
 ```
-   cap    worst-case attempts 2^(cap-1)    time at 2.39e8/s    verdict
-    24                    8,388,608            0.035 s         safe
-    32                2,147,483,648            9.0   s         already a stall
-    40              549,755,813,888        2,304     s         38 minutes
-    64    9,223,372,036,854,775,808        1,225     years     unbounded in practice
-   256                        2^255        7.7e60    years     no bound at all
+   cap    worst-case attempts 2^(cap-1)    time at 3.5e7/s     verdict
+    20                      524,288            0.015 s         safe
+    24                    8,388,608            0.24  s         already a stall
+    32                2,147,483,648           61     s         request is gone
+    40              549,755,813,888       15,707     s         4.4 hours
+    64    9,223,372,036,854,775,808        8,352     years     unbounded in practice
+   256                        2^255        5.2e61    years     no bound at all
 ```
 
-Only the 24-character row lands inside a 100 ms budget. The commonly written
-`> 256` cap reduces the worst case by a factor no human cares about: it is still
-`2^255` attempts.
+Only the 20-character row lands inside a 100 ms budget, and note how sensitive
+that verdict is to the step rate — the same table on a machine ten times faster
+moves the safe cap by only three or four characters, because you are trading a
+linear factor against an exponent. The commonly written `> 256` cap reduces the
+worst case by a factor no human cares about: it is still `2^255` attempts.
 
 So the cap is a genuine fix only for **polynomial** blowups — a quadratic
 `(\w+\s?)*`-style pattern at n = 256 is 256^2 = 65,536 steps, which really is
@@ -558,7 +620,7 @@ matcher = pattern.matcher(new InterruptibleCharSequence(userInput));
 
 | Dimension | Backtracking NFA (`java.util.regex`) | DFA / RE2 (`com.google.re2j`) |
 |-----------|--------------------------------------|-------------------------------|
-| Worst-case time | Exponential O(2ⁿ) on nested quantifiers | Linear O(n), guaranteed |
+| Worst-case time | Exponential O(2ⁿ) on nested quantifiers inside a quantified group, or anywhere in a pattern containing a backreference | Linear O(n), guaranteed |
 | Backreferences (`\1`) | Supported | **Not** supported (impossible in a DFA) |
 | Lookahead / lookbehind | Supported | **Not** supported |
 | Possessive / atomic groups | Supported | N/A (no backtracking to prevent) |
@@ -568,7 +630,7 @@ matcher = pattern.matcher(new InterruptibleCharSequence(userInput));
 | Use when | Trusted patterns needing rich features | Untrusted patterns / DoS-sensitive paths |
 
 ```
-backtracking NFA attempts = 2^n         <- n = input length in characters
+backtracking NFA attempts = 2^(n-1)     <- n = input length in characters
 DFA / RE2 transitions     = n           <- one pass, linear
 speedup                   = 2^(n-1) / n
 ```
@@ -583,26 +645,26 @@ n) versus O(n). Here the constant factors are irrelevant and only the shape matt
 
 | Symbol | What it is |
 |--------|------------|
-| `O(2ⁿ)` | Backtracking NFA worst case — attempts double per added character |
+| `O(2ⁿ)` | Backtracking NFA worst case — attempts double per added character (when the memoization in Section 7 does not apply) |
 | `O(n)` | RE2/DFA guarantee — one pass, state count bounded by the compiled automaton |
 | `n` | Input length in characters |
 | speedup | `2ⁿ⁻¹ / n` — how many times more work the backtracker does at that n |
 
-**Walk one example.** The same 35-byte string the section above measured, n = 34:
+**Walk one example.** The same 29-byte string the section above measured, n = 28:
 
 ```
-  backtracking NFA (java.util.regex):  2^33  = 8,589,934,592 attempts
-  DFA (com.google.re2j):                  34            char transitions
+  backtracking NFA (java.util.regex):  2^27  = 134,217,728 attempts
+  DFA (com.google.re2j):                  29           char transitions
 
-  ratio = 8,589,934,592 / 34 = 252,645,135x
+  ratio = 134,217,728 / 29 = 4,628,197x
 
-  in wall time at 2.39e8 attempts/s:
-      java.util.regex   36     s     <- request thread pinned
-      re2j              ~1     us    <- 34 transitions, below timer resolution
+  in wall time at 3.5e7 attempts/s:
+      java.util.regex   3.9    s     <- request thread pinned
+      re2j              ~1     us    <- 29 transitions, below timer resolution
 ```
 
-A quarter of a billion times more work for the same 35 bytes. And the ratio is
-not a fixed penalty you could tune away: at n = 40 it is 2^39/40 = 13.7 billion.
+Four and a half million times more work for the same 29 bytes. And the ratio is
+not a fixed penalty you could tune away: at n = 40 it is 2^39/41 = 13.4 billion.
 That is why the "use when" row is a *security* decision rather than a
 performance one — no amount of faster hardware closes a gap that widens per byte.
 
@@ -641,8 +703,11 @@ Each call recompiles the pattern. In a loop over a million rows, that is a milli
 `Pattern.compile` calls. Fix: hoist a `static final Pattern` and reuse `matcher()`.
 
 ### Pitfall 2: Assuming lazy quantifiers fix ReDoS
-`(a+?)+$` is just as catastrophic as `(a+)+$`. Laziness changes match *direction*,
-not the *number* of paths. Only possessive/atomic or de-nesting fixes it.
+`((a+?)+)+$` is just as catastrophic as `((a+)+)+$` — measured 48.8 s versus 52.5 s
+at n = 30 on JDK 23. Laziness changes the *order* in which splits are tried, not the
+*number* of them. Only possessive/atomic or de-nesting fixes it. (Use the doubly
+nested form to test: the singly nested `(a+?)+$` is a top-level closure and HotSpot
+memoizes it, so it will mislead you into thinking laziness helped.)
 
 ### Pitfall 3: Unanchored validation
 `Pattern.compile("\\d{3}")` with `find()` accepts `"abc123xyz"` because it matches
@@ -696,10 +761,13 @@ linear-time engine (same `Pattern`/`Matcher` API surface).
 ## 12. Interview Questions with Answers
 
 **Q: Why does Java's regex engine hang on some patterns when Go's `regexp` or `grep` never do?**
-Java uses a backtracking NFA engine, whereas Go's RE2 and `grep -E` use a DFA that guarantees linear time. Backtracking explores every way a set of nested quantifiers can partition the input, which is exponential for patterns like `(a+)+$`. A DFA cannot express backreferences or lookaround but never backtracks, so it is immune to catastrophic blowup. The practical takeaway: with `java.util.regex`, runtime depends on the pattern *shape*, not just input length.
+Java uses a backtracking NFA engine, whereas Go's RE2 and `grep -E` use a linear-time automaton. Backtracking explores every way a set of nested quantifiers can partition the input, which is exponential for shapes like `(([a-z]+)+\.)+`. A DFA cannot express backreferences or lookaround but never backtracks, so it is immune to catastrophic blowup. HotSpot narrows the gap but does not close it: `Loop` nodes memoize start positions that already failed, which is why the textbook `^(a+)+$` now returns instantly, but that memo is disabled for any pattern containing a backreference and for any closure nested inside a quantified group. The practical takeaway: with `java.util.regex`, runtime depends on the pattern *shape*, not just input length.
 
 **Q: What is catastrophic backtracking, and which pattern shapes cause it?**
-Catastrophic backtracking is exponential-time matching caused by ambiguity in how quantifiers can split the input. The three canonical shapes are nested quantifiers (`(a+)+`, `(a*)*`), a quantifier over overlapping alternation (`(a|a)*`, `(a|ab)*`), and adjacent flexible quantifiers (`\d+\d+`, `.*.*`). Each gives the engine many equivalent ways to match a prefix; when the overall match ultimately fails, it tries all 2ⁿ⁻¹ of them. Anchoring, possessive quantifiers, or de-nesting eliminate the ambiguity.
+Catastrophic backtracking is exponential-time matching caused by ambiguity in how quantifiers can split the input. The three canonical shapes are nested quantifiers (`(a+)+`, `(a*)*`), a quantifier over overlapping alternation (`(a|a)*`, `(a|ab)*`), and adjacent flexible quantifiers (`\d+\d+`, `.*.*`). Each gives the engine many equivalent ways to match a prefix; when the overall match ultimately fails, it tries all 2ⁿ⁻¹ of them. One qualification specific to modern Java: HotSpot memoizes failed start positions for *top-level* greedy closures, so those three shapes only actually blow up when the ambiguous loop sits inside a quantified group, or when the pattern contains a backreference (which disables the memo entirely). Possessive quantifiers or de-nesting eliminate the ambiguity in every case.
+
+**Q: Why does the textbook ReDoS pattern `^(a+)+$` return instantly on a modern JDK?**
+Because HotSpot memoizes the input positions at which a greedy loop has already failed, so it never re-explores them. `Pattern` collects unbounded greedy closures into a `topClosureNodes` list at compile time and gives each one a position set; `Loop.match` checks that set before recursing and short-circuits a repeat attempt, turning the classic 2ⁿ blowup into roughly quadratic work. Two conditions disable it, and knowing them is the whole point of the question: the memo is installed only when the pattern contains **no backreference** (a `\1` makes "failed here before" unsound, since the captured text can differ), and the compiler explicitly **clears every closure nested inside a quantified group** from the list — its own comment reads "no backtracking stopper optimization for inner". So `^(a+)+$` is protected while `^((a+)+)+$` is not, and the nested form is exactly the shape real validators take, where an outer quantifier repeats a segment and an inner one repeats characters within it. Treat the optimization as a safety net over the textbook example, never as a reason to stop auditing patterns.
 
 **Q: How do possessive quantifiers and atomic groups prevent ReDoS?**
 They disable local backtracking: a possessive quantifier (`a++`) or atomic group (`(?>a+)`) matches greedily and then refuses to give characters back. Because there is exactly one way to consume the run, a failing tail cannot force the engine to re-split it, collapsing the 2ⁿ search to O(n). The tradeoff is that possessive matching can *fail* where a greedy version would have succeeded, so you use it only where the sub-expression should never reconsider — which is most validation patterns.

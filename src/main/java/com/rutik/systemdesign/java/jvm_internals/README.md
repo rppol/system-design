@@ -41,7 +41,7 @@ Understanding JVM internals is what separates engineers who can explain *why* a 
 | Eden space | New objects (TLAB allocation) | Yes (minor GC) | No |
 | Survivor S0/S1 | Objects surviving minor GC | Yes (minor GC) | No |
 | Old generation | Long-lived objects (tenure threshold) | Yes (major/full GC) | No |
-| Metaspace | Class metadata, interned strings (Java 8+) | On class unload | No |
+| Metaspace | Class metadata (the interned-string table lives on the heap) | On class unload | No |
 | Stack | Method frames, local vars, operand stack | No (frame-based) | Yes |
 | PC register | Current bytecode position | No | Yes |
 | TLAB | Thread-local allocation buffer (sub-region of Eden) | Indirectly | Yes |
@@ -53,7 +53,7 @@ Understanding JVM internals is what separates engineers who can explain *why* a 
 | Serial GC | -XX:+UseSerialGC | Stop-the-world (single thread) | Single-core, small heap |
 | Parallel GC | Java 8 default | Stop-the-world (multi-thread) | High throughput batch |
 | G1 GC | Java 9+ default | Concurrent marking + STW evacuation | Balanced latency/throughput |
-| ZGC | -XX:+UseZGC (Java 15 GA) | Sub-millisecond STW | Ultra-low latency |
+| ZGC | -XX:+UseZGC (Java 15 GA; generational is the only mode from Java 24) | Sub-millisecond STW | Ultra-low latency |
 | Shenandoah | -XX:+UseShenandoahGC | Concurrent compaction | Low latency (alternative to ZGC) |
 
 ### 4.3 JIT Compilation Tiers
@@ -61,10 +61,12 @@ Understanding JVM internals is what separates engineers who can explain *why* a 
 | Tier | Compiler | Trigger | Notes |
 |------|---------|---------|-------|
 | 0 | Interpreter | All code | Initial execution |
-| 1 | C1 (client) | ~1K invocations | Fast compile, basic opts |
-| 2 | C1 + profiling | ~2K invocations | Adds type profile collection |
-| 3 | C1 + full profiling | ~15K invocations | Full profiling for C2 |
-| 4 | C2 (server) | ~15K invocations | Aggressive optimization (inlining, escape analysis) |
+| 1 | C1, no profiling | Trivial methods, or when the C2 queue is long | Terminal tier — fully optimized C1 code, never re-profiled |
+| 2 | C1, counters only | Used when the C1 queue is long | Invocation/back-edge counters, no type profile |
+| 3 | C1, full profiling | `Tier3InvocationThreshold=200`, `Tier3CompileThreshold=2000` | The normal first compile; collects the profile C2 needs |
+| 4 | C2 (server) | `Tier4InvocationThreshold=5000`, `Tier4CompileThreshold=15000` | Aggressive optimization (inlining, escape analysis) |
+
+The common path is 0 -> 3 -> 4; tiers 1 and 2 are queue-pressure and trivial-method shortcuts, not steps everything walks through.
 
 ---
 
@@ -119,13 +121,11 @@ Bigger regions raise the humongous threshold, which is the whole point of tuning
 +----------------+
 | Class Ptr (4B) |  Compressed oops (default): pointer to Klass in metaspace
 +----------------+
-| Field 1 (4B)   |  int field
+| Field 1 (4B)   |  int field, placed at offset 12 to fill the header gap
 +----------------+
-| Field 2 (8B)   |  long field (must align to 8B boundary)
+| Field 2 (8B)   |  long field, 8-byte aligned at offset 16
 +----------------+
-| Padding (4B)   |  pad to make total size multiple of 8
-+----------------+
-Total: 8+4+4+8+4 = 28B -> padded to 32B
+Total: 8+4+4+8 = 24B -> already a multiple of 8, no padding needed
 ```
 
 **In plain terms.** "An object costs you 12 bytes before you declare a single field, every field must start at an offset that is a multiple of its own width, and whatever is left over is rounded up to the next multiple of 8."
@@ -147,19 +147,18 @@ Those three rules are the whole of object sizing, and they explain the two numbe
   offset  bytes  what
   0       8      mark word
   8       4      class pointer            -> header ends at offset 12
-  12      4      alignment gap            <- long cannot start at 12
+  12      4      int field                <- HotSpot slots it into the 4-byte gap
   16      8      long field               -> ends at offset 24
-  24      4      int field                -> ends at offset 28
-  28      4      tail padding             -> round 28 up to a multiple of 8
 
-  total = 32 bytes, of which 12 are header and 8 are padding
-  useful payload = 12 bytes out of 32 = 37.5 percent
+  total = 24 bytes, of which 12 are header and 0 are padding
+  useful payload = 12 bytes out of 24 = 50 percent
 
-  Same class with compressed oops OFF (-Xmx above ~32GB):
-    8 (mark) + 8 (class ptr) + 8 (long) + 4 (int) + 4 (pad) = 32 bytes
+  Drop the int and the gap becomes real padding:
+    class with only a long -> 8 (mark) + 4 (class ptr) + 4 (gap) + 8 (long) = 24 bytes
+    -> the int above was free; it cost nothing at all
 ```
 
-The alignment gap at offset 12 is not wasted by accident — HotSpot's field layout actually reorders fields largest-first to fill such gaps, so declaring the `long` first and the `int` second changes nothing here, but adding a second `int` would land it at offset 12 for free. This is also the mechanism behind boxing overhead: an `Integer` is a 12-byte header plus a 4-byte `int` value, exactly 16 bytes with no padding needed, four times the 4 bytes an `int[]` slot costs — and that is before counting the 4-byte reference that has to point at it.
+HotSpot's field-layout algorithm deliberately fills the 4-byte hole left after the compressed class pointer, so declaration order does not matter here — an `int` declared after a `long` still lands at offset 12. That is why adding one small field to a class often costs zero bytes and adding the next one costs eight. The same arithmetic explains boxing overhead: an `Integer` is a 12-byte header plus a 4-byte `int` value, exactly 16 bytes with no padding, four times the 4 bytes an `int[]` slot costs — and that is before counting the 4-byte reference that has to point at it.
 
 ### GC Tri-Color Marking (Concurrent GC)
 
@@ -242,36 +241,37 @@ Card tables: 512-byte cards; dirty card = potential cross-region reference
 ### ZGC — Sub-Millisecond Pauses
 
 ```
-Key innovation: colored pointers + load barriers
-- 42-bit address + 22 bits for metadata (remapped/finalizable/marked flags)
+Key innovation: colored pointers + load/store barriers
+- 44-bit address + 4 metadata bits (marked0/marked1/remapped/finalizable), 16 bits unused
 - Load barrier: every object reference READ checks the color bits
 - If pointer stale (pre-relocation), update to new address on-the-fly
-- Relocation is concurrent — mutator sees consistent view via load barrier
+- Store barrier (generational ZGC) records old-to-young references
+- Relocation is concurrent — mutator sees consistent view via the barriers
 
-STW pauses: only initial mark and remark (a few ms for large heaps)
+STW pauses: only the root-scanning pauses (a few hundred microseconds)
 Concurrent: mark, relocate, remap — all happen while app runs
-Practical result: sub-1ms pauses on 1TB heaps
+Practical result: sub-1ms pauses on multi-TB heaps (16TB maximum)
 ```
 
 **What the formula is telling you.** "A 64-bit pointer has far more bits than any real heap needs, so ZGC spends the spare high bits on GC state and makes every reference read check that state — which buys concurrent relocation, and therefore a pause time that no longer depends on heap size."
 
-The bit budget is the design. Everything ZGC can and cannot do follows from how the 64 bits are split, including its historic 4TB heap ceiling and why its pauses stay flat as the heap grows.
+The bit budget is the design. Everything ZGC can and cannot do follows from how the 64 bits are split, including its 16TB heap ceiling and why its pauses stay flat as the heap grows.
 
 | Symbol | What it is |
 |--------|------------|
-| 42 address bits | The usable virtual-address portion of the pointer — sets the max heap |
-| 22 metadata bits | Color bits: marked0, marked1, remapped, finalizable |
+| 44 address bits | The usable virtual-address portion of the pointer — sets the max heap |
+| 4 metadata bits | Color bits: marked0, marked1, remapped, finalizable |
 | colored pointer | An object reference carrying GC state inline instead of in a side table |
 | load barrier | Code injected at every reference *read* that inspects and repairs the color |
-| STW phases | Only initial mark and remark; both scan GC roots, not the heap |
+| STW phases | Only the root-scanning pauses; they scan GC roots, not the heap |
 
 **Walk one example.** The bit budget and what it implies for pause time:
 
 ```
   pointer width        = 64 bits
-    address bits       = 42        -> 2^42 bytes = 4,398,046,511,104 B = 4 TiB max heap
-    metadata bits      = 22        -> 2^22 = 4,194,304 distinct color encodings
-    unused             = 64 - 42 - 22 = 0 bits
+    address bits       = 44        -> 2^44 bytes = 17,592,186,044,416 B = 16 TiB max heap
+    metadata bits      = 4         -> 2^4 = 16 encodings, of which 4 colors are used
+    unused             = 64 - 44 - 4 = 16 bits
 
   Pause-time scaling, G1 vs ZGC on the same workload:
     G1  pause work  is proportional to live data evacuated  -> grows with heap
@@ -380,10 +380,11 @@ TTSP latency problem:
 Mitigation:
   Java 10+: JEP 312 "Thread-Local Handshakes" — safepoint can target individual threads
   Java 14+: improved polling in counted loops
-  Diagnostic: -XX:+PrintSafepointStatistics (Java 8-11) or -Xlog:safepoint (Java 9+)
+  Diagnostic: -Xlog:safepoint+stats=info (per-safepoint TTSP and pause breakdown)
+              -Xlog:safepoint (one line per safepoint, cheaper)
 ```
 
-### Biased Locking (Removed in Java 21)
+### Biased Locking (disabled in Java 15, removed in Java 18)
 
 ```
 Biased locking was an optimization where the JVM stored the locking thread's ID
@@ -398,15 +399,16 @@ When a DIFFERENT thread tries to lock:
   JVM must "revoke" biased lock — requires stopping the owning thread at a safepoint
   Revocation is expensive (STW); biased locking saved time only when one thread held long
 
-Why removed in Java 21 (JEP 374):
+Why it went away (JEP 374 disabled and deprecated it in Java 15;
+JDK-8256425 obsoleted the flags and deleted the code in Java 18):
   Modern multi-threaded apps have many short-lived locks with multiple threads
   Contention is now common -> frequent revocations -> safepoint storms
   CAS (compare-and-swap) for thin locks is fast enough on modern hardware
   Benefit no longer exceeded the complexity and safepoint overhead cost
 
 Effect of removal:
-  Benchmarks show ~0.3% performance change (negligible)
-  Safepoint pauses become more predictable (fewer revocation safepoints)
+  Uncontended locking now always takes the thin-lock CAS path
+  Safepoint pauses become more predictable (no revocation safepoints at all)
   Startup slightly faster (no biased locking initialization)
 ```
 
@@ -453,7 +455,7 @@ Java construct → barrier mappings:
 
 ## 7. Real-World Examples
 
-- **G1 GC pause spike**: A financial trading system saw 3-second GC pauses during market open. Investigation: large humongous objects (>32MB) being allocated repeatedly, causing fragmentation and full GC. Fix: `-XX:G1HeapRegionSize=32m` to prevent humongous classification.
+- **G1 GC pause spike**: A trading system saw multi-second GC pauses at market open. Investigation: 10MB batch buffers were being allocated repeatedly on a 32GB heap, where G1's default 16MB region makes anything above 8MB humongous — so every buffer bypassed Eden, needed contiguous regions, and was only reclaimable by a marking cycle. Fix: `-XX:G1HeapRegionSize=32m` raises the humongous threshold to 16MB, so the 10MB buffers allocate normally. Note the limit of this knob: an object larger than 16MB is still humongous, and the maximum region size is 32MB, so objects above 16MB can never be de-humongous-ified by tuning alone.
 - **Metaspace OOM**: A hot-deploy application kept redeploying wars without restarting the JVM. Each deploy loaded new class versions but old classloaders weren't GC'd (ClassLoader leak via thread-local or static reference). Fix: `jmap -clstats` to count classloaders; hunt the reference chain.
 - **JIT deoptimization**: After a new version deployed, latency spiked for 2 minutes then recovered. Cause: JIT had compiled a method based on a type profile (only `ConcreteA` seen); new version introduced `ConcreteB` causing deoptimization and recompilation. Profiling with async-profiler confirmed.
 
@@ -502,7 +504,19 @@ A legacy class implemented `finalize()` for cleanup. The JVM processes finalizab
 ### War Story 3: OutOfMemoryError: Metaspace in dynamic proxy heavy code
 A service using heavy reflection-based frameworks (Hibernate, Spring proxies) ran for 2 weeks then crashed with `OutOfMemoryError: Metaspace`. Each CGLIB proxy class was loaded into a classloader that was never GC'd. **Fix**: Set `-XX:MaxMetaspaceSize=512m` to cap it and trigger OOME earlier for diagnostics; investigate classloader leaks with `jmap -clstats`.
 
-### War Story 4: Volatile not preventing reordering in DCL
+### War Story 4: Code cache exhaustion silently disabled the JIT
+A service using heavy runtime code generation (dynamic proxies, scripting, a large annotation-driven framework) logged `CodeCache is full. Compiler has been disabled.` after a few hours, and throughput collapsed to roughly interpreted speed with no GC anomaly and no heap growth to explain it. JIT-compiled code does not live in the heap — it lives in a separate native region, the **code cache**, and when that region fills, HotSpot stops compiling entirely. The code cache is *segmented* (`SegmentedCodeCache` is on by default) into three heaps, sized ergonomically on a 64-bit server VM:
+
+```
+  CodeHeap 'non-nmethods'          ~5.6 MB    interpreter, stubs, adapters
+  CodeHeap 'profiled nmethods'     ~117 MB    tier 2/3 C1 code carrying profiles
+  CodeHeap 'non-profiled nmethods' ~117 MB    tier 1/4 code (C1 terminal, C2)
+  ReservedCodeCacheSize             240 MB    the total of the three
+```
+
+Because the segments are sized separately, one segment can fill while the total still shows free space — a profiled-heap exhaustion looks like "plenty of code cache left" if you only read the total. **Fix**: watch `jcmd <pid> Compiler.codecache` (`full_count` and per-heap `free`) and `-Xlog:codecache+sweep`, then raise `-XX:ReservedCodeCacheSize` (segments scale with it) or cut the generated-class churn. `UseCodeCacheFlushing` is on by default and evicts cold methods first, so exhaustion means genuinely too much *live* compiled code, not merely accumulated garbage.
+
+### War Story 5: Volatile not preventing reordering in DCL
 A developer "fixed" DCL by adding `synchronized` on the inner check but not making the field `volatile`. The outer check without synchronization could see a non-null but partially constructed object due to JIT reordering. This only manifested on multi-core x86 under specific compiler optimization passes. **Fix**: The field must be `volatile` — volatile write establishes a happens-before with the volatile read.
 
 ---
@@ -541,10 +555,10 @@ ZGC uses *colored pointers* (metadata bits in the 64-bit address) and *load barr
 The JVM executes static initializer blocks and static field assignments in textual order. It's guaranteed to run at most once (JVM serializes it). Triggered by: first instance creation, first static method call, first static field access (except constants). A class initialization cycle (A initializes B which initializes A) results in A seeing B partially initialized — a subtle ordering bug. Always prefer lazy-initialized holders or enum-based singletons to avoid class initialization ordering issues.
 
 **Q6: How does escape analysis enable stack allocation?**
-Escape analysis determines whether an object's reference escapes the current method (assigned to a static field, passed to a method, returned, etc.). If an object doesn't escape, the JIT can: (1) allocate it on the stack instead of the heap (no GC overhead); (2) apply scalar replacement — decompose the object into its constituent fields, which may be kept in registers. Enabled by default in HotSpot. To verify: use `-XX:+PrintEscapeAnalysis` or async-profiler allocation profiling.
+Escape analysis determines whether an object's reference escapes the current method (assigned to a static field, passed to a method, returned, etc.). If an object doesn't escape, the JIT can: (1) allocate it on the stack instead of the heap (no GC overhead); (2) apply scalar replacement — decompose the object into its constituent fields, which may be kept in registers. Enabled by default in HotSpot. To verify: use `-Xlog:gc+heap+exit` allocation totals, JFR's `jdk.ObjectAllocationSample`, or async-profiler allocation profiling — the escape-analysis trace flags are develop-only and exist solely in debug JVM builds.
 
 **Q7: What is deoptimization and when does it happen?**
-Deoptimization is the JIT discarding compiled native code and falling back to interpretation (or lower-tier compilation) when assumptions embedded in the compiled code are violated. Common triggers: a method was compiled assuming only one concrete type was seen (monomorphic dispatch), then a second type appears (bimorphic/megamorphic); a speculated null check is violated; a final field was changed via reflection. Deoptimization causes a latency spike followed by recompilation. Detected via `-XX:+TraceDeoptimization` or async-profiler.
+Deoptimization is the JIT discarding compiled native code and falling back to interpretation (or lower-tier compilation) when assumptions embedded in the compiled code are violated. Common triggers: a method was compiled assuming only one concrete type was seen (monomorphic dispatch), then a second type appears (bimorphic/megamorphic); a speculated null check is violated; a final field was changed via reflection. Deoptimization causes a latency spike followed by recompilation. Detected via `-Xlog:deoptimization` or async-profiler.
 
 **Q8: Explain happens-before with a volatile example.**
 The JMM guarantees: a *volatile write* to a field happens-before any subsequent *volatile read* of the same field. "Subsequent" means observed to have read the write's value. So: Thread A writes `x = 42; volatile flag = true;` and Thread B reads `volatile flag; read x;` — if Thread B sees `flag == true`, it is guaranteed to see `x == 42`. The volatile write on `flag` establishes the happens-before edge across all preceding writes by Thread A. Without `volatile` on `flag`, Thread B might see `flag == true` but `x == 0` (stale cache line).
@@ -559,6 +573,8 @@ Minor GC collects only the young generation (Eden + Survivors) — typically fas
 Metaspace stores class metadata. It grows unbounded by default (unlike PermGen which was fixed size). OOM:Metaspace occurs when: (1) a class generator (CGLIB, ASM, dynamic proxies) creates classes faster than old classloaders are GC'd; (2) ClassLoader leak — a classloader is referenced from a static field, preventing GC of all its loaded classes. Every class loaded by a leaked classloader occupies metaspace permanently. Fix: set `-XX:MaxMetaspaceSize` to cap it; hunt classloader leaks with `jmap -clstats`.
 
 **Q12: What GC flags would you set for a low-latency Java service?**
+Start with ZGC, a fixed pre-touched heap, and structured GC logging, then tune only what the logs prove is a problem.
+
 ```
 -XX:+UseZGC                    # Sub-millisecond pauses
 -Xms4g -Xmx4g                  # Pre-allocate heap (avoid resize pause)
@@ -587,9 +603,12 @@ A safepoint is a program execution point where all JVM threads are paused for op
 Escape analysis is a JIT (C2) optimization that determines whether an object "escapes" the method that created it — i.e. whether a reference to it can be seen by another thread or outlive the method. If an object provably does not escape, the JIT can apply scalar replacement: it decomposes the object into its individual fields and keeps them in registers/stack slots, so *no heap allocation happens at all* and there is no GC pressure for that object. A classic case is a short-lived `new Point(x,y)` used only locally inside a hot method. The gotchas: escape analysis only fires after JIT compilation (interpreted/cold code still allocates), it is fragile — storing the reference in a field, returning it, or passing it to a non-inlined method makes it escape — and it is why microbenchmarks must use a sink (e.g. JMH `Blackhole`) or the "allocation" they measure may have been optimized away. Inlining enables it: the more the JIT inlines, the more allocations it can prove non-escaping.
 
 **Q17: What is the difference between C1 and C2 compilers, and what is tiered compilation?**
-HotSpot ships two JIT compilers: C1 (client) compiles quickly and produces moderately optimized code with profiling instrumentation; C2 (server) compiles slowly but produces highly optimized code using the profile data (aggressive inlining, escape analysis, loop unrolling, speculative optimizations). Tiered compilation (default since Java 8) combines them across 5 levels: code starts interpreted (level 0), gets compiled by C1 with increasing profiling (levels 1–3), and once it is proven hot via invocation/back-edge counters it is recompiled by C2 (level 4). This gives fast startup (C1) *and* high peak throughput (C2). It also explains JVM "warmup": peak performance is only reached after enough executions trigger C2, which is exactly the throughput that GraalVM native image gives up by having no runtime JIT.
+C1 compiles fast but optimizes lightly, C2 compiles slowly but optimizes aggressively, and tiered compilation runs both so you get quick startup and high peak throughput from the same code. C1 (client) produces moderately optimized code carrying profiling instrumentation; C2 (server) consumes that profile to drive aggressive inlining, escape analysis, loop unrolling, and speculative optimizations. Tiered compilation (default since Java 8) combines them across 5 levels: code starts interpreted (level 0), gets compiled by C1 with increasing profiling (levels 1–3), and once it is proven hot via invocation/back-edge counters it is recompiled by C2 (level 4). This gives fast startup (C1) *and* high peak throughput (C2). It also explains JVM "warmup": peak performance is only reached after enough executions trigger C2, which is exactly the throughput that GraalVM native image gives up by having no runtime JIT.
 
-**Q18: What is deoptimization and why does the JIT speculatively optimize code it may have to throw away?**
+**Q18: What is the JVM code cache, and what happens when it fills up?**
+The code cache is the native memory region holding JIT-compiled methods, and when it fills the JVM logs `CodeCache is full. Compiler has been disabled.` and falls back to interpretation. It is separate from the heap, so exhaustion shows up as a throughput collapse with no GC or heap symptom at all — the classic misdiagnosis. On a 64-bit server VM `ReservedCodeCacheSize` defaults to 240MB and `SegmentedCodeCache` splits it into three heaps (non-nmethods ~5.6MB for stubs and adapters, profiled nmethods ~117MB for tier 2/3 C1 code, non-profiled nmethods ~117MB for tier 1 and C2 code); because the segments are sized independently, one can fill while the total still reports free space. `UseCodeCacheFlushing` is on by default and sweeps cold methods, so a genuine exhaustion means too much *live* compiled code — usually runtime class generation (proxies, scripting engines, heavy framework codegen). Diagnose with `jcmd <pid> Compiler.codecache`, watching `full_count` and the per-heap `free` figures rather than the aggregate.
+
+**Q19: What is deoptimization and why does the JIT speculatively optimize code it may have to throw away?**
 Deoptimization is the JVM discarding compiled (C2) code and falling back to the interpreter for a method, then potentially recompiling later. C2 makes *speculative* optimizations based on the profile it has observed — e.g. assuming a branch is never taken, a type is always the same (monomorphic call → inlined), or a class is never loaded. These assumptions are guarded by cheap checks (uncommon traps); if an assumption is later violated (the rare branch is taken, a new subclass is loaded), the guard fires, the optimized frame is deoptimized back to the interpreter at a safepoint, and execution continues correctly. This lets the JIT optimize aggressively for the common case while staying correct. The cost: a sudden deopt storm (e.g. a new implementation class loaded into a hot megamorphic call site) can cause a latency spike as hot code reverts to interpreted speed until recompiled — visible with `-XX:+PrintCompilation` / `-Xlog:deoptimization`.
 
 ---
@@ -680,7 +699,7 @@ After deploying the bounded cache, old-gen occupancy plateaued, mixed GCs return
 
 **3. `finalize()` resurrected objects and delayed reclamation.** A legacy class overrode `finalize()`, which moves objects onto a single finalizer queue and defers their collection by at least one GC cycle, bloating old gen. Replaced with `Cleaner` / try-with-resources (`AutoCloseable`).
 
-**4. ClassLoader leak filling Metaspace.** A plugin system loaded classes with new ClassLoaders but a static listener held a reference to each, so the loaders (and their classes) never unloaded. Metaspace grew until `OutOfMemoryError: Metaspace`. Found via `jcmd <pid> GC.class_stats`; fixed by clearing the listener on undeploy.
+**4. ClassLoader leak filling Metaspace.** A plugin system loaded classes with new ClassLoaders but a static listener held a reference to each, so the loaders (and their classes) never unloaded. Metaspace grew until `OutOfMemoryError: Metaspace`. Found via `jcmd <pid> VM.classloader_stats` (and `VM.metaspace` for the arena breakdown); fixed by clearing the listener on undeploy.
 
 #### Tuning flags applied and what they did
 
@@ -690,14 +709,14 @@ After deploying the bounded cache, old-gen occupancy plateaued, mixed GCs return
 -XX:MaxGCPauseMillis=200        # G1's soft pause goal (default 200ms)
 -XX:+UseG1GC                    # default since Java 9, explicit for clarity
 -XX:+DisableExplicitGC          # neutralize stray System.gc() calls
--XX:InitiatingHeapOccupancyPercent=45  # start concurrent mark earlier to avoid evacuation failure
+-XX:InitiatingHeapOccupancyPercent=35  # below the 45 default: start concurrent mark earlier
 -Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=20m
 
 # Heap and GC headroom math for this node:
-#   32GB physical RAM
-#   - ~24GB -Xmx (75% leaves room for off-heap)
+#   48GB physical RAM
+#   - 32GB -Xmx (about 67%, leaving room for off-heap and the OS)
 #   - Metaspace (~256MB), thread stacks (platform ~1MB each), direct buffers
-#   Setting -Xmx30g caused swapping; -Xmx24g eliminated it.
+#   An earlier build ran -Xmx46g on the same box and swapped; -Xmx32g eliminated it.
 ```
 
 **What it means.** "`-Xmx` is not the JVM's memory budget, it is only the *heap* slice of it — the process also needs Metaspace, one stack per thread, direct buffers, code cache and GC structures, and the machine still needs room for the OS."
@@ -706,30 +725,30 @@ Getting this wrong does not fail loudly; it fails as swapping, which turns a 200
 
 | Symbol | What it is |
 |--------|------------|
-| physical RAM | What the node actually has — 32GB here |
+| physical RAM | What the node actually has — 48GB here |
 | `-Xmx` | Maximum *heap* size only; excludes everything below |
 | Metaspace | Class metadata, roughly 256MB for a typical service |
 | thread stacks | ~1MB per platform thread (a virtual thread's stack is only a few KB) |
 | off-heap | Direct `ByteBuffer`s, code cache, GC remembered sets, JVM native structures |
 | headroom | `RAM - Xmx - off-heap` — the OS page cache and safety margin |
 
-**Walk one example.** The 32GB node, before and after:
+**Walk one example.** The 48GB node, before and after:
 
 ```
-  BROKEN: -Xmx30g on 32 GB RAM
-    heap                                       30.00 GB
+  BROKEN: -Xmx46g on 48 GB RAM
+    heap                                       46.00 GB
     Metaspace                                   0.25 GB
     200 platform threads x 1MB stack            0.20 GB
     direct buffers + code cache + GC structs   ~0.50 GB
     ---------------------------------------------------
-    process footprint                          30.95 GB   of 32 GB
+    process footprint                          46.95 GB   of 48 GB
     left for the OS                             1.05 GB   -> swapping under load
 
-  FIXED: -Xmx24g on 32 GB RAM
-    24 / 32 = 75 percent of RAM to heap
+  FIXED: -Xmx32g on 48 GB RAM
+    32 / 48 = 67 percent of RAM to heap
     off-heap as above                          ~0.95 GB
-    process footprint                          24.95 GB
-    left for the OS                             7.05 GB   -> no swap, pauses back to 60-150 ms
+    process footprint                          32.95 GB
+    left for the OS                            15.05 GB   -> no swap, pauses back to 60-150 ms
 ```
 
 Notice how cheap the thread stacks look and how quickly that changes: those same 200 threads at 1MB cost 0.2GB, but a thread-per-request service running 10,000 platform threads would need 10GB of stack — which is precisely the constraint virtual threads remove by making a stack a few KB of heap-resident continuation rather than a reserved 1MB of native stack.
@@ -760,7 +779,7 @@ The success criterion is not "no GC" but "old-gen occupancy is flat over the soa
 
 **Why fix `-Xms` equal to `-Xmx`?** A growing heap incurs resize pauses and lazily commits OS pages, causing latency jitter as the heap expands under load. Fixing both to the same value commits the full heap at startup, trading a slower boot for predictable steady-state behavior — standard for latency-sensitive services.
 
-**What is the difference between `OutOfMemoryError: Java heap space` and `: Metaspace`?** Heap-space OOM means live objects exceed `-Xmx` (a data leak like our cache). Metaspace OOM means class metadata exceeds the Metaspace limit, almost always a ClassLoader leak where loaded classes can never unload. They have different root causes and different diagnostics (`class_histogram` vs `GC.class_stats`).
+**What is the difference between `OutOfMemoryError: Java heap space` and `: Metaspace`?** Heap-space OOM means live objects exceed `-Xmx` (a data leak like our cache). Metaspace OOM means class metadata exceeds the Metaspace limit, almost always a ClassLoader leak where loaded classes can never unload. They have different root causes and different diagnostics (`jcmd GC.class_histogram` vs `jcmd VM.classloader_stats`).
 
 ---
 
