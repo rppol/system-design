@@ -247,9 +247,14 @@ try (var scope = StructuredTaskScope.open()) {
 // If either throws: join() throws and the scope cancels the rest
 
 // Other policies come from a Joiner passed to the one-arg open():
-//   Joiner.anySuccessfulResultOrThrow()  -- race: first success wins, rest cancelled
-//   Joiner.allSuccessfulOrThrow()        -- all must succeed; yields the subtasks
-//   Joiner.awaitAll()                    -- wait for everything, success or not
+//   Joiner.anySuccessfulOrThrow()  -- race: first success wins, rest cancelled
+//   Joiner.allSuccessfulOrThrow()  -- all must succeed; join() yields List<T> of results
+//   Joiner.awaitAll()              -- wait for everything, success or not
+// The names above are the Java 26 (JEP 525) spelling; on the Java 25 LTS
+// (JEP 505) the race joiner is still called anySuccessfulResultOrThrow() and
+// allSuccessfulOrThrow() yields a stream of Subtask objects rather than a list.
+// A preview API is allowed to rename between releases -- pin the JDK you compile
+// against rather than assuming the signature is stable.
 ```
 
 ### JPMS Module Directives — Complete Reference
@@ -443,7 +448,7 @@ JPMS (Java Platform Module System) adds `module-info.java` files that declare mo
 Sequenced collections (JEP 431, Java 21) add three interfaces for collections with a defined encounter order: `SequencedCollection<E>`, `SequencedSet<E>` and `SequencedMap<K,V>`. `SequencedCollection` supplies `getFirst()`, `getLast()`, `addFirst()`, `addLast()`, `removeFirst()`, `removeLast()` and `reversed()`; `SequencedMap` adds the map-shaped equivalents (`firstEntry()`, `pollFirstEntry()`, `putFirst()`, `reversed()`). Before Java 21, there was no common interface for accessing the first/last element of ordered collections like `LinkedHashMap` and `ArrayList` — `List` had `get(0)`, `Deque` had `getFirst()`, `SortedSet` had `first()`, and none of them shared a supertype that expressed the order.
 
 **Q10: What is StructuredTaskScope and when would you use it?**
-`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — `Joiner.anySuccessfulResultOrThrow()` for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed, `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** (JEP 505 in Java 25, JEP 525 in Java 26), so it needs `--enable-preview` at both compile and run time.
+`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — `Joiner.anySuccessfulOrThrow()` for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed (its `join()` returns a `List` of the results), `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** (JEP 505 in Java 25, JEP 525 in Java 26), so it needs `--enable-preview` at both compile and run time — and the names move between previews, so the race joiner is spelled `anySuccessfulResultOrThrow()` on the Java 25 LTS.
 
 **Q11: What is a text block and how does it handle indentation?**
 A text block `"""..."""` is a multi-line string literal. The compiler strips common leading whitespace (incidental whitespace) based on the least-indented line. The trailing `"""` position controls the stripping — if it's on a new line indented by N spaces, N spaces are stripped from all lines. Backslash line continuation `\` merges lines. Text blocks support the full string API and are equivalent to regular strings at runtime.

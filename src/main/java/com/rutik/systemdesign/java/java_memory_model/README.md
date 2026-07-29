@@ -411,7 +411,7 @@ volatile int x = 0, y = 0;
 
 // Sequentially consistent executions:
 // Order 1: x=1, y=1, read y (1), read x (1)  -> both see 1
-// Order 2: x=1, read y (1), y=1, read x (1)  -> Thread A sees 1, Thread B sees 1
+// Order 2: x=1, read y (0), y=1, read x (1)  -> Thread A sees y=0, Thread B sees x=1
 // Order 3: y=1, x=1, read x (1), read y (1)  -> both see 1
 // etc.
 // NO execution can produce both reads seeing 0 — that would require
@@ -754,4 +754,4 @@ The 33x multiplier is real and the 0.04 percent is also real; they are the same 
 - [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) — ScopedValue vs ThreadLocal, virtual thread memory visibility
 - [Computer Architecture & Memory Hierarchy](../../cs_fundamentals/computer_architecture_and_memory_hierarchy/README.md) — CPU cache coherence and store buffers that the JMM's happens-before rules sit on top of
 
-**Why is the enum singleton preferable to a volatile DCL singleton?** It is initialized once by the classloader with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.
+**Why is the enum singleton preferable to a volatile DCL singleton?** Its `<clinit>` is run exactly once by the JVM, lazily on first active use of the enum type, with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.

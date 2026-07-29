@@ -383,7 +383,7 @@ null == null                              true     null reference comparison
 |---------|---------|------|
 | Static factory vs constructor | Named, cacheable, flexible | Not in standard docs; harder to discover |
 | Builder vs setter injection | Immutable, validated | More boilerplate |
-| Enum singleton vs lazy init | Simplest, safest | No lazy initialization (always initialized at class load) |
+| Enum singleton vs lazy init | Simplest, safest | Every constant of the enum is built together, on first touch of the enum type — no per-constant laziness |
 | Composition vs inheritance | Flexible, no fragile base | More delegation code |
 
 ---
@@ -474,7 +474,7 @@ Five rules: (1) Declare the class `final` — prevents subclasses from adding mu
 Builder solves the "telescoping constructor" problem: when a class has many optional parameters, providing all combinations of constructor signatures is impractical. Builder: client calls a fluent API on the inner `Builder` class to set desired parameters, then calls `build()` which validates invariants and constructs the immutable object. Use Builder when: 4+ parameters exist, many are optional, or multiple parameters have the same type (easy to transpose). Static factory methods are an alternative for simpler cases. Builder is preferred for complex objects that must be immutable.
 
 **Q3: Why is enum the best singleton implementation? (Effective Java Item 3)**
-Three reasons: (1) Serialization-safe — Java's enum serialization mechanism guarantees that each constant is only deserialized to the existing instance (using the name, not constructor); no need for `readResolve()`. (2) Reflection-safe — `Constructor.newInstance()` on an enum type throws `IllegalArgumentException`; the JVM prevents reflection-based instantiation. (3) Thread-safe — class initialization is guaranteed single-execution by the JVM. The only disadvantage: cannot use lazy initialization (enum constants are initialized when the class loads).
+Three reasons: (1) Serialization-safe — Java's enum serialization mechanism guarantees that each constant is only deserialized to the existing instance (using the name, not constructor); no need for `readResolve()`. (2) Reflection-safe — `Constructor.newInstance()` on an enum type throws `IllegalArgumentException`; the JVM prevents reflection-based instantiation. (3) Thread-safe — class initialization is guaranteed single-execution by the JVM. On laziness, correct the common myth: the enum type is *initialized on first active use*, exactly like the holder idiom, so `INSTANCE` is not built until something reads it — loading the class is not enough. What you give up is per-constant control: every constant of the enum is constructed together in `<clinit>`, and you cannot defer one of them past the first touch of the type.
 
 **Q4: What is the Integer cache and what bugs can it cause?**
 `Integer.valueOf(n)` caches `Integer` objects for values in [-128, 127]. Values outside this range always create new objects. Bug: comparing cached Integer with `==` works (same instance), but comparing larger values with `==` returns `false` even when values are equal. The fix: always use `.equals()` for `Integer` (and all boxed types). The cache exists as a performance optimization — these small integers are used very frequently (loop counters, small IDs, boolean flags).
@@ -707,7 +707,7 @@ public List<String> tags() { return tags; }   // already unmodifiable
 
 ### Interview Discussion Points
 
-**Why is an enum the best singleton in Java?** It is initialized once by the class loader (thread-safe with no locking), the JVM forbids reflective instantiation, and serialization returns the same instance automatically — eliminating the three ways classic singletons get duplicated.
+**Why is an enum the best singleton in Java?** Its `<clinit>` runs exactly once, lazily, on first active use of the enum type (thread-safe with no locking), the JVM forbids reflective instantiation, and serialization returns the same instance automatically — eliminating the three ways classic singletons get duplicated.
 
 **When do you need a Builder instead of a constructor or static factory?** When a class has many optional parameters (the telescoping-constructor problem) or requires multi-field invariant validation; the Builder gives readable named arguments and a single `build()` choke point to enforce invariants, at the cost of one extra object.
 

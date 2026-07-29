@@ -202,14 +202,61 @@ static <T> List<T> asList(T... elements) {
 // If we stored non-T into elements: heap pollution
 // @SafeVarargs suppresses the unchecked warning
 
-// INCORRECT usage would be:
+// INCORRECT usage — the write breaks the promise:
 @SafeVarargs
-static <T> void store(T... elements) {
-    Object[] raw = elements;  // legal, same array
-    raw[0] = "hello";         // heap pollution if T != String
-    T first = elements[0];    // ClassCastException at runtime!
+static void store(List<String>... lists) {
+    Object[] raw = lists;       // legal: the varargs array widens to Object[]
+    raw[0] = List.of(42);       // accepted: at runtime the array is only List[],
+                                // so a List<Integer> passes the array store check
+    String s = lists[0].get(0); // ClassCastException: Integer cannot be cast to String
+}
+
+// Why the element type matters: for a varargs parameter whose component type is
+// itself generic (List<String>), erasure leaves a plain List[] at runtime, so the
+// bad store slips through and the failure surfaces later at a compiler-inserted
+// checkcast. Had the parameter been a bare `T... elements` inferred as Integer,
+// javac would have created an Integer[] and `raw[0] = "hello"` would fail
+// immediately with ArrayStoreException instead — noisy, but not heap pollution.
+```
+
+### Generics and Exceptions — the Reifiability Rule at Its Sharpest
+
+Exception handling is the one place where the reifiable/non-reifiable split from Section 3
+becomes a hard compile error rather than a warning. A `catch` clause dispatches on the
+runtime type of the thrown object, so the type it names must survive erasure.
+
+```java
+// COMPILE ERROR: "a generic class may not extend java.lang.Throwable"
+class MyEx<T> extends Exception {}
+// Why: catch (MyEx<String> e) could not be distinguished at runtime from
+// catch (MyEx<Integer> e) -- both erase to MyEx. Rather than let you write an
+// undecidable catch, the language forbids the class outright (JLS 8.1.2).
+
+// COMPILE ERROR: "unexpected type ... found: type parameter T"
+static <T extends Throwable> void f(T t) {
+    try { throw t; } catch (T e) { }   // a catch parameter cannot be a type variable
 }
 ```
+
+What *is* legal is a type variable in a `throws` clause — and that opening is the basis of
+the "sneaky throw" idiom, which smuggles a checked exception past the compiler:
+
+```java
+@SuppressWarnings("unchecked")
+static <T extends Throwable> void sneak(Throwable t) throws T { throw (T) t; }
+
+static void doIt() { Utils.<RuntimeException>sneak(new IOException("boom")); }
+// Compiles with no `throws IOException`: T is inferred as RuntimeException, the cast
+// is erased to nothing, and an IOException propagates out of a method that declares
+// none. Lombok's @SneakyThrows is exactly this. Use it only to rethrow inside a
+// functional interface whose signature you do not control -- never as a way to skip
+// declaring exceptions you own.
+```
+
+The honest tool for the common case is Java 7's **precise rethrow**: catching `Exception`
+and rethrowing it lets the compiler infer the *actual* thrown types from the try block, so
+`catch (Exception e) { throw e; }` inside a method declaring only `throws IOException`
+compiles when `IOException` is all the block can throw.
 
 ### Reflection — getDeclaredMethod vs getMethod
 
@@ -549,7 +596,7 @@ TypeToken exploits the fact that an anonymous class retains its superclass's typ
 `@SafeVarargs` on a method promises: "this method does not perform unsafe operations on the varargs parameter" — specifically, it doesn't write to the varargs array in a way that could cause heap pollution. It suppresses the "possible heap pollution from parameterized vararg type" unchecked warning. The annotation is placed on `final`, `static`, or `private` methods (must not be overridable, as overrides might break the promise). You must manually verify the promise — the compiler doesn't check it. Incorrect use means callers get `ClassCastException` at unexpected points.
 
 **Q10: What is the difference between `Class.forName()` and `ClassLoader.loadClass()`?**
-`Class.forName(name)` loads the class AND initializes it (runs `<clinit>` static initializers). `ClassLoader.loadClass(name)` loads the class but does NOT initialize it (deferred until first use). `Class.forName(name, initialize, loader)` gives full control. Practical implication: `Class.forName("com.mysql.jdbc.Driver")` was the traditional JDBC driver registration mechanism — it worked because loading the class triggered `static {}` initialization which registered the driver. If you used `classLoader.loadClass()` instead, the driver would not be registered.
+`Class.forName(name)` loads the class AND initializes it (runs `<clinit>` static initializers). `ClassLoader.loadClass(name)` loads the class but does NOT initialize it (deferred until first use). `Class.forName(name, initialize, loader)` gives full control. Practical implication: `Class.forName("com.mysql.cj.jdbc.Driver")` is the explicit JDBC driver registration mechanism — it works because initializing the class runs the `static {}` block that registers the driver with `DriverManager`. If you used `classLoader.loadClass()` instead, the driver would not be registered.
 
 **Q11: Why is array assignment covariant in Java but generic type assignment invariant? What runtime mechanism catches array covariance violations?**
 Arrays are covariant (`String[]` is an `Object[]`) for historical reasons: Java 1.0 had no generics and needed to write generic array-processing methods like `Arrays.sort(Object[])`. The runtime safety net is `ArrayStoreException` — on every array element write, the JVM checks that the stored type is compatible with the array's actual component type (stored in the array header). This is a runtime check. Generics are invariant (`List<String>` is NOT `List<Object>`) because type erasure means no runtime type information exists for the generic parameter — there's no mechanism to perform the equivalent of `ArrayStoreException` at runtime for generic containers. The compiler performs all checks statically at compile time. Summary: arrays: covariant + runtime `ArrayStoreException`; generics: invariant + compile-time error.
@@ -613,6 +660,9 @@ static void swapFirst(List<?> list) { list.set(0, list.get(1)); }  // compile er
 static void swapFirst(List<?> list) { swapHelper(list); }
 private static <T> void swapHelper(List<T> list) { list.set(0, list.get(1)); }
 ```
+
+**Q19: Why can't a class be both generic and a `Throwable`, and why can't you `catch` a type variable?**
+Because a `catch` clause is dispatched on the object's runtime type, and erasure has already deleted the type argument by then. `catch (MyEx<String> e)` and `catch (MyEx<Integer> e)` would both erase to `catch (MyEx e)`, so the JVM could not tell which handler to run — rather than allow an undecidable catch, the language rejects the class itself with "a generic class may not extend java.lang.Throwable" (JLS 8.1.2), and rejects a bare type variable in a catch parameter for the same reason. A type variable *is* allowed in a `throws` clause, which is what makes the "sneaky throw" trick possible: `static <T extends Throwable> void sneak(Throwable t) throws T { throw (T) t; }` inferred as `RuntimeException` lets a checked `IOException` escape a method that declares nothing, because the cast erases away and checked-exception enforcement is purely a compile-time rule. Lombok's `@SneakyThrows` is this idiom; keep it for rethrowing inside a functional interface whose signature you cannot change, and reach for Java 7's precise rethrow (`catch (Exception e) { throw e; }`, where the compiler infers the actual thrown types from the try block) for ordinary code.
 
 ---
 
@@ -818,6 +868,8 @@ List<Dog> dogs = new ArrayList<>();
 
 **Why are arrays covariant but generics invariant, and why does that matter?** Arrays are reified and covariant (`Object[] a = new String[1]`), so a bad store throws `ArrayStoreException` at runtime. Generics are erased and invariant, pushing the same class of error to compile time. Mixing them (`List<String>[]`) is forbidden precisely because it would let heap pollution slip past the compiler.
 
+**When is `@SuppressWarnings("unchecked")` acceptable in a published library?** Only when you can prove the cast is safe from a surrounding invariant (such as a `Class<T>` key controlling the value type), the annotation is on the narrowest scope possible (ideally a single local variable, not a method), and you add a comment stating why it is safe so the next maintainer does not have to re-derive the proof.
+
 ---
 
 ## Related / See Also
@@ -825,5 +877,3 @@ List<Dog> dogs = new ArrayList<>();
 - [Collections Internals](../collections_internals/README.md) — generic collection implementations, bounded type parameters in practice
 - [Functional Programming](../functional_programming/README.md) — Function/Supplier/Consumer type parameters, variance in functional interfaces
 - [Core Language](../core_language/README.md) — polymorphism and OOP foundations that generics extend
-
-**When is `@SuppressWarnings("unchecked")` acceptable in a published library?** Only when you can prove the cast is safe from a surrounding invariant (such as a `Class<T>` key controlling the value type), the annotation is on the narrowest scope possible (ideally a single local variable, not a method), and you add a comment stating why it is safe so the next maintainer does not have to re-derive the proof.

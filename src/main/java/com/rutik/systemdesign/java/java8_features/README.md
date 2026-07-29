@@ -167,6 +167,47 @@ AtomicInteger count = new AtomicInteger(0);
 list.forEach(item -> count.incrementAndGet());  // OK - count reference is final
 ```
 
+### Default and Static Interface Methods
+
+Section 1 names these alongside lambdas for a reason: without them, adding `stream()` to
+`Collection` would have broken every implementation of it in existence. A `default` method
+carries a body on the interface, so the interface can grow without a source-incompatible
+change. A `static` interface method is a namespaced helper (`Comparator.comparing`,
+`Stream.of`) that no longer needs a companion `Collections`-style utility class.
+
+```java
+interface Greeter {
+    String name();                                        // abstract - the SAM
+    default String greet() { return "Hi " + name(); }     // has a body; inherited
+    static Greeter of(String n) { return () -> n; }       // NOT inherited by implementors
+}
+// Greeter stays a functional interface: default and static methods do not count
+// toward the "exactly one abstract method" rule, so the lambda above compiles.
+```
+
+Multiple inheritance of *behaviour* now exists, so the compiler needs a tie-break. Three
+rules, applied in order:
+
+```java
+interface A { default String name() { return "A"; } }
+interface B { default String name() { return "B"; } }
+interface C extends A { default String name() { return "C"; } }
+class Sup { public String name() { return "Sup"; } }
+
+class R1 extends Sup implements A { }   // 1. CLASS WINS      -> "Sup"
+class R2 implements C, A { }            // 2. MOST SPECIFIC   -> "C"
+class R3 implements A, B {              // 3. otherwise AMBIGUOUS: without this
+    @Override public String name() {    //    override, javac rejects R3 with
+        return A.super.name();          //    "inherits unrelated defaults for name()"
+    }                                   //    X.super.m() picks one explicitly
+}
+```
+
+Two consequences worth carrying: a concrete method inherited from a superclass silently
+beats a default, so adding a `default` to an interface can be a no-op on classes that
+already extend something; and static interface methods are **not** inherited — inside an
+implementor you must write `Greeter.of(...)`, never a bare `of(...)`.
+
 ### flatMap vs map
 
 ```java
@@ -505,6 +546,9 @@ A variable captured by a lambda must be effectively final — either explicitly 
 **Q16: What do "non-interfering" and "stateless" mean for stream behavioral parameters, and what breaks when you violate them?**
 Non-interfering means the lambda must not modify the stream's data source while the pipeline is running; stateless means its result must not depend on state that can change during execution. Violating non-interference on a non-concurrent source is the loud failure: `list.stream().filter(...).forEach(list::remove)` throws `ConcurrentModificationException`, because the spliterator is fail-fast. Mutating the source *before* the terminal operation is legal, since spliterators are late-binding — add to the list after calling `.stream()` but before `.collect()` and the addition is included. Violating statelessness is the quiet failure: a lambda that consults a shared `Set` of already-seen elements returns different results run to run once the stream is parallel, and synchronizing the set does not fix it because the nondeterminism is in the *split order*, not in the data structure. The same family of rules covers `reduce`, whose accumulator must be associative — `(a, b) -> a - b` gives a different answer per run in parallel because the result depends on how the range was split. Practical guidance: never write back into the source, accumulate with a `Collector` rather than a captured mutable collection, and reserve side-effects for `forEach`/`forEachOrdered`, since every other operation is allowed to optimize its behavioral parameter away when the result would not change.
 
+**Q17: Why were default methods added in Java 8, and how does the compiler resolve a class that inherits two conflicting defaults?**
+Default methods exist so an interface can gain a method without breaking every existing implementor — `Collection.stream()` could not have shipped otherwise. A `default` method carries a body on the interface; a `static` interface method is a namespaced helper and is not inherited at all, so an implementor must call `Greeter.of(...)`, not a bare `of(...)`. Neither counts toward the single-abstract-method rule, so an interface with defaults can still be a lambda target. When a type inherits the same signature from more than one place the compiler applies three rules in order: (1) a concrete method inherited from a **superclass wins** over any interface default, which is why adding a default to an interface is silently a no-op for classes that already extend something; (2) otherwise the **most specific interface wins** — a default on a sub-interface overrides the one on its super-interface; (3) if neither rule breaks the tie the class is rejected with "inherits unrelated defaults", and you must override the method, optionally delegating with the qualified form `A.super.name()`. Note that defaults give multiple inheritance of *behaviour* only — interfaces still cannot declare instance state, which is what keeps the diamond problem tractable.
+
 ---
 
 ## 13. Best Practices
@@ -618,9 +662,15 @@ Map<String, List<Profile>> byCountry = profiles.stream()
                 p -> Optional.ofNullable(p.country()).orElse("UNKNOWN"),
                 Collectors.toList()));
 
-// Or a count histogram in the same idiom:
+// Or a count histogram in the same idiom. Note the classifier must still
+// normalise null: groupingBy calls Objects.requireNonNull on every key and
+// throws NullPointerException("element cannot be mapped to a null key") the
+// first time a profile has no country -- the exact batch abort this rewrite
+// exists to remove.
 Map<String, Long> countByCountry = profiles.stream()
-        .collect(Collectors.groupingBy(Profile::country, Collectors.counting()));
+        .collect(Collectors.groupingBy(
+                p -> Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Collectors.counting()));
 ```
 
 The 200-line imperative ETL collapses to a single declarative pipeline. JMH on a representative 1M-record slice showed the Stream version within ~5% of the hand-tuned loop (the JIT inlines the lambdas), while eliminating the entire class of NPE batch aborts — the operational win dwarfs the micro-benchmark difference.
