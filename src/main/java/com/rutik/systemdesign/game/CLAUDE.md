@@ -118,7 +118,20 @@ The `game/` directory is an application, not study content — see
 - **`STUDY_PATHS` in `app.js` is the Study view's Full/Interview toggle.** Each
   section may have an `interview` array — an ordered SUBSET of that section's
   `STUDY_ORDER` — and it MUST stay in sync with that section's README "Learning
-  Paths" list (same hand-maintained discipline as `STUDY_ORDER`). Sections absent
+  Paths" list. **This is no longer hand-maintained discipline: `extract.py`
+  reconciles the two automatically and `--strict` fails the Pages deploy on drift.**
+  It parses each section README's `### Interview-Specific Path (N modules)` heading
+  and reads the module links out of that section's TABLE ONLY — the prose below the
+  table also links modules, and in `hld` those are the DELIBERATELY EXCLUDED ones, so
+  a section-wide link scan would invert the check. Three conditions are fatal:
+  membership differs between the README table and `STUDY_PATHS`; the heading's `(N
+  modules)` disagrees with the number of rows; or one source has the path and the
+  other does not. A same-members-different-sequence mismatch is a WARNING, not an
+  error — realigning it may mean resequencing `STUDY_ORDER` itself, which is a
+  pedagogy decision the guard should surface rather than force. `java` currently
+  carries that warning: its README groups `java_memory_model` under "JVM & Memory"
+  beside `jvm_internals`, but `STUDY_ORDER` teaches `concurrency` first and places
+  the memory model four modules later. Sections absent
   from `STUDY_PATHS` show no toggle (Full only). Choice persists in `sd_study_path`
   (JSON map keyed by section). **All game sections have interview paths** — every
   section except `book` and `technologies`. Both ARE bank sections (their Q&As

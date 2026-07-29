@@ -446,9 +446,21 @@ silently dropped from the game or renders wrong. These rules are derived from
   position — a module absent from the array falls through the `indexOf === -1 →
   9999` fallback and sorts to the very end, breaking the learning order.
   `extract.py --strict` (run by Pages CI) fails the deploy when a bank module is
-  missing from `STUDY_ORDER` or a `STUDY_PATHS` array stops being an ordered
-  subset. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
+  missing from `STUDY_ORDER`, when a `STUDY_PATHS` array stops being an ordered
+  subset, or when a section's **Interview-Specific Path drifts between its two
+  sources**. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
+- **The interview subset is a DUAL-SOURCE list and is now machine-reconciled.** It
+  lives in `game/app.js` (`STUDY_PATHS.<section>.interview`, driving the Study
+  Full/Interview toggle) and in `<section>/README.md` under
+  `### Interview-Specific Path (N modules)` (what a human reads). `check_wiring()`
+  parses the README **table** — not the section, because the prose beneath it links
+  modules too and in `hld` those are the *excluded* ones — and fails the build when
+  membership differs, when the heading's `(N modules)` disagrees with the row count,
+  or when one source has an interview path and the other does not. Same members in a
+  different sequence is a warning, since fixing it may require resequencing
+  `STUDY_ORDER` itself. **So: add a module to the interview path in both places, and
+  update the `(N modules)` count in the heading.**
 - **A module id is always `<section>/<module>` — exactly two segments.** `book` is the
   single exception (`book/<book>/<chapter>`). A file living in a sub-directory of a module
   — `lld/creational/prototype/README.md` — folds into its parent module the same way a

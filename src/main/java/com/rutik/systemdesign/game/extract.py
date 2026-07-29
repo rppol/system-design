@@ -361,9 +361,56 @@ def _section_arrays(body):
     return out
 
 
+# The interview subset is a DUAL-SOURCE list: it lives in app.js (STUDY_PATHS, which
+# drives the game's Study Full/Interview toggle) and in each section README's
+# "### Interview-Specific Path (N modules)" table (what a human reads). Nothing used to
+# reconcile them, so either could drift silently -- a module added to one and forgotten in
+# the other shows up in the game but not the docs, or vice versa, with a green build.
+README_PATH_RE = re.compile(r"^###\s+Interview-Specific Path\s*\((\d+)\s+modules?\)\s*$", re.M)
+README_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)#]+)\)")
+
+
+def _readme_interview_path(section):
+    """(declared_count, [slug, ...]) from a section README's Interview-Specific Path
+    TABLE, or None when the section has no such heading.
+
+    Only the table's Modules column is read. The prose that follows the table links
+    modules too -- and in hld those are the modules DELIBERATELY EXCLUDED from the
+    interview path -- so a section-wide link scan would invert the check's meaning.
+    """
+    path = os.path.join(BASE_DIR, section, "README.md")
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+    m = README_PATH_RE.search(text)
+    if not m:
+        return None
+    body = text[m.end():]
+    nxt = re.search(r"^###?\s", body, re.M)     # table ends at the next heading
+    if nxt:
+        body = body[:nxt.start()]
+    rows = [ln for ln in body.split("\n") if ln.startswith("|")]
+    rows = [ln for ln in rows if not re.match(r"^\|[\s:|-]+\|", ln)][1:]  # drop separator, then header
+    slugs = []
+    for row in rows:
+        cells = row.split("|")
+        if len(cells) < 4:
+            continue
+        for target in README_LINK_RE.findall(cells[2]):
+            # "http://"/"https://", NOT bare "http" -- backend/http_protocols is a real module
+            if target.startswith(("../", "http://", "https://", "#")):
+                continue
+            slug = f"{section}/{target.strip().split('/')[0]}"
+            if slug not in slugs:
+                slugs.append(slug)
+    return int(m.group(1)), slugs
+
+
 def check_wiring(questions, strict):
-    """Fail (under --strict) if a bank module is missing from STUDY_ORDER, or a
-    STUDY_PATHS array stops being an ordered subset of its section's STUDY_ORDER.
+    """Fail (under --strict) if a bank module is missing from STUDY_ORDER, if a
+    STUDY_PATHS array stops being an ordered subset of its section's STUDY_ORDER, or if
+    a section README's Interview-Specific Path table disagrees with STUDY_PATHS.
     Warn-only without --strict. Reads app.js as text (stdlib only)."""
     app = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
     errors, warns = [], []
@@ -384,7 +431,8 @@ def check_wiring(questions, strict):
                 warns.append(f"STUDY_ORDER dead entry: {slug} extracted 0 questions (Q&A format broken?)")
         mp = STUDY_PATHS_RE.search(app)
         if mp:
-            for sec, arr in _section_arrays(mp.group(1)).items():
+            path_secs = _section_arrays(mp.group(1))
+            for sec, arr in path_secs.items():
                 o = order.get(sec, [])
                 idxs = [o.index(x) if x in o else -1 for x in arr]
                 missing = [x for x, i in zip(arr, idxs) if i < 0]
@@ -392,6 +440,39 @@ def check_wiring(questions, strict):
                     errors.append(f"STUDY_PATHS.{sec} not a subset of STUDY_ORDER: {missing}")
                 elif idxs != sorted(idxs):
                     errors.append(f"STUDY_PATHS.{sec} order deviates from STUDY_ORDER")
+
+                # dual-source reconciliation: app.js vs the section README's table
+                doc = _readme_interview_path(sec)
+                if doc is None:
+                    errors.append(
+                        f"STUDY_PATHS.{sec} exists but {sec}/README.md has no "
+                        f"'### Interview-Specific Path (N modules)' heading -- the game offers an "
+                        f"Interview toggle the docs never describe")
+                    continue
+                declared, doc_slugs = doc
+                only_doc = [x for x in doc_slugs if x not in arr]
+                only_app = [x for x in arr if x not in doc_slugs]
+                if only_doc or only_app:
+                    errors.append(
+                        f"Interview path drift in {sec}: README table and STUDY_PATHS.{sec} "
+                        f"disagree -- only in README: {only_doc or 'none'}; "
+                        f"only in app.js: {only_app or 'none'}")
+                elif declared != len(doc_slugs):
+                    errors.append(
+                        f"Interview path count wrong in {sec}/README.md: heading says "
+                        f"({declared} modules) but the table lists {len(doc_slugs)}")
+                elif doc_slugs != arr:
+                    # same members, different sequence -- the README claims the learning
+                    # order, so this misleads a reader without breaking the game
+                    warns.append(
+                        f"Interview path order differs in {sec}: README table sequences "
+                        f"{[x.split('/')[-1] for x in doc_slugs]} but STUDY_PATHS.{sec} (which "
+                        f"follows STUDY_ORDER) sequences {[x.split('/')[-1] for x in arr]}")
+            for sec in sorted(order):
+                if sec not in path_secs and _readme_interview_path(sec) is not None:
+                    errors.append(
+                        f"{sec}/README.md documents an Interview-Specific Path but there is no "
+                        f"STUDY_PATHS.{sec} -- the game's Interview toggle will not offer it")
     for w in warns:  print(f"WIRING WARNING: {w}", file=sys.stderr)
     for e in errors: print(f"WIRING ERROR: {e}", file=sys.stderr)
     if errors and strict: sys.exit(1)
