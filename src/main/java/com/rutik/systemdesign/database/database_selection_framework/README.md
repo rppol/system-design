@@ -45,7 +45,7 @@ flowchart LR
     root{"Primary access<br/>pattern?"}
     root -->|"Structured relational<br/>+ ACID required"| rdbms(["PostgreSQL default<br/>MySQL legacy"])
     root -->|"Time-ordered<br/>+ retention policies"| ts(["TimescaleDB, InfluxDB,<br/>ClickHouse"])
-    root -->|"Write throughput<br/>over 50K TPS by key"| wide(["Cassandra self-managed<br/>DynamoDB managed"])
+    root -->|"Durable writes<br/>over 50K TPS by key"| wide(["Cassandra self-managed<br/>DynamoDB managed"])
     root -->|"Full-text search<br/>+ facets + ranking"| search(["Elasticsearch /<br/>OpenSearch"])
     root -->|"Semantic / vector<br/>similarity search"| vec(["pgvector, Pinecone,<br/>Weaviate, Qdrant"])
     root -->|"Graph traversal<br/>+ path finding"| graphdb(["Neo4j, Neptune,<br/>TigerGraph"])
@@ -364,15 +364,30 @@ The gap is the part worth reading. A 1.00 spread on a 1-5 scale means no single 
 ```
 10M writes/day = ~116 writes/second (sustainable, not peak)
 
-PostgreSQL handles this easily on a single node. Treat ~50K TPS for simple batched
-INSERTs as an order-of-magnitude planning ceiling for a well-provisioned node, not a
-measured constant — the real number depends on row width, index count, fsync policy
-and whether the writes are batched, and it is the number you must benchmark yourself
-before any migration decision rests on it.
+PostgreSQL handles this easily on a single node.
+
+There is NO published PostgreSQL TPS limit. The 50K figure used throughout this module
+is an arbitrary planning THRESHOLD for sustained durable writes, chosen so the decision
+trees have a number — it is not a measured constant and not a property of the engine.
+Read and write ceilings differ by three orders of magnitude:
+
+  reads   a single node has been measured at 3.75M TPS (pgbench -S, PG 16.3,
+          360-vCPU EPYC, everything cached, clients on the same box over a Unix
+          socket). Reads scale with cores and cache; they do not touch the WAL.
+  writes  bounded by WAL flush, not by CPU. With synchronous_commit=on every commit
+          must be physically flushed before it is acknowledged, and those flushes
+          serialize. Group commit amortizes one flush across all sessions that
+          arrive during the previous flush, so throughput depends on CONCURRENCY
+          and on your storage's flush latency, which pg_test_fsync measures.
+
+That is why a single-row-per-transaction OLTP workload and a batched bulk INSERT on
+identical hardware can differ by more than 10x. Benchmark your own shape with pgbench
+before any migration decision rests on the number.
+
 No sharding needed. Full ACID, SQL queries, joins, subqueries — all available.
 
 Cassandra is appropriate when:
-  - Peak writes significantly exceed PostgreSQL single-node capacity (> 50K TPS)
+  - Peak durable writes significantly exceed what one benchmarked node sustains (> 50K TPS)
   - Data access is always by partition key (no ad-hoc queries)
   - Multi-datacenter replication with leaderless writes is required
   - Dataset exceeds 10TB (Cassandra scales to petabytes)
@@ -384,12 +399,12 @@ At 1B writes/day (~11.5K TPS sustained, 100K TPS peak), evaluate both.
 
 ```mermaid
 xychart-beta
-    title "Write Throughput vs PostgreSQL Ceiling (writes/sec)"
-    x-axis ["Current (10M/day)", "1B/day sustained", "PostgreSQL ceiling", "1B/day peak"]
+    title "Write Throughput vs the 50K Planning Threshold (writes/sec)"
+    x-axis ["Current (10M/day)", "1B/day sustained", "Planning threshold", "1B/day peak"]
     y-axis "Writes per second" 0 --> 110000
     bar [116, 11500, 50000, 100000]
 ```
-Today's 116 writes/second is a rounding error against PostgreSQL's ~50K TPS ceiling, and even the 1B/day-sustained case (11.5K/s) stays under it — only the 1B/day peak (100K/s) crosses the line, the one scenario worth benchmarking Cassandra for.
+Today's 116 writes/second is a rounding error against the 50K planning threshold, and even the 1B/day-sustained case (11.5K/s) stays under it — only the 1B/day peak (100K/s) crosses the line, the one scenario worth benchmarking Cassandra for. Read the third bar as "the point at which you stop assuming and start benchmarking", not as a wall PostgreSQL hits.
 
 **Read it like this.** "Divide the daily number by 86,400 before you let it frighten you — a figure that sounds enormous per day is usually unremarkable per second." Almost every premature-scaling decision starts with someone quoting a per-day number in a room where nobody converted it.
 
@@ -398,12 +413,12 @@ Today's 116 writes/second is a rounding error against PostgreSQL's ~50K TPS ceil
 | `86,400` | Seconds in a day. The only conversion this entire argument needs |
 | sustained rate | Daily total spread evenly. The smaller and less interesting of the two numbers |
 | peak rate | The actual burst. Commonly 5-10x sustained for consumer traffic |
-| PostgreSQL ceiling | ~`50,000` simple INSERTs/second on one well-provisioned node |
+| planning threshold | `50,000` durable writes/second -- an arbitrary line for deciding when to benchmark, not a PostgreSQL limit (see §8) |
 
-**Walk one example.** Every write figure in this section, converted and measured against that ceiling:
+**Walk one example.** Every write figure in this section, converted and measured against that threshold:
 
 ```
-                             per day        / 86,400   =   per second     % of 50K ceiling
+                             per day        / 86,400   =   per second     % of threshold
   today                   10,000,000                          115.7            0.23%
   1B/day sustained     1,000,000,000                       11,574.1           23.1%
   1B/day peak (stated)            --                      100,000.0          200.0%
@@ -411,7 +426,7 @@ Today's 116 writes/second is a rounding error against PostgreSQL's ~50K TPS ceil
   Only the last row exceeds 100% -- and it is a peak, not a sustained load.
 ```
 
-Two things fall out of the table. First, the current workload uses under a quarter of one percent of a single node — the gap to the ceiling is a factor of 432, which is years of growth, not months. Second, the 1B/day *sustained* case still fits, at 23% utilization; it is only the peak that breaks through, and peaks have cheaper answers than a database migration (queueing, batching, a write-through buffer). Reach for Cassandra when the *sustained* number crosses the line, because that is the one you cannot smooth out.
+Two things fall out of the table. First, the current workload uses under a quarter of one percent of a single node — the gap to the threshold is a factor of 432, which is years of growth, not months. Second, the 1B/day *sustained* case still fits, at 23% utilization; it is only the peak that breaks through, and peaks have cheaper answers than a database migration (queueing, batching, a write-through buffer). Reach for Cassandra when the *sustained* number crosses the line, because that is the one you cannot smooth out.
 
 ### When Distributed SQL Outweighs PostgreSQL + Read Replicas
 
@@ -426,8 +441,8 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     dq{"Write scale + region<br/>requirements?"}
-    dq -->|"under 50K TPS<br/>single region, SQL team"| pgreplica
-    dq -->|"over 50K TPS or<br/>multi-region active-active"| distsql(["CockroachDB / TiDB"])
+    dq -->|"under 50K durable<br/>writes/s, one region"| pgreplica
+    dq -->|"over 50K durable writes/s<br/>or multi-region active-active"| distsql(["CockroachDB / TiDB"])
     pgreplica@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL Replicas", pos: "b", h: 44 }
 
     class dq mathOp
@@ -497,13 +512,13 @@ Distributed SQL earns its 2-5x cost premium only when write scale or multi-regio
 ## 12. Interview Questions with Answers
 
 **Q: How do you decide between PostgreSQL and Cassandra for a product at 10M writes/day?**
-10M writes/day equals ~116 writes/second sustained — well within a single PostgreSQL instance's capacity (which handles 50K+ TPS for simple INSERTs). The decision favors PostgreSQL unless there are additional requirements that PostgreSQL cannot meet: (1) Multi-region active-active writes with leaderless replication (Cassandra strength). (2) Dataset exceeding 10–20TB requiring horizontal storage scaling. (3) Sustained write peaks above 50K TPS that exceed PostgreSQL's single-node capacity. (4) Access patterns exclusively by partition key with no joins or complex queries needed. If none of these apply, PostgreSQL is the correct choice — it provides stronger consistency, full SQL, extensions (PostGIS, pgvector, TimescaleDB), and lower operational complexity.
+10M writes/day equals ~116 writes/second sustained — well within a single PostgreSQL instance's capacity (simple batched INSERTs reach 50K+ TPS on a well-provisioned node; measure your own shape). The decision favors PostgreSQL unless there are additional requirements that PostgreSQL cannot meet: (1) Multi-region active-active writes with leaderless replication (Cassandra strength). (2) Dataset exceeding 10–20TB requiring horizontal storage scaling. (3) Sustained durable writes above the 50K planning threshold, confirmed by benchmarking rather than assumed. (4) Access patterns exclusively by partition key with no joins or complex queries needed. If none of these apply, PostgreSQL is the correct choice — it provides stronger consistency, full SQL, extensions (PostGIS, pgvector, TimescaleDB), and lower operational complexity.
 
 **Q: Your team is building a fraud detection system — walk me through your database selection.**
 Fraud detection requires: (1) Real-time transaction lookup (< 5ms) to check if a card/account has recent suspicious activity — Redis for hot-path lookups (sub-millisecond). (2) Graph analysis — finding ring transactions (account A → B → C → A) is a graph problem — Neo4j or a graph algorithm library. (3) Historical transaction analysis — querying 12 months of transaction history for pattern matching — PostgreSQL for relational structure + temporal queries, or ClickHouse for analytical aggregations over large datasets. (4) Model feature store — features needed for the ML model at inference time — Redis (sub-millisecond) backed by a periodic batch update from PostgreSQL. Final architecture: PostgreSQL (canonical store) + Redis (hot-path cache + feature store) + Neo4j (graph analysis) + ClickHouse (analytical queries). Not all four are needed day one — start with PostgreSQL + Redis, add others as proven requirements emerge.
 
 **Q: When is it worth the operational complexity of CockroachDB over PostgreSQL with read replicas?**
-PostgreSQL with read replicas is sufficient for: single-region deployments at any scale up to ~50K TPS writes, where team has SQL expertise and wants full extension ecosystem. CockroachDB becomes worth the complexity when: (1) Writes must be horizontally scaled beyond what a single PostgreSQL primary handles (> 50K TPS sustained). (2) Multi-region active-active writes with strong consistency are required — PostgreSQL cannot provide this (Postgres primary is single-region). (3) Auto-sharding eliminates the manual sharding complexity of Citus/Vitess. The costs to accept: ~2× higher infrastructure cost, no PostgreSQL extension ecosystem (CockroachDB ships native vector indexing, but there is no PostGIS or TimescaleDB and no way to install an arbitrary extension), required distributed systems expertise for operation, ~2ms minimum write latency (Raft coordination floor). If any of these costs are unacceptable, optimize PostgreSQL further before switching.
+PostgreSQL with read replicas is sufficient for: single-region deployments up to roughly 50K sustained durable writes/sec, where team has SQL expertise and wants full extension ecosystem. CockroachDB becomes worth the complexity when: (1) Writes must be horizontally scaled beyond what a single benchmarked PostgreSQL primary sustains (> 50K TPS durable). (2) Multi-region active-active writes with strong consistency are required — PostgreSQL cannot provide this (Postgres primary is single-region). (3) Auto-sharding eliminates the manual sharding complexity of Citus/Vitess. The costs to accept: ~2× higher infrastructure cost, no PostgreSQL extension ecosystem (CockroachDB ships native vector indexing, but there is no PostGIS or TimescaleDB and no way to install an arbitrary extension), required distributed systems expertise for operation, ~2ms minimum write latency (Raft coordination floor). If any of these costs are unacceptable, optimize PostgreSQL further before switching.
 
 **Q: How do you evaluate a database for a high-traffic e-commerce product?**
 Decompose by component: (1) Product catalog: read-heavy, structured, complex queries (facets, search) — PostgreSQL for source of truth + Elasticsearch for search. (2) Inventory: high write throughput during flash sales, strong consistency required (no oversell) — PostgreSQL with `SELECT FOR UPDATE` or `UPDATE ... WHERE stock > 0 RETURNING`. (3) Sessions: ephemeral, sub-millisecond reads — Redis. (4) Orders: transactional, ACID required, complex queries — PostgreSQL. (5) Analytics: aggregate sales data, reports — ClickHouse or BigQuery (not the OLTP database). The selection is component-by-component, not a single database for all. PostgreSQL handles most components; specialized databases are added only for search (Elasticsearch) and analytics (ClickHouse).
@@ -521,7 +536,7 @@ Decide when a leading indicator crosses a threshold you set in advance, not when
 Use the strangler fig pattern: (1) Keep PostgreSQL as the source of truth. (2) Add dual-write: new writes go to both PostgreSQL and the NoSQL database. (3) Backfill historical data from PostgreSQL to NoSQL in batches (off-peak). (4) Verify: run a shadow comparison — for each production read, compare results from both databases; alert on differences. (5) Gradually route read traffic to the NoSQL database (start with 1%, ramp to 100%). (6) After 100% reads are on NoSQL: remove PostgreSQL writes (or keep as audit backup). The dual-write period is the critical window — it requires both databases to stay in sync. Use the outbox pattern (write to PostgreSQL + outbox in one transaction; CDC publishes to NoSQL asynchronously) for reliable dual-write.
 
 **Q: When would you use DynamoDB over PostgreSQL?**
-DynamoDB is appropriate when: (1) Access is exclusively by primary key or GSI (no complex SQL queries). (2) Write throughput exceeds PostgreSQL single-node capacity (> 50K TPS sustained). (3) AWS native managed service is required (no operational overhead). (4) Serverless architecture (Lambda) requires a database that can scale to 0 and back instantly. (5) Multi-region active-active with automatic conflict resolution (DynamoDB Global Tables). DynamoDB is inappropriate when: complex queries, joins, or transactions spanning multiple items are needed; full SQL expressiveness is required; team expertise is SQL-based; cost is a concern (DynamoDB pricing is high for read-heavy workloads with ConsistentRead=true).
+DynamoDB is appropriate when: (1) Access is exclusively by primary key or GSI (no complex SQL queries). (2) Sustained durable write throughput exceeds what one benchmarked PostgreSQL node handles (> 50K TPS). (3) AWS native managed service is required (no operational overhead). (4) Serverless architecture (Lambda) requires a database that can scale to 0 and back instantly. (5) Multi-region active-active with automatic conflict resolution (DynamoDB Global Tables). DynamoDB is inappropriate when: complex queries, joins, or transactions spanning multiple items are needed; full SQL expressiveness is required; team expertise is SQL-based; cost is a concern (DynamoDB pricing is high for read-heavy workloads with ConsistentRead=true).
 
 **Q: How do you select a time-series database?**
 Start with requirements: (1) Write rate: thousands/second (InfluxDB handles well), millions/second (ClickHouse or TimescaleDB). (2) Query types: operational monitoring with PromQL (Prometheus), device telemetry with SQL (TimescaleDB), business analytics with SQL (ClickHouse). (3) Retention: short (weeks) → InfluxDB; long-term with downsampling → TimescaleDB continuous aggregates or ClickHouse TTL + materialized views. (4) Team expertise: SQL → TimescaleDB (PostgreSQL extension) or ClickHouse; DevOps tooling → Prometheus/InfluxDB; (5) Scale: < 1M series → InfluxDB; 1M-1B series → TimescaleDB or ClickHouse. Default: TimescaleDB if team knows SQL and dataset is on PostgreSQL already. ClickHouse if aggregation over billions of events with high compression is the primary workload.
@@ -601,12 +616,20 @@ Budget:         $5-10K/month database budget
   3-year projection: 5,000,000 patients at the same ratios  ->  100x everything
      writes  289.4 /sec     reads  1,157.4 /sec     combined  1,446.8 /sec
 
-  PostgreSQL single-node ceiling ~50,000 TPS
-     headroom on day one    50,000 /    14.5   =   3,456x
-     headroom at year three 50,000 / 1,446.8   =      34.6x
+  Headroom, measured per path. Reads and writes do not contend for the same
+  resource, so dividing a WRITE threshold into a combined read+write figure
+  answers the wrong question.
+
+  writes, against the 50,000 planning threshold for sustained durable writes
+     day one       50,000 /     2.9   =  17,241x
+     year three    50,000 /   289.4   =     173x
+
+  reads, against nothing close to a ceiling
+     year three  1,157 /sec, on an engine measured in the millions of read TPS
+     per node -- and a read replica is available long before that matters
 ```
 
-Thirty-four times headroom *after* a hundredfold growth is what "boring choice, correct choice" looks like as a number. It also frames the deferred decisions honestly: the Citus sharding milestone noted below is not a hedge, it is the point where headroom finally becomes single-digit. Notice too what dominates the estimate — reads outnumber writes 4 to 1, which is why a read replica appears in the chosen architecture and sharding does not.
+A hundred and seventy times write headroom *after* a hundredfold growth is what "boring choice, correct choice" looks like as a number. It also frames the deferred decisions honestly: the Citus sharding milestone noted below is not a hedge, it is the point where headroom finally becomes single-digit. Notice too what dominates the estimate — reads outnumber writes 4 to 1, which is why a read replica appears in the chosen architecture and sharding does not.
 
 **Decision: PostgreSQL (RDS Multi-AZ)**
 

@@ -494,7 +494,7 @@ The four strategies trade router cost for schema cost: scatter-gather fans out a
 
 ## 9. When to Use / When NOT to Use
 
-**Use sharding when**: Write throughput exceeds what a single primary can handle (typically > 50K TPS sustained), or dataset size exceeds a single server's storage (> 10TB active), or you need geographic data distribution for latency or compliance.
+**Use sharding when**: Durable write throughput exceeds what a single primary can handle (typically > 50K TPS sustained -- a planning threshold to benchmark against, since PostgreSQL publishes no such limit and the real number swings by 10x with row width, index count and fsync policy), or dataset size exceeds a single server's storage (> 10TB active), or you need geographic data distribution for latency or compliance.
 
 **Use partitioning without sharding when**: Dataset is large but write throughput is manageable on one primary; you need fast partition-level operations (drop old time partitions, tablespace relocation); query plans benefit from partition pruning.
 
@@ -525,7 +525,7 @@ flowchart TD
     class SINGLE train
 ```
 
-None of the three sharding triggers — sustained writes over 50K TPS, an active dataset over 10TB, or a geographic requirement — should be reached before profiling proves a single primary with read replicas is exhausted; partitioning alone covers the fast-pruning and archival cases in between.
+None of the three sharding triggers — sustained durable writes over 50K TPS, an active dataset over 10TB, or a geographic requirement — should be treated as reached before profiling proves a single primary with read replicas is exhausted; partitioning alone covers the fast-pruning and archival cases in between.
 
 ---
 

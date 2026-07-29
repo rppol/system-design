@@ -373,7 +373,7 @@ SELECT /*+ READ_FROM_STORAGE(tiflash[orders]) */ ...
 ## 9. When to Use / When NOT to Use
 
 **Use NewSQL when**:
-- Data outgrows a single PostgreSQL instance (>10TB active, >50K TPS sustained)
+- Data outgrows a single PostgreSQL instance (>10TB active, or sustained durable writes past the ~50K/sec planning threshold you have benchmarked)
 - Application requires global distribution with strong consistency (global user data, financial transactions)
 - You want automatic sharding without application-level shard management
 - HTAP workload — simultaneous OLTP and real-time analytics on same dataset (TiDB)
@@ -472,7 +472,7 @@ Auto-increment keys are monotonically increasing, so all new rows are written to
 The SQL gateway node decomposes a query into a physical plan targeting specific key ranges. For a join between two tables, the planner estimates whether to shuffle one table to the other (similar to a distributed hash join) or to co-locate the computation where both tables share a Raft leader. Predicates are pushed down so each TiKV/RocksDB node filters data locally before sending results to the coordinator. The gateway assembles partial results into the final output.
 
 **Q: When would you choose CockroachDB over PostgreSQL with read replicas?**
-Choose CockroachDB when you need write scalability beyond a single node (typically above 50K TPS sustained or 10TB+ active data), when you need multi-region active-active writes with strong consistency, or when you want automatic re-sharding without downtime. PostgreSQL with read replicas is preferable for single-region deployments (5x lower latency, full extension ecosystem, lower cost, simpler operations) and for read-heavy workloads where replicas absorb load.
+Choose CockroachDB when you need write scalability beyond a single node (typically above ~50K sustained durable writes/sec -- a planning threshold to benchmark against, not a PostgreSQL limit -- or 10TB+ active data), when you need multi-region active-active writes with strong consistency, or when you want automatic re-sharding without downtime. PostgreSQL with read replicas is preferable for single-region deployments (5x lower latency, full extension ecosystem, lower cost, simpler operations) and for read-heavy workloads where replicas absorb load.
 
 **Q: How does TiDB achieve HTAP — serving both OLTP and analytical queries on the same data?**
 TiDB stores data in TiKV (row-oriented, RocksDB-backed, Raft-replicated) for OLTP, and asynchronously replicates it to TiFlash (columnar store) via Raft learner replication. The TiFlash replica receives the same Raft log entries as regular TiKV replicas but stores them in columnar format. TiDB's cost-based optimizer detects query type and routes to TiKV (index scans, small point reads) or TiFlash (full scans, aggregations). The replication lag is typically under 100ms, so analytics run on near-real-time data without ETL.
