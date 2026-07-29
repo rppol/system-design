@@ -178,6 +178,32 @@ count is bounded and predictable. Uncommon for generative models.
 throughput, AWS Bedrock provisioned throughput). You pay a flat rate for guaranteed TPM (tokens per
 minute) capacity. Cost-effective when utilization is consistently high (above ~60%).
 
+**Price multipliers stack, and compliance is one of them.** Beyond the two headline rates, a request
+carries multipliers that compose *multiplicatively* with each other:
+
+| Modifier | Where it applies | Multiplier |
+|---|---|---|
+| Data residency (`inference_geo: "us"`) | Claude 4.6 and later, first-party API | 1.1x on **every** token category — input, output, cache writes and cache reads |
+| Regional / multi-region endpoints | Claude on Bedrock and Google Cloud, Sonnet 4.5 / Haiku 4.5 / Opus 4.5 and later | 10% premium over the global endpoint |
+| Prompt cache write / read | any model | 1.25x (5-min) or 2.0x (1-hour) write; 0.1x read |
+| Batch | any model | 0.5x, both sides |
+
+Writing them as multipliers rather than as prices is what keeps the arithmetic honest, because they
+do not cancel. A cache read on a US-pinned Sonnet 5 costs `0.1 x 1.1 x $3.00 = $0.33/1M`, not
+$0.30, and the "90% off" you reported is really 89%. On one line item that is noise; across a bill
+where residency is mandatory for all regulated traffic it is a flat 10% tax, and the only way it
+gets *decided* rather than absorbed is to show it as its own line in the per-feature dashboard.
+Global routing is the default, so a team that pins every request to a region "to be safe" pays the
+tax on traffic that never needed it. Which traffic genuinely must take the residency route is a
+governance question rather than a cost one — the classification and the routing table behind it are
+covered in [Privacy & Data Governance](../llm_security/privacy_and_data_governance.md).
+
+Long context is the multiplier people expect and do not always get. Claude 4.6 and later bill the
+full 1M-token context window at standard rates — a 900K-token request costs the same per token as a
+9K-token one — while Google tiers Gemini 3.1 Pro at $2/$12 per 1M up to 200K tokens and $4/$18 above
+it. Check the provider before assuming either behaviour: a step at 200K turns a context-budget
+decision into a cliff, where one extra retrieved chunk doubles the rate on the entire prompt.
+
 ### Self-Hosting Cost Models
 
 **On-demand GPU rental** (Lambda Labs, RunPod, CoreWeave): Pay per GPU-hour. No commitment.
@@ -745,6 +771,35 @@ review process that treats batch adoption as an optimization to be justified is 
 discussion than the change costs to make. The team convention in Section 13 — "if the user does not
 see this response in the same HTTP request, use batch" — exists to remove the decision entirely.
 
+### Latency Tiers Between Real-Time and Batch
+
+Batch versus real-time is not a binary. Both major providers sell the *same model* at several points
+on a latency-price ladder, selected by one request field:
+
+| Tier | How you select it | Price vs standard | What you trade |
+|---|---|---|---|
+| Priority (OpenAI) | `service_tier: "priority"` | Premium per token | Lower, more consistent latency; long-context, fine-tuned and embedding models are not supported |
+| Fast mode (Anthropic) | `speed: "fast"` | $10/$50 per 1M on Opus 5 and Opus 4.8, against $5/$25 standard — 2x | Faster output; unavailable with the Batch API |
+| Standard | default (`service_tier: "auto"`) | 1.0x | The baseline |
+| Flex (OpenAI) | `service_tier: "flex"` | Batch API rates — the same 50% | Synchronous but slower, and capacity is not guaranteed |
+| Batch | `completion_window: "24h"`, or Message Batches | 50% | Up to 24 hours, no partial results |
+
+Flex is the tier most cost models omit: it prices at batch rates while still answering inside the
+same request, which is exactly right for evals, data enrichment and backfills — work that is
+asynchronous but for which a 24-hour turnaround is useless. The catch is capacity rather than
+latency. When there is none, flex returns `429 Resource Unavailable` and you are **not** charged for
+it, so every flex path needs an explicit fallback (exponential backoff, or a retry at
+`service_tier: "auto"` and full price) or the job silently stalls. Raise the client timeout too: the
+official SDKs default to 10 minutes, which flex can legitimately exceed.
+
+Priority is not a cost lever and should never be argued for as one — it is a latency purchase, so
+price it against what the latency is worth rather than against the token bill. Two traps: the
+premium applies to every token on that path, and OpenAI documents that priority requests may be
+**downgraded to standard** when traffic ramps more than 50% within 15 minutes at high volume
+(1M TPM and above) — the p99 you paid for reverts during exactly the spike you bought it for. Cache
+discounts still apply on priority requests, and Anthropic's caching multipliers apply on top of
+fast-mode pricing, so tier selection and caching compose rather than compete.
+
 ### Model Routing with Quality Gate
 
 ```python
@@ -1067,6 +1122,33 @@ any offline or asynchronous workload: document classification, overnight report 
 annotation, bulk embeddings, and content moderation pipelines. It should not be used for real-time
 user-facing interactions. The implementation requires writing a JSONL file, uploading it, polling
 for batch completion, and downloading the results file.
+
+**Q: Your workload is asynchronous but a 24-hour batch turnaround is useless — what sits between
+batch and real-time?**
+OpenAI's flex tier: set `service_tier: "flex"` and the request bills at Batch API rates — the same
+50% off — while still returning synchronously, just slower. That fits evals, data enrichment and
+backfills, the workloads that are too patient for real-time pricing and too impatient for a 24-hour
+window. The tradeoff is capacity rather than latency alone: when there is none, flex returns
+`429 Resource Unavailable` and does not charge you, so a flex path needs an explicit fallback —
+exponential backoff, or a retry at `service_tier: "auto"` and full price — plus a client timeout
+above the SDK's 10-minute default. In the other direction, priority processing
+(`service_tier: "priority"`) and Anthropic's fast mode (`speed: "fast"`, $10/$50 per 1M on Opus 5
+against $5/$25 standard) buy lower latency at a premium; both are latency purchases to justify
+against revenue, never cost optimizations, and priority requests can be downgraded to standard when
+traffic ramps more than 50% within 15 minutes at high volume.
+
+**Q: What does a data-residency requirement cost per token, and how does it interact with prompt
+caching?**
+On the first-party Claude API, `inference_geo: "us"` applies a 1.1x multiplier to every token
+category — input, output, cache writes and cache reads. Residency is therefore a flat 10% tax rather
+than a fixed fee, and because it composes multiplicatively with the caching multipliers, a cache
+read on a US-pinned Sonnet 5 is `0.1 x 1.1 x $3.00 = $0.33/1M` and your "90% off" is really 89%.
+Partner clouds price it separately: on Bedrock and Google Cloud, regional and multi-region endpoints
+carry a 10% premium over global endpoints for Sonnet 4.5, Haiku 4.5, Opus 4.5 and later. Two
+operational consequences. Global routing is the default, so pinning everything "to be safe" pays the
+tax on traffic that never needed it; and the residency premium belongs on its own line in the
+per-feature dashboard, so the compliance decision is priced explicitly instead of disappearing into
+the model's rate.
 
 **Q: How does tokenizer efficiency change costs across languages?**
 Non-English text tokenizes into substantially more tokens per unit of meaning on English-heavy

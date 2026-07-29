@@ -714,6 +714,42 @@ any entry in the semantic cache.
 because the key format changed after a refactor. Fix: expose cache hit rate as a first-class metric
 (hits/total, per cache type); alert if hit rate drops below expected baseline.
 
+**Pitfall 7 — Cache stampede: every concurrent request misses the same key at once.** When a hot
+entry expires (or is asked for the first time), every request that arrives while the first one is
+still generating also misses, and each of them pays a full model call. A database stampede wastes
+spare CPU; an LLM stampede wastes dollars and GPU-seconds — and at temperature > 0 the duplicates
+return *different* answers that then race to write the same key, so which answer the cache keeps is
+whichever call happened to finish last. The number of duplicates follows from the arrival rate for
+that one key and how long generation takes:
+
+```
+  N_dup  ~=  lambda_key x T_gen      requests arriving during the first miss
+
+  lambda_key    requests/second for THIS key, not for the service
+  T_gen         seconds to generate AND store the response, not TTFT
+
+  A hot FAQ entry at 20 req/s during an incident, 2.5s to generate:
+      N_dup = 20 x 2.5 = 50 concurrent calls where 1 was needed
+
+  Priced on the Section 14 workload (6,000 in + 500 out, Sonnet 5 $3/$15):
+      one call   = 6,000 x $3/1M + 500 x $15/1M      = $0.0255
+      the burst  = 50 x $0.0255                      = $1.2750
+      wasted     = 49 x $0.0255                      = $1.2495 per expiry
+
+  50 hot keys on the Section 14 six-hour TTL expire four times a day each:
+      50 x 4 x $1.2495 = $250/day re-answering questions the cache knew.
+```
+
+Fix: single-flight. On a miss, take a short-lived lock (`SET key:lock <id> NX EX 10`); the winner
+calls the model and writes both the entry and a completion signal, and the losers wait on that
+signal (Redis pub/sub, or a bounded poll) instead of calling the model themselves. Always bound the
+wait, so a winner that crashes degrades to an ordinary miss rather than a hang. For entries hot
+enough that a single expiry hurts, add probabilistic early expiry — refresh an entry slightly
+*before* its TTL with a probability that rises as it nears expiry — so the refresh is absorbed by
+one request instead of all of them simultaneously. Both belong in front of L1 and L2 only; L3
+provider prompt caching is unaffected, because a prompt-cache miss costs full input price rather
+than a duplicate generation.
+
 ---
 
 ## 11. Technologies & Tools
@@ -865,6 +901,19 @@ the same replica — which makes session-affinity routing a caching feature, not
 load-balancing choice. Budget for the growing prefix: a 50-turn conversation still pays cache-read
 price on the full history every turn, which is why history summarization or truncation remains
 necessary beyond the cache.
+
+**Q: What is a cache stampede in an LLM cache, and why is it worse than a database cache stampede?**
+A stampede is the burst of duplicate misses that reaches the model when one hot key expires, because
+every request arriving during the first generation also misses. It is worse than the database
+version on two counts: each duplicate is a full inference (dollars and GPU-seconds, not spare CPU),
+and at temperature > 0 the duplicates produce *different* answers that race to write the same key,
+so the entry the cache keeps is whichever call finished last. Size it as `lambda_key x T_gen` — a
+key taking 20 requests/second with 2.5s generation produces roughly 50 calls where one was needed,
+about $1.25 of waste per expiry on a 6,000-token prompt. Fix it with single-flight (the first miss
+takes a short-TTL Redis lock, everyone else waits on a completion signal with a timeout) plus
+probabilistic early expiry on the hottest keys, so the refresh is absorbed by one request rather
+than all of them. Provider prompt caching needs neither, since a prefix miss costs full input price
+rather than a duplicate generation.
 
 **Q: Where does caching fit when responses are streamed?**
 For cache hits there is no token stream — only a stored string — so either return it at once (a

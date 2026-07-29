@@ -557,6 +557,46 @@ Cascade (cheap model fails):    150ms + routing + 400ms = ~570ms  --> exceeds SL
   --> Solution: set cascade timeout, skip cheap model for known-complex queries
 ```
 
+### 6.6 Routing Against the Prompt Cache
+
+Sections 6.3 and 6.5 price a routed request as though the model were the only variable. It is not:
+provider prompt caches are **per model**, and Anthropic documents that changing the model
+invalidates the cache, because different models render the same prompt differently. A router that
+moves a request from Sonnet to Haiku does not carry the cached prefix with it — the request lands on
+a cold cache and pays a cache *write* (1.25x input) where it would have paid a cache *read* (0.1x).
+
+That makes the shared system prompt a per-tier cost, and the tail tiers are where it bites, because
+an entry only survives if that tier sees another request for the same prefix inside the 5-minute TTL:
+
+```
+  prefix stays warm on tier i  iff  lambda_prefix x w_i  >  1 / TTL
+
+  lambda_prefix   requests/second sharing this exact prefix (one tenant, one system prompt)
+  w_i             share of that tenant's traffic the router sends to tier i
+  TTL             300s by default on Anthropic; every read refreshes it
+
+  One tenant sending 1 request/minute against a 4,000-token system prompt,
+  routed 70 / 25 / 5 across Haiku 4.5 / Sonnet 5 / Opus 5:
+
+    tier      w_i     arrivals on that tier     inside a 300s TTL?
+    Haiku     0.70    one per     86s           yes       -> reads at $0.10/1M
+    Sonnet    0.25    one per    240s           marginal
+    Opus      0.05    one per     20 min        no        -> writes at $6.25/1M
+
+    the Opus leg, on its prefix alone:
+      cold write   4,000 x $6.25/1M  =  $0.0250
+      warm read    4,000 x $0.50/1M  =  $0.0020      12.5x cheaper
+```
+
+Three consequences for the strategies above. A **cascade** is the worst case: an escalated query
+prefills the same prefix twice, once per tier, so a prefix write belongs inside the `P_esc x C_exp`
+term in Section 6.3. **Per-conversation** routing beats per-request routing for the same reason
+session affinity matters on self-hosted replicas — see the prefix-aware and cache-aware routers in
+[Inference Engines](../inference_engines/README.md). And a router that varies the *tool set* per
+route breaks the cache even when the model is constant: Anthropic invalidates in the order
+`tools` -> `system` -> `messages`, so a change to tool definitions discards everything behind it.
+The full cache taxonomy and its mechanics live in [LLM Caching](../llm_caching/README.md).
+
 ---
 
 ## 7. Real-World Examples
@@ -850,6 +890,9 @@ Token log-probabilities measure the model's fluency-level certainty about its wo
 
 **Q: How do you estimate confidence in a cascade routing system when logprobs are not available?**
 Three approaches work without logprobs. First, self-assessment prompting: append "Rate your confidence as LOW, MEDIUM, or HIGH" to the prompt and parse the label. Second, format validation: for structured-output tasks, validate the response against a JSON schema or regex pattern — a parse failure signals low confidence. Third, output heuristics: responses that are far shorter than expected, contain hedge phrases like "I'm not sure," or fail to answer the question structure (missing required sections) trigger escalation. Self-assessment is the most general but adds tokens to every cheap-model call.
+
+**Q: How does model routing interact with provider prompt caching, and what does that do to the cost model?**
+Provider prompt caches are per model, so every route switch lands on a cold cache and pays a cache write (1.25x input) where a stable route would have paid a cache read (0.1x). Anthropic documents this directly — changing the model invalidates the cache because different models render the same prompt differently — and the damage concentrates in the tail tiers: a tier receiving 5% of one tenant's traffic may not see a second request for that prefix inside the 5-minute TTL, so it writes every time and never reads. On a 4,000-token system prompt that is $0.025 per request on Opus 5 (write at $6.25/1M) against $0.002 warm (read at $0.50/1M) — 12.5x. Cascades are the worst case, because an escalated query prefills the same prefix on both tiers. Practical guidance: route per conversation rather than per request, keep the shared prefix pinned to one model where the quality budget allows, and add the prefix write into the escalation term before quoting a routing saving.
 
 **Q: How do you collect training data for a routing classifier?**
 Run in shadow mode: send every query to both the cheap and the frontier model, then label it with the cheapest model whose response met the quality threshold. Score each response pair using LLM-as-judge or task-specific metrics (ROUGE, pass@1, human eval). Collect at least 10,000 labeled examples per model tier for reliable classifier performance. Critically, collect data from real production traffic — synthetic data causes distribution mismatch and classifier underperformance in production.
