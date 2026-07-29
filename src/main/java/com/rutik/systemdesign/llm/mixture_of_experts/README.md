@@ -657,6 +657,19 @@ With capacity_factor=1.0, significant fractions of tokens are silently dropped a
 
 The auxiliary loss enforces load balance on training data distribution. At inference with different data (e.g., a model trained on English receives code queries), routing can become unbalanced even if it was balanced during training. Expert load imbalance causes some GPUs to be idle while others are bottlenecked, reducing throughput. Monitor per-expert utilization in production dashboards.
 
+**Monitoring is the detection, not the fix.** The production remedy is to stop assuming one expert lives on exactly one GPU. DeepSeek's **Expert Parallelism Load Balancer (EPLB)**, open-sourced alongside V3/R1, duplicates the heavy-loaded experts and then heuristically packs the duplicates across GPUs so that per-GPU load evens out. The extra copies are called **redundant experts**: you spend memory (`num_redundant_experts` additional expert replicas beyond an equal split) to buy back the throughput that an idle GPU was costing you.
+
+EPLB ships two policies, and which one you want depends on the phase:
+
+| Policy | When | What it does |
+|---|---|---|
+| Hierarchical | Prefill, smaller expert-parallel size, and only when the node count divides the expert-group count | Balance groups across nodes first, replicate within a node, then pack replicas onto that node's GPUs — keeps most of the all-to-all traffic intra-node |
+| Global | Decode, larger expert-parallel size, or when the group/node counts do not divide | Replicate hot experts globally, ignoring group structure, then pack across all GPUs |
+
+The reason the two differ is the same interconnect argument as the pitfall above: at prefill's smaller EP degree you can still keep a group's traffic inside one NVLink domain, so the hierarchical policy protects locality. At decode's larger EP degree that locality is gone anyway, so you optimize purely for balance.
+
+In vLLM this is `--enable-eplb` on top of `--enable-expert-parallel`, with `--eplb-config` carrying the JSON knobs: `window_size` (how many engine steps of load history to keep), `step_interval` (rebalance every N steps), `num_redundant_experts`, `use_async` (non-blocking rebalance, lower latency cost) and `log_balancedness`. The engine collects load statistics on every forward pass and periodically re-derives the placement. Two operational gotchas: rebalancing moves expert weights between GPUs, so a short `step_interval` on a large model spends real bandwidth on the shuffle rather than on tokens; and EPLB corrects *placement*, never *routing* — if the router itself has collapsed onto a handful of experts, redundant copies of those experts just spread the same pathology more evenly.
+
 ---
 
 ## 11. Technologies & Tools
@@ -713,6 +726,9 @@ All expert weights must reside in GPU memory simultaneously, even though only k 
 
 **Q: What is expert capacity factor and what happens when it is exceeded?**
 Capacity factor defines the maximum number of tokens an expert can process in a single forward pass, expressed as a multiplier over the ideal-uniform load. Capacity = capacity_factor * (total_tokens * k / N). Tokens routed to a full expert are dropped — they skip expert computation and their input hidden state is passed through unchanged (identity fallback). A capacity_factor of 1.25 means each expert can handle 25% more than the uniform ideal. Typical values where a capacity limit exists at all: 1.25 for training, 1.5-2.0 for inference to minimize quality degradation. Note that several current stacks impose no capacity limit and drop nothing — Megatron-LM leaves `--moe-expert-capacity-factor` unset by default, and DeepSeek-V3 reports dropping no tokens in training or inference.
+
+**Q: Your MoE serving fleet shows two GPUs pinned at 100% while six sit half-idle. What do you do?**
+That is expert load imbalance at inference, and the fix is redundant experts — duplicate the hot experts and repack the replicas across GPUs. The training-time auxiliary loss only balanced routing over the *training* distribution; production traffic with a different mix (a model trained mostly on English now serving code) re-skews it, and because expert parallelism pins each expert to a GPU, a skewed router becomes a skewed GPU. DeepSeek's Expert Parallelism Load Balancer (EPLB), open-sourced with V3/R1, duplicates heavy-loaded experts and heuristically packs the duplicates so per-GPU load evens out; it offers a hierarchical policy for prefill at smaller expert-parallel size (balance groups per node first, preserving intra-node all-to-all locality) and a global policy for decode at larger EP size. In vLLM it is `--enable-eplb` plus an `--eplb-config` carrying `num_redundant_experts`, `window_size` and `step_interval`. Two things to say in an interview: you are paying memory for the extra replicas, and EPLB fixes *placement*, not *routing* — if the router itself has collapsed, redundant copies only spread the same pathology more evenly.
 
 **Q: When is a dense model the right choice over a MoE model of equivalent quality?**
 Choose dense when you are memory-constrained, latency-critical at low batch sizes, or lack multi-GPU serving expertise. A Mixtral 8x7B needs ~93GB in bfloat16 versus ~15GB for a dense 7B, so if you can barely fit a dense model, MoE is off the table. At batch size 1 (single-user, low QPS) the all-to-all routing overhead of expert parallelism is not amortized and dense is simply faster. Dense also wins for simple LoRA fine-tuning (no per-expert adapter explosion) and small models under ~3B where routing overhead outweighs the capacity benefit. MoE pays off specifically when you serve at high throughput with abundant GPU memory and want more knowledge capacity at the same active-parameter compute.

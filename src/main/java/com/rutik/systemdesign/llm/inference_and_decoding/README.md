@@ -730,6 +730,30 @@ flowchart LR
     class classify,length,chunked,monitor,batching base
 ```
 
+**Prefill/decode disaggregation — the other answer to phase interference:**
+
+Chunked prefill (§4.11) makes prefill and decode share one GPU politely. Disaggregation deletes the sharing instead: prefill runs on one pool of workers, decode on another, and the prefill worker's KV cache is transferred to the decode worker before the first decode step.
+
+```
+Interleaved, one pool                 Disaggregated, two pools
+  [P][D][P][D][D][P][D] ...             prefill pool: [P][P][P][P]
+  one scheduler, one parallelism        decode pool:  [D][D][D][D][D]
+  config, one failure domain            KV moves P -> D over RDMA / NVLink
+```
+
+The motivation is that the two phases want different machines. Prefill is compute-bound and rewards high TFLOPS and a larger tensor-parallel degree; decode is memory-bandwidth-bound and rewards HBM capacity for KV plus a batch big enough to amortize the weight read. Split them and you can size, scale and tune TTFT and inter-token latency independently, and no burst of long prompts can inject prefill work into a live decode batch — the mechanism behind tail ITL spikes.
+
+The caveat is the one vLLM's own documentation states flatly: **"Disaggregated prefill DOES NOT improve throughput."** It is a latency-shaping and SLO tool, not a capacity tool, and it buys that shaping with a KV transfer on the critical path plus a second failure domain to operate.
+
+Engine support as of this writing:
+
+| Engine | Status | Configuration |
+|---|---|---|
+| vLLM | Experimental | `--kv-transfer-config` selecting a KV connector — `NixlConnector`, `LMCacheConnectorV1`, `MooncakeConnector`, `MultiConnector`, `OffloadingConnector` and others |
+| SGLang | Supported | `--disaggregation-mode prefill\|decode` per server, `--disaggregation-transfer-backend` (Mooncake default; NIXL and Ascend also available), plus a router launched with `--pd-disaggregation` |
+
+Sequencing rule: tune chunked prefill first — it is one flag and adds no new components. Reach for disaggregation only when long prompts dominate the mix, chunked prefill is already tuned, and you have enough GPUs to dedicate separate pools *inside one rack* — the KV hop is nearly free over NVLink and expensive across racks. The research and production lineage (DistServe, Mooncake, Splitwise, NVIDIA Dynamo) is covered in [vLLM Deep Dive §7](../vllm_deep_dive/README.md).
+
 ### 4.13 Streaming Architectures
 
 Streaming delivers tokens to the client as they are generated rather than buffering the entire response. This is critical for perceived latency — a user waiting 3 seconds for a complete response feels slower than seeing the first token at 300ms with subsequent tokens flowing in.
@@ -1379,6 +1403,9 @@ A: Per-token KV cache = 2 (K+V) × num_layers × num_kv_heads × head_dim × byt
 
 **Q: What is beam search and why is it rarely used in production LLM serving?**
 A: Beam search maintains k candidate sequences simultaneously, expanding each at every step and keeping the k highest-probability partial sequences. It guarantees a higher-probability final sequence than greedy decoding. Problems for production: (1) k× KV cache memory — beam width 5 needs 5× the KV cache of greedy; (2) k× compute per step; (3) empirically produces lower-quality outputs than sampling for open-ended generation — beam search tends toward repetitive, high-confidence but generic text; (4) incompatible with continuous batching because all k beams must complete together, holding a GPU slot until the longest beam finishes. Reserved for: offline batch translation, speech recognition transcription, or structured generation where maximizing sequence log-probability is the correct objective and memory is not a constraint.
+
+**Q: Why does prefill/decode disaggregation improve tail latency but not throughput?**
+A: Because it relocates work instead of removing it — the same FLOPs still run, and a KV cache transfer is added on top. Disaggregation's win is that prefill can no longer be scheduled into a running decode batch, so inter-token latency stops spiking whenever someone pastes a long document, and the two pools can be sized and parallelized independently to hit separate TTFT and ITL targets. vLLM's documentation states the limit explicitly: "Disaggregated prefill DOES NOT improve throughput." Treat it as an SLO-shaping tool that costs you a KV transfer on the critical path and a second failure domain; if your problem is "not enough tokens/sec", add replicas or raise batch size instead. Reach for it only after chunked prefill is tuned, when long prompts dominate, and when both pools fit inside one rack — the KV hop is cheap over NVLink and expensive across racks.
 
 **Q: What is continuous batching and why does it improve throughput?**
 A: Naive batching waits for all requests in a batch to complete before accepting new ones. Short requests finish early but hold their GPU slot until the longest request in the batch completes. Continuous batching (iteration-level scheduling) adds new requests to the batch as soon as any request finishes. This eliminates the GPU idle time caused by waiting for slow requests before starting fast new ones. For a realistic workload with output lengths ranging from 50 to 2,000 tokens, continuous batching increases GPU utilization from roughly 30% to 90%. That scheduling win is only part of the up-to-24× vLLM's launch blog reported over HuggingFace's generate() API — the rest comes from PagedAttention raising the achievable batch size.

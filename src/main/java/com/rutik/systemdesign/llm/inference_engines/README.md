@@ -604,6 +604,43 @@ The scale term is the whole story. Above ~20 GPUs a 15% engine win is real money
 rounds to zero saved dollars while still costing you a second serving stack to operate, monitor
 and upgrade. Benchmark first, then divide by your actual fleet size before switching.
 
+### The Router Tier — Why a Plain Load Balancer Wastes Your Prefix Cache
+
+Every engine above is a *single-replica* story. The moment you run more than one replica, a second
+component decides which replica each request lands on — and the naive choice silently destroys the
+prefix caching that made you pick vLLM or SGLang in the first place.
+
+The prefix cache lives in one replica's GPU memory. It is not shared. So a stateless round-robin
+balancer sprays consecutive turns of the same conversation across replicas, and each one has to
+prefill the whole shared prefix from scratch:
+
+```
+  8 replicas, round-robin, 2,000-token shared system prompt
+    turn 1 -> replica 3   (miss: prefills 2,000 tokens)
+    turn 2 -> replica 5   (miss: prefills 2,000 tokens again)
+    turn 3 -> replica 1   (miss: ...)
+  expected hit rate for a k-replica fleet with uniform routing ~= 1/k
+    k=8  -> ~12.5% of what a single replica would have achieved
+
+  same traffic, prefix-aware routing
+    all turns of one conversation -> the replica that already holds the prefix
+    hit rate approaches the single-replica ceiling; TTFT falls with it
+```
+
+The routers that ship with the engines expose this directly:
+
+| Router | Policies |
+|---|---|
+| vLLM `production-stack` router | `--routing-logic roundrobin \| session \| prefixaware \| kvaware \| disaggregated_prefill`; `--session-key` names the header carrying the session id |
+| SGLang router (`sglang_router.launch_router`) | `--policy random \| round_robin \| cache_aware \| power_of_two \| consistent_hashing \| prefix_hash`; `cache_aware` keeps an approximate radix tree per worker and falls back to shortest-queue when `--balance-abs-threshold` / `--balance-rel-threshold` say the fleet has gone lopsided |
+
+Note what the SGLang fallback tells you: pure cache affinity is not the goal. Perfect affinity
+pins every request from a hot tenant onto one replica and leaves the rest idle. Every serious
+router is a *blend* — route for cache locality until the imbalance crosses a threshold, then
+route for load. Getting the blend wrong is visible as either a collapsed prefix-cache hit rate
+(too much balancing) or one replica at 100% while seven idle (too much affinity), so instrument
+both `prefix_cache_hit_rate` and per-replica queue depth before tuning the thresholds.
+
 ---
 
 ## 7. Real-World Examples
@@ -744,6 +781,9 @@ A: Chunked prefill splits a long prompt's prefill into fixed-size chunks (typica
 
 **Q: How does vLLM's automatic prefix caching differ from SGLang's RadixAttention?**
 A: Both reuse the KV cache of shared prompt prefixes, but at different granularity. vLLM's automatic prefix caching hashes fixed-size KV blocks (16 tokens by default) and reuses exact block-aligned matches; SGLang's RadixAttention maintains a token-level radix tree that matches arbitrary-length shared prefixes across requests and across branches of structured generation. For a single common system prompt, both deliver similar wins. For tree-shaped workloads — few-shot prompt variants, multi-branch JSON filling, multi-turn chats where each turn extends a shared prefix — the radix tree matches more aggressively, which is where SGLang's 2-5× advantage comes from. If your traffic is flat single-turn requests with unique prompts, expect near-parity; benchmark your actual prefix-share rate before switching engines.
+
+**Q: You scaled vLLM from 1 replica to 8 behind a round-robin load balancer and TTFT got worse. Why?**
+A: Because the prefix cache lives in one replica's GPU memory and is not shared, so round-robin turns nearly every request into a cache miss. With uniform routing across k replicas, a returning conversation lands on the replica that already holds its prefix only about 1/k of the time — at k=8 that is ~12.5% of the hit rate a single replica was giving you, so the shared system prompt gets re-prefilled on almost every turn and TTFT regresses even though aggregate capacity went up. The fix is a prefix- or session-aware router rather than a generic HTTP balancer: vLLM's production-stack router takes `--routing-logic prefixaware` (or `session` with `--session-key` naming the header), and SGLang's router takes `--policy cache_aware`, which keeps an approximate radix tree of what each worker has cached. Do not swing to pure affinity either — that pins a hot tenant onto one replica while the rest idle, which is why cache-aware routers fall back to shortest-queue once an imbalance threshold is crossed. Watch prefix-cache hit rate and per-replica queue depth together; one alone will mislead you.
 
 **Q: How do inference engines handle model loading and what are the optimization strategies?**
 Model loading (downloading weights and transferring to GPU memory) takes 1-10 minutes for large models, creating cold-start latency. Optimization strategies: (1) tensor parallelism loading — load shards in parallel across GPUs rather than sequentially (2-4x faster); (2) memory-mapped loading — mmap the model file and let the OS handle page-level loading (avoids full copy into CPU RAM first); (3) safetensors format — random-access tensor loading without deserializing the entire file (faster than PyTorch .bin format); (4) model caching — keep models in CPU RAM or on fast NVMe for quick reload; (5) pre-warming — load models during deployment before accepting traffic. Order of magnitude only, and worth measuring on your own storage path: a 7B model loads in tens of seconds from local NVMe and a 70B in a few minutes. For serverless inference (Lambda, Modal), cold start is the primary latency concern — keep instances warm or use shared model caches. Kubernetes strategy: use initContainers to download models from S3/GCS to a local PVC, then the inference container mmaps from local storage.

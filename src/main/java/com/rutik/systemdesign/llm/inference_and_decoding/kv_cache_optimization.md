@@ -51,6 +51,7 @@ Senior interviews probe this because **"how much memory does this deployment nee
 | **Scissorhands** | `seq_len` term | Persistence-of-importance: tokens important once tend to stay important | Yes (cheaper than H2O) | 80% | <1% |
 | **Cross-layer KV sharing (YOCO, CLA)** | `layers` term | Groups of layers share one KV cache instead of each computing its own | N/A (architecture) | 2× (CLA-2); ~`L`× (YOCO — one global cache for the whole model) | Minimal, requires training |
 | **PagedAttention** (cross-link [vLLM Deep Dive](../vllm_deep_dive/README.md)) | fragmentation, not total size | Block-based virtual memory for KV cache | N/A (memory mgmt) | Recovers ~60-80% of memory lost to fragmentation | None (lossless) |
+| **Offloading / tiering** (Section 6.12) | nothing — moves bytes off the GPU | Completed KV blocks are DMA'd to pinned host RAM, then optionally SSD / object store / a peer instance | N/A (serving-time) | GPU-resident cache extended by however much host RAM you grant it | None (lossless — the bytes are exact) |
 
 ---
 
@@ -710,6 +711,26 @@ def fixed_sliding_window_with_sinks(
 # contribution: not "compress more," but "compress THIS WAY, not that way."
 ```
 
+### 6.12 Offloading and tiering — the lever that throws nothing away
+
+Every technique above answers "the cache is too big" by making it smaller — evict tokens, shrink each entry, share entries. Offloading answers a different question: **the cache is the right size, it just cannot all live in HBM at once.** Instead of discarding a completed prefix's blocks when GPU pages run short, the engine copies them down a memory hierarchy and pulls them back on a later hit.
+
+```
+  L1  GPU HBM          ~3.35 TB/s (H100)     tens of GB    the working set
+  L2  pinned host RAM  ~50 GB/s over PCIe    hundreds of GB
+  L3  local NVMe       ~5-10 GB/s            terabytes
+  L4  object store /   network-bound         effectively unbounded
+      peer instance
+```
+
+This is lossless in a way eviction is not: the bytes that come back are the exact K/V tensors that were computed, so quality is untouched. What you trade is **latency for capacity** — a hit that has to climb back from host RAM is slower than a hit already in HBM, but still far faster than re-running prefill over the same prefix, which is the alternative.
+
+The economics are the same arithmetic as Section 6.2 run in reverse. Re-prefilling a 2,000-token prefix on Llama-3-70B costs a full compute-bound forward pass over 2,000 tokens; fetching that prefix's `320 KB/token x 2,000 = 640 MB` of KV over PCIe at ~50 GB/s costs ~13 ms. Whenever the transfer beats the recompute, offloading wins — which is why it pays off precisely on long shared prefixes and loses on short ones.
+
+In vLLM this is the `OffloadingConnector`, configured through `--kv-transfer-config` with `cpu_bytes_to_use` (total pinned host memory across workers), `block_size` (offloaded block size in tokens) and `eviction_policy` (`lru` or `arc`). CPU is the mandatory primary tier; filesystem, S3-compatible object storage via NIXL, and peer-to-peer sharing between vLLM instances over RDMA are optional secondary tiers. Transfers use `cudaMemcpyAsync` and overlap with model compute, so the GPU-core overhead is small. **LMCache** is the richer third-party layer over the same idea — a tiered store spanning GPU, CPU RAM, local SSD and remote backends (Redis/Valkey, S3, NIXL, Mooncake), and notable for reusing cached blocks at *any* position in the prompt rather than only at a shared prefix, using CacheBlend's selective recomputation to keep quality.
+
+Two things to hold onto. First, this is the technique that makes prefix caching survive across requests and across instances — a GPU-only prefix cache is evicted the moment pages are needed, so the hit rate you measure at low load is not the hit rate you get at capacity. Second, it composes with everything else in this file rather than competing: quantize the entries, then offload the quantized entries, and you move half the bytes over PCIe.
+
 ---
 
 ## 7. Real-World Examples
@@ -835,6 +856,9 @@ They operate on different axes and are often confused. Preemption (covered in th
 
 **Q17: Design a back-of-envelope check: your team wants to support 50 concurrent users at 64K context on Llama-3-70B with 4×H100 80GB. Is this feasible, and what would you change if not?**
 Weights: 140GB BF16 (or ~70GB if FP8-quantized). Total memory: 4×80GB = 320GB. At BF16 weights, headroom for KV = 320 - 140 = 180GB. Per-request KV at 64K with GQA/BF16: `320KB × 65,536 ≈ 21GB`. For 50 users: `50 × 21GB = 1,050GB` — over 5× the available headroom, even before accounting for weights. This is clearly infeasible as specified. Changes, roughly in order of "cheapest first": (1) FP8 weights (140GB→70GB, frees 70GB of headroom) and FP8 KV cache (21GB→10.5GB per request, `50×10.5=525GB`) — still infeasible. (2) Add SnapKV (3-5× reduction on top): `525GB / 4 ≈ 131GB` — close to the 250GB headroom (320-70), now plausible. (3) Alternatively, question the requirement: do all 50 users genuinely need 64K context simultaneously, or is that a P99 case that could be served by a separate pool with stricter concurrency limits while the common case (shorter context) runs on the main pool at full concurrency? The "back of envelope, then negotiate the requirement" pattern is often more valuable than any single technical lever.
+
+**Q18: KV cache offloading is described as "lossless" while eviction is "lossy" — what exactly are you trading instead, and when does offloading beat simply recomputing the prefix?**
+You trade latency and PCIe bandwidth for capacity: the bytes that come back are the exact K/V tensors, so quality is untouched, but a hit served from host RAM is slower than one already in HBM. Offloading copies completed KV blocks down a hierarchy — pinned host RAM first, then optionally NVMe, object storage, or a peer instance — instead of discarding them when GPU pages run short, so it extends the cache rather than shrinking it (Section 6.12). The break-even against recomputation is straightforward arithmetic: fetching a 2,000-token Llama-3-70B prefix is `320 KB/token × 2,000 = 640 MB`, about 13 ms over PCIe at ~50 GB/s, versus a full compute-bound prefill pass over those 2,000 tokens. Long shared prefixes clear that bar easily; short unique prompts do not, and paying the transfer for them is pure overhead. In vLLM this is the `OffloadingConnector` under `--kv-transfer-config` (`cpu_bytes_to_use`, `block_size`, `eviction_policy`), with LMCache as the richer tiered alternative that can also reuse blocks at non-prefix positions. The operational point worth stating: a GPU-only prefix cache is evicted as soon as pages are scarce, so the hit rate you measure at low load is not the hit rate you get at capacity — offloading is what makes prefix caching hold up under real concurrency.
 
 ---
 
