@@ -133,8 +133,8 @@ Use cases:
 - **Full-text search**: `WHERE to_tsvector('english', body) @@ to_tsquery('index')`
 
 Size tradeoffs:
-- GIN index for JSONB = 3-5x the base table size (stores every key and value path)
-- GIN insert is slow (must update posting lists for each element) — enable `gin_pending_list_limit` and fastupdate
+- The default `jsonb_ops` operator class indexes every key and every value in the document, so on wide JSONB the index can rival or exceed the table itself. `jsonb_path_ops` hashes whole key-value paths instead, producing a much smaller index — at the cost of supporting only `@>` and the `jsonpath` match operators.
+- GIN insert is slow (must update posting lists for each element) — `fastupdate` is on by default and `gin_pending_list_limit` sizes the pending list it batches into
 
 ```sql
 -- GIN on JSONB
@@ -449,7 +449,7 @@ Over time a page fills with a mix of live and dead entries, slowing scans until 
 
 ```
 +---+---+---+---+---+---+---+---+---+---+
-| L |   | L | V | L |   | L | V | V | L |   L=Live V=Valid(dead tuple)
+| L |   | L | D | L |   | L | D | D | L |   L=Live  D=Dead entry  (blank=free)
 +---+---+---+---+---+---+---+---+---+---+
 ```
 
@@ -504,7 +504,7 @@ Index Only Scan using idx_status_total on orders
 
 ### Visibility Map and Index-Only Scans
 
-PostgreSQL maintains a visibility map (1 bit per page) indicating if all tuples on a page are visible to all transactions. Index-only scans use this: if the page is marked "all visible," skip the heap fetch. After heavy updates/inserts, pages lose this bit. VACUUM sets it. Ensure autovacuum is keeping up for index-only scans to actually be index-only.
+PostgreSQL maintains a visibility map (2 bits per heap page: all-visible and all-frozen), and the all-visible bit says whether every tuple on that page is visible to all transactions. Index-only scans use this: if the page is marked all-visible, skip the heap fetch. After heavy updates/inserts, pages lose this bit. VACUUM sets it. Ensure autovacuum is keeping up for index-only scans to actually be index-only.
 
 Whether an index-only scan truly stays index-only hinges on one bit per page, set by a background process and consumed at read time:
 
@@ -531,6 +531,49 @@ flowchart LR
     class SLOW lossN
     class VAC frozen
 ```
+
+### HOT Updates — When an UPDATE Skips the Indexes Entirely
+
+Pitfall 5 prices an INSERT at `1 + n_indexes` structure writes. For an UPDATE that
+multiplier is conditional, and the condition is the most valuable indexing lever
+PostgreSQL gives you. A **HOT (Heap-Only Tuple)** update writes the new row version
+with *no index writes at all*, when both of these hold:
+
+1. The update modifies **no column referenced by any of the table's indexes**
+   (summarizing indexes such as BRIN do not count against you).
+2. There is **sufficient free space on the same heap page** for the new version.
+
+If both hold, the index entry keeps pointing at the original item identifier, which
+becomes a redirect into a HOT chain on that page. Two consequences:
+
+```
+  non-HOT UPDATE on a table with 8 indexes
+    1 heap write  +  8 index writes  =  9 structure writes
+
+  HOT UPDATE, same table
+    1 heap write  +  0 index writes  =  1 structure write   -> 9x less work
+```
+
+Second, HOT chains are cleaned by **pruning**, which happens during ordinary page
+access — including plain `SELECT`s. Intermediate versions that nobody can see are
+removed and their item identifiers reused, so a hot-updated row does not have to wait
+for VACUUM to reclaim its own churn.
+
+The trap is how easily this is lost. Adding one index on a frequently-updated column
+silently converts every such UPDATE from HOT to non-HOT for the whole table — the cost
+of that index is not the `1/n` write-amplification increment from Pitfall 5, it is the
+loss of the zero-index-write path. Two levers:
+
+- **Do not index columns you update constantly** (`last_seen_at`, `view_count`,
+  `progress`). If you must query on one, ask whether a partial or expression index on a
+  stable column can serve the query instead.
+- **Lower `fillfactor`** (70–90) on update-heavy tables so condition 2 keeps holding.
+  Without free space on the page, the new version migrates to another page and HOT is
+  unavailable regardless of which columns changed.
+
+Measure it, do not assume it: `n_tup_upd` versus `n_tup_hot_upd` in
+`pg_stat_user_tables` is the HOT ratio for a table, and a ratio near zero on a
+write-heavy table is a strong signal that an index is sitting on a churning column.
 
 ---
 
@@ -593,13 +636,25 @@ CREATE INDEX idx_upper_email ON users (UPPER(email));
 **Pitfall 2: Leading column range prevents composite index use**
 Production incident: An API that queried `WHERE created_at > now() - interval '1 day' AND user_id = $1` had a composite index on `(created_at, user_id)`. The range on `created_at` was the leading column, so the planner often chose a sequential scan for high-volume users. Fix: reverse to `(user_id, created_at)` — equality on user_id first, then range on created_at.
 
-**Pitfall 3: Implicit type cast prevents index use**
+**Pitfall 3: A cast on the indexed COLUMN prevents index use**
 ```sql
 -- Table: orders, column: customer_id INTEGER, index: (customer_id)
--- Parameterized query with string parameter:
-SELECT * FROM orders WHERE customer_id = '42'; -- May cause seq scan
--- PostgreSQL: implicit cast from text to integer may prevent index use
--- Fix: ensure application sends typed parameters, not strings
+
+-- Fine. PostgreSQL resolves the unknown-typed literal '42' to the column's
+-- type, so the index is used. This is the case people wrongly fear.
+SELECT * FROM orders WHERE customer_id = '42';
+
+-- Broken. The cast is on the COLUMN, so the index on customer_id no longer
+-- matches the expression being compared -> seq scan.
+SELECT * FROM orders WHERE customer_id::text = '42';
+
+-- Broken in MySQL. A VARCHAR column compared to a number forces MySQL to
+-- coerce every stored value to a number, so the index is unusable:
+SELECT * FROM users WHERE phone = 5551234;   -- phone is VARCHAR
+
+-- Fix: never wrap the indexed column in a cast or function; send the
+-- parameter in the column's own type, or build an expression index on
+-- exactly the expression the query uses.
 ```
 
 **Pitfall 4: Index not used due to low selectivity**
@@ -720,7 +775,7 @@ The database heap (data file) stores full rows. An index stores only the indexed
 The cost-based optimizer (CBO) estimates: (1) Index scan cost = index traversal cost + heap fetch cost (random_page_cost × estimated rows). (2) Sequential scan cost = seq_page_cost × total pages. If index selectivity is low (query returns 20%+ of rows), sequential scan is often cheaper because sequential I/O is faster than random I/O (by ~4x on HDD, ~1.5x on SSD). Settings: `random_page_cost` defaults to 4.0 (HDD assumption); for SSD, set to 1.1-1.5. `effective_cache_size` tells the planner how much data fits in OS cache — affects whether "random" I/Os are truly random or cached.
 
 **Q: What are GIN indexes and when do you choose them over B+tree?**
-GIN (Generalized Inverted Index) is an inverted index: it maps each element value to the set of rows containing it. Use GIN when: (1) JSONB containment queries (`WHERE data @> '{"type": "click"}'`), (2) Array containment (`WHERE tags @> '{postgres, index}'`), (3) Full-text search with `tsvector`. GIN is 3-5x larger than the base table for JSONB, and insert/update is slow (must update posting lists for every element). Use B+tree when: single scalar value equality/range queries. Use GIN when: containment, overlap, or element-existence queries on multi-valued columns.
+GIN (Generalized Inverted Index) is an inverted index: it maps each element value to the set of rows containing it. Use GIN when: (1) JSONB containment queries (`WHERE data @> '{"type": "click"}'`), (2) Array containment (`WHERE tags @> '{postgres, index}'`), (3) Full-text search with `tsvector`. With the default `jsonb_ops` operator class GIN indexes every key and value, so on wide JSONB it can rival or exceed the table's own size; `jsonb_path_ops` is far smaller but supports only `@>` and `jsonpath` matching. Insert and update are slow either way (posting lists must be updated for every element). Use B+tree when: single scalar value equality/range queries. Use GIN when: containment, overlap, or element-existence queries on multi-valued columns.
 
 **Q: What is a BRIN index and what are its limitations?**
 BRIN (Block Range Index) stores min/max values per range of 128 consecutive table pages. It's tiny (1/1000th of a B+tree) and has very low maintenance cost. Query: if the query range overlaps the BRIN min/max for a block range, read that block range; otherwise skip it. Limitation: only useful if data values are correlated with physical storage order. An append-only `created_at` column is perfect — new rows have newer timestamps and are physically at the end. A `user_id` column in a randomly-ordered table is useless for BRIN — every block range has min and max spanning the entire domain, so BRIN cannot skip any blocks.
@@ -741,22 +796,25 @@ A composite index (a, b, c) can be used for queries that reference a prefix of t
 An expression index stores the result of an expression over one or more columns. The planner uses it only when the query contains the exact same expression. Example: `CREATE INDEX ON users (lower(email))` — used by `WHERE lower(email) = 'alice@example.com'` but NOT by `WHERE email = 'Alice@example.com'`. Common uses: case-insensitive string matching, extracting date parts (`EXTRACT(year FROM ts)`), computed business logic (`(price * quantity)`). Important: the query must use the same expression text; even equivalent expressions with different function calls may not match.
 
 **Q: How do you add an index to a 500M-row production table without causing downtime?**
-Use `CREATE INDEX CONCURRENTLY idx_name ON table (col)`. This builds the index in three phases: (1) Initial scan of table — marks new inserts as needing index entries. (2) Second scan — catches changes made during first scan. (3) Third pass — cleanup. Throughout, reads and writes to the table continue normally. Downsides: (1) Takes 3x longer than regular CREATE INDEX. (2) Requires more disk I/O. (3) If it fails midway, leaves an INVALID index — must drop and restart. Monitor progress via `pg_stat_progress_create_index` (PostgreSQL 12+).
+Use `CREATE INDEX CONCURRENTLY idx_name ON table (col)`. This builds the index in three phases: (1) Initial scan of table — marks new inserts as needing index entries. (2) Second scan — catches changes made during first scan. (3) Third pass — cleanup. Throughout, reads and writes to the table continue normally. Downsides: (1) It does more total work than a plain build and takes significantly longer — two full table scans instead of one, plus a wait for every transaction that predates each phase. (2) Requires more disk I/O. (3) If it fails midway, leaves an INVALID index — must drop and restart. Monitor progress via `pg_stat_progress_create_index` (PostgreSQL 12+).
 
 **Q: What is the visibility map and why does it matter for index-only scans?**
 PostgreSQL maintains a visibility map (VM): 2 bits per heap page. Bit 1: "all tuples visible to all transactions" (set by VACUUM). Bit 2: "all tuples frozen" (for very old data). During an index-only scan, for each row found in the index, PostgreSQL checks the VM for that row's page. If the bit is set (all tuples visible), it can return the index data directly without visiting the heap. If the bit is not set, it must visit the heap to check MVCC visibility (defeating the purpose of the index-only scan). Ensure autovacuum is keeping up — check `pg_stat_user_tables.n_dead_tup` and `last_autovacuum`.
+
+**Q: What is a HOT update in PostgreSQL and how can adding one index destroy it?**
+A HOT (Heap-Only Tuple) update writes a new row version with zero index writes, and it applies whenever the update touches no indexed column and the new version fits on the same heap page. The index entry keeps pointing at the original item identifier, which becomes a redirect into a HOT chain, so on a table with 8 indexes a HOT update costs 1 structure write instead of 9. HOT chains are also pruned during ordinary page access, including plain SELECTs, so the row's own churn does not have to wait for VACUUM. The destruction is easy: index one frequently-updated column — `last_seen_at`, `view_count`, a progress counter — and every update to that column is now non-HOT for the entire table, so the real cost of that index is not an incremental percentage on the write path but the loss of the zero-index-write path altogether. Keep `fillfactor` at 70-90 on update-heavy tables so the same-page condition keeps holding, and measure the outcome with `n_tup_hot_upd` against `n_tup_upd` in `pg_stat_user_tables` rather than assuming HOT is happening. A ratio near zero on a write-heavy table almost always means an index is sitting on a churning column.
 
 **Q: What is fill factor for a B+tree index and when should you change it?**
 Fill factor (0-100, default 90 for indexes) specifies what percentage of each index page is filled during initial build. Leaving 10% free space means new inserts into existing pages don't immediately cause page splits. When to lower it: (1) Sequential inserts near existing keys (middle-of-range updates, backfills), (2) Tables with heavy UPDATE patterns that change indexed columns. When to raise it: (3) Insert-only tables where inserts are always at the end (like append-only logs with timestamp primary key) — 100% fill factor maximizes storage efficiency. Example: `CREATE INDEX ON orders (customer_id) WITH (fillfactor=70)` for a table with frequent customer_id-range updates.
 
 **Q: How does a GIN index handle updates and why is fastupdate important?**
-GIN index updates are expensive: each row that changes must update the posting list for every element it contains. For a JSONB document with 50 keys, an INSERT requires 50 GIN posting list updates — serialized writes on a shared data structure. `fastupdate=on` (default): new updates go to a pending list in a separate heap table rather than directly into the GIN structure. A background process (`gin_pending_list_limit` trigger) periodically merges the pending list into the main GIN structure. This batches the expensive sorting/merging. Downside: reads must check both the main GIN and the pending list. For read-heavy workloads with bursts of GIN inserts, fastupdate reduces write latency significantly.
+GIN index updates are expensive: each row that changes must update the posting list for every element it contains. For a JSONB document with 50 keys, an INSERT requires 50 GIN posting list updates — serialized writes on a shared data structure. `fastupdate=on` (default): new entries go to an unsorted pending list rather than directly into the GIN structure. The list is merged into the main structure when it exceeds `gin_pending_list_limit` (default 4MB) — flushed by whichever backend trips the limit, or by autovacuum — rather than by a dedicated background process. This batches the expensive sorting/merging. Downside: reads must check both the main GIN and the pending list. For read-heavy workloads with bursts of GIN inserts, fastupdate reduces write latency significantly.
 
 **Q: How do you handle an index on a UUID v4 primary key that causes cache thrashing?**
-UUID v4 is random — inserts go to random B+tree leaf pages, causing constant cache misses (each insert fetches a different page). At scale, the index cannot fit in the buffer pool, so every insert causes a disk read. Solutions: (1) Use ULIDv2 or UUID v7 (time-ordered UUID) — new inserts go to the end of the index, only the last few pages need to be in cache. (2) Use a sequence or BIGSERIAL primary key for internal use, expose UUID externally. (3) Use hash partitioning on UUID — each partition's index is smaller and can fit in cache. (4) Increase `shared_buffers` / buffer pool so the index fits — only viable for small tables.
+UUID v4 is random — inserts go to random B+tree leaf pages, causing constant cache misses (each insert fetches a different page). At scale, the index cannot fit in the buffer pool, so every insert causes a disk read. Solutions: (1) Use a time-ordered identifier — UUID v7 or ULID — so new inserts land at the end of the index and only the last few pages need to be in cache. PostgreSQL 18 ships `uuidv7()` natively (alongside the explicit `uuidv4()` alias), so this no longer needs an extension. (2) Use a sequence or BIGSERIAL primary key for internal use, expose UUID externally. (3) Use hash partitioning on UUID — each partition's index is smaller and can fit in cache. (4) Increase `shared_buffers` / buffer pool so the index fits — only viable for small tables.
 
 **Q: What is the difference between REINDEX and REINDEX CONCURRENTLY?**
-`REINDEX INDEX idx_name`: Acquires an ACCESS EXCLUSIVE lock on the table for the entire duration of the index rebuild. All reads and writes to the table are blocked. Fast but causes downtime. `REINDEX INDEX CONCURRENTLY idx_name` (PostgreSQL 12+): Uses the same algorithm as `CREATE INDEX CONCURRENTLY` — multiple passes, no exclusive lock, reads and writes continue. Takes 3x longer and requires temporary extra disk space (old + new index exist simultaneously). If REINDEX CONCURRENTLY fails, leaves an INVALID index — drop it and retry. Use CONCURRENTLY in production; use regular REINDEX only during maintenance windows.
+`REINDEX INDEX idx_name`: Acquires an ACCESS EXCLUSIVE lock on the table for the entire duration of the index rebuild. All reads and writes to the table are blocked. Fast but causes downtime. `REINDEX INDEX CONCURRENTLY idx_name` (PostgreSQL 12+): Uses the same algorithm as `CREATE INDEX CONCURRENTLY` — multiple passes, no exclusive lock, reads and writes continue. Takes significantly longer and requires temporary extra disk space (old + new index exist simultaneously). If REINDEX CONCURRENTLY fails, leaves an INVALID index — drop it and retry. Use CONCURRENTLY in production; use regular REINDEX only during maintenance windows.
 
 **Q: Explain how a B+tree index supports ORDER BY without a sort step.**
 B+tree leaf nodes are physically ordered by the indexed column(s) and linked in a doubly-linked list. A query `ORDER BY last_name` traverses the leaf pages in order, fetching rows already sorted. EXPLAIN shows "Index Scan" with no "Sort" node. This also enables "merge join" when joining two tables on their indexed columns — both index scans produce sorted output that can be merged in O(n+m). Descending ORDER BY: B+trees support backward traversal of the leaf list. `CREATE INDEX ON t (col DESC)` or the planner traverses an ascending index backward — both work but explicit DESC index can improve performance for mixed ASC/DESC compound sorts.
@@ -798,7 +856,7 @@ This query was taking 45 seconds. `EXPLAIN` showed a sequential scan.
 **Analysis**:
 - `clinic_id`: high cardinality (10,000 clinics), equality condition — leading column
 - `record_date`: range condition — trailing column after equality
-- `ORDER BY record_date DESC`: can be satisfied by composite index traversal (backward)
+- `ORDER BY record_date DESC`: matches the index's own `record_date DESC` key order, so no Sort node
 - SELECT columns: `record_id, patient_id, diagnosis_code, created_at, summary` — need covering
 
 **Solution**:
@@ -806,7 +864,9 @@ This query was taking 45 seconds. `EXPLAIN` showed a sequential scan.
 -- Step 1: Create composite + covering index
 CREATE INDEX CONCURRENTLY idx_patient_records_clinic_date
 ON patient_records (clinic_id, record_date DESC)
-INCLUDE (record_id, patient_id, diagnosis_code, summary);
+INCLUDE (record_id, patient_id, diagnosis_code, created_at, summary);
+-- Every SELECT column must be in the key or the INCLUDE list, created_at
+-- included, or the scan falls back to Index Scan with a heap fetch per row.
 -- Took 4 hours to build on live system (no downtime)
 
 -- Step 2: Verify
@@ -819,13 +879,22 @@ ORDER BY record_date DESC LIMIT 50;
 
 **Result**:
 ```
-Index Only Scan Backward using idx_patient_records_clinic_date
-  Index Cond: (clinic_id = 'C123') AND (record_date DESC < '2025-01-01')
-  Filter: (record_date >= '2024-01-01')
-  Heap Fetches: 0
-  Rows Removed by Filter: 12
-  Actual Rows: 50
-  Actual Time: 0.842ms
+Limit  (cost=0.57..12.34 rows=50 width=148)
+       (actual time=0.058..0.812 rows=50 loops=1)
+  ->  Index Only Scan using idx_patient_records_clinic_date on patient_records
+        (cost=0.57..27861.02 rows=118240 width=148)
+        (actual time=0.056..0.806 rows=50 loops=1)
+        Index Cond: ((clinic_id = 'C123'::text)
+                     AND (record_date >= '2024-01-01'::date)
+                     AND (record_date < '2025-01-01'::date))
+        Heap Fetches: 0
+        Buffers: shared hit=54
+Planning Time: 0.196 ms
+Execution Time: 0.842 ms
 ```
 
-Query time: **45 seconds → 0.842ms** (53,000x improvement). The index-only scan with backward traversal required no heap fetches and no sort step. The `INCLUDE` columns added only 15% to index size vs storing them in the key.
+Both range bounds land in `Index Cond`, not in a `Filter` — a composite index whose leading
+column is an equality can carry the trailing range inside the index scan, so no rows are
+read and discarded. Query time: **45 seconds → 0.842ms** (53,000x improvement). Because the
+index key is already `record_date DESC`, the `ORDER BY` is satisfied by the index's own order:
+a plain forward Index Only Scan, no `Sort` node, no backward traversal, and `Heap Fetches: 0`. The `INCLUDE` columns added only 15% to index size vs storing them in the key.

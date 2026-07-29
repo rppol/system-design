@@ -104,7 +104,9 @@ Redis forks a child process (copy-on-write semantics).
 Child writes current dataset to a temporary .rdb file.
 Swap: rename temporary file to dump.rdb.
 
-Fork overhead: 50-500ms for 10GB dataset (memory pages must be allocated for CoW)
+Fork overhead: ~9-13 ms per GB on modern hardware, so ~100-130ms for a 10GB dataset
+               (the page table, not the data, is what gets copied)
+               Old Xen VMs are 20-40x worse; measure via INFO latest_fork_usec
 During fork: parent continues serving requests (CoW = only modified pages are copied)
 
 Configuration (shipped defaults):
@@ -125,7 +127,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    P --> F("fork syscall<br/>50-500ms for 10GB")
+    P --> F("fork syscall<br/>~10ms per GB<br/>copies the page table")
     F --> C["Child: frozen view<br/>of all memory pages"]
     C --> D["Child writes full<br/>dataset to temp .rdb"]
     D --> SW(["Rename to dump.rdb<br/>atomic swap"])
@@ -297,6 +299,46 @@ Recommendation: allkeys-lru for general cache, allkeys-lfu for Zipf-distributed 
                 noeviction for non-cache uses (job queues, sessions that must survive)
 ```
 
+### Key Expiration Is Not Eviction
+
+Best Practice 5 says "set TTL on all cache keys", which is only true if you know what a
+TTL actually triggers. Expiration and eviction are separate mechanisms with separate
+failure modes: eviction fires under `maxmemory` pressure and picks victims by policy;
+expiration fires on the clock and picks the keys you already marked volatile. A key with
+a TTL is not freed the moment the TTL passes. Redis removes it in two ways:
+
+- **Passive (lazy)**: a client touches the key, Redis notices it is past its deadline,
+  deletes it, and answers as if it were absent. Costs nothing until someone asks.
+- **Active**: an expire cycle runs 10 times a second. Each pass samples 20 keys at random
+  from the volatile set and deletes the expired ones; **if more than 25% of that sample
+  was expired, it immediately repeats**. At the steady state that is only about 200 keys
+  per second actively reclaimed — the lazy path is expected to do most of the work.
+
+That 25% loop is the operational trap. It is adaptive by design, so a keyspace where a
+large share of the volatile keys come due in the *same second* — the classic result of
+writing a million keys with an identical TTL in a bulk load — makes the cycle iterate
+repeatedly on the single command thread until the expired fraction drops back under 25%.
+This is the same argument for TTL jitter that stampede prevention makes, arriving from
+the memory-reclamation side rather than the cache-miss side.
+
+Two consequences worth knowing before an incident:
+
+```
+  memory freed by a TTL is NOT freed at the deadline
+    -> used_memory can sit above what the TTLs imply, and eviction can start
+       on keys that are logically already dead
+  TTLs are stored as ABSOLUTE Unix timestamps, and time flows while Redis is down
+    -> restoring an RDB onto a host with a skewed clock can expire the whole
+       dataset the instant it loads
+```
+
+**Replicas never expire keys on their own.** The primary synthesizes an explicit `DEL`
+into the replication stream and the AOF when a key expires, so expiry is centralized and
+cannot diverge between nodes. A replica therefore keeps an expired key in its dataset —
+and in its memory accounting — until that `DEL` arrives, which matters when you route
+reads to replicas (Pitfall 2) or size a replica by expected key count. A promoted replica
+takes over the full expire state and begins expiring independently, as a primary.
+
 ### Lua Scripting and Atomicity
 
 ```lua
@@ -307,14 +349,17 @@ Recommendation: allkeys-lru for general cache, allkeys-lfu for Zipf-distributed 
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
-local current = tonumber(redis.call('GET', key) or 0)
+local current = tonumber(redis.call('GET', key) or '0')
 if current + 1 > limit then
     return 0
-else
-    redis.call('INCR', key)
-    redis.call('EXPIRE', key, window)
-    return 1
 end
+-- Set the TTL only when this INCR created the counter. Calling EXPIRE on every
+-- request slides the deadline forward, so a continuously active caller's window
+-- never closes and the limit becomes permanent rather than per-window.
+if redis.call('INCR', key) == 1 then
+    redis.call('EXPIRE', key, window)
+end
+return 1
 
 -- Execute:
 EVAL <script> 1 rate_limit:user:42 100 60
@@ -377,8 +422,10 @@ Level 1: [10] → [20] → [30] → [50] → [60] → [80] → [90]
 
 `ZRANGE` — by index, `BYSCORE`, or `BYLEX` — is O(log n): navigate the skiplist from the highest level down. `ZSCORE` is O(1): a parallel hashtable maps member to score without touching the skiplist at all.
 
-**In plain terms.** `O(log n)` on a skiplist says: "each level up halves the number of nodes, so the
-number of hops to reach any score is the number of times you can halve `n` before reaching 1." That
+**In plain terms.** `O(log n)` on a skiplist says: "each level up keeps only a fraction of the nodes
+below it — one in four, at Redis's 1/4 promotion probability — so the hops to reach any score grow
+with the *logarithm* of `n`, not with `n`." The figures below use log base 2, which is the usual way
+to state the shape; the 1/4 promotion moves the constant factor, not the shape. That
 framing is what makes the leaderboard in Section 14 viable — the cost of a rank lookup grows by one
 single hop every time the player base *doubles*.
 
@@ -428,7 +475,7 @@ flowchart TD
     T1(["Get timestamp T1"]) --> ACQ["Acquire lock on<br/>all N=5 instances"]
     ACQ --> CNT["Count successful<br/>acquisitions"]
     CNT --> EL["Elapsed = now - T1"]
-    EL --> DEC{"acquired greater than N/2<br/>AND elapsed less than ttl/2?"}
+    EL --> DEC{"acquired greater than N/2<br/>AND elapsed less than ttl?"}
     DEC -->|"yes"| OK(["Lock acquired<br/>validity = ttl - elapsed"])
     DEC -->|"no"| REL["Release all<br/>acquired locks"]
     REL -.->|"retry"| T1
@@ -442,7 +489,7 @@ flowchart TD
     class FIX train
 ```
 
-Redlock only counts a lock as held if a majority of the N=5 instances (greater than N/2) acknowledge it within half the TTL; otherwise it releases everything and retries. Martin Kleppmann's 2016 critique: a GC pause or clock jump between acquiring and using the lock can let it expire on the Redis nodes unnoticed, so two clients can both believe they hold it — a fencing token (a monotonically increasing number the protected resource must check) closes that gap by rejecting any request carrying a lower token than one it has already seen.
+Redlock only counts a lock as held if a majority of the N instances (greater than N/2, so 3 of the reference N=5) acknowledge it AND the elapsed acquisition time is still under the lock validity time; otherwise it releases everything — including the instances it thought it had failed to lock — and retries after a random delay. The remaining validity is the TTL minus that elapsed time, minus a small clock-drift allowance. Martin Kleppmann's 2016 critique: a GC pause or clock jump between acquiring and using the lock can let it expire on the Redis nodes unnoticed, so two clients can both believe they hold it — a fencing token (a monotonically increasing number the protected resource must check) closes that gap by rejecting any request carrying a lower token than one it has already seen.
 
 **Practical guidance**: Redlock is safer than single-Redis locks, but for true distributed safety use ZooKeeper (ephemeral nodes) or etcd — both provide linearizable semantics that Redlock cannot guarantee.
 
@@ -551,7 +598,7 @@ EXEC
 A Redis instance stores Python pickle objects averaging 5MB each (session data). The `BGSAVE` fork causes a 3-second pause on a 20GB dataset — every 60 seconds. Fix: use a more efficient serialization (protobuf, msgpack), split large objects across smaller keys, or disable RDB and rely only on AOF with `appendfsync everysec`.
 
 **Pitfall 2: Hot key in Redis Cluster**
-A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: `replica-serve-stale-data yes` + client routing to replicas for read-only queries. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
+A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: in Cluster mode the client sends `READONLY` on its replica connections so the replica serves reads for slots it mirrors instead of replying `MOVED`; accept the replication lag that comes with it. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
 
 ```
 per-copy QPS    = hot-key QPS / c              <- c = number of duplicate keys written
@@ -640,13 +687,16 @@ Redlock acquires locks across N independent Redis instances. Martin Kleppmann id
 Small sorted sets (≤128 members, ≤64 bytes each): listpack — a compact sequential byte array. Linear scan for all operations, but cache-friendly and very memory-efficient. Large sorted sets: dual structure — a skiplist for ordered operations and a hashtable for member lookups. Skiplist: O(log n) for ZADD, ZRANGE (by index, BYSCORE or BYLEX) and ZRANK — range queries navigate through level pointers. Hashtable: O(1) for ZSCORE (member → score lookup) and ZADD update (find existing score to remove from skiplist). Two structures because: range queries need ordering (skiplist), but score lookups by member name need O(1) (hashtable). Maintaining both doubles memory overhead vs a single structure but provides O(log n) for ranges and O(1) for point lookups simultaneously.
 
 **Q: Explain RDB snapshotting using fork and copy-on-write, and what the pause cost is.**
-`BGSAVE` (or triggered by `save` configuration): Redis calls `fork()`. The kernel creates a child process that shares all memory pages with the parent — no immediate copy. The child writes the snapshot to a `.rdb` file while the parent continues serving requests. Copy-on-Write (CoW): when the parent modifies a page (e.g., updating a key), the kernel copies that page for the child before the parent modifies it. The child sees the original. Cost: (1) Fork itself: proportional to the page table size, not data size — roughly 1ms per GB of data. For a 10GB dataset: 10ms fork pause. (2) Memory: in the worst case (all pages modified during fork), total memory temporarily doubles. (3) I/O: child writes entire dataset to disk — throughput impact during snapshot.
+`BGSAVE` (or triggered by `save` configuration): Redis calls `fork()`. The kernel creates a child process that shares all memory pages with the parent — no immediate copy. The child writes the snapshot to a `.rdb` file while the parent continues serving requests. Copy-on-Write (CoW): when the parent modifies a page (e.g., updating a key), the kernel copies that page for the child before the parent modifies it. The child sees the original. Cost: (1) Fork itself: proportional to the page table size, not the data size — a 24GB instance needs a 48MB page table (24GB / 4KB pages x 8 bytes per entry) and that is what gets copied. Redis publishes measured fork times of roughly 9-13ms per GB on physical hardware and modern HVM EC2, about 23ms/GB on KVM, and 240-420ms per GB on older Xen VMs. So a 10GB dataset is a ~100ms pause on decent hardware and multiple seconds on old Xen — check `latest_fork_usec` in `INFO` rather than assuming. (2) Memory: in the worst case (all pages modified during fork), total memory temporarily doubles. (3) I/O: child writes entire dataset to disk — throughput impact during snapshot.
 
 **Q: How does Redis handle pub/sub and what are its limitations vs Streams?**
 Pub/Sub: PUBLISH channel message sends to all SUBSCRIBE'd clients. Fire-and-forget: no persistence, no history. If no client is subscribed, the message is dropped. If a subscribed client disconnects, it misses all messages while disconnected. Use case: real-time notifications where some message loss is acceptable (chat, dashboards). Limitations vs Streams: (1) No persistence — messages lost if no subscriber is connected. (2) No consumer groups — each subscriber receives all messages (broadcast). (3) No acknowledgment — cannot track if a message was processed. (4) No backpressure — fast publisher overwhelms slow subscriber. Redis Streams solve all four limitations: persistent log, consumer groups (each consumer in group gets different messages), acknowledgment (XACK), and backpressure (consumer group tracking pending messages).
 
 **Q: What is the hot key problem in Redis Cluster and how do you handle it?**
 In Redis Cluster, each slot is owned by one primary shard. A "hot key" — a key accessed by thousands of requests per second — sends all traffic to one shard, saturating it while others are idle. Redis is single-threaded for commands: one shard can handle ~100K-500K simple ops/second. A viral product key receiving 1M GETs/second from 100 application servers would saturate that shard. Solutions: (1) Local in-process cache: use Caffeine/Guava with a short TTL (1-5s) in the application. Hot key GETs hit local cache, not Redis. Best for read-only data with acceptable staleness. (2) Read from replicas: configure client to route GET commands to replicas for hot keys. (3) Key duplication with random suffix: `product:42:replica:{0..9}` — 10 copies across different slots, read a random one. Write all copies on update. (4) Add a Redis shard specifically for hot keys.
+
+**Q: How does Redis actually expire keys, and why do replicas not do it themselves?**
+Redis expires keys two ways: passively, when a client touches a key that is past its deadline, and actively, via a cycle that runs 10 times a second and samples 20 volatile keys per pass. The active cycle is adaptive — if more than 25% of the sampled keys were already expired it repeats immediately — so in the steady state it reclaims only around 200 keys per second and the lazy path does most of the work. That adaptivity is also the trap: a bulk load that gives a million keys the same TTL makes them all come due in the same second, the sample stays above 25%, and the cycle loops on the single command thread, which is the memory-side argument for TTL jitter. Two consequences follow. Memory is not released at the deadline, so `used_memory` can exceed what the TTLs imply and eviction can start on keys that are logically already dead. And TTLs are absolute Unix timestamps whose clock keeps running while Redis is down, so restoring an RDB onto a host with a skewed clock can expire the entire dataset on load. Replicas never expire keys on their own: the primary synthesizes an explicit `DEL` into the replication stream and the AOF, centralizing expiry so nodes cannot diverge — a replica keeps the dead key, and its memory, until that `DEL` arrives, and only begins expiring independently once promoted.
 
 **Q: What happens when Redis memory reaches maxmemory and eviction policy is allkeys-lru?**
 When `maxmemory` is reached and a new write operation would exceed it, Redis runs the eviction process before executing the write. With `allkeys-lru`: Redis samples a pool of keys (default 5 samples via `maxmemory-samples=5`), tracks the approximate LRU order, and evicts the least recently used key from the sample. After eviction, the write proceeds. This is approximate LRU (not exact) — Redis uses a clock-hand approach to avoid maintaining a full LRU list. Impact: eviction adds ~0.1-1ms per write when memory is full. If eviction rate is very high (nearly all writes require eviction), Redis throughput degrades. Monitor with `INFO stats` → `evicted_keys` counter. If evicting > 1000/second, increase maxmemory or reduce value sizes.
@@ -663,13 +713,19 @@ Listpack is the compact sequential byte encoding Redis uses for small hashes, se
 **Q: How do you implement a distributed rate limiter using Redis?**
 Fixed window with atomic counter:
 ```lua
--- Lua script (atomic):
-local key = "rate:" .. KEYS[1] .. ":" .. math.floor(tonumber(ARGV[1]) / tonumber(ARGV[2]))
-local limit = tonumber(ARGV[3])
-local count = redis.call("INCR", key)
-if count == 1 then redis.call("EXPIRE", key, ARGV[2]) end
+-- Lua script (atomic). KEYS[1] is the FULLY-FORMED bucket key, built by the
+-- caller as:  "rate:" .. user_id .. ":" .. floor(now_ms / (window_seconds * 1000))
+-- Two things this gets right that the obvious version does not:
+--   * the bucket divisor converts milliseconds to the same unit as the window,
+--     otherwise the bucket rolls 1000x too fast;
+--   * the key is never constructed inside the script -- Redis Cluster routes on
+--     the declared KEYS, so a key invented in Lua can address the wrong node.
+local limit  = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local count  = redis.call("INCR", KEYS[1])
+if count == 1 then redis.call("EXPIRE", KEYS[1], window) end
 return count <= limit and 1 or 0
--- Args: user_id, current_timestamp_ms, window_seconds, limit
+-- Args: KEYS[1]=bucket key, ARGV[1]=limit, ARGV[2]=window_seconds
 ```
 Sliding window with sorted set:
 ```

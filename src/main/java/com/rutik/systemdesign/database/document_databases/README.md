@@ -30,7 +30,7 @@ flowchart LR
 
     P(["Primary"]) --> WT["WiredTiger engine<br/>B+tree + LSM-tree hybrid"]
     WT --> J["Journaling WAL<br/>durability"]
-    WT --> C["Cache<br/>50% RAM default"]
+    WT --> C["Cache<br/>50% of RAM-1GB"]
     WT --> DL["Doc limit<br/>16MB"]
     P -.->|"oplog async replication"| S1(["Secondary 1"])
     P -.->|"oplog async replication"| S2(["Secondary 2"])
@@ -39,7 +39,7 @@ flowchart LR
     class WT,J,C,DL base
     class S1,S2 frozen
 ```
-*The primary's WiredTiger engine journals every write and caches dirty pages, capped at 16MB per document; secondaries replicate asynchronously by tailing the oplog — a capped collection that new replicas copy on join and that change streams (CDC) also tail.*
+*The primary's WiredTiger engine journals every write and caches dirty pages (50% of RAM minus 1GB by default), capped at 16MB per document; secondaries replicate asynchronously by tailing the oplog — a capped collection that new replicas copy on join and that change streams (CDC) also tail.*
 
 ### Embedding vs Referencing Decision Matrix
 
@@ -118,12 +118,13 @@ hard server-side error, not a warning, so the number you must know is the diviso
   budget          16,777,216 / 200            =  83,886 enrollments per course
 
   the actual course              50,000 enrollments
-    projected size  50,000 x 200              =  10,000,000 bytes = 10.0 MB
-    headroom left   16,777,216 - 10,000,000   =   6.78 MB  ->  33,886 more students
+    projected size  50,000 x 200              =  10,000,000 bytes = 9.54 MB
+    headroom left   16,777,216 - 10,000,000   =   6.46 MB  ->  33,886 more students
 
-  add one field, e.g. a 135-byte "last_quiz_scores" array, to each sub-document:
-    bytes/child     335                       ->  max_children = 50,081
-    the SAME 50,000-student course now sits at 16.75 MB  ->  BSONObjectTooLarge
+  add one field, e.g. a 150-byte "last_quiz_scores" array, to each sub-document:
+    bytes/child     350                       ->  max_children = 47,934
+    the SAME 50,000-student course   50,000 x 350  =  17,500,000 bytes = 16.69 MB
+    17,500,000 > 16,777,216                   ->  BSONObjectTooLarge
 ```
 
 **Why this is the failure mode teams hit.** The document worked for years at 50,000 x 200 bytes.
@@ -251,7 +252,7 @@ flowchart LR
     class BAD1,BAD2 lossN
     class GOOD train
 ```
-*Shard key choice drives scalability: range and hash sharding route documents differently, but low-cardinality or monotonically increasing keys create write hotspots on one shard, while a high-cardinality key like `user_id` or a compound `(region, user_id)` spreads writes evenly. Jumbo chunks — over the 200MB default — can't be split; monitor with `db.stats()`/`sh.status()` and fix via `clearJumboFlag` or a shard-key change.*
+*Shard key choice drives scalability: range and hash sharding route documents differently, but low-cardinality or monotonically increasing keys create write hotspots on one shard, while a high-cardinality key like `user_id` or a compound `(region, user_id)` spreads writes evenly. Jumbo chunks — ranges that outgrow the 128MB default range size and cannot be split further — monitor with `sh.status()` and fix via `clearJumboFlag` or a shard-key change.*
 
 ### Change Streams
 
@@ -295,7 +296,8 @@ try {
 } finally {
   await session.endSession();
 }
-// Performance overhead: ~10-20% vs single-document ops
+// Cost vs a single-document write: snapshot setup, per-transaction state,
+// one grouped oplog entry at commit, and a majority commit round trip
 // Multi-document transactions in MongoDB use WiredTiger MVCC
 // Recommended only when cross-document atomicity is truly required
 ```
@@ -388,9 +390,9 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     W(["Write"]) --> J["Journal WAL<br/>sync ~100ms"]
-    W --> CA["Cache<br/>50% RAM, dirty pages"]
+    W --> CA["Cache<br/>50% of RAM-1GB<br/>dirty pages"]
     J --> DK["Disk"]
-    CA -->|"checkpoint every<br/>60s or 2GB"| DK
+    CA -->|"checkpoint<br/>every 60s"| DK
     DK -.->|"crash: replay journal<br/>from last checkpoint"| RC(["Recovered"])
 
     class W io
@@ -398,7 +400,43 @@ flowchart LR
     class DK frozen
     class RC train
 ```
-*Every write lands in both the journal (fsynced roughly every 100ms, tunable down to 10ms) and the WiredTiger cache; dirty cache pages checkpoint to disk every 60 seconds or when the journal reaches 2GB, and a crash recovers by replaying the journal from the last checkpoint.*
+*Every write lands in both the journal (synced every 100ms by `storage.journal.commitIntervalMs`, or immediately when a write carries `j: true`) and the WiredTiger cache; dirty cache pages checkpoint to disk at a fixed 60-second interval, and a crash recovers by replaying the journal from the last checkpoint.*
+
+### Read Concern — The Other Half of the Durability Contract
+
+Write concern decides when a write is *acknowledged*; read concern decides what a read is
+*allowed to see*. They are independent dials, and getting the write side right while
+leaving the read side at its default is a very common half-fix. The default read concern
+is `"local"`, which returns whatever the queried node has — including writes that a
+failover could still roll back.
+
+| Level | What it returns | Cost / restriction |
+|-------|-----------------|--------------------|
+| `local` | Whatever this node has. Default. May be rolled back on failover | Cheapest |
+| `available` | Same, and on a sharded cluster skips the orphan-document filter | Fastest sharded read; not usable in transactions or causal sessions |
+| `majority` | Only data acknowledged by a majority — durable, never rolled back | Waits for the majority commit point |
+| `linearizable` | Reflects every majority-acknowledged write that finished before the read began | Primary only; always pair with `maxTimeMS` |
+| `snapshot` | Majority-committed data as of one consistent point in time, across shards | Transactions and causally consistent sessions |
+
+The pairing that matters in an interview: **`w: "majority"` plus `readConcern: "local"` is
+still a read-your-writes hazard**, because a durable write can be read from a secondary
+that has not applied it yet. The two supported fixes are a causally consistent session
+(the driver carries a cluster time, and the server waits for the node to catch up) or
+`readConcern: "majority"` on the read path.
+
+```javascript
+// Read-your-writes across primary and secondaries, without pinning to primary
+const session = client.startSession({ causalConsistency: true });
+await db.orders.insertOne({ _id: 7, status: "PAID" },
+                          { session, writeConcern: { w: "majority" } });
+// Same session -> the server will not serve this read from a node behind that write
+await db.orders.findOne({ _id: 7 },
+                        { session, readConcern: { level: "majority" } });
+```
+
+Note the asymmetry with `linearizable`: it is the only level that also rules out a stale
+read from a *deposed* primary, which is why it is restricted to the primary and needs a
+timeout — it must confirm it is still the primary before answering.
 
 ### MongoDB vs Relational Transaction Overhead
 
@@ -409,7 +447,7 @@ xychart-beta
     y-axis "Latency (ms)" 0 --> 16
     bar [0.55, 2.55, 9, 5.5]
 ```
-*Single-document MongoDB writes (about 0.1 to 1ms) are comparable to single-row PostgreSQL updates (about 0.1 to 5ms); MongoDB's multi-document transactions add 10 to 20% overhead versus single-doc ops, landing around 3 to 15ms versus PostgreSQL's roughly 1 to 10ms for simple transactions. Recommendation: reserve multi-document transactions for genuine cross-document atomicity and default to single-document operations with embedding otherwise.*
+*Illustrative bands, not benchmark figures. Single-document MongoDB writes (about 0.1 to 1ms) are comparable to single-row PostgreSQL updates (about 0.1 to 5ms). A multi-document MongoDB transaction is not a small percentage on top of that: it pays snapshot setup, per-transaction state tracking, one grouped oplog entry written at commit, and a majority commit round trip — so it lands roughly an order of magnitude higher (the 3 to 15ms bar) against PostgreSQL's roughly 1 to 10ms for a simple multi-row transaction. Recommendation: reserve multi-document transactions for genuine cross-document atomicity and default to single-document operations with embedding otherwise.*
 
 ---
 
@@ -459,7 +497,8 @@ xychart-beta
 ```javascript
 // Broken: embed all comments in post document
 { _id: "post1", comments: [...10000 comments...] }
-// After 1000+ comments, document exceeds 16MB limit → ERROR
+// At ~500 bytes per comment the 16MB ceiling lands near 33,000 comments —
+// and long before that, every new comment rewrites the whole document
 
 // Fix: reference model
 { _id: "comment1", post_id: "post1", body: "...", created_at: ISODate(...) }
@@ -473,8 +512,8 @@ A sharded collection's shard key must be indexed (required). Additionally, all q
 **Pitfall 3: Using $where or JavaScript in queries**
 `db.users.find({$where: "this.age > 18"})` executes JavaScript per document — no index, full collection scan, single-threaded JavaScript engine. Always use native MongoDB query operators instead.
 
-**Pitfall 4: Write concern w:1 for financial operations**
-Default write concern `w:1` acknowledges when the primary's memory buffer receives the write — not when it's durable on disk or replicated. If the primary crashes immediately after ack, data is lost. Use `w: 'majority'` for durable writes and `j: true` for journal fsync.
+**Pitfall 4: Downgrading write concern to w:1 for throughput**
+The implicit default is `w: "majority"`, which also implies journaling because `writeConcernMajorityJournalDefault` is true — so a fresh deployment is durable out of the box. Teams then override it to `w: 1` chasing write latency, and `w: 1` acknowledges as soon as the primary has the write in memory, not once it is journaled or replicated. If the primary crashes immediately after the ack, that write is rolled back on failover. Keep `w: "majority"` for anything financial; the one replica-set shape where MongoDB itself falls back to `w: 1` is a set with arbiters where the data-bearing voting members do not form a majority.
 
 **Pitfall 5: Not monitoring oplog size and replication lag**
 The oplog is a capped collection. If a secondary falls too far behind (e.g., slow network, heavy write burst), it may fall off the oplog — it can no longer replicate. Fix: monitor replication lag (`rs.printReplicationInfo()`). Set `oplogSizeMB` large enough to cover at least 24 hours of operations. Alert when lag > 30 seconds.
@@ -501,28 +540,28 @@ The oplog is a capped collection. If a secondary falls too far behind (e.g., slo
 ## 12. Interview Questions with Answers
 
 **Q: How do you choose a shard key in MongoDB and what are the consequences of a bad one?**
-Good shard key criteria: high cardinality (many unique values — ensures even distribution across shards), good write distribution (avoid monotonically increasing keys like timestamps → all writes to one shard "hotspot"), colocates related documents (e.g., compound `{region, user_id}` ensures user's data lands on one shard). Bad shard key consequences: monotonically increasing key → all inserts go to the last shard (insert hotspot, all other shards idle); low cardinality (e.g., status) → only a few possible shards, cannot scale beyond cardinality count; querying without shard key → scatter-gather to all shards (10x overhead for 10-shard cluster).
+A good shard key has high cardinality, spreads writes evenly across shards, and colocates documents that are queried together. High cardinality means enough distinct values to fill every shard; good write distribution means avoiding monotonically increasing keys like timestamps, which send every insert to one shard; colocation means a compound key such as `{region, user_id}` keeps one user's data on one shard. Bad shard key consequences: monotonically increasing key → all inserts go to the last shard (insert hotspot, all other shards idle); low cardinality (e.g., status) → only a few possible shards, cannot scale beyond cardinality count; querying without shard key → scatter-gather to all shards (10x overhead for 10-shard cluster).
 
 **Q: When should you embed documents vs reference them in MongoDB?**
 Embed when: the data has a one-to-few relationship (user has 2-5 addresses), the embedded data is always accessed with the parent (user profile always needs address), and the total document size stays well under 16MB. Reference when: the data has a one-to-many or many-to-many relationship (post has thousands of comments), the child data changes frequently and independently (updating one comment shouldn't rewrite the entire post), or the child data is large enough to risk document size limits. General rule: start with embedding, switch to referencing when documents exceed 2MB consistently or when update patterns become problematic.
 
 **Q: How do MongoDB transactions compare to PostgreSQL in terms of overhead?**
-MongoDB multi-document transactions (4.0+) use WiredTiger's MVCC to provide snapshot isolation. Overhead: ~10-20% latency vs single-document operations for simple transactions. Causes: starting an MVCC snapshot, tracking transaction state, coordinating oplog entries. PostgreSQL single transactions: ~1-10ms, similar MVCC mechanism but more mature implementation with less overhead per operation. For cross-document atomicity requiring consistency, PostgreSQL transactions are generally faster for complex multi-table operations because its cost-based planner handles joins better than MongoDB's $lookup + $match pipeline. MongoDB's advantage: single-document operations (no transaction) are very fast and naturally atomic at the document level.
+MongoDB multi-document transactions use WiredTiger's MVCC to provide snapshot isolation, and cost several times a single-document write rather than a small percentage on top of it. They arrived in 4.0 for replica sets and 4.2 for sharded clusters. The overhead comes from starting an MVCC snapshot, tracking per-transaction state, writing the transaction's changes as one grouped oplog entry at commit, and waiting on the majority commit round trip. PostgreSQL single transactions: ~1-10ms, similar MVCC mechanism but more mature implementation with less overhead per operation. For cross-document atomicity requiring consistency, PostgreSQL transactions are generally faster for complex multi-table operations because its cost-based planner handles joins better than MongoDB's $lookup + $match pipeline. MongoDB's advantage: single-document operations (no transaction) are very fast and naturally atomic at the document level.
 
 **Q: Explain how MongoDB change streams work and what they can be used for.**
 Change streams use MongoDB's oplog as the source of truth. The oplog records all write operations to replica set members. Change streams expose this as a subscribable stream with filtering, resumability, and full document pre/post images. Use cases: (1) CDC to sync MongoDB data to Elasticsearch, Redis, or data warehouses. (2) Real-time notifications (user gets notified when their order status changes). (3) Cache invalidation (when a product document changes, invalidate Redis cache). (4) Audit logging (every change recorded). Resumability: the change stream returns a `resumeToken` with each event. On reconnect, pass the token to resume exactly from where it left off — no events missed. Requires: replica set or sharded cluster (change streams read the oplog).
 
 **Q: What is the WiredTiger cache and how does it differ from PostgreSQL's buffer pool?**
-WiredTiger cache (default 50% RAM or 1GB, whichever is larger): stores recently accessed pages from data files, including B+tree nodes for indexes and document pages. Similar to PostgreSQL's `shared_buffers`. Key differences: (1) WiredTiger uses a CLOCK eviction algorithm instead of PostgreSQL's clock-sweep. (2) WiredTiger compresses pages both in cache and on disk (Snappy compression by default). (3) WiredTiger cache is per-process (the mongod process), while PostgreSQL's shared_buffers is shared across all connections. (4) On Linux, the OS page cache also caches MongoDB data files — double-buffering similar to PostgreSQL. Set `storage.wiredTiger.engineConfig.cacheSizeGB` to tune.
+WiredTiger cache (default: the larger of 50% of (RAM - 1GB) and 256MB — so a 64GB host gets 31.5GB, not 32GB): stores recently accessed pages from data files, including B+tree nodes for indexes and document pages. Similar to PostgreSQL's `shared_buffers`. Key differences: (1) WiredTiger uses a CLOCK eviction algorithm instead of PostgreSQL's clock-sweep. (2) WiredTiger compresses pages both in cache and on disk (Snappy compression by default). (3) WiredTiger cache is per-process (the mongod process), while PostgreSQL's shared_buffers is shared across all connections. (4) On Linux, the OS page cache also caches MongoDB data files — double-buffering similar to PostgreSQL. Set `storage.wiredTiger.engineConfig.cacheSizeGB` to tune.
 
 **Q: How does MongoDB replication differ from PostgreSQL streaming replication?**
 MongoDB replication: each write is recorded in the oplog (a capped collection of logical operations). Secondaries tail the oplog and re-execute operations. Replication is logical (re-execute operations), not physical (copy byte changes). This allows filtering, selective replication, and cross-version compatibility. Failover: Raft-like election (majority of nodes must agree on new primary). PostgreSQL streaming replication: physical WAL stream (byte-level page changes). Faster replication (no re-execution overhead), but requires same major version. Logical replication (PostgreSQL) is the equivalent of MongoDB's oplog for cross-version compatibility. Both support multi-region, but PostgreSQL's physical replication is typically lower-latency for identical hardware/version.
 
 **Q: What are TTL indexes in MongoDB and when do you use them?**
-A TTL (Time-To-Live) index on a BSON date field causes MongoDB to automatically delete documents where the date field is older than the specified time. `db.sessions.createIndex({expires_at: 1}, {expireAfterSeconds: 0})` — documents where `expires_at < now()` are deleted. Use cases: session storage, cache documents, soft-expiring events, rate limiting records. Background: TTL expiration runs in a background thread every 60 seconds, deleting up to 1000 documents per pass (may lag under high insertion rates). Limitation: TTL index must be on a Date field; the `expireAfterSeconds` is relative to the field's value (or can be 0 to use the field value as the absolute expiry time).
+A TTL (Time-To-Live) index on a BSON date field causes MongoDB to automatically delete documents where the date field is older than the specified time. `db.sessions.createIndex({expires_at: 1}, {expireAfterSeconds: 0})` — documents where `expires_at < now()` are deleted. Use cases: session storage, cache documents, soft-expiring events, rate limiting records. Background: TTL expiration runs in a background thread every 60 seconds; for each TTL index it deletes until it has removed 50,000 documents, or spent one second on that index, or exhausted the expired set — then moves to the next index (so deletions can lag under high insertion rates). Limitation: TTL index must be on a Date field; the `expireAfterSeconds` is relative to the field's value (or can be 0 to use the field value as the absolute expiry time).
 
 **Q: What is the oplog and why does its size matter?**
-The oplog (operations log) is a capped collection in the `local` database that records all write operations in a replication set. Secondaries tail the oplog to apply changes. Capped collection: has a fixed size in bytes; old entries are overwritten when full. Why size matters: if a secondary falls behind (network partition, slow network, heavy write burst) and the oplog wraps around before the secondary reads those entries, the secondary can no longer catch up — it needs a full resync. Recommended oplog size: able to hold at least 24-72 hours of write operations. Default: 5% of free disk space (can be too small for high-write deployments). Set with `--oplogSize` or `storage.replication.oplogSizeMB`.
+The oplog (operations log) is a capped collection in the `local` database that records all write operations in a replication set. Secondaries tail the oplog to apply changes. Capped collection: has a fixed size in bytes; old entries are overwritten when full. Why size matters: if a secondary falls behind (network partition, slow network, heavy write burst) and the oplog wraps around before the secondary reads those entries, the secondary can no longer catch up — it needs a full resync. Recommended oplog size: able to hold at least 24-72 hours of write operations. Default: 5% of free disk space, floored at 990MB and capped at 50GB (that cap is often too small for high-write deployments). Set with `mongod --oplogSizeMB`, the `replication.oplogSizeMB` YAML key, or resize a running node with `db.adminCommand({replSetResizeOplog: 1, size: <MB>})`.
 
 **Q: How does MongoDB schema validation work?**
 MongoDB 3.6+ supports JSON Schema validation on collections. Define a schema with required fields, types, and constraints:
@@ -536,23 +575,29 @@ db.createCollection("users", {
       age: { bsonType: "int", minimum: 0, maximum: 150 }
     }
   }},
-  validationLevel: "strict",   // "strict" = all writes validated; "moderate" = new docs only
+  validationLevel: "strict",   // "strict" (default) = every insert and update validated
+                               // "moderate" = inserts, plus updates to documents that
+                               //              ALREADY satisfy the rules; updates to
+                               //              pre-existing invalid documents are exempt
   validationAction: "error"    // "error" = reject invalid; "warn" = allow with warning
 });
 ```
-Validation runs on INSERT and UPDATE. Unlike relational databases, it's applied at the application layer (doesn't prevent direct shell bypasses unless validationLevel=strict). Use it as a safety net for required fields and basic type constraints.
+Validation runs on INSERT and UPDATE and is enforced server-side by `mongod` — the shell cannot bypass it, and neither can a driver. `moderate` exists specifically so you can add a schema to a collection full of legacy documents without breaking writes to the non-conforming ones; it is not "new documents only". Use it as a safety net for required fields and basic type constraints.
 
 **Q: Explain MongoDB's aggregation pipeline performance optimization.**
-The pipeline processes documents stage by stage. Optimization rules: (1) Put `$match` as early as possible — it reduces the number of documents flowing to later stages. If the match uses an indexed field, it avoids a collection scan. (2) Put `$project` early to remove fields not needed downstream — reduces document size in memory. (3) `$limit` before `$sort` when you only need top-N: sorts up to N documents, not the whole collection. (4) `$lookup` is expensive (cross-collection join) — filter before it to minimize the joined set. (5) Use `allowDiskUse: true` for large aggregations that exceed the 100MB memory limit. (6) Use `$facet` for multiple aggregations in one pipeline pass instead of separate queries. Check performance with `.explain("executionStats")` on the aggregate call.
+The pipeline processes documents stage by stage. Optimization rules: (1) Put `$match` as early as possible — it reduces the number of documents flowing to later stages. If the match uses an indexed field, it avoids a collection scan. (2) Put `$project` early to remove fields not needed downstream — reduces document size in memory. (3) Put `$limit` immediately AFTER `$sort` when you only need top-N — the optimizer coalesces the pair into a single sort that keeps only n items in memory. Putting `$limit` first would truncate an arbitrary set of documents and then sort those, which is a different query. (4) `$lookup` is expensive (cross-collection join) — filter before it to minimize the joined set. (5) The per-stage memory limit is 100MB; since MongoDB 6.0 the `allowDiskUseByDefault` parameter decides whether an over-limit stage spills to temporary files or raises an error, and `{ allowDiskUse: false }` / `{ allowDiskUse: true }` overrides it for one command. (6) Use `$facet` for multiple aggregations in one pipeline pass instead of separate queries. Check performance with `.explain("executionStats")` on the aggregate call.
 
 **Q: What is MongoDB Atlas Search and when should you use it instead of a text index?**
-MongoDB Atlas Search (built on Lucene) provides full-text search with relevance scoring, fuzzy matching, phrase matching, facets, and autocomplete — features missing from MongoDB's native text indexes. Native text index limitations: all fields weighted equally (unless specified), no phrase search, limited relevance scoring, no facets. Atlas Search: Lucene-based, full BM25 scoring, facets, fuzzy matching (`fuzziness` parameter), autocomplete, search-as-you-type, synonym groups, custom analyzers. Trade-off: Atlas Search requires Atlas (managed MongoDB) and is eventually consistent (replication delay of ~1-2 seconds for indexed changes). Use Atlas Search when: advanced relevance ranking needed, user-facing search with autocomplete, faceted navigation. Use native text index for: simple keyword matching, self-hosted MongoDB, cases where search is not a primary use case.
+MongoDB Atlas Search (built on Lucene) provides full-text search with relevance scoring, fuzzy matching, phrase matching, facets, and autocomplete — features missing from MongoDB's native text indexes. Native text index limitations: all fields weighted equally (unless specified), no fuzzy matching, no autocomplete, no custom analyzers, limited relevance scoring, no facets. It does handle exact phrases, via escaped double quotes (`$search: "\"ssl certificate\""`), so phrase matching is not the reason to leave it. Atlas Search: Lucene-based, full BM25 scoring, facets, fuzzy matching (`fuzziness` parameter), autocomplete, search-as-you-type, synonym groups, custom analyzers. Trade-off: Atlas Search requires Atlas (managed MongoDB) and is eventually consistent (replication delay of ~1-2 seconds for indexed changes). Use Atlas Search when: advanced relevance ranking needed, user-facing search with autocomplete, faceted navigation. Use native text index for: simple keyword matching, self-hosted MongoDB, cases where search is not a primary use case.
 
 **Q: When would you use MongoDB's $lookup instead of embedding and what are the limitations?**
-`$lookup` performs a left outer join between collections in an aggregation pipeline. Use when: referencing is the right data model (one-to-many relationship where child data is large or changes independently), but you need to fetch related data in one query. Limitations: (1) `$lookup` cannot use sharding to colocate data — if the "from" collection is sharded, every lookup requires scatter-gather to all shards (expensive). (2) `$lookup` returns an array of matching documents — must use `$unwind` to join cardinality. (3) No indexed nested loop join optimization — always a hash join or nested loop without optimal index usage. (4) Performance degrades significantly at scale vs an embedded approach or pre-computed joins. Use embedding when: performance is critical and data fits in document size limits.
+`$lookup` performs a left outer join between collections in an aggregation pipeline. Use when: referencing is the right data model (one-to-many relationship where child data is large or changes independently), but you need to fetch related data in one query. Limitations: (1) `$lookup` cannot use sharding to colocate data — if the "from" collection is sharded, every lookup requires scatter-gather to all shards (expensive). (2) `$lookup` returns an array of matching documents — must use `$unwind` to join cardinality. (3) The equality-match form does use an index on `foreignField`, and MongoDB's docs warn that without one performance "will likely be poor" — but the correlated-subquery form with `$expr` only uses an index when the `let` operand resolves to a constant, and never uses a multikey, partial or sparse index. (4) Performance degrades significantly at scale vs an embedded approach or pre-computed joins. Use embedding when: performance is critical and data fits in document size limits.
 
 **Q: What is the write concern in MongoDB and when should you use w: majority?**
-Write concern specifies how many replica set members must acknowledge a write before the driver considers it successful. Options: `w:1` (primary only, default), `w: 'majority'` (majority of replica set members must acknowledge), `w: N` (specific N members). `w:1` risk: if primary crashes before replicating to any secondary, the write is lost on failover (rollback). `w: 'majority'` guarantees that even if the primary crashes and a new primary is elected, the write was replicated to a majority — it will be present. Latency cost: `w: 'majority'` adds one replication round trip (~1-10ms LAN, ~30-100ms WAN). Use `w: 'majority'` for: financial transactions, user account changes, any data that cannot afford to be lost. Use `w:1` for: analytics events, logs, metrics where occasional loss is acceptable.
+Write concern specifies how many replica set members must acknowledge a write before the driver considers it successful. Options: `w: 'majority'` (the implicit default — a majority of replica set members must acknowledge, and journaling is implied by `writeConcernMajorityJournalDefault`), `w:1` (primary only), `w: N` (specific N members). `w:1` risk: if primary crashes before replicating to any secondary, the write is lost on failover (rollback). `w: 'majority'` guarantees that even if the primary crashes and a new primary is elected, the write was replicated to a majority — it will be present. Latency cost: `w: 'majority'` adds one replication round trip (~1-10ms LAN, ~30-100ms WAN). Use `w: 'majority'` for: financial transactions, user account changes, any data that cannot afford to be lost. Use `w:1` for: analytics events, logs, metrics where occasional loss is acceptable.
+
+**Q: Why is `w: "majority"` alone not enough for read-your-writes, and what read concern fixes it?**
+Write concern controls when a write is acknowledged; read concern controls what a read may see, and the default read concern is `local`. So a write can be majority-durable while a subsequent read is served by a secondary that has not applied it yet — the write is safe, the read is stale, and no write concern setting changes that. MongoDB offers five read concerns: `local` (default, may be rolled back), `available` (same, plus it skips the orphan filter on sharded reads, and is unusable inside transactions or causal sessions), `majority` (only majority-acknowledged, therefore never rolled back), `linearizable` (reflects every majority-acknowledged write that completed before the read started, primary only, always pair with `maxTimeMS`), and `snapshot` (a single consistent point in time across shards, for transactions and causally consistent sessions). The two supported fixes are a causally consistent session, where the driver carries a cluster time and the server refuses to answer from a node behind that write, or `readConcern: "majority"` on the read path. Reach for `linearizable` only when you must also exclude a stale answer from a primary that has already been deposed — that guarantee is exactly why it costs a round trip to confirm primacy.
 
 **Q: What happens when you embed an unbounded array in a MongoDB document, like comments on a post?**
 An embedded array that grows without bound eventually pushes the document past MongoDB's 16MB hard limit, and every insert past that point fails outright with a BSONObjectTooLarge error. A course document that embedded all of its student enrollments hit this ceiling at around 50,000 embedded entries, and worse, every update to a single student's progress had to rewrite the entire multi-megabyte document even before the limit was reached. Switching to a reference model — a separate `enrollments` collection with a compound index on `(course_id, student_id)` — dropped a single-student update from over 10ms to about 0.1ms, because it now touches a document a few hundred bytes wide instead of the whole parent. Bound any embedded array explicitly, and move genuinely unbounded one-to-many relationships into a referenced collection from the start.

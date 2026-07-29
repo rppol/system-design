@@ -174,7 +174,7 @@ Both figures are permission ceilings, not promises — real throughput stops at 
 
 ### XID Wraparound
 
-PostgreSQL transaction IDs (XIDs) are 32-bit unsigned integers cycling after ~2.1 billion transactions. If a table's relfrozenxid falls more than 2 billion XIDs behind the current XID, PostgreSQL forcibly shuts down to prevent wraparound (catastrophic data corruption). Autovacuum's `--freeze` mode (`autovacuum_freeze_max_age = 200M` XIDs by default) ensures tables are frozen before the danger zone.
+PostgreSQL transaction IDs (XIDs) are 32-bit unsigned integers whose comparison is modular, giving ~2.1 billion usable transactions of runway. As that runway is consumed, PostgreSQL escalates in two documented steps: at 40 million transactions remaining it warns (`WARNING: database "mydb" must be vacuumed within 39985967 transactions`), and at fewer than 3 million remaining it refuses to assign new XIDs (`ERROR: database is not accepting commands that assign new XIDs to avoid wraparound data loss in database "mydb"`). It does not shut down — in-progress transactions finish and read-only transactions still start, but anything that modifies rows or truncates a relation fails until a database-wide VACUUM runs. Autovacuum's freeze pass (`autovacuum_freeze_max_age = 200M` XIDs by default) exists to keep tables frozen long before that point.
 
 **Read it like this.** "A 32-bit counter gives you about 2.1 billion transactions of runway; freeze the old rows before that runway ends, or the server stops accepting writes to protect itself." XID comparison is modular, so only half the 32-bit space is usable — the other half is what "in the past" means.
 
@@ -193,7 +193,8 @@ PostgreSQL transaction IDs (XIDs) are 32-bit unsigned integers cycling after ~2.
   autovacuum_freeze_max_age             200,000,000                9.3%   routine freeze
   alert threshold (Pitfall 5)         1,000,000,000               46.6%   page someone
   emergency threshold (Pitfall 5)     1,800,000,000               83.8%   347,483,648 left
-  hard stop                          ~2,100,000,000               97.8%   writes refused
+  first WARNING (40M remaining)       2,107,483,648               98.1%   still writable
+  XID assignment refused (<3M left)  ~2,144,483,648               99.9%   read-only only
 ```
 
 The freeze trigger sits at 9.3% for a reason: it must fire early enough that even a slow freeze pass over a multi-terabyte table finishes with the remaining 90% of the runway to spare. Pitfall 5's 72-hour `VACUUM FREEZE` on a 10 TB database is exactly the scenario that headroom is sized for — a database that only starts freezing at the alert threshold may not finish before the hard stop.
@@ -215,14 +216,14 @@ stateDiagram-v2
     Aging --> Healthy: autovacuum freeze<br/>age under 200M default
     Aging --> Alert: datfrozenxid age<br/>passes 1 billion
     Alert --> Emergency: age passes<br/>1.8 billion
-    Emergency --> Shutdown: age nears<br/>2.1 billion limit
-    Shutdown --> Healthy: VACUUM FREEZE<br/>on all tables
+    Emergency --> ReadOnly: under 3M XIDs left<br/>new XIDs refused
+    ReadOnly --> Healthy: VACUUM FREEZE<br/>on all tables
 
     class Healthy train
     class Aging base
     class Alert mathOp
     class Emergency lossN
-    class Shutdown frozen
+    class ReadOnly frozen
 ```
 
 ---
@@ -408,6 +409,50 @@ Performance pitfall: `SELECT *` on a table with large JSONB columns reads all TO
 
 The quarter-page rule is why the threshold exists at all: PostgreSQL cannot chain a row across pages, so without out-of-line storage a single 200 KB document would be unstorable. What the 100x gap shows is that TOAST is not a tax you pay for having a wide column — it is a tax you pay for `SELECT *`. The column is free to own and expensive only to read.
 
+### The xmin Horizon — One Idle Transaction Can Stop All VACUUM
+
+Section 2 names this as one of PostgreSQL's three defining operational problems, and it
+is the one that makes an otherwise perfectly tuned autovacuum useless. VACUUM may only
+remove a dead tuple once **no running transaction could still need to see it**. That
+cutoff is the `xmin` horizon: the oldest transaction id any live snapshot might reach.
+Nothing older than the horizon can be reclaimed — anywhere in the cluster.
+
+So a single session sitting in `idle in transaction` since breakfast pins the horizon at
+breakfast, and every dead tuple produced since then is unreclaimable across **every
+table**, no matter how aggressively you tune the scale factor. Autovacuum still runs, still
+consumes I/O, and reports its own defeat:
+
+```
+INFO: "events": found 0 removable, 41938201 nonremovable row versions
+DETAIL: 41938201 dead row versions cannot be removed yet, oldest xmin: 918273645
+```
+
+`found 0 removable` alongside a huge `nonremovable` count is the signature. Four things
+hold the horizon back, and you must check all four:
+
+| Holder | Where to look |
+|--------|---------------|
+| Long-running or idle-in-transaction backend | `pg_stat_activity`: `backend_xmin`, `xact_start`, `state` |
+| Abandoned replication slot | `pg_replication_slots`: `xmin`, `catalog_xmin` |
+| Orphaned prepared transaction (2PC) | `pg_prepared_xacts` — these survive restarts and are invisible in `pg_stat_activity` |
+| Standby with `hot_standby_feedback = on` | The standby's own long queries pin the *primary's* horizon |
+
+```sql
+-- Who is holding the horizon, oldest first
+SELECT pid, state, backend_xmin, xact_start, now() - xact_start AS age, query
+FROM pg_stat_activity
+WHERE backend_xmin IS NOT NULL
+ORDER BY age(backend_xmin) DESC;
+```
+
+The defences are timeouts, not tuning. Set `idle_in_transaction_session_timeout` to kill
+sessions that open a transaction and stop talking, and `transaction_timeout` to bound the
+total life of any transaction including the ones that stay busy. Both default to `0`
+(disabled), which is why this bites unconfigured production systems rather than
+badly-configured ones. Drop stale replication slots and orphaned prepared transactions on
+sight, and treat `hot_standby_feedback = on` as a deliberate trade: it stops the standby
+cancelling queries, and it pays for that by letting standby queries bloat the primary.
+
 ### Partitioning
 
 Declarative partitioning. Three types:
@@ -501,10 +546,10 @@ COMMIT;
 ```
 
 **Pitfall 4: TOO many partitions slowing query planning**
-A table with 3650 daily partitions (10 years of data). Every query went through the planner checking all 3650 partition constraints — planning took 500ms even for simple queries. Fix: use `constraint_exclusion = partition` (default), ensure partition constraints are simple enough for the planner. Alternatively, range-partition by month (120 partitions) with sub-partitioning by day.
+A table with 3650 daily partitions (10 years of data). Every query went through the planner checking all 3650 partition constraints — planning took 500ms even for simple queries. Fix: make sure `enable_partition_pruning` is on (it is by default — `constraint_exclusion` governs the older inheritance-based scheme, not declarative partitions) and that the WHERE clause references the partition key directly, so pruning happens at plan time. If planning is still the bottleneck, range-partition by month (120 partitions) with sub-partitioning by day.
 
 **Pitfall 5: XID wraparound emergency**
-A low-traffic database had autovacuum disabled in development. After 2 years, the XID counter was within 10M of wraparound. PostgreSQL began refusing all writes with "WARNING: database might contain unfrozen rows" and eventually stopped accepting connections. Emergency procedure: `VACUUM FREEZE` on all tables. Took 72 hours on a 10TB database. Fix: monitor `age(datfrozenxid)` for all databases. Alert at 1 billion XIDs, emergency at 1.8 billion.
+A low-traffic database had autovacuum disabled in development. After 2 years, the oldest unfrozen XID was within 10M of wraparound, and the log filled with `WARNING: database "app" must be vacuumed within 9998412 transactions`. When it crossed the 3M mark PostgreSQL began rejecting every statement that assigns an XID — `ERROR: database is not accepting commands that assign new XIDs to avoid wraparound data loss` — leaving the application able to read but not write. Emergency procedure: `VACUUM FREEZE` on all tables. Took 72 hours on a 10TB database. Fix: monitor `age(datfrozenxid)` for all databases. Alert at 1 billion XIDs, emergency at 1.8 billion.
 
 ---
 
@@ -530,7 +575,10 @@ A low-traffic database had autovacuum disabled in development. After 2 years, th
 ## 12. Interview Questions with Answers
 
 **Q: Why does PostgreSQL bloat under heavy UPDATE workloads?**
-PostgreSQL implements MVCC by never modifying rows in-place. Every UPDATE creates a new row version (new xmin, old row marked with xmax). The old version remains in the heap as a "dead tuple" until VACUUM reclaims it. Under heavy UPDATE workloads, dead tuples accumulate faster than VACUUM can clean them. Each dead tuple occupies 8-23 bytes plus the full row payload. A 10M-row table with 1M updates/day can accumulate 10M dead tuples per week if autovacuum lags. The heap file grows, sequential scans read more pages, index scans return dead rows that must be filtered — all degrading performance.
+PostgreSQL implements MVCC by never modifying rows in-place. Every UPDATE creates a new row version (new xmin, old row marked with xmax). The old version remains in the heap as a "dead tuple" until VACUUM reclaims it. Under heavy UPDATE workloads, dead tuples accumulate faster than VACUUM can clean them. Each dead tuple still occupies its 23-byte heap tuple header plus the full row payload, and a 4-byte line pointer on the page. A 10M-row table taking 1M updates/day accumulates 7M dead tuples in a week if autovacuum never catches up. The heap file grows, sequential scans read more pages, index scans return dead rows that must be filtered — all degrading performance.
+
+**Q: Autovacuum is running constantly but n_dead_tup keeps climbing — what is holding the xmin horizon?**
+VACUUM can only remove a dead tuple once no running transaction could still need to see it, and that cutoff — the xmin horizon — is pinned cluster-wide by the oldest live snapshot. The signature in the VACUUM log is `found 0 removable` next to a large `nonremovable row versions` count with an `oldest xmin` far in the past; when you see that, tuning the scale factor cannot help, because autovacuum is already running and is simply forbidden to reclaim anything. Four things hold the horizon and you have to check all four: a long-running or `idle in transaction` backend (`pg_stat_activity.backend_xmin` and `xact_start`), an abandoned replication slot (`pg_replication_slots.xmin` and `catalog_xmin`), an orphaned prepared transaction (`pg_prepared_xacts`, which survives restarts and never appears in `pg_stat_activity`), and a standby running `hot_standby_feedback = on`, whose long queries pin the primary's horizon rather than its own. The fixes are timeouts, not tuning: `idle_in_transaction_session_timeout` bounds a session that opens a transaction and stops talking, and `transaction_timeout` bounds the total life of any transaction including a busy one. Both default to 0, meaning disabled, which is why this bites unconfigured production systems. Drop stale slots and orphaned prepared transactions on sight, and treat `hot_standby_feedback = on` as a deliberate trade of primary bloat for fewer standby query cancellations.
 
 **Q: How do you tune autovacuum for a high-write table?**
 Default autovacuum triggers too late for high-write tables. Three knobs, in order of impact: (1) `autovacuum_vacuum_scale_factor`: lower from 0.2 to 0.01-0.05 to trigger vacuum at 1-5% dead tuples instead of 20% — this is almost always the real fix. (2) `autovacuum_vacuum_cost_limit`: raise from the inherited 200 to 800-2000 so each cycle cleans more pages before sleeping. (3) `autovacuum_max_workers`: raise from 3 if many tables queue at once; since PostgreSQL 18 it is changeable without a restart, up to `autovacuum_worker_slots` (default 16). Note `autovacuum_vacuum_cost_delay` is already 2ms by default — there is nothing left to win there. Apply per-table: `ALTER TABLE t SET (autovacuum_vacuum_scale_factor=0.01, autovacuum_vacuum_cost_limit=2000)`. Monitor effectiveness via `pg_stat_user_tables.n_dead_tup` trending down after each autovacuum run.
@@ -551,6 +599,7 @@ Streaming replication: physical (byte-level) WAL copy to replica. Replica is bin
 The Free Space Map (FSM) is a data structure tracking how much free space is available in each heap page. When VACUUM reclaims dead tuples, it updates the FSM to mark those pages as available for future inserts. When PostgreSQL needs to INSERT a new row, it consults the FSM to find a page with sufficient free space. Without FSM updates, inserts would always extend the heap file even when free space existed within it. With proper VACUUM, the FSM allows reuse of freed space, preventing unbounded table growth.
 
 **Q: How do you diagnose and fix table bloat?**
+Estimate it from `pg_stat_user_tables.n_dead_tup`, confirm it with `pgstattuple`, then reclaim it with plain `VACUUM` or, if the file itself must shrink, with `pg_repack`. The queries below run in that order.
 ```sql
 -- Estimate bloat (quick):
 SELECT relname, n_dead_tup, n_live_tup,
@@ -579,7 +628,7 @@ pg_repack -t large_table  -- Rebuilds table in background, swaps atomically
 `pg_stat_statements` is a PostgreSQL extension that tracks statistics for every normalized query (parameters replaced with $1, $2). Key columns: `total_exec_time` (total CPU+wait time), `calls` (how many times), `mean_exec_time` (avg latency), `stddev_exec_time` (latency variance — high stddev suggests occasional bad plans). Usage: `SELECT query, calls, mean_exec_time, total_exec_time FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20` — finds queries consuming the most total time. Enable with `shared_preload_libraries = 'pg_stat_statements'` and `pg_stat_statements.max = 5000`.
 
 **Q: How does PostgreSQL's query planner use statistics, and what happens when they're stale?**
-The planner reads `pg_statistic` (populated by ANALYZE): column histograms (100 buckets by default), n_distinct (number of unique values), correlation (physical order vs value order), most common values (MCVs) with their frequencies. Stale statistics: after a bulk load or schema change, `pg_statistic` shows old row counts and distributions. The planner may estimate 100 rows when the actual result is 1M rows — leading to wrong join order (small table should be hash-built, not the large one), wrong join algorithm (nested loop instead of hash join), and sequential scans where indexes would be faster. Fix: `ANALYZE table_name` after bulk operations. Permanent fix: adjust `default_statistics_target = 200` (more histogram buckets) for columns with non-uniform distributions.
+The planner estimates row counts from `pg_statistic`, which ANALYZE populates. What it stores per column: a histogram (100 buckets by default, set by `default_statistics_target`), `n_distinct`, the correlation between physical order and value order, and the most common values with their frequencies. Stale statistics: after a bulk load or schema change, `pg_statistic` shows old row counts and distributions. The planner may estimate 100 rows when the actual result is 1M rows — leading to wrong join order (small table should be hash-built, not the large one), wrong join algorithm (nested loop instead of hash join), and sequential scans where indexes would be faster. Fix: `ANALYZE table_name` after bulk operations. Permanent fix: adjust `default_statistics_target = 200` (more histogram buckets) for columns with non-uniform distributions.
 
 **Q: Explain partition pruning and when it fails.**
 Partition pruning eliminates partitions from query planning when their constraint ranges are incompatible with query predicates. For `WHERE created_at > '2024-07-01'`, the planner checks each partition's `FOR VALUES FROM... TO...` constraint — only partitions overlapping with 2024-07-01+ are scanned. Pruning fails when: (1) The WHERE clause uses a non-immutable function (e.g., `WHERE created_at > now()` — `now()` is evaluated at runtime, not planning time; use `STABLE` or hardcode the value). (2) Partition key uses an expression that doesn't match the WHERE expression exactly. (3) Too many partitions overwhelm the planning time (> 1000 partitions). Fix: use `enable_partition_pruning = on` (default), ensure WHERE predicates directly reference the partition key.
@@ -597,7 +646,7 @@ Autovacuum reads pages into the buffer pool and applies CPU cycles. Without thro
 PostgreSQL major versions (16→17→18) require a full dump+restore or pg_upgrade. Zero-downtime options: (1) `pg_upgrade --check` then `pg_upgrade` with link mode — fast but requires a maintenance window; from PostgreSQL 17 onward it also carries replication slots forward, so replicas do not need rebuilding. (2) Logical replication: set up a PG18 subscriber, replicate all tables from PG17, wait for lag to catch up, switch the application to PG18, drop PG17. Requires `wal_level=logical` on PG17. Limitations: sequences not replicated (sync manually); DDL changes not replicated. (3) `pg_createsubscriber` converts an existing physical standby into a logical subscriber in place, which skips the initial data copy entirely — the fastest route for large databases. The logical replication path allows < 1 minute of downtime for the cutover (stop PG17 writes, apply remaining lag, restart app against PG18).
 
 **Q: What is the Visibility Map and how does it accelerate index-only scans?**
-The Visibility Map has 2 bits per heap page: "all tuples on this page are visible to all transactions" (set by VACUUM) and "all tuples are frozen." Index-only scans: for each matching row in the index, check if the row's page is marked all-visible in the VM. If yes: return the index data without visiting the heap (no heap I/O). If no: visit the heap to check MVCC visibility. After `VACUUM`, all pages get the all-visible bit set (if all dead tuples were cleaned). After INSERTs/UPDATEs, the bit is cleared for affected pages. `n_dead_tup = 0` in `pg_stat_user_tables` and `heap_fetches = 0` in EXPLAIN confirm index-only scans are fully effective.
+The Visibility Map is 2 bits per heap page — all-visible and all-frozen — and the all-visible bit is what lets an index-only scan skip the heap. Both bits are set by VACUUM. For each matching row in the index, PostgreSQL checks whether that row's page is marked all-visible. If yes: return the index data without visiting the heap (no heap I/O). If no: visit the heap to check MVCC visibility. After `VACUUM`, all pages get the all-visible bit set (if all dead tuples were cleaned). After INSERTs/UPDATEs, the bit is cleared for affected pages. `n_dead_tup = 0` in `pg_stat_user_tables` and `heap_fetches = 0` in EXPLAIN confirm index-only scans are fully effective.
 
 **Q: Explain autovacuum workers and how you scale them.**
 `autovacuum_max_workers` (default 3) limits concurrent autovacuum processes. Each worker handles one table at a time. If more than 3 tables simultaneously need vacuuming (common in large deployments with hundreds of tables), some tables queue and bloat grows unchecked. Scaling: increase `autovacuum_max_workers = 6-10` (increases RAM usage by ~5MB per worker). Also increase `autovacuum_vacuum_cost_limit` per worker. Monitor: `SELECT relname, last_autovacuum, n_dead_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC` — if multiple high-dead-tup tables, autovacuum is falling behind.
@@ -643,7 +692,7 @@ SELECT * FROM pg_stat_progress_vacuum WHERE relname = 'events';
 -- Phase: vacuuming indexes (slow due to 12 indexes on events table)
 ```
 
-**Root cause**: Autovacuum cannot keep pace. 20M daily updates create 20M dead tuples/day. Autovacuum default settings clean ~5M dead tuples/day on a 2TB table (too slow). 850M dead tuples cause sequential scans to read 4x more data than necessary.
+**Root cause**: Autovacuum cannot keep pace. 20M daily updates create 20M dead tuples/day. Autovacuum default settings clean ~5M dead tuples/day on a 2TB table (too slow), so the backlog grows ~15M/day and reaches 850M in under two months. Against 5B live rows that is 17% dead, inflating every heap scan by about 1.2x — but the real cost is the vacuum itself: each pass must walk all 12 indexes on `events`, which is why a single pass was still 15% complete after 2.5 hours and why the spikes are periodic rather than constant.
 
 **Fix**:
 ```sql

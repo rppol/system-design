@@ -324,6 +324,44 @@ ON CONFLICT (compensation_id) DO NOTHING;
 -- If called twice, the second call is a no-op
 ```
 
+### Sagas Are ACD — There Is No Isolation
+
+The single most under-taught property of a saga: each step commits locally, so every
+*other* transaction in the system can see the half-finished saga. A saga gives you
+Atomicity (eventually, via compensation), Consistency and Durability — but not
+Isolation. The literature calls this **ACD**, and the anomalies are the familiar
+ANSI ones, arriving from a direction SQL isolation levels cannot defend against:
+
+| Anomaly | How a saga produces it |
+|---------|------------------------|
+| Lost update | Saga A reads a balance at step 1, a concurrent write changes it, saga A overwrites at step 3 |
+| Dirty read | Another transaction reads the inventory reservation that step 2 made and step 3 is about to compensate away |
+| Fuzzy / non-repeatable read | The saga reads the same row at step 1 and step 4 and gets different values |
+
+The dirty read is the expensive one, because it can escape the system: a customer is
+emailed "order confirmed" off a state that is compensated thirty seconds later.
+
+Because no database can help here, the fixes are application-level **countermeasures**
+(Garcia-Molina and Salem's 1987 saga paper; catalogued in Richardson's
+*Microservices Patterns*, §4.3):
+
+- **Semantic lock** — the saga sets an in-band flag (`order.status = PENDING`,
+  `payment.state = AUTHORIZED`) that tells every other reader "this row is mid-saga."
+  Readers must then decide: block, fail, or show the pending state honestly. This is
+  the workhorse; the `PENDING` status in the Section 14 code IS a semantic lock.
+- **Commutative updates** — design steps so order does not matter. `balance = balance - 100`
+  commutes with its own compensation `balance = balance + 100`; `balance = 400` does not.
+  This eliminates lost updates outright.
+- **Pessimistic view** — reorder the saga so the risky step runs last, shrinking the
+  window in which a dirty read can be observed.
+- **Reread value** — before writing, re-read the row and verify it has not changed
+  since the saga read it; abort and restart the saga if it has. This is optimistic
+  concurrency control applied across the saga rather than inside one transaction.
+
+The design rule that falls out: **never expose a saga's intermediate state as if it
+were final.** Model the in-progress state explicitly in the domain (`PENDING`,
+`AWAITING_PAYMENT`) rather than letting a half-applied saga masquerade as a completed one.
+
 Sagas and 2PC add up their latency in opposite ways, and the comparison decides which one is actually faster for a given workflow:
 
 ```
@@ -440,20 +478,19 @@ CREATE TABLE processed_events (
     processed_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Inventory Service consumer
-BEGIN;
-  -- Check if already processed
-  INSERT INTO processed_events (event_id) VALUES (:event_id)
-  ON CONFLICT DO NOTHING;
-
-  GET DIAGNOSTICS rows_affected = ROW_COUNT;
-
-  IF rows_affected > 0 THEN
-    -- First time processing
-    UPDATE inventory SET reserved = reserved + :quantity WHERE sku = :sku;
-  END IF;
-COMMIT;
--- If consumer receives the same event_id again, INSERT is a no-op → idempotent
+-- Inventory Service consumer: claim the event and apply it in ONE statement.
+-- A data-modifying CTE keeps claim and effect atomic without a stored procedure.
+WITH claimed AS (
+    INSERT INTO processed_events (event_id) VALUES (:event_id)
+    ON CONFLICT (event_id) DO NOTHING
+    RETURNING event_id
+)
+UPDATE inventory
+SET reserved = reserved + :quantity
+WHERE sku = :sku
+  AND EXISTS (SELECT 1 FROM claimed);
+-- On a redelivery the INSERT conflicts, `claimed` is empty, the UPDATE matches
+-- zero rows, and the statement is a no-op → idempotent
 ```
 
 ### Distributed Locks
@@ -515,13 +552,13 @@ The lock's TTL expires mid-pause, so both clients briefly believe they hold it; 
 
 ## 7. Real-World Examples
 
-**Uber** (Saga + outbox): Booking a ride involves payment service, driver assignment, and notification. Implemented as a saga with an orchestrator. The outbox pattern guarantees notifications are sent exactly once even if the notification service is temporarily down.
+**Uber** (orchestrated saga): Uber built and open-sourced Cadence, a durable workflow engine, precisely because a ride spans driver assignment, trip lifecycle, payment and rating across many services and databases. Uber's own write-up names the saga pattern as the way to standardize the compensation APIs a workflow rolls back with.
 
-**Amazon** (Saga + choreography): Amazon's order flow is a classic saga. Each stage (payment, warehouse pick, shipping) is a separate service. Failures trigger compensating events (payment release, warehouse unwind).
+**Conductor OSS** (orchestration engine): Originally built at Netflix for microservice workflow orchestration; Netflix archived its repository in December 2023 and the project is now maintained by Orkes and the Conductor OSS community. Each workflow step is a task; the orchestrator retries failed steps and runs compensations.
 
-**Netflix** (Saga + Conductor): Netflix's Conductor orchestration engine manages sagas across microservices. Each workflow step is a task; the orchestrator retries failed steps and executes compensations.
+**E-commerce order flows** (choreographed saga): The canonical choreography shape — payment, warehouse pick, and shipping as separate services, with failures publishing compensating events (payment release, warehouse unwind). Treat this as the archetype rather than a specific retailer's published architecture.
 
-**Debezium + Outbox** (Red Hat): Debezium's outbox event router is the reference implementation used by thousands of teams for CDC-based reliable messaging without polling.
+**Debezium + Outbox** (Red Hat): Debezium ships an Outbox Event Router single-message transform, the reference implementation for CDC-based reliable messaging without polling.
 
 ---
 
@@ -558,7 +595,7 @@ The lock's TTL expires mid-pause, so both clients briefly believe they hold it; 
 
 **Saga stuck in intermediate state**: The orchestrator crashes mid-saga. The saga state is stored in memory, not database. On restart, no record of in-progress sagas. Reservations are held indefinitely. Fix: saga state must be persisted durably (database) with each step result before proceeding to the next step. Resume from last checkpoint on restart.
 
-**Inbox table unbounded growth**: The inbox (processed events) table grows without bound. After a year: 1B rows, lookups slow from O(1) to O(log N) on a large B+tree. Fix: expire inbox entries after the message delivery window (typically 7 days, matching Kafka retention), using a TTL or periodic cleanup.
+**Inbox table unbounded growth**: The inbox (processed events) table grows without bound. After a year: 1B rows. The primary-key lookup is still O(log N), but the tree gains a level and the index stops fitting in the buffer pool, so what used to be a cached probe becomes a physical read on every consumed message. Fix: expire inbox entries after the message delivery window (typically 7 days, matching Kafka retention), using a TTL or periodic cleanup.
 
 ---
 
@@ -568,7 +605,7 @@ The lock's TTL expires mid-pause, so both clients briefly believe they hold it; 
 |--------------------|-------------------------------------------------|
 | Debezium           | CDC-based outbox relay from DB WAL to Kafka     |
 | Apache Kafka       | Message broker for saga events                  |
-| Netflix Conductor  | Saga orchestration engine                       |
+| Conductor OSS      | Saga orchestration engine (Orkes / community)    |
 | Temporal.io        | Durable workflow execution (saga as code)       |
 | Apache Camel       | Saga pattern integration                        |
 | Spring Integration | Outbox pattern with Spring Data                 |
@@ -599,13 +636,16 @@ TCC is a distributed transaction pattern with three phases per resource: (1) Try
 Temporal is a durable workflow engine that makes saga orchestration reliable by persisting the execution state of workflow code as events. If the workflow (orchestrator) crashes mid-execution, it replays from the last recorded event, resuming exactly where it left off without the developer writing explicit state recovery logic. Each "activity" (service call) is retried automatically with configurable policies. Workflows are written as plain code (Go, Java, TypeScript) but execute with durable state, making saga orchestration look like sequential code rather than complex state machines. Compensation is implemented as explicit cancel activities triggered on workflow failure.
 
 **Q: How does the Redlock algorithm work and why is it controversial?**
-Redlock acquires a lock across N independent Redis nodes (N ≥ 5, typically 5). The client sends `SET key value NX PX ttl` to all N nodes simultaneously and starts a timer. If N/2+1 or more nodes respond with success within a timeout, the lock is acquired. The validity time is `ttl - elapsed_time`. Martin Kleppmann's critique: if the lock holder pauses (JVM GC, OS preemption) for longer than the TTL, the lock expires and another client acquires it. Both clients now believe they hold the lock. Redlock cannot prevent this without fencing tokens because it relies on wall-clock time across nodes with independent clocks. The safe alternative is to pair distributed locks with fencing tokens that the protected resource can validate.
+Redlock acquires a lock across N totally independent Redis masters — the reference algorithm uses N=5, but N is a deployment choice, not a fixed requirement. The client sends `SET key value NX PX ttl` to all N nodes in parallel and starts a timer. The lock counts as acquired only if N/2+1 or more nodes replied success AND the elapsed acquisition time is still less than the lock validity time. The remaining validity is `ttl - elapsed_time`, minus a small allowance for clock drift between nodes. Martin Kleppmann's critique: if the lock holder pauses (JVM GC, OS preemption) for longer than the TTL, the lock expires and another client acquires it. Both clients now believe they hold the lock. Redlock cannot prevent this without fencing tokens because it relies on wall-clock time across nodes with independent clocks. The safe alternative is to pair distributed locks with fencing tokens that the protected resource can validate.
 
 **Q: What is a fencing token and how does it prevent split-brain writes?**
 A fencing token is a monotonically increasing number issued by the lock server each time a lock is granted. The client includes the token in every write request to the protected resource. The storage layer (database, file system) tracks the highest token it has seen and rejects writes with a lower token. If client A holds lock token 33 but pauses, token 34 is issued to client B. When A resumes and sends a write with token 33, the storage rejects it because token 34 is already known. This guarantees that even if two clients simultaneously believe they hold the lock, only the most recent lock holder's writes succeed.
 
 **Q: What is the difference between saga choreography and saga orchestration?**
 In choreography, there is no central coordinator. Each service reacts to events published by previous services and publishes its own events. Services are decoupled — no service knows about the others. Trade-off: event dependencies form implicit workflows that are hard to visualize and debug. Adding a new step requires modifying event handlers in multiple services. In orchestration, a central orchestrator drives the workflow, calling each service in sequence and tracking state. The workflow is visible in one place and easier to debug and modify. Trade-off: the orchestrator becomes a bottleneck and single point of deployment. For simple, stable workflows: orchestration. For complex event-driven ecosystems with many independent teams: choreography.
+
+**Q: What isolation guarantee does a saga give, and how do you compensate for what it lacks?**
+A saga is ACD, not ACID — it gives atomicity, consistency and durability, but no isolation, because every step commits locally and is immediately visible to everyone else. That exposes the classic anomalies from an angle no isolation level can block: lost updates, dirty reads of state a compensation is about to undo, and non-repeatable reads across steps. The dirty read is the one that escapes the system — a confirmation email sent off an order that gets compensated away thirty seconds later. Because the database cannot help, you apply application-level countermeasures: a semantic lock (an explicit `PENDING` / `AUTHORIZED` status that warns every other reader the row is mid-saga), commutative updates (`balance = balance - 100` rather than `balance = 400`, so order stops mattering and lost updates vanish), a pessimistic view (reorder steps so the risky one runs last and the exposure window shrinks), and reread-value checks (verify the row is unchanged before writing, abort the saga if not). The design rule is to model the in-progress state explicitly in the domain rather than let a half-applied saga look like a finished one.
 
 **Q: How do you handle a saga that gets stuck in a partially completed state?**
 Sagas can get stuck when the compensating transaction itself fails (e.g., the payment service is down when the inventory compensation triggers a payment release). Recovery strategies: (1) Retry compensations with exponential backoff — eventually the downstream service recovers. (2) Dead-letter queue: after N retries, send the stuck saga to a dead-letter topic for manual review. (3) Manual intervention: an operations dashboard shows stuck sagas with their last step and error; an operator can trigger retry or force-complete. (4) Timeout-based compensation: if a saga is in a partial state for longer than a business-defined SLA, automatically trigger full compensation. Always monitor the count of stuck sagas in production.
@@ -628,7 +668,7 @@ On receiving a request: (1) Check if key exists; if so, return stored response. 
 Direct publishing: write to DB, then publish to Kafka as two separate operations. If the DB commit succeeds but Kafka publish fails (Kafka down, network error, process crash), the event is lost — the DB change happened but the event was never delivered. This is the dual-write problem. Outbox pattern: write to DB and outbox table in one transaction, then separately publish from outbox. If Kafka publish fails, the outbox row is still there; the relay retries until successful. The event is guaranteed to be published eventually as long as the relay is running, because the outbox row persists across crashes.
 
 **Q: What is the XA transaction protocol and what are its performance characteristics?**
-XA is a standard protocol (ISO/IEC 10026) for distributed transactions across multiple resource managers (databases, message queues). The transaction manager coordinates 2PC using XA calls: `xa_start`, `xa_end`, `xa_prepare`, `xa_commit`/`xa_rollback`. Performance characteristics: each participant holds row locks from xa_prepare until xa_commit is received — typically an additional network RTT. With 2 participants on LAN: +2–5ms per transaction. With participants across data centers: +50–200ms. XA also requires stateful connections (each resource must be addressed by the same connection that called xa_start), reducing connection pool effectiveness. Overhead typically 2–3x compared to single-resource transactions.
+XA is the standard system-level interface between a transaction manager and multiple resource managers such as databases and message queues. It is defined by the X/Open CAE Specification "Distributed Transaction Processing: The XA Specification" (Document C193, published 1991, now maintained by The Open Group) — not by ISO/IEC 10026, which is the separate OSI TP standard for how transaction-processing systems talk to each other. The transaction manager coordinates 2PC using XA calls: `xa_start`, `xa_end`, `xa_prepare`, `xa_commit`/`xa_rollback`. Performance characteristics: each participant holds row locks from xa_prepare until xa_commit is received — typically an additional network RTT. With 2 participants on LAN: +2–5ms per transaction. With participants across data centers: +50–200ms. XA also requires stateful connections (each resource must be addressed by the same connection that called xa_start), reducing connection pool effectiveness. Overhead typically 2–3x compared to single-resource transactions.
 
 **Q: How do you detect and handle saga compensation failures?**
 Compensation failures must be logged with the saga ID, step, attempt number, and error. An alert fires when compensations exceed N retries (e.g., 10 retries over 30 minutes). The compensation enters a dead-letter state visible in a dashboard. Resolution: (1) Automated: fix the downstream service, then trigger saga retry from the compensation step (saga resumes rather than starts over). (2) Manual: operator reviews the stuck compensation, determines if it can be safely skipped (e.g., the resource was already cleaned up externally), and marks it complete in the saga state store. Key metric: number of sagas in compensation failure state — alert if non-zero for > 30 minutes.
