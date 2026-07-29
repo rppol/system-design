@@ -22,7 +22,7 @@ Choosing a database without requirements is like buying a vehicle without knowin
 
 **Operational cost matters as much as feature set**: A database that requires 3 senior DBAs to operate (Cassandra) has a different total cost than a managed cloud database with the same capabilities (DynamoDB).
 
-**Avoid the sunk cost trap**: If you discover the wrong database was chosen, migrating is painful but less painful than scaling the wrong database further. Make the migration decision early.
+**Avoid the sunk cost trap**: If you discover the wrong database was chosen, migrating is painful but less painful than scaling the wrong database further. Make the migration decision early, on a leading indicator (headroom falling below ~5x on the binding dimension, or workarounds accumulating for a missing engine feature) rather than a lagging one — a lagging indicator leaves less runway than the migration needs. Write that threshold down in the same document that records the choice.
 
 **Start with PostgreSQL**: For most applications at startup stage, PostgreSQL is the right default. Add specialized databases only when proven requirements cannot be met.
 
@@ -132,7 +132,7 @@ Write scale:
   → Cassandra / DynamoDB (leaderless, horizontal write scale)
   → CockroachDB / TiDB (distributed SQL, horizontal write scale)
   → ClickHouse (batch writes at massive scale)
-  → Redis (in-memory, 1M ops/second per node)
+  → Redis (in-memory; ~100-200K ops/second per node unpipelined, ~1M with deep pipelining)
 
 Dataset scale:
   → PostgreSQL: up to 10TB practical (single node + replicas)
@@ -203,48 +203,55 @@ Correct approach:
 
 ### Total Cost of Ownership (TCO)
 
+All list prices below are AWS us-east-1 on-demand, July 2026, at 730 hours/month. Prices move; the *shape* of the comparison is what to remember.
+
 ```
-Self-hosted PostgreSQL (4-core, 32GB, 2× NVMe SSD):
-  Compute: $500-800/month (EC2 r5.xlarge equivalent)
-  Storage: $200/month (2TB NVMe)
-  Engineer time: 0.25 FTE × $250K = $62,500/year for ops/upgrades/HA
-  Total: ~$75K/year
+Self-hosted PostgreSQL HA pair (2 x EC2 r6g.xlarge, 4 vCPU / 32GB, 2TB gp3 each):
+  Compute: 2 x $0.2016/hr x 730     = $294/month
+  Storage: 2 x 2,048GB x $0.08/GB   = $328/month
+  Engineer time: 0.25 FTE x $250K   = $62,500/year for ops/upgrades/HA/patching
+  Total: ~$70K/year   (of which $7.5K is infrastructure)
 
-AWS RDS PostgreSQL (db.r5.xlarge, 2TB):
-  Instance: $1,500/month ($18K/year)
-  Storage: $460/month
-  Multi-AZ: 2× instance cost → $36K/year
-  Total: ~$42K/year (lower than self-managed if ops time is valued)
+AWS RDS PostgreSQL (db.r6g.xlarge Multi-AZ, 2TB gp3):
+  Instance: $0.899/hr x 730         = $656/month   (the Multi-AZ rate is already 2x Single-AZ)
+  Storage:  2,048GB x $0.23/GB      = $471/month   (Multi-AZ storage bills at 2x Single-AZ)
+  Total: ~$13.5K/year (no dedicated ops time)
 
-AWS Aurora (db.r5.xlarge, 2TB):
-  Instance: $3,000/month (cluster with 1 reader)
-  Storage: auto-scaled, ~$300/month
-  Total: ~$40K/year (similar to RDS, better performance)
+AWS Aurora PostgreSQL (db.r6g.xlarge writer + 1 reader, 2TB, Standard storage):
+  Instances: 2 x ~$0.52/hr x 730    = ~$758/month
+  Storage:   2,048GB x $0.10/GB     = ~$205/month
+  I/O:       $0.20 per million requests -- the variable line RDS does not have
+  Total: ~$12K/year plus I/O, which on a read-heavy workload can exceed the instances
 
-Self-hosted CockroachDB (9 nodes for 3-region HA):
-  Compute: 9 × $500/month = $4,500/month
-  Engineer time: 1 FTE for distributed system expertise
-  Total: ~$305K/year
+Self-hosted CockroachDB (9 nodes for 3-region HA, r6g.xlarge + 500GB gp3 each):
+  Compute: 9 x $0.2016/hr x 730     = $1,325/month
+  Storage: 9 x 500GB x $0.08/GB     = $360/month
+  Engineer time: 1 FTE for distributed systems expertise = $250K/year
+  Total: ~$270K/year   (of which $20K is infrastructure)
 
-CockroachDB Dedicated (managed):
-  Starts at $3,000+/month per region
-  Total: $100-500K/year depending on scale
+CockroachDB Cloud (managed; tiers are Basic / Standard / Advanced):
+  Standard: from $146/month per 2 vCPU   -> ~$32K/year for the same 36 vCPU
+  Advanced: from $295/month per 2 vCPU   -> ~$64K/year for the same 36 vCPU
+  Plus storage and request units. Note this lands FAR under self-hosting the
+  same cluster, because the $250K FTE dwarfs any managed-service margin.
 
-DynamoDB (100M writes/day, 1B reads/day):
-  Write capacity: 1M writes × $1.25/million = $1,250/month
-  Read capacity: 10M reads × $0.25/million = $2,500/month
-  Storage: 5TB × $0.25/GB = $1,250/month
+DynamoDB on-demand (100M writes/day, 1B eventually-consistent reads/day, 5TB):
+  Writes:  100M x 30 = 3,000M x $0.625/million        = $1,875/month
+  Reads:   1B x 30 = 30,000M reads, 0.5 RRU each
+           = 15,000M RRU x $0.125/million             = $1,875/month
+  Storage: 5,000GB x $0.25/GB                         = $1,250/month
   Total: ~$60K/year (no operational overhead)
+  Strongly consistent reads would double the read line to $3,750/month.
 ```
 
 ```mermaid
 xychart-beta
     title "Annual TCO by Deployment Option ($K/year)"
-    x-axis ["Aurora", "RDS Postgres", "DynamoDB", "Self-hosted PG", "CRDB Dedicated", "Self-hosted CRDB"]
-    y-axis "Annual cost ($K)" 0 --> 320
-    bar [40, 42, 60, 75, 300, 305]
+    x-axis ["Aurora", "RDS Postgres", "CRDB Standard", "DynamoDB", "CRDB Advanced", "Self-hosted PG", "Self-hosted CRDB"]
+    y-axis "Annual cost ($K)" 0 --> 280
+    bar [12, 14, 32, 60, 64, 70, 270]
 ```
-The distributed-SQL tax is not linear — both CockroachDB options land near $300K/year, roughly 4-7x the boring PostgreSQL and DynamoDB options, which is why Section 9 says avoid the added complexity until a proven requirement demands it. (CockroachDB Dedicated's $100-500K/year range is plotted at its midpoint.)
+Two things jump out. First, every managed option sits in the same $12-64K band while the two self-hosted options are the expensive ones — because a fraction of an engineer costs more than the entire infrastructure bill at this size. Second, the distributed-SQL tax is real but it is an *operational* tax, not a hosting one: managed CockroachDB is a few tens of thousands per year, self-hosting the same nine nodes is $270K because it demands a full-time distributed-systems engineer. That is the concrete form of Section 9's advice to avoid the added complexity until a proven requirement demands it.
 
 **The idea behind it.** "The invoice is only part of the bill — the engineer time spent operating a database is a real, recurring line item, and on small deployments it is the largest one." TCO comparisons that stop at the hosting cost systematically favour self-hosting, which is exactly why self-hosting keeps getting chosen and then regretted.
 
@@ -255,28 +262,36 @@ The distributed-SQL tax is not linear — both CockroachDB options land near $30
 | Loaded engineer cost | Fully loaded annual cost of that engineer, `$250K` |
 | TCO | `12 x monthly infra  +  FTE fraction x loaded cost` |
 
-**Walk one example.** Self-hosted against RDS, at the same 4-core / 32 GB / 2 TB workload:
+**Walk one example.** Self-hosted against RDS, both configured for HA, at the same 4 vCPU / 32 GB / 2 TB workload:
 
 ```
-  self-hosted PostgreSQL
-    compute $500-800/mo  +  storage $200/mo          ->    $700 - $1,000 /mo
-    infra per year       12 x $700  ..  12 x $1,000   =    $8.4K  ..  $12.0K
-    ops time             0.25 FTE x $250K             =    $62.5K
-                                                           ----------------
-    total                                                  $70.9K ..  $74.5K
+  self-hosted PostgreSQL, HA pair
+    compute 2 x $147/mo   +  storage 2 x $164/mo        =    $622 /mo
+    infra per year        12 x $622                      =    $7.5K
+    ops time              0.25 FTE x $250K               =    $62.5K
+                                                              -------
+    total                                                     $70.0K
 
   RDS PostgreSQL Multi-AZ
-    instance $1,500/mo x 2 (Multi-AZ)  +  storage $460/mo  =  $3,460 /mo
-    infra per year       12 x $3,460                        =  $41.5K
-    ops time             none required                      =  $0
-                                                               -------
-    total                                                      $41.5K
+    instance $656/mo      +  storage $471/mo             =  $1,127 /mo
+    infra per year        12 x $1,127                     =  $13.5K
+    ops time              none required                   =  $0
+                                                             -------
+    total                                                    $13.5K
 
-  RDS costs 3.5x - 4.9x more per month and still wins on TCO, because the
-  $62.5K of ops time is 84% of the self-hosted total.
+  RDS costs 1.8x more per month and still wins TCO by 5x, because the
+  $62.5K of ops time is 89% of the self-hosted total.
 ```
 
-That 84% is the whole lesson. The infrastructure line items differ by a few thousand dollars a year; the operational line item differs by sixty thousand. It also tells you when the comparison flips: the ops cost is roughly fixed regardless of instance size, so as the fleet grows the managed-service premium (a percentage of compute) eventually overtakes a fixed 0.25 FTE. Run this arithmetic with your own numbers rather than inheriting the conclusion — the crossover point is specific to your scale and your loaded engineer cost.
+That 89% is the whole lesson. The infrastructure line items differ by about six thousand dollars a year; the operational line item differs by sixty-two thousand. It also tells you when the comparison flips: the ops cost is roughly fixed regardless of instance size, so as the fleet grows the managed-service premium (a percentage of compute) eventually overtakes a fixed 0.25 FTE. At this size that crossover is nowhere near — you would need roughly ten times the compute before the RDS premium reached $62.5K/year. Run this arithmetic with your own numbers rather than inheriting the conclusion; the crossover point is specific to your scale and your loaded engineer cost, and it moves every time AWS reprices.
+
+### Constraints Filter, Preferences Score
+
+Before the scorecard runs, separate the two kinds of requirement. A **constraint** is binary and eliminates a candidate outright; a **preference** is a matter of degree and gets a weighted score. Mixing them is how a disqualified database survives into the final round on the strength of a high score elsewhere.
+
+Typical constraints: data residency ("patient data must not leave the EU"), a certification the vendor either holds or does not, an air-gapped or on-prem deployment requirement, a hard licence prohibition, an existing platform mandate. Typical preferences: query expressiveness, operational burden, team familiarity, cost.
+
+The trap runs in both directions. On one side, a team disqualifies a candidate on a constraint that is not actually a constraint — the case study below rejects DynamoDB partly on "HIPAA complexity," but DynamoDB, RDS, Aurora and ElastiCache are all on AWS's HIPAA-eligible services list, so the honest reason is the query model, not the regulation. On the other, "eligible" is not "compliant": eligibility only means the service *may* hold protected data once a BAA is signed and the encryption, access-control and audit settings are actually configured. Check the vendor's published list, then check that your configuration meets the control, and record which of the two you are relying on.
 
 ### Evaluation Scorecard
 
@@ -289,7 +304,7 @@ For each candidate database, score 1-5 on each dimension:
 | Scale to requirements | 20% | 3 | 5 | 5 |
 | Operational complexity | 15% | 4 | 5 | 2 |
 | Team expertise | 10% | 5 | 3 | 2 |
-| Weighted score | 100% | 4.55 | 3.55 | 3.20 |
+| Weighted score | 100% | 4.45 | 3.45 | 3.15 |
 
 Context: Strong consistency required, SQL queries, moderate scale, no NoSQL expertise → PostgreSQL wins clearly.
 
@@ -324,23 +339,21 @@ Same scorecard with: no consistency requirement, 1M writes/second, managed cloud
   gap between 1st and 2nd:  4.45 - 3.45  =  1.00   ->  decisive, not a coin flip
 ```
 
-(The table above publishes 4.55 / 3.55 / 3.20; the term-by-term sums come to 4.45 / 3.45 / 3.15. The ranking and the ~1.0 winning margin are identical either way.)
-
 The gap is the part worth reading. A 1.00 spread on a 1-5 scale means no single scoring judgement flips the outcome — PostgreSQL could lose a full point on scale and still win. Compare that to the sensitivity noted just above: change the *context* rather than the scores, weighting scale at 30% and consistency at 10%, and DynamoDB overtakes. That is the honest reading of any scorecard — it is a record of which requirements you decided mattered, not an objective measurement of the databases.
 
 ---
 
 ## 7. Real-World Examples
 
-**Stripe (PostgreSQL)**: Stripe's entire payment processing runs on PostgreSQL. At billions of transactions, they scale via sharding (Citus extension) and application-level read replicas rather than switching databases. Deep PostgreSQL expertise and reliability over novelty.
+**Stripe (DocDB, built on MongoDB)**: Stripe's core financial data does *not* live in a relational database. They chose MongoDB in 2011 for developer velocity and, rather than migrating away as they grew, built **DocDB** — their own database-as-a-service layer over MongoDB Community's storage engine, adding a proxy tier, their own replication, and online data-movement machinery. Stripe reports DocDB serving over five million queries per second across 5,000+ collections on 2,000+ shards, with petabytes of financial data. This is the counterexample worth carrying into an interview: the "obvious" answer for payments is PostgreSQL, and the company with the most payments at stake got there by investing in the engine it already had rather than by picking the theoretically right one.
 
 **Instagram (PostgreSQL + Cassandra + Redis)**: PostgreSQL for user accounts and social graph metadata; Cassandra for feed storage (time-series, partition by user_id); Redis for session state, rate limiting, and leaderboards. Each database chosen for its access pattern.
 
 **Netflix (Cassandra + DynamoDB + EVCache)**: Cassandra for viewing history and user data at petabyte scale; DynamoDB for operational data; EVCache (Memcached-based) as the primary cache tier. Netflix published their Cassandra operational expertise extensively.
 
-**Airbnb (MySQL + Elasticsearch + Druid)**: MySQL (and Vitess for sharding) for core transactional data; Elasticsearch for listing search (full-text + geo + facets); Apache Druid for real-time analytics dashboards.
+**Airbnb (MySQL + Elasticsearch + Druid)**: MySQL on RDS for core transactional data, partitioned by hand rather than with an off-the-shelf sharding layer; Elasticsearch for listing search (full-text + geo + facets); Apache Druid, fed by Spark Streaming and queried through Airbnb's own Superset, for real-time analytics dashboards.
 
-**Uber (MySQL with Schemaless + Cassandra)**: Schemaless is Uber's custom MySQL sharding framework. Cassandra for their trip data at write-heavy scale. Separate OLAP with Presto/Hive for analytics.
+**Uber (Docstore + Cassandra)**: Uber's in-house document store, Docstore, sits on sharded MySQL and succeeded the earlier Schemaless system; Cassandra carries trip data at write-heavy scale. Analytics is a separate stack on Presto/Hive. The pattern to notice across Stripe, Uber and Airbnb: at extreme scale, none of them switched engines — all three wrapped the engine they had in their own sharding and routing layer.
 
 ---
 
@@ -351,7 +364,11 @@ The gap is the part worth reading. A 1.00 spread on a 1-5 scale means no single 
 ```
 10M writes/day = ~116 writes/second (sustainable, not peak)
 
-PostgreSQL handles this easily on a single node (max ~50K TPS for simple INSERTs).
+PostgreSQL handles this easily on a single node. Treat ~50K TPS for simple batched
+INSERTs as an order-of-magnitude planning ceiling for a well-provisioned node, not a
+measured constant — the real number depends on row width, index count, fsync policy
+and whether the writes are batched, and it is the number you must benchmark yourself
+before any migration decision rests on it.
 No sharding needed. Full ACID, SQL queries, joins, subqueries — all available.
 
 Cassandra is appropriate when:
@@ -486,13 +503,19 @@ Distributed SQL earns its 2-5x cost premium only when write scale or multi-regio
 Fraud detection requires: (1) Real-time transaction lookup (< 5ms) to check if a card/account has recent suspicious activity — Redis for hot-path lookups (sub-millisecond). (2) Graph analysis — finding ring transactions (account A → B → C → A) is a graph problem — Neo4j or a graph algorithm library. (3) Historical transaction analysis — querying 12 months of transaction history for pattern matching — PostgreSQL for relational structure + temporal queries, or ClickHouse for analytical aggregations over large datasets. (4) Model feature store — features needed for the ML model at inference time — Redis (sub-millisecond) backed by a periodic batch update from PostgreSQL. Final architecture: PostgreSQL (canonical store) + Redis (hot-path cache + feature store) + Neo4j (graph analysis) + ClickHouse (analytical queries). Not all four are needed day one — start with PostgreSQL + Redis, add others as proven requirements emerge.
 
 **Q: When is it worth the operational complexity of CockroachDB over PostgreSQL with read replicas?**
-PostgreSQL with read replicas is sufficient for: single-region deployments at any scale up to ~50K TPS writes, where team has SQL expertise and wants full extension ecosystem. CockroachDB becomes worth the complexity when: (1) Writes must be horizontally scaled beyond what a single PostgreSQL primary handles (> 50K TPS sustained). (2) Multi-region active-active writes with strong consistency are required — PostgreSQL cannot provide this (Postgres primary is single-region). (3) Auto-sharding eliminates the manual sharding complexity of Citus/Vitess. The costs to accept: ~2× higher infrastructure cost, no PostgreSQL extension ecosystem (no PostGIS, pgvector, TimescaleDB), required distributed systems expertise for operation, ~2ms minimum write latency (Raft coordination floor). If any of these costs are unacceptable, optimize PostgreSQL further before switching.
+PostgreSQL with read replicas is sufficient for: single-region deployments at any scale up to ~50K TPS writes, where team has SQL expertise and wants full extension ecosystem. CockroachDB becomes worth the complexity when: (1) Writes must be horizontally scaled beyond what a single PostgreSQL primary handles (> 50K TPS sustained). (2) Multi-region active-active writes with strong consistency are required — PostgreSQL cannot provide this (Postgres primary is single-region). (3) Auto-sharding eliminates the manual sharding complexity of Citus/Vitess. The costs to accept: ~2× higher infrastructure cost, no PostgreSQL extension ecosystem (CockroachDB ships native vector indexing, but there is no PostGIS or TimescaleDB and no way to install an arbitrary extension), required distributed systems expertise for operation, ~2ms minimum write latency (Raft coordination floor). If any of these costs are unacceptable, optimize PostgreSQL further before switching.
 
 **Q: How do you evaluate a database for a high-traffic e-commerce product?**
 Decompose by component: (1) Product catalog: read-heavy, structured, complex queries (facets, search) — PostgreSQL for source of truth + Elasticsearch for search. (2) Inventory: high write throughput during flash sales, strong consistency required (no oversell) — PostgreSQL with `SELECT FOR UPDATE` or `UPDATE ... WHERE stock > 0 RETURNING`. (3) Sessions: ephemeral, sub-millisecond reads — Redis. (4) Orders: transactional, ACID required, complex queries — PostgreSQL. (5) Analytics: aggregate sales data, reports — ClickHouse or BigQuery (not the OLTP database). The selection is component-by-component, not a single database for all. PostgreSQL handles most components; specialized databases are added only for search (Elasticsearch) and analytics (ClickHouse).
 
 **Q: What is the polyglot persistence tradeoff and when does it become a liability?**
 Polyglot persistence uses different databases for different access patterns within the same system. It becomes a liability when: (1) Synchronization between databases drifts — Elasticsearch index is 5 minutes behind PostgreSQL primary; users see stale search results. (2) Developer onboarding time increases — new engineers must learn 4+ database systems to contribute. (3) Debugging cross-database consistency bugs requires tracing through multiple data stores. (4) Operational burden multiplies — backup, monitoring, alerting, and scaling procedures per database. It is a liability when the complexity overhead exceeds the performance/capability benefit. Evaluate: can PostgreSQL handle this access pattern with proper indexing, partitioning, or extensions (pgvector, TimescaleDB)? Add a specialized database only when the answer is definitively no, with benchmark evidence.
+
+**Q: What is the difference between a constraint and a preference in database selection, and why does it matter?**
+A constraint is binary and eliminates a candidate outright; a preference is a matter of degree and gets a weighted score. Data residency, a required certification, an air-gapped deployment or a platform mandate are constraints — no amount of excellence on query expressiveness compensates for failing one. Query model, operational burden, team familiarity and cost are preferences and belong in the scorecard. Mixing them lets a disqualified database survive into the final round on a high score elsewhere, and it lets a team disqualify a perfectly eligible candidate on a constraint that turns out to be imaginary: teams routinely reject DynamoDB for HIPAA workloads when DynamoDB, RDS, Aurora and ElastiCache are all on AWS's HIPAA-eligible services list. Two disciplines follow: filter on constraints first and score only what survives, and remember that a vendor being "eligible" for a regime is not the same as your deployment being compliant with it — eligibility permits the data, your configuration is what satisfies the control.
+
+**Q: When should you decide to migrate off a database, and what makes that decision reversible or not?**
+Decide when a leading indicator crosses a threshold you set in advance, not when a lagging one hurts — because the migration takes longer than the runway the lagging indicator leaves you. Useful leading indicators: headroom to the engine's ceiling dropping below roughly 5x on the dimension that binds (write TPS, dataset size, p99 on the hot query), the rate of workarounds accumulating in application code to compensate for a missing engine feature, and the growth rate itself, since a workload doubling every six months converts 10x headroom into zero in under two years. Set the threshold in the same document where the database was chosen. The reversibility question is separate and is what actually sets the cost: a migration that preserves the data model (PostgreSQL to a distributed SQL engine, pgvector to a dedicated vector store) is a re-host and can run behind a dual-write plus shadow-read cutover; a migration that changes the model (relational to a partition-key-only store) rewrites every query and every consistency assumption in the application, and there is no incremental path back. Prefer the reversible option when the two are close on the scorecard, and price the irreversible one as if you will have to undo it.
 
 **Q: How do you migrate from PostgreSQL to a NoSQL database without downtime?**
 Use the strangler fig pattern: (1) Keep PostgreSQL as the source of truth. (2) Add dual-write: new writes go to both PostgreSQL and the NoSQL database. (3) Backfill historical data from PostgreSQL to NoSQL in batches (off-peak). (4) Verify: run a shadow comparison — for each production read, compare results from both databases; alert on differences. (5) Gradually route read traffic to the NoSQL database (start with 1%, ramp to 100%). (6) After 100% reads are on NoSQL: remove PostgreSQL writes (or keep as audit backup). The dual-write period is the critical window — it requires both databases to stay in sync. Use the outbox pattern (write to PostgreSQL + outbox in one transaction; CDC publishes to NoSQL asynchronously) for reliable dual-write.
@@ -513,7 +536,7 @@ Methodology: (1) Generate representative data: production-sized dataset with rea
 HFT requires: P99 latency < 1ms for trade execution reads/writes; strict ACID for position management; no complex analytics on the hot path. Selection: VoltDB or an in-memory RDBMS (H-Store family) for the execution engine — stored procedures avoid network overhead, serializable isolation without lock overhead (partitioned execution). For the audit log: append-only Cassandra or ClickHouse (high write throughput, never reads in hot path). For risk calculations: Redis or in-memory compute (Apache Ignite). Key principle: the hot execution path must be in-memory with no disk I/O; all disk writes are async (command log in VoltDB, AOF in Redis).
 
 **Q: How do you choose between self-hosted and managed database?**
-Managed database (RDS, Cloud SQL, Atlas, PlanetScale): lower operational burden (no OS patching, automatic backups, managed HA failover), faster time-to-value, higher cost at scale. Choose managed when: team lacks DBA expertise, time-to-production matters, operational cost savings justify higher hosting cost, or compliance requires managed service with specific certifications (SOC 2, HIPAA — managed services have these). Self-hosted: lower cost at scale (3+ RDS instances, managed service premium is 20–40% of compute cost), full control over configuration and extensions (managed services restrict some extensions), required for specific compliance (data sovereignty, no third-party access). Calculate breakeven: at what monthly cost does the DBA salary + infrastructure become cheaper than managed service fees? For most startups, managed is cheaper until $50K+/month database spend.
+Managed database (RDS, Cloud SQL, Atlas, PlanetScale): lower operational burden (no OS patching, automatic backups, managed HA failover), faster time-to-value, higher cost at scale. Choose managed when: team lacks DBA expertise, time-to-production matters, operational cost savings justify higher hosting cost, or compliance requires managed service with specific certifications (SOC 2, HIPAA — managed services have these). Self-hosted: lower infrastructure cost — at us-east-1 list prices an RDS PostgreSQL Multi-AZ db.r6g.xlarge is roughly 2x the EC2-plus-EBS cost of running the same HA pair yourself — plus full control over configuration and extensions (managed services restrict some extensions), and it is sometimes required for compliance (data sovereignty, no third-party access). Calculate the breakeven rather than assuming one: the ops FTE is a roughly fixed cost while the managed premium scales with compute, so self-hosting only wins once the premium on your fleet exceeds a loaded DBA salary. For a single 4 vCPU pair that is not close — the premium is about $6K/year against $62.5K of engineer time — so run the arithmetic on your own fleet size and your own loaded cost.
 
 **Q: When would you add vector search to an existing system?**
 Add vector search when: (1) Users need semantic search (find documents similar in meaning, not just keyword matches). (2) Recommendation system requires similarity search over embeddings. (3) Deduplication requires finding near-duplicate records. Implementation path: (1) Start with pgvector (PostgreSQL extension) if your data is already in PostgreSQL and vectors are < 5–10M (ivfflat or hnsw index handles this). No additional infrastructure. (2) Migrate to a dedicated vector database (Pinecone, Qdrant, Weaviate) when: dataset exceeds pgvector's practical scale, multi-modal search is required (text + images), or query patterns (filtering + vector search, multi-tenant isolation) exceed pgvector's capabilities. The pgvector-to-dedicated-vector-DB migration is straightforward (same vectors, same embedding model, just different index store).
@@ -525,7 +548,7 @@ Structure the decision: (1) Document requirements explicitly and agree on them f
 The team relied on DynamoDB's default eventually consistent reads for a payment status check, which can return a replica lagging behind the latest write. A read landing roughly 500ms behind the primary meant the status check didn't see a payment that had just completed, and the application processed the same payment a second time as a result. This is a direct consequence of not reading the consistency model documentation before building a transactional flow on top of a database whose default read mode trades consistency for latency and cost. Use `ConsistentRead=true` for any read that gates a state-changing decision, and confirm a database's default consistency guarantees match your correctness requirements before committing to it.
 
 **Q: Why might self-hosted PostgreSQL cost more per year than AWS RDS despite RDS's higher per-hour price?**
-Self-hosted PostgreSQL's true annual cost includes engineer time for operations, HA setup, and upgrades, and that operational cost often exceeds what a managed service charges as its premium. A self-hosted 4-core/32GB PostgreSQL instance runs roughly $700 to $1,000 a month in compute and storage, but adding about $62,500 a year for a quarter of an engineer's time to operate it brings the real total to around $75,000 a year — while RDS PostgreSQL with Multi-AZ for the same workload lands near $42,000 a year with no dedicated ops time required. The comparison flips at large enough scale, or when a team already has full-time DBA capacity that other work is paying for anyway. Calculate total cost of ownership including engineer time, not just the infrastructure line items, before assuming a self-hosted database is the cheaper option.
+Self-hosted PostgreSQL's true annual cost includes engineer time for operations, HA setup, and upgrades, and that operational cost dwarfs what a managed service charges as its premium. A self-hosted HA pair of 4 vCPU / 32GB nodes with 2TB each runs about $622 a month in EC2 and gp3 at us-east-1 on-demand list, roughly $7,500 a year, but adding about $62,500 for a quarter of an engineer's time brings the real total near $70,000 — while RDS PostgreSQL Multi-AZ for the same workload is about $1,127 a month, roughly $13,500 a year, with no dedicated ops time. RDS costs 1.8x more per month and still wins TCO by about 5x, because the ops line is 89% of the self-hosted total. The comparison flips at large enough scale, since the FTE cost is roughly fixed while the managed premium scales with compute — here you would need roughly ten times the compute before it crossed over — or when a team already has full-time DBA capacity that other work is paying for anyway. Calculate total cost of ownership including engineer time, not just the infrastructure line items, and re-run it with current list prices rather than inheriting anyone else's numbers.
 
 ---
 
@@ -552,7 +575,7 @@ Consistency:     Strong ACID required (appointments, care plans)
 Query patterns:  Complex SQL (patient history, provider schedule, care plan joins)
 Write throughput: Low (50K patients × 5 writes/day = 250K/day = ~3 writes/second)
 Read throughput: Moderate (50K DAU × 20 reads/day = 1M/day = ~12 reads/second)
-Scale (3yr):    5M patients × same ratios = still < 1K TPS (easily single DB)
+Scale (3yr):    5M patients × same ratios = ~1.4K TPS combined (easily single DB)
 Team expertise:  SQL (all 8 engineers)
 Compliance:     HIPAA (encryption, access controls, audit logging)
 Budget:         $5-10K/month database budget
@@ -588,11 +611,11 @@ Thirty-four times headroom *after* a hundredfold growth is what "boring choice, 
 **Decision: PostgreSQL (RDS Multi-AZ)**
 
 ```
-Primary: RDS PostgreSQL 16, db.r6g.xlarge (4 vCPU, 32GB RAM, Multi-AZ)
-  Cost: ~$1,500/month
+Primary: RDS PostgreSQL 18, db.r6g.xlarge (4 vCPU, 32GB RAM, Multi-AZ)
+  Cost: ~$656/month instance (us-east-1 on-demand) + storage at $0.23/GB Multi-AZ
 
-Replica: 1 read replica for reporting queries
-  Cost: ~$750/month
+Replica: 1 Single-AZ read replica for reporting queries
+  Cost: ~$329/month instance + storage at $0.115/GB
 
 Security:
   - Encryption at rest (AWS KMS)
@@ -610,14 +633,15 @@ Monitoring:
   - pganalyze: query performance, index recommendations
 
 3-year scaling plan:
-  At 5M patients → still ~100 TPS → same PostgreSQL instance, scale vertically
+  At 5M patients → ~1,450 TPS combined → same instance class, scale vertically
   At 100M patients → evaluate Citus extension for sharding (milestone, not now)
 
 Not chosen:
   MongoDB: team lacks NoSQL expertise; ACID requirements; migration risk
   DynamoDB: no complex SQL; team lacks NoSQL expertise; HIPAA complexity
-  Aurora: 40% higher cost for no tangible benefit at this scale
-  Cassandra: massive operational overhead for 3 TPS workload
+  Aurora: comparable list price, but its per-request I/O billing makes the monthly
+          number vary with workload for no benefit at 15 TPS; RDS is predictable
+  Cassandra: massive operational overhead for a 3-writes/second workload
 ```
 
-**Result after 18 months**: Platform at 800K patients, 45 TPS peak. PostgreSQL at 12% CPU. Zero performance issues. Team shipped 40 new features without any database operational incidents. The "boring" choice proved to be correct.
+**Result after 18 months**: Platform at 800K patients — about 230 requests/second sustained at the same per-user ratios, peaking near 700. PostgreSQL at 12% CPU. Zero performance issues. Team shipped 40 new features without any database operational incidents. The "boring" choice proved to be correct.

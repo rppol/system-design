@@ -280,6 +280,28 @@ public class UserService {
 
 **Delete vs update on write**: Deleting the cache key is safer than updating it because update requires the new value to be computed correctly (risk: stale data from a race if two concurrent updates write different values). Delete ensures the next read fetches fresh data from DB. Update avoids one DB round-trip but introduces a race window.
 
+**When to delete: before the DB write, after it, or both.** The order is a separate decision from delete-vs-update, and it is where cache-aside actually goes wrong in production.
+
+```
+  delete BEFORE the DB write
+    DEL key ; UPDATE row
+    a concurrent reader can miss, read the OLD row (not yet committed),
+    and repopulate the cache before the write lands -> stale until TTL
+
+  delete AFTER the DB write            <- the correct default
+    UPDATE row ; DEL key
+    the window shrinks to the invalidation-race case in Section 10:
+    only a reader whose DB read STARTED before the write can still lose
+
+  delete after, then delete again on a short delay ("double delete")
+    UPDATE row ; DEL key ; sleep(d) ; DEL key
+    the second DEL removes anything the slow reader repopulated
+```
+
+Delete-after is right because the write is the event that makes the cache wrong; deleting first invalidates a value that is still correct and opens a window for a reader to re-cache it. The residual race — a read that began before the write and finishes after the delete — is the sequence diagram in Section 10, and the second delete is what closes it. Size `d` as the longest plausible read-plus-repopulate, and where the cache reads from a replica, add the replication lag: delete before the replica has the new row and the next miss simply re-caches the old one.
+
+The second delete must be durable, not a `Thread.sleep` in the request thread: enqueue it (a delayed message, or the outbox event that already drives CDC invalidation) so a process crash between the two deletes cannot leave the stale entry in place until TTL. This is also the argument for the version-based keys below, which sidestep the ordering question entirely — a stale writer targets a key nobody will ever read.
+
 ### Write-Through
 
 ```java
@@ -312,7 +334,13 @@ public void incrementPageView(long articleId) {
 // Background job persists to DB every 30 seconds
 @Scheduled(fixedDelay = 30_000)
 public void flushPageViews() {
-    Set<String> keys = redis.keys("pageviews:*");
+    // SCAN, never KEYS: KEYS is O(N) over the whole keyspace and blocks the
+    // single Redis command thread for the duration, stalling every other client.
+    ScanOptions opts = ScanOptions.scanOptions().match("pageviews:*").count(500).build();
+    List<String> keys = new ArrayList<>();
+    try (Cursor<String> cursor = redis.scan(opts)) {
+        cursor.forEachRemaining(keys::add);
+    }
     for (String key : keys) {
         Long views = redis.opsForValue().get(key);
         if (views != null) {
@@ -402,7 +430,7 @@ production you usually want jitter plus one of the other two.
 
 ### Hot Key Problem
 
-A hot key is a cache key accessed at a rate far exceeding what a single Redis node can handle (typically > 100K ops/second per key).
+A hot key is a cache key accessed at a rate far exceeding what a single Redis node can handle. Redis executes commands on one core, so the ceiling is per-node, not per-cluster: `redis-benchmark` on a modern Xeon reports around 180,000 SET/s without pipelining, but a real workload with larger values, TLS, and no pipelining lands far below that, so **100,000 ops/second per key is the number to plan against** — treat anything approaching it as a hot key.
 
 ```mermaid
 flowchart LR
@@ -446,7 +474,7 @@ control it; `processes / L1_ttl` is set by your deployment and you can.
 | Symbol | What it is |
 |--------|------------|
 | app QPS | Reads of the hot key across the fleet. 500,000/s here. Not under your control |
-| node limit | ~100,000 ops/second for one Redis node before it becomes CPU-bound |
+| node limit | ~100,000 ops/second planning figure for one Redis node before it becomes CPU-bound |
 | `P` | Application processes, each holding its own L1 copy (Caffeine, Guava) |
 | `t` | L1 TTL. 100 ms in the diagram — the freshness you are willing to give up |
 | `P / t` | Redis ops/second after L1. Each process refreshes at most once per `t` |
@@ -543,13 +571,13 @@ The first request is a cache miss and gets a fresh response carrying Cache-Contr
 
 ## 7. Real-World Examples
 
-**Facebook**: TAO (The Associations and Objects) cache is a write-through cache of the social graph. Over 1 billion reads per second with ~99% cache hit rate. Write-through ensures cache is always consistent with the database on writes.
+**Facebook**: TAO (The Associations and Objects) is a two-tier write-through cache of the social graph in front of MySQL. The USENIX ATC 2013 paper reports over one billion reads per second at a **96.4%** overall read hit rate. The two tiers matter as much as the write-through: followers serve reads locally and forward misses to a leader, which coordinates writes and absorbs the thundering herd so MySQL never sees it.
 
-**Twitter**: Used a multi-level cache: Memcached for tweet objects, Redis for timelines (sorted sets), and CDN for media. Timeline cache precomputed fan-out at write time for users with < 10K followers.
+**Twitter**: Used a multi-level cache: Memcached for tweet objects, Redis for timelines (sorted sets), and CDN for media. Timelines were precomputed by fanning out at write time, with high-follower accounts excluded from fan-out and merged in at read time instead — the hybrid fan-out design that keeps a single celebrity post from generating tens of millions of writes.
 
-**Stack Overflow**: Relies on SQL Server in-memory OLTP tables + application-layer cache (Redis/Memcached). 99.9% of traffic served from cache; database handles only cache misses and writes.
+**Stack Overflow**: Runs SQL Server as the single source of truth with a layered cache in front: a local in-process cache per web server, plus Redis as the shared L2 (a separate Redis database ID per site in the multi-tenant setup). Published 2019 figures: ~1.58 billion Redis commands per day on the primaries against ~308 million HTTP hits, peaking around 87,000 commands/second, with 124 million active keys held in under 96GB on 256GB servers — and Redis CPU averaging ~2%, which is the real lesson: a correctly sized cache tier is almost never the bottleneck.
 
-**Shopify**: Uses Redis with cache-aside pattern. Every cache key has TTL-based expiration. Critical data (product prices, inventory) uses shorter TTL (60 seconds); static data (product descriptions) uses longer TTL (1 hour).
+**Shopify**: Uses Redis with the cache-aside pattern, with TTL-based expiration on every key and TTLs graded by volatility — short for data whose staleness a customer would notice (prices, inventory), long for effectively static descriptive content.
 
 ---
 
@@ -714,10 +742,10 @@ Write-through updates both the database and the cache synchronously during each 
 Strategies: (1) Lazy warming: let the cache fill naturally from cache misses. Use a circuit breaker on the database to shed load while the cache warms. (2) Pre-warming script: before cutting traffic over, run a script that reads frequently accessed keys from the database and populates the cache. Identify hot keys from historical access logs. (3) Redis persistence: configure RDB or AOF so Redis restores its state from disk on restart — no warming needed for data that was cached before shutdown. (4) Blue-green cache: maintain a second Redis instance, gradually shift traffic while the new instance warms from the primary's replication stream. (5) Staggered deployment: deploy to a subset of servers, let them warm the cache, then expand.
 
 **Q: What metrics indicate caching is working and when it is degrading?**
-Primary metric: cache hit rate = hits / (hits + misses). Target: ≥ 95% for frequently accessed data. Alert if it drops below 90%. Secondary metrics: (1) Cache eviction rate — high evictions (from Redis INFO: evicted_keys) indicate cache is undersized. (2) Average cache miss latency — a spike indicates the database is slow on cache misses. (3) Key TTL distribution — if most keys have very short TTL, they expire before being accessed, contributing to low hit rate. (4) Memory usage vs maxmemory — if approaching 90%, add capacity or reduce TTL. (5) Per-key access frequency (Redis --hotkeys flag) — identify hot keys for dedicated treatment.
+Primary metric: cache hit rate = hits / (hits + misses). Target: ≥ 95% for frequently accessed data. Alert if it drops below 90%. Secondary metrics: (1) Cache eviction rate — high evictions (from Redis INFO: evicted_keys) indicate cache is undersized. (2) Average cache miss latency — a spike indicates the database is slow on cache misses. (3) Key TTL distribution — if most keys have very short TTL, they expire before being accessed, contributing to low hit rate. (4) Memory usage vs maxmemory — if approaching 90%, add capacity or reduce TTL. (5) Per-key access frequency (`redis-cli --hotkeys`, which requires an LFU `maxmemory-policy`) — identify hot keys for dedicated treatment.
 
 **Q: What is the stale-while-revalidate CDN pattern?**
-`stale-while-revalidate` is an HTTP Cache-Control directive that tells CDN edge nodes: serve the stale (expired) cached version immediately to the current request while simultaneously revalidating (fetching a fresh copy) in the background. This eliminates the latency spike that occurs when an entry expires and the CDN must wait for the origin server to respond before serving the request. The syntax: `Cache-Control: max-age=3600, stale-while-revalidate=60` means: fresh for 1 hour; after expiry, serve stale for up to 60 more seconds while revalidating. The user always gets a fast response; the stale-serving window is bounded to 60 seconds.
+`stale-while-revalidate` is a Cache-Control directive telling the CDN to serve the expired copy immediately and fetch a fresh one in the background. The current request never waits on the origin; the next one gets the refreshed copy. This eliminates the latency spike that occurs when an entry expires and the CDN must wait for the origin server to respond before serving the request. The syntax: `Cache-Control: max-age=3600, stale-while-revalidate=60` means: fresh for 1 hour; after expiry, serve stale for up to 60 more seconds while revalidating. The user always gets a fast response; the stale-serving window is bounded to 60 seconds.
 
 **Q: How does Spring Cache abstraction simplify caching?**
 Spring Cache (`@Cacheable`, `@CachePut`, `@CacheEvict`) provides declarative caching as an AOP-based abstraction. Annotate methods; Spring intercepts calls, checks the cache, and either returns cached results or calls the method and caches the result. The backing store (Redis, Caffeine, EhCache) is swappable via `CacheManager` configuration.
@@ -761,9 +789,13 @@ public List<User> getUsers(List<Long> userIds) {
         List<User> dbUsers = userRepository.findAllById(missingIds);
 
         // Populate cache for misses (pipeline: single round trip)
-        Map<String, User> toCache = dbUsers.stream()
-            .collect(toMap(u -> "user:" + u.getId(), identity()));
-        redis.opsForValue().multiSet(toCache);
+        // multiSet (MSET) cannot carry a TTL, so pipeline SETEX instead —
+        // MSET-populated keys never expire and the cache grows without bound.
+        redis.executePipelined((RedisCallback<Object>) conn -> {
+            dbUsers.forEach(u -> redis.opsForValue()
+                .set("user:" + u.getId(), u, TTL));
+            return null;
+        });
 
         // Merge DB results into cached list
         Map<Long, User> dbMap = dbUsers.stream().collect(toMap(User::getId, identity()));
@@ -794,7 +826,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     A(["App read"]) --> B{"Caffeine L1<br/>hit?"}
-    B -->|"hit (0.1ms)"| C(["return"])
+    B -->|"hit (sub-microsecond)"| C(["return"])
     B -->|"miss"| D{"Redis L2<br/>hit?"}
     D -->|"hit (0.5ms)"| E["populate L1"]
     E --> C
@@ -807,12 +839,15 @@ flowchart LR
     class E,F,G base
 ```
 
-L1 is checked first and returns in about 0.1ms; an L1 miss falls through to L2 (about 0.5ms), which repopulates L1; only an L2 miss reaches the database (about 10ms), which then repopulates both cache levels.
+L1 is an in-process hash lookup and returns in well under a microsecond — three orders of magnitude faster than L2, not a few times faster, which is the whole reason the tier exists; an L1 miss falls through to L2 (about 0.5ms, dominated by the network round trip), which repopulates L1; only an L2 miss reaches the database (about 10ms), which then repopulates both cache levels.
 
 L1 caches ultra-hot data locally, reducing Redis network traffic by 90%+ for the hottest keys. Tradeoff: L1 entries on different application instances may be stale relative to each other for up to the L1 TTL. On L2 invalidation (explicit delete), L1 entries continue serving stale data until their own TTL expires. Acceptable for configuration data and slowly changing reference data; not acceptable for user-facing profile data that must reflect writes quickly.
 
 **Q: What causes the cache invalidation race condition where a stale read repopulates the cache after a delete?**
 A slow read that started before a write can finish after the write's cache delete, so it repopulates the cache with the old value and leaves it stale until the next TTL expiry. Request A begins reading the database while it's still slow to respond; meanwhile Request B updates the database and deletes the cache key; Request A's read then finally completes and writes the pre-update value back into what is now an empty cache slot, and nothing triggers another invalidation until TTL. Fix: use `SET NX` so the repopulating write only succeeds if the key is still absent, or use version-based keys so a stale write targets a version that's already obsolete and never gets read back.
+
+**Q: In cache-aside, should you delete the cache key before or after the database write?**
+Delete after the database write, never before, because the write is the event that makes the cached value wrong. Deleting first invalidates a value that is still correct and leaves a window in which a concurrent reader misses, reads the pre-update row, and re-caches it — stale until TTL. Deleting after narrows the exposure to one residual race: a read whose database query started before the write can still finish after the delete and repopulate with the old value. Close that with a delayed second delete ("double delete") sized to the longest plausible read-plus-repopulate, plus replication lag if the read path uses a replica; enqueue the second delete durably rather than sleeping in the request thread, so a crash between the two deletes cannot strand the stale entry. Version-based cache keys avoid the whole ordering question, because a stale writer populates a key nobody will look up again.
 
 **Q: What is write-around caching and when should you use it?**
 Write-around sends writes straight to the database and bypasses the cache entirely, so a key is only populated later by a normal read (cache-aside style) rather than at write time. This differs from write-through, which populates the cache immediately on every write — write-around deliberately avoids caching data that may never be read again, which suits write-heavy, rarely-re-read data such as bulk imports, audit logs, or write-once event records. The tradeoff is that the very first read after a write is always a cache miss, a cold read that pays full database latency, which makes write-around a poor fit for data that's read immediately after being written. Use write-around for write-heavy data with low read-after-write likelihood, and pair it with cache-aside to handle the read path.
@@ -825,7 +860,7 @@ Negative caching stores the fact that a lookup found nothing — a `null` or a s
 ## 13. Best Practices
 
 - **Monitor cache hit rate continuously** and alert on drops below 90% — a silent hit rate drop means the database absorbs unexpected load.
-- **Set maxmemory and an appropriate eviction policy** (allkeys-lfu for general caches) before production; never run without memory limits.
+- **Set maxmemory and an appropriate eviction policy** (allkeys-lfu for general caches) before production; never run without memory limits. Policy-by-policy tradeoffs and the `volatile-*` traps are in [`key_value_stores/`](../key_value_stores/README.md) and [`in_memory_databases/`](../in_memory_databases/README.md).
 - **Add TTL jitter** to all bulk-loaded cache entries to prevent synchronized expiration.
 - **Use MGET/pipeline** for bulk cache operations — individual round trips for N keys cost N×RTT.
 - **Cache at the right granularity** — cache full objects rather than individual fields; avoid partial object caching which leads to inconsistency.
@@ -854,20 +889,20 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     A(["50K req/s"]) --> B["Layer 1: Caffeine<br/>JVM in-process, 500ms TTL"]
-    B -->|"80% hit rate<br/>0.05ms, no network"| C(["return"])
+    B -->|"80% hit rate<br/>sub-microsecond<br/>no network"| C(["return"])
     B -.->|"miss"| D
     D@{ icon: "logos:redis", form: "square", label: "Layer 2: Redis<br/>shared, 5-min TTL", pos: "b", h: 44 }
     D -->|"95% hit rate"| C
     D -.->|"miss"| E
     E@{ icon: "logos:postgresql", form: "square", label: "Layer 3: PostgreSQL<br/>cache-miss path only", pos: "b", h: 44 }
-    E -->|"~2,500 QPS<br/>5% miss x 50K req/s"| C
+    E -->|"~500 QPS<br/>20% x 5% of 50K req/s"| C
 
     class A req
     class B base
     class C io
 ```
 
-Product and pricing keys are cached in both layers; user-specific discounts vary per user and live only in Caffeine (Layer 1), while inventory keys live only in Layer 2 (Redis) with acceptable 60-second staleness. The design projects roughly 2,500 database queries per second at 50K req/s — a 5% miss rate cascading through both cache layers.
+Product and pricing keys are cached in both layers; user-specific discounts vary per user and live only in Caffeine (Layer 1), while inventory keys live only in Layer 2 (Redis) with acceptable 60-second staleness. The design projects roughly 500 database queries per second at 50K req/s: the two miss rates multiply, so 50,000 x 0.20 x 0.05 = 500, not the 2,500 you would get by counting only the Redis layer.
 
 **Cache invalidation**:
 - Product data updated: outbox event → Debezium → Kafka → cache invalidation service deletes Redis key
@@ -876,12 +911,12 @@ Product and pricing keys are cached in both layers; user-specific discounts vary
 
 **Results at 50K req/s**:
 - Caffeine hit rate: 82% (41K requests served from JVM)
-- Redis hit rate: 94% of remaining 9K (8.5K from Redis)
-- DB QPS: 500 (from 200K theoretical; 99.75% reduction)
+- Redis hit rate: 94% of remaining 9K (8.46K from Redis)
+- DB QPS: 540 (from 200K theoretical; 99.7% reduction)
 - DB CPU: 8% (from 70%)
 
 **At 150K req/s (3× event)**:
-- Caffeine: 123K requests
-- Redis: 24.3K requests
-- DB QPS: 1,500 (well within capacity)
+- Caffeine: 123K requests (82% of 150K)
+- Redis: 25.4K requests (94% of the remaining 27K)
+- DB QPS: 1,620 — exactly 3× the 540 measured at 50K req/s, because the hit rates are unchanged and only the input scaled (well within capacity)
 - Action: increase Redis memory from 16GB to 32GB for larger working set; no DB scaling needed
