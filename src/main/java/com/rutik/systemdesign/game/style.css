@@ -1446,9 +1446,25 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 .md-body h2 .recall-all:hover { color: var(--od-text); border-color: var(--sec-accent, var(--accent)); }
 #reader.recall-off .recall-btn, #reader.recall-off .recall-all { display: none; }
+
+/* [SH] Authored "**Short:**" summaries are the MCQ option, not prose. Hidden by
+   default; the Summaries row in the typography popover sets #reader.short-on.
+   Shown, they read as a quiet lead-in above the full answer rather than as body
+   text, so the answer below stays the thing you read. */
+.md-body p.qa-short { display: none; }
+#reader.short-on .md-body p.qa-short {
+  display: block;
+  margin: 0 0 .45rem;
+  padding-left: .7rem;
+  border-left: 2px solid var(--sec-accent, var(--accent));
+  color: var(--od-muted);
+  font-size: .93em;
+}
+#reader.short-on .md-body p.qa-short strong { color: var(--sec-accent, var(--accent)); font-weight: 600; }
 @media print {
   .recall-body { display: block !important; }
   .recall-btn, .recall-all { display: none !important; }
+  .md-body p.qa-short { display: none !important; }
 }
 
 /* "Continue your path" cards + end-of-read closure reveal. Each card carries its

@@ -56,6 +56,25 @@ SKIP_PATH_PARTS = {"case_studies"}
 SHORT_MIN = 15
 SHORT_MAX = 220
 
+# An AUTHORED one-line summary, written directly under the question:
+#
+#     **Q: <question>?**
+#     **Short:** <one self-contained sentence>
+#
+#     <the full answer, unchanged>
+#
+# When present it becomes the MCQ option instead of the make_short() derivation,
+# which trims a long first sentence at a clause boundary and mangles answers that
+# open with a code fence. It is stripped from the answer text, so answerFull never
+# contains it and the post-answer reveal is unaffected; the reader hides the line
+# behind a toggle. Files without one keep working unchanged -- this is a per-Q&A
+# opt-in, so the migration can run section by section.
+SHORT_LABEL = re.compile(r"^\*\*Short:\*\*\s*(.+?)\s*$", re.I)
+
+# Authored shorts outside [SHORT_MIN, SHORT_MAX], collected so --strict can fail
+# the build. An unbounded authored line is worse than the fallback it replaced.
+SHORT_VIOLATIONS = []
+
 # --- lexical model for picking RELATED distractors (no ML deps) ---
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 STOPWORDS = frozenset("""
@@ -255,6 +274,20 @@ def parse_md(path, section, module, hdr=INTERVIEW_HDR, source_file=None):
                 # leak a literal "> " into the MCQ option.
                 answer_lines.append(re.sub(r"^\s*>\s?", "", lines[j]))
                 j += 1
+
+            # Pull out an authored "**Short:**" line. It must be the FIRST non-blank
+            # line of the answer -- anywhere else it is prose that happens to start
+            # that way, and swallowing it would silently delete content.
+            authored_short = None
+            for s_idx, s_ln in enumerate(answer_lines):
+                if not s_ln.strip():
+                    continue
+                m_short = SHORT_LABEL.match(s_ln.strip())
+                if m_short:
+                    authored_short = m_short.group(1).strip()
+                    answer_lines.pop(s_idx)
+                break
+
             answer_raw = " ".join(answer_lines)
             answer_full = re.sub(r"^A\s*[:.]\s*", "", strip_markdown(answer_raw))  # drop a leading "A:" label
             answer_full_md = re.sub(r"^\*{0,2}A\s*[:.]\*{0,2}\s*", "", md_inline(answer_raw, keep_bold=True))
@@ -262,13 +295,19 @@ def parse_md(path, section, module, hdr=INTERVIEW_HDR, source_file=None):
 
             if not question or not answer_full:
                 continue
-            short = make_short(answer_full)
+            if authored_short:
+                short = strip_markdown(authored_short)
+                short_md = md_inline(authored_short, keep_bold=False)
+                if not (SHORT_MIN <= len(short) <= SHORT_MAX):
+                    SHORT_VIOLATIONS.append((path, question[:70], len(short)))
+            else:
+                short = make_short(answer_full)
+                # Display variants: emitted only when they differ from the stripped text.
+                short_md = first_sentence(answer_full_md)
+                if strip_markdown(short_md) != short:    # sentence split disagreed -> can't align
+                    short_md = None
             if not short:
                 continue
-            # Display variants: emitted only when they differ from the stripped text.
-            short_md = first_sentence(answer_full_md)
-            if strip_markdown(short_md) != short:        # sentence split disagreed -> can't align
-                short_md = None
             results.append({
                 "section": section,
                 "module": module,
@@ -280,6 +319,7 @@ def parse_md(path, section, module, hdr=INTERVIEW_HDR, source_file=None):
                 "answerFullMd": answer_full_md if answer_full_md != answer_full else None,
                 "answerShort": short,
                 "answerShortMd": short_md if (short_md is not None and short_md != short) else None,
+                "shortAuthored": bool(authored_short),
             })
     return results
 
@@ -692,7 +732,22 @@ def main():
     print("Per-section counts:")
     for sec, cnt in index["sections"].items():
         print(f"  {sec:16s} {cnt}")
-    check_wiring(questions, "--strict" in sys.argv[1:])
+    strict = "--strict" in sys.argv[1:]
+    # Migration progress. Counted from the parsed Q&As, not the emitted bank, since
+    # the flag is a build-time signal and does not need to ship in questions/*.json.
+    n_short = sum(1 for q in raw if q.get("shortAuthored"))
+    if n_short:
+        print(f"authored **Short:** summaries: {n_short} of {len(raw)} parsed Q&As")
+    if SHORT_VIOLATIONS:
+        # An authored short outside the bounds is worse than the fallback it
+        # replaced -- it ships as the MCQ option either way, so fail loudly.
+        print(f"ERROR: {len(SHORT_VIOLATIONS)} authored **Short:** lines outside "
+              f"{SHORT_MIN}-{SHORT_MAX} chars", file=sys.stderr)
+        for path, q, n in SHORT_VIOLATIONS[:20]:
+            print(f"  {n:4d} chars  {os.path.relpath(path, BASE_DIR)}  {q}", file=sys.stderr)
+        if strict:
+            sys.exit(1)
+    check_wiring(questions, strict)
 
 
 if __name__ == "__main__":

@@ -3400,6 +3400,7 @@ const BACKUP_KEYS = [
   "sd_reader_w", "sd_modules_w", "sd_toc_w", "sd_reader_fs", "sd_reader_full",
   "sd_reader_toc", "sd_reader_modules", "sd_reader_scroll", "sd_last_read",
   "sd_reader_font", "sd_reader_measure", "sd_reader_dropcap", "sd_reader_recall",
+  "sd_reader_short",
   "sd_diagram_dir",
   "sd_last_mastery", "sd_last_export",
   "sd_cm_first_question", "sd_cm_first_combo", "sd_cm_first_results", "sd_cm_first_cards",
@@ -6104,12 +6105,26 @@ function mdRender(src) {
     const para = [];
     while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6})\s/.test(lines[i]) &&
            !/^\s*```/.test(lines[i]) && !/^>\s?/.test(lines[i]) &&
-           !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^(---+|\*\*\*+)\s*$/.test(lines[i])) {
+           !/^\s*([-*+]|\d+\.)\s+/.test(lines[i]) && !/^(---+|\*\*\*+)\s*$/.test(lines[i]) &&
+           // [SH] A "**Short:**" line always starts its OWN paragraph. Authors write
+           // it directly under the question with no blank line, and without this the
+           // collector would fuse question and summary into one <p>. The para.length
+           // guard is load-bearing: without it the line could never be consumed.
+           (para.length === 0 || !/^\*\*Short:\*\*/i.test(lines[i]))) {
       para.push(lines[i]); i++;
     }
     // A fully-bold paragraph is an interview question (CLAUDE.md §12 format); the
     // paragraph right after it is its answer. Colour them distinctly.
     let p = para.join(" ").trim();
+    // [SH] An authored one-line MCQ summary (extract.py's SHORT_LABEL), written
+    // directly under a question. It is quiz metadata rather than prose, so it is
+    // hidden behind the reader's Summaries toggle. Handled BEFORE the Q/A
+    // classification below and WITHOUT consuming qaPending -- otherwise it would
+    // take the `md-a` answer styling and push the real answer out of it.
+    if (/^\*\*Short:\*\*\s*\S/i.test(p)) {
+      out.push(`<p class="qa-short">${mdInline(p)}</p>`);
+      continue;
+    }
     const isQ = /^\*\*[\s\S]+\*\*$/.test(p) && (p.match(/\*\*/g) || []).length === 2;
     // Normalize the §12 question label: numbered "**Q1:/**Q2:" and "**Q:" all
     // display as a uniform "Q: " (CLAUDE.md convention). Only rewrites an existing
@@ -6261,6 +6276,7 @@ function openReaderTypeMenu(anchorBtn) {
   const measure = localStorage.getItem("sd_reader_measure") || "default";
   const dropcap = localStorage.getItem("sd_reader_dropcap") !== "0";
   const recall = localStorage.getItem("sd_reader_recall") !== "0";
+  const shortOn = localStorage.getItem("sd_reader_short") === "1";
   const seg = (k, opts, cur) => `<div class="rtp-seg" data-k="${k}">` +
     opts.map(([v, lbl]) => `<button data-v="${v}" class="${v === cur ? "on" : ""}">${lbl}</button>`).join("") + `</div>`;
   const pop = document.createElement("div");
@@ -6273,14 +6289,17 @@ function openReaderTypeMenu(anchorBtn) {
     `<div class="rtp-row"><span class="rtp-lbl">Font</span>${seg("sd_reader_font", [["sans", "Sans"], ["serif", "Serif"]], font)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Width</span>${seg("sd_reader_measure", [["narrow", "Narrow"], ["cozy", "Cozy"], ["wide", "Wide"], ["default", "Auto"]], measure)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>` +
-    `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>`;
+    `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>` +
+    `<div class="rtp-row"><span class="rtp-lbl">Summaries</span>${seg("sd_reader_short", [["0", "Hidden"], ["1", "Shown"]], shortOn ? "1" : "0")}</div>`;
   panel.appendChild(pop);
   pop.querySelectorAll(".rtp-seg").forEach((s) => {
     if (!s.dataset.k) return;   // the Size seg drives font-size directly (below), not a pref key
     s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
       safeSet(s.dataset.k, b.dataset.v);
       s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-      if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
+      if (s.dataset.k === "sd_reader_recall") applyRecallPref();
+      else if (s.dataset.k === "sd_reader_short") applyShortPref();
+      else applyReaderTypography();
     }));
   });
   // Size row: bump the font and keep the popover open (no `done()` call).
@@ -6802,6 +6821,15 @@ function applyRecallPref() {
   if (main) main.querySelectorAll(".recall").forEach((r) => openRecall(r, off));
 }
 
+// [SH] Authored "**Short:**" summaries are the MCQ option, not prose, so the
+// reader hides them by default. Opt in from the typography popover; CSS does the
+// work via #reader.short-on, so this never touches rendered markup.
+function applyShortPref() {
+  const on = localStorage.getItem("sd_reader_short") === "1";
+  const panel = el("#reader");
+  if (panel) panel.classList.toggle("short-on", on);
+}
+
 // "Evaluate me": every topic page ends with a one-click quiz scoped to its
 // module. Hidden mid-quiz (starting one would destroy the live deck) and on
 // pages that aren't a bank module (section roots, case studies).
@@ -7178,6 +7206,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     buildMasthead(main, path);                     // badge + title + rule + "~N min read"
     wireReaderBody(main);
     wireRecallPrompts(main);                       // think-first: collapse §12 answers
+    applyShortPref();                              // [SH] hide authored MCQ summaries unless opted in
     wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
     wireTables(main);                              // wrap wide tables in a horizontal-scroll box
     renderMermaid(main);                           // no-op when page has no mermaid fences

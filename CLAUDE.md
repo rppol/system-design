@@ -154,18 +154,19 @@ question *prompts* with no answers, so renaming it would inject answerless fragm
 the bank. **Read the content before renaming a heading** — the heading is the trigger, the
 content is the test.
 
-### Planned: authored one-line summaries (NOT YET ACTIVE — do not author these yet)
+### Authored one-line summaries — ACTIVE since 2026-07-29
 
-Today the game derives each MCQ's correct option by taking the answer's first sentence
-and, if it exceeds 220 characters, trimming it at a clause boundary (`make_short()` in
-`game/extract.py`). That produces a weak or mangled option whenever the first sentence is
-long, opens with a code fence, or is not self-contained.
+`game/extract.py` and the reader now understand an authored `**Short:**` line, so these
+may be written. The migration runs section by section, llm first.
 
-The agreed replacement is an **authored one-line summary per Q&A**, which becomes the MCQ
-option; the full answer stays untouched and is what the quiz reveals after answering. The
-summary is hidden by default in the reader and shown by a toggle.
+**Why.** Without one, the MCQ option is derived by taking the answer's first sentence and
+trimming it at a clause boundary past 220 chars (`make_short()`). That produces a weak or
+mangled option whenever the first sentence is long, opens with a code fence, or is not
+self-contained. An authored line replaces the derivation; the full answer is untouched and
+is still what the quiz reveals after answering.
 
-Target format:
+**The format** — the `**Short:**` line goes directly under the question, no blank line
+needed (the reader treats it as its own paragraph either way):
 
 ```
 **Q: <question>?**
@@ -174,15 +175,27 @@ Target format:
 <the full answer — mechanism, example, gotcha, guidance — unchanged>
 ```
 
-**Do not author `**Short:**` lines until `extract.py` understands them.** Until then the
-parser would read the label as part of the answer and ship `"Short: ..."` as the MCQ
-option, which is worse than what it does now. Until the migration lands, **the existing
-rule binds**: the first sentence must be a self-contained direct answer of 15–220
-characters.
+**Rules for the line itself.** It must stand alone as an answer to the question with no
+surrounding context, since it is read as a bare option among three distractors. 15–220
+characters — `extract.py --strict` FAILS THE BUILD outside that range, because an
+unbounded authored line ships as the option either way. No code fence, no list, no
+trailing "see below". Do not restate the question. Prefer the claim over the hedge.
 
-Migration requirements, when it runs: `extract.py` prefers `**Short:**` and falls back to
-`make_short()` so un-migrated files keep working; `answerFull` never loses a word; the
-reader hides the line behind a toggle; and the pass doubles as an answer-structure review.
+**Rules for everything around it.** The line must be the FIRST non-blank line of the
+answer — anywhere else it is treated as ordinary prose and left alone, which is what stops
+the parser silently deleting a sentence that happens to start that way. Never edit the
+full answer while adding one; if the answer's first sentence was doing the job, the
+`**Short:**` line may simply restate it more tightly. `answerFull` must never lose a word.
+
+**It is per-Q&A opt-in.** A file with no `**Short:**` lines keeps working exactly as
+before, so a section can be migrated in any order. `extract.py` reports migration progress
+("authored **Short:** summaries: N of M parsed Q&As"). Until a Q&A has one, the existing
+rule still binds for it: the first sentence must be a self-contained direct answer of
+15–220 characters.
+
+**In the reader** the line is hidden by default and revealed by the Summaries row in the
+typography popover (`sd_reader_short`). It is never part of `answerFull` and never
+appears in the quiz as anything but the option.
 
 ---
 
