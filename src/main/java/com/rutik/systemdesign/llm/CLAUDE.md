@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 52 Modules
+## Module List — 53 Modules
 
 | Module Directory | Topic | Sub-files |
 |-----------------|-------|-----------|
@@ -37,6 +37,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | automated_jailbreak_algorithms |
 | `mechanistic_interpretability/` | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | — |
 | `evaluation_and_benchmarks/` | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | — |
+| `error_analysis_and_eval_design/` | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval ladder, annotation guidelines, inter-rater agreement, LLM-judge alignment and drift, slice coverage, eval-set maintenance | — |
 | `multimodal_models/` | VLMs, vision encoders, diffusion, speech, video | — |
 | `context_windows_and_long_context/` | RoPE, ALiBi, YaRN, long context vs RAG | — |
 | `ai_applications/` | Healthcare, legal, finance, education, customer support | — |
@@ -103,8 +104,8 @@ cosmetic in the reader only.
 
 ## Learning Paths (Full + Interview-Specific)
 
-`README.md` documents two routes through the section: the **Full Path** (all 52 modules
-= "Recommended Learning Order") and a curated **Interview-Specific Path** (30 modules).
+`README.md` documents two routes through the section: the **Full Path** (all 53 modules
+= "Recommended Learning Order") and a curated **Interview-Specific Path** (31 modules).
 The interview subset is a **dual-source list** — it lives in both `README.md`
 ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.llm.interview`, which drives the
 game's Study Full/Interview toggle). **If you change one, change the other** — they must

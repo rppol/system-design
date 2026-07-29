@@ -428,6 +428,291 @@ Self-preference: a judge prefers responses written in its own family's style
 Instruction-following bias: prefers well-formatted responses regardless of accuracy
 ```
 
+#### The judge is a reward model wearing a different hat
+
+This is the framing that makes every judge pathology predictable instead of surprising. An RLHF
+reward model and an LLM judge are the *same artifact*: a learned, imperfect proxy for human
+preference, deployed as the scoring function for an optimization process. Everything the
+alignment literature knows about reward hacking transfers directly — see
+[Alignment & RLHF](../alignment_and_rlhf/README.md) for the reward-model side, including the
+overoptimization curve and the calibration and length-bias measurements.
+
+| | Reward model (RLHF) | LLM judge (evaluation) |
+|---|---|---|
+| What it approximates | human preference over responses | human preference over responses |
+| Who optimizes against it | PPO/GRPO, thousands of gradient steps per hour | your team, iterating prompts and models until the number goes up |
+| Optimization loop speed | hours | weeks |
+| Failure name | reward hacking | benchmark gaming, judge overfitting |
+| Bias that dominates | length | length |
+| The only non-circular check | agreement with fresh human labels | agreement with fresh human labels |
+
+The slower loop is the only real difference, and it is why judge overfitting is so easy to miss:
+nobody watches a metric climb over three months the way they watch a reward curve climb over three
+hours. The same corrective applies — a proxy score is evidence only while it still tracks a gold
+signal you measure separately.
+
+#### Measuring judge bias as a quantity
+
+Naming the four biases is table stakes. What separates a working eval programme is that each one
+is a **number in the eval report**, recomputed whenever the judge, the rubric, or the model under
+test changes.
+
+```
+1. POSITION BIAS  ->  flip rate
+     run every pairwise item twice, in both orders
+     flip_rate = fraction where the verdict changes when A and B swap
+     consistency = 1 - flip_rate
+     also report the ASYMMETRY: of the flipped items, how many favour
+     position 1 vs position 2 (a symmetric flip is noise; a skewed one is bias)
+     healthy: flip_rate low AND balanced. Report both, never just one.
+
+2. VERBOSITY BIAS  ->  slope, not a claim
+     regress judge score on response token count across the eval set
+     report the slope in score-points-per-100-tokens and the partial R^2
+     control: score two responses with identical content, one padded with
+     150 tokens of on-topic filler. Delta should be 0.
+
+3. SELF-PREFERENCE  ->  win-rate delta against a fixed human ground truth
+     take items where humans already scored both responses
+     measure the judge's win rate for own-family responses minus the
+     win rate a neutral third-family judge gives the same responses
+
+4. FORMATTING BIAS  ->  presentation-only A/B
+     hold the content byte-identical, vary only presentation:
+     markdown headers + bullets vs one plain paragraph
+     any non-zero score delta is pure formatting bias
+```
+
+The published anchors for how large these get: Zheng et al. 2023
+([arXiv 2306.05685](https://arxiv.org/abs/2306.05685)) measured GPT-4 returning the same pairwise
+verdict after a position swap only **65.0%** of the time, and when it flipped it favoured the
+first position in 30.0% of cases against the second in 5.0% — a heavily skewed flip, which is the
+signature of bias rather than noise. Wang et al. ([arXiv 2305.17926](https://arxiv.org/abs/2305.17926))
+made the stakes concrete: by reordering responses alone, they made Vicuna-13B "beat" ChatGPT on
+**66 of 80** tested queries with ChatGPT as the evaluator. For self-preference, Panickssery,
+Bowman & Feng ([arXiv 2404.13076](https://arxiv.org/abs/2404.13076)) showed GPT-4 and Llama 2 can
+distinguish their own outputs from other models' at non-trivial accuracy without any training, and
+established a linear relationship between self-recognition ability and self-preference strength via
+fine-tuning — the bias is not stylistic coincidence, it is recognition. For verbosity, the
+length-controlled AlpacaEval work (Dubois et al.,
+[arXiv 2404.04475](https://arxiv.org/abs/2404.04475)) fits a GLM with length difference as a
+mediator and reports the preference at zero length difference, which lifted Spearman correlation
+with LMSYS Chatbot Arena from **0.94 to 0.98**.
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ANCH(["Anchor set<br/>human-labelled<br/>frozen"])
+    PROBE(["Bias probes<br/>swap · pad · reformat"])
+    JUDGE(["Pinned judge<br/>snapshot + prompt<br/>+ temp + parser"])
+    NUM(["Bias report<br/>flip rate · slope<br/>self-pref · format delta"])
+    GATE{"Any probe<br/>past threshold?"}
+    FIX(["Fix rubric<br/>or swap judge"])
+    SHIP(["Publish scores<br/>with bias report"])
+
+    ANCH --> JUDGE
+    PROBE --> JUDGE --> NUM --> GATE
+    GATE -->|"yes"| FIX --> JUDGE
+    GATE -->|"no"| SHIP
+
+    class ANCH,PROBE io
+    class JUDGE frozen
+    class NUM mathOp
+    class GATE base
+    class FIX lossN
+    class SHIP train
+```
+
+The loop that matters: bias probes run against the **same pinned judge** that produces the scores,
+on every run, and the bias report ships alongside the scores rather than living in a one-off
+notebook. A score without its flip rate is not interpretable.
+
+#### Judge drift — the failure that invalidates your history
+
+A judge is a dependency with a version, and hosted judge models are deprecated on the provider's
+schedule, not yours. The day you swap `judge-v1` for `judge-v2`, every score you have ever
+recorded silently changes meaning, and the first symptom is a "regression" in a product that did
+not change. Worse is the attribution problem: when the number drops, you cannot tell whether the
+system got worse or the judge got different.
+
+What to pin, and hash into every run record, is not just the model:
+
+```
+  judge identity = model snapshot id
+                 + judge prompt text (hash it, do not eyeball it)
+                 + temperature and top_p
+                 + rubric version
+                 + output parser version
+                 + tie-handling rule
+
+  Change ANY component -> it is a new judge -> the trend line breaks.
+```
+
+The migration procedure when you are forced to upgrade:
+
+```
+1. Freeze an ANCHOR SET: 200-500 items with human labels, never edited.
+2. Dual-run: score the anchor set with BOTH old and new judge.
+3. Report three numbers, not one:
+     - per-item score delta (mean and spread)
+     - rank correlation between the two judges' orderings (Spearman)
+     - each judge's agreement with the frozen human labels
+4. If human agreement improved and Spearman is high -> re-baseline: re-score
+   the historical comparison points you still care about under the new judge.
+5. If Spearman is low -> the two judges measure different things. Do NOT
+   convert. Cut the trend line, tag the boundary, start a new series.
+6. Never mix judges within a single comparison. Never.
+```
+
+Step 3's middle number is the one teams skip and the one that decides everything. A high rank
+correlation with a shifted mean is a units change you can re-baseline through; a low rank
+correlation means the new judge disagrees about *which response is better*, and no amount of
+rescaling fixes that. Recent auditing work (Yang, Hou & Yang,
+[arXiv 2607.08535](https://arxiv.org/abs/2607.08535), 2026) makes the same point empirically
+across four judgment datasets and two upgrade paths — Qwen3 1.7B through 32B, and successive
+MiniMax API releases — finding that judge upgrades are **not interchangeable**: only the Qwen3
+1.7B-to-4B step gave a robust adjacent gain, and adjacent MiniMax releases did not. Two further
+findings from that audit are worth internalising: stronger judges **reduce but do not remove**
+position and verbosity bias, so "we upgraded the judge" is never a bias mitigation; and
+repeated-sample juries add little when the sampled errors are correlated, which is the judge-side
+restatement of the reward-model ensemble result that ensembles sharing a base model share their
+mistakes.
+
+#### Rubric design that reduces variance
+
+Judge variance is mostly a prompt-design problem, and five choices carry almost all of it.
+
+| Choice | Lower variance | Why |
+|---|---|---|
+| Pairwise vs absolute | **pairwise** for model selection | comparison is easier than calibration; absolute scores drift between runs and across topics |
+| Absolute rubric | use for **monitoring** a single system over time | pairwise needs a fixed opponent; absolute survives the opponent being retired |
+| Reasoning placement | **reason first, score last** | a score emitted before its justification is a prior, not a judgement |
+| Scale | **discrete 1-5 with anchored labels**, or continuous via token probabilities | free-form 0-100 clusters on multiples of 5 and carries fake precision |
+| Few-shot | **one worked example per scale point** | anchors what a "3" means; without it the scale drifts between batches |
+
+The reason-first rule has direct empirical support. Wang et al.'s *multiple evidence calibration*
+requires the evaluator to generate supporting evidence **before** assigning a rating, and it was one
+of the interventions that reduced their measured bias. G-Eval (Liu et al.,
+[arXiv 2303.16634](https://arxiv.org/abs/2303.16634)) builds the same ordering into its design —
+chain-of-thought evaluation steps first, then a form-filling score — reaching Spearman 0.514 with
+humans on SummEval summarization, ahead of prior methods; the same paper flags that LLM-based
+evaluators carry a bias toward LLM-generated text, which is the self-preference result arriving
+from another direction.
+
+G-Eval also supplies the fix for the discrete-scale problem: instead of taking the sampled integer,
+take the **probability-weighted sum** of the score tokens, `sum(p(s) * s)`. A judge that is torn
+between 3 and 4 emits 3.62 rather than flipping between 3 and 4 across runs, which removes an
+entire source of run-to-run variance without adding a call.
+
+```
+BROKEN rubric — every failure mode in six lines
+  "Rate this response 1-10 for quality. Reply with just the number."
+    - no criteria      -> "quality" means something different per item
+    - 1-10             -> raters cluster on 7 and 8; the tails go unused
+    - score only       -> no reasoning to audit, and no reason-before-score
+    - absolute         -> no fixed comparison point across runs
+    - one order        -> position bias uncontrolled and unmeasured
+    - no tie rule      -> the judge invents one, differently each time
+
+FIXED rubric
+  For each of {factual accuracy, instruction compliance, conciseness}:
+    1. Quote the specific span of the response that determines the score.
+    2. State the reason in one sentence.
+    3. THEN emit an integer 1-5 against these anchors:
+         5 = fully correct and complete   4 = correct, one minor omission
+         3 = mostly correct, one real error
+         2 = substantially wrong          1 = fails the instruction entirely
+    4. Ties are allowed and must be emitted as "TIE", never broken arbitrarily.
+  Run every item in both orders; report the mean and the flip rate.
+  Penalise length only via the conciseness axis; never mention length elsewhere.
+```
+
+Note what the fixed version does *not* do: it does not tell the judge to "be objective" or "avoid
+bias". Instructions to not be biased are unmeasurable and do not survive contact with a flip-rate
+probe. Structure the task so the bias has nowhere to act instead.
+
+#### Ensembles, and the cheap-judge/expensive-judge cascade
+
+A panel beats a single judge for the same reason a reward-model ensemble beats a single reward
+model, and it fails for the same reason too. Verga et al.
+([arXiv 2404.18796](https://arxiv.org/abs/2404.18796)) show that a **Panel of LLM evaluators
+(PoLL)** built from several smaller models drawn from **disjoint model families** outperforms a
+single large judge across three judge settings and six datasets, at **over seven times lower cost**,
+and with less intra-model bias precisely because the families are disjoint. The constraint is the
+one the 2026 audit above restates: repeated samples of the *same* judge add little, because the
+errors are correlated. Diversity has to be across families, not across seeds or samples — the exact
+analogue of the reward-model finding that pretraining-seed diversity generalises better than
+fine-tuning-seed diversity.
+
+The cascade is the cost-driven cousin: a cheap judge scores everything, and only ambiguous items
+are escalated. The arithmetic is decisive, in units normalised to one expensive-judge call:
+
+```
+  10,000 eval items.  expensive judge = 1.00 unit/item.  cheap judge = 0.05.
+
+  all-expensive              10,000 x 1.00                     = 10,000 units
+  cascade, 15% escalated     10,000 x 0.05  +  1,500 x 1.00     =  2,000 units  (-80%)
+  cascade, 40% escalated     10,000 x 0.05  +  4,000 x 1.00     =  4,500 units  (-55%)
+  3-family cheap panel       10,000 x 3 x 0.05                  =  1,500 units  (-85%)
+
+  break-even escalation rate:  0.05 + x = 1.00  ->  x = 0.95
+```
+
+The cascade stays cheaper until 95% of items escalate, so cost is never the reason not to build
+one — the whole design question is whether the escalation trigger is *accurate*. A judge's
+self-reported confidence is the worst available trigger. Three that work: disagreement between two
+cheap judges from different families; a score sitting within one point of the decision threshold;
+and a pairwise verdict that flips when the order is swapped. That third one is free — you are
+already running both orders to measure the flip rate.
+
+#### When a judge is the wrong tool
+
+The most common eval mistake is not a biased judge, it is a judge deployed where an assertion
+belongs. If a property can be checked by code that fails deterministically, checking it with an
+LLM makes it slower, more expensive, non-reproducible, and *less* accurate.
+
+| Property | Wrong: judge | Right: deterministic assertion |
+|---|---|---|
+| Output is valid JSON matching a schema | "does this look well-formed?" | `json.loads` + `jsonschema.validate` |
+| Required fields present | "does it include the price?" | key presence check |
+| No PII leaked | "does this contain personal data?" | regex/NER detector with a fixed pattern set, plus a fixed leak corpus |
+| SQL is correct | "is this query right?" | execute both queries, compare result sets |
+| Code is correct | "does this code work?" | run the test suite |
+| Citation actually supports the claim | "is this well-cited?" | substring/span check that the quoted text exists in the cited chunk |
+| Answer matches a known fact | "is this accurate?" | exact or normalised match against the golden answer |
+| Refusal on a known-unsafe prompt | "was this a refusal?" | classifier with a frozen threshold, validated once |
+| Latency, cost, token count | never | measure it |
+
+```
+BROKEN: an LLM judge asked to check structural validity
+  judge("Does this response contain a valid ISO-8601 timestamp and a
+         non-negative integer 'count' field? Answer YES or NO.")
+    - costs a call per item and adds seconds of latency
+    - non-deterministic: the same input can flip between runs
+    - it will say YES for "2026-13-45T99:00:00Z" often enough to matter
+
+FIXED: assert it, and spend the judge budget where nothing else works
+  schema_ok = validate(payload, SCHEMA)            # deterministic, free, exact
+  ts_ok     = parse_iso8601(payload["ts"]) is not None
+  judge_score = judge(question, payload["answer"], rubric=TONE_RUBRIC)
+  # the judge now scores ONE thing no assertion can: whether the explanation
+  # is genuinely helpful to a non-expert reader.
+```
+
+The rule of thumb: a judge earns its cost only on axes that are irreducibly subjective — helpfulness,
+tone, explanation quality, whether a summary preserved the *point* rather than the words. Everything
+with a decidable answer should be an assertion, and every assertion you add makes the remaining
+judge scores easier to interpret, because the judge is no longer averaging a formatting failure and
+a reasoning failure into one number.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -1254,6 +1539,26 @@ Typically 1,000-5,000+ pairwise comparisons per variant — an order of magnitud
 **Q: Why has SWE-bench largely displaced HumanEval as the primary code-capability benchmark?**
 **Short:** SWE-bench displaced HumanEval because HumanEval is saturated near 90%+ pass@1, while SWE-bench's real multi-file GitHub issues still have real headroom.
 Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite; almost all published figures are on SWE-bench **Verified**, the 500-issue human-validated subset rather than the 2,294-issue full set — Claude 3.5 Sonnet with two tools resolved 49.0% there in Oct 2024 and o3 with scaffolding 71.7% in Dec 2024, while 2026 frontier systems sit in the mid-90s. Always state which SWE-bench variant and which agent scaffold a number came from, keep HumanEval as a cheap smoke test, and expect Verified itself to need a harder successor.
+
+**Q: How do you measure a judge's position bias instead of just naming it?**
+**Short:** Run every pairwise item in both orders and report the flip rate together with its asymmetry — a balanced flip is noise, a skewed one is position bias.
+Run every pairwise item twice with A and B swapped, then report two numbers, not one: the flip rate (the fraction of items whose verdict changes on swap) and the asymmetry of those flips (how many favour position 1 versus position 2). The asymmetry is the part people omit and the part that carries the diagnosis — a flip rate that splits evenly between the two positions is judge noise you can average away, while a skewed one is a systematic preference for a slot. Zheng et al. 2023 (arXiv 2306.05685) measured GPT-4 giving the same verdict after a swap only 65.0% of the time, and of the flips, 30.0% favoured the first position against 5.0% for the second — heavily skewed, so clearly bias. Wang et al. (arXiv 2305.17926) showed how much that is worth in practice: by reordering responses alone, they made Vicuna-13B beat ChatGPT on 66 of 80 queries with ChatGPT as evaluator. Mitigation is the measurement itself — score both orders and average, which costs 2x calls and removes the bias from the aggregate — plus generating supporting evidence before the rating, the "multiple evidence calibration" intervention from the same paper. Two operational rules: recompute the flip rate on every eval run rather than once, since it changes when the judge, rubric, or model under test changes; and treat the swap-flipped items as free escalation candidates for a stronger judge, because they are exactly the ambiguous cases.
+
+**Q: Your judge model is being deprecated mid-programme — how do you upgrade without invalidating your score history?**
+**Short:** Dual-run the old and new judge over a frozen human-labelled anchor set, then re-baseline only if their rank correlation is high; if it is low, cut the trend line instead.
+Treat the judge as a pinned dependency and the upgrade as a migration. First recognise what "the judge" actually is: the model snapshot id plus the judge prompt, temperature, rubric version, output parser and tie-handling rule — change any one and the trend line breaks, so hash all of them into every run record. To migrate: (1) freeze an anchor set of 200-500 items carrying human labels that never change; (2) dual-run it through both the old and the new judge; (3) report three numbers — the per-item score delta with its spread, the Spearman rank correlation between the two judges' orderings, and each judge's agreement with the frozen human labels. The rank correlation is the decider. High correlation with a shifted mean is a units change, so re-baseline: re-score the historical comparison points you still care about under the new judge and continue the series. Low correlation means the two judges disagree about which response is better, which no rescaling can repair — tag the boundary, start a new series, and never mix judges inside a single comparison. Auditing work across four judgment datasets (Yang, Hou & Yang, arXiv 2607.08535, 2026) found judge upgrades are not interchangeable — only the Qwen3 1.7B-to-4B step gave a robust adjacent gain and successive MiniMax API releases did not — and that stronger judges reduce but do not remove position and verbosity bias, so an upgrade is never itself a bias mitigation.
+
+**Q: Why is an LLM judge structurally the same problem as an RLHF reward model?**
+**Short:** Both are learned, imperfect proxies for human preference used as a scoring function, so both get Goodharted — the judge just on a weeks-long human loop rather than an hourly gradient loop.
+Because both are a learned proxy for human preference standing in as the objective of an optimization process, which is the precise setup Goodhart's law describes. In RLHF, PPO optimizes the reward model thousands of gradient steps per hour and finds its blind spots in an afternoon. With a judge, the optimizer is your team iterating prompts, retrieval settings and models until the number goes up — a loop that turns over in weeks rather than hours, which is exactly why judge overfitting goes unnoticed: nobody watches a metric over three months the way they watch a reward curve over three hours. The shared failure modes follow directly: length bias dominates both (a purely length-based reward reproduces most of RLHF's downstream gain, and length-controlled AlpacaEval raised Spearman correlation with Chatbot Arena from 0.94 to 0.98 just by regressing it out); ensembling helps both but is capped by correlated errors, so diversity must come from disjoint model families rather than extra samples or seeds; and in both cases the only non-circular validation is agreement with fresh human labels produced by people who did not generate the tuning data. The practical consequence is to run a judge programme the way you would run a reward model: pin it, probe it for bias on every run, keep a frozen human-labelled anchor set, and treat a rising score as evidence only for as long as it still tracks that gold signal.
+
+**Q: When is an LLM judge the wrong tool, and what should you use instead?**
+**Short:** Whenever the property is decidable by code — schema validity, PII patterns, SQL result equality, a test suite — a deterministic assertion is cheaper, reproducible and strictly more accurate.
+Whenever the property has a decidable answer. An assertion is cheaper, deterministic, instant, and strictly more accurate than a judge on anything a program can check: JSON schema validity via a validator, required-field presence via a key check, PII leakage via a fixed detector plus a frozen leak corpus, SQL correctness by executing both queries and comparing result sets, code correctness by running the test suite, citation support by checking that the quoted span actually exists in the cited chunk, factual answers by normalised exact match against a golden answer, and latency, cost and token count by measuring them. The failure of doing it with a judge is not only cost — it is that the same input can flip between runs, so a red build cannot be reproduced, and a judge asked whether a timestamp is valid ISO-8601 will accept something like "2026-13-45T99:00:00Z" often enough to matter. Reserve the judge for axes that are irreducibly subjective: helpfulness, tone, explanation quality, whether a summary preserved the point rather than the words. There is a second-order benefit: every assertion you move out of the judge makes the remaining judge score easier to interpret, because it is no longer averaging a formatting failure and a reasoning failure into one number.
+
+**Q: Does a panel of cheap judges beat a single expensive judge?**
+**Short:** Yes when the panel spans disjoint model families — PoLL beat a single large judge at over seven times lower cost — but repeated samples of one judge add almost nothing.
+Yes, provided the diversity is across model families rather than across samples. Verga et al. (arXiv 2404.18796) found that a Panel of LLM evaluators built from several smaller models drawn from disjoint families outperformed a single large judge across three judge settings and six datasets, at over seven times lower cost, with less intra-model bias precisely because the families do not share a lineage. The constraint is symmetric with the reward-model ensemble literature: repeated samples of the same judge add little once the errors are correlated, the same reason RM ensembles varying only by fine-tuning seed generalise worse than ensembles varying by pretraining seed. The cheaper variant is a cascade — a cheap judge scores everything and only ambiguous items escalate. Normalising the expensive judge to 1.00 unit per item and a cheap one to 0.05, scoring 10,000 items all-expensive costs 10,000 units, while a cascade escalating 15% costs 10,000 x 0.05 + 1,500 = 2,000 units, an 80% saving; break-even is at a 95% escalation rate, so a cascade is essentially always cheaper and the only real design question is whether the escalation trigger is accurate. Judge self-reported confidence is the worst trigger available. Use disagreement between two cheap judges from different families, a score within one point of the decision threshold, or a pairwise verdict that flips when the order is swapped — the last is free, since you are already running both orders to measure the flip rate.
 
 ---
 

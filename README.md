@@ -161,6 +161,7 @@ A distilled, one-stop reference for everything LLM — from transformer fundamen
 | [Mechanistic Interpretability](src/main/java/com/rutik/systemdesign/llm/mechanistic_interpretability/) | Superposition, sparse autoencoders, activation patching, circuit analysis, activation steering, model editing |
 | [LLM Security](src/main/java/com/rutik/systemdesign/llm/llm_security/) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness |
 | [Evaluation & Benchmarks](src/main/java/com/rutik/systemdesign/llm/evaluation_and_benchmarks/) | MMLU, HumanEval, RAGAS, LLM-as-judge, Chatbot Arena |
+| [Error Analysis & Eval Design](src/main/java/com/rutik/systemdesign/llm/error_analysis_and_eval_design/) | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval design, annotator agreement, judge alignment, slice coverage |
 
 #### Advanced & Landscape
 | Topic | Key Concepts |

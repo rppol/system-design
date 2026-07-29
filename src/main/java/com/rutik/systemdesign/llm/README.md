@@ -73,21 +73,22 @@ column reflects learning sequence, not addition order.
 | 35 | 5b — Operate | [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
 | 36 | 5b — Operate | [Prompt Management & PromptOps](prompt_management_and_promptops/README.md) | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, prompt injection prevention | Intermediate |
 | 37 | 5c — Quality Gate | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAS | Intermediate |
-| 38 | 5c — Quality Gate | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
-| 39 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
-| 40 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
-| 41 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/README.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
-| 42 | 6 — Advanced | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
-| 43 | 6 — Advanced | [AI Regulations & Compliance](ai_regulations_and_compliance/README.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | Intermediate |
-| 44 | 6 — Advanced | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
-| 45 | 6 — Advanced | [Vision-Language Models](vision_language_models/README.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
-| 46 | 6 — Advanced | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/README.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | Advanced |
-| 47 | 6 — Advanced | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
-| 48 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
-| 49 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/README.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
-| 50 | 6 — Advanced | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 51 | 6 — Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 52 | 6 — Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
+| 38 | 5c — Quality Gate | [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md) | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval design, annotator agreement, judge alignment, slice coverage | Intermediate |
+| 39 | 5c — Quality Gate | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
+| 40 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
+| 41 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
+| 42 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/README.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
+| 43 | 6 — Advanced | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
+| 44 | 6 — Advanced | [AI Regulations & Compliance](ai_regulations_and_compliance/README.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | Intermediate |
+| 45 | 6 — Advanced | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
+| 46 | 6 — Advanced | [Vision-Language Models](vision_language_models/README.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
+| 47 | 6 — Advanced | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/README.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | Advanced |
+| 48 | 6 — Advanced | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
+| 49 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
+| 50 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/README.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
+| 51 | 6 — Advanced | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
+| 52 | 6 — Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
+| 53 | 6 — Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---
 
@@ -293,11 +294,14 @@ side: versioning, testing, and safe deployment of the prompts that drive your pr
 
 **5c — Quality gate**
 ```
-Evaluation & Benchmarks  -->  LLM Testing Strategies  -->  Guardrails & Content Safety
+Evaluation & Benchmarks  -->  Error Analysis & Eval Design  -->  LLM Testing Strategies
+        -->  Guardrails & Content Safety
 ```
-LLM Testing Strategies sits between Evaluation and Guardrails: it covers the engineering
-side of evaluation (golden datasets, regression suites, CI/CD integration) that bridges benchmark
-methodology and production safety hardening.
+Error Analysis & Eval Design sits between Evaluation and Testing: Evaluation teaches the metrics,
+Error Analysis teaches how to decide *which* of them your own system needs (read traces, open-code
+failures, build a taxonomy, promote the top modes to assertions and aligned judges), and Testing
+takes that output and turns it into golden datasets, regression suites, and CI/CD gates. Guardrails
+then hardens production safety.
 
 ### Phase 6 — Advanced Topics
 ```
@@ -325,19 +329,19 @@ decoding) adjacently, both contrasted against the dense-autoregressive default.
 
 ## Learning Paths
 
-This section is deliberately exhaustive — 52 modules covering the full LLM lifecycle. That is the right
+This section is deliberately exhaustive — 53 modules covering the full LLM lifecycle. That is the right
 depth for a reference, but the wrong shape for someone with an interview in two weeks. So there are **two
 ways through it**. Pick based on your goal; the browser learning game's **Study** view surfaces both as a
 **Full / Interview** toggle (Full is the default).
 
-### Full Path (52 modules)
+### Full Path (53 modules)
 
 The complete curriculum, in the order above — see [Recommended Learning Order](#recommended-learning-order).
 Use this when you want genuine mastery of the whole field: research frontier (diffusion LMs, VLA/robotics,
 mechanistic interpretability), breadth (multimodal, edge SLMs, ecosystem, regulations), and every
 specialized agent type. Nothing is dropped.
 
-### Interview-Specific Path (30 modules)
+### Interview-Specific Path (31 modules)
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
 [Knowledge-Question Map](#knowledge-question-map) and [Study Plan](#study-plan)
@@ -352,7 +356,7 @@ why it earns interview time.
 | Agents | [Agents & Tool Use](agents_and_tool_use/README.md), [Agentic Workflow Patterns](agentic_workflow_patterns/README.md), [Multi-Agent Systems](multi_agent_systems/README.md), [MCP](mcp_model_context_protocol/README.md) | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, and MCP are hot |
 | Serving | [Inference & Decoding](inference_and_decoding/README.md), [Context Windows & Long Context](context_windows_and_long_context/README.md), [Inference Engines](inference_engines/README.md), [vLLM Deep Dive](vllm_deep_dive/README.md), [Optimization & Quantization](optimization_and_quantization/README.md) | KV cache, speculative decoding, RoPE/YaRN, PagedAttention, GPTQ/AWQ/FP8 — the systems core |
 | Operate | [Deployment & MLOps](deployment_and_mlops/README.md), [LLM Caching](llm_caching/README.md), [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md), [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | "Cut serving cost 10x" is a staple system-design ask |
-| Quality & Safety | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md), [Guardrails & Content Safety](guardrails_and_content_safety/README.md), [Safety & Alignment](safety_and_alignment/README.md), [LLM Security](llm_security/README.md) | LLM-as-judge pitfalls, prompt injection defense, hallucination mitigation |
+| Quality & Safety | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md), [Guardrails & Content Safety](guardrails_and_content_safety/README.md), [Safety & Alignment](safety_and_alignment/README.md), [LLM Security](llm_security/README.md) | LLM-as-judge pitfalls, error analysis and failure taxonomies, prompt injection defense, hallucination mitigation |
 | Architecture | [Mixture of Experts](mixture_of_experts/README.md) | MoE training/serving tradeoffs come up whenever frontier models are discussed |
 
 **Deliberately deferred to the Full Path** (still valuable, just lower interview yield): training
@@ -415,6 +419,7 @@ The highest-frequency LLM *knowledge* questions mapped to the exact file that an
 | Walk through chunking, embedding, retrieval, reranking choices | [chunking_strategies.md](rag_fundamentals/chunking_strategies.md), [retrieval_methods.md](rag_fundamentals/retrieval_methods.md), [reranking.md](rag_fundamentals/reranking.md) |
 | How do you guarantee the model emits valid JSON? | [constrained_decoding_and_structured_outputs.md](inference_and_decoding/constrained_decoding_and_structured_outputs.md) |
 | How do you evaluate an LLM system? LLM-as-judge pitfalls? | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md) |
+| How do you decide WHAT to evaluate? Error analysis, failure taxonomies, judge alignment? | [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md) |
 | How do you evaluate an agent? | [agent_evaluation_and_benchmarking.md](agents_and_tool_use/agent_evaluation_and_benchmarking.md) |
 | How does function calling / ReAct actually work? | [function_calling_and_tool_design.md](agents_and_tool_use/function_calling_and_tool_design.md), [react_and_reasoning_patterns.md](agents_and_tool_use/react_and_reasoning_patterns.md) |
 | What is MCP and when is it better than native tools? | [MCP](mcp_model_context_protocol/README.md) |

@@ -61,18 +61,38 @@ Trajectory and efficiency metrics are what make that visible.
 
 ### 4.3 By benchmark family
 
-| Benchmark | Environment | Scored on | What it uniquely stresses |
-|-----------|------------|-----------|--------------------------|
-| GAIA | Web search, files, tools | Exact match on the final answer | General assistant tool use across three step-count tiers |
-| SWE-bench | Real Python repositories | Repository test suite after applying a patch | Codebase comprehension, not code generation |
-| AgentBench | 8 environments (OS, DB, KG, games, web) | Per-environment native metrics, normalized | Breadth — where an agent's competence stops |
-| WebArena | Self-hosted functional websites | Backend state matches the annotated goal state | Realistic multi-step web navigation |
-| τ-bench / τ²-bench | Domain policy plus an LM user simulator | Final database state, reported as pass^k | Requirement gathering through dialogue, and reliability |
-| Custom harness | Your own production task distribution | Whatever your users mean by success | The distribution gap every public benchmark has |
+Group benchmarks by the *capability they stress*, not by the year they shipped. A roster that
+is all coding benchmarks tells you nothing about whether the agent can drive a shell, hold a
+policy through a conversation, or refuse a harmful request.
+
+| Family | Benchmark (first release) | Environment | Scored on | What it uniquely stresses |
+|--------|--------------------------|-------------|-----------|--------------------------|
+| Coding agents | SWE-bench (2023) — Full 2,294 / Verified 500 / Lite 300 / Multimodal 517 | Real Python repos; Multimodal is JavaScript | Repository test suite after applying a patch | Codebase comprehension, not code generation. Verified is now contaminated and retired by OpenAI |
+| Coding agents | SWE-bench Pro (2025) — 731 public / 276 private | Copyleft OSS plus private company repos; multi-file patches | Same test-suite gate, on hours-to-days tasks | Contamination resistance and long-horizon change scope |
+| Computer & OS use | Terminal-Bench 2.x (2025) — 89 tasks | Containerised terminal driven through a tmux session | A per-task verification script the agent must satisfy | Whether the agent can drive a real shell to a checkable end state |
+| Computer & OS use | OSWorld (2024) — 369 tasks; OSWorld 2.0 (2026) — 108 | Real Ubuntu / Windows / macOS VMs with GUI apps | Execution-based post-condition script over files and app state | GUI grounding; 2.0 adds hour-scale, hundreds-of-steps workflows |
+| Web research | BrowseComp (2025) — 1,266 questions | The live open web | Short answer matched against a reference answer | Search *persistence* — answers hard to find, easy to verify |
+| Web research | GAIA (2023) — 466; Gaia2 (2025) — 800 | Web plus files; Gaia2 runs in Meta's ARE mobile simulator | Exact match (GAIA); per-capability judge plus exact match (Gaia2) | General assistant tool use; Gaia2 adds async time, noise, ambiguity, agent-to-agent |
+| Web research | WebArena (2023) — 812 tasks | Five self-hosted functional websites | Backend state matches the annotated goal state | Realistic multi-step web navigation. Historically important, now largely superseded |
+| Tool + policy dialogue | τ-bench (2024) / τ²-bench (2025) / τ³-bench (2026) | Written domain policy plus an LM user simulator | Final database state, reported as pass^k | Requirement gathering through dialogue, and reliability across repeats |
+| ML engineering | MLE-bench (2024) — 75 Kaggle competitions | Kaggle datasets under a compute and time budget | Submission scored against the real historical leaderboard; "any medal" rate | Open-ended experimentation and iteration under a budget |
+| Safety & security | AgentHarm (2024) — 110 base behaviours, 440 augmented | Synthetic tool suite (search, email, messaging) | Refusal rate plus a per-behaviour harm score | Whether tool access survives a jailbreak into coherent multi-step harm |
+| Safety & security | Cybench (2024) — 40 CTF tasks | Container with the challenge files and a shell | Exact match on the recovered flag | Offensive-capability ceiling, with scoring that cannot be talked around |
+| Reasoning frontier | ARC-AGI-2 (2025) — 120 tasks per eval split | Static grid puzzles, no tools | Exact grid match, reported *with cost per task* | Novel rule composition. NOT an agent benchmark — context only |
+| Reasoning frontier | Humanity's Last Exam (2025) — 2,500 questions | Closed-book expert exam | Short-answer / multiple-choice match | Expert breadth across 100+ subjects. NOT an agent benchmark — context only |
+| Reasoning frontier | GDPval (2025) — 1,320 tasks, 220 open-sourced | Real professional deliverables across 44 occupations | Blinded pairwise comparison against a human expert's deliverable | Economic value of the artifact produced, not task completion |
+| Your distribution | Custom harness | Your own production task distribution | Whatever your users mean by success | The distribution gap every public benchmark has |
 
 Public benchmarks are directional; the custom harness is the only one measured on the
 distribution you actually serve. Run both — a public benchmark for comparability, a private
 harness for deployment decisions.
+
+**Three questions to ask before you quote any row of that table.** *Which split?* — SWE-bench
+alone has five, and the same system moves double digits between them. *Which scaffold?* — every
+number in the coding, terminal and OS rows is a system score, not a model score. *How old is
+the environment?* — a benchmark whose tasks and gold answers have sat on GitHub for two years
+is measuring recall as much as capability, which is exactly what happened to SWE-bench
+Verified (§6).
 
 ### 4.4 By run count — capability versus reliability
 
@@ -210,6 +230,18 @@ Per-level scores are the honest reporting format; a one-number score is what lea
 
 **Why the plain average would mislead.** Averaging 50, 35 and 15 gives 33.3% — more than three points below the true 36.5%, because it silently promotes Level 3 from 16.1% of the benchmark to 33.3% of the score. The bias runs the other way too: a system tuned only on easy tasks looks better under the weighted score than a plain average would suggest, since Level 1 carries nearly double Level 3's weight. Always ask which mean a reported agent score used, and prefer the per-level breakdown when comparing two systems.
 
+**Gaia2 (2025) is the successor, and it is a different shape of benchmark.** Gaia2 ships as
+part of Meta's Agents Research Environments (ARE), a simulated mobile universe with a tool
+surface the agent acts through rather than a set of web questions. It is 800 human-written
+scenarios spread across capability configurations of 200 each — execution, search,
+adaptability, time, ambiguity — plus agent-to-agent and noise conditions. The change that
+matters for evaluation design: **scenarios run asynchronously against a clock**. The world
+keeps moving while the agent thinks, so an agent that reaches the right answer too late fails,
+and a slow-but-accurate scaffold can score worse than a fast approximate one. That failure
+mode is structurally invisible in GAIA, where the task waits. Gaia2 also reports per-capability
+scores rather than one number, and normalizes against LLM calls and output tokens — a
+Pareto frontier of accuracy against spend, not a leaderboard row.
+
 ### SWE-bench
 
 ```
@@ -236,28 +268,63 @@ Scoring:
   3. "Resolved" = all relevant tests now pass
   Binary score per issue: 0 or 1
 
-SWE-bench Verified (500 tasks):
-  Subset manually verified to have clear, well-specified issues
+The splits, and why the split is half the score:
+  Full        2,294 issues, 12 Python repos. The original test set
+  Verified      500 issues. Human-validated to be well-specified and solvable.
+                Deliberately easier: vague issues were filtered out
+  Lite          300 issues. A cheap-to-run subset for iteration
+  Multimodal    517 test instances (617 total with the 102-instance dev split)
+                drawn from 17 JavaScript libraries — UI, diagramming, charting,
+                syntax highlighting, mapping. Every instance carries at least one
+                image; annotators judged visual input necessary for 83.5% of them
+  Bash Only     Verified, run with only a shell — no bespoke retrieval tooling
+  Pro           731 public (copyleft OSS) + 276 private (proprietary company
+                repos), 1,865 tasks in total across 41 repositories. Long-horizon:
+                hours to days of expert time, patches spanning multiple files
 ```
+
+**SWE-bench Verified was retired as a frontier metric in February 2026, and the reason is the
+most instructive thing in this section.** On 2026-02-23 OpenAI's Frontier Evals team published
+*Why we no longer evaluate SWE-bench Verified* and stopped reporting it. Two findings, and
+they compound: the task set had decayed — over 60% of the problems their models still failed
+turned out to be flawed rather than hard, with 49 tests too narrowly specified and 26 testing
+for behaviour the issue never asked for — and the set was contaminated. Frontier models could
+reproduce the gold patch or the problem statement verbatim **from the SWE-bench Verified task
+ID alone**, with no issue text in the prompt. That is the strongest form of contamination
+evidence available: not a suspicious score, but the answer recited on request.
+
+The mechanism is worth stating plainly because it generalizes to every static agent benchmark.
+Verified's 500 issues and their gold patches were published on GitHub. GitHub is crawled into
+pretraining. Any model trained after mid-2024 has read the answer key. The benchmark did not
+get gamed by anyone in particular; it decayed on its own, on a clock set by the next
+pretraining run. SWE-bench Pro is the endorsed successor, and its design is a direct response:
+the public set is restricted to strong-copyleft (GPL-family) repositories so that inclusion in
+a training corpus carries legal exposure, and the private set of 276 instances comes from
+proprietary codebases that were never public at all. Under a unified scaffold, frontier models
+scored below 25% pass@1 on SWE-bench Pro at its September 2025 release — against 70%+ on
+Verified in the same period.
 
 ```mermaid
 xychart-beta
-    title "SWE-bench resolve rate over time — NOTE: mixed splits, see caption"
-    x-axis ["RAG GPT-4 2024 (full)", "Devin 2024 (25% subset)", "SWE-agent GPT-4 2024 (Lite)", "o3 2024 (Verified, vendor)", "live-SWE-agent + Opus 4.5 2025 (Verified)"]
-    y-axis "Issues resolved (%)" 0 --> 90
-    bar [1.31, 13.86, 18.0, 71.7, 79.2]
+    title "SWE-bench resolve rate — NOTE: mixed splits and mixed rigor, see caption"
+    x-axis ["RAG GPT-4 2024 (Full)", "Devin 2024 (25% subset)", "SWE-agent GPT-4 2024 (Lite)", "o3 2024 (Verified, vendor)", "live-SWE-agent Opus 4.5 2025 (Verified)", "top self-report 2026 (Verified)", "top entry 2026 (Pro public)"]
+    y-axis "Issues resolved (%)" 0 --> 100
+    bar [1.31, 13.86, 18.0, 71.7, 79.2, 95.0, 61.5]
 ```
 
-**The bars are not directly comparable — each is on a different split.** RAG GPT-4 resolved 30/2294 = 1.31% of the full test split (the paper's often-quoted 1.74% is GPT-4 with oracle file retrieval on a 25% sample, a different setting). Devin resolved 79/570 = 13.86% of a randomly chosen 25% subset. SWE-agent + GPT-4 resolved 54/300 = 18.0% on Lite and 286/2294 = 12.47% on the full split — the same system, 5.5 points apart, purely from the split. o3's 71.7% on Verified is an OpenAI-reported figure, not a leaderboard submission. The current leaderboard top on Verified is 396/500 = 79.2% (live-SWE-agent and Sonar Foundation Agent, both on Claude Opus 4.5, Dec 2025). Always state the split.
+**The bars are not directly comparable — each is on a different split, and the last two are not even on the same benchmark.** RAG GPT-4 resolved 30/2294 = 1.31% of the full test split (the paper's often-quoted 1.74% is GPT-4 with oracle file retrieval on a 25% sample, a different setting). Devin resolved 79/570 = 13.86% of a randomly chosen 25% subset. SWE-agent + GPT-4 resolved 54/300 = 18.0% on Lite and 286/2294 = 12.47% on the full split — the same system, 5.5 points apart, purely from the split. o3's 71.7% on Verified is an OpenAI-reported figure, not a leaderboard submission. live-SWE-agent reached 396/500 = 79.2% on Verified in Dec 2025. The 95.0% bar is the top *self-reported* Verified figure aggregated by llm-stats as of 2026-07-29 — that tracker lists 104 self-reported results and zero independently verified ones, on a split its own maintainers' primary consumer has since abandoned as contaminated. The 61.5% bar is the top entry on Scale's SWE-bench Pro public leaderboard (731 instances, several top entries run under the mini-swe-agent harness), retrieved the same day. **Read the last two bars together: the 33-point drop is what removing the answer key from the training corpus costs.** Always state the split, the scaffold, and whether anyone but the vendor ran it.
 
 ```
-What 20% means in practice:
+What a 20% resolve rate means in practice (the range SWE-bench Pro
+opened at, and the range every split passed through on its way up):
   - 1 in 5 real GitHub issues is automatically resolved
   - Issues are real production bugs, not toy problems
-  - Evaluation is purely automated (test suite)
+  - Evaluation is purely automated (test suite), no reviewer in the loop
   - 20% is a dramatic improvement over zero; 50%+ is commercially viable
-  - Remaining 50-80% require: codebase-specific knowledge, test writing,
-    design judgment, architecture decisions
+  - The remaining 50-80% require: codebase-specific knowledge, test
+    writing, design judgment, architecture decisions
+  - The number moves with the split. Read it as "20% of THIS set",
+    never as "20% of software engineering"
 ```
 
 **What it means.** "Resolve rate is a pass/fail test-suite count, nothing more — no partial credit, no style points, no reviewer."
@@ -268,6 +335,7 @@ That severity is the benchmark's greatest strength and its sharpest limitation. 
 |--------|------------|
 | `2294` | Full SWE-bench issue count, drawn from 12 real Python repositories |
 | `500` | The Verified subset — manually checked to be well-specified. 21.8% of the full set |
+| `731` | SWE-bench Pro public set, from strong-copyleft repositories. Plus 276 private |
 | resolve | Binary `1` if every relevant test passes after applying the patch, else `0`. No middle ground |
 | resolve rate | Resolved issues divided by issues attempted. Always split-specific |
 
@@ -280,8 +348,15 @@ That severity is the benchmark's greatest strength and its sharpest limitation. 
     SWE-agent + GPT-4 (Lite)              54 /   300             18.00%
     SWE-agent + GPT-4 (full split)       286 / 2,294             12.47%
     live-SWE-agent + Opus 4.5 (Verified) 396 /   500             79.20%
+    top self-report 2026 (Verified)        - /   500             95.00%
+    top entry 2026 (Pro, public set)       - /   731             61.50%
 
-  1.31% -> 79.20% is a 60x improvement in roughly two years
+  the last two rows show no numerator on purpose: both are published as
+  rates averaged over repeated runs, so multiplying back out invents a
+  count that was never a count. Only report a numerator you were given.
+
+  1.31% -> 95.00% on Verified is a 72x climb in roughly two years,
+  and a chunk of it is recall, not capability -- see the retirement note
 
   reading the "1 in 5" framing: at a 20% resolve rate,
     issues attempted per issue resolved = 1 / 0.20 = 5
@@ -289,6 +364,155 @@ That severity is the benchmark's greatest strength and its sharpest limitation. 
 ```
 
 **Why the scaffold, not just the model, is on the x-axis.** Every entry past bare RAG pairs a model with a harness: file navigation, test execution, patch validation, retry logic. The 71.7% and 79.2% figures are not model scores, they are system scores, and swapping the scaffold moves them by tens of points on an unchanged model. The two SWE-agent rows make the second point concrete: the *same* system reports 18.00% or 12.47% depending only on the split. This is why "SWE-bench score" is close to meaningless without naming both the scaffold and the split — the Verified subset is deliberately easier, having filtered out issues whose descriptions were too vague to be solvable at all.
+
+**The same argument, sharpened by three benchmarks that separate the two variables for you.** Terminal-Bench makes the scaffold an explicit leaderboard column: one row per *agent + model* pair, so the same model appears many times at different scores, and a neutral harness (Terminus 2) exists precisely so you can hold it fixed. Artificial Analysis publishes its Terminal-Bench v2.1 numbers with the harness, the sandbox and the repeat count stated in one line — Terminus 2, e2b sandbox, pass@1 averaged over 3 repeats per task — which is the minimum disclosure any agent score should carry. And ARC-AGI-2 puts the cleanest version of it on the record: at ARC Prize 2025, a Gemini 3 Pro *refinement harness* built by the team Poetiq scored 54% at roughly $30 per task against the same model's 31% baseline at $0.81 per task. Same model, 23 points, entirely from the scaffold and the money spent — and that is exactly why cost per task belongs on the axis next to accuracy.
+
+### Terminal-Bench
+
+```
+Terminal-Bench (Stanford + Laude Institute + open-source community)
+  1.0  2025, 80 tasks
+  2.0  November 2025, 89 tasks, each given hours of manual and
+       LLM-assisted validation. Shipped with Harbor, a container
+       framework for running agents
+  2.1  Same 89 tasks, further corrected
+
+Purpose: can an agent drive a real terminal to a verifiable end state?
+
+Task anatomy -- one folder containing:
+  instruction     the natural-language goal
+  Dockerfile      the environment, built fresh per attempt
+  test script     the verification suite the agent must satisfy
+
+The agent gets a tmux session and issues commands; the harness reads
+terminal state back. Nothing about the agent's prose is scored --
+only whether the test script passes at the end.
+
+Difficulty mix (2.0): 4 Easy, 55 Medium, 30 Hard, over 16 categories
+  software engineering, debugging, security, machine learning,
+  scientific computing, system administration, data processing
+
+Scaffolds on the leaderboard: Terminus and Terminus 2 (the project's
+  own neutral harnesses), Codex CLI, Claude Code, mini-SWE-agent and
+  others. EVERY ROW IS AN AGENT + MODEL PAIR, NOT A MODEL.
+```
+
+**What a terminal benchmark exposes that a code benchmark cannot.** SWE-bench hands the agent
+a repository and takes back a diff; the environment is a filesystem and the action space is
+"write a patch". Terminal-Bench hands it a shell, and the action space is everything a shell
+can do — install a dependency, notice the install failed, read the error, pick a different
+version, restart a service, check that the port is actually listening. Those are *environment*
+failures, not reasoning failures, and they are the ones that dominate real agent deployments.
+A model that writes an excellent patch and cannot recover from `command not found` scores well
+on one benchmark and is useless on the other. This is also why the same model swings so far
+across scaffolds here: the harness owns context management, error recovery and how much of the
+terminal state the model ever sees.
+
+Two current reference points, both stated with the scaffold, because a bare number would be
+meaningless. On the project's own Terminal-Bench 2.0 leaderboard the top entry as of
+2026-05-14 was the NexAU-AHE agent on GPT-5.5 at 84.7%, with 142 submissions listed across
+roughly two dozen distinct scaffolds. Artificial Analysis runs a *standardized* v2.1 suite —
+Terminus 2 harness, e2b sandbox, pass@1 averaged over 3 repeats per task — and reported GPT-5.6
+Sol (xhigh) at 89.5% and Claude Opus 5 (max effort) at 89.1% as of 2026-07-29. The two rankings
+are not interchangeable: one measures the best system anyone submitted, the other measures
+models under a fixed harness. Both are legitimate; quoting either without saying which is not.
+
+### OSWorld
+
+```
+OSWorld (Xie et al., 2024) -- XLANG Lab, University of Hong Kong, with
+  Salesforce Research, CMU and Waterloo
+
+369 tasks in real VMs across Ubuntu, Windows and macOS.
+Note: 8 Google Drive tasks have setup problems and are commonly
+excluded, so many reported runs are on 361, not 369. Check which.
+
+Each task is a triple:
+  setup script       puts the VM into a known initial state
+  instruction        natural language, e.g. "make this the default PDF app"
+  success function   PROGRAM that inspects the filesystem / app state after
+
+The agent sees screenshots and/or the accessibility tree and emits
+mouse and keyboard actions. No API shortcut exists -- if the app has
+no CLI, the agent clicks.
+
+At the 2024 release: human baseline 72.36%, best model 12.24%.
+
+OSWorld-Verified (2025-07-28): community-reported broken examples
+  fixed, parallel AWS execution bringing a full run under an hour.
+  This is the split leaderboards mean when they say "OSWorld" today.
+
+OSWorld 2.0 (2026, XLANG Lab): 108 LONG-HORIZON workflows.
+  ~1.6 hours of median human time per task; agents average ~318 steps
+  against roughly 30 in v1. Targets streaming interaction, dynamic
+  environments, cross-source reasoning, implicit-state inference.
+```
+
+**The two OSWorld generations are the clearest saturation story in agent evaluation, and they
+run in opposite directions at the same moment.** OSWorld-Verified is close to done: as of
+2026-07-28 the top several entries on the public leaderboard sat within about 1.6 points of
+each other in the mid-80s, which is the shape a benchmark takes when it has stopped
+discriminating. OSWorld 2.0, published the same year by the same lab, put the best reported
+agent around 20% — Claude Opus 4.8 at maximum thinking effort at 20.6% binary completion
+(54.8% partial, averaging 481.8 tool calls), against GPT-5.5 at 13.0% (49.5% partial) while
+spending 149.8 tool calls, under a third as many. Nothing about
+the models changed between those two numbers. What changed is task *length*: an agent that is
+reliable for 30 steps and an agent that is reliable for 318 are different systems, and only
+the second one matches what a user actually asks a computer-use agent to do. When you see a
+GUI-agent score in the 80s, find out whether it was measured on the 30-step benchmark or the
+318-step one.
+
+### BrowseComp
+
+```
+BrowseComp (Wei et al., OpenAI, April 2025)
+
+1,266 questions requiring persistent, multi-hop navigation of the
+LIVE web to find a single short, verifiable answer.
+
+Construction -- the INVERTED QUESTION method, and this is the whole
+trick of the benchmark:
+  1. a human browses until they find a verifiable, obscure fact
+  2. they write a question BACKWARDS from that fact, layering
+     constraints until it is hard to search for
+  3. reject the question if GPT-4o (with and without browsing) or
+     o1 can answer it
+  4. reject it if the answer appears in top search results
+
+Design property: hard to find, EASY TO VERIFY. Answers are short
+strings, so grading is a reference match -- no judge, no rubric.
+
+Paper results:
+  GPT-4o, no browsing        0.6%
+  GPT-4o with browsing       1.9%
+  GPT-4.5                    0.9%
+  o1                         9.9%
+  Deep Research             51.5%
+
+Human trainers: solved 367 of 1,255 attempted = 29.2%, allowed to
+  give up after two hours. When they did solve one, their answer
+  matched the reference 86.4% of the time.
+```
+
+**What BrowseComp measures is persistence, and the numbers make that unusually legible.**
+Browsing access alone took GPT-4o from 0.6% to 1.9% — a rounding error. The jump to 51.5%
+came from an agent built to keep going: issue a query, read, reformulate, follow a lead
+sideways, backtrack. That is a scaffolding property, not a knowledge property, and the 27-point
+gap between the agent and the humans who *gave up after two hours* is the cleanest available
+evidence that search agents can now out-persist a motivated person on a narrow class of
+lookups.
+
+The construction method also solves a problem worth stealing for your own harness. Most eval
+sets are hard to grade because the answer is long; BrowseComp is hard to *solve* and trivial to
+grade because the author started from the answer. If you are building a research-agent eval,
+write your questions backwards from a fact you have already verified, and reject any question a
+bare model answers without tools. You get an automatic grader for free and a guaranteed
+tool-use requirement in the same step.
+
+**And note the contamination profile is different from SWE-bench's.** BrowseComp questions run
+against the live internet, so the environment cannot be memorized the way a frozen repository
+can — but the 1,266 *question-answer pairs* are published, and those can be. Live environment,
+static answer key: the half that leaks is the half you wrote down.
 
 ### AgentBench
 
@@ -329,6 +553,15 @@ Key finding: Strong performance on OS/DB tasks;
 
 Note: WebArena is a separate benchmark (below), not one of AgentBench's eight environments.
 
+**Read AgentBench as history, not as a current result.** It was the first multi-environment
+agent benchmark with a public leaderboard, and the eight-environment framing — grouping
+environments by grounding type and refusing to collapse them into one percentage — shaped
+essentially every agent benchmark that followed, including the family table in §4.3. Its
+leaderboard has been cold since 2025 and its 2023 model roster is entirely superseded. What
+survives is the design lesson: **a normalized cross-environment "overall" is a ranking device,
+not a capability measurement**, which is why the roster in §4.3 keeps the families separate
+rather than averaging them.
+
 ### WebArena
 
 ```
@@ -361,6 +594,131 @@ Results (paper baselines, 2023-24):
 Frontier agent scaffolds have since pushed well past the paper's baseline;
 quote the live leaderboard rather than these numbers as current SOTA.
 ```
+
+**WebArena's contribution outlived its leaderboard.** Backend-state verification — check the
+database, not the transcript — is now the default way every serious environment benchmark
+scores, and OSWorld's per-task success functions and τ-bench's final-database-state check are
+both that idea applied to a different surface. As a *number*, though, WebArena has stopped
+being informative: third-party trackers put frontier scaffolds somewhere in the high-60s to
+mid-70s during 2026, in the neighbourhood of the paper's 78.24% human reference, and those are
+tracker figures rather than reviewed leaderboard submissions. Treat WebArena as the benchmark
+that taught the field how to score web agents, and reach for OSWorld or BrowseComp when you
+need a number that still separates systems.
+
+### MLE-bench
+
+```
+MLE-bench (Chan et al., OpenAI, October 2024)
+
+75 real Kaggle competitions, offline. "Lite" = the 22 low-complexity
+competitions. Splits by complexity: low / medium / high.
+
+The agent gets the competition description, the training data and a
+compute budget; it must produce a submission file. That means it has
+to do the whole loop -- read the task, build features, train, tune,
+validate, decide when to stop.
+
+Scoring is the sharp part: the submission is scored against the
+competition's REAL historical leaderboard, and the medal thresholds
+(bronze / silver / gold) are the thresholds thousands of human
+competitors were actually measured against. Headline metric is
+"Any Medal %" -- the fraction of the 75 where the agent medalled.
+
+Paper baseline: o1-preview with the AIDE scaffold, 16.9% any-medal.
+Repo leaderboard (openai/mle-bench), as of Feb 2026: Famou-Agent 2.0
+  on Gemini-3-Pro-Preview at 64.44 +/- 1.18 overall, 80.3 +/- 1.52
+  on the low-complexity split.
+
+The repo also ships a RULE VIOLATION DETECTOR and a PLAGIARISM
+DETECTOR, because the obvious cheat is to fetch the winning notebook
+off the internet instead of doing the work.
+```
+
+**MLE-bench is the only benchmark on this roster with a *free* human baseline at every
+percentile.** GAIA had to pay annotators; WebArena had to run a human study; OSWorld had to
+time people. MLE-bench inherits an entire competitive distribution — thousands of humans, real
+effort, real leaderboard — for nothing, and that is what makes "bronze medal" a meaningful unit
+instead of an arbitrary threshold. Steal the pattern where you can: if your domain has an
+existing scored human population, calibrate against it rather than inventing a rubric.
+
+The two detectors are the other lesson. As soon as an agent has a shell and a network, the
+cheapest path to a high score stops being "solve the problem" — a benchmark that grants
+internet access must assume the answer is on the internet and check for it explicitly.
+
+### Safety and Security: AgentHarm and Cybench
+
+```
+AgentHarm (Andriushchenko et al., Gray Swan AI + UK AI Safety
+Institute, October 2024; ICLR 2025)
+
+110 explicitly malicious agent tasks, 440 with augmentations,
+across 11 harm categories (fraud, cybercrime, harassment, ...).
+
+Tasks are wired to SYNTHETIC tools -- fake search, fake email, fake
+messaging -- so a compliant agent produces a complete, traceable
+harmful trajectory without touching anything real.
+
+Two things are measured, and they are independent:
+  refusal rate  did the agent decline?
+  harm score    if it did not decline, how far through the
+                multi-step harmful task did it actually get?
+
+Three findings from the paper:
+  1. leading models comply with malicious AGENT requests at a
+     surprising rate WITHOUT any jailbreak
+  2. simple universal jailbreak templates transfer into the agent
+     setting with little adaptation
+  3. jailbroken agents stay COHERENT -- they keep their capability
+     across the multi-step task rather than degenerating
+
+
+Cybench (Zhang et al., Stanford, 2024; ICLR 2025)
+
+40 professional-level Capture-the-Flag tasks from 4 real
+competitions (HackTheBox Cyber Apocalypse 2024, SekaiCTF 2022-23,
+Glacier, HKCert), spanning 6 domains: cryptography, web security,
+reverse engineering, forensics, exploitation, misc.
+
+The agent gets a container, the challenge files and a shell.
+Scoring is EXACT MATCH ON THE RECOVERED FLAG -- a random string.
+There is no partial credit and no way to argue with the grader.
+
+A subset of tasks ships with guided subtasks, so a run that fails
+the flag still reports how far along the intended path it reached.
+```
+
+**These two benchmarks split the safety axis along a line worth internalizing: refusal versus
+capability.** AgentHarm asks whether the agent *will*; Cybench asks whether it *can*. They fail
+in opposite directions if you only run one. An agent that refuses everything scores perfectly on
+AgentHarm and tells you nothing about the blast radius when a jailbreak lands — which finding 2
+says is not hypothetical. An agent that scores low on Cybench is genuinely less dangerous, but a
+model can be weak at CTFs and still cheerfully help with fraud. The pairing is the measurement:
+harm rate tells you how often the guard opens, capability tells you what walks through.
+
+The flag-match scoring in Cybench also deserves a note in its own right. Most agent scoring
+either runs a test suite (arguable — see the SWE-bench "correct patch, missing test" case) or
+calls a judge (biased, needs calibration). A flag is a random string the agent can only produce
+by actually having solved the challenge. Where your domain admits a scoring artifact of that
+shape — a checksum, a signed receipt, a value only the completed action could generate — prefer
+it over every other mechanism in §4.2.
+
+### The Reasoning Frontier — Context, Not Agent Benchmarks
+
+The three benchmarks below get quoted constantly in agent discussions and **none of them is an
+agent benchmark**. They are worth knowing because they bound what the underlying model brings
+to your scaffold, and because misreading them as agent results is a common interview error.
+
+| Benchmark | What it actually is | Why it appears in agent conversations |
+|-----------|--------------------|---------------------------------------|
+| ARC-AGI-2 (ARC Prize Foundation, 2025) | 1,000 training / 120 public eval / 120 semi-private / 120 private static grid puzzles, no tools. Every task was solved by at least 2 humans in 2 attempts or fewer in a 400+ participant study; median human solve time ~300s against ~30s on ARC-AGI-1 | It reports **cost per task as a first-class axis**, and its 2025 results are the sharpest public demonstration that a scaffold moves a fixed model by tens of points (§ SWE-bench). The ARC Prize 2025 Kaggle track drew 1,455 teams; NVIDIA's NVARC won with 24% on the private set using synthetic data and test-time training on a 4B model |
+| Humanity's Last Exam (CAIS + Scale AI, 2025; published in Nature January 2026) | 2,500 closed-book expert questions across 100+ subjects, short-answer and multiple-choice | It is the standard "is the base model smart enough" reference. Scores moved from low single digits at release to the low 50s by mid-2026 — a reasoning-capability trend line, with no tools, no environment and no trajectory anywhere in it |
+| GDPval (OpenAI, September 2025) | 1,320 real professional deliverables across 44 occupations in the 9 US sectors that each exceed 5% of GDP; 220 open-sourced as a gold subset. Graded by **blinded pairwise comparison** against a human expert's deliverable | It is the closest thing to an economic-value measure, and its scoring model is genuinely different: a GDPval "score" is a win rate against a person, not an accuracy. The launch release put the strongest model a little under a coin flip on wins-or-ties against expert deliverables |
+
+**Why the distinction matters in practice.** A high HLE score says the model knows things. A
+high ARC-AGI-2 score says it can compose novel rules. Neither says it will notice that a tool
+returned an error, re-plan around it, and stop before burning your budget — which is the entire
+content of §4.1 and the reason agent benchmarks exist as a separate family. When someone
+justifies an agent architecture with an HLE number, the missing evidence is a trajectory.
 
 ### Trajectory-Level Evaluation
 
@@ -620,7 +978,7 @@ The formula is built as one minus the bad case because the bad case is the easy 
 
 **Why the pass@1-to-pass@5 gap is the number to watch.** `pass@1` is what a user experiences: one run, one shot. `pass@5` is what the agent is *capable* of when you can afford five attempts and have an oracle to pick the winner — which in production you usually do not. A gap of 0.400 says the capability is there but the reliability is not, and that is a scaffolding problem (better verification, retry-on-failure, self-checking) rather than a model problem. A small gap with a low `pass@1` says the opposite: the agent fails the same way every time, and no amount of retrying will help.
 
-### pass^k — the Reliability Metric, and τ-bench
+### pass^k — the Reliability Metric, and the τ-bench Family
 
 `pass@k` answers "can the agent do it at all, given k tries?" That is the right question
 for code generation, where a unit test picks the winner for free. It is the wrong question
@@ -655,12 +1013,62 @@ are near-certain to see at least one wrong outcome in most of them.
 simulator** on the other side of the conversation, so the agent must extract requirements
 through dialogue while obeying a written domain policy, and it scores by comparing the
 final **database state** to the annotated goal state rather than by judging the transcript.
-τ²-bench (2025) extends it to a **dual-control** telecom domain where the simulated user
-also holds tools and mutates the shared environment — a Dec-POMDP rather than an agent
-acting alone — and reports significant drops when agents move from the no-user setting to
-guiding a user through actions they cannot perform themselves. If your agent talks to
-people, this family is the closest public proxy for your task distribution, and `pass^k`
-is the number to put on the dashboard next to `pass@1`.
+
+```
+The family, and what each version added
+
+tau-bench (Yao et al., Sierra, June 2024)
+  retail   115 tasks    airline   50 tasks
+  Agent holds the tools. An LM user simulator supplies the request,
+  incrementally and imperfectly, the way a customer does.
+  Agent must obey a written domain policy document.
+  Scored: final DB state == annotated goal state, reported as pass^k.
+  This is where pass^k was introduced.
+
+tau2-bench (Barres et al., Sierra, June 2025) -- DUAL CONTROL
+  + telecom  114 tasks, subsampled from 2,285 combinations built
+             programmatically from 15 atomic subtask groups across
+             3 user intents of increasing complexity
+  The USER also holds tools. They can toggle a device setting, grant
+  a permission, restart a modem, read an error message back. The
+  agent cannot perform those actions -- it must TALK the user
+  through them, then verify from what the user reports.
+  Formally a Dec-POMDP: two actors, one shared mutating world.
+  Paper's headline: significant drops moving from the no-user
+  setting to guiding a user through actions the agent cannot take.
+
+tau3-bench (Sierra, February 2026)
+  Audited and fixed 50+ retail and airline tasks -- i.e. the SAME
+  decay SWE-bench Verified suffered, caught and repaired instead
+  of quietly inflating scores.
+  + tau-knowledge: a banking domain where the agent must retrieve
+    and reason over a knowledge base of roughly 700 documents
+  + tau-voice: full-duplex real-time voice on retail, airline,
+    telecom -- the agent is now judged with latency and barge-in
+    in the loop, not on a clean text transcript
+```
+
+**Why the dual-control move is the important one.** In τ-bench the world only changes when the
+agent acts, so a failure is always the agent's. In τ²-bench the user acts too, which
+introduces a failure mode no single-actor benchmark can produce: the agent gives a correct
+instruction, the user executes it wrong or reports back inaccurately, and the shared state
+diverges from what the agent believes. Recovering requires the agent to *verify* rather than
+assume — ask the user to read the screen back, re-check the account state, notice the
+contradiction. Every human-in-the-loop production agent has exactly this problem and almost no
+other public benchmark contains it.
+
+**The scoreboard, and the reason to read it by domain.** As of 2026-07-29 the project's
+leaderboard put the top τ²-bench text result at 90.9% pass^1 (GLM-5.2), the top τ³-Banking
+knowledge result at 46.4% pass^1 (GPT-5.5), and the top τ³-Voice result at 67.3% pass^1
+(grok-voice-think-fast-1.0). Those are the same underlying skill — hold a policy, gather
+requirements, mutate a database correctly — measured through three different channels, and the
+44-point spread between text and knowledge-retrieval is the cost of adding a corpus the agent
+must ground in. A single "τ-bench score" collapses that and is worth nothing.
+
+If your agent talks to people, this family is the closest public proxy for your task
+distribution, and `pass^k` is the number to put on the dashboard next to `pass@1`. The
+leaderboard reports pass^k at k = 1 through 4 precisely so the reliability decay is visible
+rather than inferred.
 
 ---
 
@@ -679,6 +1087,39 @@ is the number to put on the dashboard next to `pass@1`.
 - Task success rate across a set of roughly 600 basic skills
 - Generalization: agents trained on N-1 games evaluated on the N-th game
 - Result: agents that understand natural language instructions generalize better
+
+### OpenAI retiring SWE-bench Verified (2026-02-23)
+
+The best-documented public case of a benchmark being killed by its own popularity, and a
+template for auditing your own eval set:
+
+- **Trigger**: scores kept rising while the team's confidence that they meant anything fell
+- **Audit of the failures, not the successes**: they inspected the problems their models still
+  got wrong and found over 60% were flawed rather than hard — 49 tests too narrow, 26 checking
+  for behaviour the issue never specified. A benchmark's *ceiling* is set by its broken tasks
+- **Contamination probe**: prompt the model with the task ID alone, no issue text, and see if
+  it recites the gold patch. It did, across labs
+- **Action**: stop reporting the metric publicly, publish the reasoning, name a successor
+  (SWE-bench Pro) whose licensing and private split make the same decay harder
+
+The transferable practice is the second and third bullets. Auditing your held-out failures for
+task defects, and probing for memorization with an identifier rather than a rephrasing, are
+both cheap and neither is standard.
+
+### Third-party standardized evaluation (Artificial Analysis, Epoch AI, Vals AI)
+
+Because almost every headline agent score is vendor-reported — one public Verified tracker
+listed 104 self-reported results and zero independently verified ones as of 2026-07-29 — a
+layer of independent evaluators now re-runs benchmarks under a fixed harness:
+
+- The disclosure they publish alongside each number is the model to copy: harness, sandbox,
+  and repeat count in one line (e.g. Terminal-Bench v2.1, Terminus 2 harness, e2b sandbox,
+  pass@1 averaged over 3 repeats per task)
+- Their rankings routinely differ from vendor rankings, because a vendor optimizes its own
+  scaffold and a standardized run deliberately does not
+- Practical rule for a deployment decision: a vendor number tells you the ceiling of the
+  vendor's system; a standardized number tells you what the model contributes; your own
+  harness tells you what you will get. You need all three, and they will not agree
 
 ### Production Agent Monitoring at Scale
 
@@ -699,13 +1140,21 @@ A large enterprise deploys a research agent:
 | Automated outcome eval | Low | Very high | Binary | Seconds |
 | Trajectory scoring | High | Medium | High | Hours |
 
-| Benchmark | Task Type | Difficulty | Coverage | Automation |
-|-----------|-----------|------------|----------|------------|
-| GAIA | General tool use | Easy-Hard | Broad | Full |
-| SWE-bench | Code repair | Very Hard | Narrow (Python) | Full |
-| AgentBench | Multi-environment | Variable | Broad | Full |
-| WebArena | Web navigation | Hard | Web-focused | Full |
-| Custom harness | Domain-specific | Configurable | Narrow | Varies |
+| Benchmark | Task type | Headroom left (mid-2026) | Contamination exposure | Cost to run | Automation |
+|-----------|-----------|--------------------------|------------------------|-------------|------------|
+| SWE-bench Verified | Code repair | None — retired as contaminated | Severe: tasks and gold patches public since 2024 | Low | Full |
+| SWE-bench Pro | Long-horizon code change | Large | Low by design: copyleft public set, private set never published | High — hours-scale tasks | Full |
+| Terminal-Bench 2.x | Terminal / sysadmin | Moderate — top entries near 90% | Moderate: tasks public, but environments rebuild per run | Moderate — container per task | Full |
+| OSWorld-Verified | GUI computer use | Little — top entries clustered in the mid-80s | Moderate | High — VM per task | Full |
+| OSWorld 2.0 | Hour-scale GUI workflows | Very large — best reported near 20% | Low, newly published | Very high — ~318 steps per task | Full |
+| BrowseComp | Web research | Large | Split: live web cannot leak, the 1,266 Q-A pairs can | Moderate, plus live-web flakiness | Full (reference match) |
+| GAIA / Gaia2 | General assistant tool use | Moderate (Gaia2) | Moderate | Moderate; Gaia2 adds wall-clock sensitivity | Full |
+| τ²-/τ³-bench | Policy dialogue, dual control | Domain-dependent — text high, knowledge and voice low | Low: state-based scoring, task set actively audited | Moderate — user simulator doubles LLM calls | Full |
+| MLE-bench | ML engineering | Moderate | Real: winning notebooks are public, hence the plagiarism detector | Very high — GPU training per task | Full |
+| AgentHarm / Cybench | Safety / offensive capability | Not a race — these are floors, not ceilings | Low | Low to moderate | Full |
+| WebArena | Web navigation | Little — effectively superseded | Moderate | Moderate — self-hosted stack | Full |
+| AgentBench | Multi-environment | Historical only | High | Moderate | Full |
+| Custom harness | Domain-specific | Whatever your users still fail at | None if never published | Yours to control | Varies |
 
 ---
 
@@ -747,16 +1196,47 @@ assert spearman(judge.scores(calibration_set), human_scores) > 0.8
 
 5. **Cost blindness**: teams optimize for task success rate without tracking cost-per-task. An agent that achieves 70% success at $5/task vs. 65% success at $0.50/task — the cheaper one may be better for production.
 
+6. **Quoting a benchmark that has already saturated or decayed**: SWE-bench Verified was the single most-cited agentic number in 2025 and was retired by OpenAI in February 2026 as contaminated and full of defective tests; OSWorld-Verified's top entries now sit within a couple of points of each other. A benchmark whose leaders are clustered has stopped discriminating and cannot justify a model choice. Check when the split was published and how far apart the top entries are *before* you put it in a decision document.
+
+7. **Reporting a score without the split, the scaffold and the runner**: the same SWE-agent system reports 18.00% or 12.47% purely from the split; a refinement harness moved one fixed model 23 points on ARC-AGI-2 by spending 37x more per task; one public Verified tracker listed 104 self-reported results and zero independently verified ones. "Agent X scores N%" is not a claim — it is three missing facts wearing a number.
+
 ---
 
 ## 11. Technologies & Tools
 
+### Benchmarks — coding and terminal
+
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| **GAIA benchmark** | General agent eval | Tool-use, web search, reasoning |
-| **SWE-bench** | Code repair eval | Real GitHub issues; Python |
-| **AgentBench** | Multi-env eval | OS, DB, web, household tasks |
-| **WebArena** | Web navigation eval | Realistic web environments |
+| **SWE-bench Pro** | Long-horizon code repair | 731 public + 276 private instances; the endorsed successor to Verified |
+| **SWE-bench (Full / Lite / Multimodal)** | Code repair eval | Still useful splits; Verified is retired as a frontier metric |
+| **Terminal-Bench + Harbor** | Terminal agent eval | 89 tasks; Harbor is the container framework; Terminus 2 is the neutral harness |
+| **MLE-bench** | ML engineering eval | 75 Kaggle competitions; ships rule-violation and plagiarism detectors |
+
+### Benchmarks — computer, web and dialogue
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **OSWorld / OSWorld 2.0** | GUI computer-use eval | Real VMs; 2.0 is the long-horizon successor and is far from saturated |
+| **BrowseComp** | Web research eval | 1,266 inverted questions; short verifiable answers, no judge needed |
+| **GAIA / Gaia2 (ARE)** | General assistant eval | Gaia2 runs asynchronously against a clock inside Meta's ARE platform |
+| **τ²-bench / τ³-bench** | Policy dialogue eval | Dual control, LM user simulator, pass^k at k = 1-4; adds knowledge and voice |
+| **WebArena** | Web navigation eval | Historically important; originated backend-state scoring |
+
+### Benchmarks — safety and frontier context
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **AgentHarm** | Agent harmfulness eval | 110 base behaviours on synthetic tools; scores refusal AND harm separately |
+| **Cybench** | Offensive capability eval | 40 CTFs; exact flag match, the least gameable scoring on this page |
+| **ARC-AGI-2 / HLE / GDPval** | Frontier reasoning context | Not agent benchmarks — quote them as model context only |
+
+### Harnesses and platforms
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **Inspect (UK AISI)** | Eval framework | Reference implementation for AgentHarm and Cybench-style suites |
+| **Artificial Analysis / Epoch AI / Vals AI** | Third-party standardized runs | Independent re-runs with the harness and repeat count disclosed |
 | **LangSmith** | Trace logging + eval | Built-in LLM judge support |
 | **Langfuse** | Open-source eval | Trace + score; any framework |
 | **RAGAS** | RAG + agent eval | Faithfulness, relevance metrics |
@@ -850,6 +1330,30 @@ A: A domain-specific benchmark construction process: (1) Task sampling — colle
 **Q: What does pass^k measure that pass@k does not, and when do you report it?**
 **Short:** pass^k is the chance ALL k trials succeed, exposing a reliability gap that pass@k's best-of-k ceiling hides entirely.
 A: pass^k is the probability that ALL k independent trials of the same task succeed, where pass@k is the probability that at least one does — so pass^k measures reliability and pass@k measures capability. Both are estimated from the same n runs with c successes: `pass^k = C(c,k)/C(n,k)` versus `pass@k = 1 - C(n-c,k)/C(n,k)`. They are identical at k=1 and diverge immediately afterwards; with n=5 and c=3, pass@2 is 0.900 while pass^2 is 0.300. Report pass@k when an oracle picks the winning run — code generation with a unit test, patch selection against a test suite — because retrying is genuinely free and the ceiling is what matters. Report pass^k when every run reaches a user and there is no selection step: customer service, booking, anything that writes to a database. τ-bench introduced the metric for exactly that case and its headline result shows why it matters — a gpt-4o function-calling agent at roughly 61% pass^1 on the retail domain dropped below 25% at pass^8, meaning an agent that resolves two-thirds of tickets is still near-certain to mishandle a given ticket at least once across eight attempts. Practical rule: a large pass@k-to-pass^k gap says the failures are stochastic and the fix is scaffolding (verification, self-check, deterministic tool paths), not a bigger model.
+
+**Q: Why does a terminal or OS benchmark expose failures that a code benchmark cannot?**
+**Short:** A terminal benchmark scores environment recovery — failed installs, missing binaries, dead services — which a patch-and-test benchmark never exercises.
+A: SWE-bench hands the agent a repository and takes back a diff, so the action space is "write a patch" and the environment is a static filesystem. Terminal-Bench hands it a shell and OSWorld hands it a desktop VM, and the action space becomes everything those surfaces allow: install a dependency, notice the install failed, read the error, pick a different version, restart a service, verify the port is listening, click through a dialog with no CLI equivalent. Those are environment failures rather than reasoning failures, and they dominate real deployments — a model that writes an excellent patch but cannot recover from `command not found` scores well on one benchmark and is unusable on the other. The second thing they expose is horizon. OSWorld 2.0 tasks average around 318 agent steps against roughly 30 in the original OSWorld, and the best reported agents sit near 20% on the long version while the original's verified split has top entries clustered in the mid-80s — the same models, separated only by how long they have to stay coherent. Interview framing: name the axis the benchmark adds (environment recovery, GUI grounding, horizon length), not just the benchmark.
+
+**Q: What does τ²-bench's dual-control setup test that τ-bench does not, and why does pass^k matter there?**
+**Short:** Dual control gives the simulated user their own tools, so the agent must talk a person through actions it cannot perform and then verify the result.
+A: In τ-bench only the agent holds tools, so the shared world changes only when the agent acts and every failure is attributable to the agent. τ²-bench's telecom domain gives the simulated user tools too — toggling a device setting, granting a permission, restarting a modem, reading an error message back — which the agent cannot do itself. That makes it formally a Dec-POMDP: two actors mutating one environment. The new failure mode is divergence: the agent issues a correct instruction, the user executes it wrong or reports back inaccurately, and the agent's belief about the world stops matching the world. Recovering requires the agent to verify rather than assume, which is precisely the behaviour production human-in-the-loop agents need and almost no other public benchmark contains. pass^k is the right metric for the whole family because every run reaches a real customer and there is no selection oracle — the leaderboard reports pass^k at k = 1 through 4 so the reliability decay is visible rather than inferred, and a domain that looks strong at pass^1 can be unusable by pass^4.
+
+**Q: How does contamination work differently for agent benchmarks with live environments?**
+**Short:** A live environment cannot be memorized, but the published question-answer pairs can — the half you wrote down is the half that leaks.
+A: Static benchmarks leak wholesale. SWE-bench Verified published 500 issues and their gold patches on GitHub, GitHub is crawled into pretraining, and by 2026 frontier models could reproduce the gold patch from the task ID alone with no issue text in the prompt — which is why OpenAI stopped reporting it on 2026-02-23. Benchmarks with live or regenerated environments leak only partially. BrowseComp runs against the real internet, so the environment itself cannot be memorized, but its 1,266 question-answer pairs are published and can be. Terminal-Bench rebuilds a container per attempt, so the environment is fresh, but the task instructions and test scripts are public. The rule that falls out: **contamination attaches to whatever you froze and published, not to the benchmark as a whole** — audit the answer key separately from the environment. Detection also differs. For a static set, probe with the identifier rather than a rephrasing: prompt the model with the task ID alone and see whether it recites the solution, which is far stronger evidence than a suspicious score. For a live-environment set, compare performance on the published tasks against freshly authored tasks of the same construction.
+
+**Q: Why was SWE-bench Verified retired, and what should that change about how you build eval sets?**
+**Short:** Its tasks and gold patches sat public on GitHub for two years, so models could recite the answer from the task ID alone.
+A: OpenAI's Frontier Evals team stopped evaluating on it on 2026-02-23 for two compounding reasons. First, decay: auditing the problems their models still failed showed over 60% were flawed rather than hard — 49 tests specified too narrowly, 26 checking for behaviour the issue never asked for — which means the benchmark's apparent ceiling was set by its broken tasks, not by capability. Second, contamination: models across labs could reproduce the gold patch or the problem statement verbatim from the task ID alone. SWE-bench Pro is the endorsed successor and its design answers both: the 731-instance public set is drawn from strong-copyleft repositories so training on it carries legal exposure, and the 276-instance private set comes from proprietary codebases that were never public. Three practices transfer to your own harness. Audit your held-out *failures* for task defects rather than assuming they are hard. Probe for memorization with identifiers, not paraphrases. And keep a genuinely private split — contamination is impossible by construction if the tasks were never published, which is the one guarantee no public benchmark can offer.
+
+**Q: How would you assemble an agent benchmark roster today, and what would you deliberately leave out?**
+**Short:** Cover one benchmark per capability axis — coding, terminal, GUI, web research, policy dialogue, safety — plus a private harness on your own distribution.
+A: Pick by the capability each benchmark stresses, one per axis, and refuse to average them. Coding: SWE-bench Pro rather than Verified, because Verified is retired and contaminated. Terminal and system work: Terminal-Bench, where every leaderboard row is an agent-plus-model pair so the scaffold is explicit. GUI computer use: OSWorld 2.0 rather than the verified original, because the original's top entries are clustered in the mid-80s and no longer separate systems. Web research: BrowseComp, whose inverted-question construction gives you a free automatic grader. Policy dialogue: the τ-bench family, reported as pass^k. Safety: AgentHarm for refusal behaviour and Cybench for offensive capability ceiling — you need both, since an agent that refuses everything scores perfectly on the first and tells you nothing about blast radius. Then a private harness on your own task distribution, which is the only one that decides deployments. What to leave out: any saturated split (WebArena, AgentBench, SWE-bench Verified) except as historical context, and any single cross-environment "overall" number, which is a ranking device rather than a capability measurement. Never quote a number without the split, the scaffold and whether anyone but the vendor ran it.
+
+**Q: Why are ARC-AGI-2 and Humanity's Last Exam not agent benchmarks, and what do they legitimately tell you?**
+**Short:** They score closed-book reasoning with no tools, environment or trajectory, so they bound the model's ceiling rather than the agent's behaviour.
+A: Both are single-shot question sets. ARC-AGI-2 is static grid puzzles testing novel rule composition, with 120 tasks in each evaluation split and a human study confirming every task was solved by at least two people in two attempts or fewer; Humanity's Last Exam is 2,500 closed-book expert questions across more than a hundred subjects. Neither has a tool, an environment, a multi-step trajectory or an error to recover from, so neither can tell you whether an agent will notice a failed tool call, re-plan around it, or stop before burning its budget. What they legitimately bound is what the underlying model brings to your scaffold — raw reasoning and raw breadth. ARC-AGI-2 earns a mention in agent discussions for a different reason: it reports **cost per task as a first-class axis**, and the ARC Prize 2025 results are the sharpest public demonstration of the scaffold effect, with a refinement harness taking one fixed model from 31% at roughly $0.81 per task to 54% at roughly $30 per task. That is a scaffolding-and-spend result on a benchmark with no agent in it, which is exactly why cost belongs next to accuracy on every agent dashboard. When someone justifies an agent architecture with an HLE number, the missing evidence is a trajectory.
 
 ---
 

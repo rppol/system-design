@@ -679,6 +679,271 @@ rewards; the paper does not publish the weighting):
   lambda = 0.1-0.5 (format reward weight, typical practice)
 ```
 
+### Evaluating the Reward Model
+
+Everything else in the pipeline gets a standing eval. The SFT model gets MMLU and IFEval, the
+policy gets a preference win rate and a safety suite, the serving stack gets latency SLOs. The
+reward model usually gets one number — validation accuracy, printed at the end of RM training —
+and is then treated as ground truth for the entire RL stage. That is backwards: the RM *is* the
+objective function, so an error in it is not a bug the optimizer will route around, it is a bug
+the optimizer will actively hunt down and amplify.
+
+**What it costs to skip the RM eval.** The failure surfaces six hours into PPO as "reward is
+climbing, human evals are flat," and at that point you cannot tell whether the fault is the
+policy, the KL schedule, the sampling temperature, or the RM. Worse, the reward number itself
+cannot arbitrate: Bradley-Terry fixes only the *gap* between two scores, so shifting every reward
+by +100 leaves the loss unchanged (see the case A / case B table above). A rising mean reward is
+therefore not evidence of anything on its own — it is evidence that the policy is finding higher
+values of a function nobody re-measured.
+
+#### RewardBench and RewardBench 2
+
+| | RewardBench (Lambert et al., [arXiv 2403.13787](https://arxiv.org/abs/2403.13787), 2024) | RewardBench 2 (Malik et al., [arXiv 2506.01937](https://arxiv.org/abs/2506.01937), 2025) |
+|---|---|---|
+| Item shape | 1 prompt, 1 chosen, 1 rejected | 1 prompt, 1 correct, 3 rejected |
+| Scored as | accuracy: is `r(chosen) > r(rejected)`? | best-of-4 accuracy: is the correct one ranked top of 4? |
+| Random baseline | 50% | 25% |
+| Sections | Chat, Chat Hard, Safety, Reasoning, Prior Sets | Factuality, Precise Instruction Following, Math, Safety, Focus, Ties |
+| Core size | 456 / 456 / 740 / 1,431 prompts in the four core sections | 1,865 prompts, ~70% from previously unseen human WildChat interactions |
+| Aggregation | per-section weighted average, then the mean of the section scores | per-domain accuracy, then the mean |
+
+RewardBench 2's headline structural change is that it sources **new** human prompts rather than
+recycling prompts from downstream evaluations, which is why the same models score roughly **20
+points lower** on it than on RewardBench 1. The **Ties** domain is genuinely new and is the one
+worth understanding: for a question with several equally correct answers, it scores both whether
+every correct answer outranks every incorrect one *and* whether the reward margin between correct
+and incorrect exceeds the spread among the correct answers themselves. That second clause is a
+calibration test smuggled into an accuracy benchmark — it penalises an RM that separates
+correct-from-incorrect only as strongly as it separates two equally good answers.
+
+**Known limitations, from the benchmarks' own authors.** RewardBench 1 states that the
+correlation between its scores and downstream RLHF effectiveness was unexplored, that some
+constituent datasets carry test-set contamination risk, that generative reward models and
+LLM-as-judge scorers were out of scope, and that the results are published without error bars or
+significance testing. Both benchmarks share a deeper limitation: they measure the RM on a static
+set of pairs somebody else wrote, while what determines your policy's quality is the RM's error
+on the responses *your* policy actually generates while climbing.
+
+#### Accuracy is a weak predictor of policy quality — and here is why
+
+This is the single most-misunderstood point about reward models, and two papers now quantify it.
+
+- **RewardBench 2's own correlation study** reports Pearson **r = 0.87** between benchmark score
+  and downstream best-of-N performance — strong. Under **PPO** it largely evaporates: post-RLHF
+  performance "quickly saturates to a similarly good performance" for every decent-to-good reward
+  model across a RewardBench 2 band of **49.8 to 68.5**. The paper also finds that when the RM's
+  base model and the policy's base model come from different lineages, downstream performance
+  drops sharply, and concludes explicitly that taking the highest-scoring reward model on a
+  leaderboard "will not ensure a good post RLHF model."
+- **Wen et al.** ([arXiv 2410.05584](https://arxiv.org/abs/2410.05584), ICLR 2025 spotlight)
+  measured accuracy against *policy regret* directly: Pearson **0.75** for best-of-N and **0.64**
+  for PPO, and — the sharper result — reward models inside the same accuracy band produce
+  substantially different regret. They also find that the *rank* of the responses in the eval set
+  affects the correlation more than which model sampled them, that the correlation weakens when
+  the eval prompts differ from the RL prompts, and that scoring on 5 responses per prompt is
+  markedly more predictive than the standard 2-response accuracy.
+
+The mechanism behind all of that: **accuracy averages the RM's error uniformly over a fixed
+preference set, but the policy only ever visits the high-reward tail.** RL is a search for
+argmax. It spends essentially none of its time on the mid-quality pairs that dominate a benchmark
+and all of its time in the region where the RM's scores are extrapolations, because that region
+was barely represented in the preference data. An RM can be 75% accurate overall and still be
+catastrophically wrong on exactly the sliver of response space PPO steers into — and those two
+facts are almost independent of each other.
+
+#### Reward hacking and the KL-vs-reward curve
+
+Gao, Schulman & Hilton ([arXiv 2210.10760](https://arxiv.org/abs/2210.10760), ICML 2023) built the
+canonical measurement: a synthetic setup where a large "gold" reward model generates the
+preference labels, a smaller proxy RM is trained on them, and the policy is optimized against the
+proxy while the gold score is tracked. With `d = sqrt(KL(pi || pi_init))`, they fit:
+
+```
+  best-of-n :  R_gold(d) = d * (alpha_bon - beta_bon * d)
+  RL        :  R_gold(d) = d * (alpha_RL  - beta_RL  * log d)
+```
+
+Read each as **gain minus gap**: the leading `d * alpha` term is the genuine improvement the
+policy earns as it moves away from the reference, and the subtracted term is the proxy-vs-gold
+divergence opening up as the policy leaves the region the RM was trained on. Both forms are
+concave — they rise, peak, and then fall. Meanwhile the *proxy* reward, the only number visible
+during training, rises monotonically the whole way.
+
+```mermaid
+xychart-beta
+    title "Overoptimization: proxy reward keeps rising, gold reward peaks and falls"
+    x-axis "sqrt(KL) from the reference policy" 1 --> 9
+    y-axis "Reward (illustrative units)" 0 --> 7
+    line [2.00, 2.83, 3.46, 4.00, 4.47, 4.90, 5.29, 5.66, 6.00]
+    line [2.00, 2.75, 3.03, 3.01, 2.76, 2.32, 1.74, 1.03, 0.20]
+```
+
+The upper monotone line is the proxy reward the trainer logs; the lower peaked line is
+`d * (alpha_RL - beta_RL * log d)`, the functional form Gao et al. fit for RL, plotted here with
+illustrative coefficients rather than their measured values. Everything right of the peak is
+Goodhart's law rendered as geometry: the metric and the goal are still positively related on the
+left, and negatively related on the right, and nothing in the training loop tells you which side
+you are on.
+
+Three findings from that paper that change how you run RLHF:
+
+1. **The alpha and beta coefficients vary smoothly — roughly logarithmically — with the proxy
+   RM's parameter count.** A larger RM pushes the peak both higher and later. Overoptimization is
+   not a bug to be patched; it is a budget that scales with RM capacity.
+2. **Below roughly 2,000 comparisons, a preference dataset yields very little improvement over
+   near-chance loss.** If you are collecting preference data and have a few hundred pairs, you do
+   not yet have a reward model, you have noise with a regression head.
+3. **The explicit KL penalty does not move the KL-versus-gold-reward frontier.** This is the
+   finding people get wrong most often. Raising beta does *not* make the policy robust to
+   overoptimization; it just stops the policy earlier along the same curve. The KL penalty is an
+   early-stopping mechanism, not a fix — which means you still need an independent signal to tell
+   you *where* to stop, and that signal cannot be the proxy reward.
+
+**Ensembles help, but do not close it.** Coste et al.
+([arXiv 2310.02743](https://arxiv.org/abs/2310.02743), ICLR 2024) show that conservative
+aggregation over an RM ensemble — worst-case (take the minimum) or uncertainty-weighted — improves
+best-of-N performance by up to 70% and practically eliminates overoptimization in their setting.
+Eisenstein et al. ([arXiv 2312.09244](https://arxiv.org/abs/2312.09244), CoLM 2024) show the
+ceiling: ensembles *mitigate but do not eliminate* reward hacking, because every RM in the
+ensemble tends to share the same error patterns. Their operationally useful detail is that
+ensembles varying by **pretraining** seed generalise better than ensembles varying only by
+**fine-tuning** seed — five fine-tunes of one base model are close to one reward model with extra
+compute.
+
+#### Calibration and the reward margin distribution
+
+Bradley-Terry does not just give you an ordering, it gives you a probability:
+`P(chosen preferred) = sigma(r_chosen - r_rejected)`. That makes the margin distribution a
+calibration instrument, and it is free — you already compute both scores to get accuracy.
+
+```
+  margin   sigma(margin)   the RM is claiming...
+  ------   -------------   ----------------------------------------------
+    0.1        0.525       "a coin flip" — a genuine tie or an unlearned pair
+    0.5        0.622       "mild preference"
+    1.5        0.818       "clear preference"
+    4.0        0.982       "near-certain" — 55 of 56 such pairs should be right
+```
+
+The check is a reliability diagram: bucket held-out pairs by `sigma(margin)`, and compare each
+bucket's predicted probability against its empirical accuracy. A well-calibrated RM's 0.82 bucket
+is right about 82% of the time. An RM whose 0.98 bucket is right 84% of the time is confidently
+wrong, and PPO will find every one of those pairs.
+
+```
+  HEALTHY margin histogram                  DEGENERATE: saturated / feature-latched
+  (unimodal, positive-centred, a real
+   left tail for genuine ties)
+
+  count                                     count
+    |          ####                           |                              ########
+    |         ######                          |                              ########
+    |        ########                         |                              ########
+    |      ###########                        |   #                          ########
+    |   ################                      |   #                          ########
+    +---+----+----+----+----> margin          +---+----+----+----+----> margin
+       -2    0    2    4                         -2    0    2    4
+
+  Accuracy can be IDENTICAL in both panels. The right-hand RM has latched onto a
+  surface feature (length, markdown, a stock phrase): sigma saturates, gradients
+  vanish, and it can no longer rank two genuinely good answers against each other.
+```
+
+Two more shapes worth recognising. **Mass piled at zero** means the RM never separated the pairs
+at all — accuracy near 50% with tiny margins, usually too little data or too high a learning
+rate. **A bimodal distribution with a substantial negative lobe** means a block of pairs is
+confidently ranked backwards, which in practice is label noise or an annotator-guideline change
+partway through collection; find the batch boundary before you retrain. And because absolute
+reward values are meaningless (case A / case B again), **margin histograms are never comparable
+across two separately trained RMs** — compare their accuracy and their reliability diagrams.
+
+#### Length bias: measure it, then correct it
+
+Singhal et al. ([arXiv 2310.03716](https://arxiv.org/abs/2310.03716)) found that across three
+settings, a **purely length-based reward reproduces most of the downstream RLHF improvement over
+the SFT model**, and identified reward models as the dominant source of the bias — they are
+non-robust and readily absorb the length preference latent in the preference data. The most
+telling detail in that paper is that length-countering interventions frequently cause outright
+convergence failure, with reward failing to rise at all. If removing length from the reward stops
+learning, length *was* the learning.
+
+Three measurements, all cheap, all on a held-out set:
+
+```
+  1. Score-vs-length regression
+       regress r(prompt, response) on response token count
+       report Pearson r AND the slope in reward-per-100-tokens
+       a slope you can read off means the RM will pay the policy to pad
+
+  2. Long-rejected slice accuracy
+       restrict to pairs where the REJECTED response is the longer one
+       overall acc 0.75 but 0.55 on this slice => length is doing the work
+       this is the single most diagnostic number and almost nobody reports it
+
+  3. Padding probe (adversarial)
+       take a good response, append 200 tokens of on-topic but content-free
+       filler, and re-score. Delta should be <= 0. If it is positive, you have
+       measured the exact exploit PPO is about to find.
+```
+
+Corrections, in increasing order of effort: **length-balanced preference data** (resample so the
+chosen response is longer in about half the pairs); **ODIN** (Chen et al.,
+[arXiv 2402.07319](https://arxiv.org/abs/2402.07319), ICML 2024), a two-head reward model over
+shared features where one head is trained to *correlate* with length and the other to be
+decorrelated from it, and the length head is discarded at RL time so the policy can only optimize
+the content head; and inside the loss itself, SimPO's `1/|y|` normalisation (§4.7) which attacks
+the same bias one layer down. The eval-side analogue is **length-controlled AlpacaEval** (Dubois
+et al., [arXiv 2404.04475](https://arxiv.org/abs/2404.04475)): fit a generalised linear model of
+the annotator's preference with length difference as a mediator, then read off the preference at
+zero length difference. That single correction raised Spearman correlation with LMSYS Chatbot
+Arena from **0.94 to 0.98**.
+
+#### When the "reward model" is a program: RLVR
+
+Under RL with verifiable rewards the artifact changes from a learned scorer to a verifier — a test
+runner, a symbolic checker, an answer extractor. You still evaluate it; you just evaluate it like
+software instead of like a model. See [grpo_and_rlvr.md](grpo_and_rlvr.md) for the training side.
+
+| | Learned reward model | Verifier program (RLVR) |
+|---|---|---|
+| Primary failure | miscalibration, off-distribution extrapolation | false positives (weak tests) and false negatives (parsing) |
+| Goodhart risk | high — the proxy is learned and smooth | shifted, not removed — the policy hacks the *tests*, not the scorer |
+| What you measure | accuracy, calibration, length slope, per-domain slices | FP rate, FN rate, flake rate, timeout rate, mutation score |
+| Fix when it breaks | retrain on new data | write more tests / widen the answer normaliser |
+
+The concrete evals for a verifier: **false-positive rate** against a curated set of known-wrong
+solutions (a solution that special-cases the visible test inputs must score 0); **false-negative
+rate** against known-correct answers written in varied surface forms (`1/2`, `0.5`, `\frac{1}{2}`,
+`0.50` must all be accepted, and a numeric comparison with `epsilon = 1e-6` is not the same
+normaliser as a symbolic one); **flake rate**, the same submission executed twice under the same
+sandbox; and **timeout rate**, since a 30s timeout scored as `reward = 0` is indistinguishable
+from a wrong answer and silently teaches the policy to avoid a whole solution style. Reward
+hacking does not disappear here — it moves from the scorer to the test suite, which is why
+DeepSeek-R1-style recipes pair correctness with a format reward.
+
+#### The standing checklist
+
+Run these per RM checkpoint, not once at the end of RM training:
+
+- **A holdout preference set from the same collection round**, split before any training touched
+  it, and never used for hyperparameter selection. Held-out accuracy in the high 70s to low 80s is
+  a reasonable working target; anything above ~90% on in-distribution pairs is a leak, not a win.
+- **Per-domain slices.** One aggregate number hides the case where the RM is 0.85 on chat and 0.55
+  on code — and code is where the policy will spend its exploration budget.
+- **Agreement with fresh human labels.** Re-label 200–500 pairs using annotators who did not
+  produce the training data, and report RM-vs-fresh-human agreement alongside RM-vs-training-label
+  accuracy. This is the only number in the whole suite that is not circular; every other metric is
+  scored against the same preference distribution that trained the model.
+- **Adversarial slices** — the padding probe above, sycophancy pairs where the factually correct
+  response disagrees with the user, and format-only pairs where two responses have identical
+  content but different markdown.
+- **The reliability diagram and the length slope**, tracked as time series across checkpoints. A
+  step change in either between two RM versions is a data-pipeline change you did not know about.
+- **A gold signal for the stop decision.** Because the KL penalty only early-stops rather than
+  protects, you need something outside the proxy — held-out human preference on policy samples, or
+  a cross-family judge — evaluated at several KL checkpoints so you can see the peak in the curve
+  above rather than assume you are left of it.
+
 ---
 
 ## 7. Real-World Examples
@@ -902,6 +1167,31 @@ A: The KL term anchors the policy to the SFT reference so the optimizer cannot w
 **Short:** Safety alignment is shallow because refusal behavior lives mostly in the first few output tokens, so a handful of fine-tuning examples can overwrite it cheaply.
 
 Safety alignment is shallow — preference training mostly reshapes the output distribution over the first few tokens, so only those positions have to move for refusal behavior to disappear. Qi et al. (arXiv 2310.03693, ICLR 2024) demonstrated the practical consequence — 10 hand-written adversarial examples through OpenAI's fine-tuning API, for under $0.20, produced a GPT-3.5 Turbo that complied with nearly any harmful instruction; the same paper showed that fine-tuning on benign, commonly used instruction datasets also degrades safety, without any adversarial intent. The follow-up (arXiv 2406.05946, ICLR 2025) named the mechanism "shallow safety alignment" and used it to explain adversarial-suffix, prefilling, decoding-parameter and fine-tuning attacks as one phenomenon: a refusal is effectively a learned opening prefix, and past that prefix the aligned and base models behave alike. Mitigations attack the depth directly — train on safety recovery examples that start with a harmful prefix and turn back into a refusal, so refusal is not conditional on having refused at token 1, and use a token-wise constrained fine-tuning objective that heavily penalizes updates to the earliest positions. The operational rule is that any fine-tuned derivative is an unaligned model until its own safety eval says otherwise, so make that eval a release gate on every checkpoint rather than a one-time check on the base.
+
+**Q: What does a reward model's margin distribution tell you that accuracy cannot?**
+**Short:** Under Bradley-Terry, sigma(margin) is a probability, so the margin distribution is a free calibration instrument that two RMs with identical accuracy can fail differently.
+
+Accuracy only asks whether `r_chosen > r_rejected`; the margin says how strongly the model believes it, and under Bradley-Terry that belief is directly interpretable — `P(chosen preferred) = sigma(r_chosen - r_rejected)`, so a margin of 1.5 is a claim of 82% and a margin of 4.0 a claim of 98%. That makes the check a reliability diagram: bucket held-out pairs by `sigma(margin)` and compare each bucket's claimed probability against its empirical accuracy. Three shapes matter. A healthy histogram is unimodal, centred on a modest positive margin, with a real left tail for pairs that are genuine ties. Mass piled at very large margins with the same overall accuracy means the RM has latched onto a surface feature such as length or markdown — sigma saturates, gradients vanish, and it can no longer separate two genuinely good answers, which is exactly the discrimination PPO needs late in training. Mass piled at zero means it never learned the task. A bimodal distribution with a substantial negative lobe means a block of pairs is confidently ranked backwards, which in practice is label noise or an annotator-guideline change partway through collection — find the batch boundary before retraining. One caveat interviewers like: because Bradley-Terry fixes only the gap and not the level, margin histograms are never comparable across two separately trained reward models; compare accuracy and reliability diagrams instead.
+
+**Q: What is reward overoptimization, and does raising the KL penalty fix it?**
+**Short:** No. Gao et al. found the KL penalty does not move the KL-versus-gold-reward frontier at all; it acts as early stopping, moving you to a different point on the same curve.
+
+Overoptimization is the regime where continued optimization against a proxy reward model keeps raising the proxy score while the true objective is already falling — Goodhart's law with a measurable shape. Gao, Schulman & Hilton (arXiv 2210.10760, ICML 2023) quantified it with a synthetic gold reward model: writing `d = sqrt(KL(pi || pi_init))`, gold reward follows `d(alpha_bon - beta_bon*d)` for best-of-n and `d(alpha_RL - beta_RL*log d)` for RL. Both are concave, so gold reward rises, peaks and declines, while the proxy reward the trainer logs rises monotonically the whole way — you cannot see the peak from inside the training loop. The counterintuitive result is that the explicit KL penalty does not change that frontier; it only determines how far along the curve you travel before stopping, which makes beta an early-stopping knob rather than a robustness mechanism. What does move the frontier is reward model capacity (the alpha and beta coefficients scale roughly logarithmically with proxy RM parameter count, pushing the peak higher and later) and preference data volume (below roughly 2,000 comparisons there is very little improvement over near-chance loss). Practically: evaluate the policy against a gold signal — fresh human preference on policy samples, or a cross-family judge — at several KL checkpoints so you can locate the peak, use an ensemble with worst-case aggregation (Coste et al., arXiv 2310.02743) to push it out, and remember that ensembles mitigate rather than eliminate the problem because member RMs share error patterns (Eisenstein et al., arXiv 2312.09244), with pretraining-seed diversity generalising better than fine-tuning-seed diversity.
+
+**Q: A reward model tops RewardBench 2 — does that make it the right choice for your RLHF run?**
+**Short:** Not on its own: benchmark score tracks best-of-N well but PPO quality saturates across a wide score band, and a base-model lineage mismatch with your policy hurts more than a few points.
+
+No, and the RewardBench 2 paper says so itself. Its correlation study reports Pearson r = 0.87 between benchmark score and downstream best-of-N performance, which is strong, but under PPO the post-RLHF result saturates to roughly the same quality for every decent-to-good reward model across a RewardBench 2 band of 49.8 to 68.5; the paper concludes that simply taking the highest-scoring reward model on a benchmark will not ensure a good post-RLHF model. It also finds that when the reward model's base model and the policy's base model come from different lineages, downstream performance drops significantly — lineage compatibility outweighs a handful of leaderboard points. Wen et al. (arXiv 2410.05584, ICLR 2025) reach the same conclusion from the other direction: accuracy-versus-policy-regret correlation is only 0.75 for best-of-N and 0.64 for PPO, and reward models inside the same accuracy band produce substantially different regret. The mechanism is that accuracy averages error uniformly over a fixed preference set, while RL is a search for argmax that spends all its time in the high-reward tail where the RM is extrapolating. So use the benchmark as a smoke test and a lineage filter, then decide on your own holdout preference set drawn from your prompt distribution, per-domain slices, and agreement with fresh human labels on policy-generated responses.
+
+**Q: How do you measure length bias in a reward model instead of just asserting it?**
+**Short:** Regress reward on token count to get a slope, measure accuracy on the slice where the rejected response is longer, and re-score a padded response to look for a positive delta.
+
+Three measurements on a held-out set, none of which need new annotation. First, regress the reward score on response token count and report both the Pearson correlation and the slope in reward-per-100-tokens — a slope you can read off means the RM will literally pay the policy to pad. Second, and most diagnostic, restrict accuracy to the pairs where the rejected response is the longer one: an RM at 0.75 overall that collapses to 0.55 on that slice is not a preference model, it is a length model with noise. Third, run a padding probe — take a good response, append 200 tokens of on-topic but content-free filler, and re-score; the delta should be at most zero, and a positive delta is the exact exploit PPO is about to find. This matters because Singhal et al. (arXiv 2310.03716) showed that across three settings a purely length-based reward reproduces most of the downstream RLHF gain over SFT, with reward models identified as the dominant source, and that length-countering interventions often cause outright convergence failure — if removing length stops the learning, length was the learning. Corrections, in increasing effort: resample the preference data so the chosen response is longer in about half the pairs; use ODIN (Chen et al., arXiv 2402.07319, ICML 2024), a two-head RM over shared features with one head trained to correlate with length and the other decorrelated, discarding the length head during RL; or normalise inside the loss the way SimPO's 1/|y| does. On the evaluation side the analogue is length-controlled AlpacaEval (Dubois et al., arXiv 2404.04475), which fits a GLM with length difference as a mediator and reads off the preference at zero length difference, raising Spearman correlation with Chatbot Arena from 0.94 to 0.98.
+
+**Q: What replaces reward-model evaluation when you train with verifiable rewards?**
+**Short:** You evaluate the verifier like software: false-positive rate on known-wrong solutions, false-negative rate on varied answer formats, plus flake rate and timeout rate.
+
+With RLVR the reward is a program — a test runner, a symbolic checker, an answer extractor — so calibration and margin analysis are meaningless and software metrics replace them. Measure four things. False-positive rate against a curated set of known-wrong solutions, including a solution that special-cases the visible test inputs, since weak tests are the RLVR equivalent of a hackable reward model. False-negative rate against known-correct answers written in varied surface forms: `1/2`, `0.5`, `\frac{1}{2}` and `0.50` must all be accepted, and a numeric comparison at epsilon = 1e-6 is a different normaliser from a symbolic one, so state which you use. Flake rate, the same submission executed twice in the same sandbox — a flaky verifier injects pure noise into the advantage estimate, and under GRPO that noise is amplified because advantages are normalised within a small group. And timeout rate, because a submission that hits a 30s limit and scores reward = 0 is indistinguishable from a wrong answer, which silently teaches the policy to avoid an entire solution style. The honest framing is that verifiable rewards do not remove reward hacking, they relocate it: the policy now hacks the test suite rather than the scorer, which is why DeepSeek-R1-style recipes pair correctness rewards with format rewards. See [grpo_and_rlvr.md](grpo_and_rlvr.md) for the training-side treatment.
 
 ---
 

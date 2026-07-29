@@ -272,7 +272,7 @@ const STUDY_ORDER = {
     "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/agentic_frameworks","llm/multi_agent_systems","llm/mcp_model_context_protocol","llm/coding_agents","llm/voice_agents","llm/browser_agents_deep_dive",
     "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization","llm/knowledge_distillation_and_model_merging",
     "llm/deployment_and_mlops","llm/llm_caching","llm/llm_observability_and_monitoring","llm/llm_ops_platforms","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection","llm/prompt_management_and_promptops",
-    "llm/evaluation_and_benchmarks","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
+    "llm/evaluation_and_benchmarks","llm/error_analysis_and_eval_design","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
     "llm/safety_and_alignment","llm/mechanistic_interpretability","llm/llm_security","llm/ai_regulations_and_compliance","llm/multimodal_models","llm/vision_language_models","llm/vla_and_robotics_foundation_models","llm/small_language_models_and_edge_ai","llm/mixture_of_experts","llm/diffusion_language_models","llm/ai_applications","llm/llm_ecosystem_and_landscape","llm/data_flywheels_and_continuous_learning",
   ],
   ml: [
@@ -334,7 +334,7 @@ const STUDY_PATHS = {
       "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/multi_agent_systems","llm/mcp_model_context_protocol",
       "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization",
       "llm/deployment_and_mlops","llm/llm_caching","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection",
-      "llm/evaluation_and_benchmarks","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
+      "llm/evaluation_and_benchmarks","llm/error_analysis_and_eval_design","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
       "llm/safety_and_alignment","llm/llm_security","llm/mixture_of_experts",
     ],
   },
